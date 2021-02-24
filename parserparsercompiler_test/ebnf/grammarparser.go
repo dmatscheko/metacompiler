@@ -47,13 +47,32 @@ func (gp *grammarParser) addIdent(ident string) int {
 	return k
 }
 
-// The self-referential EBNF is (different description):
+// The self-referential EBNF is (different description form!):
 //
 //      EBNF = Production* .
 //      Production = <ident> "=" Expression "." .
 //      Expression = Sequence ("|" Sequence)* .
 //      Sequence = Term+ .
 //      Term = (<ident> | <string> | ("<" <ident> ">") | ("(" Expression ")")) ("*" | "+" | "?" | "!")? .
+//
+// The self-referential EBNF is:
+//
+// {
+// EBNF = "{" { production } "}" .
+// production  = name "=" [ expression ] "." .
+// expression  = name | terminal [ "..." terminal ] | sequence | alternative | group | option | repetition .
+// sequence    = expression expression { expression } .
+// alternative = expression "|" expression { "|" expression } .
+// group       = "(" expression ")" .
+// option      = "[" expression "]" .
+// repetition  = "{" expression "}" .
+// }
+//
+// // rule == production
+// // factors == non-terminal expression. a subgroup of productions/rules
+// // ident == name             //  <=  identifies another block (== address of the other expression)
+// // string == token == terminal == text
+// // or == alternative
 //
 //		SOOOOOO:
 //
@@ -70,9 +89,10 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 	localProductions = localProductions[:0]
 
 	wasSdx := gp.sdx // in case of failure
+
 	r1 := rule[0]
 	if _, ok := r1.(string); !ok {
-		for i := 0; i < len(rule); i++ {
+		for i := 0; i < len(rule); i++ { // if there is no string at rule[0], it is a group of rules. iterate through them and apply
 
 			newProduction, ok := gp.applies(rule[i].(sequence))
 
@@ -141,7 +161,7 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 			localProductions = append(localProductions, sequence{"optional", newProduction})
 		}
 
-	} else if r1 == "ident" { // this identifies another block (get a new index)
+	} else if r1 == "ident" { // "ident" identifies another block (and its index): this is a "ident" to the expression-block which is at position 3: { "ident", "expression", 3 }
 		i := rule[2].(int)
 		ii := gp.grammar.ididx[i]
 
