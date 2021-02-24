@@ -1,3 +1,8 @@
-# parserparsercompiler
+# ParserParserCompiler
 
-An attempt to create a parser _A_that should use the syntax, specified by an EBNF, to create a parser _B_ at runtime. Parser _B_ should use annotations in the EBNF to compile the language, specified by the EBNF and its annotations.
+This is the attempt to create
+* a parser that parses an annotated EBNF
+* and (at runtime!) creates a second parser with the EBNF
+* plus a compiler with the annotations in the EBNF.
+
+That new parser plus compiler should allow to compile an arbitrary language, specified in the EBNF and its annotations.
