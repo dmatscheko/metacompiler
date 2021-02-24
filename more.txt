@@ -1,0 +1,18 @@
+https://github.com/alecthomas/participle            A dead simple parser package for Go
+
+https://github.com/golang/exp/tree/master/ebnf  https://pkg.go.dev/golang.org/x/exp/ebnf    Package ebnf is a library for EBNF grammars. The input is text.
+
+https://github.com/llir/llvm            Library for interacting with LLVM IR in pure Go. Parse LLVM IR assembly, Produce LLVM IR assembly, Process LLVM IR (callgraph, ...)
+
+
+
+!!!!!
+git clone --recursive https://github.com/llir/ll
+!!!!!
+
+go get github.com/inspirer/textmapper/tm-go/cmd/textmapper
+echo %GOPATH% (C:\Users\dma\go)
+%GOPATH%/bin/textmapper
+GOROOT (c:\go\src\main)
+
+
