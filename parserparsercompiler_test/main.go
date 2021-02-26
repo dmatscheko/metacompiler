@@ -32,23 +32,23 @@ var (
 		// Bigger EBNF of EBNF with tags (can parse):
 		`"aEBNF of aEBNF" {
 		program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		production  = name [ tag ] "=" [ expression ] "." .
-		expression  = sequence .
+		production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
+		expression  = sequence < "thing" > .
 		sequence    = alternative { alternative } .
 		alternative = term { "|" term } .
-		term        = ( name | text [ "..." text ] | group | option | repetition | considerspaces ) [ tag ] .
-		group       = "(" expression ")" .
+		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
+		group       = "(" expression  < "meow" > ")" < "thing2" > .
 		option      = "[" expression "]" .
-		repetition  = "{" expression "}" .
-		considerspaces = "+" | "-" .
+		repetition  = "{" expression "}"  < "bar" > .
+		skipspaces  < "foo" > = "+" | "-" .
 
 		title = text .
 		comment = text .
 
 		name = ( small | caps ) { small | caps | digit | "_" } .
-		text = "\"" + { small | caps | digit | special } "\"" - .
+		text = "\"" - { small | caps | digit | special } < "thing3" > "\"" + .
 
-		tag = "<" text { ";" text } ">" .
+		tag  < "test" > = "<" text { ";" text } ">" .
 
 		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
 		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
@@ -64,16 +64,17 @@ var (
 		// expression  = sequence .
 		// sequence    = alternative { alternative } .
 		// alternative = term { "|" term } .
-		// term        = name | text [ "..." text ] | group | option | repetition .
+		// term        = name | text [ "..." text ] | group | option | repetition | skipspaces .
 		// group       = "(" expression ")" .
 		// option      = "[" expression "]" .
 		// repetition  = "{" expression "}" .
+		// skipspaces = "+" | "-" .
 
 		// title = text .
 		// comment = text .
 
 		// name = ( small | caps ) { small | caps | digit | "_" } .
-		// text = "\"" + { small | caps | digit | special } "\"" - .
+		// text = "\"" - { small | caps | digit | special } "\"" + .
 
 		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
 		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
@@ -86,12 +87,13 @@ var (
 		// `{
 		// ebnf = "{" { production } "}" .
 		// production  = name "=" [ expression ] ( "." | ";" ) .
-		// expression  = name | text [ "..." text ] | group | option | repetition | alternative | sequence .
+		// expression  = name | text [ "..." text ] | group | option | repetition | skipspaces | alternative | sequence .
 		// sequence    = expression expression { expression } .
 		// alternative = expression "|" expression { "|" expression } .
 		// group       = "(" expression ")" .
 		// option      = "[" expression "]" .
 		// repetition  = "{" expression "}" .
+		// skipspaces = "+" | "-" .
 
 		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
 		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
@@ -99,7 +101,7 @@ var (
 		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
 
 		// name = ( small | caps ) { small | caps | digit | "_" } .
-		// text = "\"" + { small | caps | digit | special } "\"" - .
+		// text = "\"" - { small | caps | digit | special } "\"" + .
 		// }`,
 
 		// // Default EBNF of EBNF (can MAYBE parse) (sequence | alternative can both not be together with the rest of the expression alternatives, but why?):
@@ -123,7 +125,7 @@ var (
 		// 			special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
 
 		// 			name = ( small | caps ) { small | caps | digit | "_" } .
-		// 			text = "\"" { small | caps | digit | special } "\"" .
+		// 			text = "\"" - { small | caps | digit | special } "\"" + .
 		// 			}`,
 	}
 
@@ -144,25 +146,23 @@ var (
 		// 		`{ }`,
 		// 		`{ moo < "test" ; "toast" > = "ABC" | "DEF" . }`,
 		//
-		// `{ top = abc { uvw } ; abc = "ABC" ; uvw = "XYZ" ; }`,
-		//
 		`"aEBNF of aEBNF" {
 		program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		production  = name [ tag ] "=" [ expression ] "." .
+		production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
 		expression  = sequence .
 		sequence    = alternative { alternative } .
 		alternative = term { "|" term } .
-		term        = ( name | text [ "..." text ] | group | option | repetition | considerspaces ) [ tag ] .
+		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
 		group       = "(" expression ")" .
 		option      = "[" expression "]" .
 		repetition  = "{" expression "}" .
-		considerspaces = "+" | "-" .
+		skipspaces  < "foo" > = "+" | "-" .
 
 		title = text .
 		comment = text .
 
 		name = ( small | caps ) { small | caps | digit | "_" } .
-		text = "\"" + { small | caps | digit | special } "\"" - .
+		text = "\"" - { small | caps | digit | special } "\"" + .
 
 		tag = "<" text { ";" text } ">" .
 
@@ -172,6 +172,8 @@ var (
 		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
 
 		} "Some comment"`,
+
+		// `{ top = abc { uvw } ; abc = "ABC" ; uvw = "XYZ" ; }`,
 	}
 )
 
