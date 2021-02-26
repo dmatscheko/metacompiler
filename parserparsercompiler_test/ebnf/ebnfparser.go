@@ -61,7 +61,7 @@ func (ep *ebnfParser) getToken() {
 		return
 	}
 	tokstart := ep.sdx
-	if strings.IndexRune("{}()[]<>|=.;", ep.ch) >= 0 {
+	if strings.IndexRune("{}()[]<>|=.;+-", ep.ch) >= 0 {
 		ep.sdx++
 		ep.token = ep.ch
 		ep.isSeq = false
@@ -150,6 +150,7 @@ func (ep *ebnfParser) addIdent(ident string) int {
 	return k
 }
 
+// also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) factor() object {
 	var res object
 	if ep.isSeq {
@@ -175,8 +176,14 @@ func (ep *ebnfParser) factor() object {
 		ep.matchToken('}')
 	} else if ep.token == '<' {
 		ep.getToken()
-		res = sequence{"TAG", ep.expression()}	// from DMA
+		res = sequence{"TAG", ep.expression()} // from DMA // TODO: inside the <>, there is no expression but a completely other syntax (maybe in "")
 		ep.matchToken('>')
+	} else if ep.token == '+' {
+		res = sequence{"SKIPSPACES", false} // from DMA
+		ep.getToken()
+	} else if ep.token == '-' {
+		res = sequence{"SKIPSPACES", true} // from DMA
+		ep.getToken()
 	} else {
 		panic("invalid token in factor() function")
 	}
@@ -186,9 +193,10 @@ func (ep *ebnfParser) factor() object {
 	return res
 }
 
+// also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) term() object {
 	res := sequence{ep.factor()}
-	tokens := []object{-1, '|', '.', ';', ')', ']', '}'}
+	tokens := []object{-1, '|', '.', ';', ')', ']', '}', '>'}
 outer:
 	for {
 		for _, t := range tokens {
@@ -204,6 +212,7 @@ outer:
 	return res
 }
 
+// also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) expression() object {
 	res := sequence{ep.term()}
 	if ep.token == '|' {
@@ -219,6 +228,7 @@ func (ep *ebnfParser) expression() object {
 	return res
 }
 
+// also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) production() object {
 	// Returns a token or -1; the real result is left in 'productions' etc,
 	ep.getToken()

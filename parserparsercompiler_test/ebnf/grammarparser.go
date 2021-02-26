@@ -1,8 +1,8 @@
 package ebnf
 
 import (
-	"strings"
 	"fmt"
+	"strings"
 )
 
 type grammarParser struct {
@@ -77,7 +77,7 @@ func (gp *grammarParser) addIdent(ident string) int {
 //
 //		SOOOOOO:
 //
-// The rules that applies() has to deal with are:
+// The rules that applies() has to deal with are BASICALLY THE SAME AS AN BNF-PARSER with annotations (NOT EBNF):
 // {factors} - if rule[0] is not string,
 // just apply one after the other recursively.
 // {"TERMINAL", "a1"}       -- literal constants
@@ -86,15 +86,11 @@ func (gp *grammarParser) addIdent(ident string) int {
 // {"OPTIONAL", <e1>}       -- as per "[]" in ebnf
 // {"IDENT", <name>, idx}   -- apply the sub-rule (its a link to the sub-rule)
 // {"TAG", code, <name>, idx }  ---- from dma: the semantic description in IL or something else (script language). also other things like coloring
-func (gp *grammarParser) applies(rule sequence) (object, bool) {
-	
-	// DMA: remove again - test
-	foo := '-'
-	if gp.sdx < len(gp.src) {
-		foo = gp.src[gp.sdx]
-	}
-	pprint(fmt.Sprintf("rule for pos # %d (%c)", gp.sdx, foo), rule)
-	
+//
+// TODO: REMEMBER WHAT HAS BEEN TRIED ALREADY FOR A POSITION!
+//
+func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) (object, bool) {
+	// func (gp *grammarParser) applies(rule sequence, depth int) (object, bool) {
 	var localProductions sequence
 	localProductions = localProductions[:0]
 
@@ -102,9 +98,11 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 
 	r1 := rule[0]
 	if _, ok := r1.(string); !ok {
+		gp.printTrace(rule, "DESCENT INTO SEQUENCE", depth)
+
 		for i := 0; i < len(rule); i++ { // if there is no string at rule[0], it is a group of rules. iterate through them and apply
 
-			newProduction, ok := gp.applies(rule[i].(sequence))
+			newProduction, ok := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1)
 
 			if ok && len(newProduction.(sequence)) > 1 {
 				if newProduction.(sequence)[1] != nil {
@@ -118,8 +116,13 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 			}
 
 		}
+	} else if r1 == "SKIPSPACES" {
+		doSkipSpaces = rule[1].(bool)
 	} else if r1 == "TERMINAL" {
-		gp.skipSpaces()
+		if doSkipSpaces {
+			gp.skipSpaces() // TODO: NOT ALWAYS! in strings/text can be white space!
+		}
+		gp.printTrace(rule, "TERMINAL", depth)
 
 		// myStartofTerminal := gp.sdx
 
@@ -136,9 +139,10 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 		localProductions = append(localProductions, sequence{"TERMINAL", newProduction})
 
 	} else if r1 == "OR" {
+		gp.printTrace(rule, "OR", depth)
 		for i := 1; i < len(rule); i++ {
 
-			newProduction, ok := gp.applies(rule[i].(sequence))
+			newProduction, ok := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1)
 			if ok {
 				// TODO: this only iterates through all aternatives until it finds one that matches. we need to collect all OR
 				localProductions = append(localProductions, sequence{"OR", newProduction})
@@ -155,9 +159,10 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 		gp.sdx = wasSdx
 		return nil, false
 	} else if r1 == "REPEAT" {
+		gp.printTrace(rule, "REPEAT", depth)
 		// for gp.applies(rule[1].(sequence)) {}
 		for {
-			newProduction, ok := gp.applies(rule[1].(sequence))
+			newProduction, ok := gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
 			if ok {
 				localProductions = append(localProductions, sequence{"REPEAT", newProduction})
 			} else {
@@ -165,17 +170,18 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 			}
 		}
 	} else if r1 == "OPTIONAL" {
-
-		newProduction, ok := gp.applies(rule[1].(sequence))
+		gp.printTrace(rule, "OPTIONAL", depth)
+		newProduction, ok := gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
 		if ok {
 			localProductions = append(localProductions, sequence{"OPTIONAL", newProduction})
 		}
 
-	} else if r1 == "IDENT" { // "IDENT" identifies another block (and its index): this is a "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
+	} else if r1 == "IDENT" { // "IDENT" identifies another block (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
+		gp.printTrace(rule, "IDENT", depth)
+
 		i := rule[2].(int)
 		ii := gp.grammar.ididx[i]
-
-		newProduction, ok := gp.applies(gp.grammar.productions[ii][2].(sequence))
+		newProduction, ok := gp.applies(gp.grammar.productions[ii][2].(sequence), doSkipSpaces, depth+1)
 		if ok {
 			ident := "IDENT" // TODO: find what belongs here!
 			idx := gp.addIdent(ident)
@@ -185,12 +191,14 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 			return nil, false
 		}
 
-	} else if r1 == "TAG" {		// from DMA
+	} else if r1 == "TAG" { // from DMA: A TAG is an annotation
+		gp.printTrace(rule, "TAG", depth)
 
 		newProduction := "TAG"
 		localProductions = append(localProductions, sequence{newProduction})
 
 	} else {
+		gp.printTrace(rule, "------INVALID-----", depth)
 		panic("invalid rule in applies() function")
 	}
 
@@ -215,7 +223,7 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 		// res = gp.applies(gp.grammar.productions[0][2].(sequence))
 		// ident := "DMA_TEST_START"
 		// idx := gp.addIdent(ident)
-		newProduction, ok := gp.applies(gp.grammar.productions[0][2].(sequence))
+		newProduction, ok := gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
 		// if ok {
 		// 	gp.newGrammar.productions = newProduction
 		// }
@@ -232,6 +240,24 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 	}
 
 	return res
+}
+
+func (gp *grammarParser) printTrace(rule sequence, action string, depth int) {
+	traceEnabled := false // TODO: CHANGE THIS WHEN DEBUGGING
+	// traceEnabled := true // TODO: CHANGE THIS WHEN DEBUGGING
+
+	d := ">"
+	for i := 0; i < depth; i++ {
+		d += ">"
+	}
+
+	if traceEnabled {
+		c := '-'
+		if gp.sdx < len(gp.src) {
+			c = gp.src[gp.sdx]
+		}
+		pprint(fmt.Sprintf("%3d%s rule for pos # %d (%c) action: %s", depth, d, gp.sdx, c, action), rule)
+	}
 }
 
 func ParseWithGrammar(grammar Grammar, srcCode string) (success bool, e error) {
