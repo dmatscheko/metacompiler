@@ -84,7 +84,7 @@ func (gp *grammarParser) addIdent(ident string) int {
 // {"OR", <e1>, <e2>, ...}  -- (any) one of n
 // {"REPEAT", <e1>}         -- as per "{}" in ebnf
 // {"OPTIONAL", <e1>}       -- as per "[]" in ebnf
-// {"IDENT", <name>, idx}   -- apply the sub-rule (its a link to the sub-rule)
+// {"IDENT", <name>, idx}   -- apply the sub-rule (its a link to the sub-rule) (its a production)
 // {"TAG", code, <name>, idx }  ---- from dma: the semantic description in IL or something else (script language). also other things like coloring
 //
 // TODO: REMEMBER WHAT HAS BEEN TRIED ALREADY FOR A POSITION!

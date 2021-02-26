@@ -120,11 +120,12 @@ func (ep *ebnfParser) getToken() {
 		ep.token = sequence{"IDENT", string(ep.src[tokstart:ep.sdx])}
 		ep.isSeq = true
 	} else {
-		ep.token = ep.invalid("invalid ebnf")
+		ep.token = ep.invalid(fmt.Sprintf("invalid ebnf (char %c)", ep.ch))
 		ep.isSeq = false
 	}
 }
 
+// also works like getToken()
 func (ep *ebnfParser) matchToken(ch rune) {
 	if ep.token != ch {
 		ep.token = ep.invalid(fmt.Sprintf("invalid ebnf (%c expected)", ch))
@@ -174,19 +175,24 @@ func (ep *ebnfParser) factor() object {
 		ep.getToken()
 		res = sequence{"REPEAT", ep.expression()}
 		ep.matchToken('}')
-	} else if ep.token == '<' {
-		ep.getToken()
-		res = sequence{"TAG", ep.expression()} // from DMA // TODO: inside the <>, there is no expression but a completely other syntax (maybe in "")
-		ep.matchToken('>')
 	} else if ep.token == '+' {
-		res = sequence{"SKIPSPACES", false} // from DMA
-		ep.getToken()
-	} else if ep.token == '-' {
 		res = sequence{"SKIPSPACES", true} // from DMA
 		ep.getToken()
+	} else if ep.token == '-' {
+		res = sequence{"SKIPSPACES", false} // from DMA
+		ep.getToken()
+	} else if ep.token == '<' { // from DMA
+		tag := ep.tag()
+		if tag != nil {
+			// pprint("TEST:", tag)
+			res = tag
+		} else {
+			res = sequence{"TAG", 0} // from DMA
+		}
 	} else {
-		panic("invalid token in factor() function")
+		panic(fmt.Sprintf("invalid token in factor() function (%#q)", ep.token))
 	}
+
 	if s, ok := res.(sequence); ok && len(s) == 1 {
 		return s[0]
 	}
@@ -194,8 +200,31 @@ func (ep *ebnfParser) factor() object {
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
+func (ep *ebnfParser) tag() object {
+	var res object
+	if ep.token == '<' {
+		ep.getToken()
+		res = sequence{"TAG", ep.expression()} // from DMA // TODO: allow multiple strings/text, separated by ";"!
+		ep.matchToken('>')
+	} else {
+		panic("invalid token in tag")
+	}
+	if s, ok := res.(sequence); ok && len(s) == 1 {
+		return s[0]
+	}
+	return res
+}
+
+// also works like getToken(), but advances before that as much as it itself knows (= implements sequence)
 func (ep *ebnfParser) term() object {
-	res := sequence{ep.factor()}
+	factor := ep.factor()
+	if f, ok := factor.(sequence); ok && len(f) > 0 {
+		if f[0] == "TAG" {
+			return ep.invalid("tag is invalid at this position!")
+		}
+	}
+	res := sequence{factor}
+
 	tokens := []object{-1, '|', '.', ';', ')', ']', '}', '>'}
 outer:
 	for {
@@ -204,7 +233,28 @@ outer:
 				break outer
 			}
 		}
-		res = append(res, ep.factor())
+
+		newFactor := ep.factor()
+
+		// if newFactor is a TAG, merge this TAG with the last factor in res
+		if f, ok := newFactor.(sequence); ok && len(f) > 0 {
+
+			if f[0] == "TAG" {
+				lastFactor := res[len(res)-1]
+
+				tmpFactor := lastFactor.([]object)
+				tmpFactor = append(tmpFactor, newFactor)
+
+				newFactor = tmpFactor
+
+				// remove the last factor from res, because it will be appended in its new form with TAG
+				res = res[:len(res)-1]
+			}
+
+		}
+
+		res = append(res, newFactor)
+		// res = append(res, ep.factor()) // original version without tags
 	}
 	if len(res) == 1 {
 		return res[0]
@@ -215,6 +265,7 @@ outer:
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) expression() object {
 	res := sequence{ep.term()}
+
 	if ep.token == '|' {
 		res = sequence{"OR", res[0]}
 		for ep.token == '|' {
@@ -246,11 +297,21 @@ func (ep *ebnfParser) production() object {
 		ident := t[1].(string)
 		idx := ep.addIdent(ident)
 		ep.getToken()
+
+		var tag object
+		if ep.token == '<' {
+			tag = ep.tag()
+		}
+
 		ep.matchToken('=')
 		if ep.token == -1 {
 			return -1
 		}
-		ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, ep.expression()})
+		if tag != nil {
+			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, ep.expression(), tag})
+		} else {
+			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, ep.expression()})
+		}
 		ep.grammar.ididx[idx] = len(ep.grammar.productions) - 1
 	}
 	return ep.token
