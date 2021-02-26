@@ -53,7 +53,7 @@ func (ep *ebnfParser) invalid(msg string) int {
 
 func (ep *ebnfParser) getToken() {
 	// Yields a single character token, one of {}()[]|=.;
-	// or {"terminal",string} or {"ident", string} or -1.
+	// or {"TERMINAL",string} or {"IDENT", string} or -1.
 	ep.skipSpaces()
 	if ep.sdx >= len(ep.src) {
 		ep.token = -1
@@ -93,7 +93,7 @@ func (ep *ebnfParser) getToken() {
 				}
 				// fmt.Printf(">>> %s\n", string(tokenrunes))
 
-				ep.token = sequence{"terminal", string(tokenrunes)}
+				ep.token = sequence{"TERMINAL", string(tokenrunes)}
 				ep.isSeq = true
 				return
 			}
@@ -117,7 +117,7 @@ func (ep *ebnfParser) getToken() {
 				break
 			}
 		}
-		ep.token = sequence{"ident", string(ep.src[tokstart:ep.sdx])}
+		ep.token = sequence{"IDENT", string(ep.src[tokstart:ep.sdx])}
 		ep.isSeq = true
 	} else {
 		ep.token = ep.invalid("invalid ebnf")
@@ -154,7 +154,7 @@ func (ep *ebnfParser) factor() object {
 	var res object
 	if ep.isSeq {
 		t := ep.token.([]object)
-		if t[0] == "ident" {
+		if t[0] == "IDENT" {
 			idx := ep.addIdent(t[1].(string))
 			t = append(t, idx)
 			ep.token = t
@@ -163,7 +163,7 @@ func (ep *ebnfParser) factor() object {
 		ep.getToken()
 	} else if ep.token == '[' {
 		ep.getToken()
-		res = sequence{"optional", ep.expression()}
+		res = sequence{"OPTIONAL", ep.expression()}
 		ep.matchToken(']')
 	} else if ep.token == '(' {
 		ep.getToken()
@@ -171,11 +171,11 @@ func (ep *ebnfParser) factor() object {
 		ep.matchToken(')')
 	} else if ep.token == '{' {
 		ep.getToken()
-		res = sequence{"repeat", ep.expression()}
+		res = sequence{"REPEAT", ep.expression()}
 		ep.matchToken('}')
 	} else if ep.token == '<' {
 		ep.getToken()
-		res = sequence{"tag", ep.expression()}
+		res = sequence{"TAG", ep.expression()}	// from DMA
 		ep.matchToken('>')
 	} else {
 		panic("invalid token in factor() function")
@@ -207,7 +207,7 @@ outer:
 func (ep *ebnfParser) expression() object {
 	res := sequence{ep.term()}
 	if ep.token == '|' {
-		res = sequence{"or", res[0]}
+		res = sequence{"OR", res[0]}
 		for ep.token == '|' {
 			ep.getToken()
 			res = append(res, ep.term())
@@ -230,7 +230,7 @@ func (ep *ebnfParser) production() object {
 			return -1
 		}
 		t := ep.token.(sequence)
-		if t[0] != "ident" {
+		if t[0] != "IDENT" {
 			return -1
 		}
 		ident := t[1].(string)

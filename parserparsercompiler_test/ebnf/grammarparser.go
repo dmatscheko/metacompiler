@@ -2,6 +2,7 @@ package ebnf
 
 import (
 	"strings"
+	"fmt"
 )
 
 type grammarParser struct {
@@ -79,12 +80,21 @@ func (gp *grammarParser) addIdent(ident string) int {
 // The rules that applies() has to deal with are:
 // {factors} - if rule[0] is not string,
 // just apply one after the other recursively.
-// {"terminal", "a1"}       -- literal constants
-// {"or", <e1>, <e2>, ...}  -- (any) one of n
-// {"repeat", <e1>}         -- as per "{}" in ebnf
-// {"optional", <e1>}       -- as per "[]" in ebnf
-// {"ident", <name>, idx}   -- apply the sub-rule
+// {"TERMINAL", "a1"}       -- literal constants
+// {"OR", <e1>, <e2>, ...}  -- (any) one of n
+// {"REPEAT", <e1>}         -- as per "{}" in ebnf
+// {"OPTIONAL", <e1>}       -- as per "[]" in ebnf
+// {"IDENT", <name>, idx}   -- apply the sub-rule (its a link to the sub-rule)
+// {"TAG", code, <name>, idx }  ---- from dma: the semantic description in IL or something else (script language). also other things like coloring
 func (gp *grammarParser) applies(rule sequence) (object, bool) {
+	
+	// DMA: remove again - test
+	foo := '-'
+	if gp.sdx < len(gp.src) {
+		foo = gp.src[gp.sdx]
+	}
+	pprint(fmt.Sprintf("rule for pos # %d (%c)", gp.sdx, foo), rule)
+	
 	var localProductions sequence
 	localProductions = localProductions[:0]
 
@@ -108,7 +118,7 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 			}
 
 		}
-	} else if r1 == "terminal" {
+	} else if r1 == "TERMINAL" {
 		gp.skipSpaces()
 
 		// myStartofTerminal := gp.sdx
@@ -123,15 +133,15 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 		}
 
 		newProduction := rule[1].(string) // string(gp.src[myStartofTerminal:gp.sdx]) //    rule[1].(string)
-		localProductions = append(localProductions, sequence{"terminal", newProduction})
+		localProductions = append(localProductions, sequence{"TERMINAL", newProduction})
 
-	} else if r1 == "or" {
+	} else if r1 == "OR" {
 		for i := 1; i < len(rule); i++ {
 
 			newProduction, ok := gp.applies(rule[i].(sequence))
 			if ok {
 				// TODO: this only iterates through all aternatives until it finds one that matches. we need to collect all OR
-				localProductions = append(localProductions, sequence{"or", newProduction})
+				localProductions = append(localProductions, sequence{"OR", newProduction})
 			}
 
 			if ok {
@@ -144,30 +154,30 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 		}
 		gp.sdx = wasSdx
 		return nil, false
-	} else if r1 == "repeat" {
+	} else if r1 == "REPEAT" {
 		// for gp.applies(rule[1].(sequence)) {}
 		for {
 			newProduction, ok := gp.applies(rule[1].(sequence))
 			if ok {
-				localProductions = append(localProductions, sequence{"repeat", newProduction})
+				localProductions = append(localProductions, sequence{"REPEAT", newProduction})
 			} else {
 				break
 			}
 		}
-	} else if r1 == "optional" {
+	} else if r1 == "OPTIONAL" {
 
 		newProduction, ok := gp.applies(rule[1].(sequence))
 		if ok {
-			localProductions = append(localProductions, sequence{"optional", newProduction})
+			localProductions = append(localProductions, sequence{"OPTIONAL", newProduction})
 		}
 
-	} else if r1 == "ident" { // "ident" identifies another block (and its index): this is a "ident" to the expression-block which is at position 3: { "ident", "expression", 3 }
+	} else if r1 == "IDENT" { // "IDENT" identifies another block (and its index): this is a "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
 		i := rule[2].(int)
 		ii := gp.grammar.ididx[i]
 
 		newProduction, ok := gp.applies(gp.grammar.productions[ii][2].(sequence))
 		if ok {
-			ident := "ident" // TODO: find what belongs here!
+			ident := "IDENT" // TODO: find what belongs here!
 			idx := gp.addIdent(ident)
 			localProductions = append(localProductions, sequence{ident, idx, newProduction})
 		} else {
@@ -175,9 +185,9 @@ func (gp *grammarParser) applies(rule sequence) (object, bool) {
 			return nil, false
 		}
 
-	} else if r1 == "tag" {
+	} else if r1 == "TAG" {		// from DMA
 
-		newProduction := "tag"
+		newProduction := "TAG"
 		localProductions = append(localProductions, sequence{newProduction})
 
 	} else {

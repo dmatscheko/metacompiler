@@ -30,142 +30,149 @@ var (
 		// `{ }`,
 
 		// Bigger EBNF of EBNF with tags (can parse):
-		// `"aEBNF of aEBNF" {
-		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		// production  = name [ tag ] "=" [ expression ] "." .
-		// expression  = sequence .
-		// sequence    = alternative { alternative } .
-		// alternative = term { "|" term } .
-		// term        = ( name | text [ "..." text ] | group | option | repetition ) [ tag ] .
-		// group       = "(" expression ")" .
-		// option      = "[" expression "]" .
-		// repetition  = "{" expression "}" .
+// 		`"aEBNF of aEBNF" {
+// 		program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
+// 		production  = name [ tag ] "=" [ expression ] "." .
+// 		expression  = sequence .
+// 		sequence    = alternative { alternative } .
+// 		alternative = term { "|" term } .
+// 		term        = ( name | text [ "..." text ] | group | option | repetition ) [ tag ] .
+// 		group       = "(" expression ")" .
+// 		option      = "[" expression "]" .
+// 		repetition  = "{" expression "}" .
+// 
+// 		title = text .
+// 		comment = text .
+// 
+// 		name = ( small | caps ) { small | caps | digit | "_" } .
+// 		text = "\"" { small | caps | digit | special } "\"" .
+// 
+// 		tag = "<" text { ";" text } ">" .
+// 
+// 		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+// 		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+// 		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+// 		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+// 
+// 		} "Some comment"`,
 
-		// title = text .
-		// comment = text .
+		
+// 		`"EBNF of EBNF (can parse)" {
+// 		program = [ title ] "{" { production } "}" [ comment ] .
+// 
+// 		production  = name "=" [ expression ] "." .
+// 		expression  = sequence .
+// 		sequence    = alternative { alternative } .
+// 		alternative = term { "|" term } .
+// 		term        = name | text [ "..." text ] | group | option | repetition .
+// 		group       = "(" expression ")" .
+// 		option      = "[" expression "]" .
+// 		repetition  = "{" expression "}" .
+// 
+// 		title = text .
+// 		comment = text .
+// 
+// 		name = ( small | caps ) { small | caps | digit | "_" } .
+// 		text = "\"" { small | caps | digit | special } "\"" .
+// 
+// 		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+// 		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+// 		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+// 		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+// 
+// 		} "Some comment"`,
 
-		// name = ( small | caps ) { small | caps | digit | "_" } .
-		// text = "\"" { small | caps | digit | special } "\"" .
-
-		// tag = "<" text { ";" text } ">" .
-
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
-
-		// } "Some comment"`,
-
-		// `"EBNF of EBNF (can parse)" {
-		// program = [ title ] "{" { production } "}" [ comment ] .
-
-		// production  = name "=" [ expression ] "." .
-		// expression  = sequence .
-		// sequence    = alternative { alternative } .
-		// alternative = term { "|" term } .
-		// term        = name | text [ "..." text ] | group | option | repetition .
-		// group       = "(" expression ")" .
-		// option      = "[" expression "]" .
-		// repetition  = "{" expression "}" .
-
-		// title = text .
-		// comment = text .
-
-		// name = ( small | caps ) { small | caps | digit | "_" } .
-		// text = "\"" { small | caps | digit | special } "\"" .
-
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
-
-		// } "Some comment"`,
-
-		// // Minimal EBNF of EBNF (can NOT parse) (sequence | alternative can both not be together with the rest of the expression alternatives, but why? <- sequence and alternative can not have itself inside):
-		// `{
-		// ebnf = "{" { production } "}" .
-		// production  = name "=" [ expression ] "." .
-		// expression  = name | text [ "..." text ] | sequence | alternative | group | option | repetition .
-		// sequence    = expression expression { expression } .
-		// alternative = expression "|" expression { "|" expression } .
-		// group       = "(" expression ")" .
-		// option      = "[" expression "]" .
-		// repetition  = "{" expression "}" .
-
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
-
-		// name = ( small | caps ) { small | caps | digit | "_" } .
-		// text = "\"" { small | caps | digit | special } "\"" .
-		// }`,
-
-		// Default EBNF of EBNF (can MAYBE parse) (sequence | alternative can both not be together with the rest of the expression alternatives, but why?):
+     
+		// Minimal EBNF of EBNF (can NOT parse) (sequence | alternative can both not be together with the rest of the expression alternatives, but why? <- sequence and alternative can not have itself inside):
 		`{
-			ebnf = [ title ] "{" { production } "}" [ comment ] .
-			production  = name "=" [ expression ] "." .
-			expression  = term | sequence | alternative .
-			sequence    = term term { term } .
-			alternative = term "|" term { "|" term } .
-			term        = name | text [ "..." text ] | group | option | repetition .
-			group       = "(" expression ")" .
-			option      = "[" expression "]" .
-			repetition  = "{" expression "}" .
-
-			title = text .
-			comment = text .
-
-			digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-			small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-			caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-			special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
-
-			name = ( small | caps ) { small | caps | digit | "_" } .
-			text = "\"" { small | caps | digit | special } "\"" .
-			}`,
-	}
-
-	tests = []string{
-		// "a1a3a4a4a5a6",
-		// "a1 a2a6",
-		// "a1 a3 a4 a6",
-		// "a1 a4 a5 a6",
-		// "a1 a2 a4 a5 a5 a6",
-		// "a1 a2 a4 a5 a6 a7",
-		// "your ad here",
-		// "2",
-		// "2*3 + 4/23 - 7",
-		// "(3 + 4) * 6-2+(4*(4))",
-		// "-2",
-		// "3 +",
-		// "(4 + 3",
-		`{ }`,
-		// `{ moo < "test" ; "toast" > = "ABC" | "DEF" . }`,
-
-		`"EBNF of EBNF (can parse)" {
-		program = [ text ] "{" { production } "}" [ text ] .
-
+		ebnf = "{" { production } "}" .
 		production  = name "=" [ expression ] "." .
-		expression  = sequence .
-		sequence    = alternative { alternative } .
-		alternative = term { "|" term } .
-		term        = name | text [ "..." text ] | group | option | repetition .
+		expression  = name | text [ "..." text ] | sequence | alternative | group | option | repetition .
+		sequence    = expression expression { expression } .
+		alternative = expression "|" expression { "|" expression } .
 		group       = "(" expression ")" .
 		option      = "[" expression "]" .
 		repetition  = "{" expression "}" .
-
-		name = ( small | caps ) { small | caps | digit | "_" } .
-		text = "\"" { small | caps | digit | special } "\"" .
 
 		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
 		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
 		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
 		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
 
-		} "Some comment"`,
+		name = ( small | caps ) { small | caps | digit | "_" } .
+		text = "\"" { small | caps | digit | special } "\"" .
+		}`,
 
-		// `{ foo = [ "bar" ] . }`,
+     
+		// Default EBNF of EBNF (can MAYBE parse) (sequence | alternative can both not be together with the rest of the expression alternatives, but why?):
+// 		`{
+// 			ebnf = [ title ] "{" { production } "}" [ comment ] .
+// 			production  = name "=" [ expression ] "." .
+// 			expression  = term | sequence | alternative .
+// 			sequence    = term term { term } .
+// 			alternative = term "|" term { "|" term } .
+// 			term        = name | text [ "..." text ] | group | option | repetition .
+// 			group       = "(" expression ")" .
+// 			option      = "[" expression "]" .
+// 			repetition  = "{" expression "}" .
+// 
+// 			title = text .
+// 			comment = text .
+// 
+// 			digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+// 			small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+// 			caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+// 			special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+// 
+// 			name = ( small | caps ) { small | caps | digit | "_" } .
+// 			text = "\"" { small | caps | digit | special } "\"" .
+// 			}`,
+	}
+
+	tests = []string{
+// 		"a1a3a4a4a5a6",
+// 		"a1 a2a6",
+// 		"a1 a3 a4 a6",
+// 		"a1 a4 a5 a6",
+// 		"a1 a2 a4 a5 a5 a6",
+// 		"a1 a2 a4 a5 a6 a7",
+// 		"your ad here",
+// 		"2",
+// 		"2*3 + 4/23 - 7",
+// 		"(3 + 4) * 6-2+(4*(4))",
+// 		"-2",
+// 		"3 +",
+// 		"(4 + 3",
+// 		`{ }`,
+// 		`{ moo < "test" ; "toast" > = "ABC" | "DEF" . }`,
+// 
+// 		`"aEBNF of aEBNF" {
+// 		program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
+// 		production  = name [ tag ] "=" [ expression ] "." .
+// 		expression  = sequence .
+// 		sequence    = alternative { alternative } .
+// 		alternative = term { "|" term } .
+// 		term        = ( name | text [ "..." text ] | group | option | repetition ) [ tag ] .
+// 		group       = "(" expression ")" .
+// 		option      = "[" expression "]" .
+// 		repetition  = "{" expression "}" .
+// 
+// 		title = text .
+// 		comment = text .
+// 
+// 		name = ( small | caps ) { small | caps | digit | "_" } .
+// 		text = "\"" { small | caps | digit | special } "\"" .
+// 
+// 		tag = "<" text { ";" text } ">" .
+// 
+// 		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+// 		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+// 		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+// 		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+// 
+// 		} "Some comment"`,
+
+		`{ abc = [ "def" ] . }`,
 	}
 )
 
