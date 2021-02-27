@@ -182,13 +182,7 @@ func (ep *ebnfParser) factor() object {
 		res = sequence{"SKIPSPACES", false} // from DMA
 		ep.getToken()
 	} else if ep.token == '<' { // from DMA
-		tag := ep.tag()
-		if tag != nil {
-			// pprint("TEST:", tag)
-			res = tag
-		} else {
-			res = sequence{"TAG", 0} // from DMA
-		}
+		res = ep.tag()
 	} else {
 		panic(fmt.Sprintf("invalid token in factor() function (%#q)", ep.token))
 	}
@@ -200,18 +194,11 @@ func (ep *ebnfParser) factor() object {
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) tag() object {
-	var res object
-	if ep.token == '<' {
-		ep.getToken()
-		res = sequence{"TAG", ep.expression()} // from DMA // TODO: allow multiple strings/text, separated by ";"!
-		ep.matchToken('>')
-	} else {
-		panic("invalid token in tag")
-	}
-	if s, ok := res.(sequence); ok && len(s) == 1 {
-		return s[0]
-	}
+func (ep *ebnfParser) tag() sequence {
+	var res sequence
+	ep.getToken()
+	res = sequence{"TAG", ep.expression()} // from DMA // TODO: allow multiple strings/text, separated by ";"!
+	ep.matchToken('>')
 	return res
 }
 
@@ -237,24 +224,18 @@ outer:
 		newFactor := ep.factor()
 
 		// if newFactor is a TAG, merge this TAG with the last factor in res
-		if f, ok := newFactor.(sequence); ok && len(f) > 0 {
+		if f, ok := newFactor.(sequence); ok && len(f) > 0 && f[0] == "TAG" {
+			lastFactor := res[len(res)-1]
+			// remove the last factor from res, because it will be appended in its new form with TAG
+			res = res[:len(res)-1]
 
-			if f[0] == "TAG" {
-				lastFactor := res[len(res)-1]
-
-				tmpFactor := lastFactor.([]object)
-				tmpFactor = append(tmpFactor, newFactor)
-
-				newFactor = tmpFactor
-
-				// remove the last factor from res, because it will be appended in its new form with TAG
-				res = res[:len(res)-1]
-			}
-
+			f = append(f, lastFactor)
+			res = append(res, f)
+		} else {
+			// if newFactor is not a TAG, only append newFactor
+			res = append(res, newFactor)
 		}
 
-		res = append(res, newFactor)
-		// res = append(res, ep.factor()) // original version without tags
 	}
 	if len(res) == 1 {
 		return res[0]
@@ -298,7 +279,7 @@ func (ep *ebnfParser) production() object {
 		idx := ep.addIdent(ident)
 		ep.getToken()
 
-		var tag object
+		var tag sequence
 		if ep.token == '<' {
 			tag = ep.tag()
 		}
@@ -308,7 +289,14 @@ func (ep *ebnfParser) production() object {
 			return -1
 		}
 		if tag != nil {
-			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, ep.expression(), tag})
+			// tag = append(tag, sequence{ident, idx, ep.expression()})
+			// ep.grammar.productions = append(ep.grammar.productions, tag)
+
+			tag = append(tag, ep.expression())
+			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, tag})
+
+			// ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, sequence{tag, ep.expression()}})
+
 		} else {
 			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, ep.expression()})
 		}

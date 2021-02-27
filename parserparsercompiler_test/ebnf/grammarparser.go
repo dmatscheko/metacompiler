@@ -222,16 +222,23 @@ func (gp *grammarParser) addIdent(ident string) int {
 // 	return localProductions, true
 // }
 
-func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) bool {
+func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) object {
 	wasSdx := gp.sdx // in case of failure
 	r1 := rule[0]
 
-	if _, ok := r1.(string); !ok {
+	var localProductions sequence
+	localProductions = localProductions[:0]
+
+	// gp.printTrace(rule, "A", depth)
+
+	if _, ok := r1.(string); !ok { // "SEQUENCE"
 		for i := 0; i < len(rule); i++ {
-			if !gp.applies(rule[i].(sequence), doSkipSpaces, depth+1) {
+			newProduction := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1)
+			if newProduction == nil {
 				gp.sdx = wasSdx
-				return false
+				return nil
 			}
+			localProductions = append(localProductions, newProduction)
 		}
 	} else if r1 == "TERMINAL" {
 		if doSkipSpaces { // There can be white space in strings/text! Do not skip that.
@@ -241,37 +248,59 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) bo
 		for i := 0; i < len(r2); i++ {
 			if gp.sdx >= len(gp.src) || gp.src[gp.sdx] != r2[i] {
 				gp.sdx = wasSdx
-				return false
+				return nil
 			}
 			gp.sdx++
 		}
-		pprint("X", rule)
+		localProductions = append(localProductions, rule)
+		// pprint("X", rule)
 	} else if r1 == "OR" {
 		for i := 1; i < len(rule); i++ {
-			if gp.applies(rule[i].(sequence), doSkipSpaces, depth+1) {
-				return true
+			if newProduction := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1); newProduction != nil {
+				return newProduction
 			}
 		}
 		gp.sdx = wasSdx
-		return false
+		return nil
 	} else if r1 == "REPEAT" {
-		for gp.applies(rule[1].(sequence), doSkipSpaces, depth+1) {
+		for {
+			newProduction := gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
+			if newProduction == nil {
+				break
+			}
+			localProductions = append(localProductions, newProduction)
 		}
 	} else if r1 == "OPTIONAL" {
-		gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
+		newProduction := gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
+		if newProduction != nil {
+			localProductions = append(localProductions, newProduction)
+		}
 	} else if r1 == "IDENT" {
 		i := rule[2].(int)
 		ii := gp.grammar.ididx[i]
-		if !gp.applies(gp.grammar.productions[ii][2].(sequence), doSkipSpaces, depth+1) {
+		newProduction := gp.applies(gp.grammar.productions[ii][2].(sequence), doSkipSpaces, depth+1)
+		if newProduction == nil {
 			gp.sdx = wasSdx
-			return false
+			return nil
 		}
-	} else if r1 == "SKIPSPACES" {
+		localProductions = append(localProductions, newProduction)
+	} else if r1 == "TAG" {
+		newProduction := gp.applies(rule[2].(sequence), doSkipSpaces, depth+1)
+		if newProduction != nil {
+			return sequence{rule[0], rule[1], newProduction}
+		}
+		return nil
+	} else if r1 == "SKIPSPACES" { // TODO: modify SKIPSPACES so that the chars to skip must be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		doSkipSpaces = rule[1].(bool)
 	} else {
 		panic(fmt.Sprintf("invalid rule in applies() function: %#q", r1))
 	}
-	return true
+
+	if localProductions == nil { // REMOVE LATER
+		localProductions = sequence{}
+	}
+
+	return localProductions
 }
 
 func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
@@ -282,7 +311,7 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 
 	gp.src = []rune(test)
 	gp.sdx = 0
-	res := false
+	var res object
 	if len(gp.grammar.productions) > 0 {
 		// ORIGINAL CALL:
 		// res = gp.applies(gp.grammar.productions[0][2].(sequence))
@@ -291,16 +320,16 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 
 		res = gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
 
-		// pprint("productions of new grammar", newProduction)
+		pprint("productions of new grammar", res)
 
 		// res = ok
 	}
 	gp.skipSpaces()
 	if gp.sdx < len(gp.src) {
-		res = false
+		res = nil
 	}
 
-	return res
+	return res != nil
 }
 
 func (gp *grammarParser) printTrace(rule sequence, action string, depth int) {

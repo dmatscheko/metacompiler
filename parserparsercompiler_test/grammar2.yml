@@ -1,153 +1,72 @@
 {
-  { "DESCENT", { "TERMINAL", "{" } },
+  {},
+  {},
+  { { "TERMINAL", "{" } },
   {
-    "DESCENT",
     {
-      "REPEAT",
       {
-        "IDENT",
-        0,
         {
           {
-            "DESCENT",
+            "TAG",
+            { "TERMINAL", "collect1" },
             {
-              "IDENT",
-              0,
-              {
-                {
-                  "DESCENT",
-                  { "OR", { "IDENT", 0, { "OR", { "TERMINAL", "t" } } } },
-                },
-                {
-                  "DESCENT",
-                  {
-                    {
-                      "REPEAT",
-                      { "OR", { "IDENT", 0, { "OR", { "TERMINAL", "o" } } } },
-                    },
-                    {
-                      "REPEAT",
-                      { "OR", { "IDENT", 0, { "OR", { "TERMINAL", "p" } } } },
-                    },
-                  },
-                },
-              },
+              { { { "TERMINAL", "t" } } },
+              { { { { "TERMINAL", "o" } } }, { { { "TERMINAL", "p" } } } },
             },
           },
-          
-          { "DESCENT", { "TERMINAL", "=" } },
+        },
+        {},
+        { { "TERMINAL", "=" } },
+        {
           {
-            "DESCENT",
             {
-              "OPTIONAL",
               {
-                "IDENT",
-                0,
                 {
-                  "IDENT",
-                  0,
                   {
                     {
-                      "DESCENT",
                       {
-                        "IDENT",
-                        0,
                         {
                           {
-                            "DESCENT",
                             {
-                              "IDENT",
-                              0,
+                              "TAG",
+                              { "TERMINAL", "collect2" },
                               {
+                                { { "TERMINAL", '"' } },
+                                {},
                                 {
-                                  "DESCENT",
+                                  { { { "TERMINAL", "A" } } },
                                   {
-                                    "OR",
                                     {
-                                      {
-                                        "DESCENT",
-                                        {
-                                          "IDENT",
-                                          0,
-                                          {
-                                            { "DESCENT", { "TERMINAL", '"' } },
-                                            
-                                            {
-                                              "DESCENT",
-                                              {
-                                                {
-                                                  "REPEAT",
-                                                  {
-                                                    "OR",
-                                                    {
-                                                      "IDENT",
-                                                      0,
-                                                      {
-                                                        "OR",
-                                                        { "TERMINAL", "A" },
-                                                      },
-                                                    },
-                                                  },
-                                                },
-                                                {
-                                                  "REPEAT",
-                                                  {
-                                                    "OR",
-                                                    {
-                                                      "IDENT",
-                                                      0,
-                                                      {
-                                                        "OR",
-                                                        { "TERMINAL", "B" },
-                                                      },
-                                                    },
-                                                  },
-                                                },
-                                                {
-                                                  "REPEAT",
-                                                  {
-                                                    "OR",
-                                                    {
-                                                      "IDENT",
-                                                      0,
-                                                      {
-                                                        "OR",
-                                                        { "TERMINAL", "C" },
-                                                      },
-                                                    },
-                                                  },
-                                                },
-                                              },
-                                            },
-                                            { "DESCENT", { "TERMINAL", '"' } },
-                                            
-                                          },
-                                        },
-                                      },
-                                      
+                                      "TAG",
+                                      { "TERMINAL", "test" },
+                                      { { "TERMINAL", "B" } },
                                     },
                                   },
+                                  { { { "TERMINAL", "C" } } },
                                 },
-                                
+                                { { "TERMINAL", '"' } },
+                                {},
                               },
                             },
                           },
-                          
+                          {},
                         },
+                        {},
                       },
                     },
-                    
+                    {},
                   },
                 },
+                {},
               },
             },
           },
-          { "DESCENT", { "OR", { "TERMINAL", ";" } } },
         },
+        { { "TERMINAL", ";" } },
       },
     },
   },
-  { "DESCENT", { "TERMINAL", "}" } },
-  
-  
+  { { "TERMINAL", "}" } },
+  {},
+  {},
 }
