@@ -191,18 +191,74 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 
 // ----------------------------------------------------
 
-var wholeTree object
+var params map[string]object
 
-func handleScript(id string, script string, childStr string, childCode string, variables map[string]object, tree object) string { // TODO: maybe the result should be an object if it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.
+func handleScript(id string, script string, childStr string, childCode string, variables map[string]object, codeVariables map[string]string, tree object) string { // TODO: maybe the result should be an object if it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.
 	fmt.Printf("### ID: %s\n    Script: %s\n    Variables: %#v\n    Tree: %#v\n    Result: ", id, script, variables, tree)
 
-	tmpl, err := template.New("test").Parse(script)
+	funcMap := template.FuncMap{
+		// The name "inc" is what the function will be called in the template text
+		"inc": func(name string) int {
+			if params[name] == nil {
+				params[name] = 0
+				return 0
+			}
+
+			params[name] = params[name].(int) + 1
+
+			return params[name].(int)
+		},
+
+		"mkSlice": func(args ...interface{}) []interface{} {
+			return args
+		},
+
+		// "exists": func(name string, data interface{}) bool {
+		// 	v := reflect.ValueOf(data)
+		// 	if v.Kind() == reflect.Ptr {
+		// 		v = v.Elem()
+		// 	}
+		// 	if v.Kind() != reflect.Struct {
+		// 		return false
+		// 	}
+		// 	return v.FieldByName(name).IsValid()
+		// },
+
+		// // {{ initOnce \"counter\" .}}
+		// "initOnce": func(name string, value object) bool {
+
+		// 	if params[name] == nil {
+		// 		params[name] = value
+		// 		return false
+		// 	}
+
+		// 	return true
+
+		// 	// d := data.(map[string]object)
+
+		// 	// if d[name] == nil {
+		// 	// 	d[name] = value
+		// 	// 	return false
+		// 	// }
+
+		// 	// return true
+		// },
+	}
+
+	tmpl, err := template.New(id).Funcs(funcMap).Parse(script)
 	if err != nil {
 		panic(err)
 	}
 
+	params["id"] = id
+	params["childStr"] = childStr
+	params["childCode"] = childCode
+	params["vars"] = variables
+	params["codevars"] = codeVariables
+	params["tree"] = tree
+
 	var tpl bytes.Buffer
-	err = tmpl.Execute(&tpl, map[string]object{"id": id, "childStr": childStr, "childCode": childCode, "vars": variables, "tree": tree, "wholeTree": wholeTree})
+	err = tmpl.Execute(&tpl, params) // TODO: id, tree are probably not necessary // TODO: variables should maybe contain implicit variables (e.g.: (underscore + name) of all objects below)
 	if err != nil {
 		panic(err)
 	}
@@ -246,7 +302,7 @@ func getIDAndCodeFromTag(tagAnnotation object) (string, string) {
 	return tagID, tagCode
 }
 
-func compile(tree object, inVariables map[string]object) (string, string, map[string]object) { // => (outStr, outCode, outVariables)
+func compile(tree object, inVariables map[string]object, inCodeVariables map[string]string) (string, string, map[string]object, map[string]string) { // => (outStr, outCode, outVariables)
 	if t, ok := tree.(sequence); ok && len(t) > 0 {
 		t1 := t[0]
 
@@ -254,17 +310,21 @@ func compile(tree object, inVariables map[string]object) (string, string, map[st
 			outStr := ""
 			outCode := ""
 			outVariables := map[string]object{}
+			outCodeVariables := map[string]string{}
 			for _, o := range t {
-				tmpStr, tmpCode, tmpVariables := compile(o, inVariables)
+				tmpStr, tmpCode, tmpVariables, tmpCodeVariables := compile(o, inVariables, inCodeVariables)
 				outStr += tmpStr
 				outCode += tmpCode
 				for k, v := range tmpVariables {
 					outVariables[k] = v
 				}
+				for k, v := range tmpCodeVariables {
+					outCodeVariables[k] = v
+				}
 			}
-			return outStr, outCode, outVariables
+			return outStr, outCode, outVariables, outCodeVariables
 		} else if t1 == "TERMINAL" {
-			return t[1].(string), "", inVariables
+			return t[1].(string), "", inVariables, inCodeVariables
 		} else if t1 == "TAG" {
 			if len(t) != 3 { // TODO: maybe also 2, if tag is allowed to hold no child productions (e.g. useful at preamble).
 				panic(fmt.Sprintf("error at TAG: %#v", t))
@@ -272,7 +332,8 @@ func compile(tree object, inVariables map[string]object) (string, string, map[st
 
 			tagID, tagCode := getIDAndCodeFromTag(t[1])
 
-			outStr, outCode, tmpVariables := compile(t[2], inVariables) // evaluate the child productions of the TAG
+			outStr, outCode, tmpVariables, tmpCodeVariables := compile(t[2], inVariables, inCodeVariables) // evaluate the child productions of the TAG
+
 			outVariables := map[string]object{}
 			for k, v := range tmpVariables {
 				outVariables[k] = v
@@ -280,9 +341,18 @@ func compile(tree object, inVariables map[string]object) (string, string, map[st
 			outVariables[tagID] = outStr
 
 			// TODO: HANDLE TAG SCRIPT HERE
-			outCode += handleScript(tagID, tagCode, outStr, outCode, outVariables, tree)
+			tmpCode := handleScript(tagID, tagCode, outStr, outCode, outVariables, tmpCodeVariables, tree)
 
-			return outStr, outCode, outVariables
+			outCodeVariables := map[string]string{}
+			for k, v := range tmpCodeVariables {
+				outCodeVariables[k] = v
+			}
+			outCodeVariables[tagID] = tmpCode
+
+			// outCode += tmpCode
+			outCode = tmpCode
+
+			return outStr, outCode, outVariables, outCodeVariables
 		}
 
 		// fmt.Printf("## A # %#v\n", t1)
@@ -291,7 +361,7 @@ func compile(tree object, inVariables map[string]object) (string, string, map[st
 		// fmt.Printf("## B # %#v\n", tree)
 	}
 
-	return "", "", inVariables
+	return "", "", inVariables, inCodeVariables
 }
 
 // ----------------------------------------------------
@@ -302,6 +372,8 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 	gp.newGrammar.productions = gp.newGrammar.productions[:0]
 	// ep.extras = ep.extras[:0]
 
+	var wholeTree object
+
 	gp.src = []rune(test)
 	gp.sdx = 0
 	if len(gp.grammar.productions) > 0 {
@@ -310,6 +382,7 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 
 		// newProduction, ok := gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
 
+		params = map[string]object{}
 		wholeTree = gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
 
 		fmt.Println()
@@ -320,8 +393,9 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 
 		// var variables map[string]object
 		var variables = map[string]object{}
-		outStr, outCode, outVariables := compile(wholeTree, variables)
-		fmt.Printf("\n\nvariables:\n    %#v\n\noutStr:\n    %s\n\noutCode:\n    %s\n\n", outVariables, outStr, outCode)
+		var codeVariables = map[string]string{}
+		outStr, outCode, outVariables, outCodeVariables := compile(wholeTree, variables, codeVariables)
+		fmt.Printf("\n\nvariables:\n    %#v\n\ncode variables:\n    %#v\n\noutStr:\n    %s\n\noutCode:\n    %s\n\n", outVariables, outCodeVariables, outStr, outCode)
 		// pprint("variables", variables)
 
 		// res = ok

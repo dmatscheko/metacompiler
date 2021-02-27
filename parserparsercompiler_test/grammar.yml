@@ -1,1 +1,10 @@
-{ { "top", 0, { "TERMINAL", "ABC" } } }
+{{"top", 0, {"TERMINAL", "AB C"}}, {"foo", 1, {"TERMINAL", "BAR"}}, {"xyz", 2, {"IDENT", "rtu", 3}}, {"rtu", 3, {"OR", {"IDENT", "foo", 1}, {"TERMINAL", "B"}}}}
+
+^
+|  should be
+
+
+| is
+v
+
+{{"top", 0, {"TERMINAL", "AB C"}}, {"foo", 1, {"TERMINAL", "BAR"}}, {"xyz", 3, {"IDENT", "rtu", 2}}, {"rtu", 5, {"IDENT", "foo", 4 }{ "OR", {"TERMINAL", "B"}}},}

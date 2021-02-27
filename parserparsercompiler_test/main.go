@@ -29,7 +29,9 @@ var (
 		// `{ foo = "bar" . }`,
 		// `{ }`,
 
-		// // Bigger EBNF of EBNF with tags (can parse):
+		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu ; rtu = foo | "B" ; }`,
+
+		// // Bigger EBNF of EBNF with tags (can parse) (ORIGINAL):
 		// `"aEBNF of aEBNF" {
 		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
 		// production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
@@ -45,14 +47,14 @@ var (
 		// title = text .
 		// comment = text .
 
-		// name <"collect1" "fooo({{.id}} {{.vars.test}}) {{index .tree 0}} {{.child}}">  = ( small | caps ) { small | caps | digit | "_" } < "test" > .
-		// text <"collect2"> = "\"" - { small | caps | digit | special } "\"" + .
+		// name = ( small | caps ) { small | caps | digit | "_" } .
+		// text = "\"" - { small | caps | digit | special } "\"" + .
 
 		// tag  = "<" text text ">" .
 
 		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
 		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" <"test"> | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
 		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
 
 		// } "Some comment"`,
@@ -130,14 +132,14 @@ var (
 
 		// `{ top = "ABC" ; }`,
 
-		// Bigger EBNF of EBNF with tags (can parse):
-		`"aEBNF of aEBNF" <"" "foo"> {
-		program <"program" "bar(''' {{.childStr}} {{.childCode}} ''')"> = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
+		// Bigger EBNF of EBNF with tags (can parse):   {{inc \"counter\"}}  {{ initOnce \"counter\" 1}}  {{incx .counter}}		// TODO: make array of names with index of name as counter for IDENT
+		`"aEBNF of aEBNF" <"" "AA - ."> {
+		program     <"" "{ {{.childCode}} }">                                                        = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
+		production  <"" "{ \"{{.vars.name}}\", {{inc \"counter\"}}, {{.codevars.expression}} }, ">   = name <"name"> [ tag ] "=" [ expression ] <"expression" "{{.childCode}}"> ( "." | ";" ) .
 		expression  = sequence .
 		sequence    = alternative { alternative } .
-		alternative = term { "|" term } .
-		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
+		alternative                                                    = term { "|" term } <"" "{{ if .childCode }}{ \"OR\", {{.childCode}} }{{end}}"> .
+		term        = ( name <"" "{ \"IDENT\", \"{{.childStr}}\", {{inc \"counter\"}} }"> | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
 		group       = "(" expression  ")" .
 		option      = "[" expression "]" .
 		repetition  = "{" expression "}" .
@@ -146,14 +148,14 @@ var (
 		title = text .
 		comment = text .
 
-		name <"collect1" "fooo({{.vars.testA}} of {{.childStr}});">  = ( small | caps ) { small | caps | digit | "_" } < "testA" > .
-		text <"collect2"> = "\"" - { small | caps | digit | special } "\"" + .
+		name   = ( small | caps ) { small | caps | digit | "_" } .
+		text <"" "{ \"TERMINAL\", {{.childStr}} }" > = "\"" - { small | caps | digit | special } "\"" + .
 
 		tag  = "<" text text ">" .
 
 		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
 		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		caps = "A" | "B" <"testB"> | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
 		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
 
 		} "Some comment"`,
@@ -204,7 +206,7 @@ var (
 		// } "Some comment"`,
 
 		// `{ top = abc { uvw } ; abc = "ABC" ; uvw = "XYZ" ; }`,
-		`{ top = "AB C" ; }`,
+		`{ top = "AB C" ; foo = "BAR" ; xyz = rtu ; rtu = foo | "B" ; }`,
 		// `"aEBNF of aEBNF" {
 		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
 		// production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
