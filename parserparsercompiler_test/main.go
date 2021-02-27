@@ -29,33 +29,33 @@ var (
 		// `{ foo = "bar" . }`,
 		// `{ }`,
 
-		// Bigger EBNF of EBNF with tags (can parse):
-		`"aEBNF of aEBNF" {
-		program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
-		expression  = sequence .
-		sequence    = alternative { alternative } .
-		alternative = term { "|" term } .
-		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
-		group       = "(" expression  ")" .
-		option      = "[" expression "]" .
-		repetition  = "{" expression "}" .
-		skipspaces  = "+" | "-" .
+		// // Bigger EBNF of EBNF with tags (can parse):
+		// `"aEBNF of aEBNF" {
+		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
+		// production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
+		// expression  = sequence .
+		// sequence    = alternative { alternative } .
+		// alternative = term { "|" term } .
+		// term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
+		// group       = "(" expression  ")" .
+		// option      = "[" expression "]" .
+		// repetition  = "{" expression "}" .
+		// skipspaces  = "+" | "-" .
 
-		title = text .
-		comment = text .
+		// title = text .
+		// comment = text .
 
-		name <"collect1">  = ( small | caps ) { small | caps | digit | "_" } .
-		text <"collect2"> = "\"" - { small | caps | digit | special } "\"" + .
+		// name <"collect1" "fooo({{.id}} {{.vars.test}}) {{index .tree 0}} {{.child}}">  = ( small | caps ) { small | caps | digit | "_" } < "test" > .
+		// text <"collect2"> = "\"" - { small | caps | digit | special } "\"" + .
 
-		tag  = "<" "id" "=" text ";" "code" "=" text ">" .
+		// tag  = "<" text text ">" .
 
-		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		caps = "A" | "B" <"test"> | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+		// caps = "A" | "B" <"test"> | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
 
-		} "Some comment"`,
+		// } "Some comment"`,
 
 		// `"EBNF of EBNF (can parse)" {
 		// program = [ title ] "{" { production } "}" [ comment ] .
@@ -129,6 +129,34 @@ var (
 		// 			}`,
 
 		// `{ top = "ABC" ; }`,
+
+		// Bigger EBNF of EBNF with tags (can parse):
+		`"aEBNF of aEBNF" <"" "foo"> {
+		program <"program" "bar(''' {{.childStr}} {{.childCode}} ''')"> = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
+		production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
+		expression  = sequence .
+		sequence    = alternative { alternative } .
+		alternative = term { "|" term } .
+		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
+		group       = "(" expression  ")" .
+		option      = "[" expression "]" .
+		repetition  = "{" expression "}" .
+		skipspaces  = "+" | "-" .
+
+		title = text .
+		comment = text .
+
+		name <"collect1" "fooo({{.vars.testA}} of {{.childStr}});">  = ( small | caps ) { small | caps | digit | "_" } < "testA" > .
+		text <"collect2"> = "\"" - { small | caps | digit | special } "\"" + .
+
+		tag  = "<" text text ">" .
+
+		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+		caps = "A" | "B" <"testB"> | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+
+		} "Some comment"`,
 	}
 
 	tests = []string{
