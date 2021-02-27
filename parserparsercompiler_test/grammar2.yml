@@ -1,72 +1,45 @@
 {
   {},
   {},
-  { { "TERMINAL", "{" } },
+  { "TERMINAL", "{" },
   {
+    {
+      "TAG",
+      { "TERMINAL", "collect1" },
+      { { "TERMINAL", "t" }, { { "TERMINAL", "o" }, { "TERMINAL", "p" } } },
+    },
+    {},
+    { "TERMINAL", "=" },
     {
       {
         {
           {
-            "TAG",
-            { "TERMINAL", "collect1" },
             {
-              { { { "TERMINAL", "t" } } },
-              { { { { "TERMINAL", "o" } } }, { { { "TERMINAL", "p" } } } },
-            },
-          },
-        },
-        {},
-        { { "TERMINAL", "=" } },
-        {
-          {
-            {
+              "TAG",
+              { "TERMINAL", "collect2" },
               {
+                { "TERMINAL", '"' },
+                {},
                 {
-                  {
-                    {
-                      {
-                        {
-                          {
-                            {
-                              "TAG",
-                              { "TERMINAL", "collect2" },
-                              {
-                                { { "TERMINAL", '"' } },
-                                {},
-                                {
-                                  { { { "TERMINAL", "A" } } },
-                                  {
-                                    {
-                                      "TAG",
-                                      { "TERMINAL", "test" },
-                                      { { "TERMINAL", "B" } },
-                                    },
-                                  },
-                                  { { { "TERMINAL", "C" } } },
-                                },
-                                { { "TERMINAL", '"' } },
-                                {},
-                              },
-                            },
-                          },
-                          {},
-                        },
-                        {},
-                      },
-                    },
-                    {},
-                  },
+                  { "TERMINAL", "A" },
+                  { "TAG", { "TERMINAL", "test" }, { "TERMINAL", "B" } },
+                  { "TERMINAL", "C" },
                 },
+                { "TERMINAL", '"' },
                 {},
               },
             },
+            {},
           },
+          {},
         },
-        { { "TERMINAL", ";" } },
+        {},
       },
+      {},
     },
+    { "TERMINAL", ";" },
   },
-  { { "TERMINAL", "}" } },
+  { "TERMINAL", "}" },
   {},
   {},
 }
