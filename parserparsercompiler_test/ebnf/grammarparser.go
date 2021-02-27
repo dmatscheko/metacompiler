@@ -189,20 +189,23 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 
 // ----------------------------------------------------
 
-var variables map[string]object
-
-func Walk(tree object) string {
+func Walk(tree object, inVariables map[string]object) (string, map[string]object) { // => (outStr, outVariables)
 	if t, ok := tree.(sequence); ok && len(t) > 0 {
 		t1 := t[0]
 
 		if _, ok := t1.(string); !ok { // "SEQUENCE" (if there is no string at rule[0], it is a group/sequence of rules. iterate through them and apply)
-			res := ""
+			outStr := ""
+			outVariables := map[string]object{}
 			for _, o := range t {
-				res += Walk(o)
+				tmpStr, tmpVariables := Walk(o, inVariables)
+				outStr += tmpStr
+				for k, v := range tmpVariables {
+					outVariables[k] = v
+				}
 			}
-			return res
+			return outStr, outVariables
 		} else if t1 == "TERMINAL" {
-			return t[1].(string)
+			return t[1].(string), inVariables
 		} else if t1 == "TAG" {
 			tagAnnotation, ok := t[1].(sequence)
 			if !ok || len(tagAnnotation) < 2 || tagAnnotation[0] != "TERMINAL" {
@@ -210,21 +213,25 @@ func Walk(tree object) string {
 			}
 			tagAnnotationString := tagAnnotation[1].(string)
 
-			res := Walk(t[2])
-			variables[tagAnnotationString] = res
+			outStr, tmpVariables := Walk(t[2], inVariables)
+			outVariables := map[string]object{}
+			for k, v := range tmpVariables {
+				outVariables[k] = v
+			}
+			outVariables[tagAnnotationString] = outStr
 
-			return res
+			// TODO: HANDLE TAG SCRIPT HERE
+
+			return outStr, outVariables
 		}
 
 		fmt.Printf("### %#v\n", t1)
 
 	} else {
-		// if tree != nil {
-		// 	fmt.Printf("### %#v\n", tree)
-		// }
+		// fmt.Printf("### %#v\n", tree)
 	}
 
-	return ""
+	return "", inVariables
 }
 
 // ----------------------------------------------------
@@ -248,9 +255,11 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 
 		pprint("productions of new grammar", res)
 
-		variables = map[string]object{}
-		fmt.Printf("\n\n%s\n\n", Walk(res))
-		pprint("variables", variables)
+		// var variables map[string]object
+		var variables = map[string]object{}
+		data, vars := Walk(res, variables)
+		fmt.Printf("\n\ndata:\n%s\n\nvariables:\n%#v\n\n", data, vars)
+		// pprint("variables", variables)
 
 		// res = ok
 	}
