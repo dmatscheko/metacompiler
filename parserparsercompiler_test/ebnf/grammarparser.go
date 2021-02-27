@@ -231,7 +231,7 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 
 	// gp.printTrace(rule, "A", depth)
 
-	if _, ok := r1.(string); !ok { // "SEQUENCE"
+	if _, ok := r1.(string); !ok { // "SEQUENCE" (if there is no string at rule[0], it is a group/sequence of rules. iterate through them and apply)
 		for i := 0; i < len(rule); i++ {
 			newProduction := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1)
 			if newProduction == nil {
@@ -275,7 +275,7 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 		if newProduction != nil {
 			localProductions = append(localProductions, newProduction)
 		}
-	} else if r1 == "IDENT" {
+	} else if r1 == "IDENT" { // "IDENT" identifies another block (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
 		i := rule[2].(int)
 		ii := gp.grammar.ididx[i]
 		newProduction := gp.applies(gp.grammar.productions[ii][2].(sequence), doSkipSpaces, depth+1)
@@ -292,6 +292,7 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 		return nil
 	} else if r1 == "SKIPSPACES" { // TODO: modify SKIPSPACES so that the chars to skip must be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		doSkipSpaces = rule[1].(bool)
+		localProductions = sequence{"SKIPSPACES", doSkipSpaces}
 	} else {
 		panic(fmt.Sprintf("invalid rule in applies() function: %#q", r1))
 	}
@@ -300,6 +301,9 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 		localProductions = sequence{}
 	}
 
+	if len(localProductions) == 1 {
+		return localProductions[0]
+	}
 	return localProductions
 }
 
