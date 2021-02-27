@@ -1,7 +1,9 @@
 package ebnf
 
 import (
+	"bytes"
 	"fmt"
+	"html/template"
 	"strings"
 )
 
@@ -189,49 +191,107 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 
 // ----------------------------------------------------
 
-func Walk(tree object, inVariables map[string]object) (string, map[string]object) { // => (outStr, outVariables)
+var wholeTree object
+
+func handleScript(id string, script string, childStr string, childCode string, variables map[string]object, tree object) string { // TODO: maybe the result should be an object if it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.
+	fmt.Printf("### ID: %s\n    Script: %s\n    Variables: %#v\n    Tree: %#v\n    Result: ", id, script, variables, tree)
+
+	tmpl, err := template.New("test").Parse(script)
+	if err != nil {
+		panic(err)
+	}
+
+	var tpl bytes.Buffer
+	err = tmpl.Execute(&tpl, map[string]object{"id": id, "childStr": childStr, "childCode": childCode, "vars": variables, "tree": tree, "wholeTree": wholeTree})
+	if err != nil {
+		panic(err)
+	}
+
+	result := tpl.String()
+	fmt.Println(result)
+	fmt.Println()
+
+	return result
+}
+
+func getTextFromTerminal(terminal object) string {
+	t, ok := terminal.(sequence)
+	if ok && len(t) == 2 && t[0] == "TERMINAL" {
+		tStr, ok := t[1].(string)
+		if ok {
+			return tStr
+		}
+	}
+	panic(fmt.Sprintf("error at TAG: %#v", terminal))
+}
+
+func getIDAndCodeFromTag(tagAnnotation object) (string, string) {
+	tagID := ""
+	tagCode := ""
+
+	if annotationSeq, ok := tagAnnotation.(sequence); ok {
+		// we have the annotation of the TAG. The annotation can be either a single TERMINAL, or a sequence of TERMINALs.
+		if _, ok := annotationSeq[0].(string); ok { // single TERMINAL
+			tagID = getTextFromTerminal(annotationSeq)
+		} else if len(annotationSeq) == 2 { // sequence of TERMINALs (so far there is only ID and code, so 2 elements)
+			tagID = getTextFromTerminal(annotationSeq[0])
+			tagCode = getTextFromTerminal(annotationSeq[1])
+		} else {
+			panic(fmt.Sprintf("only ID and code is allowed inside TAG: %#v", tagAnnotation))
+		}
+	} else {
+		panic(fmt.Sprintf("error at TAG: %#v", tagAnnotation))
+	}
+
+	return tagID, tagCode
+}
+
+func compile(tree object, inVariables map[string]object) (string, string, map[string]object) { // => (outStr, outCode, outVariables)
 	if t, ok := tree.(sequence); ok && len(t) > 0 {
 		t1 := t[0]
 
-		if _, ok := t1.(string); !ok { // "SEQUENCE" (if there is no string at rule[0], it is a group/sequence of rules. iterate through them and apply)
+		if _, ok := t1.(string); !ok { // "SEQUENCE" (if there is no string at rule[0], it is a group/sequence of rules. iterate through them and apply).
 			outStr := ""
+			outCode := ""
 			outVariables := map[string]object{}
 			for _, o := range t {
-				tmpStr, tmpVariables := Walk(o, inVariables)
+				tmpStr, tmpCode, tmpVariables := compile(o, inVariables)
 				outStr += tmpStr
+				outCode += tmpCode
 				for k, v := range tmpVariables {
 					outVariables[k] = v
 				}
 			}
-			return outStr, outVariables
+			return outStr, outCode, outVariables
 		} else if t1 == "TERMINAL" {
-			return t[1].(string), inVariables
+			return t[1].(string), "", inVariables
 		} else if t1 == "TAG" {
-			tagAnnotation, ok := t[1].(sequence)
-			if !ok || len(tagAnnotation) < 2 || tagAnnotation[0] != "TERMINAL" {
-				panic(fmt.Sprintf("error in tree at tag %#v", t))
+			if len(t) != 3 { // TODO: maybe also 2, if tag is allowed to hold no child productions (e.g. useful at preamble).
+				panic(fmt.Sprintf("error at TAG: %#v", t))
 			}
-			tagAnnotationString := tagAnnotation[1].(string)
 
-			outStr, tmpVariables := Walk(t[2], inVariables)
+			tagID, tagCode := getIDAndCodeFromTag(t[1])
+
+			outStr, outCode, tmpVariables := compile(t[2], inVariables) // evaluate the child productions of the TAG
 			outVariables := map[string]object{}
 			for k, v := range tmpVariables {
 				outVariables[k] = v
 			}
-			outVariables[tagAnnotationString] = outStr
+			outVariables[tagID] = outStr
 
 			// TODO: HANDLE TAG SCRIPT HERE
+			outCode += handleScript(tagID, tagCode, outStr, outCode, outVariables, tree)
 
-			return outStr, outVariables
+			return outStr, outCode, outVariables
 		}
 
-		fmt.Printf("### %#v\n", t1)
+		// fmt.Printf("## A # %#v\n", t1)
 
 	} else {
-		// fmt.Printf("### %#v\n", tree)
+		// fmt.Printf("## B # %#v\n", tree)
 	}
 
-	return "", inVariables
+	return "", "", inVariables
 }
 
 // ----------------------------------------------------
@@ -244,31 +304,34 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 
 	gp.src = []rune(test)
 	gp.sdx = 0
-	var res object
 	if len(gp.grammar.productions) > 0 {
 		// ORIGINAL CALL:
 		// res = gp.applies(gp.grammar.productions[0][2].(sequence))
 
 		// newProduction, ok := gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
 
-		res = gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
+		wholeTree = gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
 
-		pprint("productions of new grammar", res)
+		fmt.Println()
+
+		pprint("productions of new grammar (whole tree)", wholeTree)
+
+		fmt.Println()
 
 		// var variables map[string]object
 		var variables = map[string]object{}
-		data, vars := Walk(res, variables)
-		fmt.Printf("\n\ndata:\n%s\n\nvariables:\n%#v\n\n", data, vars)
+		outStr, outCode, outVariables := compile(wholeTree, variables)
+		fmt.Printf("\n\nvariables:\n    %#v\n\noutStr:\n    %s\n\noutCode:\n    %s\n\n", outVariables, outStr, outCode)
 		// pprint("variables", variables)
 
 		// res = ok
 	}
 	gp.skipSpaces()
 	if gp.sdx < len(gp.src) {
-		res = nil
+		wholeTree = nil
 	}
 
-	return res != nil
+	return wholeTree != nil
 }
 
 func (gp *grammarParser) printTrace(rule sequence, action string, depth int) {

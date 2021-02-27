@@ -289,14 +289,8 @@ func (ep *ebnfParser) production() object {
 			return -1
 		}
 		if tag != nil {
-			// tag = append(tag, sequence{ident, idx, ep.expression()})
-			// ep.grammar.productions = append(ep.grammar.productions, tag)
-
 			tag = append(tag, ep.expression())
 			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, tag})
-
-			// ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, sequence{tag, ep.expression()}})
-
 		} else {
 			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, ep.expression()})
 		}
@@ -314,6 +308,8 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	ep.grammar.ididx = ep.grammar.ididx[:0]
 	ep.grammar.productions = ep.grammar.productions[:0]
 	ep.extras = ep.extras[:0]
+
+	// title
 	ep.getToken()
 	if ep.isSeq {
 		t := ep.token.(sequence)
@@ -321,6 +317,18 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		ep.extras = append(ep.extras, ep.token)
 		ep.getToken()
 	}
+
+	// prolog
+	var tag sequence
+	if ep.token == '<' {
+		tag = ep.tag()
+	}
+	if tag != nil {
+		tagID, tagCode := getIDAndCodeFromTag(tag[1])
+		ep.extras = append(ep.extras, sequence{"prolog.id", tagID}, sequence{"prolog.code", tagCode})
+	}
+
+	// main
 	if ep.token != '{' {
 		ep.invalid("invalid ebnf (missing opening {)")
 		return
@@ -332,6 +340,19 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		}
 	}
 	ep.getToken()
+
+	// TODO: prolog and epilog code and id is not yet used!!!!
+	// epilog
+	tag = nil
+	if ep.token == '<' {
+		tag = ep.tag()
+	}
+	if tag != nil {
+		tagID, tagCode := getIDAndCodeFromTag(tag[1])
+		ep.extras = append(ep.extras, sequence{"epilog.id", tagID}, sequence{"epilog.code", tagCode})
+	}
+
+	// comment
 	if ep.isSeq {
 		t := ep.token.(sequence)
 		t[0] = "comment"
