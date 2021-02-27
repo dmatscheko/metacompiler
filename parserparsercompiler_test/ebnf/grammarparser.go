@@ -3,8 +3,8 @@ package ebnf
 import (
 	"bytes"
 	"fmt"
-	"html/template"
 	"strings"
+	"text/template"
 )
 
 type grammarParser struct {
