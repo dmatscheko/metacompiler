@@ -1,269 +1,153 @@
 {
+  { "DESCENT", { "TERMINAL", "{" } },
   {
-    "program",
-    0,
+    "DESCENT",
     {
-      { "OPTIONAL", { "IDENT", "title", 1 } },
-      { "OPTIONAL", { "IDENT", "tag", 2 } },
-      { "TERMINAL", "{" },
-      { "REPEAT", { "IDENT", "production", 3 } },
-      { "TERMINAL", "}" },
-      { "OPTIONAL", { "IDENT", "tag", 2 } },
-      { "OPTIONAL", { "IDENT", "comment", 4 } },
-    },
-  },
-  {
-    "production",
-    3,
-    {
-      { "IDENT", "name", 5 },
-      { "OPTIONAL", { "IDENT", "tag", 2 } },
-      { "TERMINAL", "=" },
-      { "OPTIONAL", { "IDENT", "expression", 6 } },
-      { "OR", { "TERMINAL", "." }, { "TERMINAL", ";" } },
-    },
-  },
-  {
-    "expression",
-    6,
-    { "IDENT", "sequence", 7, { "TAG", { "TERMINAL", "thing" } } },
-  },
-  {
-    "sequence",
-    7,
-    {
-      { "IDENT", "alternative", 8 },
-      { "REPEAT", { "IDENT", "alternative", 8 } },
-    },
-  },
-  {
-    "alternative",
-    8,
-    {
-      { "IDENT", "term", 9 },
-      { "REPEAT", { { "TERMINAL", "|" }, { "IDENT", "term", 9 } } },
-    },
-  },
-  {
-    "term",
-    9,
-    {
+      "REPEAT",
       {
-        "OR",
-        { "IDENT", "name", 5 },
+        "IDENT",
+        0,
         {
-          { "IDENT", "text", 10 },
-          { "OPTIONAL", { { "TERMINAL", "..." }, { "IDENT", "text", 10 } } },
+          {
+            "DESCENT",
+            {
+              "IDENT",
+              0,
+              {
+                {
+                  "DESCENT",
+                  { "OR", { "IDENT", 0, { "OR", { "TERMINAL", "t" } } } },
+                },
+                {
+                  "DESCENT",
+                  {
+                    {
+                      "REPEAT",
+                      { "OR", { "IDENT", 0, { "OR", { "TERMINAL", "o" } } } },
+                    },
+                    {
+                      "REPEAT",
+                      { "OR", { "IDENT", 0, { "OR", { "TERMINAL", "p" } } } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          
+          { "DESCENT", { "TERMINAL", "=" } },
+          {
+            "DESCENT",
+            {
+              "OPTIONAL",
+              {
+                "IDENT",
+                0,
+                {
+                  "IDENT",
+                  0,
+                  {
+                    {
+                      "DESCENT",
+                      {
+                        "IDENT",
+                        0,
+                        {
+                          {
+                            "DESCENT",
+                            {
+                              "IDENT",
+                              0,
+                              {
+                                {
+                                  "DESCENT",
+                                  {
+                                    "OR",
+                                    {
+                                      {
+                                        "DESCENT",
+                                        {
+                                          "IDENT",
+                                          0,
+                                          {
+                                            { "DESCENT", { "TERMINAL", '"' } },
+                                            
+                                            {
+                                              "DESCENT",
+                                              {
+                                                {
+                                                  "REPEAT",
+                                                  {
+                                                    "OR",
+                                                    {
+                                                      "IDENT",
+                                                      0,
+                                                      {
+                                                        "OR",
+                                                        { "TERMINAL", "A" },
+                                                      },
+                                                    },
+                                                  },
+                                                },
+                                                {
+                                                  "REPEAT",
+                                                  {
+                                                    "OR",
+                                                    {
+                                                      "IDENT",
+                                                      0,
+                                                      {
+                                                        "OR",
+                                                        { "TERMINAL", "B" },
+                                                      },
+                                                    },
+                                                  },
+                                                },
+                                                {
+                                                  "REPEAT",
+                                                  {
+                                                    "OR",
+                                                    {
+                                                      "IDENT",
+                                                      0,
+                                                      {
+                                                        "OR",
+                                                        { "TERMINAL", "C" },
+                                                      },
+                                                    },
+                                                  },
+                                                },
+                                              },
+                                            },
+                                            { "DESCENT", { "TERMINAL", '"' } },
+                                            
+                                          },
+                                        },
+                                      },
+                                      
+                                    },
+                                  },
+                                },
+                                
+                              },
+                            },
+                          },
+                          
+                        },
+                      },
+                    },
+                    
+                  },
+                },
+              },
+            },
+          },
+          { "DESCENT", { "OR", { "TERMINAL", ";" } } },
         },
-        { "IDENT", "group", 11 },
-        { "IDENT", "option", 12 },
-        { "IDENT", "repetition", 13 },
-        { "IDENT", "skipspaces", 14 },
-      },
-      { "OPTIONAL", { "IDENT", "tag", 2 } },
-    },
-  },
-  {
-    "group",
-    11,
-    {
-      { "TERMINAL", "(" },
-      { "IDENT", "expression", 6, { "TAG", { "TERMINAL", "meow" } } },
-      { "TERMINAL", ")", { "TAG", { "TERMINAL", "thing2" } } },
-    },
-  },
-  {
-    "option",
-    12,
-    { { "TERMINAL", "[" }, { "IDENT", "expression", 6 }, { "TERMINAL", "]" } },
-  },
-  {
-    "repetition",
-    13,
-    {
-      { "TERMINAL", "{" },
-      { "IDENT", "expression", 6 },
-      { "TERMINAL", "}", { "TAG", { "TERMINAL", "bar" } } },
-    },
-  },
-  {
-    "skipspaces",
-    14,
-    { "OR", { "TERMINAL", "+" }, { "TERMINAL", "-" } },
-    { "TAG", { "TERMINAL", "foo" } },
-  },
-  { "title", 1, { "IDENT", "text", 10 } },
-  { "comment", 4, { "IDENT", "text", 10 } },
-  {
-    "name",
-    5,
-    {
-      { "OR", { "IDENT", "small", 15 }, { "IDENT", "caps", 16 } },
-      {
-        "REPEAT",
-        {
-          "OR",
-          { "IDENT", "small", 15 },
-          { "IDENT", "caps", 16 },
-          { "IDENT", "digit", 17 },
-          { "TERMINAL", "_" },
-        },
       },
     },
   },
-  {
-    "text",
-    10,
-    {
-      { "TERMINAL", '"' },
-      { "SKIPSPACES", false },
-      {
-        "REPEAT",
-        {
-          "OR",
-          { "IDENT", "small", 15 },
-          { "IDENT", "caps", 16 },
-          { "IDENT", "digit", 17 },
-          { "IDENT", "special", 18 },
-        },
-        { "TAG", { "TERMINAL", "thing3" } },
-      },
-      { "TERMINAL", '"' },
-      { "SKIPSPACES", true },
-    },
-  },
-  {
-    "tag",
-    2,
-    {
-      { "TERMINAL", "<" },
-      { "IDENT", "text", 10 },
-      { "REPEAT", { { "TERMINAL", ";" }, { "IDENT", "text", 10 } } },
-      { "TERMINAL", ">" },
-    },
-    { "TAG", { "TERMINAL", "test" } },
-  },
-  {
-    "digit",
-    17,
-    {
-      "OR",
-      { "TERMINAL", "0" },
-      { "TERMINAL", "1" },
-      { "TERMINAL", "2" },
-      { "TERMINAL", "3" },
-      { "TERMINAL", "4" },
-      { "TERMINAL", "5" },
-      { "TERMINAL", "6" },
-      { "TERMINAL", "7" },
-      { "TERMINAL", "8" },
-      { "TERMINAL", "9" },
-    },
-  },
-  {
-    "small",
-    15,
-    {
-      "OR",
-      { "TERMINAL", "a" },
-      { "TERMINAL", "b" },
-      { "TERMINAL", "c" },
-      { "TERMINAL", "d" },
-      { "TERMINAL", "e" },
-      { "TERMINAL", "f" },
-      { "TERMINAL", "g" },
-      { "TERMINAL", "h" },
-      { "TERMINAL", "i" },
-      { "TERMINAL", "j" },
-      { "TERMINAL", "k" },
-      { "TERMINAL", "l" },
-      { "TERMINAL", "m" },
-      { "TERMINAL", "n" },
-      { "TERMINAL", "o" },
-      { "TERMINAL", "p" },
-      { "TERMINAL", "q" },
-      { "TERMINAL", "r" },
-      { "TERMINAL", "s" },
-      { "TERMINAL", "t" },
-      { "TERMINAL", "u" },
-      { "TERMINAL", "v" },
-      { "TERMINAL", "w" },
-      { "TERMINAL", "x" },
-      { "TERMINAL", "y" },
-      { "TERMINAL", "z" },
-    },
-  },
-  {
-    "caps",
-    16,
-    {
-      "OR",
-      { "TERMINAL", "A" },
-      { "TERMINAL", "B" },
-      { "TERMINAL", "C" },
-      { "TERMINAL", "D" },
-      { "TERMINAL", "E" },
-      { "TERMINAL", "F" },
-      { "TERMINAL", "G" },
-      { "TERMINAL", "H" },
-      { "TERMINAL", "I" },
-      { "TERMINAL", "J" },
-      { "TERMINAL", "K" },
-      { "TERMINAL", "L" },
-      { "TERMINAL", "M" },
-      { "TERMINAL", "N" },
-      { "TERMINAL", "O" },
-      { "TERMINAL", "P" },
-      { "TERMINAL", "Q" },
-      { "TERMINAL", "R" },
-      { "TERMINAL", "S" },
-      { "TERMINAL", "T" },
-      { "TERMINAL", "U" },
-      { "TERMINAL", "V" },
-      { "TERMINAL", "W" },
-      { "TERMINAL", "X" },
-      { "TERMINAL", "Y" },
-      { "TERMINAL", "Z" },
-    },
-  },
-  {
-    "special",
-    18,
-    {
-      "OR",
-      { "TERMINAL", "_" },
-      { "TERMINAL", "." },
-      { "TERMINAL", "," },
-      { "TERMINAL", ":" },
-      { "TERMINAL", ";" },
-      { "TERMINAL", "!" },
-      { "TERMINAL", "?" },
-      { "TERMINAL", "+" },
-      { "TERMINAL", "-" },
-      { "TERMINAL", "*" },
-      { "TERMINAL", "/" },
-      { "TERMINAL", "=" },
-      { "TERMINAL", "(" },
-      { "TERMINAL", ")" },
-      { "TERMINAL", "{" },
-      { "TERMINAL", "}" },
-      { "TERMINAL", "[" },
-      { "TERMINAL", "]" },
-      { "TERMINAL", "<" },
-      { "TERMINAL", ">" },
-      { "TERMINAL", "\\\\" },
-      { "TERMINAL", "\\\"" },
-      { "TERMINAL", "\\n" },
-      { "TERMINAL", "\\t" },
-      { "TERMINAL", " " },
-      { "TERMINAL", "|" },
-      { "TERMINAL", "%" },
-      { "TERMINAL", "$" },
-      { "TERMINAL", "&" },
-      { "TERMINAL", "'" },
-      { "TERMINAL", "#" },
-      { "TERMINAL", "~" },
-      { "TERMINAL", "@" },
-    },
-  },
+  { "DESCENT", { "TERMINAL", "}" } },
+  
+  
 }
