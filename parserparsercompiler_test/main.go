@@ -176,7 +176,33 @@ var (
 		// } "Some comment"`,
 
 		// `{ top = abc { uvw } ; abc = "ABC" ; uvw = "XYZ" ; }`,
-		`{ top = "ABC" ; }`,
+		`{ top = "AB C" ; }`,
+		// `"aEBNF of aEBNF" {
+		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
+		// production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
+		// expression  = sequence .
+		// sequence    = alternative { alternative } .
+		// alternative = term { "|" term } .
+		// term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
+		// group       = "(" expression  ")" .
+		// option      = "[" expression "]" .
+		// repetition  = "{" expression "}" .
+		// skipspaces  = "+" | "-" .
+
+		// title = text .
+		// comment = text .
+
+		// name <"collect1">  = ( small | caps ) { small | caps | digit | "_" } .
+		// text <"collect2"> = "\"" - { small | caps | digit | special } "\"" + .
+
+		// tag  = "<" text { ";" text } ">" .
+
+		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+		// caps = "A" | "B" <"test"> | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+
+		// } "Some comment"`,
 	}
 )
 

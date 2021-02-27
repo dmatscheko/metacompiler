@@ -89,139 +89,6 @@ func (gp *grammarParser) addIdent(ident string) int {
 //
 // TODO: REMEMBER WHAT HAS BEEN TRIED ALREADY FOR A POSITION!
 //
-// func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) (object, bool) {
-// 	// func (gp *grammarParser) applies(rule sequence, depth int) (object, bool) {
-// 	var localProductions sequence
-// 	// localProductions = localProductions[:0]
-
-// 	wasSdx := gp.sdx // in case of failure
-
-// 	r1 := rule[0]
-// 	if _, ok := r1.(string); !ok {
-// 		gp.printTrace(rule, "DESCENT INTO SEQUENCE", depth)
-
-// 		for i := 0; i < len(rule); i++ { // if there is no string at rule[0], it is a group of rules. iterate through them and apply
-
-// 			newProduction, ok := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1)
-
-// 			if ok && newProduction != nil {
-// 				localProductions = append(localProductions, sequence{"DESCENT", newProduction})
-// 			}
-
-// 			// localProductions = append(localProductions, newProduction)
-// 			// if x, ok := newProduction.(sequence); ok && len(x) > 1 {
-// 			// 	if x[len(x)-1] != nil {
-// 			// 		localProductions = append(localProductions, x[len(x)-1])
-// 			// 	}
-// 			// }
-
-// 			if !ok {
-// 				gp.sdx = wasSdx
-// 				return nil, false
-// 			}
-
-// 		}
-// 	} else if r1 == "SKIPSPACES" {
-// 		doSkipSpaces = rule[1].(bool)
-// 	} else if r1 == "TERMINAL" {
-// 		if doSkipSpaces { // There can be white space in strings/text! Do not skip that.
-// 			gp.skipSpaces()
-// 		}
-// 		gp.printTrace(rule, "TERMINAL", depth)
-
-// 		// myStartofTerminal := gp.sdx
-
-// 		r2 := []rune(rule[1].(string))
-// 		for i := 0; i < len(r2); i++ {
-// 			if gp.sdx >= len(gp.src) || gp.src[gp.sdx] != r2[i] {
-// 				gp.sdx = wasSdx
-// 				return nil, false
-// 			}
-// 			gp.sdx++
-// 		}
-
-// 		localProductions = append(localProductions, sequence{"TERMINAL", rule[1].(string)}) // TODO: only if TAG says so!
-// 		// newProduction := rule[1].(string) // string(gp.src[myStartofTerminal:gp.sdx]) //    rule[1].(string)
-// 		// localProductions = append(localProductions, sequence{"TERMINAL", newProduction})
-
-// 	} else if r1 == "OR" {
-// 		gp.printTrace(rule, "OR", depth)
-// 		for i := 1; i < len(rule); i++ {
-
-// 			newProduction, ok := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1)
-// 			// _, ok := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1)
-// 			if ok && newProduction != nil {
-// 				localProductions = append(localProductions, sequence{"OR", newProduction})
-// 				// 	// TODO: this only iterates through all aternatives until it finds one that matches. we need to collect all OR
-// 				// 	localProductions = append(localProductions, sequence{"OR", newProduction})
-// 			}
-
-// 			if ok {
-// 				// TODO: return only the current part: replace localProductions everywhere in this function with a locally generated object!
-// 				if len(localProductions) == 1 {
-// 					return localProductions[0], true
-// 				}
-// 				return localProductions, true
-// 			}
-// 		}
-// 		gp.sdx = wasSdx
-// 		return nil, false
-// 	} else if r1 == "REPEAT" {
-// 		gp.printTrace(rule, "REPEAT", depth)
-// 		// for gp.applies(rule[1].(sequence)) {}
-// 		for {
-// 			newProduction, ok := gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
-// 			if ok && newProduction != nil {
-// 				localProductions = append(localProductions, sequence{"REPEAT", newProduction})
-// 			} else if !ok {
-// 				break
-// 			}
-// 		}
-// 	} else if r1 == "OPTIONAL" {
-// 		gp.printTrace(rule, "OPTIONAL", depth)
-// 		newProduction, ok := gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
-// 		if ok && newProduction != nil {
-// 			localProductions = append(localProductions, sequence{"OPTIONAL", newProduction})
-// 		}
-
-// 	} else if r1 == "IDENT" { // "IDENT" identifies another block (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
-// 		gp.printTrace(rule, "IDENT", depth)
-
-// 		i := rule[2].(int)
-// 		ii := gp.grammar.ididx[i]
-// 		newProduction, ok := gp.applies(gp.grammar.productions[ii][2].(sequence), doSkipSpaces, depth+1)
-// 		if ok {
-// 			ident := "IDENT" // TODO: find what belongs here!
-// 			idx := gp.addIdent(ident)
-// 			if newProduction != nil {
-// 				localProductions = append(localProductions, sequence{ident, idx, newProduction})
-// 			}
-// 		} else {
-// 			gp.sdx = wasSdx
-// 			return nil, false
-// 		}
-
-// 	} else {
-// 		gp.printTrace(rule, "------INVALID-----", depth)
-// 		panic("invalid rule in applies() function")
-// 	}
-
-// 	// // DMA
-// 	// for _, elem := range rule {
-// 	// 	if e, ok := elem.(string); !ok {
-// 	// 		if e == "TAG" {
-// 	// 			pprint("TAG", rule)
-// 	// 		}
-// 	// 	}
-// 	// }
-
-// 	// TODO: return only the current part: replace localProductions everywhere in this function with a locally generated object!
-// 	if len(localProductions) == 1 {
-// 		return localProductions[0], true
-// 	}
-// 	return localProductions, true
-// }
-
 func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) object {
 	wasSdx := gp.sdx // in case of failure
 	r1 := rule[0]
@@ -238,6 +105,12 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 				gp.sdx = wasSdx
 				return nil
 			}
+
+			if t, ok := newProduction.(sequence); ok && len(t) > 0 && t[0] == "SKIPSPACES" { // this has to be handled in a sequence
+				doSkipSpaces = t[1].(bool)
+				continue
+			}
+
 			localProductions = append(localProductions, newProduction)
 		}
 	} else if r1 == "TERMINAL" {
@@ -255,13 +128,18 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 		localProductions = append(localProductions, rule)
 		// pprint("X", rule)
 	} else if r1 == "OR" {
+		found := false
 		for i := 1; i < len(rule); i++ {
 			if newProduction := gp.applies(rule[i].(sequence), doSkipSpaces, depth+1); newProduction != nil {
-				return newProduction
+				// return newProduction
+				localProductions = append(localProductions, newProduction)
+				found = true
 			}
 		}
-		gp.sdx = wasSdx
-		return nil
+		if !found {
+			gp.sdx = wasSdx
+			return nil
+		}
 	} else if r1 == "REPEAT" {
 		for {
 			newProduction := gp.applies(rule[1].(sequence), doSkipSpaces, depth+1)
@@ -287,25 +165,69 @@ func (gp *grammarParser) applies(rule sequence, doSkipSpaces bool, depth int) ob
 	} else if r1 == "TAG" {
 		newProduction := gp.applies(rule[2].(sequence), doSkipSpaces, depth+1)
 		if newProduction != nil {
-			return sequence{rule[0], rule[1], newProduction}
+			localProductions = append(localProductions, sequence{rule[0], rule[1], newProduction})
+		} else {
+			return nil
 		}
-		return nil
 	} else if r1 == "SKIPSPACES" { // TODO: modify SKIPSPACES so that the chars to skip must be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
-		doSkipSpaces = rule[1].(bool)
-		localProductions = sequence{"SKIPSPACES", doSkipSpaces}
+		return rule
 	} else {
 		panic(fmt.Sprintf("invalid rule in applies() function: %#q", r1))
 	}
 
-	if localProductions == nil { // REMOVE LATER
-		localProductions = sequence{}
-	}
+	// all failed matches should have returned already
+	// here must only be matches
 
 	if len(localProductions) == 1 {
 		return localProductions[0]
 	}
+	if localProductions == nil { // must not be nil because nil is for failed match
+		localProductions = sequence{}
+	}
 	return localProductions
 }
+
+// ----------------------------------------------------
+
+var variables map[string]object
+
+func Walk(tree object) string {
+	if t, ok := tree.(sequence); ok && len(t) > 0 {
+		t1 := t[0]
+
+		if _, ok := t1.(string); !ok { // "SEQUENCE" (if there is no string at rule[0], it is a group/sequence of rules. iterate through them and apply)
+			res := ""
+			for _, o := range t {
+				res += Walk(o)
+			}
+			return res
+		} else if t1 == "TERMINAL" {
+			return t[1].(string)
+		} else if t1 == "TAG" {
+			tagAnnotation, ok := t[1].(sequence)
+			if !ok || len(tagAnnotation) < 2 || tagAnnotation[0] != "TERMINAL" {
+				panic(fmt.Sprintf("error in tree at tag %#v", t))
+			}
+			tagAnnotationString := tagAnnotation[1].(string)
+
+			res := Walk(t[2])
+			variables[tagAnnotationString] = res
+
+			return res
+		}
+
+		fmt.Printf("### %#v\n", t1)
+
+	} else {
+		// if tree != nil {
+		// 	fmt.Printf("### %#v\n", tree)
+		// }
+	}
+
+	return ""
+}
+
+// ----------------------------------------------------
 
 func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 	gp.newIdents = gp.newIdents[:0]
@@ -325,6 +247,10 @@ func (gp *grammarParser) parseWithGrammarInternal(test string) bool {
 		res = gp.applies(gp.grammar.productions[0][2].(sequence), true, 0)
 
 		pprint("productions of new grammar", res)
+
+		variables = map[string]object{}
+		fmt.Printf("\n\n%s\n\n", Walk(res))
+		pprint("variables", variables)
 
 		// res = ok
 	}
