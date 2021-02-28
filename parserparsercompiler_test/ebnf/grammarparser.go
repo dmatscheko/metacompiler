@@ -3,6 +3,7 @@ package ebnf
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"strings"
 	"text/template"
 )
@@ -31,23 +32,6 @@ func (gp *grammarParser) skipSpaces() {
 		}
 		gp.sdx++
 	}
-}
-
-// TODO DEDUPLICATE!
-func (gp *grammarParser) addIdent(ident string) int {
-	k := -1
-	for i, id := range gp.newIdents {
-		if id == ident {
-			k = i
-			break
-		}
-	}
-	if k == -1 {
-		gp.newIdents = append(gp.newIdents, ident)
-		k = len(gp.newIdents) - 1
-		gp.newGrammar.ididx = append(gp.newGrammar.ididx, -1)
-	}
-	return k
 }
 
 // The self-referential EBNF is (different description form!):
@@ -197,7 +181,6 @@ func handleScript(id string, script string, childStr string, childCode string, v
 	fmt.Printf("### ID: %s\n    Script: %s\n    Variables: %#v\n    Tree: %#v\n    Result: ", id, script, variables, tree)
 
 	funcMap := template.FuncMap{
-		// The name "inc" is what the function will be called in the template text
 		"inc": func(name string) int {
 			if params[name] == nil {
 				params[name] = 0
@@ -213,36 +196,51 @@ func handleScript(id string, script string, childStr string, childCode string, v
 			return args
 		},
 
-		// "exists": func(name string, data interface{}) bool {
-		// 	v := reflect.ValueOf(data)
-		// 	if v.Kind() == reflect.Ptr {
-		// 		v = v.Elem()
-		// 	}
-		// 	if v.Kind() != reflect.Struct {
-		// 		return false
-		// 	}
-		// 	return v.FieldByName(name).IsValid()
-		// },
+		// Sets a global unique name and returns its index. Example: ' {{ident .childStr}} '
+		"ident": func(name string) int {
+			idents := params["idents"].([]string)
+			// ididx := params["ididx"].([]int)
 
-		// // {{ initOnce \"counter\" .}}
-		// "initOnce": func(name string, value object) bool {
+			k := -1
+			for i, id := range idents {
+				if id == name {
+					k = i
+					break
+				}
+			}
+			if k == -1 {
+				idents = append(idents, name)
+				k = len(idents) - 1
+				// ididx = append(ididx, -1)
+			}
 
-		// 	if params[name] == nil {
-		// 		params[name] = value
-		// 		return false
-		// 	}
+			params["idents"] = idents
+			// params["ididx"] = ididx
 
-		// 	return true
+			return k
+		},
 
-		// 	// d := data.(map[string]object)
+		// using vars:
+		// <"" "{ \"{{.vars.trololo}}\", {{inc \"counter\"}}, {{.codeVars.expression}} }, ">
+		// foo <"trololo"> = bar <"expression" "{{.childCode}}">
 
-		// 	// if d[name] == nil {
-		// 	// 	d[name] = value
-		// 	// 	return false
-		// 	// }
+		// <"" "{{ if .childCode }}{{ set \"or\" true }}{{end}}, {{.childCode}}">
+		// <"" "{{ if (eq .setVars.or true) }}{ \"OR\", {{.childCode}} }{{end}}">
+		"set": func(name string, data interface{}) string {
+			params["setVars"].(map[string]object)[name] = data
+			return ""
+		},
 
-		// 	// return true
-		// },
+		"exists": func(name string, data interface{}) bool {
+			v := reflect.ValueOf(data)
+			if v.Kind() == reflect.Ptr {
+				v = v.Elem()
+			}
+			if v.Kind() != reflect.Struct {
+				return false
+			}
+			return v.FieldByName(name).IsValid()
+		},
 	}
 
 	tmpl, err := template.New(id).Funcs(funcMap).Parse(script)
@@ -250,12 +248,22 @@ func handleScript(id string, script string, childStr string, childCode string, v
 		panic(err)
 	}
 
-	params["id"] = id
-	params["childStr"] = childStr
-	params["childCode"] = childCode
-	params["vars"] = variables
-	params["codevars"] = codeVariables
-	params["tree"] = tree
+	// a tag looks like <"ID" "CODE">
+	params["id"] = id                  // The tag ID can be referenced by the code part.
+	params["childStr"] = childStr      // The collective matched strings of all child nodes.
+	params["childCode"] = childCode    // The collective output of all child nodes code part.
+	params["vars"] = variables         // The collective matched strings from some child node identified by a tag ID. The name of the variable is the tag ID. Example: ' foo <"bar"> '  // TODO: maybe rename to strVars
+	params["codeVars"] = codeVariables // The code output from some child node identified by a tag ID. The name of the variable is the tag ID. Example: ' foo <"bar" "xyz{{.childCode}}"> '
+	params["subTree"] = tree           // The current subtree of the parser grammar
+	if params["setVars"] == nil {      // The global variables, that can be set with {{ set \"foo\" true }}
+		params["setVars"] = map[string]object{}
+	}
+	if params["idents"] == nil { // The global list of unique names. Set by {{ident "someName"}}.
+		params["idents"] = []string{}
+	}
+	// if params["ididx"] == nil {
+	// 	params["ididx"] = []int{}
+	// }
 
 	var tpl bytes.Buffer
 	err = tmpl.Execute(&tpl, params) // TODO: id, tree are probably not necessary // TODO: variables should maybe contain implicit variables (e.g.: (underscore + name) of all objects below)
