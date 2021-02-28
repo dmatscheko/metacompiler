@@ -264,9 +264,10 @@ func handleScript(id string, script string, childStr string, childCode string, v
 	// if params["ididx"] == nil {
 	// 	params["ididx"] = []int{}
 	// }
+	// params["directChildCount"] = directChildCount // The amount of direct child nodes.
 
 	var tpl bytes.Buffer
-	err = tmpl.Execute(&tpl, params) // TODO: id, tree are probably not necessary // TODO: variables should maybe contain implicit variables (e.g.: (underscore + name) of all objects below)
+	err = tmpl.Execute(&tpl, params) // TODO: variables should maybe contain implicit variables (e.g.: (underscore + name) of all objects below)
 	if err != nil {
 		panic(err)
 	}
@@ -310,6 +311,8 @@ func getIDAndCodeFromTag(tagAnnotation object) (string, string) {
 	return tagID, tagCode
 }
 
+// TODO: move into file compiler.go
+
 func compile(tree object, inVariables map[string]object, inCodeVariables map[string]string) (string, string, map[string]object, map[string]string) { // => (outStr, outCode, outVariables)
 	if t, ok := tree.(sequence); ok && len(t) > 0 {
 		t1 := t[0]
@@ -347,6 +350,15 @@ func compile(tree object, inVariables map[string]object, inCodeVariables map[str
 				outVariables[k] = v
 			}
 			outVariables[tagID] = outStr
+
+			// directChildCount := 1
+			// if childs, ok := t[2].(sequence); ok {
+			// 	fmt.Println()
+			// 	pprint("FOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO", childs)
+			// 	fmt.Println()
+			// 	fmt.Println()
+			// 	directChildCount = len(childs)
+			// }
 
 			// TODO: HANDLE TAG SCRIPT HERE
 			tmpCode := handleScript(tagID, tagCode, outStr, outCode, outVariables, tmpCodeVariables, tree)

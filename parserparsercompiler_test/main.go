@@ -6,6 +6,15 @@ import (
 	"./ebnf"
 )
 
+// PUBLIC EBNF of EBNF:
+// 	  Production  = name "=" [ Expression ] "." .
+//    Expression  = Alternative { "|" Alternative } .
+//    Alternative = Term { Term } .
+//    Term        = name | token [ "…" token ] | Group | Option | Repetition .
+//    Group       = "(" Expression ")" .
+//    Option      = "[" Expression "]" .
+//    Repetition  = "{" Expression "}" .
+
 var (
 	ebnfs = []string{
 		// `"a" {
@@ -130,19 +139,26 @@ var (
 
 		// `{ top = "ABC" ; }`,
 
-		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; }`,
+		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "P" { "Z" } }`,
+		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "X" "Y" [ "Z" ] "P" { "Z" } ; } `,
+
+		// ----------
+
+		// expression  <"" '{{if (eq .setVars.or true)}}{"OR", {{.childCode}}}{{else}}{{.childCode}}{{end}}'>          = alternative <"" '{{set "or" false}}{{.childCode}}'> { "|" alternative <"" '{{if (ne .childCode "")}}{{set "or" true}}, {{.childCode}}{{end}}'> } .
+		// alternative <"" '{{if (eq .setVars.seq true)}}{{"{"}}{{.childCode}}{{"}"}}{{else}}{{.childCode}}{{end}}'>   = term <"" '{{set "seq" false}}{{.childCode}}'> { term <"" '{{if (ne .childCode "")}}{{set "seq" true}}, {{.childCode}}{{end}}'> } .
 
 		// sequence    = alternative <"" "{{.childCode}}"> { alternative <"" ", {{.childCode}}"> } .
 		// sequence    <"" "{{if (eq .seq true)}}{ {{.childCode}} }{{else}}{{.childCode}}{{end}}">      = alternative <"" "{{set \"seq\" false}}{{.childCode}}"> { alternative <"" "{{if .childCode}}{{set \"seq\" true}}{{end}}, {{.childCode}}"> } .
 		// TODO: braces are not correct and comma is often missing
+		// TODO: implement directChildCount or hasMultipleChilds
 		// Bigger EBNF of EBNF with tags (can parse):
 		`"aEBNF of aEBNF" <"" "AA - ."> {
-		program     <"" '{{"{"}}{{.childCode}}{{"}"}}'>                                                             = [ title ] [ tag ] "{" [ production ] { production <"" ", {{.childCode}}"> } "}" [ tag ] [ comment ] .
-		production  <"" '{"{{.vars.name}}", {{ident .vars.name}}, {{.childCode}}}'>                                 = name <"name"> [ tag ] "=" [ expression ] ( "." | ";" ) .
-		expression  <"" '{{if (eq .setVars.or true)}}{"OR", {{.childCode}}}{{else}}{{.childCode}}{{end}}'>          = alternative <"" '{{set "or" false}}{{.childCode}}'> { "|" alternative <"" '{{if (ne .childCode "")}}{{set "or" true}}, {{.childCode}}{{end}}'> } .
-		alternative <"" '{{if (eq .setVars.seq true)}}{{"{"}}{{.childCode}}{{"}"}}{{else}}{{.childCode}}{{end}}'>   = term <"" '{{set "seq" false}}{{.childCode}}'> { term <"" '{{if (ne .childCode "")}}{{set "seq" true}}, {{.childCode}}{{end}}'> } .
+		program     <"" '{{"{"}}{{.childCode}}}'>                                                                = [ title ] [ tag ] "{" [ production ] { production <"" ", {{.childCode}}"> } "}" [ tag ] [ comment ] .
+		production  <"" '{"{{.vars.name}}", {{ident .vars.name}}, {{.childCode}}}'>                              = name <"name"> [ tag ] "=" [ expression ] ( "." | ";" ) .
+		expression  <"" '{{if (eq .setVars.or true)}}{"OR", {{.childCode}}}{{else}}{{.childCode}}{{end}}'>       = alternative <"" '{{set "or" false}}{{.childCode}}'> { "|" alternative <"" '{{set "or" true}}, {{.childCode}}'> } .
+		alternative <"" '{{"{"}}{{.childCode}}{{"}"}}'>                                                          = term <"" '{{.childCode}}'> { term <"" ', {{.childCode}}'> } .
 		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
-		group       <"" '{{"{"}}{{.childCode}}{{"}"}}'>             = "(" expression  ")" .
+		group       <"" '{{"{"}}{{.childCode}}{{"}"}}'>             = "(" expression ")" .
 		option      <"" '{"OPTIONAL", {{.childCode}}}'>             = "[" expression "]" .
 		repetition  <"" '{"REPEAT", {{.childCode}}}'>               = "{" expression "}" .
 		skipspaces  = "+" <"" '{"SKIPSPACES", true}'> | "-" <"" '{"SKIPSPACES", false}'> .
@@ -214,32 +230,34 @@ var (
 		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu ; rtu = foo | "B" ; }`,
 		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; }`,
 
-		`"aEBNF of aEBNF" {
-		program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
-		expression  = sequence .
-		sequence    = alternative { alternative } .
-		alternative = term { "|" term } .
-		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
-		group       = "(" expression  ")" .
-		option      = "[" expression "]" .
-		repetition  = "{" expression "}" .
-		skipspaces  = "+" | "-" .
+		`{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "X" "Y" [ "Z" ] "P" { "Z" } ; } `,
 
-		title = text .
-		comment = text .
+		// `"aEBNF of aEBNF" {
+		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
+		// production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
+		// expression  = sequence .
+		// sequence    = alternative { alternative } .
+		// alternative = term { "|" term } .
+		// term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
+		// group       = "(" expression  ")" .
+		// option      = "[" expression "]" .
+		// repetition  = "{" expression "}" .
+		// skipspaces  = "+" | "-" .
 
-		name = ( small | caps ) - { small | caps | digit | "_" } + .
-		text = "\"" - { small | caps | digit | special } "\"" + .
+		// title = text .
+		// comment = text .
 
-		tag  = "<" text text ">" .
+		// name = ( small | caps ) - { small | caps | digit | "_" } + .
+		// text = "\"" - { small | caps | digit | special } "\"" + .
 
-		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+		// tag  = "<" text text ">" .
 
-		} "Some comment"`,
+		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+
+		// } "Some comment"`,
 	}
 )
 
