@@ -13,6 +13,38 @@ func btoi(b bool) int {
 	return 0
 }
 
+func getTextFromTerminal(terminal object) string {
+	t, ok := terminal.(sequence)
+	if ok && len(t) == 2 && t[0] == "TERMINAL" {
+		tStr, ok := t[1].(string)
+		if ok {
+			return tStr
+		}
+	}
+	panic(fmt.Sprintf("error at TAG: %#v", terminal))
+}
+
+func getIDAndCodeFromTag(tagAnnotation object) (string, string) {
+	tagID := ""
+	tagCode := ""
+
+	if annotationSeq, ok := tagAnnotation.(sequence); ok {
+		// we have the annotation of the TAG. The annotation can be either a single TERMINAL, or a sequence of TERMINALs.
+		if _, ok := annotationSeq[0].(string); ok { // single TERMINAL
+			tagID = getTextFromTerminal(annotationSeq)
+		} else if len(annotationSeq) == 2 { // sequence of TERMINALs (so far there is only ID and code, so 2 elements)
+			tagID = getTextFromTerminal(annotationSeq[0])
+			tagCode = getTextFromTerminal(annotationSeq[1])
+		} else {
+			panic(fmt.Sprintf("only ID and code is allowed inside TAG: %#v", tagAnnotation))
+		}
+	} else {
+		panic(fmt.Sprintf("error at TAG: %#v", tagAnnotation))
+	}
+
+	return tagID, tagCode
+}
+
 func pprint(header string, ob object) {
 	pp := fmt.Sprintf("%#v", ob)
 	pp = strings.ReplaceAll(pp, "[]interface {}", "")

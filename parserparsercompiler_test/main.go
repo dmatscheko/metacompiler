@@ -151,6 +151,7 @@ var (
 		// sequence    <"" "{{if (eq .seq true)}}{ {{.childCode}} }{{else}}{{.childCode}}{{end}}">      = alternative <"" "{{set \"seq\" false}}{{.childCode}}"> { alternative <"" "{{if .childCode}}{{set \"seq\" true}}{{end}}, {{.childCode}}"> } .
 		// TODO: braces are not correct and comma is often missing
 		// TODO: implement directChildCount or hasMultipleChilds
+		// TODO: for that use objects instead of childCode  (and implement a serializer and a deserializer)
 		// Bigger EBNF of EBNF with tags (can parse):
 		`"aEBNF of aEBNF" <"" "AA - ."> {
 		program     <"" '{{"{"}}{{.childCode}}}'>                                                                = [ title ] [ tag ] "{" [ production ] { production <"" ", {{.childCode}}"> } "}" [ tag ] [ comment ] .
@@ -282,12 +283,10 @@ func main() {
 
 			ebnf.PprintSrcSingleLine(srcCode)
 
-			res, err := ebnf.ParseWithGrammar(grammar, srcCode)
+			resStr := "Success"
+			err := ebnf.ParseWithGrammar(grammar, srcCode)
 			if err != nil {
 				fmt.Printf("  (%v)", err)
-			}
-			resStr := "Success"
-			if !res {
 				resStr = "Fail"
 			}
 			fmt.Printf(" ==> %s\n\n", resStr)
