@@ -67,28 +67,28 @@ var (
 		// } "Some comment"`,
 
 		// `"EBNF of EBNF (can parse)" {
-		// program = [ title ] "{" { production } "}" [ comment ] .
+		// program = [ title ] "{" { production } "}" [ comment ] ;
 
-		// production  = name "=" [ expression ] ( "." | ";" ) .
-		// expression  = sequence .
-		// sequence    = alternative { alternative } .
-		// alternative = term { "|" term } .
-		// term        = name | text [ "..." text ] | group | option | repetition | skipspaces .
-		// group       = "(" expression ")" .
-		// option      = "[" expression "]" .
-		// repetition  = "{" expression "}" .
-		// skipspaces = "+" | "-" .
+		// production  = name "=" [ expression ] ";" ;
+		// expression  = sequence ;
+		// sequence    = alternative { alternative } ;
+		// alternative = term { "|" term } ;
+		// term        = name | text [ "..." text ] | group | option | repetition | skipspaces ;
+		// group       = "(" expression ")" ;
+		// option      = "[" expression "]" ;
+		// repetition  = "{" expression "}" ;
+		// skipspaces = "+" | "-" ;
 
-		// title = text .
-		// comment = text .
+		// title = text ;
+		// comment = text ;
 
-		// name = ( small | caps ) { small | caps | digit | "_" } .
-		// text = "\"" - { small | caps | digit | special } "\"" + .
+		// name = ( small | caps ) { small | caps | digit | "_" } ;
+		// text = "\"" - { small | caps | digit | special } "\"" + ;
 
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
 
 		// } "Some comment"`,
 
@@ -152,33 +152,68 @@ var (
 		// TODO: braces are not correct and comma is often missing
 		// TODO: implement directChildCount or hasMultipleChilds
 		// TODO: for that use objects instead of childCode  (and implement a serializer and a deserializer)
+
+		// {{upstream .vars.name (ident .vars.name) .childObj}}
+
+		// // Bigger EBNF of EBNF with tags (can parse):
+		// `"aEBNF of aEBNF" <"" "AA - ."> {
+		// program     <"" '{{"{"}}{{.childCode}}}'>                                                                = [ title ] [ tag ] "{" [ production ] { production <"" ", {{.childCode}}"> } "}" [ tag ] [ comment ] .
+		// production  <"" '{"{{.vars.name}}", {{ident .vars.name}}, {{.childCode}}}; {{addProduction .vars.name (ident .vars.name) .childObj}}{{upstream .vars.name (ident .vars.name) .childObj}}'>                            = name <"name"> [ tag ] "=" [ expression ] ( "." | ";" ) .
+		// expression  <"" '{{if (eq .setVars.or true)}}{"OR", {{.childCode}}}{{else}}{{.childCode}}{{end}}'>       = alternative <"" '{{set "or" false}}{{.childCode}}'> { "|" alternative <"" '{{set "or" true}}, {{.childCode}}'> } .
+		// alternative <"" '{{"{"}}{{.childCode}}{{"}"}}'>                                                          = term <"" '{{.childCode}}'> { term <"" ', {{.childCode}}'> } .
+		// term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
+		// group       <"" '{{"{"}}{{.childCode}}{{"}"}}'>             = "(" expression ")" .
+		// option      <"" '{"OPTIONAL", {{.childCode}}}{{if notNil .childObj}}{{upstream "OPTIONAL" .childObj}}{{end}}'>             = "[" expression "]" .
+		// repetition  <"" '{"REPEAT", {{.childCode}}}{{if notNil .childObj}}{{upstream "REPEAT" .childObj}}{{end}}'>               = "{" expression "}" .
+		// skipspaces  = "+" <"" '{"SKIPSPACES", true}{{upstream "SKIPSPACES" true}}'> | "-" <"" '{"SKIPSPACES", false}{{upstream "SKIPSPACES" false}}'> .
+
+		// title = text .
+		// comment = text .
+
+		// name        <"" '{"IDENT", "{{.childStr}}", {{ident .childStr}}}{{upstream "IDENT" .childStr (ident .childStr)}}'>                = ( small | caps ) - { small | caps | digit | "_" } + .
+		// text        <"" '{"TERMINAL", {{.childStr}}}{{upstream "TERMINAL" .childStr}}'>                                                   = dquotetext | squotetext .
+
+		// dquotetext = '"' - { small | caps | digit | special } '"' + .
+		// squotetext = "'" - { small | caps | digit | special } "'" + .
+
+		// tag  = "<" text text ">" .
+
+		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
+		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
+		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
+		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+
+		// } "Some comment"`,
+
+		//  <'' '{{upstream "IDENT" .childStr (ident .childStr)}}'>
+		// {{if (and (gt (objCount .childObj) 1) (ne "string" (printf "%T" (index .childObj 0))))}}{{upstream "OR" .childObj}}{{end}}
 		// Bigger EBNF of EBNF with tags (can parse):
-		`"aEBNF of aEBNF" <"" "AA - ."> {
-		program     <"" '{{"{"}}{{.childCode}}}'>                                                                = [ title ] [ tag ] "{" [ production ] { production <"" ", {{.childCode}}"> } "}" [ tag ] [ comment ] .
-		production  <"" '{"{{.vars.name}}", {{ident .vars.name}}, {{.childCode}}}'>                              = name <"name"> [ tag ] "=" [ expression ] ( "." | ";" ) .
-		expression  <"" '{{if (eq .setVars.or true)}}{"OR", {{.childCode}}}{{else}}{{.childCode}}{{end}}'>       = alternative <"" '{{set "or" false}}{{.childCode}}'> { "|" alternative <"" '{{set "or" true}}, {{.childCode}}'> } .
-		alternative <"" '{{"{"}}{{.childCode}}{{"}"}}'>                                                          = term <"" '{{.childCode}}'> { term <"" ', {{.childCode}}'> } .
-		term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
-		group       <"" '{{"{"}}{{.childCode}}{{"}"}}'>             = "(" expression ")" .
-		option      <"" '{"OPTIONAL", {{.childCode}}}'>             = "[" expression "]" .
-		repetition  <"" '{"REPEAT", {{.childCode}}}'>               = "{" expression "}" .
-		skipspaces  = "+" <"" '{"SKIPSPACES", true}'> | "-" <"" '{"SKIPSPACES", false}'> .
+		`"aEBNF of aEBNF" {
+		program     = [ title ] [ tag ] "{" [ production ] { production } "}" [ tag ] [ comment ] ;
+		production  <'' '{{addProduction .vars.name (ident .vars.name) .childObj}}{{upstream (group .vars.name (ident .vars.name) (group .childObj))}}'>      = name <'name'> [ tag ] "=" [ expression ] ";" ;
+		expression  <'' '{{if (eq .codeVars.or "true")}}{{upstream (group "OR" .childObj)}}{{end}}'>                                                          = alternative <'or' 'false'> { "|" <'or' 'true'> alternative } ;
+		alternative = term { term } ;
+		term        = ( name <'' '{{.childStr}}{{upstream (group "IDENT" .childStr (ident .childStr))}}'> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
+		group       <'' '{{upstream (group .childObj)}}'>                                                                                                     = "(" expression ")" ;
+		option      <'' '{{if notNil .childObj}}{{upstream (group "OPTIONAL" (group .childObj))}}{{end}}'>                                                            = "[" expression "]" ;
+		repetition  <'' '{{if notNil .childObj}}{{upstream (group "REPEAT" (group .childObj))}}{{end}}'>                                                      = "{" expression "}" ;
+		skipspaces  = "+" <'' '{{upstream (group "SKIPSPACES" true)}}'> | "-" <'' '{{upstream (group "SKIPSPACES" false)}}'> ;
 
-		title = text .
-		comment = text .
+		title = text ;
+		comment = text ;
 
-		name        <"" '{"IDENT", "{{.childStr}}", {{ident .childStr}}}'>                      = ( small | caps ) - { small | caps | digit | "_" } + .
-		text        <"" '{"TERMINAL", {{.childStr}}}'>                                          = dquotetext | squotetext .
+		name        = ( small | caps ) - { small | caps | digit | "_" } + ;
+		text        <'' '{{upstream (group "TERMINAL" .childObj)}}'>                                                                                          = dquotetext | squotetext ;
 
-		dquotetext = '"' - { small | caps | digit | special } '"' + .
-		squotetext = "'" - { small | caps | digit | special } "'" + .
+		dquotetext = '"' - { small | caps | digit | special } <'' '{{upstream .childStr}}'> '"' + ;
+		squotetext = "'" - { small | caps | digit | special } <'' '{{upstream .childStr}}'> "'" + ;
 
-		tag  = "<" text text ">" .
+		tag  = "<" text text ">" ;
 
-		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
 
 		} "Some comment"`,
 	}
@@ -231,34 +266,33 @@ var (
 		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu ; rtu = foo | "B" ; }`,
 		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; }`,
 
-		`{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "X" "Y" [ "Z" ] "P" { "Z" } ; } `,
+		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "X" "Y" [ "Z" ] "P" { "Z" } ; } `,
 
-		// `"aEBNF of aEBNF" {
-		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		// production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
-		// expression  = sequence .
-		// sequence    = alternative { alternative } .
-		// alternative = term { "|" term } .
-		// term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
-		// group       = "(" expression  ")" .
-		// option      = "[" expression "]" .
-		// repetition  = "{" expression "}" .
-		// skipspaces  = "+" | "-" .
+		`"EBNF of EBNF (can parse)" {
+		program = [ title ] "{" { production } "}" [ comment ] ;
 
-		// title = text .
-		// comment = text .
+		production  = name "=" [ expression ] ";" ;
+		expression  = sequence ;
+		sequence    = alternative { alternative } ;
+		alternative = term { "|" term } ;
+		term        = name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ;
+		group       = "(" expression ")" ;
+		option      = "[" expression "]" ;
+		repetition  = "{" expression "}" ;
+		skipspaces = "+" | "-" ;
 
-		// name = ( small | caps ) - { small | caps | digit | "_" } + .
-		// text = "\"" - { small | caps | digit | special } "\"" + .
+		title = text ;
+		comment = text ;
 
-		// tag  = "<" text text ">" .
+		name = ( small | caps ) { small | caps | digit | "_" } ;
+		text = "\"" - { small | caps | digit | special } "\"" + ;
 
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
+		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
 
-		// } "Some comment"`,
+		} "Some comment"`,
 	}
 )
 

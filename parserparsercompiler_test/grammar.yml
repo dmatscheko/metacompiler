@@ -14,15 +14,26 @@ v
 
 
 
-
     {{"top", 0, {"TERMINAL", "AB C"}}, {"foo", 1, {"TERMINAL", "BAR"}}, {"xyz", 2, {{"IDENT", "rtu", 3}, {"IDENT", "mmx", 4}}}, {"rtu", 3, {"OR", {"IDENT", "foo", 1}, {"TERMINAL", "B"}}}, {"mmx", 4, {"OPTIONAL", {"IDENT", "xyz", 2}}}, {"zzz", 5, {{"OR", {"TERMINAL", "U"}, {"TERMINAL", "V"}}, {"TERMINAL", "W"}, {"TERMINAL", "X"}, {"TERMINAL", "Y"}, {"OPTIONAL", {"TERMINAL", "Z"}}, {"TERMINAL", "P"}, {"REPEAT", {"TERMINAL", "Z"}}}}}
-    {{"top", 0, {"TERMINAL", "AB C"}}, {"foo", 1, {"TERMINAL", "BAR"}}, {"xyz", 2, {{"IDENT", "rtu", 3}, {"IDENT", "mmx", 4}}}, {"rtu", 3, {"OR", {"IDENT", "foo", 1}, {"TERMINAL", "B"}}}, {"mmx", 4, {"OPTIONAL", {"IDENT", "xyz", 2}}}, {"zzz", 5, {{"OR", {"TERMINAL", "U"}, {"TERMINAL", "V"}}, {"TERMINAL", "W"}, {"TERMINAL", "X"}, {"TERMINAL", "Y"}##{"OPTIONAL", {"TERMINAL", "Z"}}, {"TERMINAL", "P"}##{"REPEAT", {"TERMINAL", "Z"}}}}}
+    {{"top", 0, {"TERMINAL", "AB C"}}, {"foo", 1, {"TERMINAL", "BAR"}}, {"xyz", 4, {{"IDENT", "rtu", 2}, {"IDENT", "mmx", 3}}}, {"rtu", 2, {"OR", {"IDENT", "foo", 1}, {"TERMINAL", "B"}}}, {"mmx", 3, {"OPTIONAL", {"IDENT", "xyz", 4}}}, {"zzz", 5, {{"OR", {"TERMINAL", "U"}, {"TERMINAL", "V"}}, {"TERMINAL", "W"}, {"TERMINAL", "X"}, {"TERMINAL", "Y"}, {"OPTIONAL", {"TERMINAL", "Z"}}, {"TERMINAL", "P"}, {"REPEAT", {"TERMINAL", "Z"}}}}}
+    
 
 
 
+    {
+        {"top", 0, {{"TERMINAL", "AB C"}}}; ,
+        {"foo", 1, {{"TERMINAL", "BAR"}}}; , 
+        {"xyz", 2, {{"IDENT", "rtu", 3}, {"IDENT", "mmx", 4}}}; , 
+        {"rtu", 3, {"OR", {{"IDENT", "foo", 1}}, {{"TERMINAL", "B"}}}}; , 
+        {"mmx", 4, {{"OPTIONAL", {{"IDENT", "xyz", 2}}}}}; , 
+        {"zzz", 5, {{{"OR", {{"TERMINAL", "U"}}, {{"TERMINAL", "V"}}}}, {"TERMINAL", "W"}, {"TERMINAL", "X"}, {"TERMINAL", "Y"}{"OPTIONAL", {{"TERMINAL", "Z"}}}, {"TERMINAL", "P"}{"REPEAT", {{"TERMINAL", "Z"}}}}};
+    }
 
-
-
-
-
-
+    {
+         {"top", 0, "{{\"TERMINAL\", \"AB C\"}}"}, 
+         {"foo", 1, "{{\"TERMINAL\", \"BAR\"}}"}, 
+         {"xyz", 2, "{{\"IDENT\", \"rtu\", 3}, {\"IDENT\", \"mmx\", 4}}"}, 
+         {"rtu", 3, "{\"OR\", {{\"IDENT\", \"foo\", 1}}, {{\"TERMINAL\", \"B\"}}}"}, 
+         {"mmx", 4, "{{\"OPTIONAL\", {{\"IDENT\", \"xyz\", 2}}}}"}, 
+         {"zzz", 5, "{{{\"OR\", {{\"TERMINAL\", \"U\"}}, {{\"TERMINAL\", \"V\"}}}}, {\"TERMINAL\", \"W\"}, {\"TERMINAL\", \"X\"}, {\"TERMINAL\", \"Y\"}{\"OPTIONAL\", {{\"TERMINAL\", \"Z\"}}}, {\"TERMINAL\", \"P\"}{\"REPEAT\", {{\"TERMINAL\", \"Z\"}}}}"}
+    }
