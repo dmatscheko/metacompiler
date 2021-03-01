@@ -45,21 +45,53 @@ func getIDAndCodeFromTag(tagAnnotation object) (string, string) {
 	return tagID, tagCode
 }
 
-func pprint(header string, ob object) {
+func jsonizeObject(ob object) string {
 	pp := fmt.Sprintf("%#v", ob)
 	pp = strings.ReplaceAll(pp, "[]interface {}", "")
 	if strings.HasPrefix(pp, "[]int") {
 		pp = strings.Replace(pp, "[]int", "", 1)
 	} else if strings.HasPrefix(pp, "[]string") {
 		pp = strings.Replace(pp, "[]string", "", 1)
-	} else if strings.HasPrefix(pp, "[]") {
-		pp = strings.Replace(pp, "[]", "", 1)
+	} else if strings.HasPrefix(pp, "[][]") {
+		pp = strings.Replace(pp, "[][]", "[]", 1)
+	} else if strings.HasPrefix(pp, "map[string]interface {}") {
+		pp = strings.Replace(pp, "map[string]interface {}", "map", 1)
+	} else if strings.HasPrefix(pp, "map[string]string") {
+		pp = strings.Replace(pp, "map[string]string", "map", 1)
 	}
+
+	// pp = strings.ReplaceAll(pp, "ebnf.group{}, ", "G: ")
+	pp = strings.ReplaceAll(pp, "ebnf.group{}, ", "")
 
 	space := regexp.MustCompile(`[ \t]+`)
 	pp = space.ReplaceAllString(pp, " ")
 
-	fmt.Printf("\n%s:\n   %s\n", header, pp)
+	return pp
+}
+
+// func jsonizeObject(ob object) string {
+// 	pp := fmt.Sprintf("%#v", ob)
+// 	pp = strings.ReplaceAll(pp, "[]interface {}", "")
+// 	if strings.HasPrefix(pp, "[]int") {
+// 		pp = strings.Replace(pp, "[]int", "", 1)
+// 	} else if strings.HasPrefix(pp, "[]string") {
+// 		pp = strings.Replace(pp, "[]string", "", 1)
+// 	} else if strings.HasPrefix(pp, "[]") {
+// 		pp = strings.Replace(pp, "[]", "", 1)
+// 	} else if strings.HasPrefix(pp, "map[string]interface {}") {
+// 		pp = strings.Replace(pp, "map[string]interface {}", "", 1)
+// 	} else if strings.HasPrefix(pp, "map[string]string") {
+// 		pp = strings.Replace(pp, "map[string]string", "", 1)
+// 	}
+
+// 	space := regexp.MustCompile(`[ \t]+`)
+// 	pp = space.ReplaceAllString(pp, " ")
+
+// 	return pp
+// }
+
+func pprint(header string, ob object) {
+	fmt.Printf("\n%s:\n   %s\n", header, jsonizeObject(ob))
 }
 
 func pprintSrc(header string, pp string) {
