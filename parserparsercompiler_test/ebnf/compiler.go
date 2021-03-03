@@ -11,14 +11,35 @@ import (
 // Dynamic parse tree compiler
 
 // TODO: make nicely named constants for all TAG array indizes!!! (also do that for all other constant array indizes)
+// TODO: set and read objVars (in addition to the vars and codeVars)
+// TODO: use the verifier part of the other ebnf-parser project. Also test if every ident is available (exists)!
+// TODO: remoce the integer list of idents and replace with hashmap. also panic if an entry is already in the hashmap!
 
-type group struct{}
+// TODO: implement this!!!
+// object type:
+type group2 int
+
+const ( // iota is reset to 0
+	no    group2 = iota // can be broken apart
+	yes                 // a group, but nils can be deleted
+	fixed               // a group where position is imporant. keep nil elements in this group
+)
+
+type sequence2 struct {
+	group group2
+	data  []object
+}
+
+/// instead of this:
+type noGroup struct{}    // can be broken apart
+type group struct{}      // a group where nils can be deleted
 type fixedGroup struct{} // keep nil elements in this group
 
 type compiler struct {
-	params map[string]object
-
+	globalVars map[string]object
 	newGrammar Grammar
+
+	traceEnabled bool
 }
 
 func appendObj(target []interface{}, elems ...interface{}) []interface{} {
@@ -74,7 +95,7 @@ func simplifyObj(obj interface{}, mustBeGroup ...bool /* = false */) object {
 		res := sequence{group{}}
 
 		for i := 1; i < len(o); i++ { // Do not drop nil elements in a group.
-			// We are not allowed to delete nils, but we can split NON group objects
+			// We are not allowed to delete nils, but we can do this inside the NON group childs
 			res = appendObj(res, simplifyObj(o[i]))
 		}
 		return res
@@ -117,21 +138,21 @@ func simplifyObj(obj interface{}, mustBeGroup ...bool /* = false */) object {
 }
 
 // maybe store only beginning and end instead of matched string?
-func (co *compiler) handleScript(id string, code string, childStrJoined string, childCodeResultStr string, childCodeResultObject object, variables map[string]object, codeVariables map[string]string, tree object) (string, object) { // (childCode, childObject) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
-	fmt.Printf("### TagID: %s\n    Code: %s\n    ChildStr: %s\n    ChildObject: %s\n    Variables: %s\n    CodeVariables: %s\n    Tree: %s\n", id, code, childStrJoined, jsonizeObject(childCodeResultObject), jsonizeObject(variables), jsonizeObject(codeVariables), jsonizeObject(tree))
-
-	objResult := childCodeResultObject
+// childCodeResultStrJoined : maybe makle this also a tree of strings and flatten later!
+func (co *compiler) handleTagCode(code string, childMatchStrJoined string, childCodeResultStrJoined string, childCodeResultObjTree object, localVars map[string]object, localTree object) (string, object) { // => (codeResultStrJoined, codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
+	codeResultObjTree := childCodeResultObjTree
+	vars := map[string]object{}
 
 	funcMap := template.FuncMap{
 		"inc": func(name string) int {
-			if co.params[name] == nil {
-				co.params[name] = 0
+			if co.globalVars[name] == nil {
+				co.globalVars[name] = 0
 				return 0
 			}
 
-			co.params[name] = co.params[name].(int) + 1
+			co.globalVars[name] = co.globalVars[name].(int) + 1
 
-			return co.params[name].(int)
+			return co.globalVars[name].(int)
 		},
 
 		// "mkSlice": func(args ...interface{}) []interface{} {
@@ -142,19 +163,39 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 			return o != nil
 		},
 
-		"childObj": func() object {
-			return childCodeResultObject
+		"notEmpty": func(s interface{}) bool {
+			return s != nil && s != ""
 		},
 
-		"objCount": func(o interface{}) int {
+		"childObj": func() object {
+			return childCodeResultObjTree
+		},
+
+		// TODO: maybe it can overwrite len!!!!
+		"lenx": func(o interface{}) int {
 			if o == nil {
 				return 0
 			}
 			if seq, ok := o.([]interface{}); ok {
+				if len(seq) > 0 {
+					if _, ok := seq[0].(group); ok {
+						return len(seq) - 1
+					}
+				}
 				return len(seq)
 			}
 			return 1
 		},
+
+		// "objCount": func(o interface{}) int {
+		// 	if o == nil {
+		// 		return 0
+		// 	}
+		// 	if seq, ok := o.([]interface{}); ok {
+		// 		return len(seq)
+		// 	}
+		// 	return 1
+		// },
 
 		// "strip": func(o interface{}) interface{} {
 		// 	if seq, ok := o.(sequence); ok {
@@ -191,7 +232,7 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 
 		// TODO!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! after this is implemented, add "functions" or "variables" like directChildCount, leftCount, depth, ... also add functions to access objects (nodes)
 		// {{ upstream a b c d }}
-		"upstream": func(args ...interface{}) object {
+		"upstream": func(args ...interface{}) string {
 			// Only if no upstream is called, everything is put upstream unmodified.
 
 			// seq := sequence{}
@@ -206,15 +247,15 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 				}
 			}
 			if allNil {
-				objResult = nil
-				return nil
+				codeResultObjTree = nil
+				return ""
 			}
 
 			// objResult = args
 			// return args
 
-			objResult = simplifyObj(args)
-			return objResult
+			codeResultObjTree = simplifyObj(args)
+			return ""
 		},
 
 		"group": func(args ...interface{}) object {
@@ -235,9 +276,10 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 			return appendObj(sequence{group{}}, args...)
 		},
 
+		// TODO: allow multiple arrays of unique names. Something like ' {{ident "groupfoo" .childStr}} '
 		// Sets a global unique name and returns its index. Example: ' {{ident .childStr}} '
 		"ident": func(name string) int {
-			idents := co.params["idents"].([]string)
+			idents := co.globalVars["idents"].([]string)
 			// ididx := params["ididx"].([]int)
 
 			k := -1
@@ -253,7 +295,7 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 				// ididx = append(ididx, -1)
 			}
 
-			co.params["idents"] = idents
+			co.globalVars["idents"] = idents
 			// params["ididx"] = ididx
 
 			return k
@@ -264,14 +306,34 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 			return ""
 		},
 
+		// <"" "{{ if (eq .globalVars.or true) }}{ \"OR\", {{.childCode}} }{{end}}">
+		// <"" "{{ if .childCode }}{{ setGlobal \"or\" true }}{{end}}, {{.childCode}}">
+		// this variables will only be visible upstream
+		"setLocal": func(name string, data interface{}) string {
+			localVars[name] = data
+			return ""
+		},
+
 		// using vars:
 		// <"" "{ \"{{.vars.trololo}}\", {{inc \"counter\"}}, {{.codeVars.expression}} }, ">
 		// foo <"trololo"> = bar <"expression" "{{.childCode}}">
 
-		// <"" "{{ if .childCode }}{{ set \"or\" true }}{{end}}, {{.childCode}}">
-		// <"" "{{ if (eq .setVars.or true) }}{ \"OR\", {{.childCode}} }{{end}}">
-		"set": func(name string, data interface{}) string {
-			co.params["setVars"].(map[string]object)[name] = data
+		// <"" "{{ if (eq .globalVars.or true) }}{ \"OR\", {{.childCode}} }{{end}}">
+		// <"" "{{ if .childCode }}{{ setGlobal \"or\" true }}{{end}}, {{.childCode}}">
+		"setGlobal": func(name string, data interface{}) string {
+			co.globalVars[name] = data
+			return ""
+		},
+
+		// {{deleteLocalVar "foo"}}
+		"deleteLocalVar": func(s string) string {
+			delete(localVars, s)
+			return ""
+		},
+
+		// {{deleteLocalVar "foo"}}
+		"deleteGlobalVar": func(s string) string {
+			delete(co.globalVars, s)
 			return ""
 		},
 
@@ -295,38 +357,40 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 	// 	}
 	// }
 
-	tmpl, err := template.New(id).Funcs(funcMap).Parse(code)
+	tmpl, err := template.New("").Funcs(funcMap).Parse(code)
 	if err != nil {
 		panic(err)
 	}
 
-	// a tag looks like <"ID" "CODE">
-	co.params["id"] = id                          // The tag ID can be referenced by the code part.
-	co.params["childStr"] = childStrJoined        // The collective matched strings of all child nodes.
-	co.params["childCode"] = childCodeResultStr   // The collective output of all child nodes code part.
-	co.params["childObj"] = childCodeResultObject // The collective generated object tree of all child nodes code part.
-	co.params["vars"] = variables                 // The collective matched strings from some child node identified by a tag ID. The name of the variable is the tag ID. Example: ' foo <"bar"> '  // TODO: maybe rename to strVars
-	co.params["codeVars"] = codeVariables         // The code output from some child node identified by a tag ID. The name of the variable is the tag ID. Example: ' foo <"bar" "xyz{{.childCode}}"> '
-	co.params["subTree"] = tree                   // The current subtree of the parser grammar
-	if co.params["setVars"] == nil {              // The global variables, that can be set with {{ set \"foo\" true }}
-		co.params["setVars"] = map[string]object{}
-	}
-	if co.params["idents"] == nil { // The global list of unique names. Set by {{ident "someName"}}.
-		co.params["idents"] = []string{}
+	// a tag looks like <"CODE">
+	vars["childStr"] = childMatchStrJoined       // (string) The collective matched strings of all child nodes.
+	vars["childCode"] = childCodeResultStrJoined // (string) The collective textual output of all child tag nodes code.
+	vars["childObj"] = childCodeResultObjTree    // (object tree) The collective generated object tree of all child tag nodes code.
+	vars["locals"] = localVars                   // (objects map) The local (going upstream) variables, that can be set with {{ setLocal "foo" true }}, accessed with {{ .locals.foo }}, or deleted with {{ deleteLocal "foo" }}
+	vars["globals"] = co.globalVars              // (objects map) The global variables, that can be set with {{ setGlobal "foo" true }}, accessed with {{ .globals.foo }}, or deleted with {{ deletGlobal "foo" }}
+	vars["subTree"] = localTree                  // (object tree) The current sub tree of the parser grammar
+	if co.globalVars["idents"] == nil {          // (string list) The global list of unique names. Set by {{ident "someName"}}. It is exposed to the scripting language on purpose.
+		co.globalVars["idents"] = []string{}
 	}
 	// if params["ididx"] == nil {
 	// 	params["ididx"] = []int{}
 	// }
 	// params["directChildCount"] = directChildCount // The amount of direct child nodes.
 
+	if co.traceEnabled {
+		fmt.Printf("\n### handleTagCode input:\n    TagCode: %s\n    ChildMatchedStr: %s\n    ChildCodeResultStrJoined: %s\n    ChildCodeResultObjTree: %s\n    GlobalVars: %s\n    LocalVars: %s\n    LocalGrammarTree: %s\n", code, childMatchStrJoined, childCodeResultStrJoined, jsonizeObject(childCodeResultObjTree), jsonizeObject(co.globalVars), jsonizeObject(localVars), jsonizeObject(localTree))
+	}
+
 	var tpl bytes.Buffer
-	err = tmpl.Execute(&tpl, co.params) // TODO: variables should maybe contain implicit variables (e.g.: (underscore + name) of all objects below)
+	err = tmpl.Execute(&tpl, vars) // TODO: variables should maybe contain implicit variables (e.g.: (underscore + name) of all objects below)
 	if err != nil {
 		panic(err)
 	}
+	codeResultStrJoined := tpl.String()
 
-	result := tpl.String()
-	fmt.Printf("    Result:\n      CodeStrResult: %s\n      CodeObjResult: %s\n\n", result, jsonizeObject(objResult))
+	if co.traceEnabled {
+		fmt.Printf("  ## Result:\n    CodeResultStrJoined: %s\n    CodeResultObjTree: %s\n    GlobalVars: %s\n    LocalVars: %s\n", codeResultStrJoined, jsonizeObject(codeResultObjTree), jsonizeObject(co.globalVars), jsonizeObject(localVars))
+	}
 
 	// activate if necessary:
 	// if seq, ok := objResult.(sequence); ok {
@@ -337,57 +401,43 @@ func (co *compiler) handleScript(id string, code string, childStrJoined string, 
 	// 	}
 	// }
 
-	return result, objResult
+	return codeResultStrJoined, codeResultObjTree // localVars (the modification is already seen by the caller, because its a pointer)
 }
 
-func (co *compiler) compile(tree object, inVariables map[string]object, inCodeVariables map[string]string) (string, string, object, map[string]object, map[string]string) { // => (outStr, outCode, outObj, outVariables, outCodeVariables)
-	if t, ok := tree.(sequence); ok && len(t) > 0 {
+func (co *compiler) compile(parseTree object, inLocalVars map[string]object) (string, string, object, map[string]object) { // => (childMatchStrJoined, codeResultStrJoined, codeResultObjTree, outLocalVars)
+	if t, ok := parseTree.(sequence); ok && len(t) > 0 {
 		t1 := t[0]
 
 		if _, ok := t1.(string); !ok { // "SEQUENCE" (if there is no string at rule[0], it is a group/sequence of rules. iterate through them and apply).
-			outStr := ""
-			outCode := ""
-			outObj := sequence{}
-			outVariables := map[string]object{}
-			outCodeVariables := map[string]string{}
-			for _, o := range t {
-				tmpStr, tmpCode, tmpObj, tmpVariables, tmpCodeVariables := co.compile(o, inVariables, inCodeVariables)
-				outStr += tmpStr
-				outCode += tmpCode
-				if tmpObj != nil {
-					outObj = appendObj(outObj, tmpObj)
+			matchStr := ""
+			codeResultStr := ""
+			codeResultObjTree := sequence{}
+			localVars := map[string]object{}
+			for _, subTree := range t {
+				childMatchStr, childCodeResultStr, childCodeResultObjTree, childLocalVars := co.compile(subTree, inLocalVars)
+				matchStr += childMatchStr
+				codeResultStr += childCodeResultStr
+				if childCodeResultObjTree != nil {
+					codeResultObjTree = appendObj(codeResultObjTree, childCodeResultObjTree)
 				}
-				for k, v := range tmpVariables {
-					outVariables[k] = v
-				}
-				for k, v := range tmpCodeVariables {
-					outCodeVariables[k] = v
+				for k, v := range childLocalVars {
+					localVars[k] = v
 				}
 			}
 
-			var outObjRes object = outObj
-			if len(outObj) == 1 {
-				outObjRes = outObj[0]
-			} else if len(outObj) == 0 {
-				outObjRes = nil
+			var outCodeResultObjTree object = codeResultObjTree
+			if len(codeResultObjTree) == 1 {
+				outCodeResultObjTree = codeResultObjTree[0]
+			} else if len(codeResultObjTree) == 0 {
+				outCodeResultObjTree = nil
 			}
-			return outStr, outCode, outObjRes, outVariables, outCodeVariables
+			return matchStr, codeResultStr, outCodeResultObjTree, localVars
 		} else if t1 == "TERMINAL" {
-			return t[1].(string), "", nil, inVariables, inCodeVariables
+			return t[1].(string), "", nil, inLocalVars
 		} else if t1 == "TAG" {
-			if len(t) != 3 {
-				panic(fmt.Sprintf("error at TAG: %#v", t))
-			}
+			tagCode := getIDAndCodeFromTag(t)
 
-			tagID, tagCode := getIDAndCodeFromTag(t[1])
-
-			outStr, outCode, outObj, tmpVariables, tmpCodeVariables := co.compile(t[2], inVariables, inCodeVariables) // evaluate the child productions of the TAG
-
-			outVariables := map[string]object{}
-			for k, v := range tmpVariables {
-				outVariables[k] = v
-			}
-			outVariables[tagID] = outStr
+			childMatchStrJoined, childCodeResultStrJoined, childCodeResultObjTree, childLocalVars := co.compile(t[2], inLocalVars) // evaluate the child productions of the TAG
 
 			// directChildCount := 1
 			// if childs, ok := t[2].(sequence); ok {
@@ -398,21 +448,23 @@ func (co *compiler) compile(tree object, inVariables map[string]object, inCodeVa
 			// 	directChildCount = len(childs)
 			// }
 
-			// TODO: HANDLE TAG SCRIPT HERE
-			tmpCode, tmpObj := co.handleScript(tagID, tagCode, outStr, outCode, outObj, outVariables, tmpCodeVariables, tree)
+			// Copy, so that handleTagCode() can change them:
+			outLocalVars := map[string]object{}
+			for k, v := range childLocalVars {
+				outLocalVars[k] = v
+			}
+
+			// outLocalVars will be changed by co.handleCode()!
+			codeResultStrJoined, codeResultObjTree := co.handleTagCode(tagCode, childMatchStrJoined, childCodeResultStrJoined, childCodeResultObjTree, outLocalVars, parseTree)
 
 			// store code generated output as a variable with the name of the ID of the tag
-			outCodeVariables := map[string]string{}
-			for k, v := range tmpCodeVariables {
-				outCodeVariables[k] = v
-			}
-			outCodeVariables[tagID] = tmpCode
+			// outCodeVariables := map[string]string{}
+			// for k, v := range tmpCodeVars {
+			// 	outCodeVariables[k] = v
+			// }
+			// outCodeVariables[tagID] = tmpCode
 
-			// outCode += tmpCode
-			outCode = tmpCode
-			outObj = tmpObj
-
-			return outStr, outCode, outObj, outVariables, outCodeVariables
+			return childMatchStrJoined, codeResultStrJoined, codeResultObjTree, outLocalVars
 		}
 
 		// fmt.Printf("## A # %#v\n", t1)
@@ -421,28 +473,33 @@ func (co *compiler) compile(tree object, inVariables map[string]object, inCodeVa
 		// fmt.Printf("## B # %#v\n", tree)
 	}
 
-	return "", "", nil, inVariables, inCodeVariables
+	return "", "", nil, inLocalVars
 }
 
-func (co *compiler) CompileParseTree(parseTree object) error {
+func CompileParseTree(parseTree object, traceEnabled bool) (err error) {
 	// defer func() {
 	// 	if err := recover(); err != nil {
-	// 		success = false
-	// 		e = fmt.Errorf(fmt.Sprintf("%s", err))
+	// 		err = fmt.Errorf(fmt.Sprintf("%s", err))
 	// 	}
 	// }()
+
+	var co compiler
+	co.traceEnabled = traceEnabled
 
 	// The newly generated grammar
 	co.newGrammar.productions = co.newGrammar.productions[:0]
 	co.newGrammar.ididx = co.newGrammar.ididx[:0]
 
-	co.params = map[string]object{}         // Global variables.
-	var variables = map[string]object{}     // Local variables from source text (must be passed through compile).
-	var codeVariables = map[string]string{} // Local variables created by semantic code (must be passed through compile).
+	co.globalVars = map[string]object{} // Global variables.
+	var localVars = map[string]object{} // Local variables (must be passed through compile).
 
-	outStr, outCode, outObj, outVariables, outCodeVariables := co.compile(parseTree, variables, codeVariables)
+	// childMatchStrJoined = String tree
+	// codeResultStrJoined = Joined strings of the code output tree
+	// codeResultObjTree = Code object output tree (created by upstream)
+	// outLocalVars = local variables that were passed up the tree
+	childMatchStrJoined, codeResultStrJoined, codeResultObjTree, outLocalVars := co.compile(parseTree, localVars)
 
-	fmt.Printf("\n\nvariables:\n    %#v\n\ncode variables:\n    %#v\n\noutStr:\n    %s\n\noutCode:\n    %s\n\noutObj:\n    %s\n\nnewGrammar:\n    %#v\n\n", outVariables, outCodeVariables, outStr, outCode, jsonizeObject(simplifyObj(outObj)), jsonizeObject(co.newGrammar.productions))
+	fmt.Printf("\n\n==================\nResult:\n==================\n\nLocalVars:\n    %#v\n\nChildMatchStrJoined:\n    %s\n\nCodeResultStrJoined:\n    %s\n\nCodeResultObjTree:\n    %s\n\nNewGrammar:\n    %s\n\n", outLocalVars, childMatchStrJoined, codeResultStrJoined, jsonizeObject(simplifyObj(codeResultObjTree)), jsonizeObject(co.newGrammar.productions))
 
 	return nil
 }

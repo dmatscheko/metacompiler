@@ -13,6 +13,8 @@ type grammarParser struct {
 	ch      rune
 	sdx     int
 	grammar Grammar
+
+	traceEnabled bool
 }
 
 // TODO: DEDUPLICATE!!
@@ -30,22 +32,23 @@ func (gp *grammarParser) skipSpaces() {
 }
 
 func (gp *grammarParser) printTrace(rule sequence, action string, depth int) {
-	traceEnabled := false // TODO: CHANGE THIS WHEN DEBUGGING
-	// traceEnabled := true // TODO: CHANGE THIS WHEN DEBUGGING
+	if !gp.traceEnabled {
+		return
+	}
 
 	d := ">"
 	for i := 0; i < depth; i++ {
 		d += ">"
 	}
 
-	if traceEnabled {
-		c := '-'
-		if gp.sdx < len(gp.src) {
-			c = gp.src[gp.sdx]
-		}
-		pprint(fmt.Sprintf("%3d%s rule for pos # %d (%c) action: %s", depth, d, gp.sdx, c, action), rule)
+	c := '-'
+	if gp.sdx < len(gp.src) {
+		c = gp.src[gp.sdx]
 	}
+	Pprint(fmt.Sprintf("%3d%s rule for pos # %d (%c) action: %s", depth, d, gp.sdx, c, action), rule)
 }
+
+// TODO: fuse sequencial terminals (NOT in OR)!!!!!!!!!!
 
 // The self-referential EBNF is (different description form!):
 //
@@ -186,21 +189,22 @@ func (gp *grammarParser) apply(rule sequence, doSkipSpaces bool, depth int) obje
 	return localProductions
 }
 
-func ParseWithGrammar(grammar Grammar, srcCode string) (err error) {
+func ParseWithGrammar(grammar Grammar, srcCode string, traceEnabled bool) (res object, err error) {
 	// defer func() {
 	// 	if errRecover := recover(); errRecover != nil {
-	// 		success = false
+	// 		res = nil
 	// 		err = fmt.Errorf(fmt.Sprintf("%s", errRecover))
 	// 	}
 	// }()
 
 	var gp grammarParser
 	gp.grammar = grammar
-
 	gp.src = []rune(srcCode)
 	gp.sdx = 0
+	gp.traceEnabled = traceEnabled
+
 	if len(gp.grammar.productions) <= 0 {
-		return fmt.Errorf("No productions to parse")
+		return nil, fmt.Errorf("No productions to parse")
 	}
 
 	parseTree := gp.apply(gp.grammar.productions[0][2].(sequence), true, 0)
@@ -208,9 +212,9 @@ func ParseWithGrammar(grammar Grammar, srcCode string) (err error) {
 
 	gp.skipSpaces()
 	if gp.sdx < len(gp.src) {
-		return fmt.Errorf("Not everything could be parsed")
+		// fmt.Printf("\n\nWARN: Not everything could be parsed: (%d / %d chars)", gp.sdx, len(gp.src))
+		return nil, fmt.Errorf("Not everything could be parsed")
 	}
 
-	var co compiler
-	return co.CompileParseTree(parseTree)
+	return parseTree, nil
 }

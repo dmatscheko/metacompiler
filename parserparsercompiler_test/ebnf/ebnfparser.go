@@ -324,8 +324,8 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		tag = ep.tag()
 	}
 	if tag != nil {
-		tagID, tagCode := getIDAndCodeFromTag(tag[1])
-		ep.extras = append(ep.extras, sequence{"prolog.id", tagID}, sequence{"prolog.code", tagCode})
+		tagCode := getIDAndCodeFromTag(tag)
+		ep.extras = append(ep.extras, sequence{"prolog.code", tagCode})
 	}
 
 	// main
@@ -348,8 +348,8 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		tag = ep.tag()
 	}
 	if tag != nil {
-		tagID, tagCode := getIDAndCodeFromTag(tag[1])
-		ep.extras = append(ep.extras, sequence{"epilog.id", tagID}, sequence{"epilog.code", tagCode})
+		tagCode := getIDAndCodeFromTag(tag)
+		ep.extras = append(ep.extras, sequence{"epilog.code", tagCode})
 	}
 
 	// comment
@@ -380,9 +380,6 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 }
 
 func ParseEBNF(srcEbnf string) (g Grammar, e error) {
-	pprintSrc("parse", srcEbnf)
-	// fmt.Printf("parse:\n%s\n", srcEbnf)
-
 	var ep ebnfParser
 
 	defer func() {
@@ -396,10 +393,10 @@ func ParseEBNF(srcEbnf string) (g Grammar, e error) {
 
 	if !ep.err {
 		fmt.Println("  ===> Success")
-		pprint("productions", ep.grammar.productions)
-		pprint("ididx", ep.grammar.ididx)
-		pprint("idents", ep.idents)
-		pprint("extras", ep.extras)
+		Pprint("productions", ep.grammar.productions)
+		Pprint("ididx", ep.grammar.ididx)
+		Pprint("idents", ep.idents)
+		Pprint("extras", ep.extras)
 		return ep.grammar, nil
 	} else {
 		fmt.Println("  ===> Fail\n")

@@ -21,28 +21,20 @@ func getTextFromTerminal(terminal object) string {
 			return tStr
 		}
 	}
-	panic(fmt.Sprintf("error at TAG: %#v", terminal))
+	panic(fmt.Sprintf("Error at TAG TERMINAL: %#v", terminal))
 }
 
-func getIDAndCodeFromTag(tagAnnotation object) (string, string) {
-	tagID := ""
-	tagCode := ""
-
-	if annotationSeq, ok := tagAnnotation.(sequence); ok {
-		// we have the annotation of the TAG. The annotation can be either a single TERMINAL, or a sequence of TERMINALs.
-		if _, ok := annotationSeq[0].(string); ok { // single TERMINAL
-			tagID = getTextFromTerminal(annotationSeq)
-		} else if len(annotationSeq) == 2 { // sequence of TERMINALs (so far there is only ID and code, so 2 elements)
-			tagID = getTextFromTerminal(annotationSeq[0])
-			tagCode = getTextFromTerminal(annotationSeq[1])
-		} else {
-			panic(fmt.Sprintf("only ID and code is allowed inside TAG: %#v", tagAnnotation))
+func getIDAndCodeFromTag(tag object) string {
+	if tagSeq, ok := tag.(sequence); ok && len(tagSeq) > 1 {
+		// The annotation can be either a single TERMINAL, or a sequence of TERMINALs.
+		if annotationSeq, ok := tagSeq[1].(sequence); ok && len(annotationSeq) > 0 {
+			if _, ok := annotationSeq[0].(string); ok { // A single TERMINAL.
+				return getTextFromTerminal(annotationSeq)
+			}
+			return getTextFromTerminal(annotationSeq[0]) // A sequence and so the code is in the first TERMINAL.
 		}
-	} else {
-		panic(fmt.Sprintf("error at TAG: %#v", tagAnnotation))
 	}
-
-	return tagID, tagCode
+	panic(fmt.Sprintf("Error at TAG: %#v", tag))
 }
 
 func jsonizeObject(ob object) string {
@@ -90,11 +82,11 @@ func jsonizeObject(ob object) string {
 // 	return pp
 // }
 
-func pprint(header string, ob object) {
+func Pprint(header string, ob object) {
 	fmt.Printf("\n%s:\n   %s\n", header, jsonizeObject(ob))
 }
 
-func pprintSrc(header string, pp string) {
+func PprintSrc(header string, pp string) {
 	linebreaks := regexp.MustCompile(`(?s)([ \t]*[\r\n]+[ \t]*)+`)
 	pp = linebreaks.ReplaceAllString(pp, "\n")
 
@@ -104,7 +96,7 @@ func pprintSrc(header string, pp string) {
 	indent := regexp.MustCompile(`(?m)^[ \t]*`)
 	pp = indent.ReplaceAllString(pp, "   ")
 
-	fmt.Printf("\n%s:\n%s\n", header, pp)
+	fmt.Printf("%s:\n%s\n", header, pp)
 }
 
 func PprintSrcSingleLine(pp string) {
