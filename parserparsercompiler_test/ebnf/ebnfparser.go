@@ -109,7 +109,7 @@ func (ep *ebnfParser) getToken() {
 	} else if ep.ch == '~' && len(ep.src) > ep.sdx+1 && ep.src[ep.sdx+1] == '~' {
 		atEscapeCh := 0
 		unescape := false
-		for tokend := ep.sdx + 1; tokend < len(ep.src); tokend++ {
+		for tokend := ep.sdx + 2; tokend < len(ep.src); tokend++ {
 			if ep.src[tokend] == '\\' {
 				atEscapeCh = (atEscapeCh + 1) % 2
 				unescape = true
@@ -117,7 +117,7 @@ func (ep *ebnfParser) getToken() {
 			if ep.src[tokend] == '~' && atEscapeCh == 0 && len(ep.src) > tokend+1 && ep.src[tokend+1] == '~' {
 				ep.sdx = tokend + 2
 
-				tokenrunes := ep.src[tokstart+1 : tokend]
+				tokenrunes := ep.src[tokstart+2 : tokend]
 				if unescape {
 					for pos := 0; pos < len(tokenrunes); pos++ {
 						if tokenrunes[pos] == '\\' {
@@ -137,7 +137,7 @@ func (ep *ebnfParser) getToken() {
 				}
 				// fmt.Printf(">>> %s\n", string(tokenrunes))
 
-				ep.token = seq.Sequence{Operator: seq.Terminal, String: string(tokenrunes[1:]), Pos: tokstart}
+				ep.token = seq.Sequence{Operator: seq.Terminal, String: string(tokenrunes), Pos: tokstart}
 				ep.isSeq = true
 				return
 			}
@@ -174,7 +174,7 @@ func (ep *ebnfParser) matchToken(ch rune) {
 	if ep.token.Operator == seq.Factor && ep.token.Rune == ch {
 		ep.getToken()
 	} else {
-		ep.token = ep.invalid(fmt.Sprintf("Invalid char ('%c' expected)", ch), ep.sdx)
+		ep.token = ep.invalid(fmt.Sprintf("Invalid char ('%c' expected, '%c' found)", ch, ep.src[ep.sdx]), ep.sdx)
 		ep.isSeq = false
 	}
 }
@@ -269,10 +269,16 @@ func (ep *ebnfParser) factor() seq.Sequence {
 // TODO: allow multiple strings/text, separated by ";"!
 func (ep *ebnfParser) tag() seq.Sequence {
 	pos := ep.sdx
-	ep.getToken()
 
 	res := seq.Sequence{Operator: seq.Tag, Pos: pos}
-	res.TagChilds = seq.AppendPossibleSequence(res.TagChilds, ep.expression())
+	for {
+		ep.getToken()
+		res.TagChilds = seq.AppendPossibleSequence(res.TagChilds, ep.token)
+		ep.getToken()
+		if !(ep.token.Operator == seq.Factor && ep.ch == ',') {
+			break
+		}
+	}
 
 	ep.matchToken('>')
 	return res
@@ -402,8 +408,10 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		// tag := seq.Sequence{Operator: seq.Production, String: "prolog.code", Int: -1, Childs: []seq.Sequence{ep.tag()}, Pos: pos}
 		// ep.grammar.extras = append(ep.grammar.extras, tag)
 		pos = ep.sdx
-		ep.getToken()
+		// ep.getToken()
 	}
+
+	PprintProductions(&ep.grammar.Productions, ">>>    ")
 
 	// Main
 	if !(ep.token.Operator == seq.Factor && ep.token.Rune == '{') {
@@ -427,7 +435,7 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		// tag := seq.Sequence{Operator: seq.Production, String: "epilog.code", Int: -1, Childs: []seq.Sequence{ep.tag()}, Pos: pos}
 		// ep.grammar.extras = append(ep.grammar.extras, tag)
 		pos = ep.sdx
-		ep.getToken()
+		// ep.getToken()
 	}
 
 	// Entry point
