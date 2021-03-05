@@ -8,37 +8,6 @@ import (
 	"./seq"
 )
 
-func btoi(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
-}
-
-// func getTextFromTerminal(terminal object) string {
-// 	t, ok := terminal.(sequence)
-// 	if ok && len(t) == 2 && t[0] == "TERMINAL" {
-// 		tStr, ok := t[1].(string)
-// 		if ok {
-// 			return tStr
-// 		}
-// 	}
-// 	panic(fmt.Sprintf("Error at TAG TERMINAL: %#v", terminal))
-// }
-
-// func getIDAndCodeFromTag(tag object) string {
-// 	if tagSeq, ok := tag.(sequence); ok && len(tagSeq) > 1 {
-// 		// The annotation can be either a single TERMINAL, or a sequence of TERMINALs.
-// 		if annotationSeq, ok := tagSeq[1].(sequence); ok && len(annotationSeq) > 0 {
-// 			if _, ok := annotationSeq[0].(string); ok { // A single TERMINAL.
-// 				return getTextFromTerminal(annotationSeq)
-// 			}
-// 			return getTextFromTerminal(annotationSeq[0]) // A sequence and so the code is in the first TERMINAL.
-// 		}
-// 	}
-// 	panic(fmt.Sprintf("Error at TAG: %#v", tag))
-// }
-
 func jsonizeObject(ob seq.Object) string {
 	pp := fmt.Sprintf("%#v", ob)
 	pp = strings.ReplaceAll(pp, "[]interface {}", "")
@@ -103,8 +72,8 @@ func jsonizeObject(ob seq.Object) string {
 
 func Pprint(header string, ob seq.Object) {
 	str := jsonizeObject(ob)
-	if len(str) > 2000 {
-		str = str[:2000] + " ..."
+	if len(str) > 1200 {
+		str = str[:1200] + " ..."
 	}
 	fmt.Printf("\n%s:\n   %s\n", header, str)
 }
@@ -192,6 +161,14 @@ func PprintProductions(productions *[]seq.Sequence, space ...string) string {
 	return res
 }
 
+func PprintProductionsShort(productions *[]seq.Sequence, space ...string) string {
+	str := PprintProductions(productions, space...)
+	if len(str) > 1200 {
+		str = str[:1200] + " ..."
+	}
+	return str
+}
+
 func PprintExtras(extras *map[string]seq.Sequence, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
@@ -208,4 +185,12 @@ func PprintExtras(extras *map[string]seq.Sequence, space ...string) string {
 	}
 	res += "\n" + sp + "}"
 	return res
+}
+
+func PprintExtrasShort(extras *map[string]seq.Sequence, space ...string) string {
+	str := PprintExtras(extras, space...)
+	if len(str) > 1200 {
+		str = str[:1200] + " ..."
+	}
+	return str
 }

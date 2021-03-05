@@ -154,8 +154,8 @@ func (co *compiler) initFuncMap() {
 	}
 }
 
-// Maybe call it "abstract semantic graph" instead of AST
-func CompileAST(ast []seq.Sequence, traceEnabled bool) (g Grammar, err error) {
+// Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
+func CompileASG(ast []seq.Sequence, traceEnabled bool) (g Grammar, err error) {
 	// defer func() {
 	// 	if err := recover(); err != nil {
 	// 		g = Grammar{}

@@ -429,25 +429,26 @@ func main() {
 			fmt.Println(err)
 			continue
 		}
-		fmt.Print("  ==> Success\n\nGrammar:\n")
-		fmt.Println("  ==> Extras: " + ebnf.PprintExtras(&grammar.Extras, "    "))
-		fmt.Println("  ==> Productions: " + ebnf.PprintProductions(&grammar.Productions, "    "))
+		fmt.Println("  ==> Success\n\nGrammar:")
+		fmt.Println("  ==> Extras: " + ebnf.PprintExtrasShort(&grammar.Extras, "    "))
+		fmt.Println("  ==> Productions: " + ebnf.PprintProductionsShort(&grammar.Productions, "    "))
 
 		fmt.Print("\n\n==================\nTests:\n==================\n\n")
 		for _, srcCode := range tests {
 			ebnf.PprintSrcSingleLine(srcCode)
-			// Uses the grammar to parse a new type of code. It generates the codes AST.
-			ast, err := ebnf.ParseWithGrammar(grammar, srcCode, false)
+			// Uses the grammar to parse the with it described text. It generates the ASG (abstract semantic graph) of the parsed text.
+			asg, err := ebnf.ParseWithGrammar(grammar, srcCode, false)
 			if err != nil {
 				fmt.Println("  ==> Fail")
 				// fmt.Printf("%v\n\n", err)
 				fmt.Println(err)
 				continue
 			}
-			ebnf.Pprint("  ==> Success\n\nAbstract syntax tree", ast)
+			fmt.Println("  ==> Success\n\nAbstract syntax tree:")
+			fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
 
-			// Uses the annotations inside the AST to compile it.
-			_, err = ebnf.CompileAST(ast, true)
+			// Uses the annotations inside the ASG to compile it.
+			_, err = ebnf.CompileASG(asg, true)
 			if err != nil {
 				fmt.Println("  ==> Fail")
 				// fmt.Printf("%v\n\n", err)
