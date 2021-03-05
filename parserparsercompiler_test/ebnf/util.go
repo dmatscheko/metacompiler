@@ -40,6 +40,8 @@ func jsonizeObject(ob seq.Object) string {
 	pp = strings.ReplaceAll(pp, " Int:", " ")
 	pp = strings.ReplaceAll(pp, " Bool:", " ")
 
+	pp = strings.ReplaceAll(pp, "\\\"", "\"")
+
 	// pp = strings.ReplaceAll(pp, "ebnf.group{}, ", "G: ")
 	pp = strings.ReplaceAll(pp, "ebnf.group{}, ", "")
 

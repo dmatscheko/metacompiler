@@ -271,7 +271,7 @@ var (
 
 		// } program`,
 
-		`"aEBNF of aEBNF as text" {
+		`"aEBNF of aEBNF as text" <~~ c.globals.names = []; c.globals.getNameIdx = function(name) { pos := c.globals.names.indexOf(name); if (pos != -1) { return pos } return c.globals.names.push(name) ~~> {
 			program                                                                    = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] .
 			production                                   = name [ tag ] "=" [ expression ] ( "." | ";" ) .
 			expression                                   = alternative { "|" alternative } .
@@ -291,9 +291,9 @@ var (
 			code  = '~\~' - { { codeinner } [ "~" ] codeinner } '~\~' + ;
 			codeinner = small | caps | digit | special | "'" | '\\"' | '"' | "\\'" | "\\~" ;
 
-			name                     = ( small | caps ) - { small | caps | digit | "_" } + .
+			name         < ~~ c.upstream = '{"IDENT", ' + c.childStr + "}" ~~ >             = ( small | caps ) - { small | caps | digit | "_" } + .
 
-			text     < ~~ c.upstream = '{"TERMINAL", ' + c.childStr + "}" ~~, ~~TEST LOL~~ >                = dquotetext | squotetext .
+			text     < ~~ c.upstream = '{"TERMINAL", ' + c.childStr + "}" ~~ >                = dquotetext | squotetext .
 			dquotetext = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
 			squotetext = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } "'" + ;
 	
