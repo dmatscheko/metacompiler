@@ -3,16 +3,14 @@ package ebnf
 import (
 	"fmt"
 	"strings"
+
+	"./seq"
 )
 
-// type aliases for Phix types
-type object = interface{}
-type sequence = []object
-
-// TODO: change to needed values!
 type Grammar = struct {
-	ididx       []int
-	productions []sequence
+	Productions []seq.Sequence
+	start       int
+	Extras      map[string]seq.Sequence
 }
 
 // ----------------------------------------------------------------------------
@@ -22,11 +20,11 @@ type ebnfParser struct {
 	src     []rune
 	ch      rune
 	sdx     int
-	token   object
-	isSeq   bool
+	token   seq.Sequence
+	isSeq   bool // Only true if the String in ep.token is valid.
 	err     bool
+	ididx   []int
 	idents  []string
-	extras  sequence
 	grammar Grammar
 }
 
@@ -44,11 +42,12 @@ func (ep *ebnfParser) skipSpaces() {
 	}
 }
 
-func (ep *ebnfParser) invalid(msg string) int {
+func (ep *ebnfParser) invalid(msg string, pos int) seq.Sequence {
 	ep.err = true
-	fmt.Println("char", ep.sdx, ": ", msg)
+	fmt.Printf("Error at position %d: %s\n", pos, msg)
 	ep.sdx = len(ep.src) // set to eof
-	return -1
+	// ep.token = seq.Sequence{Operator: seq.Invalid, String: msg} // TODO: maybe store the message later
+	return seq.Sequence{Operator: seq.Invalid, String: msg, Pos: pos}
 }
 
 func (ep *ebnfParser) getToken() {
@@ -56,15 +55,15 @@ func (ep *ebnfParser) getToken() {
 	// or {"TERMINAL",string} or {"IDENT", string} or -1.
 	ep.skipSpaces()
 	if ep.sdx >= len(ep.src) {
-		ep.token = -1
+		ep.token = seq.Sequence{Operator: seq.Invalid, String: "Error while parsing EBNF (beyond EOF)", Pos: ep.sdx}
 		ep.isSeq = false
 		return
 	}
 	tokstart := ep.sdx
-	if strings.IndexRune("{}()[]<>|=.;+-", ep.ch) >= 0 {
-		ep.sdx++
-		ep.token = ep.ch
+	if strings.IndexRune("{}()[]<>|=.;+-,", ep.ch) >= 0 {
+		ep.token = seq.Sequence{Operator: seq.Factor, Rune: ep.ch, Pos: tokstart}
 		ep.isSeq = false
+		ep.sdx++
 	} else if ep.ch == '"' || ep.ch == '\'' {
 		closech := ep.ch
 		atEscapeCh := 0
@@ -83,6 +82,8 @@ func (ep *ebnfParser) getToken() {
 						if tokenrunes[pos] == '\\' {
 							tokenrunes = append(tokenrunes[:pos], tokenrunes[pos+1:]...)
 							switch tokenrunes[pos] {
+							case 'r':
+								tokenrunes[pos] = '\r'
 							case 'n':
 								tokenrunes[pos] = '\n'
 							case 't':
@@ -93,7 +94,7 @@ func (ep *ebnfParser) getToken() {
 				}
 				// fmt.Printf(">>> %s\n", string(tokenrunes))
 
-				ep.token = sequence{"TERMINAL", string(tokenrunes)}
+				ep.token = seq.Sequence{Operator: seq.Terminal, String: string(tokenrunes), Pos: tokstart}
 				ep.isSeq = true
 				return
 			}
@@ -102,7 +103,50 @@ func (ep *ebnfParser) getToken() {
 			}
 
 		}
-		ep.token = ep.invalid("no closing quote")
+		ep.token = ep.invalid("no closing quote", tokstart)
+		ep.isSeq = false
+
+	} else if ep.ch == '~' && len(ep.src) > ep.sdx+1 && ep.src[ep.sdx+1] == '~' {
+		atEscapeCh := 0
+		unescape := false
+		for tokend := ep.sdx + 1; tokend < len(ep.src); tokend++ {
+			if ep.src[tokend] == '\\' {
+				atEscapeCh = (atEscapeCh + 1) % 2
+				unescape = true
+			}
+			if ep.src[tokend] == '~' && atEscapeCh == 0 && len(ep.src) > tokend+1 && ep.src[tokend+1] == '~' {
+				ep.sdx = tokend + 2
+
+				tokenrunes := ep.src[tokstart+1 : tokend]
+				if unescape {
+					for pos := 0; pos < len(tokenrunes); pos++ {
+						if tokenrunes[pos] == '\\' {
+							tokenrunes = append(tokenrunes[:pos], tokenrunes[pos+1:]...)
+							switch tokenrunes[pos] {
+							case 'r':
+								tokenrunes[pos] = '\r'
+							case 'n':
+								tokenrunes[pos] = '\n'
+							case 't':
+								tokenrunes[pos] = '\t'
+							case '~':
+								tokenrunes[pos] = '~'
+							}
+						}
+					}
+				}
+				// fmt.Printf(">>> %s\n", string(tokenrunes))
+
+				ep.token = seq.Sequence{Operator: seq.Terminal, String: string(tokenrunes[1:]), Pos: tokstart}
+				ep.isSeq = true
+				return
+			}
+			if ep.src[tokend] != '\\' {
+				atEscapeCh = 0
+			}
+
+		}
+		ep.token = ep.invalid("no closing quote", tokstart)
 		ep.isSeq = false
 	} else if ep.ch >= 'a' && ep.ch <= 'z' {
 		// To simplify things for the purposes of this task,
@@ -117,21 +161,21 @@ func (ep *ebnfParser) getToken() {
 				break
 			}
 		}
-		ep.token = sequence{"IDENT", string(ep.src[tokstart:ep.sdx])}
+		ep.token = seq.Sequence{Operator: seq.Ident, String: string(ep.src[tokstart:ep.sdx]), Pos: tokstart}
 		ep.isSeq = true
 	} else {
-		ep.token = ep.invalid(fmt.Sprintf("invalid ebnf (char %c)", ep.ch))
+		ep.token = ep.invalid(fmt.Sprintf("Invalid char '%c'", ep.ch), ep.sdx)
 		ep.isSeq = false
 	}
 }
 
 // also works like getToken()
 func (ep *ebnfParser) matchToken(ch rune) {
-	if ep.token != ch {
-		ep.token = ep.invalid(fmt.Sprintf("invalid ebnf (%c expected)", ch))
-		ep.isSeq = false
-	} else {
+	if ep.token.Operator == seq.Factor && ep.token.Rune == ch {
 		ep.getToken()
+	} else {
+		ep.token = ep.invalid(fmt.Sprintf("Invalid char ('%c' expected)", ch), ep.sdx)
+		ep.isSeq = false
 	}
 }
 
@@ -146,156 +190,187 @@ func (ep *ebnfParser) addIdent(ident string) int {
 	if k == -1 {
 		ep.idents = append(ep.idents, ident)
 		k = len(ep.idents) - 1
-		ep.grammar.ididx = append(ep.grammar.ididx, -1)
+		ep.ididx = append(ep.ididx, -1)
 	}
 	return k
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) factor() object {
-	var res object
-	if ep.isSeq {
-		t := ep.token.([]object)
-		if t[0] == "IDENT" {
-			idx := ep.addIdent(t[1].(string))
-			t = append(t, idx)
-			ep.token = t
-		}
+func (ep *ebnfParser) factor() seq.Sequence {
+	pos := ep.sdx
+	var res seq.Sequence
+
+	valid := true
+	if ep.token.Operator == seq.Terminal {
 		res = ep.token
 		ep.getToken()
-	} else if ep.token == '[' {
+	} else if ep.token.Operator == seq.Ident {
+		ep.token.Int = ep.addIdent(ep.token.String) // Complete the IDENT command with the index of the target.
+		res = ep.token
 		ep.getToken()
-		res = sequence{"OPTIONAL", ep.expression()}
-		ep.matchToken(']')
-	} else if ep.token == '(' {
-		ep.getToken()
-		res = ep.expression()
-		ep.matchToken(')')
-	} else if ep.token == '{' {
-		ep.getToken()
-		res = sequence{"REPEAT", ep.expression()}
-		ep.matchToken('}')
-	} else if ep.token == '+' {
-		res = sequence{"SKIPSPACES", true} // from DMA
-		ep.getToken()
-	} else if ep.token == '-' {
-		res = sequence{"SKIPSPACES", false} // from DMA
-		ep.getToken()
-	} else if ep.token == '<' { // from DMA
-		res = ep.tag()
+	} else if ep.token.Operator == seq.Factor {
+
+		switch ep.token.Rune {
+		case '[':
+			ep.getToken()
+			res = seq.Sequence{Operator: seq.Optional, Childs: []seq.Sequence{ep.expression()}, Pos: pos}
+			ep.matchToken(']')
+		case '(':
+			ep.getToken()
+			res = ep.expression()
+			ep.matchToken(')')
+		case '{':
+			ep.getToken()
+			res = seq.Sequence{Operator: seq.Repeat, Childs: []seq.Sequence{ep.expression()}, Pos: pos}
+			ep.matchToken('}')
+		case '+':
+			res = seq.Sequence{Operator: seq.SkipSpaces, Bool: true, Pos: pos}
+			ep.getToken()
+		case '-':
+			res = seq.Sequence{Operator: seq.SkipSpaces, Bool: false, Pos: pos}
+			ep.getToken()
+		case '<':
+			res = ep.tag()
+		case ',':
+			ep.getToken()
+			res = ep.token
+			if ep.ch != '~' {
+				valid = false
+			}
+			ep.getToken()
+		default:
+			valid = false
+		}
+	} else if ep.token.Operator == seq.Tag {
+		if ep.token.Rune == '~' {
+			res = ep.token
+			ep.getToken()
+			ep.matchToken('~')
+		} else if ep.token.Rune == ',' {
+			ep.getToken()
+		} else {
+			valid = false
+		}
 	} else {
-		panic(fmt.Sprintf("invalid token in factor() function (%#q)", ep.token))
+		valid = false
 	}
 
-	if s, ok := res.(sequence); ok && len(s) == 1 {
-		return s[0]
+	if !valid {
+		panic(fmt.Sprintf("invalid token in factor() function (%#v)", ep.token))
 	}
+
+	// if res.Operator == seq.Basic && len(res.Childs) == 1 {
+	// 	return res.Childs[0]
+	// }
 	return res
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) tag() sequence {
-	var res sequence
+// TODO: allow multiple strings/text, separated by ";"!
+func (ep *ebnfParser) tag() seq.Sequence {
+	pos := ep.sdx
 	ep.getToken()
-	res = sequence{"TAG", ep.expression()} // from DMA // TODO: allow multiple strings/text, separated by ";"!
+
+	res := seq.Sequence{Operator: seq.Tag, Pos: pos}
+	res.TagChilds = seq.AppendPossibleSequence(res.TagChilds, ep.expression())
+
 	ep.matchToken('>')
 	return res
 }
 
 // also works like getToken(), but advances before that as much as it itself knows (= implements sequence)
-func (ep *ebnfParser) term() object {
-	factor := ep.factor()
-	if f, ok := factor.(sequence); ok && len(f) > 0 {
-		if f[0] == "TAG" {
-			return ep.invalid("tag is invalid at this position!")
-		}
-	}
-	res := sequence{factor}
+func (ep *ebnfParser) term() seq.Sequence {
+	pos := ep.sdx
 
-	tokens := []object{-1, '|', '.', ';', ')', ']', '}', '>'}
-outer:
+	firstFactor := ep.factor()
+	if firstFactor.Operator == seq.Tag {
+		return ep.invalid("TAG is invalid at this position", pos)
+	}
+
+	res := []seq.Sequence{firstFactor}
+
 	for {
-		for _, t := range tokens {
-			if t == ep.token {
-				break outer
-			}
+		if (ep.token.Operator == seq.Factor && strings.IndexRune("})]>|.;", ep.token.Rune) >= 0) || ep.token.Operator == seq.Invalid {
+			break
 		}
 
 		newFactor := ep.factor()
 
-		// if newFactor is a TAG, merge this TAG with the last factor in res
-		if f, ok := newFactor.(sequence); ok && len(f) > 0 && f[0] == "TAG" {
+		// MOVE EVERYTHING THAT THE TAG DESRIBES (which is to the left) INTO INTO THE TAG!
+		// If newFactor is a TAG, merge this TAG with the last command in firstFactor.
+		if newFactor.Operator == seq.Tag {
 			lastFactor := res[len(res)-1]
-			// remove the last factor from res, because it will be appended in its new form with TAG
-			res = res[:len(res)-1]
-
-			f = append(f, lastFactor)
-			res = append(res, f)
-		} else {
-			// if newFactor is not a TAG, only append newFactor
+			res = res[:len(res)-1]                                                      // Remove the last factor from the result, because it will be appended again, but as a child of TAG.
+			newFactor.Childs = seq.AppendPossibleSequence(newFactor.Childs, lastFactor) // Fill the TAG.
 			res = append(res, newFactor)
+		} else {
+			// If newFactor is not a TAG, only append newFactor to the firstFactor.
+			res = seq.AppendPossibleSequence(res, newFactor)
 		}
-
 	}
+
 	if len(res) == 1 {
 		return res[0]
 	}
-	return res
+	return seq.Sequence{Operator: seq.Basic, Childs: res, Pos: pos}
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) expression() object {
-	res := sequence{ep.term()}
+func (ep *ebnfParser) expression() seq.Sequence {
+	pos := ep.sdx
+	res := ep.term()
 
-	if ep.token == '|' {
-		res = sequence{"OR", res[0]}
-		for ep.token == '|' {
+	if ep.token.Operator == seq.Factor && ep.token.Rune == '|' {
+		res = seq.Sequence{Operator: seq.Or, Childs: []seq.Sequence{res}, Pos: pos} // Override the result (a factor) with the command for OR.
+		for ep.token.Operator == seq.Factor && ep.token.Rune == '|' {
 			ep.getToken()
-			res = append(res, ep.term())
+			res.Childs = append(res.Childs, ep.term()) // Append the found alternative to the OR (It must not be ungrouped here, so use normal append() instead of seq.AppendPossibleSequence()).
 		}
-	}
-	if len(res) == 1 {
-		return res[0]
+		if len(res.Childs) == 1 {
+			return res.Childs[0]
+		}
 	}
 	return res
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) production() object {
-	// Returns a token or -1; the real result is left in 'productions' etc,
+func (ep *ebnfParser) production() seq.Sequence {
+	pos := ep.sdx
+	// Returns a token or seq.Invalid; the real result is left in 'productions' etc, ...
 	ep.getToken()
-	if ep.token != '}' {
-		if ep.token == -1 {
-			return ep.invalid("invalid ebnf (missing closing })")
+
+	if !(ep.token.Operator == seq.Factor && ep.token.Rune == '}') {
+		if ep.token.Operator == seq.Invalid {
+			return ep.invalid("Invalid EBNF (missing closing })", pos)
 		}
-		if !ep.isSeq {
-			return -1
+		if ep.token.Operator != seq.Ident {
+			return seq.Sequence{Operator: seq.Invalid, String: fmt.Sprintf("Ident expected but got %s", ep.token.Operator), Pos: pos}
 		}
-		t := ep.token.(sequence)
-		if t[0] != "IDENT" {
-			return -1
-		}
-		ident := t[1].(string)
+
+		ident := ep.token.String
 		idx := ep.addIdent(ident)
 		ep.getToken()
 
-		var tag sequence
-		if ep.token == '<' {
+		var tag seq.Sequence
+		foundTag := false
+		if ep.token.Operator == seq.Factor && ep.token.Rune == '<' {
 			tag = ep.tag()
+			foundTag = true
 		}
 
 		ep.matchToken('=')
-		if ep.token == -1 {
-			return -1
+		if ep.token.Operator == seq.Invalid {
+			return ep.token
 		}
-		if tag != nil {
-			tag = append(tag, ep.expression())
-			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, tag})
+		if foundTag {
+			tag.Childs = seq.AppendPossibleSequence(tag.Childs, ep.expression()) // Fill the TAG.
+			ep.grammar.Productions = append(ep.grammar.Productions, seq.Sequence{Operator: seq.Production, String: ident, Int: idx, Childs: []seq.Sequence{tag}, Pos: pos})
 		} else {
-			ep.grammar.productions = append(ep.grammar.productions, sequence{ident, idx, ep.expression()})
+			ep.grammar.Productions = append(ep.grammar.Productions, seq.Sequence{Operator: seq.Production, String: ident, Int: idx, Childs: []seq.Sequence{ep.expression()}, Pos: pos})
 		}
-		ep.grammar.ididx[idx] = len(ep.grammar.productions) - 1
+		ep.ididx[idx] = len(ep.grammar.Productions) - 1
 	}
+
 	return ep.token
 }
 
@@ -304,103 +379,129 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	ep.err = false
 	ep.src = []rune(srcEbnf)
 	ep.sdx = 0
+	ep.grammar.Extras = make(map[string]seq.Sequence)
+	ep.grammar.Productions = ep.grammar.Productions[:0]
+	ep.ididx = ep.ididx[:0]
 	ep.idents = ep.idents[:0]
-	ep.grammar.ididx = ep.grammar.ididx[:0]
-	ep.grammar.productions = ep.grammar.productions[:0]
-	ep.extras = ep.extras[:0]
 
-	// title
+	pos := ep.sdx
 	ep.getToken()
-	if ep.isSeq {
-		t := ep.token.(sequence)
-		t[0] = "title"
-		ep.extras = append(ep.extras, ep.token)
+
+	// Title
+	if ep.token.Operator == seq.Terminal {
+		ep.grammar.Extras["title"] = ep.token
+		// title := seq.Sequence{Operator: seq.Production, String: "title", Int: -1, Childs: []seq.Sequence{ep.token}, Pos: pos}
+		// ep.grammar.extras = append(ep.grammar.extras, title)
+		pos = ep.sdx
 		ep.getToken()
 	}
 
-	// prolog
-	var tag sequence
-	if ep.token == '<' {
-		tag = ep.tag()
-	}
-	if tag != nil {
-		tagCode := getIDAndCodeFromTag(tag)
-		ep.extras = append(ep.extras, sequence{"prolog.code", tagCode})
+	// Prolog
+	if ep.token.Operator == seq.Factor && ep.token.Rune == '<' {
+		ep.grammar.Extras["prolog.code"] = ep.tag()
+		// tag := seq.Sequence{Operator: seq.Production, String: "prolog.code", Int: -1, Childs: []seq.Sequence{ep.tag()}, Pos: pos}
+		// ep.grammar.extras = append(ep.grammar.extras, tag)
+		pos = ep.sdx
+		ep.getToken()
 	}
 
-	// main
-	if ep.token != '{' {
-		ep.invalid("invalid ebnf (missing opening {)")
+	// Main
+	if !(ep.token.Operator == seq.Factor && ep.token.Rune == '{') {
+		ep.invalid("Invalid EBNF (missing opening {)", pos)
 		return
 	}
 	for {
 		ep.token = ep.production()
-		if ep.token == '}' || ep.token == -1 {
+		if (ep.token.Operator == seq.Factor && ep.token.Rune == '}') || ep.token.Operator == seq.Invalid {
 			break
 		}
 	}
+	pos = ep.sdx
 	ep.getToken()
 
 	// TODO: prolog and epilog code and id is not yet used!!!!
-	// epilog
-	tag = nil
-	if ep.token == '<' {
-		tag = ep.tag()
-	}
-	if tag != nil {
-		tagCode := getIDAndCodeFromTag(tag)
-		ep.extras = append(ep.extras, sequence{"epilog.code", tagCode})
-	}
 
-	// comment
-	if ep.isSeq {
-		t := ep.token.(sequence)
-		t[0] = "comment"
-		ep.extras = append(ep.extras, ep.token)
+	// Epilog
+	if ep.token.Operator == seq.Factor && ep.token.Rune == '<' {
+		ep.grammar.Extras["epilog.code"] = ep.tag()
+		// tag := seq.Sequence{Operator: seq.Production, String: "epilog.code", Int: -1, Childs: []seq.Sequence{ep.tag()}, Pos: pos}
+		// ep.grammar.extras = append(ep.grammar.extras, tag)
+		pos = ep.sdx
 		ep.getToken()
 	}
-	if ep.token != -1 {
-		ep.invalid("invalid ebnf (missing eof?)")
+
+	// Entry point
+	if ep.token.Operator == seq.Ident {
+		start := ep.token
+		start.Int = ep.addIdent(ep.token.String)
+		ep.grammar.Extras["start"] = start
+		// start := seq.Sequence{Operator: seq.Production, String: "start", Int: -1, Childs: []seq.Sequence{ep.token}, Pos: pos}
+		// ep.grammar.extras = append(ep.grammar.extras, start)
+		pos = ep.sdx
+		ep.getToken()
+	} else {
+		ep.invalid("Invalid EBNF (missing entry point)", pos)
+	}
+
+	// Comment
+	if ep.token.Operator == seq.Terminal {
+		ep.grammar.Extras["comment"] = ep.token
+		// comment := seq.Sequence{Operator: seq.Production, String: "comment", Int: -1, Childs: []seq.Sequence{ep.token}, Pos: pos}
+		// ep.grammar.extras = append(ep.grammar.extras, comment)
+		pos = ep.sdx
+		ep.getToken()
+	}
+
+	// End of parsing
+	if ep.token.Operator != seq.Invalid {
+		ep.invalid("Invalid EBNF (missing EOF?)", pos)
 		return
 	}
 	if ep.err {
 		return
 	}
-	k := -1
-	for i, idx := range ep.grammar.ididx {
-		if idx == -1 {
-			k = i
-			break
+
+	ep.token = seq.Sequence{}
+	ep.verifyGrammar()
+	ep.resolveIdIdx(&ep.grammar.Productions)
+
+	// Also resolve the index of the start rule.
+	tmpStart := ep.grammar.Extras["start"]
+	tmpStart.Int = ep.ididx[tmpStart.Int]
+	ep.grammar.Extras["start"] = tmpStart
+}
+
+func (ep *ebnfParser) resolveIdIdx(productions *[]seq.Sequence) {
+	for i := range *productions {
+		rule := &(*productions)[i]
+		if len(rule.Childs) > 0 {
+			ep.resolveIdIdx(&rule.Childs)
 		}
-	}
-	if k != -1 {
-		ep.invalid(fmt.Sprintf("invalid ebnf (undefined:%s)", ep.idents[k]))
-		return
+		if rule.Operator == seq.Production || rule.Operator == seq.Ident {
+			rule.Int = ep.ididx[rule.Int]
+		}
 	}
 }
 
 func ParseEBNF(srcEbnf string) (g Grammar, e error) {
-	var ep ebnfParser
-
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Printf("%s\n  ===> Fail\n", err)
+			fmt.Printf("%s\n  ==> Fail\n", err)
 			e = fmt.Errorf("Fail")
 		}
 	}()
 
+	var ep ebnfParser
 	ep.parse(srcEbnf)
 
-	if !ep.err {
-		fmt.Println("  ===> Success")
-		Pprint("productions", ep.grammar.productions)
-		Pprint("ididx", ep.grammar.ididx)
-		Pprint("idents", ep.idents)
-		Pprint("extras", ep.extras)
-		return ep.grammar, nil
-	} else {
-		fmt.Println("  ===> Fail\n")
+	var err error = nil
+	if ep.err {
+		if ep.token.String != "" {
+			err = fmt.Errorf("%s", ep.token.String)
+		} else {
+			err = fmt.Errorf("Error while parsing")
+		}
 	}
 
-	return Grammar{}, fmt.Errorf("Fail")
+	return ep.grammar, err
 }
