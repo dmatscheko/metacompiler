@@ -271,12 +271,19 @@ var (
 
 		// } program`,
 
-		`"aEBNF of aEBNF as text" <~~ var names = []; function getNameIdx(name) { pos = names.indexOf(name); if (pos != -1) { return pos }; return names.push(name) } ~~> {
-			program          = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
-			production       = name [ tag ] "=" [ expression <~~ upstream.text = '{"PRODUCTION", ' + upstream.name + " " + upstream.text + "}" ~~>  ] ( "." | ";" ) ;
+		`"aEBNF of aEBNF as text" <~~ 
+		var names = [];
+		function getNameIdx(name) {
+			var pos = names.indexOf(name);
+			if (pos != -1) { return pos };
+			return names.push(name);
+		}		
+		~~> {
+			program          <~~ print(" >>" + upstream.text + "<< " + names) ~~>                               = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
+			production       <~~ upstream.text = '{"PRODUCTION", ' + upstream.name + ", " + getNameIdx(upstream.name) + "} " // + upstream.text + "}" ~~>       = name [ tag ] "=" [ expression ] ( "." | ";" ) ;
 			expression       = alternative { "|" alternative } ;
 			alternative      = term { term } ;
-			term             = ( name <~~ upstream.name = upstream.text; upstream.text = '{"IDENT", ' + upstream.text + "}" ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
+			term             = ( name <~~ upstream.text = '{"IDENT", ' + upstream.text + "}" ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
 			group            = "(" expression ")" ;
 			option           = "[" expression "]" ;
 			repetition       = "{" expression "}" ;
@@ -288,10 +295,10 @@ var (
 	
 			tag              = "<" code {"," code } ">" ;
 
-			code             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = '~\~' - { { codeinner } [ "~" ] codeinner } '~\~' + ;
-			codeinner        = small | caps | digit | special | "'" | '\\"' | '"' | "\\'" | "\\~" ;
+			code             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = '~~' - { { codeinner } [ "~" ] <~~~~,~~ THIS PART DOES NOT ALLOW TAGS TO BE PARSED !!!!!!! ~~> codeinner } '~~' + ;
+			codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
-			name             = ( small | caps ) - { small | caps | digit | "_" } + ;
+			name             <~~ upstream.name = upstream.text ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
 
 			text             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = dquotetext | squotetext ;
 			dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
@@ -302,7 +309,7 @@ var (
 			caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
 			special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
 	
-			} <~~ print(" >>" + upstream.text + "<< ") ~~> program`,
+			} program`,
 	}
 
 	tests = []string{
@@ -391,7 +398,7 @@ var (
 
 		// 	`,
 
-		`"EBNF of EBNF (can parse)" {
+		`"EBNF of EBNF (can parse)" <~~ print("test") ~~> {
 			program = [ title ] "{" { production } "}" [ comment ] ;
 			production  = name "=" [ expression ] ";" ;
 			expression  = sequence ;
@@ -410,7 +417,7 @@ var (
 			small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
 			caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
 			special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
-			} program`,
+			} program "foo"`,
 	}
 )
 
