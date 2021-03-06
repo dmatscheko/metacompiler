@@ -295,7 +295,7 @@ var (
 	
 			tag              = "<" code {"," code } ">" ;
 
-			code             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = '~~' - { { codeinner } [ "~" ] <~~~~,~~ THIS PART DOES NOT ALLOW TAGS TO BE PARSED !!!!!!! ~~> codeinner } '~~' + ;
+			code             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = '~~' - { [ "~" ] codeinner } '~~' + ;
 			codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
 			name             <~~ upstream.name = upstream.text ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
