@@ -151,6 +151,8 @@ func (co *compiler) initFuncMap() {
 	co.vm.Set("printf", fmt.Printf)
 	co.vm.Set("sprintf", fmt.Sprintf)
 
+	co.vm.Set("defined", func(o seq.Object) bool { return o != nil })
+
 	co.funcMap = map[string]seq.Object{ // The LLVM function will be inside such a map.
 		"objectAsString": func(object seq.Object, stripBraces bool) string {
 			return "NOT IMPLEMENTED YET"
