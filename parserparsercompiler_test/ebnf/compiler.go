@@ -8,10 +8,10 @@ import (
 )
 
 type compiler struct {
-	globalVars map[string]seq.Object
-	newGrammar Grammar
-	vm         *goja.Runtime
-	funcMap    map[string]seq.Object
+	// newGrammar Grammar
+	// globalVars map[string]seq.Object
+	vm      *goja.Runtime
+	funcMap map[string]seq.Object
 
 	traceEnabled bool
 }
@@ -40,58 +40,76 @@ type compiler struct {
 	if co.globalVars["idents"] == nil {          // (string list) The global list of unique names. Set by {{ident "someName"}}. It is exposed to the scripting language on purpose.
 */
 
-func (co *compiler) handleTagCode(code string, childMatchStr string, childCodeResultObjTree interface{}, childLocalVars map[string]seq.Object, localTree seq.Object) interface{} { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
-	// co.funcMap["globals"] = co.globalVars // is set once by initFuncMap()
-	co.funcMap["locals"] = childLocalVars
-	co.funcMap["upstream"] = childCodeResultObjTree // The object that is passed from the bottom roots to the top of the tree.
-	co.funcMap["childStr"] = childMatchStr
-	co.funcMap["localAST"] = localTree
+// RunScript executes the given string in the global context.
+func (co *compiler) Run(name, src string) (goja.Value, error) {
+	p, err := goja.Compile(name, src, true)
 
-	co.vm.Set("c", co.funcMap)
+	if err != nil {
+		return nil, err
+	}
+
+	return co.vm.RunProgram(p)
+}
+
+func (co *compiler) handleTagCode(code string, name string, upstream map[string]seq.Object, localTree []seq.Sequence) { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
+	// co.vm.Set("globals", co.globalVars) // is set once by initFuncMap()
+	co.vm.Set("upstream", upstream) // The object(s) that are passed from the bottom roots to the top of the tree. Initially, only TERMINALs are entered into 'upstream.text'. If 'upstream.text' contains something that can be converted into string, it is concateneted with the other TERMINAL values or filled upstream.text contents.
+	co.funcMap["localAST"] = localTree
 
 	// fmt.Printf("\n\nCODE: %s\n\n", code)
 
-	// TODO: precompile!
-	_, err := co.vm.RunString(code)
+	// TODO: store precompiled data!
+	_, err := co.Run(name, code)
 	if err != nil {
 		panic(err)
 	}
-
-	return co.funcMap["upstream"] // localVars (the modification is already seen by the caller, because its a pointer)
 }
 
-func (co *compiler) compile(productions []seq.Sequence, inLocalVars map[string]seq.Object) (string, interface{}, map[string]seq.Object) { // => (childMatchStr, codeResultObjTree, outLocalVars)
+func (co *compiler) compile(productions []seq.Sequence, upstream map[string]seq.Object) {
 	if productions == nil || len(productions) == 0 {
 		// fmt.Printf("## A # %#v\n", t1)
-		return "", nil, inLocalVars
+		return
 	}
 
 	// ----------------------------------
 
+	upstreamNew := map[string]seq.Object{}
 	if len(productions) > 1 { // "SEQUENCE" Iterate through all rules and apply.
-		matchStr := ""
-		codeResultObjTree := []interface{}{}
-		localVars := map[string]seq.Object{}
 		for _, rule := range productions { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
-			childMatchStr, childCodeResultObjTree, childLocalVars := co.compile([]seq.Sequence{rule}, inLocalVars)
-			matchStr += childMatchStr
-			if childCodeResultObjTree != nil {
-				if arr, ok := childCodeResultObjTree.([]interface{}); ok {
-					codeResultObjTree = append(codeResultObjTree, arr...)
-				} else if childCodeResultObjTree != nil {
-					codeResultObjTree = append(codeResultObjTree, childCodeResultObjTree)
-				}
+
+			// Copy, so that compile and handleTagCode can change them:
+			upstreamCopy := map[string]seq.Object{}
+			for k, v := range upstream {
+				upstreamCopy[k] = v
 			}
-			for k, v := range childLocalVars {
-				localVars[k] = v
+			co.compile([]seq.Sequence{rule}, upstreamCopy)
+			for k, v := range upstreamCopy {
+				if k == "text" {
+					str1, ok1 := upstreamNew[k].(string)
+					str2, ok2 := v.(string)
+					if ok1 && ok2 {
+						upstreamNew[k] = str1 + str2
+					} else if ok2 {
+						upstreamNew[k] = str2
+					}
+				} else {
+					if !(v == nil && upstreamNew[k] != nil) {
+						upstreamNew[k] = v
+					}
+				}
 			}
 		}
 
-		outCodeResultObjTree := codeResultObjTree
-		if len(outCodeResultObjTree) == 0 {
-			outCodeResultObjTree = nil
+		for k, v := range upstreamNew {
+			upstream[k] = v
 		}
-		return matchStr, outCodeResultObjTree, localVars
+		for k := range upstream {
+			if upstreamNew[k] == nil {
+				delete(upstream, k)
+			}
+		}
+
+		return
 	}
 
 	// --------------------------------------
@@ -101,35 +119,40 @@ func (co *compiler) compile(productions []seq.Sequence, inLocalVars map[string]s
 
 	switch rule.Operator {
 	case seq.Terminal:
-		return rule.String, nil, inLocalVars
+		// if str, ok := inLocalVars["text"].(string); ok && len(str) > 0 {
+		// 	panic("ONLY FOR DEBUG! no this should not happen")
+		// }
+		upstream["text"] = rule.String
+		return
 	case seq.Tag:
 		tagCode := rule.TagChilds[0].String
-
-		childMatchStrJoined, childCodeResultObjTree, childLocalVars := co.compile(rule.Childs, inLocalVars) // evaluate the child productions of the TAG
-
-		// directChildCount, ....
-
-		// Copy, so that handleTagCode() can change them:
-		outLocalVars := map[string]seq.Object{}
-		for k, v := range childLocalVars {
-			outLocalVars[k] = v
+		// First collect all the data.
+		// inLocalVars will be changed by co.compile()
+		co.compile(rule.Childs, upstream) // Evaluate the child productions of the TAG.
+		// Then run the script on it.
+		// inLocalVars will be changed by co.handleTagCode()
+		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), upstream, productions)
+		return
+	default:
+		if len(rule.Childs) > 0 {
+			co.compile(rule.Childs, upstream) // Evaluate the child productions of groups.
 		}
-
-		// outLocalVars will be changed by co.handleCode()!
-		codeResultObjTree := co.handleTagCode(tagCode, childMatchStrJoined, childCodeResultObjTree, outLocalVars, productions)
-
-		return childMatchStrJoined, codeResultObjTree, outLocalVars
 	}
 
 	// fmt.Printf("## B # %#v\n", tree)
-	return "", nil, inLocalVars
+	return
 }
 
 func (co *compiler) initFuncMap() {
-	co.funcMap = map[string]seq.Object{
-		"globals": co.globalVars,
+	// co.vm.Set("globals", co.globalVars)
 
-		"upstreamAsString": func() string {
+	co.vm.Set("print", fmt.Print)
+	co.vm.Set("println", fmt.Println)
+	co.vm.Set("printf", fmt.Printf)
+	co.vm.Set("sprintf", fmt.Sprintf)
+
+	co.funcMap = map[string]seq.Object{ // The LLVM function will be inside such a map.
+		"objectAsString": func(object seq.Object, stripBraces bool) string {
 			return "NOT IMPLEMENTED YET"
 		},
 
@@ -152,33 +175,45 @@ func (co *compiler) initFuncMap() {
 			fmt.Printf("\n\nTEST2: %#v", a)
 		},
 	}
+	co.vm.Set("c", co.funcMap)
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
-func CompileASG(ast []seq.Sequence, traceEnabled bool) (g Grammar, err error) {
-	// defer func() {
-	// 	if err := recover(); err != nil {
-	// 		g = Grammar{}
-	// 		err = fmt.Errorf(fmt.Sprintf("%s", err))
-	// 	}
-	// }()
+func CompileASG(ast []seq.Sequence, extras *map[string]seq.Sequence, traceEnabled bool) (g Grammar, e error) {
+	defer func() {
+		if err := recover(); err != nil {
+			g = Grammar{}
+			e = fmt.Errorf(fmt.Sprintf("%s", err))
+		}
+	}()
 
 	var co compiler
 	co.traceEnabled = traceEnabled
 
-	co.globalVars = map[string]seq.Object{} // Global variables.
-	var localVars = map[string]seq.Object{} // Local variables (must be passed through compile).
+	// co.globalVars = map[string]seq.Object{} // Global variables.
+	var upstream = map[string]seq.Object{} // Local variables (must be passed through compile).
 
-	co.initFuncMap()
 	co.vm = goja.New()
+	co.initFuncMap()
 
-	// childMatchStrJoined = String tree
-	// codeResultStrJoined = Joined strings of the code output tree
-	// codeResultObjTree = Code object output tree (created by upstream)
-	// outLocalVars = local variables that were passed up the tree
-	childMatchStrJoined, codeResultObjTree, outLocalVars := co.compile(ast, localVars)
+	if prolog, ok := (*extras)["prolog.code"]; ok {
+		_, err := co.Run("prolog.code", prolog.TagChilds[0].String)
+		if err != nil {
+			panic(err)
+		}
+	}
 
-	fmt.Printf("\n\n==================\nResult:\n==================\n\nLocalVars:\n    %#v\n\nChildMatchStrJoined:\n    %s\n\nCodeResultObjTree:\n    %s\n\nNewGrammar:\n    %s\n\n", outLocalVars, childMatchStrJoined, jsonizeObject(codeResultObjTree), jsonizeObject(co.newGrammar.Productions))
+	co.compile(ast, upstream)
 
-	return co.newGrammar, nil
+	if epilog, ok := (*extras)["epilog.code"]; ok {
+		_, err := co.Run("epilog.code", epilog.TagChilds[0].String)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	// fmt.Printf("\n\n==================\nResult:\n==================\n\nUpstream Vars:\n    %#v\n\n", upstream)
+
+	// return co.newGrammar, nil
+	return Grammar{}, nil // TODO: change
 }
