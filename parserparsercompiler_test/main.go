@@ -288,12 +288,12 @@ var (
 	
 			tag              = "<" code {"," code } ">" ;
 
-			code <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~> = '~\~' - { { codeinner } [ "~" ] codeinner } '~\~' + ;
+			code             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = '~\~' - { { codeinner } [ "~" ] codeinner } '~\~' + ;
 			codeinner        = small | caps | digit | special | "'" | '\\"' | '"' | "\\'" | "\\~" ;
 
 			name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 
-			text    <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>     = dquotetext | squotetext ;
+			text             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = dquotetext | squotetext ;
 			dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
 			squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } "'" + ;
 	
@@ -428,32 +428,33 @@ func main() {
 			fmt.Println(err)
 			continue
 		}
-		fmt.Println("  ==> Success\n\nGrammar:")
-		fmt.Println("  ==> Extras: " + ebnf.PprintExtrasShort(&grammar.Extras, "    "))
-		fmt.Println("  ==> Productions: " + ebnf.PprintProductionsShort(&grammar.Productions, "    "))
+		fmt.Println("  ==> Success\n\n  Grammar:")
+		fmt.Println("   => Extras: " + ebnf.PprintExtrasShort(&grammar.Extras, "    "))
+		fmt.Println("   => Productions: " + ebnf.PprintProductionsShort(&grammar.Productions, "    "))
 
 		fmt.Print("\n\n==================\nTests:\n==================\n\n")
 		for _, srcCode := range tests {
+			fmt.Println("Parse via grammar:")
 			ebnf.PprintSrcSingleLine(srcCode)
 			// Uses the grammar to parse the with it described text. It generates the ASG (abstract semantic graph) of the parsed text.
 			asg, err := ebnf.ParseWithGrammar(grammar, srcCode, false)
 			if err != nil {
-				fmt.Println("  ==> Fail")
+				fmt.Println("\n  ==> Fail")
 				fmt.Println(err)
 				continue
 			}
-			fmt.Println("  ==> Success\n\nAbstract syntax tree:")
+			fmt.Println("\n  ==> Success\n\n  Abstract syntax tree:")
 			fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
 
 			fmt.Println("\nCode output:")
 			// Uses the annotations inside the ASG to compile it.
 			_, err = ebnf.CompileASG(asg, &grammar.Extras, true)
 			if err != nil {
-				fmt.Println("  ==> Fail")
+				fmt.Println("\n  ==> Fail")
 				fmt.Println(err)
 				continue
 			}
-			fmt.Print(" ==> Success\n\n")
+			fmt.Print("\n ==> Success\n\n")
 		}
 		fmt.Println()
 	}
