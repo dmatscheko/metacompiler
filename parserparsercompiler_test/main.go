@@ -8,6 +8,8 @@ import (
 	"./ebnf"
 )
 
+// TODO: add possibility to comment the ebnf via //
+
 // PUBLIC EBNF of EBNF:
 // 	  Production  = name "=" [ Expression ] "." .
 //    Expression  = Alternative { "|" Alternative } .
@@ -277,30 +279,30 @@ var (
 			var pos = names.indexOf(name);
 			if (pos != -1) { return pos };
 			return names.push(name);
-		}		
+		}
 		~~> {
-			program          <~~ print(" >>" + upstream.str + "<< " + names) ~~>                               = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
-			production       <~~ upstream.str = '{"PRODUCTION", ' + upstream.name + ", " + getNameIdx(upstream.name) + "} " // + upstream.str + "}" ~~>       = name [ tag ] "=" [ expression ] ( "." | ";" ) ;
-			expression       = alternative { "|" alternative } ;
-			alternative      = term { term } ;
-			term             = ( name <~~ upstream.str = '{"IDENT", ' + upstream.str + "}" ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
-			group            = "(" expression ")" ;
-			option           = "[" expression "]" ;
-			repetition       = "{" expression "}" ;
-			skipspaces       = "+" | "-" ;
+			program          <~~ print('{'+upstream.str+'}') ~~>                             = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
+			production       <~~ upstream.str = '{"'+upstream.name+'", '+getNameIdx(upstream.name)+', '+upstream.str+'}' ~~>       = name [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '' ~~> ;
+			expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~> = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
+			alternative      = term { term <~~ upstream.str = ', '+upstream.str ~~> } ;
+			term             = ( name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
+			group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                  = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
+			option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>      = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
+			repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>        = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
+			skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
 	
 			title            = text ;
 			start            = name ;
 			comment          = text ;
 	
-			tag              = "<" code {"," code } ">" ;
+			tag <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>                        = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
 
-			code             <~~ upstream.str = '{"TERMINAL", ' + upstream.str + "}" ~~>              = '~~' - { [ "~" ] codeinner } '~~' + ;
+			code             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>      = '~~' - { [ "~" ] codeinner } '~~' + ;
 			codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
-			name             <~~ upstream.name = upstream.str ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
+			name             <~~ upstream.name = upstream.str; upstream.str = '{"IDENT", "'+upstream.name+'", '+getNameIdx(upstream.name)+'}' ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
 
-			text             <~~ upstream.str = '{"TERMINAL", ' + upstream.str + "}" ~~>              = dquotetext | squotetext ;
+			text             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                     = dquotetext | squotetext ;
 			dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
 			squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } "'" + ;
 	
