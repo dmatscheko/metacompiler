@@ -62,5 +62,6 @@ special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "
 }
 
 program
-"This aEBNF contains the grammatic and semantic information for annotated EBNF. It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."
+"This aEBNF contains the grammatic and semantic information for annotated EBNF.
+It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."
 ```
