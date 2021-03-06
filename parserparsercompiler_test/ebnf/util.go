@@ -5,10 +5,10 @@ import (
 	"regexp"
 	"strings"
 
-	"./seq"
+	"./r"
 )
 
-func jsonizeObject(ob seq.Object) string {
+func jsonizeObject(ob r.Object) string {
 	pp := fmt.Sprintf("%#v", ob)
 	pp = strings.ReplaceAll(pp, "[]interface {}", "")
 	if strings.HasPrefix(pp, "[]int") {
@@ -23,12 +23,12 @@ func jsonizeObject(ob seq.Object) string {
 		pp = strings.Replace(pp, "map[string]string", "map", 1)
 	}
 
-	pp = strings.ReplaceAll(pp, ", TagChilds:[]seq.Sequence(nil)", "")
-	pp = strings.ReplaceAll(pp, ", Childs:[]seq.Sequence(nil)", "")
-	// pp = strings.ReplaceAll(pp, "TagChilds:[]seq.Sequence", "")
-	// pp = strings.ReplaceAll(pp, "Childs:[]seq.Sequence", "")
-	pp = strings.ReplaceAll(pp, "[]seq.Sequence{", "{")
-	pp = strings.ReplaceAll(pp, "seq.Sequence{", "{")
+	pp = strings.ReplaceAll(pp, ", TagChilds:[]r.Sequence(nil)", "")
+	pp = strings.ReplaceAll(pp, ", Childs:[]r.Sequence(nil)", "")
+	// pp = strings.ReplaceAll(pp, "TagChilds:[]r.Sequence", "")
+	// pp = strings.ReplaceAll(pp, "Childs:[]r.Sequence", "")
+	pp = strings.ReplaceAll(pp, "[]r.Sequence{", "{")
+	pp = strings.ReplaceAll(pp, "r.Sequence{", "{")
 	pp = strings.ReplaceAll(pp, "Operator:", "")
 	pp = strings.ReplaceAll(pp, "TagChilds:", "")
 	pp = strings.ReplaceAll(pp, "Childs:", "")
@@ -72,7 +72,7 @@ func jsonizeObject(ob seq.Object) string {
 // 	return pp
 // }
 
-func Pprint(header string, ob seq.Object) {
+func Pprint(header string, ob r.Object) {
 	str := jsonizeObject(ob)
 	if len(str) > 1200 {
 		str = str[:1200] + " ..."
@@ -106,7 +106,7 @@ func PprintSrcSingleLine(pp string) {
 	fmt.Print(pp)
 }
 
-func PprintSequenceHeader(rule *seq.Sequence, space ...string) string {
+func PprintSequenceHeader(rule *r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -114,25 +114,25 @@ func PprintSequenceHeader(rule *seq.Sequence, space ...string) string {
 	res := string("\"" + rule.Operator + "\"")
 
 	switch rule.Operator {
-	case seq.Terminal, seq.Invalid:
+	case r.Terminal, r.Invalid:
 		res += fmt.Sprintf(", Pos:%d, %q", rule.Pos, rule.String)
-	case seq.Ident, seq.Production:
+	case r.Ident, r.Production:
 		res += fmt.Sprintf(", Pos:%d, %q:%d", rule.Pos, rule.String, rule.Int)
-	case seq.Range:
+	case r.Range:
 		// TODO:!
-	case seq.SkipSpaces:
+	case r.SkipSpaces:
 		res += fmt.Sprintf(", Pos:%d, %t", rule.Pos, rule.Bool)
-	case seq.Tag:
+	case r.Tag:
 		res += fmt.Sprintf(", Pos:%d, Code:", rule.Pos)
 		res += PprintProductions(&rule.TagChilds, sp+"  ")
-	case seq.Factor:
+	case r.Factor:
 		res += fmt.Sprintf(", Pos:%d, %c", rule.Pos, rule.Rune)
 	}
 
 	return res
 }
 
-func PprintSequence(rule *seq.Sequence, space ...string) string {
+func PprintSequence(rule *r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -146,7 +146,7 @@ func PprintSequence(rule *seq.Sequence, space ...string) string {
 	return res
 }
 
-func PprintProductions(productions *[]seq.Sequence, space ...string) string {
+func PprintProductions(productions *[]r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -163,7 +163,7 @@ func PprintProductions(productions *[]seq.Sequence, space ...string) string {
 	return res
 }
 
-func PprintProductionsShort(productions *[]seq.Sequence, space ...string) string {
+func PprintProductionsShort(productions *[]r.Rule, space ...string) string {
 	str := PprintProductions(productions, space...)
 	if len(str) > 1200 {
 		str = str[:1200] + " ..."
@@ -171,7 +171,7 @@ func PprintProductionsShort(productions *[]seq.Sequence, space ...string) string
 	return str
 }
 
-func PprintExtras(extras *map[string]seq.Sequence, space ...string) string {
+func PprintExtras(extras *map[string]r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -189,7 +189,7 @@ func PprintExtras(extras *map[string]seq.Sequence, space ...string) string {
 	return res
 }
 
-func PprintExtrasShort(extras *map[string]seq.Sequence, space ...string) string {
+func PprintExtrasShort(extras *map[string]r.Rule, space ...string) string {
 	str := PprintExtras(extras, space...)
 	if len(str) > 1200 {
 		str = str[:1200] + " ..."

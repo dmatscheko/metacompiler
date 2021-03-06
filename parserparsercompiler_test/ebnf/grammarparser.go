@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"./seq"
+	"./r"
 )
 
 // ----------------------------------------------------------------------------
@@ -36,7 +36,7 @@ func (gp *grammarParser) skipSpaces() {
 	}
 }
 
-func (gp *grammarParser) printTrace(rule seq.Sequence, doSkipSpaces bool, depth int) {
+func (gp *grammarParser) printTrace(rule r.Rule, doSkipSpaces bool, depth int) {
 	if !gp.traceEnabled {
 		return
 	}
@@ -101,9 +101,9 @@ func (gp *grammarParser) printTrace(rule seq.Sequence, doSkipSpaces bool, depth 
 // {"IDENT", <name>, idx}   -- apply the sub-rule (its a link to the sub-rule) (its a production)
 // {"TAG", code, <name>, idx }  ---- from dma: the semantic description in IL or something else (script language). also other things like coloring
 //
-func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) []seq.Sequence { // => (localProductions)
+func (gp *grammarParser) apply(rule r.Rule, doSkipSpaces bool, depth int) []r.Rule { // => (localProductions)
 	wasSdx := gp.sdx // In case of failure
-	var localProductions []seq.Sequence = nil
+	var localProductions []r.Rule = nil
 
 	// TODO: FOR DEBUG. Make this configurable:
 	// ---------------
@@ -114,23 +114,23 @@ func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) 
 	// ---------------
 
 	switch rule.Operator {
-	case seq.Basic, seq.Group, seq.Production: // Those are groups/sequences of rules. Iterate through them and apply.
+	case r.Sequence, r.Group, r.Production: // Those are groups/sequences of rules. Iterate through them and apply.
 		for i := 0; i < len(rule.Childs); i++ {
 			newProductions := gp.apply(rule.Childs[i], doSkipSpaces, depth+1)
 			if newProductions == nil {
 				gp.sdx = wasSdx
 				return nil
-			} else if len(newProductions) > 0 && newProductions[0].Operator == seq.SkipSpaces { // this has to be handled in a sequence
+			} else if len(newProductions) > 0 && newProductions[0].Operator == r.SkipSpaces { // this has to be handled in a sequence
 				doSkipSpaces = newProductions[0].Bool
 				continue
 			}
-			if rule.Operator == seq.Basic {
-				localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only seq.Basic can be flattened fully
+			if rule.Operator == r.Sequence {
+				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only r.Basic can be flattened fully
 			} else {
-				localProductions = seq.AppendPossibleSequence(localProductions, seq.Sequence{Operator: seq.Group, Childs: newProductions, Pos: gp.sdx})
+				localProductions = r.AppendPossibleSequence(localProductions, r.Rule{Operator: r.Group, Childs: newProductions, Pos: gp.sdx})
 			}
 		}
-	case seq.Terminal:
+	case r.Terminal:
 		if doSkipSpaces { // There can be white space in strings/text. Do not skip that.
 			gp.skipSpaces()
 		}
@@ -144,12 +144,12 @@ func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) 
 		}
 		localProductions = append(localProductions, rule)
 		// Pprint("X", rule)
-	case seq.Or:
+	case r.Or:
 		found := false
 		for i := 0; i < len(rule.Childs); i++ {
 			newProductions := gp.apply(rule.Childs[i], doSkipSpaces, depth+1)
 			if newProductions != nil { // HERE, nil as the result array is used as not found ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil
-				localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions)
+				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 				found = true
 				break // This should shortcut some parts (depth first search). // TODO: make this configurable! Sometimes it might be useful to get all variants.
 			}
@@ -158,59 +158,59 @@ func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) 
 			gp.sdx = wasSdx
 			return nil
 		}
-	case seq.Repeat:
-		rule.Operator = seq.Basic
+	case r.Repeat:
+		rule.Operator = r.Sequence
 		for { // Repeat as often as possible.
 			newProductions := gp.apply(rule, doSkipSpaces, depth+1)
 			if newProductions == nil {
 				break
 			}
-			localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
+			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
 		}
-	case seq.Optional:
-		rule.Operator = seq.Basic
+	case r.Optional:
+		rule.Operator = r.Sequence
 		newProductions := gp.apply(rule, doSkipSpaces, depth+1)
-		localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
-	case seq.Ident: // "IDENT" identifies another block (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
-		newRule := seq.Sequence{Operator: seq.Basic, Childs: gp.grammar.Productions[rule.Int].Childs, Pos: gp.sdx}
+		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
+	case r.Ident: // "IDENT" identifies another block (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
+		newRule := r.Rule{Operator: r.Sequence, Childs: gp.grammar.Productions[rule.Int].Childs, Pos: gp.sdx}
 		newProductions := gp.apply(newRule, doSkipSpaces, depth+1)
 		if newProductions == nil {
 			gp.sdx = wasSdx
 			return nil
 		}
-		localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions)
-	case seq.Tag:
-		newRule := seq.Sequence{Operator: seq.Basic, Childs: rule.Childs, Pos: gp.sdx}
+		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
+	case r.Tag:
+		newRule := r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: gp.sdx}
 		newProductions := gp.apply(newRule, doSkipSpaces, depth+1)
 		if newProductions == nil {
 			return nil
 		}
-		newTag := seq.Sequence{Operator: seq.Tag, TagChilds: rule.TagChilds, Pos: gp.sdx}
-		newTag.Childs = seq.AppendArrayOfPossibleSequences(newTag.Childs, newProductions)
+		newTag := r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Pos: gp.sdx}
+		newTag.Childs = r.AppendArrayOfPossibleSequences(newTag.Childs, newProductions)
 		localProductions = append(localProductions, newTag)
-	case seq.SkipSpaces: // TODO: modify SKIPSPACES so that the chars to skip must be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
+	case r.SkipSpaces: // TODO: modify SKIPSPACES so that the chars to skip must be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		rule.Pos = gp.sdx
-		return []seq.Sequence{rule}
-	default: // seq.Factor || seq.Invalid
+		return []r.Rule{rule}
+	default: // r.Factor || r.Invalid
 		panic(fmt.Sprintf("invalid rule in applies() function: %#v", rule))
 	}
 
 	// all failed matches should have returned already
 	// here must only be matches
 
-	if len(localProductions) == 1 && localProductions[0].Operator == seq.Group {
+	if len(localProductions) == 1 && localProductions[0].Operator == r.Group {
 		localProductions = localProductions[0].Childs
 	}
 	if localProductions == nil { // Must not be nil because nil is for failed match.
-		localProductions = []seq.Sequence{}
+		localProductions = []r.Rule{}
 	}
 	return localProductions
 }
 
-func mergeTerminals(productions []seq.Sequence) []seq.Sequence {
+func mergeTerminals(productions []r.Rule) []r.Rule {
 	lastWasTerminal := false
 	for i := 0; i < len(productions); i++ {
-		if productions[i].Operator == seq.Terminal {
+		if productions[i].Operator == r.Terminal {
 			if lastWasTerminal {
 				productions[i-1].String += productions[i].String
 				productions = append(productions[0:i], productions[i+1:]...)
@@ -228,7 +228,7 @@ func mergeTerminals(productions []seq.Sequence) []seq.Sequence {
 	return productions
 }
 
-func ParseWithGrammar(grammar Grammar, srcCode string, traceEnabled bool) (res []seq.Sequence, err error) { // => (productions, error)
+func ParseWithGrammar(grammar Grammar, srcCode string, traceEnabled bool) (res []r.Rule, err error) { // => (productions, error)
 	defer func() {
 		if errRecover := recover(); errRecover != nil {
 			res = nil
