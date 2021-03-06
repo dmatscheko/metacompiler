@@ -25,20 +25,20 @@ package ebnf
 import (
 	"fmt"
 
-	"./seq"
+	"./r"
 )
 
 // -------------------------------------------------------- verifier for ebnfparser by DMA -----
 
 var reachedNames map[string]bool
 
-func (ep *ebnfParser) collectReachableNames(production seq.Sequence) {
+func (ep *ebnfParser) collectReachableNames(production r.Rule) {
 	for _, child := range production.Childs {
-		if child.Operator == seq.Ident {
+		if child.Operator == r.Ident {
 			i := child.Int
 			ii := ep.ididx[i]
 			nextProduction := ep.grammar.Productions[ii]
-			if nextProduction.Operator == seq.Production {
+			if nextProduction.Operator == r.Production {
 				if reachedNames[nextProduction.String] {
 					continue
 				}
@@ -67,15 +67,15 @@ func (ep *ebnfParser) verifyAllNamesUsed() {
 	}
 
 	// Get start production.
-	startProduction := seq.Sequence{Operator: seq.Invalid}
+	startProduction := r.Rule{Operator: r.Invalid}
 	for _, elem := range ep.grammar.Productions {
-		if elem.Operator == seq.Production && elem.String == startName {
+		if elem.Operator == r.Production && elem.String == startName {
 			startProduction = elem
 			break
 		}
 	}
 
-	if startProduction.Operator != seq.Production {
+	if startProduction.Operator != r.Production {
 		panic(fmt.Sprintf("Defined start production (%s) not found.", startName))
 	}
 	reachedNames[startProduction.String] = true
@@ -125,10 +125,10 @@ import (
 type verifier struct {
 	errors errorList
 	// worklist []*Production
-	worklist []*seq.Sequence
+	worklist []*r.Sequence
 	// reached  Grammar // set of productions reached from (and including) the root production
-	reached map[string]*seq.Sequence
-	grammar map[string]*seq.Sequence
+	reached map[string]*r.Sequence
+	grammar map[string]*r.Sequence
 	// grammar Grammar
 }
 
@@ -136,8 +136,8 @@ func (v *verifier) error(pos int, msg string) {
 	v.errors = append(v.errors, newError(pos, msg))
 }
 
-func (v *verifier) push(prod *seq.Sequence) {
-	if prod.Operator != seq.Production {
+func (v *verifier) push(prod *r.Sequence) {
+	if prod.Operator != r.Production {
 		panic("No PRODUCTION given to push()")
 	}
 	name := prod.String
@@ -147,8 +147,8 @@ func (v *verifier) push(prod *seq.Sequence) {
 	}
 }
 
-func (v *verifier) verifyChar(x *seq.Sequence) rune {
-	if x.Operator != seq.Terminal {
+func (v *verifier) verifyChar(x *r.Sequence) rune {
+	if x.Operator != r.Terminal {
 		panic("No TERMINAL given to verifyChar()")
 	}
 	s := x.String
@@ -160,18 +160,18 @@ func (v *verifier) verifyChar(x *seq.Sequence) rune {
 	return ch
 }
 
-func (v *verifier) verifyExpr(expr *seq.Sequence) {
+func (v *verifier) verifyExpr(expr *r.Sequence) {
 
 	switch expr.Operator {
-	case seq.Or:
+	case r.Or:
 		for _, e := range expr.Childs {
 			v.verifyExpr(&e)
 		}
-	case seq.Group, seq.Optional, seq.Repeat, seq.Basic: // TODO: RENAME IN SEQUENCE!!!
+	case r.Group, r.Optional, r.Repeat, r.Basic: // TODO: RENAME IN SEQUENCE!!!
 		for _, e := range expr.Childs {
 			v.verifyExpr(&e)
 		}
-	case seq.Ident: //  TODO: MAYBE CHANGE TO "NAME"
+	case r.Ident: //  TODO: MAYBE CHANGE TO "NAME"
 		// a production with this name must exist;
 		// add it to the worklist if not yet processed
 		if prod, found := v.grammar[expr.String]; found {
@@ -179,15 +179,15 @@ func (v *verifier) verifyExpr(expr *seq.Sequence) {
 		} else {
 			v.error(expr.Pos, "missing production "+expr.String)
 		}
-	case seq.Terminal:
+	case r.Terminal:
 		// nothing to do for now
-	case seq.Range:
+	case r.Range:
 		i := v.verifyChar(expr.Begin)
 		j := v.verifyChar(expr.End)
 		if i >= j {
 			v.error(expr.Pos, "decreasing character range")
 		}
-	case seq.Invalid:
+	case r.Invalid:
 		v.error(expr.Pos, expr.String)
 	default:
 		panic(fmt.Sprintf("internal error: unexpected type %T", expr))

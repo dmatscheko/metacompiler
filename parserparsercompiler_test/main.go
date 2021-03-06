@@ -279,11 +279,11 @@ var (
 			return names.push(name);
 		}		
 		~~> {
-			program          <~~ print(" >>" + upstream.text + "<< " + names) ~~>                               = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
-			production       <~~ upstream.text = '{"PRODUCTION", ' + upstream.name + ", " + getNameIdx(upstream.name) + "} " // + upstream.text + "}" ~~>       = name [ tag ] "=" [ expression ] ( "." | ";" ) ;
+			program          <~~ print(" >>" + upstream.str + "<< " + names) ~~>                               = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
+			production       <~~ upstream.str = '{"PRODUCTION", ' + upstream.name + ", " + getNameIdx(upstream.name) + "} " // + upstream.str + "}" ~~>       = name [ tag ] "=" [ expression ] ( "." | ";" ) ;
 			expression       = alternative { "|" alternative } ;
 			alternative      = term { term } ;
-			term             = ( name <~~ upstream.text = '{"IDENT", ' + upstream.text + "}" ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
+			term             = ( name <~~ upstream.str = '{"IDENT", ' + upstream.str + "}" ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
 			group            = "(" expression ")" ;
 			option           = "[" expression "]" ;
 			repetition       = "{" expression "}" ;
@@ -295,12 +295,12 @@ var (
 	
 			tag              = "<" code {"," code } ">" ;
 
-			code             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = '~~' - { [ "~" ] codeinner } '~~' + ;
+			code             <~~ upstream.str = '{"TERMINAL", ' + upstream.str + "}" ~~>              = '~~' - { [ "~" ] codeinner } '~~' + ;
 			codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
-			name             <~~ upstream.name = upstream.text ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
+			name             <~~ upstream.name = upstream.str ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
 
-			text             <~~ upstream.text = '{"TERMINAL", ' + upstream.text + "}" ~~>              = dquotetext | squotetext ;
+			text             <~~ upstream.str = '{"TERMINAL", ' + upstream.str + "}" ~~>              = dquotetext | squotetext ;
 			dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
 			squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } "'" + ;
 	
@@ -398,14 +398,14 @@ var (
 
 		// 	`,
 
-		`"EBNF of EBNF (can parse)" <~~ print("test") ~~> {
+		`"EBNF of EBNF (can parse)" {
 			program = [ title ] "{" { production } "}" [ comment ] ;
 			production  = name "=" [ expression ] ";" ;
 			expression  = sequence ;
 			sequence    = alternative { alternative } ;
 			alternative = term { "|" term } ;
 			term        = name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ;
-			group       = "(" expression ")" ;
+			group       <~~ print("test") ~~>      = "(" expression ")" ;
 			option      = "[" expression "]" ;
 			repetition  = "{" expression "}" ;
 			skipspaces = "+" | "-" ;
@@ -443,25 +443,26 @@ func main() {
 		for _, srcCode := range tests {
 			fmt.Println("Parse via grammar:")
 			ebnf.PprintSrcSingleLine(srcCode)
-			// Uses the grammar to parse the with it described text. It generates the ASG (abstract semantic graph) of the parsed text.
+			// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
 			asg, err := ebnf.ParseWithGrammar(grammar, srcCode, false)
 			if err != nil {
 				fmt.Println("\n  ==> Fail")
 				fmt.Println(err)
 				continue
 			}
-			fmt.Println("\n  ==> Success\n\n  Abstract syntax tree:")
+			fmt.Println("\n  ==> Success\n\n  Abstract semantic graph:")
 			fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
 
 			fmt.Println("\nCode output:")
 			// Uses the annotations inside the ASG to compile it.
-			_, err = ebnf.CompileASG(asg, &grammar.Extras, true)
+			upstream, err := ebnf.CompileASG(asg, &grammar.Extras, false)
 			if err != nil {
 				fmt.Println("\n  ==> Fail")
 				fmt.Println(err)
 				continue
 			}
 			fmt.Print("\n ==> Success\n\n")
+			fmt.Printf("  Upstream Vars:\n    %#v\n\n", upstream)
 		}
 		fmt.Println()
 	}

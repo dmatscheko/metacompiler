@@ -3,15 +3,15 @@ package ebnf
 import (
 	"fmt"
 
-	"./seq"
+	"./r"
 	"github.com/dop251/goja"
 )
 
 type compiler struct {
 	// newGrammar Grammar
-	// globalVars map[string]seq.Object
+	// globalVars map[string]r.Object
 	vm      *goja.Runtime
-	funcMap map[string]seq.Object
+	funcMap map[string]r.Object
 
 	traceEnabled bool
 }
@@ -33,7 +33,7 @@ type compiler struct {
 	// a tag looks like <"CODE">
 	vars["childStr"] = childMatchStrJoined       // (string) The collective matched strings of all child nodes.
 	vars["childCode"] = childCodeResultStrJoined // (string) The collective textual output of all child tag nodes code.
-	vars["childObj"] = childCodeResultObjTree    // ([]seq.Sequence) The collective generated list of all child tag nodes code upstream seq.Sequence trees. Each TAG node can insert its objects into one of the trees in the list via upstream.
+	vars["childObj"] = childCodeResultObjTree    // ([]r.Sequence) The collective generated list of all child tag nodes code upstream r.Sequence trees. Each TAG node can insert its objects into one of the trees in the list via upstream.
 	vars["locals"] = localVars                   // (objects map) The local (going upstream) variables, that can be set with {{ setLocal "foo" true }}, accessed with {{ .locals.foo }}, or deleted with {{ deleteLocal "foo" }}
 	vars["globals"] = co.globalVars              // (objects map) The global variables, that can be set with {{ setGlobal "foo" true }}, accessed with {{ .globals.foo }}, or deleted with {{ deletGlobal "foo" }}
 	vars["subTree"] = localTree                  // (object tree) The current sub tree of the parser grammar
@@ -51,7 +51,7 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 	return co.vm.RunProgram(p)
 }
 
-func (co *compiler) handleTagCode(code string, name string, upstream map[string]seq.Object, localTree []seq.Sequence) { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
+func (co *compiler) handleTagCode(code string, name string, upstream map[string]r.Object, localTree []r.Rule) { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
 	// co.vm.Set("globals", co.globalVars) // is set once by initFuncMap()
 	co.vm.Set("upstream", upstream) // The object(s) that are passed from the bottom roots to the top of the tree. Initially, only TERMINALs are entered into 'upstream.text'. If 'upstream.text' contains something that can be converted into string, it is concateneted with the other TERMINAL values or filled upstream.text contents.
 	co.funcMap["localAST"] = localTree
@@ -65,46 +65,92 @@ func (co *compiler) handleTagCode(code string, name string, upstream map[string]
 	}
 }
 
-func (co *compiler) compile(productions []seq.Sequence, upstream map[string]seq.Object) {
+//
+//    OUT
+//     ^
+//     |
+//     C--.      (C) If the Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
+//     |   |
+//   * ^   v     (*) All upstream values are combined.
+//    /|   |
+//   | | _ |
+//   T | | |     (T) The text of a terminal gets sent to 'upstream.str'.
+//   | X | |     (X) Here, the script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
+//   | | O |     (O) Other Rules are ignored.
+//   | | | |
+//   \ | / |
+//  * \|/  |     (*) Childs from one Rule get splitted.
+//     |__/
+//     |
+//     ^
+//     IN
+//
+func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) {
+	if co.traceEnabled {
+		fmt.Printf("\n## %#v\n--\n%#v\n", productions, upstream)
+	}
 	if productions == nil || len(productions) == 0 {
-		// fmt.Printf("## A # %#v\n", t1)
 		return
 	}
 
 	// ----------------------------------
+	// Split and collect
 
-	upstreamNew := map[string]seq.Object{}
-	if len(productions) > 1 { // "SEQUENCE" Iterate through all rules and apply.
+	// Problem: One sets an upstream variable and it gets overwritten by another that was not updated.
+
+	upstreamMerged := map[string]r.Object{}
+	if len(productions) > 1 { // "SEQUENCE" Iterate through all rules and applies.
 		for _, rule := range productions { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
 
-			// Copy, so that compile and handleTagCode can change them:
-			upstreamCopy := map[string]seq.Object{}
+			// Copy, so that compile() and handleTagCode() can change them:
+			upstreamEdit := map[string]r.Object{}
 			for k, v := range upstream {
-				upstreamCopy[k] = v
+				upstreamEdit[k] = v
 			}
-			co.compile([]seq.Sequence{rule}, upstreamCopy)
-			for k, v := range upstreamCopy {
-				if k == "text" {
-					str1, ok1 := upstreamNew[k].(string)
+
+			// Compile:
+			co.compile([]r.Rule{rule}, upstreamEdit)
+
+			// Merge into upstreamMerged:
+			for k, v := range upstreamEdit {
+				if v == nil && upstreamMerged[k] != nil { // One other child already had a result but the current one does not. Keep the result of the other child.
+					continue
+				}
+				if upstreamMerged[k] != upstream[k] && v == upstream[k] { // If another child changed the result but the current one would not, keep the changed result of the other child.
+					continue
+				}
+
+				if len(k) >= 3 && k[:3] == "str" { // All upstream variables that start with 'str' are combined as string.
+					str1, ok1 := upstreamMerged[k].(string)
 					str2, ok2 := v.(string)
 					if ok1 && ok2 {
-						upstreamNew[k] = str1 + str2
+						upstreamMerged[k] = str1 + str2
 					} else if ok2 {
-						upstreamNew[k] = str2
+						upstreamMerged[k] = str2
 					}
 				} else {
-					if !(v == nil && upstreamNew[k] != nil) {
-						upstreamNew[k] = v
-					}
+					// TODO:
+					// if upstreamMerged[k] != nil && v != nil {
+					// 	if mergedArr, ok := upstreamMerged[k].([]interface{}); ok { // If we can merge as array:
+					// 		if vArr, ok := v.([]interface{}); ok {
+					// 			upstreamMerged[k] = append(mergedArr, vArr...)
+					// 		} else {
+					// 			upstreamMerged[k] = append(mergedArr, v)
+					// 		}
+					// 	} else {
+					// 		upstreamMerged[k] = []interface{}{upstreamMerged[k], v}
+					// 	}
+					upstreamMerged[k] = v
+					// }
 				}
 			}
 		}
 
-		for k, v := range upstreamNew {
+		for k, v := range upstreamMerged {
 			upstream[k] = v
 		}
 		for k := range upstream {
-			if upstreamNew[k] == nil {
+			if upstreamMerged[k] == nil {
 				delete(upstream, k)
 			}
 		}
@@ -112,34 +158,32 @@ func (co *compiler) compile(productions []seq.Sequence, upstream map[string]seq.
 		return
 	}
 
-	// --------------------------------------
+	// ----------------------------------
+	// Inside each splitted arm do this
 
 	// There is only one production:
 	rule := productions[0]
 
 	switch rule.Operator {
-	case seq.Terminal:
-		// if str, ok := inLocalVars["text"].(string); ok && len(str) > 0 {
+	case r.Terminal:
+		// if str, ok := upstream["text"].(string); ok && len(str) > 0 {
 		// 	panic("ONLY FOR DEBUG! no this should not happen")
 		// }
-		upstream["text"] = rule.String
+		upstream["str"] = rule.String
 		return
-	case seq.Tag:
+	case r.Tag:
 		tagCode := rule.TagChilds[0].String
 		// First collect all the data.
-		// inLocalVars will be changed by co.compile()
-		co.compile(rule.Childs, upstream) // Evaluate the child productions of the TAG.
+		co.compile(rule.Childs, upstream) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		// inLocalVars will be changed by co.handleTagCode()
-		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), upstream, productions)
+		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), upstream, productions) // TODO: maybe change "upstream" to "upstreamReplace, upstreamCombine"
 		return
 	default:
 		if len(rule.Childs) > 0 {
-			co.compile(rule.Childs, upstream) // Evaluate the child productions of groups.
+			co.compile(rule.Childs, upstream) // Evaluate the child productions of groups to collect their values.
 		}
 	}
 
-	// fmt.Printf("## B # %#v\n", tree)
 	return
 }
 
@@ -151,21 +195,21 @@ func (co *compiler) initFuncMap() {
 	co.vm.Set("printf", fmt.Printf)
 	co.vm.Set("sprintf", fmt.Sprintf)
 
-	co.vm.Set("defined", func(o seq.Object) bool { return o != nil })
+	co.vm.Set("defined", func(o r.Object) bool { return o != nil })
 
-	co.funcMap = map[string]seq.Object{ // The LLVM function will be inside such a map.
-		"objectAsString": func(object seq.Object, stripBraces bool) string {
+	co.funcMap = map[string]r.Object{ // The LLVM function will be inside such a map.
+		"objectAsString": func(object r.Object, stripBraces bool) string {
 			return "NOT IMPLEMENTED YET"
 		},
 
-		"sequence": func(Operator seq.OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []seq.Sequence, TagChilds []seq.Sequence) seq.Sequence {
-			return seq.Sequence{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
+		"sequence": func(Operator r.OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []r.Rule, TagChilds []r.Rule) r.Rule {
+			return r.Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
 		},
-		// "Upstream": func(a []seq.Sequence) {
+		// "Upstream": func(a []r.Sequence) {
 		// 	codeResultObjTree
 		// },
-		"GetSeqArr": func(a string, b int) []seq.Sequence {
-			return []seq.Sequence{{String: a, Int: b}, {String: a, Int: b + 1}}
+		"GetSeqArr": func(a string, b int) []r.Rule {
+			return []r.Rule{{String: a, Int: b}, {String: a, Int: b + 1}}
 		},
 		"Test": func() int {
 			return 123
@@ -173,7 +217,7 @@ func (co *compiler) initFuncMap() {
 		"Foo": func(a int) int {
 			return a*2 + 123
 		},
-		"Test2": func(a []seq.Sequence) {
+		"Test2": func(a []r.Rule) {
 			fmt.Printf("\n\nTEST2: %#v", a)
 		},
 	}
@@ -181,10 +225,10 @@ func (co *compiler) initFuncMap() {
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
-func CompileASG(ast []seq.Sequence, extras *map[string]seq.Sequence, traceEnabled bool) (g Grammar, e error) {
+func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res map[string]r.Object, e error) {
 	defer func() {
 		if err := recover(); err != nil {
-			g = Grammar{}
+			res = nil
 			e = fmt.Errorf(fmt.Sprintf("%s", err))
 		}
 	}()
@@ -192,8 +236,8 @@ func CompileASG(ast []seq.Sequence, extras *map[string]seq.Sequence, traceEnable
 	var co compiler
 	co.traceEnabled = traceEnabled
 
-	// co.globalVars = map[string]seq.Object{} // Global variables.
-	var upstream = map[string]seq.Object{} // Local variables (must be passed through compile).
+	// co.globalVars = map[string]r.Object{} // Global variables.
+	var upstream = map[string]r.Object{} // Local variables (must be passed through compile).
 
 	co.vm = goja.New()
 	co.initFuncMap()
@@ -205,7 +249,7 @@ func CompileASG(ast []seq.Sequence, extras *map[string]seq.Sequence, traceEnable
 		}
 	}
 
-	co.compile(ast, upstream)
+	co.compile(asg, upstream)
 
 	if epilog, ok := (*extras)["epilog.code"]; ok {
 		_, err := co.Run("epilog.code", epilog.TagChilds[0].String)
@@ -214,8 +258,6 @@ func CompileASG(ast []seq.Sequence, extras *map[string]seq.Sequence, traceEnable
 		}
 	}
 
-	// fmt.Printf("\n\n==================\nResult:\n==================\n\nUpstream Vars:\n    %#v\n\n", upstream)
-
 	// return co.newGrammar, nil
-	return Grammar{}, nil // TODO: change
+	return upstream, nil
 }
