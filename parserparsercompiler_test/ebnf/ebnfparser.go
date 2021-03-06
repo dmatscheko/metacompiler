@@ -51,7 +51,7 @@ func (ep *ebnfParser) invalid(msg string, pos int) seq.Sequence {
 }
 
 func (ep *ebnfParser) getToken() {
-	// Yields a single character token, one of {}()[]|=.;
+	// Yields a single character token, one of {}()[]<>|=.;+-,
 	// or {"TERMINAL",string} or {"IDENT", string} or -1.
 	ep.skipSpaces()
 	if ep.sdx >= len(ep.src) {
@@ -302,7 +302,7 @@ func (ep *ebnfParser) term() seq.Sequence {
 
 		newFactor := ep.factor()
 
-		// MOVE EVERYTHING THAT THE TAG DESRIBES (which is to the left) INTO INTO THE TAG!
+		// Move everything that the TAG desribes (which is to the left) into into the TAG.
 		// If newFactor is a TAG, merge this TAG with the last command in firstFactor.
 		if newFactor.Operator == seq.Tag {
 			lastFactor := res[len(res)-1]
@@ -396,8 +396,6 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	// Title
 	if ep.token.Operator == seq.Terminal {
 		ep.grammar.Extras["title"] = ep.token
-		// title := seq.Sequence{Operator: seq.Production, String: "title", Int: -1, Childs: []seq.Sequence{ep.token}, Pos: pos}
-		// ep.grammar.extras = append(ep.grammar.extras, title)
 		pos = ep.sdx
 		ep.getToken()
 	}
@@ -405,13 +403,9 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	// Prolog
 	if ep.token.Operator == seq.Factor && ep.token.Rune == '<' {
 		ep.grammar.Extras["prolog.code"] = ep.tag()
-		// tag := seq.Sequence{Operator: seq.Production, String: "prolog.code", Int: -1, Childs: []seq.Sequence{ep.tag()}, Pos: pos}
-		// ep.grammar.extras = append(ep.grammar.extras, tag)
 		pos = ep.sdx
 		// ep.getToken()
 	}
-
-	PprintProductions(&ep.grammar.Productions, ">>>    ")
 
 	// Main
 	if !(ep.token.Operator == seq.Factor && ep.token.Rune == '{') {
@@ -427,13 +421,9 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	pos = ep.sdx
 	ep.getToken()
 
-	// TODO: prolog and epilog code and id is not yet used!!!!
-
 	// Epilog
 	if ep.token.Operator == seq.Factor && ep.token.Rune == '<' {
 		ep.grammar.Extras["epilog.code"] = ep.tag()
-		// tag := seq.Sequence{Operator: seq.Production, String: "epilog.code", Int: -1, Childs: []seq.Sequence{ep.tag()}, Pos: pos}
-		// ep.grammar.extras = append(ep.grammar.extras, tag)
 		pos = ep.sdx
 		// ep.getToken()
 	}
@@ -443,8 +433,6 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		start := ep.token
 		start.Int = ep.addIdent(ep.token.String)
 		ep.grammar.Extras["start"] = start
-		// start := seq.Sequence{Operator: seq.Production, String: "start", Int: -1, Childs: []seq.Sequence{ep.token}, Pos: pos}
-		// ep.grammar.extras = append(ep.grammar.extras, start)
 		pos = ep.sdx
 		ep.getToken()
 	} else {
@@ -454,8 +442,6 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	// Comment
 	if ep.token.Operator == seq.Terminal {
 		ep.grammar.Extras["comment"] = ep.token
-		// comment := seq.Sequence{Operator: seq.Production, String: "comment", Int: -1, Childs: []seq.Sequence{ep.token}, Pos: pos}
-		// ep.grammar.extras = append(ep.grammar.extras, comment)
 		pos = ep.sdx
 		ep.getToken()
 	}

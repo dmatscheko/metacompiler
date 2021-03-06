@@ -10,6 +10,8 @@ import (
 // ----------------------------------------------------------------------------
 // Dynamic grammar parser
 
+// TODO: REMEMBER WHAT HAS BEEN TRIED ALREADY FOR A POSITION!
+
 type grammarParser struct {
 	src     []rune
 	ch      rune
@@ -17,6 +19,7 @@ type grammarParser struct {
 	grammar Grammar
 
 	traceEnabled bool
+	traceCount   int
 }
 
 // TODO: DEDUPLICATE!!
@@ -37,45 +40,27 @@ func (gp *grammarParser) printTrace(rule seq.Sequence, doSkipSpaces bool, depth 
 	if !gp.traceEnabled {
 		return
 	}
+
 	doSkipSpacesStr := "skipspaces: NO"
 	if doSkipSpaces {
 		doSkipSpacesStr = "skipspaces: YES"
 	}
 
-	// d := ">"
-	// for i := 0; i < depth; i++ {
-	// 	d += ">"
-	// }
+	d := ">"
+	for i := 0; i < depth; i++ {
+		d += ">"
+	}
 
 	c := '-'
 	if gp.sdx < len(gp.src) {
 		c = gp.src[gp.sdx]
 	}
-	Pprint(fmt.Sprintf("%3d>>>> rule for pos # %d (char '%c') %s", depth, gp.sdx, c, doSkipSpacesStr), rule)
-	// Pprint(fmt.Sprintf("%3d%s rule for pos # %d (%c) action: %s", depth, d, gp.sdx, c, action), rule)
+
+	gp.traceCount++
+
+	// Pprint(fmt.Sprintf("%4d: %3d>>>> rule for pos # %d (char '%c') %s", gp.traceCount, depth, gp.sdx, c, doSkipSpacesStr), rule)
+	Pprint(fmt.Sprintf("%4d: %3d%s rule for pos # %d (char '%c') %s", gp.traceCount, depth, d, gp.sdx, c, doSkipSpacesStr), rule)
 }
-
-// func (gp *grammarParser) applyAllOrNone(rules []seq.Sequence, doSkipSpaces bool, depth int) []seq.Sequence { // => (localProductions)
-// 	var localProductions []seq.Sequence = nil
-// 	matched := true
-// 	for i := 0; i < len(rules); i++ { // Try all rules in order. They have to match all or it is no match.
-// 		newProductions := gp.apply(rules[i], doSkipSpaces, depth+1)
-// 		if newProductions == nil {
-// 			matched = false // If even a single rule does not match, the whole list of rules does not match.
-// 		}
-// 		localProductions = append(localProductions, newProductions...)
-// 	}
-
-// 	if len(localProductions) == 1 && localProductions[0].Operator == seq.Group {
-// 		localProductions = localProductions[0].Childs
-// 	}
-// 	if matched && localProductions == nil { // Must not be nil because nil is for failed match.
-// 		localProductions = []seq.Sequence{}
-// 	}
-// 	return localProductions
-// }
-
-// TODO: fuse sequencial terminals (NOT in OR)!!!!!!!!!!
 
 // The self-referential EBNF is (different description form!):
 //
@@ -116,13 +101,11 @@ func (gp *grammarParser) printTrace(rule seq.Sequence, doSkipSpaces bool, depth 
 // {"IDENT", <name>, idx}   -- apply the sub-rule (its a link to the sub-rule) (its a production)
 // {"TAG", code, <name>, idx }  ---- from dma: the semantic description in IL or something else (script language). also other things like coloring
 //
-// TODO: REMEMBER WHAT HAS BEEN TRIED ALREADY FOR A POSITION!
-//
 func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) []seq.Sequence { // => (localProductions)
 	wasSdx := gp.sdx // In case of failure
 	var localProductions []seq.Sequence = nil
 
-	// TODO: FOR DEBUG:
+	// TODO: FOR DEBUG. Make this configurable:
 	// ---------------
 	if depth > 1000 {
 		panic("ERROR: Too many loops!")
@@ -144,7 +127,7 @@ func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) 
 			if rule.Operator == seq.Basic {
 				localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only seq.Basic can be flattened fully
 			} else {
-				localProductions = seq.AppendPossibleSequence(localProductions, seq.Sequence{Operator: seq.Group, Childs: newProductions})
+				localProductions = seq.AppendPossibleSequence(localProductions, seq.Sequence{Operator: seq.Group, Childs: newProductions, Pos: gp.sdx})
 			}
 		}
 	case seq.Terminal:
@@ -168,7 +151,7 @@ func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) 
 			if newProductions != nil { // HERE, nil as the result array is used as not found ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil
 				localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions)
 				found = true
-				// break // TODO: this has been added by DMA. It should shortcut some parts (and should allow simpler EBNF) but might be bad. It only uses the first finding and does not try more.... TEST THIS!!!! It is short circuit evaluation!
+				break // This should shortcut some parts (depth first search). // TODO: make this configurable! Sometimes it might be useful to get all variants.
 			}
 		}
 		if !found {
@@ -189,7 +172,7 @@ func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) 
 		newProductions := gp.apply(rule, doSkipSpaces, depth+1)
 		localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
 	case seq.Ident: // "IDENT" identifies another block (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
-		newRule := seq.Sequence{Operator: seq.Basic, Childs: gp.grammar.Productions[rule.Int].Childs}
+		newRule := seq.Sequence{Operator: seq.Basic, Childs: gp.grammar.Productions[rule.Int].Childs, Pos: gp.sdx}
 		newProductions := gp.apply(newRule, doSkipSpaces, depth+1)
 		if newProductions == nil {
 			gp.sdx = wasSdx
@@ -197,15 +180,16 @@ func (gp *grammarParser) apply(rule seq.Sequence, doSkipSpaces bool, depth int) 
 		}
 		localProductions = seq.AppendArrayOfPossibleSequences(localProductions, newProductions)
 	case seq.Tag:
-		newRule := seq.Sequence{Operator: seq.Basic, Childs: rule.Childs}
+		newRule := seq.Sequence{Operator: seq.Basic, Childs: rule.Childs, Pos: gp.sdx}
 		newProductions := gp.apply(newRule, doSkipSpaces, depth+1)
 		if newProductions == nil {
 			return nil
 		}
-		newTag := seq.Sequence{Operator: seq.Tag, TagChilds: rule.TagChilds}
+		newTag := seq.Sequence{Operator: seq.Tag, TagChilds: rule.TagChilds, Pos: gp.sdx}
 		newTag.Childs = seq.AppendArrayOfPossibleSequences(newTag.Childs, newProductions)
 		localProductions = append(localProductions, newTag)
 	case seq.SkipSpaces: // TODO: modify SKIPSPACES so that the chars to skip must be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
+		rule.Pos = gp.sdx
 		return []seq.Sequence{rule}
 	default: // seq.Factor || seq.Invalid
 		panic(fmt.Sprintf("invalid rule in applies() function: %#v", rule))
@@ -245,28 +229,27 @@ func mergeTerminals(productions []seq.Sequence) []seq.Sequence {
 }
 
 func ParseWithGrammar(grammar Grammar, srcCode string, traceEnabled bool) (res []seq.Sequence, err error) { // => (productions, error)
-	// defer func() {
-	// 	if errRecover := recover(); errRecover != nil {
-	// 		res = nil
-	// 		err = fmt.Errorf(fmt.Sprintf("%s", errRecover))
-	// 	}
-	// }()
+	defer func() {
+		if errRecover := recover(); errRecover != nil {
+			res = nil
+			err = fmt.Errorf(fmt.Sprintf("%s", errRecover))
+		}
+	}()
+
 	var gp grammarParser
 	gp.grammar = grammar
 	gp.src = []rune(srcCode)
 	gp.sdx = 0
 	gp.traceEnabled = traceEnabled
+	gp.traceCount = 0
 
 	if len(gp.grammar.Productions) <= 0 {
 		return nil, fmt.Errorf("No productions to parse")
 	}
 
 	newProductions := gp.apply(gp.grammar.Productions[0], true, 0)
-	// pprint("productions of new parse tree (grammar) (whole tree)", parseTree)
-
 	gp.skipSpaces()
 	if gp.sdx < len(gp.src) {
-		// fmt.Printf("\n\nWARN: Not everything could be parsed: (%d / %d chars)", gp.sdx, len(gp.src))
 		return nil, fmt.Errorf("Not everything could be parsed")
 	}
 
