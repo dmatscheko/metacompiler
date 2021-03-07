@@ -12,7 +12,7 @@ import (
 // 	  Production  = name "=" [ Expression ] "." .
 //    Expression  = Alternative { "|" Alternative } .
 //    Alternative = Term { Term } .
-//    Term        = name | token [ "…" token ] | Group | Option | Repetition .
+//    Term        = name | token [ "..." token ] | Group | Option | Repetition .
 //    Group       = "(" Expression ")" .
 //    Option      = "[" Expression "]" .
 //    Repetition  = "{" Expression "}" .
@@ -86,6 +86,7 @@ var (
 		  if (pos != -1) { return pos };
 		  return names.push(name)-1;
 		}
+		c.compile(c.asg, upstream)
 		~~>
 		
 		{
@@ -129,7 +130,54 @@ var (
 		
 		}
 		
-		<~~ print(upstream.str) ~~>
+		<~~ print(upstream.str)
+
+		println("\\n\\nTHE FOLLOWING IS NOT FROM THE ABOVE CODE BUT ONLY A TEST")
+
+		println("\\nLLVM IR test:\\n------------------------------------")
+
+		// Create convenience types and constants.
+		var i32 = llvm.types.I32
+		var zero = llvm.constant.NewInt(i32, 0)
+		var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
+		var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
+	
+		// Create a new LLVM IR module.
+		var m = llvm.ir.NewModule()
+	
+		// Create an external function declaration and append it to the module.
+		//
+		//    int abs(int x);
+		var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
+	
+		// Create a global variable definition and append it to the module.
+		//
+		//    int seed = 0;
+		var seed = m.NewGlobalDef("seed", zero)
+	
+		// Create a function definition and append it to the module.
+		//
+		//    int rand(void) { ... }
+		var rand = m.NewFunc("rand", i32)
+	
+		// Create an unnamed entry basic block and append it to the 'rand' function.
+		var entry = rand.NewBlock("")
+	
+		// Create instructions and append them to the entry basic block.
+		var tmp1 = entry.NewLoad(i32, seed)
+		var tmp2 = entry.NewMul(tmp1, a)
+		var tmp3 = entry.NewAdd(tmp2, c)
+		entry.NewStore(tmp3, seed)
+		var tmp4 = entry.NewCall(abs, tmp3)
+		entry.NewRet(tmp4)
+	
+		// Print the LLVM IR assembly of the module.
+		println(m)
+
+		println("GRAPH:\\n------------------------------------")
+		println(llvm.Callgraph(m))
+
+		~~>
 		program
 		"This aEBNF contains the grammatic and semantic information for annotated EBNF.
 		It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
@@ -138,20 +186,9 @@ var (
 	// <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>
 
 	tests = []string{
-		// 		"a1a3a4a4a5a6",
-		// 		"a1 a2a6",
-		// 		"a1 a3 a4 a6",
-		// 		"a1 a4 a5 a6",
-		// 		"a1 a2 a4 a5 a5 a6",
-		// 		"a1 a2 a4 a5 a6 a7",
-		// 		"your ad here",
-		// 		"2",
-		// 		"2*3 + 4/23 - 7",
-		// 		"(3 + 4) * 6-2+(4*(4))",
-		// 		"-2",
-		// 		"3 +",
-		// 		"(4 + 3",
-		// 		`{ }`,
+		// `{ }`,
+		// `2+(2*3)`
+		//  `+.+.+.---.+++++[>++<-]>.`
 
 		// ==========================================
 
@@ -163,6 +200,7 @@ var (
 		  if (pos != -1) { return pos };
 		  return names.push(name)-1;
 		}
+		c.compile(c.asg, upstream)
 		~~>
 		
 		{
@@ -277,7 +315,11 @@ func main() {
 				continue
 			}
 			fmt.Print("\n ==> Success\n\n")
-			fmt.Printf("  Upstream Vars:\n    %#v\n\n", upstream)
+			tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", upstream)
+			if len(tmpStr) > 1000 {
+				tmpStr = tmpStr[:1000] + " ..."
+			}
+			fmt.Print(tmpStr)
 		}
 		fmt.Println()
 	}
