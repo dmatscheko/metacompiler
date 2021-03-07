@@ -2,16 +2,21 @@ package ebnf
 
 import (
 	"fmt"
+	"strings"
 
 	"./r"
 	"github.com/dop251/goja"
+
+	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
+	"github.com/llir/llvm/ir/types"
 )
 
 type compiler struct {
-	// newGrammar Grammar
-	// globalVars map[string]r.Object
-	vm      *goja.Runtime
-	funcMap map[string]r.Object
+	vm              *goja.Runtime
+	compilerFuncMap map[string]r.Object
+
+	asg []r.Rule
 
 	traceEnabled bool
 }
@@ -40,6 +45,41 @@ type compiler struct {
 	if co.globalVars["idents"] == nil {          // (string list) The global list of unique names. Set by {{ident "someName"}}. It is exposed to the scripting language on purpose.
 */
 
+// genCallgraph returns the callgraph in Graphviz DOT format of the given LLVM IR module.
+// Code taken from: https://github.com/llir/llvm#analysis-example---process-llvm-ir
+// DOT output is viewable online e.g. with: http://magjac.com/graphviz-visual-editor/
+func callgraph(m *ir.Module) string {
+	buf := &strings.Builder{}
+	buf.WriteString("digraph {\n")
+	// For each function of the module.
+	for _, f := range m.Funcs {
+		// Add caller node.
+		caller := f.Ident()
+		fmt.Fprintf(buf, "\t%q\n", caller)
+		// For each basic block of the function.
+		for _, block := range f.Blocks {
+			// For each non-branching instruction of the basic block.
+			for _, inst := range block.Insts {
+				// Type switch on instruction to find call instructions.
+				switch inst := inst.(type) {
+				case *ir.InstCall:
+					callee := inst.Callee.Ident()
+					// Add edges from caller to callee.
+					fmt.Fprintf(buf, "\t%q -> %q\n", caller, callee)
+				}
+			}
+			// Terminator of basic block.
+			switch term := block.Term.(type) {
+			case *ir.TermRet:
+				// do something.
+				_ = term
+			}
+		}
+	}
+	buf.WriteString("}")
+	return buf.String()
+}
+
 // RunScript executes the given string in the global context.
 func (co *compiler) Run(name, src string) (goja.Value, error) {
 	p, err := goja.Compile(name, src, true)
@@ -51,9 +91,9 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 	return co.vm.RunProgram(p)
 }
 
-func (co *compiler) handleTagCode(code string, name string, upstream map[string]r.Object, localTree []r.Rule) { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
+func (co *compiler) handleTagCode(code string, name string, upstream map[string]r.Object, localASG []r.Rule) { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
 	co.vm.Set("upstream", upstream) // The object(s) that are passed from the bottom roots to the top of the tree. Initially, only TERMINALs are entered into 'upstream.text'. If 'upstream.text' contains something that can be converted into string, it is concateneted with the other TERMINAL values or filled upstream.text contents.
-	co.funcMap["localAST"] = localTree
+	co.compilerFuncMap["localAsg"] = localASG
 
 	// fmt.Printf("\n\nCODE: %s\n\n", code)
 
@@ -84,11 +124,11 @@ func (co *compiler) handleTagCode(code string, name string, upstream map[string]
 //     ^
 //     IN
 //
-func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) {
+func (co *compiler) compile(localASG []r.Rule, upstream map[string]r.Object) {
 	if co.traceEnabled {
-		fmt.Printf("\n## %#v\n--\n%#v\n", productions, upstream)
+		fmt.Printf("\n## %#v\n--\n%#v\n", localASG, upstream)
 	}
-	if productions == nil || len(productions) == 0 {
+	if localASG == nil || len(localASG) == 0 {
 		return
 	}
 
@@ -96,8 +136,8 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 	// Split and collect
 
 	upstreamMerged := map[string]r.Object{}
-	if len(productions) > 1 { // "SEQUENCE" Iterate through all rules and applies.
-		for _, rule := range productions { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
+	if len(localASG) > 1 { // "SEQUENCE" Iterate through all rules and applies.
+		for _, rule := range localASG { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
 
 			// Copy, so that compile() and handleTagCode() can change them:
 			upstreamEdit := map[string]r.Object{}
@@ -169,7 +209,7 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 	// Inside each splitted arm do this
 
 	// There is only one production:
-	rule := productions[0]
+	rule := localASG[0]
 
 	switch rule.Operator {
 	case r.Terminal:
@@ -184,7 +224,7 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 		// First collect all the data.
 		co.compile(rule.Childs, upstream) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), upstream, productions) // TODO: maybe change "upstream" to "upstreamReplace, upstreamCombine"
+		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), upstream, localASG) // TODO: maybe change "upstream" to "upstreamReplace, upstreamCombine"
 		return
 	default:
 		if len(rule.Childs) > 0 {
@@ -203,31 +243,33 @@ func (co *compiler) initFuncMap() {
 
 	co.vm.Set("defined", func(o r.Object) bool { return o != nil })
 
-	co.funcMap = map[string]r.Object{ // The LLVM function will be inside such a map.
-		"objectAsString": func(object r.Object, stripBraces bool) string {
-			return "NOT IMPLEMENTED YET"
-		},
+	// co.vm.Set("compile", func(localASG []r.Rule, upstream map[string]r.Object) { co.compile(localASG, upstream) })
+	// co.vm.Set("asg", co.asg)
 
-		"sequence": func(Operator r.OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []r.Rule, TagChilds []r.Rule) r.Rule {
-			return r.Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
-		},
-		// "Upstream": func(a []r.Sequence) {
-		// 	codeResultObjTree
+	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
+		"compile": func(localASG []r.Rule, upstream map[string]r.Object) { co.compile(localASG, upstream) },
+		"asg":     co.asg,
+
+		// "sequence": func(Operator r.OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []r.Rule, TagChilds []r.Rule) r.Rule {
+		// 	return r.Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
 		// },
-		"GetSeqArr": func(a string, b int) []r.Rule {
-			return []r.Rule{{String: a, Int: b}, {String: a, Int: b + 1}}
-		},
-		"Test": func() int {
-			return 123
-		},
-		"Foo": func(a int) int {
-			return a*2 + 123
-		},
-		"Test2": func(a []r.Rule) {
-			fmt.Printf("\n\nTEST2: %#v", a)
-		},
 	}
-	co.vm.Set("c", co.funcMap)
+	co.vm.Set("c", co.compilerFuncMap)
+
+	llvmFuncMap := map[string]r.Object{ // The LLVM functions.
+		"types": map[string]r.Object{
+			"I32": types.I32,
+		},
+		"constant": map[string]r.Object{
+			"NewInt": constant.NewInt,
+		},
+		"ir": map[string]r.Object{
+			"NewModule": ir.NewModule,
+			"NewParam":  ir.NewParam,
+		},
+		"Callgraph": callgraph,
+	}
+	co.vm.Set("llvm", llvmFuncMap)
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
@@ -241,8 +283,8 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res
 
 	var co compiler
 	co.traceEnabled = traceEnabled
+	co.asg = asg
 
-	// co.globalVars = map[string]r.Object{} // Global variables.
 	var upstream = map[string]r.Object{} // Local variables (must be passed through compile).
 
 	co.vm = goja.New()
@@ -252,12 +294,12 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res
 		co.handleTagCode(prolog.TagChilds[0].String, "prolog.code", upstream, asg)
 	}
 
-	co.compile(asg, upstream)
+	// Is called fom JS.
+	// co.compile(asg, upstream)
 
 	if epilog, ok := (*extras)["epilog.code"]; ok {
 		co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upstream, asg)
 	}
 
-	// return co.newGrammar, nil
 	return upstream, nil
 }
