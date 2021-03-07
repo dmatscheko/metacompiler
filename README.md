@@ -134,5 +134,5 @@ The functions and constants are exposed to JS as:
 * [llvm.types](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/types)
 
 * Custom functions:
-  * The function `llvm.Callgraph(m ir.Module)` creates the callgraph of the given LLVM IR module in Graphviz DOT format.
+  * The function `llvm.Callgraph(m ir.Module)` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. at [http://magjac.com/graphviz-visual-editor/](http://magjac.com/graphviz-visual-editor/)).
   * The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
