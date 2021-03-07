@@ -125,7 +125,7 @@ func PprintSequenceHeader(rule *r.Rule, space ...string) string {
 	case r.Terminal, r.Invalid:
 		res += fmt.Sprintf(", Pos:%d, %q", rule.Pos, rule.String)
 	case r.Ident, r.Production:
-		res += fmt.Sprintf(", Pos:%d, %q:%d", rule.Pos, rule.String, rule.Int)
+		res += fmt.Sprintf(", %q:%d, Pos:%d", rule.String, rule.Int, rule.Pos)
 	case r.Range:
 		// TODO:!
 	case r.SkipSpaces:
@@ -135,12 +135,14 @@ func PprintSequenceHeader(rule *r.Rule, space ...string) string {
 		res += PprintProductions(&rule.TagChilds, sp+"  ")
 	case r.Factor:
 		res += fmt.Sprintf(", Pos:%d, %c", rule.Pos, rule.Rune)
+	default:
+		res += fmt.Sprintf(", Pos:%d", rule.Pos)
 	}
 
 	return res
 }
 
-func PprintSequence(rule *r.Rule, space ...string) string {
+func PprintRule(rule *r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -150,6 +152,18 @@ func PprintSequence(rule *r.Rule, space ...string) string {
 	if len(rule.Childs) > 0 {
 		res += ", " + PprintProductions(&rule.Childs, sp+"  ")
 	}
+	res += "}"
+	return res
+}
+
+func PprintRuleOnly(rule *r.Rule, space ...string) string {
+	sp := ""
+	if len(space) > 0 {
+		sp = space[0]
+	}
+	res := "{"
+	res += PprintSequenceHeader(rule, sp)
+	res += ", [...]"
 	res += "}"
 	return res
 }
@@ -165,7 +179,7 @@ func PprintProductions(productions *[]r.Rule, space ...string) string {
 		if i > 0 {
 			res += ",\n"
 		}
-		res += sp + "  " + PprintSequence(rule, sp)
+		res += sp + "  " + PprintRule(rule, sp)
 	}
 	res += "\n" + sp + "}"
 	return res
@@ -190,7 +204,7 @@ func PprintExtras(extras *map[string]r.Rule, space ...string) string {
 		if comma {
 			res += ",\n"
 		}
-		res += sp + "  \"" + name + "\":" + PprintSequence(&rule, sp+"    ")
+		res += sp + "  \"" + name + "\":" + PprintRule(&rule, sp+"    ")
 		comma = true
 	}
 	res += "\n" + sp + "}"
