@@ -1,12 +1,14 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"io/ioutil"
 
 	"./ebnf"
 )
 
-// TODO: add possibility to comment the ebnf via //
+// TODO: Add possibility to comment the EBNF via //
 
 // PUBLIC EBNF of EBNF:
 // 	  Production  = name "=" [ Expression ] "." .
@@ -78,170 +80,133 @@ var (
 
 		// ==========================================
 
-		`"aEBNF of aEBNF as text"
-		<~~
-		var names = [];
-		function getNameIdx(name) {
-		  var pos = names.indexOf(name);
-		  if (pos != -1) { return pos };
-		  return names.push(name)-1;
-		}
-		c.compile(c.asg, upstream)
-		~~>
-		
-		{
-		
-		program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
-		programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
-		production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>       
-						 = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
-		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   
-						 = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
-		alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
-		
-		taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
-						 = term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
-		
-		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
-		group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
-		option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
-		repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
-		skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
-		
-		title            = text ;
-		start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
-		comment          = text ;
-		
-		tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
-		
-		code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
-		codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
-		
-		name             = ( small | caps ) - { small | caps | digit | "_" } + ;
-		
-		text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
-		dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
-		squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
-		
-		digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-		small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-		caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
-		
-		}
-		
-		<~~ print(upstream.str)
+		// `"aEBNF of aEBNF as text"
+		// <~~
+		// var names = [];
+		// function getNameIdx(name) {
+		//   var pos = names.indexOf(name);
+		//   if (pos != -1) { return pos };
+		//   return names.push(name)-1;
+		// }
+		// c.compile(c.asg, upstream)
+		// ~~>
 
-		println("\\n\\nTHE FOLLOWING IS NOT FROM THE ABOVE CODE BUT ONLY A TEST")
+		// {
 
-		println("\\nLLVM IR test:\\n------------------------------------")
+		// program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+		// programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
+		// production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>
+		// 				 = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
+		// expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>
+		// 				 = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
+		// alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
 
-		// Create convenience types and constants.
-		var i32 = llvm.types.I32
-	
-		// Create a new LLVM IR module.
-		var m = llvm.ir.NewModule()
-	
-		// -----------------
+		// taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
+		// 				 = term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
 
-		var zero = llvm.constant.NewInt(i32, 0)
-		var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
-		var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
+		// term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
+		// group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
+		// option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
+		// repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
+		// skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
 
-		// Create an external function declaration and append it to the module.
-		//
-		//    int abs(int x);
-		var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
-	
-		// Create a global variable definition and append it to the module.
-		//
-		//    int seed = 0;
-		var seed = m.NewGlobalDef("seed", zero)
-	
-		// Create a function definition and append it to the module.
-		//
-		//    int rand(void) { ... }
-		var rand = m.NewFunc("rand", i32)
-	
-		// Create an unnamed entry basic block and append it to the 'rand' function.
-		var entry = rand.NewBlock("")
-	
-		// Create instructions and append them to the entry basic block.
-		var tmp1 = entry.NewLoad(i32, seed)
-		var tmp2 = entry.NewMul(tmp1, a)
-		var tmp3 = entry.NewAdd(tmp2, c)
-		entry.NewStore(tmp3, seed)
-		var tmp4 = entry.NewCall(abs, tmp3)
-		entry.NewRet(tmp4)
-	
-		// -----------------
+		// title            = text ;
+		// start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
+		// comment          = text ;
 
-		// int foo() { ... }
-		var foo = m.NewFunc("foo", i32)
-	
-		// Create an unnamed entry basic block and append it to the 'foo' function.
-		var entry = foo.NewBlock("")
-		// Create instructions and append them to the entry basic block.
-	
-		// %a = alloca i32
-		var a = entry.NewAlloca(i32)
-		a.SetName("a")
-	
-		// %b = alloca i32
-		var b = entry.NewAlloca(i32)
-		b.SetName("b")
-	
-		// store i32 32, i32* %a
-		entry.NewStore(llvm.constant.NewInt(i32, 32), a)
-	
-		// store i32 16, i32* %b
-		entry.NewStore(llvm.constant.NewInt(i32, 16), b)
-	
-		// %1 = load i32, i32* %a
-		var tmpA = entry.NewLoad(llvm.types.I32, a)
-	
-		// %2 = load i32, i32* %b
-		var tmpB = entry.NewLoad(llvm.types.I32, b)
-	
-		// %3 = add nsw i32 %1, %2
-		var tmpC = entry.NewAdd(tmpA, tmpB)
-	
-		// ret i32 %3
-		entry.NewRet(tmpC)
+		// tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
 
-		// -----------------
+		// code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
+		// codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
-		// int test() { ... }
-		var test = m.NewFunc("test", i32)
-	
-		// Create an unnamed entry basic block and append it to the 'test' function.
-		var entry = test.NewBlock("")
-		// Create instructions and append them to the entry basic block.
-	
-	
-		// %3 = add 
-		var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 32))
-	
-		// ret i32 %3
-		entry.NewRet(tmp)
+		// name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 
+		// text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
+		// dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
+		// squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
 
-		// Print the LLVM IR assembly of the module.
-		println(m)
+		// digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+		// small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+		// caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+		// special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
 
-		println("GRAPH:\\n------------------------------------")
-		println(llvm.Callgraph(m))
+		// }
 
-		println("\\nEVAL:\\n------------------------------------")
-		println(llvm.Eval(m, "test"))
+		// <~~ print(upstream.str)
 
-		~~>
-		program
-		"This aEBNF contains the grammatic and semantic information for annotated EBNF.
-		It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
+		// println("\\n\\nTHE FOLLOWING IS NOT FROM THE ABOVE CODE BUT ONLY A TEST")
+
+		// println("\\nLLVM IR test:\\n------------------------------------")
+
+		// // Create convenience types and constants.
+		// var i32 = llvm.types.I32
+
+		// // Create a new LLVM IR module.
+		// var m = llvm.ir.NewModule()
+
+		// // -----------------
+
+		// var zero = llvm.constant.NewInt(i32, 0)
+		// var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
+		// var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
+
+		// // Create an external function declaration and append it to the module.
+		// //
+		// //    int abs(int x);
+		// var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
+
+		// // Create a global variable definition and append it to the module.
+		// //
+		// //    int seed = 0;
+		// var seed = m.NewGlobalDef("seed", zero)
+
+		// // Create a function definition and append it to the module.
+		// //
+		// //    int rand(void) { ... }
+		// var rand = m.NewFunc("rand", i32)
+
+		// // Create an unnamed entry basic block and append it to the 'rand' function.
+		// var entry = rand.NewBlock("")
+
+		// // Create instructions and append them to the entry basic block.
+		// var tmp1 = entry.NewLoad(i32, seed)
+		// var tmp2 = entry.NewMul(tmp1, a)
+		// var tmp3 = entry.NewAdd(tmp2, c)
+		// entry.NewStore(tmp3, seed)
+		// var tmp4 = entry.NewCall(abs, tmp3)
+		// entry.NewRet(tmp4)
+
+		// // -----------------
+
+		// // int test() { ... }
+		// var test = m.NewFunc("test", i32)
+
+		// // Create an unnamed entry basic block and append it to the 'test' function.
+		// var entry = test.NewBlock("")
+		// // Create instructions and append them to the entry basic block.
+
+		// // %3 = add
+		// var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 32))
+
+		// // ret i32 %3
+		// entry.NewRet(tmp)
+
+		// // -----------------
+
+		// // Print the LLVM IR assembly of the module.
+		// println(m)
+
+		// println("GRAPH:\\n------------------------------------")
+		// println(llvm.Callgraph(m))
+
+		// println("\\nEVAL:\\n------------------------------------")
+		// println(llvm.Eval(m, "test"))
+
+		// ~~>
+		// program
+		// "This aEBNF contains the grammatic and semantic information for annotated EBNF.
+		// It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
 	}
-
-	// <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>
 
 	tests = []string{
 		// `{ }`,
@@ -250,62 +215,62 @@ var (
 
 		// ==========================================
 
-		`"aEBNF of aEBNF as text"
-		<~~
-		var names = [];
-		function getNameIdx(name) {
-		  var pos = names.indexOf(name);
-		  if (pos != -1) { return pos };
-		  return names.push(name)-1;
-		}
-		c.compile(c.asg, upstream)
-		~~>
-		
-		{
-		
-		program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
-		programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
-		production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>       
-						 = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
-		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   
-						 = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
-		alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
-		
-		taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
-						 = term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
-		
-		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
-		group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
-		option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
-		repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
-		skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
-		
-		title            = text ;
-		start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
-		comment          = text ;
-		
-		tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
-		
-		code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
-		codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
-		
-		name             = ( small | caps ) - { small | caps | digit | "_" } + ;
-		
-		text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
-		dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
-		squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
-		
-		digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-		small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-		caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
-		
-		}
-		
-		<~~ print(upstream.str) ~~>
-		program
-		"This aEBNF contains the grammatic and semantic information for annotated EBNF.
-		It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
+		// `"aEBNF of aEBNF as text"
+		// <~~
+		// var names = [];
+		// function getNameIdx(name) {
+		//   var pos = names.indexOf(name);
+		//   if (pos != -1) { return pos };
+		//   return names.push(name)-1;
+		// }
+		// c.compile(c.asg, upstream)
+		// ~~>
+
+		// {
+
+		// program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+		// programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
+		// production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>
+		// 				 = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
+		// expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>
+		// 				 = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
+		// alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
+
+		// taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
+		// 				 = term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
+
+		// term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
+		// group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
+		// option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
+		// repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
+		// skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
+
+		// title            = text ;
+		// start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
+		// comment          = text ;
+
+		// tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
+
+		// code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
+		// codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
+
+		// name             = ( small | caps ) - { small | caps | digit | "_" } + ;
+
+		// text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
+		// dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
+		// squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
+
+		// digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+		// small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+		// caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+		// special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
+
+		// }
+
+		// <~~ print(upstream.str) ~~>
+		// program
+		// "This aEBNF contains the grammatic and semantic information for annotated EBNF.
+		// It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
 
 		// ==========================================
 
@@ -336,51 +301,128 @@ func main() {
 	// speedtest()
 	// return
 
-	for _, srcEBNF := range ebnfs {
-		fmt.Print("\n===========================================================\nEBNF:\n===========================================================\n\n")
-		ebnf.PprintSrc("Parse", srcEBNF)
-		// Parses an EBNF and generates a grammar with it.
-		grammar, err := ebnf.ParseEBNF(srcEBNF)
-		if err != nil {
-			fmt.Println("  ==> Fail")
-			fmt.Println(err)
-			continue
-		}
-		fmt.Println("  ==> Success\n\n  Grammar:")
-		fmt.Println("   => Extras: " + ebnf.PprintExtrasShort(&grammar.Extras, "    "))
-		fmt.Println("   => Productions: " + ebnf.PprintProductionsShort(&grammar.Productions, "    "))
+	param_aEbnf := flag.String("f", "", "The path of the a-EBNF")
+	param_srcCode := flag.String("s", "", "The a-EBNF gets applied to this file")
 
-		fmt.Print("\n\n==================\nTests:\n==================\n\n")
-		for _, srcCode := range tests {
-			fmt.Println("Parse via grammar:")
-			ebnf.PprintSrcSingleLine(srcCode)
-			// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
-			asg, err := ebnf.ParseWithGrammar(grammar, srcCode, false)
-			if err != nil {
-				fmt.Println("\n  ==> Fail")
-				fmt.Println(err)
-				continue
-			}
-			fmt.Println("\n  ==> Success\n\n  Abstract semantic graph:")
-			fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
+	param_trace_ParseAEBNF := flag.Bool("te", false, "Show trace output for the a-EBNF parser")
+	param_trace_ParseWithAGrammar := flag.Bool("tg", false, "Show trace output for the a-grammar parser")
+	param_trace_CompileASG := flag.Bool("tc", false, "Show trace output for the ASG compiler")
+	param_trace_All := flag.Bool("t", false, "Show all trace output")
 
-			fmt.Println("\nCode output:")
-			// Uses the annotations inside the ASG to compile it.
-			upstream, err := ebnf.CompileASG(asg, &grammar.Extras, false)
-			if err != nil {
-				fmt.Println("\n  ==> Fail")
-				fmt.Println(err)
-				continue
-			}
-			fmt.Print("\n ==> Success\n\n")
-			tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", upstream)
-			if len(tmpStr) > 1000 {
-				tmpStr = tmpStr[:1000] + " ..."
-			}
-			fmt.Print(tmpStr)
-		}
-		fmt.Println()
+	flag.Parse()
+
+	if *param_aEbnf == "" || *param_srcCode == "" {
+		flag.Usage()
+		return
 	}
+
+	dat, err := ioutil.ReadFile(*param_aEbnf)
+	if err != nil {
+		fmt.Println("Error: ", err)
+		return
+	}
+	aEbnf := string(dat)
+
+	dat, err = ioutil.ReadFile(*param_srcCode)
+	if err != nil {
+		fmt.Println("Error: ", err)
+		return
+	}
+	srcCode := string(dat)
+
+	if *param_trace_All {
+		*param_trace_ParseAEBNF = true
+		*param_trace_ParseWithAGrammar = true
+		*param_trace_CompileASG = true
+	}
+
+	fmt.Print("\n==================\nParse a-EBNF\n==================\n\n")
+	ebnf.PprintSrc("a-EBNF", aEbnf)
+	// Parses an aEBNF and generates a a-grammar with it.
+	aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
+	if err != nil {
+		fmt.Println("  ==> Fail")
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("  ==> Success\n\n  a-Grammar:")
+	fmt.Println("   => Extras: " + ebnf.PprintExtrasShort(&aGrammar.Extras, "    "))
+	fmt.Println("   => Productions: " + ebnf.PprintProductionsShort(&aGrammar.Productions, "    "))
+
+	fmt.Print("\n\n==================\nParse target code\n==================\n\n")
+	fmt.Println("Parse via a-grammar:")
+	ebnf.PprintSrcSingleLine(srcCode)
+	// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
+	asg, err := ebnf.ParseWithGrammar(aGrammar, srcCode, *param_trace_ParseWithAGrammar)
+	if err != nil {
+		fmt.Println("\n  ==> Fail")
+		fmt.Println(err)
+		return
+	}
+	fmt.Println("\n  ==> Success\n\n  Abstract semantic graph:")
+	fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
+
+	fmt.Println("\nCode output:")
+	// Uses the annotations inside the ASG to compile it.
+	upstream, err := ebnf.CompileASG(asg, &aGrammar.Extras, *param_trace_CompileASG)
+	if err != nil {
+		fmt.Println("\n  ==> Fail")
+		fmt.Println(err)
+		return
+	}
+	fmt.Print("\n ==> Success\n\n")
+	tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", upstream)
+	if len(tmpStr) > 1000 {
+		tmpStr = tmpStr[:1000] + " ..."
+	}
+	fmt.Print(tmpStr)
+	fmt.Println()
+
+	// for _, srcEBNF := range ebnfs {
+	// 	fmt.Print("\n===========================================================\nEBNF:\n===========================================================\n\n")
+	// 	ebnf.PprintSrc("Parse", srcEBNF)
+	// 	// Parses an EBNF and generates a grammar with it.
+	// 	grammar, err := ebnf.ParseEBNF(srcEBNF)
+	// 	if err != nil {
+	// 		fmt.Println("  ==> Fail")
+	// 		fmt.Println(err)
+	// 		continue
+	// 	}
+	// 	fmt.Println("  ==> Success\n\n  Grammar:")
+	// 	fmt.Println("   => Extras: " + ebnf.PprintExtrasShort(&grammar.Extras, "    "))
+	// 	fmt.Println("   => Productions: " + ebnf.PprintProductionsShort(&grammar.Productions, "    "))
+
+	// 	fmt.Print("\n\n==================\nTests:\n==================\n\n")
+	// 	for _, srcCode := range tests {
+	// 		fmt.Println("Parse via grammar:")
+	// 		ebnf.PprintSrcSingleLine(srcCode)
+	// 		// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
+	// 		asg, err := ebnf.ParseWithGrammar(grammar, srcCode, false)
+	// 		if err != nil {
+	// 			fmt.Println("\n  ==> Fail")
+	// 			fmt.Println(err)
+	// 			continue
+	// 		}
+	// 		fmt.Println("\n  ==> Success\n\n  Abstract semantic graph:")
+	// 		fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
+
+	// 		fmt.Println("\nCode output:")
+	// 		// Uses the annotations inside the ASG to compile it.
+	// 		upstream, err := ebnf.CompileASG(asg, &grammar.Extras, false)
+	// 		if err != nil {
+	// 			fmt.Println("\n  ==> Fail")
+	// 			fmt.Println(err)
+	// 			continue
+	// 		}
+	// 		fmt.Print("\n ==> Success\n\n")
+	// 		tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", upstream)
+	// 		if len(tmpStr) > 1000 {
+	// 			tmpStr = tmpStr[:1000] + " ..."
+	// 		}
+	// 		fmt.Print(tmpStr)
+	// 	}
+	// 	fmt.Println()
+	// }
 
 }
 
