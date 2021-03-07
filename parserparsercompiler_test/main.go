@@ -138,13 +138,16 @@ var (
 
 		// Create convenience types and constants.
 		var i32 = llvm.types.I32
-		var zero = llvm.constant.NewInt(i32, 0)
-		var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
-		var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
 	
 		// Create a new LLVM IR module.
 		var m = llvm.ir.NewModule()
 	
+		// -----------------
+
+		var zero = llvm.constant.NewInt(i32, 0)
+		var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
+		var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
+
 		// Create an external function declaration and append it to the module.
 		//
 		//    int abs(int x);
@@ -171,11 +174,66 @@ var (
 		var tmp4 = entry.NewCall(abs, tmp3)
 		entry.NewRet(tmp4)
 	
+		// -----------------
+
+		// int foo() { ... }
+		var foo = m.NewFunc("foo", i32)
+	
+		// Create an unnamed entry basic block and append it to the 'foo' function.
+		var entry = foo.NewBlock("")
+		// Create instructions and append them to the entry basic block.
+	
+		// %a = alloca i32
+		var a = entry.NewAlloca(i32)
+		a.SetName("a")
+	
+		// %b = alloca i32
+		var b = entry.NewAlloca(i32)
+		b.SetName("b")
+	
+		// store i32 32, i32* %a
+		entry.NewStore(llvm.constant.NewInt(i32, 32), a)
+	
+		// store i32 16, i32* %b
+		entry.NewStore(llvm.constant.NewInt(i32, 16), b)
+	
+		// %1 = load i32, i32* %a
+		var tmpA = entry.NewLoad(llvm.types.I32, a)
+	
+		// %2 = load i32, i32* %b
+		var tmpB = entry.NewLoad(llvm.types.I32, b)
+	
+		// %3 = add nsw i32 %1, %2
+		var tmpC = entry.NewAdd(tmpA, tmpB)
+	
+		// ret i32 %3
+		entry.NewRet(tmpC)
+
+		// -----------------
+
+		// int test() { ... }
+		var test = m.NewFunc("test", i32)
+	
+		// Create an unnamed entry basic block and append it to the 'test' function.
+		var entry = test.NewBlock("")
+		// Create instructions and append them to the entry basic block.
+	
+	
+		// %3 = add 
+		var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 32))
+	
+		// ret i32 %3
+		entry.NewRet(tmp)
+
+
 		// Print the LLVM IR assembly of the module.
 		println(m)
 
 		println("GRAPH:\\n------------------------------------")
 		println(llvm.Callgraph(m))
+
+		println("\\nEVAL:\\n------------------------------------")
+		println(llvm.Eval(m, "test"))
 
 		~~>
 		program
