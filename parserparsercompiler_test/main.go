@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"time"
 
 	"./ebnf"
 )
@@ -80,223 +78,30 @@ var (
 
 		// ==========================================
 
-		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "P" { "Z" } }`,
-		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "X" "Y" [ "Z" ] "P" { "Z" } ; } `,
-
-		// ==========================================
-
-		// expression  <"" '{{if (eq .globalVars.or true)}}{"OR", {{.childCode}}}{{else}}{{.childCode}}{{end}}'>          = alternative <"" '{{setGlobal "or" false}}{{.childCode}}'> { "|" alternative <"" '{{if (ne .childCode "")}}{{setGlobal "or" true}}, {{.childCode}}{{end}}'> } .
-		// alternative <"" '{{if (eq .globalVars.seq true)}}{{"{"}}{{.childCode}}{{"}"}}{{else}}{{.childCode}}{{end}}'>   = term <"" '{{setGlobal "seq" false}}{{.childCode}}'> { term <"" '{{if (ne .childCode "")}}{{setGlobal "seq" true}}, {{.childCode}}{{end}}'> } .
-
-		// sequence    = alternative <"" "{{.childCode}}"> { alternative <"" ", {{.childCode}}"> } .
-		// sequence    <"" "{{if (eq .seq true)}}{ {{.childCode}} }{{else}}{{.childCode}}{{end}}">      = alternative <"" "{{setGlobal \"seq\" false}}{{.childCode}}"> { alternative <"" "{{if .childCode}}{{setGlobal \"seq\" true}}{{end}}, {{.childCode}}"> } .
-		// TODO: braces are not correct and comma is often missing
-		// TODO: implement directChildCount or hasMultipleChilds
-		// TODO: for that use objects instead of childCode  (and implement a serializer and a deserializer)
-
-		// {{upstream .vars.name (ident .vars.name) .childObj}}
-
-		// // Bigger EBNF of EBNF with tags (can parse):
-		// `"aEBNF of aEBNF" <"" "AA - ."> {
-		// program     <"" '{{"{"}}{{.childCode}}}'>                                                                = [ title ] [ tag ] "{" [ production ] { production <"" ", {{.childCode}}"> } "}" [ tag ] [ comment ] .
-		// production  <"" '{"{{.vars.name}}", {{ident .vars.name}}, {{.childCode}}}; {{addProduction .vars.name (ident .vars.name) .childObj}}{{upstream .vars.name (ident .vars.name) .childObj}}'>                            = name <"name"> [ tag ] "=" [ expression ] ( "." | ";" ) .
-		// expression  <"" '{{if (eq .globalVars.or true)}}{"OR", {{.childCode}}}{{else}}{{.childCode}}{{end}}'>       = alternative <"" '{{setGlobal "or" false}}{{.childCode}}'> { "|" alternative <"" '{{setGlobal "or" true}}, {{.childCode}}'> } .
-		// alternative <"" '{{"{"}}{{.childCode}}{{"}"}}'>                                                          = term <"" '{{.childCode}}'> { term <"" ', {{.childCode}}'> } .
-		// term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
-		// group       <"" '{{"{"}}{{.childCode}}{{"}"}}'>             = "(" expression ")" .
-		// option      <"" '{"OPTIONAL", {{.childCode}}}{{if notNil .childObj}}{{upstream "OPTIONAL" .childObj}}{{end}}'>             = "[" expression "]" .
-		// repetition  <"" '{"REPEAT", {{.childCode}}}{{if notNil .childObj}}{{upstream "REPEAT" .childObj}}{{end}}'>               = "{" expression "}" .
-		// skipspaces  = "+" <"" '{"SKIPSPACES", true}{{upstream "SKIPSPACES" true}}'> | "-" <"" '{"SKIPSPACES", false}{{upstream "SKIPSPACES" false}}'> .
-
-		// title = text .
-		// comment = text .
-
-		// name        <"" '{"IDENT", "{{.childStr}}", {{ident .childStr}}}{{upstream "IDENT" .childStr (ident .childStr)}}'>                = ( small | caps ) - { small | caps | digit | "_" } + .
-		// text        <"" '{"TERMINAL", {{.childStr}}}{{upstream "TERMINAL" .childStr}}'>                                                   = dquotetext | squotetext .
-
-		// dquotetext = '"' - { small | caps | digit | special } '"' + .
-		// squotetext = "'" - { small | caps | digit | special } "'" + .
-
-		// tag  = "<" text text ">" .
-
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
-
-		// } "Some comment"`,
-
-		// //  <'' '{{upstream "IDENT" .childStr (ident .childStr)}}'>
-		// // {{if (and (gt (objCount .childObj) 1) (ne "string" (printf "%T" (index .childObj 0))))}}{{upstream "OR" .childObj}}{{end}}
-
-		// // TODO:  prolog and epilog [ tag ] are not evaluated
-		// // TODO: TAG does not include .childObj but it is appended !!!!!!!!!!! seems like some parts do not get pushed in upstream - debug
-
-		// // Bigger EBNF of EBNF with tags (can parse):  ====================================== EDIT THIS ==============================================
-		// `"aEBNF of aEBNF" {
-		// program     = [ title ] [ tag ] "{" { addedproduction } "}" [ tag ] [ comment ] ;
-
-		// addedproduction <'{{addProduction .locals.name (ident .locals.name) .childObj}}{{upstream (group .locals.name (ident .locals.name) (group .childObj))}}'>       = production ;
-		// production <'{{if (notNil .locals.tagcode)}}{{upstream (group "TAG" (group .locals.tagcode) "BBBBBBBBBB"   (group .childObj)    "BBBBBBBBBB"   )}}{{end}}{{deleteLocalVar "tagcode"}}'> = ( taggedname "=" [ expression ] ";" ) [ tag ] ;
-
-		// taggedname  <'{{if (notNil .locals.tagcode)}}{{upstream (group "TAG" (group .locals.tagcode) "AAAAAAAAAAAA>>>>>>>" (group .childObj)  "<<<<<<AAAAAAAAAAAA"  )}}{{end}}{{deleteLocalVar "tagcode"}}'>      = name <'{{setLocal "name" .childStr}}'> [ tag ] ;
-		// expression  <'{{if (eq .locals.or "true")}}{{upstream (group "OR" .childObj)}}{{end}}'>                                                                     = alternative <'{{setLocal "or" "false"}}'> { "|" <'{{setLocal "or" "true"}}'> alternative } ;
-		// alternative = taggedterm { taggedterm } ;
-		// taggedterm  <'{{if (notNil .locals.tagcode)}}{{upstream (group "TAG" (group .locals.tagcode) (group .childObj))}}{{end}}{{deleteLocalVar "tagcode"}}'>      = term [ tag ] ;
-		// term        = name <'{{.childStr}}{{upstream (group "IDENT" .childStr (ident .childStr))}}'> | range | group | option | repetition | skipspaces ;
-		// range       = ( text [ "..." text ] ) ;
-		// group       <'{{upstream (group .childObj)}}'>                                                                                  = "(" expression ")" ;
-		// option      <'{{if notNil .childObj}}{{upstream (group "OPTIONAL" (group .childObj))}}{{end}}'>                                 = "[" expression "]" ;
-		// repetition  <'{{if notNil .childObj}}{{upstream (group "REPEAT" (group .childObj))}}{{end}}'>                                   = "{" expression "}" ;
-		// skipspaces  = "+" <'{{upstream (group "SKIPSPACES" true)}}'> | "-" <'{{upstream (group "SKIPSPACES" false)}}'> ;
-
-		// title = text ;
-		// comment = text ;
-
-		// name        = ( small | caps ) - { small | caps | digit | "_" } + ;
-		// tag         <'{{upstream nil}}'>                                                                                                = "<" text <'{{setLocal "tagcode" .childObj}}'> [ text <'{{setLocal "tagoptional" .childObj}}'> ] ">" ;
-		// text        <'{{upstream (group "TERMINAL" .childCode)}}'>                                                                      = dquotetext | squotetext ;
-
-		// dquotetext = '"' - { small | caps | digit | special | "'" | '\\"' } <'{{.childStr}}'> '"' + ;
-		// squotetext = "'" - { small | caps | digit | special | '"' | "\\'" } <'{{.childStr}}'> "'" + ;
-
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		// special = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "~" | "@" ;
-
-		// } "Some comment"`,
-
-		// `{ top <'{{upstream (group "up foo:" .locals.foo "TEST1" .childObj "TEST2")}}'> = "abc" c ;
-		// c  = b <'{{upstream .childObj "aaaaaaaa"}}'> ;
-		// b <'{{upstream (group "FOO:" .locals.foo)}}{{deleteLocalVar "foo"}}'> = "Z" | x ;
-		// x = { "X" | "Y" } <'{{setLocal "foo" .childStr}}'> ; }`,
-
-		//  <'' '{{upstream "IDENT" .childStr (ident .childStr)}}'>
-		// {{if (and (gt (objCount .childObj) 1) (ne "string" (printf "%T" (index .childObj 0))))}}{{upstream "OR" .childObj}}{{end}}
-
-		// TODO:  prolog and epilog [ tag ] are not evaluated
-		// TODO: TAG does not include .childObj but it is appended !!!!!!!!!!! seems like some parts do not get pushed in upstream - debug
-
-		// Bigger EBNF of EBNF with tags (can parse):  ====================================== EDIT THIS ==============================================
-		// `{
-		// 	program     = { addedproduction } ;
-
-		// 	addedproduction <'{{addProduction .locals.name (ident .locals.name) .childObj}}{{upstream (group .locals.name (ident .locals.name) (group .childObj))}}'>       = production ;
-		// 	production <'{{if (notNil .locals.tagcode)}}{{upstream (group "TAG" (group .locals.tagcode) "BBBBBBBBBB"   (group .childObj)    "BBBBBBBBBB"   )}}{{end}}{{deleteLocalVar "tagcode"}}'> = ( taggedname "=" [ expression ] ";" ) [ tag ] ;
-
-		// 	taggedname  <'{{if (notNil .locals.tagcode)}}{{upstream (group "TAG" (group .locals.tagcode) "AAAAAAAAAAAA>>>>>>>" (group .childObj)  "<<<<<<AAAAAAAAAAAA"  )}}{{end}}{{deleteLocalVar "tagcode"}}'>      = name <'{{setLocal "name" .childStr}}'> [ tag ] ;
-		// 	expression  <'{{if (eq .locals.or "true")}}{{upstream (group "OR" .childObj)}}{{end}}'>                                                                     = alternative <'{{setLocal "or" "false"}}'> { "|" <'{{setLocal "or" "true"}}'> alternative } ;
-		// 	alternative = taggedterm { taggedterm } ;
-		// 	taggedterm  <'{{if (notNil .locals.tagcode)}}{{upstream (group "TAG" (group .locals.tagcode) (group .childObj))}}{{end}}{{deleteLocalVar "tagcode"}}'>      = term [ tag ] ;
-		// 	term        = name <'{{.childStr}}{{upstream (group "IDENT" .childStr (ident .childStr))}}'> | range | group | option | repetition | skipspaces ;
-		// 	range       = ( text [ "..." text ] ) ;
-		// 	group       <'{{upstream (group .childObj)}}'>                                                                                  = "(" expression ")" ;
-		// 	option      <'{{if notNil .childObj}}{{upstream (group "OPTIONAL" (group .childObj))}}{{end}}'>                                 = "[" expression "]" ;
-		// 	repetition  <'{{if notNil .childObj}}{{upstream (group "REPEAT" (group .childObj))}}{{end}}'>                                   = "{" expression "}" ;
-		// 	skipspaces  = "+" <'{{upstream (group "SKIPSPACES" true)}}'> | "-" <'{{upstream (group "SKIPSPACES" false)}}'> ;
-
-		// 	title = text ;
-		// 	comment = text ;
-
-		// 	name        = ( small | caps ) - { small | caps | digit | "_" } + ;
-		// 	tag         <'{{upstream nil}}'>                                                                                                = "<" text <'{{setLocal "tagcode" .childObj}}'> [ text <'{{setLocal "tagoptional" .childObj}}'> ] ">" ;
-		// 	text        <'{{upstream (group "TERMINAL" .childCode)}}'>                                                                      = dquotetext | squotetext ;
-
-		// 	dquotetext = '"' - { small | caps | digit | special | "'" | '\\"' } <'{{.childStr}}'> '"' + ;
-		// 	squotetext = "'" - { small | caps | digit | special | '"' | "\\'" } <'{{.childStr}}'> "'" + ;
-
-		// 	digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-		// 	small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-		// 	caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		// 	special = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" | "~" | "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
-
-		// 	}`,
-
-		// `"aEBNF of aEBNF as text" {
-		// 	program                                                                    = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] .
-		// 	production                                   = name [ tag ] "=" [ expression ] ( "." | ";" ) .
-		// 	expression                                   = alternative { "|" alternative } .
-		// 	alternative                                  = term { term } .
-		// 	term                                         = ( name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] .
-		// 	group                                        = "(" expression ")" .
-		// 	option                                       = "[" expression "]" .
-		// 	repetition                                   = "{" expression "}" .
-		// 	skipspaces  = "+" | "-"  .
-
-		// 	title = text .
-		// 	start = name .
-		// 	comment = text .
-
-		// 	tag  = "<" text text ">" .
-
-		// 	name                     = ( small | caps ) - { small | caps | digit | "_" } + .
-		// 	text     <'c.upstream=c.childStr'>                = dquotetext | squotetext .
-
-		// 	dquotetext = '"' - { small | caps | digit | special | "'" | '\\"' } '"' + ;
-		// 	squotetext = "'" - { small | caps | digit | special | '"' | "\\'" } "'" + ;
-
-		// 	digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-		// 	small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-		// 	caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		// 	special = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "~" | "@" ;
-
-		// 	} program`,
-
-		// `"aEBNF of aEBNF as text" {
-		// program     <'{{"{"}}{{.childCode}}{{"}"}}'>                                                                = [ title ] [ tag ] "{" [ production ] { production <", {{.childCode}}"> } "}" [ tag ] start [ comment ] .
-		// production  <'{"{{.locals.name}}", {{ident .locals.name}}, {{.childCode}}{{"}"}}; {{addProduction .locals.name (ident .locals.name) .childObj}}{{upstream (group .locals.name (ident .locals.name) .childObj)}}'>          = name <'{{setLocal "name" .childStr}}'> [ tag ] "=" [ expression ] ( "." | ";" ) .
-		// expression  <'{{if (eq .locals.or true)}}{"OR", {{.childCode}}{{"}"}}{{else}}{{.childCode}}{{end}}'>       = alternative <'{{setLocal "or" false}}{{.childCode}}'> { "|" alternative <'{{setLocal "or" true}}, {{.childCode}}'> } .
-		// alternative <'{{if (gt (lenx .childObj) 1)}}{{"{"}}{{.childCode}}{{"}"}}{{else}}{{.childCode}}{{end}}'>                                                          = term <'{{.childCode}}'> { term <', {{.childCode}}'> } .
-		// term        = ( name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] .
-		// group       <'{{if (gt (lenx .childObj) 1)}}{{"{"}}{{.childCode}}{{"}"}}{{upstream (group .childObj)}}{{else}}{{.childCode}}{{end}}'>             = "(" expression ")" .
-		// option      <'{{if notNil .childObj}}{"OPTIONAL", {{.childCode}}}{{upstream "OPTIONAL" (group .childObj)}}{{end}}'>                              = "[" expression "]" .
-		// repetition  <'{{if notNil .childObj}}{"REPEAT", {{.childCode}}}{{upstream "REPEAT" (group .childObj)}}{{end}}'>                                  = "{" expression "}" .
-		// skipspaces  = "+" <'{"SKIPSPACES", true}{{upstream "SKIPSPACES" true}}'> | "-" <'{"SKIPSPACES", false}{{upstream "SKIPSPACES" false}}'> .
-
-		// title = text .
-		// start = name .
-		// comment = text .
-
-		// tag  = "<" text text ">" .
-
-		// name        <'{"IDENT", "{{.childStr}}", {{ident .childStr}}}{{upstream "IDENT" .childStr (ident .childStr)}}'>                = ( small | caps ) - { small | caps | digit | "_" } + .
-		// text        <'{"TERMINAL", {{.childStr}}}{{upstream "TERMINAL" .childStr}}'>                                                   = dquotetext | squotetext .
-
-		// dquotetext = '"' - { small | caps | digit | special | "'" | '\\"' } '"' + ;
-		// squotetext = "'" - { small | caps | digit | special | '"' | "\\'" } "'" + ;
-
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		// special = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "~" | "@" ;
-
-		// } program`,
-
 		`"aEBNF of aEBNF as text"
 		<~~
 		var names = [];
 		function getNameIdx(name) {
 		  var pos = names.indexOf(name);
 		  if (pos != -1) { return pos };
-		  return names.push(name);
+		  return names.push(name)-1;
 		}
 		~~>
 		
 		{
 		
-		program          <~~ print('{'+upstream.str+'}') ~~>                                      = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
-		production       <~~ upstream.str = '{"'+upstream.name+'", '+getNameIdx(upstream.name)+', '+upstream.str+'}' ~~>       = name [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '' ~~> ;
+		program          = [ title <~~ upstream.str = upstream.str+', \\n' ~~> ] [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+		production       = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}, \\n' ~~> ;
 		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
 		alternative      = term { term <~~ upstream.str = ', '+upstream.str ~~> } ;
-		term             = ( name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
+		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag <~~ upstream.str = ', '+upstream.str ~~> ] ;
 		group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
 		option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
 		repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
 		skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
 		
 		title            = text ;
-		start            = name ;
+		start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
 		comment          = text ;
 		
 		tag <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>                                    = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
@@ -304,7 +109,7 @@ var (
 		code             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = '~~' - { [ "~" ] codeinner } '~~' + ;
 		codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 		
-		name             <~~ upstream.name = upstream.str; upstream.str = '{"IDENT", "'+upstream.name+'", '+getNameIdx(upstream.name)+'}' ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
+		name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 		
 		text             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = dquotetext | squotetext ;
 		dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
@@ -317,6 +122,7 @@ var (
 		
 		}
 		
+		<~~ print(upstream.str) ~~>
 		program
 		"This aEBNF contains the grammatic and semantic information for annotated EBNF.
 		It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
@@ -337,97 +143,80 @@ var (
 		// 		"3 +",
 		// 		"(4 + 3",
 		// 		`{ }`,
-		// 		`{ moo < "test" ; "toast" > = "ABC" | "DEF" . }`,
-		//
-		// `"aEBNF of aEBNF" {
-		// program = [ title ] [ tag ] "{" { production } "}" [ tag ] [ comment ] .
-		// production  = name [ tag ] "=" [ expression ] ( "." | ";" ) .
-		// expression  = sequence .
-		// sequence    = alternative { alternative } .
-		// alternative = term { "|" term } .
-		// term        = ( name | text [ "..." text ] | group | option | repetition | skipspaces ) [ tag ] .
-		// group       = "(" expression ")" .
-		// option      = "[" expression "]" .
-		// repetition  = "{" expression "}" .
-		// skipspaces  < "foo" > = "+" | "-" .
 
-		// title = text .
-		// comment = text .
+		// ==========================================
 
-		// name = ( small | caps ) { small | caps | digit | "_" } .
-		// text = "\"" - { small | caps | digit | special } "\"" + .
+		`"aEBNF of aEBNF as text"
+		<~~
+		var names = [];
+		function getNameIdx(name) {
+		  var pos = names.indexOf(name);
+		  if (pos != -1) { return pos };
+		  return names.push(name)-1;
+		}
+		~~>
+		
+		{
+		
+		program          = [ title <~~ upstream.str = upstream.str+', \\n' ~~> ] [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+		production       = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}, \\n' ~~> ;
+		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
+		alternative      = term { term <~~ upstream.str = ', '+upstream.str ~~> } ;
+		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag <~~ upstream.str = ', '+upstream.str ~~> ] ;
+		group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
+		option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
+		repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
+		skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
+		
+		title            = text ;
+		start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
+		comment          = text ;
+		
+		tag <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>                                    = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
+		
+		code             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = '~~' - { [ "~" ] codeinner } '~~' + ;
+		codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
+		
+		name             = ( small | caps ) - { small | caps | digit | "_" } + ;
+		
+		text             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = dquotetext | squotetext ;
+		dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
+		squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } "'" + ;
+		
+		digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+		small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+		caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+		special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
+		
+		}
+		
+		<~~ print(upstream.str) ~~>
+		program
+		"This aEBNF contains the grammatic and semantic information for annotated EBNF.
+		It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
 
-		// tag = "<" text { ";" text } ">" .
+		// ==========================================
 
-		// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" .
-		// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" .
-		// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" .
-		// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" .
-
-		// } "Some comment"`,
-
-		// `abc XYXXY`,
-		// `{ top = "abc" <'setLocal "foo" "test"' ''> ; }`,
-		// `{ top = abc { uvw } ; abc  = 'ABC' <'aaa' ''> ; uvw = 'XYZ' ; }`,
-		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu ; rtu = foo | "B" ; }`,
-		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; }`,
-
-		// `{ top = "AB C" ; foo = "BAR" ; xyz = rtu mmx ; rtu = foo | "B" ; mmx = [xyz] ; zzz = ("U" | "V") "W" "X" "Y" [ "Z" ] "P" { "Z" } ; } `,
-
-		// `
-		// 	program     = { addedproduction } ;
-
-		// 	addedproduction <'tagcode18'>       = production ;
-		// 	production <'tagcode17'> = ( taggedname "=" [ expression ] ";" ) [ tag ] ;
-
-		// 	taggedname  <'tagcode16'>      = name <'tagcode15'> [ tag ] ;
-		// 	expression  <'tagcode14'>                                                                     = alternative <'tagcode'> { "|" <'tagcode13'> alternative } ;
-		// 	alternative = taggedterm { taggedterm } ;
-		// 	taggedterm  <'tagcode'>      = term [ tag ] ;
-		// 	term        = name <'tagcode12'> | range | group | option | repetition | skipspaces ;
-		// 	range       = ( text [ "..." text ] ) ;
-		// 	group       <'tagcode11'>                                                                                  = "(" expression ")" ;
-		// 	option      <'tagcode10'>                                 = "[" expression "]" ;
-		// 	repetition  <'tagcode9'>                                   = "{" expression "}" ;
-		// 	skipspaces  = "+" <'tagcode7'> | "-" <'tagcode8'> ;
-
+		// `"EBNF of EBNF (can parse)" {
+		// 	program = [ title ] "{" { production } "}" [ comment ] ;
+		// 	production  = name "=" [ expression ] ";" ;
+		// 	expression  = sequence ;
+		// 	sequence    = alternative { alternative } ;
+		// 	alternative = term { "|" term } ;
+		// 	term        = name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ;
+		// 	group       <~~ print("test") ~~>      = "(" expression ")" ;
+		// 	option      = "[" expression "]" ;
+		// 	repetition  = "{" expression "}" ;
+		// 	skipspaces = "+" | "-" ;
 		// 	title = text ;
 		// 	comment = text ;
-
-		// 	name        = ( small | caps ) - { small | caps | digit | "_" } + ;
-		// 	tag         <'tagcode6'>                                                                                                = "<" text <'tagcode4'> [ text <'tagcode5'> ] ">" ;
-		// 	text        <'tagcode3'>                                                                      = dquotetext | squotetext ;
-
-		// 	dquotetext = '"' - { small | caps | digit | special | "'" | '\\"' } <'tagcode2'> '"' + ;
-		// 	squotetext = "'" - { small | caps | digit | special | '"' | "\\'" } <'tagcode1'> "'" + ;
-
+		// 	name = ( small | caps ) { small | caps | digit | "_" } ;
+		// 	text = "\"" - { small | caps | digit | special } "\"" + ;
 		// 	digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 		// 	small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
 		// 	caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		// 	special = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "~" | "@" ;
-
-		// 	`,
-
-		`"EBNF of EBNF (can parse)" {
-			program = [ title ] "{" { production } "}" [ comment ] ;
-			production  = name "=" [ expression ] ";" ;
-			expression  = sequence ;
-			sequence    = alternative { alternative } ;
-			alternative = term { "|" term } ;
-			term        = name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ;
-			group       <~~ print("test") ~~>      = "(" expression ")" ;
-			option      = "[" expression "]" ;
-			repetition  = "{" expression "}" ;
-			skipspaces = "+" | "-" ;
-			title = text ;
-			comment = text ;
-			name = ( small | caps ) { small | caps | digit | "_" } ;
-			text = "\"" - { small | caps | digit | special } "\"" + ;
-			digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-			small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-			caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-			special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
-			} program "foo"`,
+		// 	special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
+		// 	} program "foo"`,
 	}
 )
 
@@ -479,40 +268,40 @@ func main() {
 
 }
 
-func timeTrack(start time.Time, name string) {
-	elapsed := time.Since(start)
-	log.Printf("%s took %s", name, elapsed)
-}
-func speedtest() {
-	src := `{
-		program = [ title ] "{" { production } "}" [ comment ] ;
-		production  = name "=" [ expression ] ";" ;
-		expression  = sequence ;
-		sequence    = alternative { alternative } ;
-		alternative = term { "|" term } ;
-		term        = name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ;
-		group       = "(" expression ")" ;
-		option      = "[" expression "]" ;
-		repetition  = "{" expression "}" ;
-		skipspaces = "+" | "-" ;
-		title = text ;
-		comment = text ;
-		name = ( small | caps ) { small | caps | digit | "_" } ;
-		text = "\"" - { small | caps | digit | special } "\"" + ;
-		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
-		} program`
+// func timeTrack(start time.Time, name string) {
+// 	elapsed := time.Since(start)
+// 	log.Printf("%s took %s", name, elapsed)
+// }
+// func speedtest() {
+// 	src := `{
+// 		program = [ title ] "{" { production } "}" [ comment ] ;
+// 		production  = name "=" [ expression ] ";" ;
+// 		expression  = sequence ;
+// 		sequence    = alternative { alternative } ;
+// 		alternative = term { "|" term } ;
+// 		term        = name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ;
+// 		group       = "(" expression ")" ;
+// 		option      = "[" expression "]" ;
+// 		repetition  = "{" expression "}" ;
+// 		skipspaces = "+" | "-" ;
+// 		title = text ;
+// 		comment = text ;
+// 		name = ( small | caps ) { small | caps | digit | "_" } ;
+// 		text = "\"" - { small | caps | digit | special } "\"" + ;
+// 		digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+// 		small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+// 		caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+// 		special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
+// 		} program`
 
-	defer timeTrack(time.Now(), "parse DMA")
-	var err error = nil
-	for i := 0; i < 10000; i++ {
-		_, err = ebnf.ParseEBNF(src)
-	}
-	if err != nil {
-		fmt.Println("Error")
-		return
-	}
-	// fmt.Printf("%#v", g)
-}
+// 	defer timeTrack(time.Now(), "parse DMA")
+// 	var err error = nil
+// 	for i := 0; i < 10000; i++ {
+// 		_, err = ebnf.ParseEBNF(src)
+// 	}
+// 	if err != nil {
+// 		fmt.Println("Error")
+// 		return
+// 	}
+// 	// fmt.Printf("%#v", g)
+// }

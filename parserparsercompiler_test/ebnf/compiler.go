@@ -52,7 +52,6 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 }
 
 func (co *compiler) handleTagCode(code string, name string, upstream map[string]r.Object, localTree []r.Rule) { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
-	// co.vm.Set("globals", co.globalVars) // is set once by initFuncMap()
 	co.vm.Set("upstream", upstream) // The object(s) that are passed from the bottom roots to the top of the tree. Initially, only TERMINALs are entered into 'upstream.text'. If 'upstream.text' contains something that can be converted into string, it is concateneted with the other TERMINAL values or filled upstream.text contents.
 	co.funcMap["localAST"] = localTree
 
@@ -96,8 +95,6 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 	// ----------------------------------
 	// Split and collect
 
-	// Problem: One sets an upstream variable and it gets overwritten by another that was not updated.
-
 	upstreamMerged := map[string]r.Object{}
 	if len(productions) > 1 { // "SEQUENCE" Iterate through all rules and applies.
 		for _, rule := range productions { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
@@ -113,14 +110,10 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 
 			// Merge into upstreamMerged:
 			for k, v := range upstreamEdit {
-				if v == nil && upstreamMerged[k] != nil { // One other child already had a result but the current one does not. Keep the result of the other child.
-					continue
-				}
-				if upstreamMerged[k] != upstream[k] && v == upstream[k] { // If another child changed the result but the current one would not, keep the changed result of the other child.
-					continue
-				}
-
 				if len(k) >= 3 && k[:3] == "str" { // All upstream variables that start with 'str' are combined as string.
+					// if v == nil { // Only when merging: Ignore empty/nil responses.
+					// 	continue
+					// }
 					str1, ok1 := upstreamMerged[k].(string)
 					str2, ok2 := v.(string)
 					if ok1 && ok2 {
@@ -128,21 +121,35 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 					} else if ok2 {
 						upstreamMerged[k] = str2
 					}
-				} else {
-					// TODO:
-					// if upstreamMerged[k] != nil && v != nil {
-					// 	if mergedArr, ok := upstreamMerged[k].([]interface{}); ok { // If we can merge as array:
-					// 		if vArr, ok := v.([]interface{}); ok {
-					// 			upstreamMerged[k] = append(mergedArr, vArr...)
-					// 		} else {
-					// 			upstreamMerged[k] = append(mergedArr, v)
-					// 		}
-					// 	} else {
-					// 		upstreamMerged[k] = []interface{}{upstreamMerged[k], v}
-					// 	}
-					upstreamMerged[k] = v
-					// }
+					continue
 				}
+
+				if len(k) >= 3 && k[:3] == "obj" { // All upstream variables that start with 'str' are combined as string.
+					if v == nil { // Only when merging: Ignore empty/nil responses.
+						continue
+					}
+					if upstreamMerged[k] != nil {
+						if mergedArr, ok := upstreamMerged[k].([]interface{}); ok { // If we can merge as array:
+							if vArr, ok := v.([]interface{}); ok {
+								upstreamMerged[k] = append(mergedArr, vArr...)
+							} else {
+								upstreamMerged[k] = append(mergedArr, v)
+							}
+						} else {
+							upstreamMerged[k] = []interface{}{upstreamMerged[k], v}
+						}
+					} else {
+						upstreamMerged[k] = v
+					}
+					continue
+				}
+
+				if upstreamMerged[k] != upstream[k] && v == upstream[k] { // If another child changed the result but the current one would not, keep the changed result of the other child (only usable when NOT merging).
+					continue
+				}
+
+				// // Problem: One sets an upstream variable and it gets overwritten by another that was not updated.
+				upstreamMerged[k] = v
 			}
 		}
 
@@ -170,6 +177,7 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 		// 	panic("ONLY FOR DEBUG! no this should not happen")
 		// }
 		upstream["str"] = rule.String
+		upstream["obj"] = rule.String
 		return
 	case r.Tag:
 		tagCode := rule.TagChilds[0].String
@@ -188,8 +196,6 @@ func (co *compiler) compile(productions []r.Rule, upstream map[string]r.Object) 
 }
 
 func (co *compiler) initFuncMap() {
-	// co.vm.Set("globals", co.globalVars)
-
 	co.vm.Set("print", fmt.Print)
 	co.vm.Set("println", fmt.Println)
 	co.vm.Set("printf", fmt.Printf)
@@ -243,19 +249,13 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res
 	co.initFuncMap()
 
 	if prolog, ok := (*extras)["prolog.code"]; ok {
-		_, err := co.Run("prolog.code", prolog.TagChilds[0].String)
-		if err != nil {
-			panic(err)
-		}
+		co.handleTagCode(prolog.TagChilds[0].String, "prolog.code", upstream, asg)
 	}
 
 	co.compile(asg, upstream)
 
 	if epilog, ok := (*extras)["epilog.code"]; ok {
-		_, err := co.Run("epilog.code", epilog.TagChilds[0].String)
-		if err != nil {
-			panic(err)
-		}
+		co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upstream, asg)
 	}
 
 	// return co.newGrammar, nil
