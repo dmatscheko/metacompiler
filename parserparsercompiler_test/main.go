@@ -90,11 +90,18 @@ var (
 		
 		{
 		
-		program          = [ title <~~ upstream.str = upstream.str+', \\n' ~~> ] [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
-		production       = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}, \\n' ~~> ;
-		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
-		alternative      = term { term <~~ upstream.str = ', '+upstream.str ~~> } ;
-		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag <~~ upstream.str = ', '+upstream.str ~~> ] ;
+		program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+		programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
+		production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>       
+						 = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
+		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   
+						 = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
+		alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
+		
+		taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
+						 = term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
+		
+		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
 		group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
 		option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
 		repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
@@ -104,16 +111,16 @@ var (
 		start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
 		comment          = text ;
 		
-		tag <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>                                    = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
+		tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
 		
-		code             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = '~~' - { [ "~" ] codeinner } '~~' + ;
+		code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
 		codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 		
 		name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 		
-		text             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = dquotetext | squotetext ;
-		dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
-		squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } "'" + ;
+		text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
+		dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
+		squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
 		
 		digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 		small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
@@ -127,6 +134,8 @@ var (
 		"This aEBNF contains the grammatic and semantic information for annotated EBNF.
 		It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
 	}
+
+	// <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>
 
 	tests = []string{
 		// 		"a1a3a4a4a5a6",
@@ -158,11 +167,18 @@ var (
 		
 		{
 		
-		program          = [ title <~~ upstream.str = upstream.str+', \\n' ~~> ] [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
-		production       = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}, \\n' ~~> ;
-		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
-		alternative      = term { term <~~ upstream.str = ', '+upstream.str ~~> } ;
-		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag <~~ upstream.str = ', '+upstream.str ~~> ] ;
+		program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+		programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
+		production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>       
+						 = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
+		expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   
+						 = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
+		alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
+		
+		taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
+						 = term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
+		
+		term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
 		group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
 		option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
 		repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
@@ -172,16 +188,16 @@ var (
 		start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
 		comment          = text ;
 		
-		tag <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>                                    = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
+		tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
 		
-		code             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = '~~' - { [ "~" ] codeinner } '~~' + ;
+		code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
 		codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 		
 		name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 		
-		text             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = dquotetext | squotetext ;
-		dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
-		squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } "'" + ;
+		text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
+		dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
+		squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
 		
 		digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 		small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
