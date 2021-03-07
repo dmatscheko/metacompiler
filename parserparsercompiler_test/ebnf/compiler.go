@@ -2,14 +2,9 @@ package ebnf
 
 import (
 	"fmt"
-	"strings"
 
 	"./r"
 	"github.com/dop251/goja"
-
-	"github.com/llir/llvm/ir"
-	"github.com/llir/llvm/ir/constant"
-	"github.com/llir/llvm/ir/types"
 )
 
 type compiler struct {
@@ -22,7 +17,7 @@ type compiler struct {
 }
 
 // ----------------------------------------------------------------------------
-// Dynamic parse tree compiler
+// Dynamic ASG compiler
 
 // TODO: make nicely named constants for all TAG array indizes!!! (also do that for all other constant array indizes)
 // TODO: set and read objVars (in addition to the vars and codeVars)
@@ -44,41 +39,6 @@ type compiler struct {
 	vars["subTree"] = localTree                  // (object tree) The current sub tree of the parser grammar
 	if co.globalVars["idents"] == nil {          // (string list) The global list of unique names. Set by {{ident "someName"}}. It is exposed to the scripting language on purpose.
 */
-
-// genCallgraph returns the callgraph in Graphviz DOT format of the given LLVM IR module.
-// Code taken from: https://github.com/llir/llvm#analysis-example---process-llvm-ir
-// DOT output is viewable online e.g. with: http://magjac.com/graphviz-visual-editor/
-func callgraph(m *ir.Module) string {
-	buf := &strings.Builder{}
-	buf.WriteString("digraph {\n")
-	// For each function of the module.
-	for _, f := range m.Funcs {
-		// Add caller node.
-		caller := f.Ident()
-		fmt.Fprintf(buf, "\t%q\n", caller)
-		// For each basic block of the function.
-		for _, block := range f.Blocks {
-			// For each non-branching instruction of the basic block.
-			for _, inst := range block.Insts {
-				// Type switch on instruction to find call instructions.
-				switch inst := inst.(type) {
-				case *ir.InstCall:
-					callee := inst.Callee.Ident()
-					// Add edges from caller to callee.
-					fmt.Fprintf(buf, "\t%q -> %q\n", caller, callee)
-				}
-			}
-			// Terminator of basic block.
-			switch term := block.Term.(type) {
-			case *ir.TermRet:
-				// do something.
-				_ = term
-			}
-		}
-	}
-	buf.WriteString("}")
-	return buf.String()
-}
 
 // RunScript executes the given string in the global context.
 func (co *compiler) Run(name, src string) (goja.Value, error) {
@@ -256,19 +216,6 @@ func (co *compiler) initFuncMap() {
 	}
 	co.vm.Set("c", co.compilerFuncMap)
 
-	llvmFuncMap := map[string]r.Object{ // The LLVM functions.
-		"types": map[string]r.Object{
-			"I32": types.I32,
-		},
-		"constant": map[string]r.Object{
-			"NewInt": constant.NewInt,
-		},
-		"ir": map[string]r.Object{
-			"NewModule": ir.NewModule,
-			"NewParam":  ir.NewParam,
-		},
-		"Callgraph": callgraph,
-	}
 	co.vm.Set("llvm", llvmFuncMap)
 }
 
