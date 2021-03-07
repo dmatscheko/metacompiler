@@ -7,7 +7,7 @@ https://github.com/llir/llvm            Library for interacting with LLVM IR in 
 
 
 !!!!!
-git clone --recursive https://github.com/llir/ll
+git clone --recursive https://github.com/llvm
 !!!!!
 
 go get github.com/inspirer/textmapper/tm-go/cmd/textmapper
