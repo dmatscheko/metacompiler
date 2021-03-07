@@ -17,6 +17,65 @@ That new runtime generated parser plus compiler should allow to compile an arbit
 ## Example of an annotated EBNF
 
 ```
+`"aEBNF of aEBNF as text"
+<~~
+var names = [];
+function getNameIdx(name) {
+	var pos = names.indexOf(name);
+	if (pos != -1) { return pos };
+	return names.push(name)-1;
+}
+~~>
+
+{
+
+program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
+production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>       
+					= name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
+expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   
+					= alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
+alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
+
+taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
+					= term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
+
+term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
+group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
+option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
+repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
+skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
+
+title            = text ;
+start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
+comment          = text ;
+
+tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
+
+code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
+codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
+
+name             = ( small | caps ) - { small | caps | digit | "_" } + ;
+
+text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
+dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
+squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
+
+digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
+
+}
+
+<~~ print(upstream.str) ~~>
+program
+"This aEBNF contains the grammatic and semantic information for annotated EBNF.
+It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
+```
+
+Its output, when it gets applied on itself would be:
+```
 {"TERMINAL", "aEBNF of aEBNF as text"}, 
 {"TAG", {"TERMINAL", "\n\t\tvar names = [];\n\t\tfunction getNameIdx(name) {\n\t\t  var pos = names.indexOf(name);\n\t\t  if (pos != -1) { return pos };\n\t\t  return names.push(name)-1;\n\t\t}\n\t\t"}}, 
 
