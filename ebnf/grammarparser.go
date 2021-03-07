@@ -60,6 +60,7 @@ func (gp *grammarParser) printTrace(rule r.Rule, doSkipSpaces bool, depth int) {
 
 	// Pprint(fmt.Sprintf("%4d: %3d>>>> rule for pos # %d (char '%c') %s", gp.traceCount, depth, gp.sdx, c, doSkipSpacesStr), rule)
 	Pprint(fmt.Sprintf("%4d: %3d%s rule for pos # %d (char '%c') %s", gp.traceCount, depth, d, gp.sdx, c, doSkipSpacesStr), rule)
+	// fmt.Printf("%4d: %3d%s rule for pos # %d (char '%c') %s %s", gp.traceCount, depth, d, gp.sdx, c, doSkipSpacesStr, PprintSequence(&rule, ""))
 }
 
 // The self-referential EBNF is (different description form!):

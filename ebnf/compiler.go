@@ -201,10 +201,7 @@ func (co *compiler) initFuncMap() {
 	co.vm.Set("printf", fmt.Printf)
 	co.vm.Set("sprintf", fmt.Sprintf)
 
-	co.vm.Set("defined", func(o r.Object) bool { return o != nil })
-
-	// co.vm.Set("compile", func(localASG []r.Rule, upstream map[string]r.Object) { co.compile(localASG, upstream) })
-	// co.vm.Set("asg", co.asg)
+	// co.vm.Set("defined", func(o r.Object) bool { return o != nil })
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
 		"compile": func(localASG []r.Rule, upstream map[string]r.Object) { co.compile(localASG, upstream) },

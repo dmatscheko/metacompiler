@@ -9,8 +9,8 @@ import (
 
 type Grammar = struct {
 	Productions []r.Rule
-	start       int
-	Extras      map[string]r.Rule
+	// start       int
+	Extras map[string]r.Rule
 
 	// TODO: var loopStop!! loop prevention (also for grammarparser): whenever the parser steps deeper, get the entry of map[the current position] in a map: the entry is nil or a map of already tried rules. if a rule has been tried already, return false and don't try again
 	// TODO: also make it configurable if it is used (only if it has performance impact)
@@ -24,15 +24,16 @@ type Grammar = struct {
 // EBNF parser
 
 type ebnfParser struct {
-	src     []rune
-	ch      rune
-	sdx     int
-	token   r.Rule
-	isSeq   bool // Only true if the String in ep.token is valid.
-	err     bool
-	ididx   []int
-	idents  []string
-	grammar Grammar
+	src          []rune
+	ch           rune
+	sdx          int
+	token        r.Rule
+	isSeq        bool // Only true if the String in ep.token is valid.
+	err          bool
+	traceEnabled bool
+	ididx        []int
+	idents       []string
+	grammar      Grammar
 }
 
 // // call this whenever pos is set before for a new rule is tested
@@ -212,6 +213,9 @@ func (ep *ebnfParser) addIdent(ident string) int {
 
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) factor() r.Rule {
+	if ep.traceEnabled {
+		fmt.Printf("fact> %4d\n", ep.sdx)
+	}
 	pos := ep.sdx
 	var res r.Rule
 
@@ -283,6 +287,9 @@ func (ep *ebnfParser) factor() r.Rule {
 // also works like getToken(), but advances before that as much as it itself knows
 // TODO: allow multiple strings/text, separated by ";"!
 func (ep *ebnfParser) tag() r.Rule {
+	if ep.traceEnabled {
+		fmt.Printf("tag> %4d\n", ep.sdx)
+	}
 	pos := ep.sdx
 
 	res := r.Rule{Operator: r.Tag, Pos: pos}
@@ -301,6 +308,9 @@ func (ep *ebnfParser) tag() r.Rule {
 
 // also works like getToken(), but advances before that as much as it itself knows (= implements sequence)
 func (ep *ebnfParser) term() r.Rule {
+	if ep.traceEnabled {
+		fmt.Printf("term> %4d\n", ep.sdx)
+	}
 	pos := ep.sdx
 
 	firstFactor := ep.factor()
@@ -338,6 +348,9 @@ func (ep *ebnfParser) term() r.Rule {
 
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) expression() r.Rule {
+	if ep.traceEnabled {
+		fmt.Printf("expr> %4d\n", ep.sdx)
+	}
 	pos := ep.sdx
 	res := ep.term()
 
@@ -356,6 +369,9 @@ func (ep *ebnfParser) expression() r.Rule {
 
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) production() r.Rule {
+	if ep.traceEnabled {
+		fmt.Printf("prod> %4d\n", ep.sdx)
+	}
 	pos := ep.sdx
 	// Returns a token or r.Invalid; the real result is left in 'productions' etc, ...
 	ep.getToken()
@@ -492,7 +508,7 @@ func (ep *ebnfParser) resolveIdIdx(productions *[]r.Rule) {
 	}
 }
 
-func ParseEBNF(srcEbnf string) (g Grammar, e error) {
+func ParseAEBNF(srcEbnf string, traceEnabled bool) (g Grammar, e error) {
 	defer func() {
 		if err := recover(); err != nil {
 			fmt.Printf("%s\n  ==> Fail\n", err)
@@ -501,6 +517,7 @@ func ParseEBNF(srcEbnf string) (g Grammar, e error) {
 	}()
 
 	var ep ebnfParser
+	ep.traceEnabled = traceEnabled
 	ep.parse(srcEbnf)
 
 	var err error = nil

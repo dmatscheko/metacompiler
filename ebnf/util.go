@@ -23,12 +23,12 @@ func jsonizeObject(ob r.Object) string {
 		pp = strings.Replace(pp, "map[string]string", "map", 1)
 	}
 
-	pp = strings.ReplaceAll(pp, ", TagChilds:[]r.Sequence(nil)", "")
-	pp = strings.ReplaceAll(pp, ", Childs:[]r.Sequence(nil)", "")
-	// pp = strings.ReplaceAll(pp, "TagChilds:[]r.Sequence", "")
-	// pp = strings.ReplaceAll(pp, "Childs:[]r.Sequence", "")
-	pp = strings.ReplaceAll(pp, "[]r.Sequence{", "{")
-	pp = strings.ReplaceAll(pp, "r.Sequence{", "{")
+	pp = strings.ReplaceAll(pp, ", TagChilds:[]r.Rule(nil)", "")
+	pp = strings.ReplaceAll(pp, ", Childs:[]r.Rule(nil)", "")
+	// pp = strings.ReplaceAll(pp, "TagChilds:[]r.Rule", "")
+	// pp = strings.ReplaceAll(pp, "Childs:[]r.Rule", "")
+	pp = strings.ReplaceAll(pp, "[]r.Rule{", "{")
+	pp = strings.ReplaceAll(pp, "r.Rule{", "{")
 	pp = strings.ReplaceAll(pp, "Operator:", "")
 	pp = strings.ReplaceAll(pp, "TagChilds:", "")
 	pp = strings.ReplaceAll(pp, "Childs:", "")
@@ -90,6 +90,10 @@ func PprintSrc(header string, pp string) {
 	indent := regexp.MustCompile(`(?m)^[ \t]*`)
 	pp = indent.ReplaceAllString(pp, "   ")
 
+	if len(pp) > 1200 {
+		pp = pp[:1200] + " ..."
+	}
+
 	fmt.Printf("%s:\n%s\n", header, pp)
 }
 
@@ -102,6 +106,10 @@ func PprintSrcSingleLine(pp string) {
 
 	indent := regexp.MustCompile(`(?m)^[ \t]*`)
 	pp = indent.ReplaceAllString(pp, "   ")
+
+	if len(pp) > 1200 {
+		pp = pp[:1200] + " ..."
+	}
 
 	fmt.Print(pp)
 }
