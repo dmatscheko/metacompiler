@@ -1,18 +1,22 @@
 # ParserParserCompiler
 
-This is the attempt to create
+This is
 * a parser that parses an annotated EBNF
-* and (at runtime!) creates a second parser with the EBNF
+* and (at runtime) creates a second parser with the EBNF
 * plus a compiler with the annotations in the EBNF.
 
 That new runtime generated parser plus compiler should allow to compile an arbitrary new language, specified in the EBNF and its annotations.
 
 ## What is an annotated EBNF?
 
-* The EBNF stores the grammar of the new language.
+* The EBNF stores the grammar of e.g. a new language.
 * The annotations in the EBNF store the semantic of the new language.
 
-## Example of an annotated EBNF
+## Examples
+
+### Example of an annotated EBNF
+<details>
+  <summary>Click to expand!</summary>
 
 ```
 `"aEBNF of aEBNF as text"
@@ -71,8 +75,12 @@ program
 "This aEBNF contains the grammatic and semantic information for annotated EBNF.
 It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
 ```
+</details>
 
-Its output, when it gets applied on itself would be:
+### Its output, when it gets applied on itself:
+<details>
+  <summary>Click to expand!</summary>
+
 ```
 {"TERMINAL", "aEBNF of aEBNF as text"}, 
 {"TAG", {"TERMINAL", "\n\t\tvar names = [];\n\t\tfunction getNameIdx(name) {\n\t\t  var pos = names.indexOf(name);\n\t\t  if (pos != -1) { return pos };\n\t\t  return names.push(name)-1;\n\t\t}\n\t\t"}}, 
@@ -111,15 +119,45 @@ Its output, when it gets applied on itself would be:
 {"IDENT", "program", 0}, 
 {"TERMINAL", "This aEBNF contains the grammatic and semantic information for annotated EBNF.\n\t\tIt allows to automatically create a compiler for everything described in aEBNF (yes, that format)."}
 ```
+</details>
 
 
 ## Documentation
 
-upstream
-upstream.str + upstream.obj
-str*
-obj*
+* upstream
+  * upstream.str + upstream.obj
+  * upstream.str*
+  * upstream.obj*
+* c.asg
+* c.localAsg
+* c.compile
+  * &nbsp;
+```
+    OUT
+     ^
+     |
+     C--.      (C) If the Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
+     |   |
+   * ^   v     (*) All upstream values are combined.
+    /|   |
+   | | _ |
+   T | | |     (T) The text of a terminal gets sent to 'upstream.str'.
+   | X | |     (X) Here, the script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
+   | | O |     (O) Other Rules are ignored.
+   | | | |
+   \ | / |
+  * \|/  |     (*) Childs from one Rule get splitted.
+     |__/
+     |
+     ^
+     IN
+```
 
+* Exposed go funcs:
+  * print [fmt.Print](https://golang.org/pkg/fmt/#Print)
+  * println [fmt.Println](https://golang.org/pkg/fmt/#Println)
+  * printf [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
+  * sprintf [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
 
 ### LLVM IR
 
