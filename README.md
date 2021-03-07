@@ -1,7 +1,5 @@
 # ParserParserCompiler
 
-Note: The developed version is at [./parserparsercompiler_test](./parserparsercompiler_test).
-
 This is the attempt to create
 * a parser that parses an annotated EBNF
 * and (at runtime!) creates a second parser with the EBNF
@@ -113,3 +111,28 @@ Its output, when it gets applied on itself would be:
 {"IDENT", "program", 0}, 
 {"TERMINAL", "This aEBNF contains the grammatic and semantic information for annotated EBNF.\n\t\tIt allows to automatically create a compiler for everything described in aEBNF (yes, that format)."}
 ```
+
+
+## Documentation
+
+upstream
+upstream.str + upstream.obj
+str*
+obj*
+
+
+### LLVM IR
+
+This tool uses [https://github.com/llir/llvm](https://github.com/llir/llvm) to create LLVM IR. 
+The API documentation can be found here: [https://pkg.go.dev/github.com/llir/llvm/](https://pkg.go.dev/github.com/llir/llvm/).
+
+The functions and constants are exposed to JS as:
+
+* [llvm.ir](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir)
+* [llvm.constant](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/constant)
+* [llvm.metadata](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/metadata)
+* [llvm.types](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/types)
+
+* Custom functions:
+  * The function `llvm.Callgraph(m ir.Module)` creates the callgraph of the given LLVM IR module in Graphviz DOT format.
+  * The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
