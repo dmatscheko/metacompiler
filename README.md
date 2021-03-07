@@ -21,19 +21,19 @@ That new runtime generated parser plus compiler should allow to compile an arbit
 <~~
 var names = [];
 function getNameIdx(name) {
-  var pos = names.indexOf(name);
-  if (pos != -1) { return pos };
-  return names.push(name);
+	var pos = names.indexOf(name);
+	if (pos != -1) { return pos };
+	return names.push(name)-1;
 }
 ~~>
 
 {
 
-program          <~~ print('{'+upstream.str+'}') ~~>                                      = [ title ] [ tag ] "{" { production } "}" [ tag ] start [ comment ] ;
-production       <~~ upstream.str = '{"'+upstream.name+'", '+getNameIdx(upstream.name)+', '+upstream.str+'}' ~~>       = name [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '' ~~> ;
+program          <~~ print(upstream.str) ~~>                                              = [ title <~~ upstream.str = upstream.str+', \\n' ~~> ] [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+production       = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}, \\n' ~~> ;
 expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
 alternative      = term { term <~~ upstream.str = ', '+upstream.str ~~> } ;
-term             = ( name | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
+term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
 group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
 option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
 repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
@@ -48,7 +48,7 @@ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>                          
 code             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = '~~' - { [ "~" ] codeinner } '~~' + ;
 codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
-name             <~~ upstream.name = upstream.str; upstream.str = '{"IDENT", "'+upstream.name+'", '+getNameIdx(upstream.name)+'}' ~~>  = ( small | caps ) - { small | caps | digit | "_" } + ;
+name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 
 text             <~~ upstream.str = '{"TERMINAL", '+upstream.str+'}' ~~>                  = dquotetext | squotetext ;
 dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } '"' + ;
