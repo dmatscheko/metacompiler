@@ -29,18 +29,18 @@ function getNameIdx(name) {
 
 {
 
-program          <~~ print(upstream.str) ~~>                                              = [ title <~~ upstream.str = upstream.str+', \\n' ~~> ] [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
+program          = [ title <~~ upstream.str = upstream.str+', \\n' ~~> ] [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> [ tag <~~ upstream.str = upstream.str+', \\n' ~~> ] start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
 production       = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}, \\n' ~~> ;
 expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
 alternative      = term { term <~~ upstream.str = ', '+upstream.str ~~> } ;
-term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag ] ;
+term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) [ tag <~~ upstream.str = ', '+upstream.str ~~> ] ;
 group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
 option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
 repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
 skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
 
 title            = text ;
-start            = name ;
+start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
 comment          = text ;
 
 tag <~~ upstream.str = '{"TAG", '+upstream.str+'}' ~~>                                    = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
@@ -61,6 +61,7 @@ special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "
 
 }
 
+<~~ print(upstream.str) ~~>
 program
 "This aEBNF contains the grammatic and semantic information for annotated EBNF.
 It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."
