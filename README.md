@@ -127,8 +127,8 @@ It allows to automatically create a compiler for everything described in aEBNF (
 ### Installation / Build
 
 ```
-go get "github.com/dop251/goja" "github.com/llir/llvm/ir" "github.com/golang/go/tree/master/src/hash/maphash"
-go run .
+go get "github.com/dop251/goja" "github.com/llir/llvm/ir"
+go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 ```
 
 ### JS API
