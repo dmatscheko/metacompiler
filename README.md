@@ -124,6 +124,24 @@ It allows to automatically create a compiler for everything described in aEBNF (
 
 ## Documentation
 
+### Installation / Build
+
+```
+go get "github.com/dop251/goja" "github.com/llir/llvm/ir" "github.com/golang/go/tree/master/src/hash/maphash"
+go run .
+```
+
+### JS API
+
+#### Basic exposed API
+
+* print [fmt.Print](https://golang.org/pkg/fmt/#Print)
+* println [fmt.Println](https://golang.org/pkg/fmt/#Println)
+* printf [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
+* sprintf [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
+
+#### Compiler API
+
 * upstream
   * upstream.str + upstream.obj
   * upstream.str*
@@ -153,13 +171,7 @@ It allows to automatically create a compiler for everything described in aEBNF (
      IN
 ```
 
-* Exposed go funcs:
-  * print [fmt.Print](https://golang.org/pkg/fmt/#Print)
-  * println [fmt.Println](https://golang.org/pkg/fmt/#Println)
-  * printf [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
-  * sprintf [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
-
-### LLVM IR
+#### LLVM IR API
 
 This tool uses [https://github.com/llir/llvm](https://github.com/llir/llvm) to create LLVM IR. 
 The API documentation can be found here: [https://pkg.go.dev/github.com/llir/llvm/](https://pkg.go.dev/github.com/llir/llvm/).
