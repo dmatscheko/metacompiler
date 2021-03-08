@@ -84,10 +84,7 @@ func (co *compiler) handleTagCode(code string, name string, upstream map[string]
 //     ^
 //     IN
 //
-func (co *compiler) compile(localASG []r.Rule, upstream map[string]r.Object) {
-	if co.traceEnabled {
-		fmt.Printf("\n## %#v\n--\n%#v\n", localASG, upstream)
-	}
+func (co *compiler) compile(localASG []r.Rule, upstream *map[string]r.Object) {
 	if localASG == nil || len(localASG) == 0 {
 		return
 	}
@@ -101,65 +98,83 @@ func (co *compiler) compile(localASG []r.Rule, upstream map[string]r.Object) {
 
 			// Copy, so that compile() and handleTagCode() can change them:
 			upstreamEdit := map[string]r.Object{}
-			for k, v := range upstream {
+			for k, v := range *upstream {
 				upstreamEdit[k] = v
 			}
 
+			// LTR override of input.
+			for k, v := range upstreamMerged {
+				if len(k) >= 3 && k[:3] == "ltr" {
+					upstreamEdit[k] = v
+				}
+			}
+
 			// Compile:
-			co.compile([]r.Rule{rule}, upstreamEdit)
+			co.compile([]r.Rule{rule}, &upstreamEdit)
 
 			// Merge into upstreamMerged:
 			for k, v := range upstreamEdit {
-				if len(k) >= 3 && k[:3] == "str" { // All upstream variables that start with 'str' are combined as string.
-					// if v == nil { // Only when merging: Ignore empty/nil responses.
-					// 	continue
-					// }
-					str1, ok1 := upstreamMerged[k].(string)
-					str2, ok2 := v.(string)
-					if ok1 && ok2 {
-						upstreamMerged[k] = str1 + str2
-					} else if ok2 {
-						upstreamMerged[k] = str2
-					}
-					continue
-				}
 
-				if len(k) >= 3 && k[:3] == "obj" { // All upstream variables that start with 'str' are combined as string.
-					if v == nil { // Only when merging: Ignore empty/nil responses.
+				if len(k) >= 3 {
+
+					prefix := k[:3]
+					switch prefix {
+					case "str": // All upstream variables that start with 'str' are combined as string.
+						// if v == nil { // Only when merging: Ignore empty/nil responses.
+						// 	continue
+						// }
+						str1, ok1 := upstreamMerged[k].(string)
+						str2, ok2 := v.(string)
+						if ok1 && ok2 {
+							upstreamMerged[k] = str1 + str2
+						} else if ok2 {
+							upstreamMerged[k] = str2
+						}
 						continue
-					}
-					if upstreamMerged[k] != nil {
-						if mergedArr, ok := upstreamMerged[k].([]interface{}); ok { // If we can merge as array:
-							if vArr, ok := v.([]interface{}); ok {
-								upstreamMerged[k] = append(mergedArr, vArr...)
+					case "obj": // All upstream variables that start with 'str' are combined as string.
+						if v == nil { // Only when merging: Ignore empty/nil responses.
+							continue
+						}
+						if upstreamMerged[k] != nil {
+							if mergedArr, ok := upstreamMerged[k].([]interface{}); ok { // If we can merge as array:
+								if vArr, ok := v.([]interface{}); ok {
+									upstreamMerged[k] = append(mergedArr, vArr...)
+								} else {
+									upstreamMerged[k] = append(mergedArr, v)
+								}
 							} else {
-								upstreamMerged[k] = append(mergedArr, v)
+								upstreamMerged[k] = []interface{}{upstreamMerged[k], v}
 							}
 						} else {
-							upstreamMerged[k] = []interface{}{upstreamMerged[k], v}
+							upstreamMerged[k] = v
 						}
-					} else {
+						continue
+					case "ltr":
 						upstreamMerged[k] = v
+						continue
 					}
+				}
+
+				if upstreamMerged[k] != (*upstream)[k] && v == (*upstream)[k] { // If another child changed the result but the current one would not, keep the changed result of the other child (only usable when NOT merging).
 					continue
 				}
 
-				if upstreamMerged[k] != upstream[k] && v == upstream[k] { // If another child changed the result but the current one would not, keep the changed result of the other child (only usable when NOT merging).
-					continue
-				}
-
-				// // Problem: One sets an upstream variable and it gets overwritten by another that was not updated.
+				// LTR override of output.
 				upstreamMerged[k] = v
 			}
 		}
 
 		for k, v := range upstreamMerged {
-			upstream[k] = v
+			(*upstream)[k] = v
 		}
-		for k := range upstream {
+		for k := range *upstream {
 			if upstreamMerged[k] == nil {
-				delete(upstream, k)
+				delete((*upstream), k)
 			}
+		}
+
+		if co.traceEnabled {
+			fmt.Printf("\n## %s\n--\n%#v\n", PprintProductions(&localASG, ""), (*upstream))
 		}
 
 		return
@@ -176,15 +191,15 @@ func (co *compiler) compile(localASG []r.Rule, upstream map[string]r.Object) {
 		// if str, ok := upstream["text"].(string); ok && len(str) > 0 {
 		// 	panic("ONLY FOR DEBUG! no this should not happen")
 		// }
-		upstream["str"] = rule.String
-		upstream["obj"] = rule.String
+		(*upstream)["str"] = rule.String
+		(*upstream)["obj"] = rule.String
 		return
 	case r.Tag:
 		tagCode := rule.TagChilds[0].String
 		// First collect all the data.
 		co.compile(rule.Childs, upstream) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), upstream, localASG) // TODO: maybe change "upstream" to "upstreamReplace, upstreamCombine"
+		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), (*upstream), localASG) // TODO: maybe change "upstream" to "upstreamReplace, upstreamCombine"
 		return
 	default:
 		if len(rule.Childs) > 0 {
@@ -204,7 +219,7 @@ func (co *compiler) initFuncMap() {
 	// co.vm.Set("defined", func(o r.Object) bool { return o != nil })
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
-		"compile": func(localASG []r.Rule, upstream map[string]r.Object) { co.compile(localASG, upstream) },
+		"compile": func(localASG []r.Rule, upstream map[string]r.Object) { co.compile(localASG, &upstream) },
 		"asg":     co.asg,
 
 		// "sequence": func(Operator r.OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []r.Rule, TagChilds []r.Rule) r.Rule {

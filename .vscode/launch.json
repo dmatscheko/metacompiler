@@ -12,11 +12,28 @@
             "program": "${workspaceFolder}"
         },
         {
-            "name": "Launch Test simplifyObj",
+            "name": "Launch Math Test (TRACE)",
             "type": "go",
             "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}/../test/"
+            "program": "${workspaceFolder}","args": ["-f", "tests/math.aebnf", "-s", "tests/calculation.txt", "-t"]
+        },
+        {
+            "name": "Launch Math Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-f", "tests/math.aebnf", "-s", "tests/calculation.txt"]
+        },
+        {
+            "name": "Launch aEBNF Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf"]
+        },
+        {
+            "name": "Launch aEBNF Test (TRACE)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tc"]
         }
 
     ]

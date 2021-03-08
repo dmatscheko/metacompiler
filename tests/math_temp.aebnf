@@ -13,9 +13,7 @@ expression  <~~ upstream.str = ltrPlus ~~>                        =
     term                <~~ var ltrPlus = upstream.str ~~>
     {
         ( "+" | "-" )   <~~ var plusOp = upstream.str ~~>
-        term            <~~ print(" ltrPlus:" + plusOp + "," + ltrPlus + "," + upstream.str + ";   ");
-                            ltrPlus = (plusOp=="+") ? parseInt(ltrPlus) + parseInt(upstream.str) : parseInt(ltrPlus) - parseInt(upstream.str);
-                            print(" ltrPlus=" + ltrPlus + ";\\n") ~~>
+        term            <~~ ltrPlus = (plusOp=="+") ? parseInt(ltrPlus) + parseInt(upstream.str) : parseInt(ltrPlus) - parseInt(upstream.str) ~~>
     }                   
     ;
 
@@ -24,10 +22,8 @@ expression  <~~ upstream.str = ltrPlus ~~>                        =
 term        <~~ upstream.str = ltrMul ~~>                         =
     factor              <~~ var ltrMul = upstream.str ~~>
     {
-        ( "*" | "/" )   <~~ var mulOp = upstream.str ~~>
-        factor          <~~ print(" ltrMul:" + mulOp + "," + ltrMul + "," + upstream.str + ";   ");
-                            ltrMul = (mulOp=="*") ? parseInt(ltrMul) * parseInt(upstream.str) : parseInt(ltrMul) / parseInt(upstream.str);
-                            print(" ltrMul=" + ltrMul + ";\\n") ~~>
+        ( "*" | "/" )   <~~ upstream.mulOp = upstream.str ~~>
+        factor          <~~ ltrMul = (upstream.mulOp=="*") ? parseInt(ltrMul) * parseInt(upstream.str) : parseInt(ltrMul) / parseInt(upstream.str) ~~>
     }                   
     ;
 
