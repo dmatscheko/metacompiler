@@ -9,14 +9,16 @@ import (
 
 // ----------------------------------------------------------------------------
 // Dynamic grammar parser
-
-// TODO: REMEMBER WHAT HAS BEEN TRIED ALREADY FOR A POSITION!
+//
+// Idea partially taken from: https://rosettacode.org/wiki/Parse_EBNF
 
 type grammarParser struct {
 	src     []rune
 	ch      rune
 	sdx     int
 	grammar Grammar
+
+	blockList map[string]bool
 
 	traceEnabled bool
 	traceCount   int
@@ -36,33 +38,76 @@ func (gp *grammarParser) skipSpaces() {
 	}
 }
 
-func (gp *grammarParser) printTrace(rule r.Rule, doSkipSpaces bool, depth int) {
+func times(s string, n int) string {
+	res := s
+	for ; n > 0; n-- {
+		res = res + s
+	}
+	return res
+}
+
+func (gp *grammarParser) getRuleId(rule *r.Rule, pos int) string {
+	return fmt.Sprintf("%d:%d", rule.ID, pos)
+}
+
+func (gp *grammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) bool {
+	gp.traceCount++
+	if rule.ID == 0 {
+		rule.ID = gp.traceCount
+	}
+
+	blocked := gp.blockList[gp.getRuleId(rule, gp.sdx)] // True if the current rule on the current position in the text to parse is its own parent (= loop).
+	if rule.Operator != r.Or {                          // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
+		gp.blockList[gp.getRuleId(rule, gp.sdx)] = true // Entry of the rule. Block the current rule in the block list.
+	}
+
+	if !gp.traceEnabled {
+		return !blocked
+	}
+	c := "EOF"
+	if gp.sdx < len(gp.src) {
+		c = fmt.Sprintf("%q", gp.src[gp.sdx])
+	}
+	space := times(" ", depth)
+	msg := ""
+	if blocked {
+		msg = "\n" + space + "<INSTANT EXIT (LOOP)"
+	}
+	skip := "  noskip  "
+	if doSkipSpaces {
+		skip = "  skip  "
+	}
+	fmt.Print(space, ">", depth, "  (", gp.traceCount, ")  pos:", gp.sdx, "  char:", c, skip, rule.ID, ":", PprintRuleOnly(rule, ""), msg, "\n")
+	return !blocked
+}
+
+func (gp *grammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, found bool, pos int) {
+	gp.traceCount++
+	gp.blockList[gp.getRuleId(rule, pos)] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
+
 	if !gp.traceEnabled {
 		return
 	}
-
-	doSkipSpacesStr := "space:noskip"
-	if doSkipSpaces {
-		doSkipSpacesStr = "space:skip"
-	}
-
-	d := ">"
-	d2 := " "
-	for i := 0; i < depth; i++ {
-		d += ">"
-		d2 += " "
-	}
-
-	c := '-'
+	c := "EOF"
 	if gp.sdx < len(gp.src) {
-		c = gp.src[gp.sdx]
+		c = fmt.Sprintf("%q", gp.src[gp.sdx])
 	}
+	skip := "  noskip  "
+	if doSkipSpaces {
+		skip = "  skip  "
+	}
+	fmt.Print(times(" ", depth), "<", depth, "  (", gp.traceCount, ")  pos:", gp.sdx, "  char:", c, skip, rule.ID, ":", PprintRuleOnly(rule, ""), " found:", found, "\n")
+}
 
-	gp.traceCount++
-
-	// Pprint(fmt.Sprintf("%4d: %3d>>>> rule for pos # %d (char '%c') %s", gp.traceCount, depth, gp.sdx, c, doSkipSpacesStr), rule)
-	// Pprint(fmt.Sprintf("%4d: %3d%s rule for pos # %d (char '%c') %s", gp.traceCount, depth, d, gp.sdx, c, doSkipSpacesStr), rule)
-	fmt.Printf("%4d: %3d %s rule for pos # %d (char '%c') %s\n%s%s\n\n", gp.traceCount, depth, d, gp.sdx, c, doSkipSpacesStr, d2, PprintRuleOnly(&rule, d2)) // "  "
+func (gp *grammarParser) applyChildSequence(rules []r.Rule, doSkipSpaces bool, depth int, pos int) []r.Rule {
+	newProductions := []r.Rule{}
+	if len(rules) == 1 {
+		newProductions = gp.apply(&rules[0], doSkipSpaces, depth)
+	} else {
+		newRule := &r.Rule{Operator: r.Sequence, Childs: rules, Pos: pos} // Creating a new rule means that the rule.ID will be new. That does not matter because there is always a parent that has a known rule.ID.
+		newProductions = gp.apply(newRule, doSkipSpaces, depth)
+	}
+	return newProductions
 }
 
 // The self-referential EBNF is (different description form!):
@@ -88,39 +133,26 @@ func (gp *grammarParser) printTrace(rule r.Rule, doSkipSpaces bool, depth int) {
 //
 // // rule == production
 // // factors == non-terminal expression. a subgroup of productions/rules
-// // ident == name             //  <=  identifies another block (== address of the other expression)
+// // ident == name             //  <=  identifies another rule (== address of the other rule)
 // // string == token == terminal == text
 // // or == alternative
 //
-//		SOOOOOO:
-//
-// The rules that apply() has to deal with are BASICALLY THE SAME AS AN BNF-PARSER with annotations (NOT EBNF):
-// {factors} - if rule[0] is not string,
-// just apply one after the other recursively.
-// {"TERMINAL", "a1"}       -- literal constants
-// {"OR", <e1>, <e2>, ...}  -- (any) one of n
-// {"REPEAT", <e1>}         -- as per "{}" in ebnf
-// {"OPTIONAL", <e1>}       -- as per "[]" in ebnf
-// {"IDENT", <name>, idx}   -- apply the sub-rule (its a link to the sub-rule) (its a production)
-// {"TAG", code, <name>, idx }  ---- from dma: the semantic description in IL or something else (script language). also other things like coloring
-//
-func (gp *grammarParser) apply(rule r.Rule, doSkipSpaces bool, depth int) []r.Rule { // => (localProductions)
-	wasSdx := gp.sdx // In case of failure
+// Apply uses the rules recursive.
+func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) []r.Rule { // => (localProductions)
+	wasSdx := gp.sdx // Start position of the rule. Return, if the rule does not match.
 	var localProductions []r.Rule = nil
 
-	// TODO: FOR DEBUG. Make this configurable:
-	// ---------------
-	if depth > 1000 {
-		panic("ERROR: Too many loops!")
+	if !gp.ruleEnter(rule, doSkipSpaces, depth) {
+		gp.ruleExit(rule, doSkipSpaces, depth, false, wasSdx)
+		return nil
 	}
-	gp.printTrace(rule, doSkipSpaces, depth)
-	// ---------------
 
 	switch rule.Operator {
 	case r.Sequence, r.Group, r.Production: // Those are groups/sequences of rules. Iterate through them and apply.
 		for i := 0; i < len(rule.Childs); i++ {
-			newProductions := gp.apply(rule.Childs[i], doSkipSpaces, depth+1)
+			newProductions := gp.apply(&rule.Childs[i], doSkipSpaces, depth+1)
 			if newProductions == nil {
+				gp.ruleExit(rule, doSkipSpaces, depth, false, wasSdx)
 				gp.sdx = wasSdx
 				return nil
 			} else if len(newProductions) > 0 && newProductions[0].Operator == r.SkipSpaces { // this has to be handled in a sequence
@@ -128,7 +160,7 @@ func (gp *grammarParser) apply(rule r.Rule, doSkipSpaces bool, depth int) []r.Ru
 				continue
 			}
 			if rule.Operator == r.Sequence {
-				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only r.Basic can be flattened fully
+				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only r.Sequence can be flattened fully
 			} else {
 				localProductions = r.AppendPossibleSequence(localProductions, r.Rule{Operator: r.Group, Childs: newProductions, Pos: gp.sdx})
 			}
@@ -140,17 +172,17 @@ func (gp *grammarParser) apply(rule r.Rule, doSkipSpaces bool, depth int) []r.Ru
 		text := []rune(rule.String)
 		for i := 0; i < len(text); i++ {
 			if gp.sdx >= len(gp.src) || gp.src[gp.sdx] != text[i] {
+				gp.ruleExit(rule, doSkipSpaces, depth, false, wasSdx)
 				gp.sdx = wasSdx
 				return nil
 			}
 			gp.sdx++
 		}
-		localProductions = append(localProductions, rule)
-		// Pprint("X", rule)
+		localProductions = append(localProductions, *rule)
 	case r.Or:
 		found := false
 		for i := 0; i < len(rule.Childs); i++ {
-			newProductions := gp.apply(rule.Childs[i], doSkipSpaces, depth+1)
+			newProductions := gp.apply(&rule.Childs[i], doSkipSpaces, depth+1)
 			if newProductions != nil { // HERE, nil as the result array is used as not found ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil
 				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 				found = true
@@ -158,51 +190,61 @@ func (gp *grammarParser) apply(rule r.Rule, doSkipSpaces bool, depth int) []r.Ru
 			}
 		}
 		if !found {
+			gp.ruleExit(rule, doSkipSpaces, depth, false, wasSdx)
 			gp.sdx = wasSdx
 			return nil
 		}
 	case r.Repeat:
-		rule.Operator = r.Sequence
+		var newRule *r.Rule
+		if len(rule.Childs) == 1 {
+			newRule = &rule.Childs[0]
+		} else {
+			newRule = &r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: rule.Pos}
+		}
 		for { // Repeat as often as possible.
-			newProductions := gp.apply(rule, doSkipSpaces, depth+1)
+			newProductions := gp.apply(newRule, doSkipSpaces, depth+1)
 			if newProductions == nil {
 				break
 			}
 			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
 		}
 	case r.Optional:
-		rule.Operator = r.Sequence
-		newProductions := gp.apply(rule, doSkipSpaces, depth+1)
+		newProductions := gp.applyChildSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos)
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
-	case r.Ident: // "IDENT" identifies another block (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-block which is at position 3: { "IDENT", "expression", 3 }
-		newRule := r.Rule{Operator: r.Sequence, Childs: gp.grammar.Productions[rule.Int].Childs, Pos: gp.sdx}
-		newProductions := gp.apply(newRule, doSkipSpaces, depth+1)
+	case r.Ident: // "IDENT" identifies another rule (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-rule which is at position 3: { "IDENT", "expression", 3 }
+		newProductions := gp.applyChildSequence(gp.grammar.Productions[rule.Int].Childs, doSkipSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
+			gp.ruleExit(rule, doSkipSpaces, depth, false, wasSdx)
 			gp.sdx = wasSdx
 			return nil
 		}
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 	case r.Tag:
-		newRule := r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: gp.sdx}
-		newProductions := gp.apply(newRule, doSkipSpaces, depth+1)
+		newProductions := gp.applyChildSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
+			gp.ruleExit(rule, doSkipSpaces, depth, false, wasSdx)
 			return nil
 		}
 		newTag := r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Pos: gp.sdx}
 		newTag.Childs = r.AppendArrayOfPossibleSequences(newTag.Childs, newProductions)
 		localProductions = append(localProductions, newTag)
-	case r.SkipSpaces: // TODO: modify SKIPSPACES so that the chars to skip must be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
+	case r.SkipSpaces: // TODO: Modify SKIPSPACES so that the chars to skip can be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		rule.Pos = gp.sdx
-		return []r.Rule{rule}
+		gp.ruleExit(rule, doSkipSpaces, depth, true, wasSdx)
+		return []r.Rule{*rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
 	default: // r.Factor || r.Invalid
+		gp.ruleExit(rule, doSkipSpaces, depth, false, wasSdx)
 		panic(fmt.Sprintf("invalid rule in applies() function: %#v", rule))
 	}
+	gp.ruleExit(rule, doSkipSpaces, depth, true, wasSdx)
 
-	// all failed matches should have returned already
-	// here must only be matches
+	// All failed matches should have returned already.
+	// Here must only be matches.
 
-	if len(localProductions) == 1 && localProductions[0].Operator == r.Group {
-		localProductions = localProductions[0].Childs
+	if len(localProductions) == 1 {
+		if localProductions[0].Operator == r.Group || localProductions[0].Operator == r.Sequence {
+			localProductions = localProductions[0].Childs
+		}
 	}
 	if localProductions == nil { // Must not be nil because nil is for failed match.
 		localProductions = []r.Rule{}
@@ -245,12 +287,14 @@ func ParseWithGrammar(grammar Grammar, srcCode string, traceEnabled bool) (res [
 	gp.sdx = 0
 	gp.traceEnabled = traceEnabled
 	gp.traceCount = 0
+	gp.blockList = make(map[string]bool)
 
 	if len(gp.grammar.Productions) <= 0 {
 		return nil, fmt.Errorf("No productions to parse")
 	}
 
-	newProductions := gp.apply(gp.grammar.Productions[0], true, 0)
+	newProductions := gp.apply(&gp.grammar.Productions[0], true, 0)
+	// Check if the position is at EOF at end of parsing. There can be spaces left, but otherwise its an error:
 	gp.skipSpaces()
 	if gp.sdx < len(gp.src) {
 		return nil, fmt.Errorf("Not everything could be parsed")

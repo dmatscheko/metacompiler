@@ -114,7 +114,7 @@ func PprintSrcSingleLine(pp string) {
 	fmt.Print(pp)
 }
 
-func PprintSequenceHeader(rule *r.Rule, space ...string) string {
+func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -132,9 +132,13 @@ func PprintSequenceHeader(rule *r.Rule, space ...string) string {
 		res += fmt.Sprintf(", Pos:%d, %t", rule.Pos, rule.Bool)
 	case r.Tag:
 		res += fmt.Sprintf(", Pos:%d, Code:", rule.Pos)
-		res += PprintProductions(&rule.TagChilds, sp+"  ")
+		if printChilds {
+			res += PprintProductions(&rule.TagChilds, sp+"  ")
+		} else {
+			res += "[...]"
+		}
 	case r.Factor:
-		res += fmt.Sprintf(", Pos:%d, %c", rule.Pos, rule.Rune)
+		res += fmt.Sprintf(", Pos:%d, Rune:'%c'", rule.Pos, rule.Rune)
 	default:
 		res += fmt.Sprintf(", Pos:%d", rule.Pos)
 	}
@@ -148,7 +152,7 @@ func PprintRule(rule *r.Rule, space ...string) string {
 		sp = space[0]
 	}
 	res := "{"
-	res += PprintSequenceHeader(rule, sp)
+	res += PprintSequenceHeader(rule, true, sp)
 	if len(rule.Childs) > 0 {
 		res += ", " + PprintProductions(&rule.Childs, sp+"  ")
 	}
@@ -162,8 +166,10 @@ func PprintRuleOnly(rule *r.Rule, space ...string) string {
 		sp = space[0]
 	}
 	res := "{"
-	res += PprintSequenceHeader(rule, sp)
-	res += ", [...]"
+	res += PprintSequenceHeader(rule, false, sp)
+	if len(rule.Childs) > 0 {
+		res += ", [...]"
+	}
 	res += "}"
 	return res
 }

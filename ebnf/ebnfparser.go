@@ -214,7 +214,7 @@ func (ep *ebnfParser) addIdent(ident string) int {
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) factor() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("fact> %4d\n", ep.sdx)
+		fmt.Printf("fact(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 	var res r.Rule
@@ -275,7 +275,7 @@ func (ep *ebnfParser) factor() r.Rule {
 	}
 
 	if !valid {
-		panic(fmt.Sprintf("invalid token in factor() function (%#v)", ep.token))
+		panic(fmt.Sprintf("invalid token in factor() function (%s)", PprintRuleOnly(&ep.token)))
 	}
 
 	// if res.Operator == r.Basic && len(res.Childs) == 1 {
@@ -288,7 +288,7 @@ func (ep *ebnfParser) factor() r.Rule {
 // TODO: allow multiple strings/text, separated by ";"!
 func (ep *ebnfParser) tag() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("tag> %4d\n", ep.sdx)
+		fmt.Printf("tag(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 
@@ -309,7 +309,7 @@ func (ep *ebnfParser) tag() r.Rule {
 // also works like getToken(), but advances before that as much as it itself knows (= implements sequence)
 func (ep *ebnfParser) term() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("term> %4d\n", ep.sdx)
+		fmt.Printf("term(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 
@@ -349,7 +349,7 @@ func (ep *ebnfParser) term() r.Rule {
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) expression() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("expr> %4d\n", ep.sdx)
+		fmt.Printf("expr(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 	res := ep.term()
@@ -370,7 +370,7 @@ func (ep *ebnfParser) expression() r.Rule {
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) production() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("prod> %4d\n", ep.sdx)
+		fmt.Printf("prod(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 	// Returns a token or r.Invalid; the real result is left in 'productions' etc, ...

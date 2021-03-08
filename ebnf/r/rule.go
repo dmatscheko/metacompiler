@@ -41,6 +41,7 @@ type Rule struct {
 	Bool      bool   // Only used when Operator == seq.SkipSpaces
 	Rune      rune   // Only used when Operator == seq.Factor  // TODO: Maybe always convert runes into strings...
 	Pos       int    // The position where this Sequence has matched.
+	ID        int    // Used for the block list, when applying the rule as grammar.
 	Childs    []Rule // Used by most Operators
 	TagChilds []Rule // Only used when Operator == seq.Tag
 }

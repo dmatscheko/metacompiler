@@ -10,6 +10,7 @@ import (
 
 // TODO: Add possibility to comment the EBNF via //
 // TODO: Allow to state the start rule via JS
+// TODO: define an EOF symbol for the EBNF syntax
 
 // ==========================================
 
@@ -279,7 +280,6 @@ func main() {
 		return
 	}
 	fmt.Println("\n  ==> Success\n\n  Abstract semantic graph:")
-	fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
 	if *param_trace_ParseWithAGrammar {
 		fmt.Println("    " + ebnf.PprintProductions(&asg, "    "))
 	} else {
