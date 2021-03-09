@@ -288,22 +288,22 @@ func main() {
 
 	fmt.Println("\nCode output:")
 	// Uses the annotations inside the ASG to compile it.
-	upstream, err := ebnf.CompileASG(asg, &aGrammar.Extras, *param_trace_CompileASG)
+	_, err = ebnf.CompileASG(asg, &aGrammar.Extras, *param_trace_CompileASG)
 	if err != nil {
 		fmt.Println("\n  ==> Fail")
 		fmt.Println(err)
 		return
 	}
 	fmt.Print("\n ==> Success\n\n")
-	tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", upstream)
+	// tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", upstream)
 
-	if !*param_trace_CompileASG {
-		if len(tmpStr) > 1000 {
-			tmpStr = tmpStr[:1000] + " ..."
-		}
-	}
+	// if !*param_trace_CompileASG {
+	// 	if len(tmpStr) > 1000 {
+	// 		tmpStr = tmpStr[:1000] + " ..."
+	// 	}
+	// }
 
-	fmt.Print(tmpStr)
+	// fmt.Print(tmpStr)
 	fmt.Println()
 }
 
