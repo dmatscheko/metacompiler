@@ -1,57 +1,51 @@
 "math test"
-<~~ c.compile(c.asg, upstream) ~~>
+<~~ c.compile(c.asg) ~~>
 
 {
 
-formula     = expression <~~ print("\\n\\nRESULT: " + upstream.str + "\\n\\n") ~~> ;
-
-
-
-
-
-expression  <~~ upstream.str = ltrPlus ~~>                        =
-    term                <~~ var ltrPlus = upstream.str ~~>
+expression  =
+    term                   
     {
-        ( "+" | "-" )   <~~ var plusOp = upstream.str ~~>
-        term            <~~ print(" ltrPlus:" + plusOp + "," + ltrPlus + "," + upstream.str + ";   ");
-                            ltrPlus = (plusOp=="+") ? parseInt(ltrPlus) + parseInt(upstream.str) : parseInt(ltrPlus) - parseInt(upstream.str);
-                            print(" ltrPlus=" + ltrPlus + ";\\n") ~~>
-    }                   
+        ( "+" | "-" )      <~~push(up.in)~~>
+        term               <~~
+                           var t2 = parseInt(pop())
+                           var op = pop()
+                           var t1 = parseInt(pop())
+                           var res = (op=="+") ? t1 + t2 : t1 - t2
+                           push(res)
+                           ~~>
+    }
     ;
 
-
-
-term        <~~ upstream.str = ltrMul ~~>                         =
-    factor              <~~ var ltrMul = upstream.str ~~>
+term        =
+    factor                 
     {
-        ( "*" | "/" )   <~~ var mulOp = upstream.str ~~>
-        factor          <~~ print(" ltrMul:" + mulOp + "," + ltrMul + "," + upstream.str + ";   ");
-                            ltrMul = (mulOp=="*") ? parseInt(ltrMul) * parseInt(upstream.str) : parseInt(ltrMul) / parseInt(upstream.str);
-                            print(" ltrMul=" + ltrMul + ";\\n") ~~>
-    }                   
+        ( "*" | "/" )      <~~push(up.in)~~>
+        factor             <~~
+                           var t2 = parseInt(pop())
+                           var op = pop()
+                           var t1 = parseInt(pop())
+                           var res = (op=="*") ? t1 * t2 : t1 / t2
+                           push(res)
+                           ~~>
+    }
     ;
 
-factor =
+factor      =
     (
-        "("             
-        expression      <~~ var expr = upstream.str ~~>
-        ")"             
-    )                   <~~ upstream.str = expr ~~>
+        "("                
+        expression         
+        ")"                
+    )
     |
-    number
+    number                 <~~push(up.in)~~>
     ;
 
 number      = "0" | nonzero { "0" | nonzero } ;
 nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
-
-
-
-
-
-
-
 }
 
+<~~ println("\\nRESULT: " + pop()) ~~>
 
-formula
+expression

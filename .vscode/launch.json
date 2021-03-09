@@ -4,6 +4,7 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Launch Package",
             "type": "go",
@@ -34,7 +35,14 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tc"]
-        }
+        },
+
+        {
+            "name": "Launch aEBNF Test with old",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "../parserparsercompiler_kopie/tests/a-ebnf_to_text-a-grammar.aebnf"]
+        },
 
     ]
 }

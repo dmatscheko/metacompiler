@@ -2,6 +2,8 @@ package ebnf
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 
 	"./r"
 	"github.com/dop251/goja"
@@ -13,7 +15,11 @@ type compiler struct {
 
 	asg []r.Rule
 
+	stack     []r.Object          // global stack.
+	ltrStream map[string]r.Object // global variables.
+
 	traceEnabled bool
+	traceCount   int
 }
 
 // ----------------------------------------------------------------------------
@@ -40,6 +46,48 @@ type compiler struct {
 	if co.globalVars["idents"] == nil {          // (string list) The global list of unique names. Set by {{ident "someName"}}. It is exposed to the scripting language on purpose.
 */
 
+func (co *compiler) sprintStack(space string) string {
+	res := ""
+	for _, elem := range co.stack {
+		if s, ok := elem.(*string); ok {
+			res = res + space + jsonizeObject(*s) + "\n"
+		} else {
+			res = res + space + jsonizeObject(elem) + "\n"
+		}
+	}
+	return res
+}
+
+func (co *compiler) traceTop(code string, depth int, upStream map[string]r.Object) {
+	co.traceCount++
+	space := "  "
+
+	logCode := code
+
+	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", co.traceCount, ")\n")
+	removeSpace1 := regexp.MustCompile(`[ \t]+`)
+	logCode = removeSpace1.ReplaceAllString(logCode, " ")
+	removeSpace2 := regexp.MustCompile(`[\n\r]\s+`)
+	logCode = removeSpace2.ReplaceAllString(logCode, "\n")
+	logCode = strings.ReplaceAll(logCode, "\n", "\n"+space)
+
+	fmt.Print(space, "--\n", space, logCode, "\n")
+
+	fmt.Print(space, "---\n", space, ">>>>Before call:\n")
+	fmt.Print(space, ">>stack:\n", co.sprintStack(space), space, "--\n")
+	fmt.Print(space, ">>ltr: ", jsonizeObject(co.ltrStream), "\n", space, "--\n")
+	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n")
+	fmt.Print(space, "---\n", space, ">>>>Code output:\n")
+}
+
+func (co *compiler) traceBottom(upStream map[string]r.Object) {
+	space := "  "
+	fmt.Print(space, "---\n", space, ">>>>After call:\n")
+	fmt.Print(space, ">>stack:\n", co.sprintStack(space), space, "--\n")
+	fmt.Print(space, ">>ltr: ", jsonizeObject(co.ltrStream), "\n", space, "--\n")
+	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n", space, "--\n\n\n")
+}
+
 // RunScript executes the given string in the global context.
 func (co *compiler) Run(name, src string) (goja.Value, error) {
 	p, err := goja.Compile(name, src, true)
@@ -51,16 +99,23 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 	return co.vm.RunProgram(p)
 }
 
-func (co *compiler) handleTagCode(code string, name string, upstream map[string]r.Object, localASG []r.Rule) { // => (codeResultObjTree) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
-	co.vm.Set("upstream", upstream) // The object(s) that are passed from the bottom roots to the top of the tree. Initially, only TERMINALs are entered into 'upstream.text'. If 'upstream.text' contains something that can be converted into string, it is concateneted with the other TERMINAL values or filled upstream.text contents.
+func (co *compiler) handleTagCode(code string, name string, upStream map[string]r.Object, localASG []r.Rule, depth int) { // => (upStream) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
+
+	co.vm.Set("up", upStream) // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
+
 	co.compilerFuncMap["localAsg"] = localASG
 
-	// fmt.Printf("\n\nCODE: %s\n\n", code)
+	if co.traceEnabled {
+		co.traceTop(code, depth, upStream)
+	}
 
 	// TODO: store precompiled data!
 	_, err := co.Run(name, code)
 	if err != nil {
 		panic(err)
+	}
+	if co.traceEnabled {
+		co.traceBottom(upStream)
 	}
 }
 
@@ -84,100 +139,51 @@ func (co *compiler) handleTagCode(code string, name string, upstream map[string]
 //     ^
 //     IN
 //
-func (co *compiler) compile(localASG []r.Rule, upstream *map[string]r.Object) {
+// 'upStream' are the variables that go up only. They are basically local variables.
+// 'ltrStream' are basically global variables. The difference betwee ltrStram and global JS variables is, that they ltrStream appends variables of sibling rules when their branches meet while propagating upwards.
+func (co *compiler) compile(localASG []r.Rule, depth int) map[string]r.Object { // => (upStream)
 	if localASG == nil || len(localASG) == 0 {
-		return
+		return map[string]r.Object{"in": ""}
 	}
 
 	// ----------------------------------
 	// Split and collect
 
-	upstreamMerged := map[string]r.Object{}
 	if len(localASG) > 1 { // "SEQUENCE" Iterate through all rules and applies.
+
+		upStreamMerged := map[string]r.Object{"in": ""}
+
 		for _, rule := range localASG { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
-
-			// Copy, so that compile() and handleTagCode() can change them:
-			upstreamEdit := map[string]r.Object{}
-			for k, v := range *upstream {
-				upstreamEdit[k] = v
-			}
-
-			// LTR override of input.
-			for k, v := range upstreamMerged {
-				if len(k) >= 3 && k[:3] == "ltr" {
-					upstreamEdit[k] = v
-				}
-			}
-
 			// Compile:
-			co.compile([]r.Rule{rule}, &upstreamEdit)
+			upStreamNew := co.compile([]r.Rule{rule}, depth+1)
 
-			// Merge into upstreamMerged:
-			for k, v := range upstreamEdit {
-
-				if len(k) >= 3 {
-
-					prefix := k[:3]
-					switch prefix {
-					case "str": // All upstream variables that start with 'str' are combined as string.
-						// if v == nil { // Only when merging: Ignore empty/nil responses.
-						// 	continue
-						// }
-						str1, ok1 := upstreamMerged[k].(string)
-						str2, ok2 := v.(string)
-						if ok1 && ok2 {
-							upstreamMerged[k] = str1 + str2
-						} else if ok2 {
-							upstreamMerged[k] = str2
-						}
-						continue
-					case "obj": // All upstream variables that start with 'str' are combined as string.
-						if v == nil { // Only when merging: Ignore empty/nil responses.
-							continue
-						}
-						if upstreamMerged[k] != nil {
-							if mergedArr, ok := upstreamMerged[k].([]interface{}); ok { // If we can merge as array:
-								if vArr, ok := v.([]interface{}); ok {
-									upstreamMerged[k] = append(mergedArr, vArr...)
-								} else {
-									upstreamMerged[k] = append(mergedArr, v)
-								}
-							} else {
-								upstreamMerged[k] = []interface{}{upstreamMerged[k], v}
-							}
-						} else {
-							upstreamMerged[k] = v
-						}
-						continue
-					case "ltr":
-						upstreamMerged[k] = v
-						continue
+			for k, v := range upStreamNew {
+				if k == "in" || strings.HasPrefix(k, "str") {
+					str1, ok1 := upStreamMerged[k].(string)
+					str2, ok2 := v.(string)
+					if !ok1 {
+						panic("Variable 'up." + k + "' must only contain strings. Contains: " + fmt.Sprintf("%#v", upStreamMerged[k]))
 					}
-				}
-
-				if upstreamMerged[k] != (*upstream)[k] && v == (*upstream)[k] { // If another child changed the result but the current one would not, keep the changed result of the other child (only usable when NOT merging).
+					if !ok2 {
+						panic("Variable 'up." + k + "' must only contain strings. Contains: " + fmt.Sprintf("%#v", v))
+					}
+					upStreamMerged[k] = str1 + str2
 					continue
 				}
-
-				// LTR override of output.
-				upstreamMerged[k] = v
+				// If upStreamMerged[k] already holds an array, it must stay that array and must NOT get filled with newer v.
+				// So if upStreamMerged[k] has no previous entry, create an array inside and add the array v one object.
+				if _, ok := upStreamMerged[k]; !ok {
+					upStreamMerged[k] = []interface{}{}
+				}
+				if arr, ok := upStreamMerged[k].([]interface{}); ok {
+					upStreamMerged[k] = append(arr, v)
+				} else {
+					panic("Array missing in upStreamMerged.")
+				}
 			}
 		}
 
-		for k, v := range upstreamMerged {
-			(*upstream)[k] = v
-		}
-		for k := range *upstream {
-			if upstreamMerged[k] == nil {
-				delete((*upstream), k)
-			}
-		}
-
-		if co.traceEnabled {
-			fmt.Printf("\n## %s\n--\n%#v\n", PprintProductions(&localASG, ""), (*upstream))
-		}
-
-		return
+		return upStreamMerged
 	}
 
 	// ----------------------------------
@@ -188,26 +194,26 @@ func (co *compiler) compile(localASG []r.Rule, upstream *map[string]r.Object) {
 
 	switch rule.Operator {
 	case r.Terminal:
-		// if str, ok := upstream["text"].(string); ok && len(str) > 0 {
-		// 	panic("ONLY FOR DEBUG! no this should not happen")
-		// }
-		(*upstream)["str"] = rule.String
-		(*upstream)["obj"] = rule.String
-		return
+		if str, ok := co.ltrStream["in"].(string); ok {
+			co.ltrStream["in"] = str + rule.String
+		} else {
+			panic("Variable 'ltr.in' must only contain strings.")
+		}
+		return map[string]r.Object{"in": rule.String}
 	case r.Tag:
 		tagCode := rule.TagChilds[0].String
 		// First collect all the data.
-		co.compile(rule.Childs, upstream) // Evaluate the child productions of the TAG to collect their values.
+		upStream := co.compile(rule.Childs, depth+1) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), (*upstream), localASG) // TODO: maybe change "upstream" to "upstreamReplace, upstreamCombine"
-		return
+		co.handleTagCode(tagCode, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, depth)
+		return upStream
 	default:
 		if len(rule.Childs) > 0 {
-			co.compile(rule.Childs, upstream) // Evaluate the child productions of groups to collect their values.
+			return co.compile(rule.Childs, depth+1) // Evaluate the child productions of groups to collect their values.
 		}
 	}
 
-	return
+	return map[string]r.Object{"in": ""}
 }
 
 func (co *compiler) initFuncMap() {
@@ -216,11 +222,26 @@ func (co *compiler) initFuncMap() {
 	co.vm.Set("printf", fmt.Printf)
 	co.vm.Set("sprintf", fmt.Sprintf)
 
-	// co.vm.Set("defined", func(o r.Object) bool { return o != nil })
+	co.vm.Set("ltr", co.ltrStream)
+
+	co.vm.Set("pop", func() interface{} {
+		if len(co.stack) > 0 {
+			res := co.stack[len(co.stack)-1]
+			co.stack = co.stack[:len(co.stack)-1]
+			return res
+		}
+		return nil
+	})
+
+	co.vm.Set("push", func(v interface{}) {
+		co.stack = append(co.stack, v)
+	})
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
-		"compile": func(localASG []r.Rule, upstream map[string]r.Object) { co.compile(localASG, &upstream) },
-		"asg":     co.asg,
+		"compile": func(localASG []r.Rule) map[string]r.Object {
+			return co.compile(localASG, 0)
+		},
+		"asg": co.asg,
 
 		// "sequence": func(Operator r.OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []r.Rule, TagChilds []r.Rule) r.Rule {
 		// 	return r.Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
@@ -242,23 +263,28 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res
 
 	var co compiler
 	co.traceEnabled = traceEnabled
+	co.traceCount = 0
 	co.asg = asg
-
-	var upstream = map[string]r.Object{} // Local variables (must be passed through compile).
+	co.ltrStream = map[string]r.Object{ // Basically like global variables.
+		"in": "", // This is the parser input (the terminals).
+	}
+	upStream := map[string]r.Object{ // Basically the local variables.
+		"in": "", // This is the parser input (the terminals).
+	}
 
 	co.vm = goja.New()
 	co.initFuncMap()
 
 	if prolog, ok := (*extras)["prolog.code"]; ok {
-		co.handleTagCode(prolog.TagChilds[0].String, "prolog.code", upstream, asg)
+		co.handleTagCode(prolog.TagChilds[0].String, "prolog.code", upStream, asg, 0)
 	}
 
 	// Is called fom JS.
-	// co.compile(asg, upstream)
+	// co.compile(asg)
 
 	if epilog, ok := (*extras)["epilog.code"]; ok {
-		co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upstream, asg)
+		co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upStream, asg, 0)
 	}
 
-	return upstream, nil
+	return upStream, nil
 }

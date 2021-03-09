@@ -6,52 +6,58 @@ function getNameIdx(name) {
   if (pos != -1) { return pos };
   return names.push(name)-1;
 }
-c.compile(c.asg, upstream)
+c.compile(c.asg, up.in)
 ~~>
 
 {
 
-program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
-programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
-production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>       
-				 = name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
-expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   
-				 = alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
-alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
+program          <~~push(up.in)~~>
+                 = [ title <~~ up.in += ', \\n' ~~> ] programtag "{" <~~ up.in = '\\n{\\n\\n' ~~> { production } "}" <~~ up.in = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ up.in = ', \\n'+up.in+'\\n' ~~> ] ;
 
-taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
-				 = term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
+programtag       = [ tag <~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~> ] ;
 
-term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
-group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
-option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
-repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
-skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
+production       <~~ var productionTag = pop(); if (productionTag != undefined) { pop()/*=undefined*/; up.in = '{"TAG", '+productionTag+', '+up.in+'}'}; up.in += ',\\n' ~~>       
+                 = name <~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', '; push(undefined) ~~> [ tag <~~ push(up.in); up.in = '' ~~> ] "=" <~~up.in=''~~> [ expression ] ( "." | ";" ) <~~ up.in = '}' ~~> ;
+
+expression       <~~ if (/*or*/ pop()) { up.in = '{"OR", '+up.in+'}' } ~~>
+                 = alternative <~~ /*or=false*/ push(false); ~~> { "|" <~~up.in=''~~> alternative <~~ /*or=true*/ pop();push(true); up.in = ', '+up.in ~~> } ;
+
+alternative      = taggedterm { taggedterm <~~ up.in = ', '+up.in ~~> } ;
+
+taggedterm       <~~up.in=pop()~~>                                                  = term <~~push(up.in)~~> [ tag <~~ push('{"TAG", '+up.in+', '+pop()+'}') ~~> ] ;
+
+term             = ( name <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
+
+group            <~~ up.in = '{'+pop()+'}' ~~>                                      = "(" expression <~~push(up.in)~~> ")" ;
+option           <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>                          = "[" expression <~~push(up.in)~~> "]" ;
+repetition       <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>                            = "{" expression <~~push(up.in)~~> "}" ;
+skipspaces       = "+" <~~ up.in = '{"SKIPSPACES", true}' ~~> | "-" <~~ up.in = '{"SKIPSPACES", false}' ~~> ;
 
 title            = text ;
-start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
+start            = name <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
 comment          = text ;
 
-tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
+tag              <~~up.in=pop()~~>                                                  = "<" code <~~push(up.in)~~> { "," code <~~ push(pop()+', '+up.in) ~~> } ">" ;
 
-code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
+code             <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>                  = '~~' - { [ "~" ] codeinner } <~~push(up.in)~~> '~~' + ;
 codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
 name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 
-text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
-dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
-squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
+text             <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>                  = dquotetext | squotetext ;
+dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
+squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;
 
 digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
 caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
+special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" | "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
 
 }
 
-<~~ print(upstream.str)
+<~~ print(pop())
 
+/*
 println("\\n\\nTHE FOLLOWING IS NOT FROM THE ABOVE CODE BUT ONLY A TEST")
 
 println("\\nLLVM IR test:\\n------------------------------------")
@@ -119,6 +125,7 @@ println(llvm.Callgraph(m))
 
 println("\\nEVAL:\\n------------------------------------")
 println(llvm.Eval(m, "test"))
+*/
 
 ~~>
 program
