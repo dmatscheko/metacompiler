@@ -408,8 +408,8 @@ Special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*
 
 <~~ print(pop()) ~~>
 Program
-"This aEBNF contains the grammatic and semantic information for annotated EBNF.
-It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."
+"This a-EBNF contains the grammatic and semantic information for annotated EBNF.
+It allows to automatically create a compiler for everything described in a-EBNF (yes, that format)."
 ```
 </details>
 
@@ -454,7 +454,7 @@ It allows to automatically create a compiler for everything described in aEBNF (
 
 {"TAG", {"TERMINAL", " print(pop()) "}}, 
 {"IDENT", "Program", 0}, 
-{"TERMINAL", "This aEBNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in aEBNF (yes, that format)."}
+{"TERMINAL", "This a-EBNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in a-EBNF (yes, that format)."}
 ```
 </details>
 
