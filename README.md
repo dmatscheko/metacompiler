@@ -269,23 +269,22 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
     OUT
      ^
      |
-     C--.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
-     |   |
-     ^   v
-     *   |     (*) All upstream (up.*) values are combined.
-    /|   |
-   | | _ |
-   T | | |     (T) The text of a Terminal symbol gets sent to 'up.in'.
-   | X | |     (X) Here, the script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
-   | | O |     (O) Other Rules are ignored.
-   | | | |
-   \ | / |
-    \|/  |
-     *   |     (*) Childs from one Rule get splitted.
-     |__/
-     |
-     ^
-     IN
+     C---.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
+     |    |
+     ^    v
+     *    |     (*) All upstream (up.*) values from returning 'compile()'s are combined.
+    /|    |
+   | | _  |
+   T | |  |     (T) The text of a Terminal symbol gets sent to 'up.in'.
+   | X |  |     (X) Here, the script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
+   | | O  |     (O) Other Rules are ignored.
+   | | |  |
+   \ | /  |
+    \|/   |
+     *    |     (*) Childs from one Rule get splitted. The splitted path always only processe one rule (That can contain childs).
+     |    |
+     ^    |
+     IN<-'
 ```
 
 #### LLVM IR API
