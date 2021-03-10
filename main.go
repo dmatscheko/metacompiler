@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"time"
@@ -123,14 +122,14 @@ func main() {
 
 	dat, err := ioutil.ReadFile(*param_aEbnf)
 	if err != nil {
-		fmt.Println("Error: ", err)
+		log.Println("Error: ", err)
 		return
 	}
 	aEbnf := string(dat)
 
 	dat, err = ioutil.ReadFile(*param_srcCode)
 	if err != nil {
-		fmt.Println("Error: ", err)
+		log.Println("Error: ", err)
 		return
 	}
 	srcCode := string(dat)
@@ -146,62 +145,61 @@ func main() {
 		*param_trace_CompileASG = true
 	}
 
-	fmt.Print("\n==================\nParse a-EBNF\n==================\n\n")
-	ebnf.PprintSrc("a-EBNF", aEbnf)
+	log.Print("\n==================\nParse a-EBNF\n==================\n\n")
+	log.Println("a-EBNF:")
+	log.Print(ebnf.PprintSrc(aEbnf))
 	// Parses an aEBNF and generates a a-grammar with it.
 	aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
 	if err != nil {
-		fmt.Println("  ==> Fail")
-		fmt.Println(err)
+		log.Println("  ==> Fail")
+		log.Println(err)
 		return
 	}
-	fmt.Println("  ==> Success\n\n  a-Grammar:")
+	log.Println("  ==> Success\n\n  a-Grammar:")
 	if *param_trace_ParseAEBNF {
-		fmt.Println("   => Extras: " + ebnf.PprintExtras(&aGrammar.Extras, "    "))
-		fmt.Println("   => Productions: " + ebnf.PprintProductions(&aGrammar.Productions, "    "))
+		log.Println("   => Extras: " + ebnf.PprintExtras(&aGrammar.Extras, "    "))
+		log.Println("   => Productions: " + ebnf.PprintProductions(&aGrammar.Productions, "    "))
 	} else {
-		fmt.Println("   => Extras: " + ebnf.PprintExtrasShort(&aGrammar.Extras, "    "))
-		fmt.Println("   => Productions: " + ebnf.PprintProductionsShort(&aGrammar.Productions, "    "))
+		log.Println("   => Extras: " + ebnf.Shorten(ebnf.PprintExtras(&aGrammar.Extras, "    ")))
+		log.Println("   => Productions: " + ebnf.Shorten(ebnf.PprintProductions(&aGrammar.Productions, "    ")))
 	}
 
-	fmt.Print("\n\n==================\nParse target code\n==================\n\n")
-	fmt.Println("Parse via a-grammar:")
-	ebnf.PprintSrcSingleLine(srcCode)
-	fmt.Println()
-	fmt.Println()
+	log.Print("\n\n==================\nParse target code\n==================\n\n")
+	log.Println("Parse via a-grammar:")
+	log.Print(ebnf.PprintSrcSingleLine(srcCode))
+	log.Println()
+	log.Println()
 	// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
 	asg, err := ebnf.ParseWithGrammar(aGrammar, srcCode, false, *param_trace_ParseWithAGrammar)
 	if err != nil {
-		fmt.Println("\n  ==> Fail")
-		fmt.Println(err)
+		log.Println("\n  ==> Fail")
+		log.Println(err)
 		return
 	}
-	fmt.Println("\n  ==> Success\n\n  Abstract semantic graph:")
+	log.Println("\n  ==> Success\n\n  Abstract semantic graph:")
 	if *param_trace_ParseWithAGrammar {
-		fmt.Println("    " + ebnf.PprintProductions(&asg, "    "))
+		log.Println("    " + ebnf.PprintProductions(&asg, "    "))
 	} else {
-		fmt.Println("    " + ebnf.PprintProductionsShort(&asg, "    "))
+		log.Println("    " + ebnf.Shorten(ebnf.PprintProductions(&asg, "    ")))
 	}
 
-	fmt.Print("\nCode output:\n\n")
+	log.Print("\nCode output:\n\n")
 	// Uses the annotations inside the ASG to compile it.
 	_, err = ebnf.CompileASG(asg, &aGrammar.Extras, *param_trace_CompileASG, false)
 	if err != nil {
-		fmt.Println("\n  ==> Fail")
-		fmt.Println(err)
+		log.Println("\n  ==> Fail")
+		log.Println(err)
 		return
 	}
-	fmt.Print("\n ==> Success\n\n")
-	// tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", upstream)
+	log.Print("\n ==> Success\n\n")
+	// tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", up)
 
 	// if !*param_trace_CompileASG {
-	// 	if len(tmpStr) > 1000 {
-	// 		tmpStr = tmpStr[:1000] + " ..."
-	// 	}
+	// 	tmpStr = ebnf.Shorten(tmpStr)
 	// }
 
-	// fmt.Print(tmpStr)
-	fmt.Println()
+	// log.Print(tmpStr)
+	log.Println()
 }
 
 func speedtest(src, target string, count int) {
@@ -220,14 +218,14 @@ func speedtestParseAEBNF(src, target string, count int) {
 		_, err = ebnf.ParseAEBNF(src, false)
 	}
 	if err != nil {
-		fmt.Println("Error")
+		log.Println("Error")
 		return
 	}
 }
 func speedtestParseWithGrammar(src, target string, count int) {
 	aGrammar, err := ebnf.ParseAEBNF(src, false)
 	if err != nil {
-		fmt.Println("Error ParseAEBNF")
+		log.Println("Error ParseAEBNF")
 		return
 	}
 	defer timeTrack(time.Now(), "ParseWithGrammar")
@@ -235,19 +233,19 @@ func speedtestParseWithGrammar(src, target string, count int) {
 		_, err = ebnf.ParseWithGrammar(aGrammar, target, false, false)
 	}
 	if err != nil {
-		fmt.Println("Error ParseWithGrammar")
+		log.Println("Error ParseWithGrammar")
 		return
 	}
 }
 func speedtestCompileASG(src, target string, count int) {
 	aGrammar, err := ebnf.ParseAEBNF(src, false)
 	if err != nil {
-		fmt.Println("Error ParseAEBNF")
+		log.Println("Error ParseAEBNF")
 		return
 	}
 	asg, err := ebnf.ParseWithGrammar(aGrammar, target, false, false)
 	if err != nil {
-		fmt.Println("Error ParseWithGrammar")
+		log.Println("Error ParseWithGrammar")
 		return
 	}
 	defer timeTrack(time.Now(), "CompileASG")
@@ -255,7 +253,7 @@ func speedtestCompileASG(src, target string, count int) {
 		_, err = ebnf.CompileASG(asg, &aGrammar.Extras, false, true)
 	}
 	if err != nil {
-		fmt.Println("Error CompileASG")
+		log.Println("Error CompileASG")
 		return
 	}
 }

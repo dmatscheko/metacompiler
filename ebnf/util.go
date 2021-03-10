@@ -51,36 +51,15 @@ func jsonizeObject(ob r.Object) string {
 	return pp
 }
 
-// func jsonizeObject(ob object) string {
-// 	pp := fmt.Sprintf("%#v", ob)
-// 	pp = strings.ReplaceAll(pp, "[]interface {}", "")
-// 	if strings.HasPrefix(pp, "[]int") {
-// 		pp = strings.Replace(pp, "[]int", "", 1)
-// 	} else if strings.HasPrefix(pp, "[]string") {
-// 		pp = strings.Replace(pp, "[]string", "", 1)
-// 	} else if strings.HasPrefix(pp, "[]") {
-// 		pp = strings.Replace(pp, "[]", "", 1)
-// 	} else if strings.HasPrefix(pp, "map[string]interface {}") {
-// 		pp = strings.Replace(pp, "map[string]interface {}", "", 1)
-// 	} else if strings.HasPrefix(pp, "map[string]string") {
-// 		pp = strings.Replace(pp, "map[string]string", "", 1)
-// 	}
-
-// 	space := regexp.MustCompile(`[ \t]+`)
-// 	pp = space.ReplaceAllString(pp, " ")
-
-// 	return pp
-// }
-
-func Pprint(header string, ob r.Object) {
-	str := jsonizeObject(ob)
-	if len(str) > 1200 {
-		str = str[:1200] + " ..."
+func Shorten(s string) string {
+	const maxLen = 800
+	if len(s) > maxLen {
+		s = s[:maxLen-5] + " ..."
 	}
-	fmt.Printf("\n%s:\n   %s\n", header, str)
+	return s
 }
 
-func PprintSrc(header string, pp string) {
+func PprintSrc(pp string) string {
 	linebreaks := regexp.MustCompile(`(?s)([ \t]*[\r\n]+[ \t]*)+`)
 	pp = linebreaks.ReplaceAllString(pp, "\n")
 
@@ -90,14 +69,10 @@ func PprintSrc(header string, pp string) {
 	indent := regexp.MustCompile(`(?m)^[ \t]*`)
 	pp = indent.ReplaceAllString(pp, "   ")
 
-	if len(pp) > 1200 {
-		pp = pp[:1200] + " ..."
-	}
-
-	fmt.Printf("%s:\n%s\n", header, pp)
+	return Shorten(pp)
 }
 
-func PprintSrcSingleLine(pp string) {
+func PprintSrcSingleLine(pp string) string {
 	linebreaks := regexp.MustCompile(`(?s)([ \t]*[\r\n]+[ \t]*)+`)
 	pp = linebreaks.ReplaceAllString(pp, " ")
 
@@ -107,11 +82,7 @@ func PprintSrcSingleLine(pp string) {
 	indent := regexp.MustCompile(`(?m)^[ \t]*`)
 	pp = indent.ReplaceAllString(pp, "   ")
 
-	if len(pp) > 1200 {
-		pp = pp[:1200] + " ..."
-	}
-
-	fmt.Print(pp)
+	return Shorten(pp)
 }
 
 func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) string {
@@ -192,14 +163,6 @@ func PprintProductions(productions *[]r.Rule, space ...string) string {
 	return res
 }
 
-func PprintProductionsShort(productions *[]r.Rule, space ...string) string {
-	str := PprintProductions(productions, space...)
-	if len(str) > 1200 {
-		str = str[:1200] + " ..."
-	}
-	return str
-}
-
 func PprintExtras(extras *map[string]r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
@@ -216,14 +179,6 @@ func PprintExtras(extras *map[string]r.Rule, space ...string) string {
 	}
 	res += "\n" + sp + "}"
 	return res
-}
-
-func PprintExtrasShort(extras *map[string]r.Rule, space ...string) string {
-	str := PprintExtras(extras, space...)
-	if len(str) > 1200 {
-		str = str[:1200] + " ..."
-	}
-	return str
 }
 
 func LinePosFromStrPos(data string, pos int) string {
