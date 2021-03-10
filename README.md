@@ -7,10 +7,11 @@ This is
 
 That new runtime generated parser plus compiler should allow to compile an arbitrary new language, specified in the EBNF and its annotations.
 
-## What is an annotated EBNF?
+## What is an annotated EBNF (a-EBNF)?
 
 * The EBNF stores the grammar of e.g. a new language.
 * The annotations in the EBNF store the semantic of the new language.
+* The combined format is annotated EBNF or a-EBNF.
 
 ## Examples
 
@@ -217,24 +218,31 @@ go get "github.com/dop251/goja" "github.com/llir/llvm/ir"
 go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 ```
 
-### JS API
+### Exposed JS API
 
-#### Basic exposed API
+#### Output
 
 * print [fmt.Print](https://golang.org/pkg/fmt/#Print)
 * println [fmt.Println](https://golang.org/pkg/fmt/#Println)
 * printf [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
 * sprintf [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
 
+#### Data Handling
+
+* up (for upstream)
+  * up.in
+  * up.*
+  * up.str*
+  * ltr.in
+  * ltr.*
+* pop()
+* push()
+
 #### Compiler API
 
-* upstream
-  * upstream.str + upstream.obj
-  * upstream.str*
-  * upstream.obj*
 * c.asg
 * c.localAsg
-* c.compile
+* c.compile()
   * &nbsp;
 ```
     OUT
@@ -270,5 +278,5 @@ The functions and constants are exposed to JS as:
 * [llvm.types](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/types)
 
 * Custom functions:
-  * The function `llvm.Callgraph(m ir.Module)` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. at [http://magjac.com/graphviz-visual-editor/](http://magjac.com/graphviz-visual-editor/)).
+  * The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. at [http://magjac.com/graphviz-visual-editor/](http://magjac.com/graphviz-visual-editor/)).
   * The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
