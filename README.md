@@ -303,3 +303,39 @@ The functions and constants are exposed to JS as:
   The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. at [http://magjac.com/graphviz-visual-editor/](http://magjac.com/graphviz-visual-editor/)).
   * __llvm.Callgraph(m ir.Module, f string)__  
   The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
+
+### a-EBNF Syntax
+
+A normal EBNF syntax looks like this:
+
+__EBNF of EBNF:__
+```javascript
+Production  = name "=" [ Expression ] ";" .
+Expression  = Alternative { "|" Alternative } ;
+Alternative = Term { Term } ;
+Term        = name | token [ "..." token ] | Group | Option | Repetition | skip | noskip ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
+```
+
+The definition of `name` and `token`, and of `skip` and `noskip` can be seen here:
+```javascript
+name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
+token       = Dquotetoken | Squotetoken ;
+
+Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } '"' + ;
+Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } "'" + ;
+
+Digit       = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+Small       = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
+              "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+Caps        = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
+              "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
+              "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
+              "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
+
+skip        = "+" ;  // Skips all whitespace in the future.
+noskip      = "-" ;  // Do not skip whitspace in the future.
+```
