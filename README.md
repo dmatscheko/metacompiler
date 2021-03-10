@@ -19,61 +19,147 @@ That new runtime generated parser plus compiler should allow to compile an arbit
   <summary>Click to expand!</summary>
 
 ```
-`"aEBNF of aEBNF as text"
+"aEBNF of aEBNF as text"
 <~~
 var names = [];
 function getNameIdx(name) {
-	var pos = names.indexOf(name);
-	if (pos != -1) { return pos };
-	return names.push(name)-1;
+    var pos = names.indexOf(name);
+    if (pos != -1) { return pos };
+    return names.push(name)-1;
 }
+c.compile(c.asg, up.in)
 ~~>
 
 {
 
-program          = [ title <~~ upstream.str += ', \\n' ~~> ] programtag "{" <~~ upstream.str = '\\n{\\n\\n' ~~> { production } "}" <~~ upstream.str = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ upstream.str = ', \\n'+upstream.str+'\\n' ~~> ] ;
-programtag       = [ tag <~~ upstream.str = '{"TAG", '+upstream.str+'}, \\n' ~~> ] ;
-production       <~~ if (upstream.productionTag != undefined) { upstream.str = '{"TAG", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\n' ~~>       
-					= name <~~ upstream.str = '{"'+upstream.str+'", '+getNameIdx(upstream.str)+', ' ~~> [ tag ] <~~ upstream.productionTag = upstream.str; upstream.str = '' ~~> "=" <~~ upstream.str = '' ~~> [ expression ] ( "." | ";" ) <~~ upstream.str = '}' ~~> ;
-expression       <~~ if (upstream.or) { upstream.str = '{"OR", '+upstream.str+'}' } ~~>   
-					= alternative <~~ upstream.or = false ~~> { "|" <~~ upstream.str = '' ~~> alternative <~~ upstream.or = true; upstream.str = ', '+upstream.str ~~> } ;
-alternative      = taggedterm { taggedterm <~~ upstream.str = ', '+upstream.str ~~> } ;
+program                                 <~~push(up.in)~~>
+                =
+                [
+                    title               <~~ up.in += ', \\n' ~~>
+                ]
+                programtag
+                "{"                     <~~ up.in = '\\n{\\n\\n' ~~>
+                { production }
+                "}"                     <~~ up.in = '\\n}, \\n\\n' ~~>
+                programtag
+                start
+                [
+                    comment             <~~ up.in = ', \\n'+up.in+'\\n' ~~>
+                ] ;
 
-taggedterm       <~~ if (upstream.termTag != undefined) { upstream.str = '{"TAG", '+upstream.termTag+', '+upstream.str+'}' } ~~>
-					= term <~~ upstream.termTag = undefined ~~> [ tag <~~ upstream.termTag = upstream.str; upstream.str = '' ~~> ] ;
+programtag      =
+                [
+                    tag                 <~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~>
+                ] ;
 
-term             = ( name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
-group            <~~ upstream.str = '{'+upstream.str+'}' ~~>                              = "(" <~~ upstream.str = '' ~~> expression ")" <~~ upstream.str = '' ~~> ;
-option           <~~ upstream.str = '{"OPTIONAL", '+upstream.str+'}' ~~>                  = "[" <~~ upstream.str = '' ~~> expression "]" <~~ upstream.str = '' ~~> ;
-repetition       <~~ upstream.str = '{"REPEAT", '+upstream.str+'}' ~~>                    = "{" <~~ upstream.str = '' ~~> expression "}" <~~ upstream.str = '' ~~> ;
-skipspaces       = "+" <~~ upstream.str = '{"SKIPSPACES", true}' ~~> | "-" <~~ upstream.str = '{"SKIPSPACES", false}' ~~> ;
+production                              <~~ var productionTag = pop();
+                                        if (productionTag != undefined) {
+                                            pop()/*=undefined*/;
+                                            up.in = '{"TAG", '+productionTag+', '+up.in+'}'
+                                        };
+                                        up.in += ',\\n' ~~>       
+                =
+                name                    <~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', ';
+                                        push(undefined) ~~>
+                [
+                    tag                 <~~ push(up.in); up.in = '' ~~>
+                ]
+                "="                     <~~up.in=''~~>
+                [ expression ]
+                ( "." | ";" )           <~~ up.in = '}' ~~> ;
 
-title            = text ;
-start            = name <~~ upstream.str = '{"IDENT", "'+upstream.str+'", '+getNameIdx(upstream.str)+'}' ~~> ;
-comment          = text ;
+expression                              <~~ if (/*or*/ pop()) {
+                                            up.in = '{"OR", '+up.in+'}'
+                                        } ~~>
+                =
+                alternative             <~~ /*or=false*/ push(false); ~~>
+                {
+                    "|"                 <~~up.in=''~~>
+                    alternative         <~~ /*or=true*/ pop();push(true); up.in = ', '+up.in ~~>
+                } ;
 
-tag              = "<" <~~ upstream.str = '' ~~> code { "," <~~ upstream.str = '' ~~> code <~~ upstream.str = ', '+upstream.str ~~> } ">" <~~ upstream.str = '' ~~> ;
+alternative     =
+                taggedterm
+                {
+                    taggedterm          <~~ up.in = ', '+up.in ~~>
+                } ;
 
-code             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = '~~' <~~ upstream.str = '' ~~> - { [ "~" ] codeinner } '~~' <~~ upstream.str = '' ~~> + ;
-codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
+taggedterm                              <~~up.in=pop()~~>
+                =
+                term                    <~~push(up.in)~~>
+                [
+                    tag                 <~~ push('{"TAG", '+up.in+', '+pop()+'}') ~~>
+                ] ;
 
-name             = ( small | caps ) - { small | caps | digit | "_" } + ;
+term            =
+                (
+                    name                <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~>
+                    |
+                    ( text [ "..." text ] )
+                    |
+                    group
+                    |
+                    option
+                    |
+                    repetition
+                    |
+                    skipspaces
+                ) ;
 
-text             <~~ upstream.str = '{"TERMINAL", '+sprintf("%q",upstream.str)+'}' ~~>                  = dquotetext | squotetext ;
-dquotetext       = '"' <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | "'" | '\\"' } '"' <~~ upstream.str = '' ~~> + ;
-squotetext       = "'" <~~ upstream.str = '' ~~> - { small | caps | digit | special | "~" | '"' | "\\'" } "'" <~~ upstream.str = '' ~~> + ;
+group           <~~ up.in = '{'+pop()+'}' ~~>                    = "(" expression <~~push(up.in)~~> ")" ;
+option          <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>        = "[" expression <~~push(up.in)~~> "]" ;
+repetition      <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>          = "{" expression <~~push(up.in)~~> "}" ;
+skipspaces      =
+                "+"                     <~~ up.in = '{"SKIPSPACES", true}' ~~>
+                |
+                "-"                     <~~ up.in = '{"SKIPSPACES", false}' ~~> ;
 
-digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\n" | "\n" | "\\t" | "\t" | "|" | "%" | "$" | "&" | "#" | "@" ;
+title           = text ;
+start           = name                  <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
+comment         = text ;
+
+tag                                     <~~up.in=pop()~~>
+                =
+                "<"
+                code                    <~~push(up.in)~~>
+                {
+                    ","
+                    code                <~~ push(pop()+', '+up.in) ~~>
+                }
+                ">" ;
+
+code                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+                =
+                '~~'
+                -
+                { [ "~" ] codeinner }   <~~push(up.in)~~>
+                '~~'
+                + ;
+
+codeinner       = small | caps | digit | special | "'" | '"' | "\\~" ;
+
+name            = ( small | caps ) - { small | caps | digit | "_" } + ;
+
+text                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+                = dquotetext | squotetext ;
+dquotetext      = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
+squotetext      = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;
+
+digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+small           = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
+                  "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+caps            = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
+                  "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
+                  "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
+                  "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
 
 }
 
-<~~ print(upstream.str) ~~>
+<~~ print(pop()) ~~>
 program
 "This aEBNF contains the grammatic and semantic information for annotated EBNF.
-It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."`,
+It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."
 ```
 </details>
 
@@ -83,41 +169,41 @@ It allows to automatically create a compiler for everything described in aEBNF (
 
 ```
 {"TERMINAL", "aEBNF of aEBNF as text"}, 
-{"TAG", {"TERMINAL", "\n\t\tvar names = [];\n\t\tfunction getNameIdx(name) {\n\t\t  var pos = names.indexOf(name);\n\t\t  if (pos != -1) { return pos };\n\t\t  return names.push(name)-1;\n\t\t}\n\t\t"}}, 
+{"TAG", {"TERMINAL", "\nvar names = [];\nfunction getNameIdx(name) {\n    var pos = names.indexOf(name);\n    if (pos != -1) { return pos };\n    return names.push(name)-1;\n}\nc.compile(c.asg, up.in)\n"}}, 
 
 {
 
-{"program", 0, {"OPTIONAL", {"TAG", {"TERMINAL", " upstream.str += ', \\\\n' "}, {"IDENT", "title", 1}}}, {"IDENT", "programtag", 2}, {"TAG", {"TERMINAL", " upstream.str = '\\\\n{\\\\n\\\\n' "}, {"TERMINAL", "{"}}, {"REPEAT", {"IDENT", "production", 3}}, {"TAG", {"TERMINAL", " upstream.str = '\\\\n}, \\\\n\\\\n' "}, {"TERMINAL", "}"}}, {"IDENT", "programtag", 2}, {"IDENT", "start", 4}, {"OPTIONAL", {"TAG", {"TERMINAL", " upstream.str = ', \\\\n'+upstream.str+'\\\\n' "}, {"IDENT", "comment", 5}}}}, 
-{"programtag", 2, {"OPTIONAL", {"TAG", {"TERMINAL", " upstream.str = '{\"TAG\", '+upstream.str+'}, \\\\n' "}, {"IDENT", "tag", 6}}}}, 
-{"TAG", {"TERMINAL", " if (upstream.productionTag != undefined) { upstream.str = '{\"TAG\", '+upstream.productionTag+', '+upstream.str+'}' }; upstream.str += ', \\\\n' "}, {"production", 3, {"TAG", {"TERMINAL", " upstream.str = '{\"'+upstream.str+'\", '+getNameIdx(upstream.str)+', ' "}, {"IDENT", "name", 7}}, {"TAG", {"TERMINAL", " upstream.productionTag = upstream.str; upstream.str = '' "}, {"OPTIONAL", {"IDENT", "tag", 6}}}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "="}}, {"OPTIONAL", {"IDENT", "expression", 8}}, {"TAG", {"TERMINAL", " upstream.str = '}' "}, {{"OR", {"TERMINAL", "."}, {"TERMINAL", ";"}}}}}}, 
-{"TAG", {"TERMINAL", " if (upstream.or) { upstream.str = '{\"OR\", '+upstream.str+'}' } "}, {"expression", 8, {"TAG", {"TERMINAL", " upstream.or = false "}, {"IDENT", "alternative", 9}}, {"REPEAT", {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "|"}}, {"TAG", {"TERMINAL", " upstream.or = true; upstream.str = ', '+upstream.str "}, {"IDENT", "alternative", 9}}}}}, 
-{"alternative", 9, {"IDENT", "taggedterm", 10}, {"REPEAT", {"TAG", {"TERMINAL", " upstream.str = ', '+upstream.str "}, {"IDENT", "taggedterm", 10}}}}, 
-{"TAG", {"TERMINAL", " if (upstream.termTag != undefined) { upstream.str = '{\"TAG\", '+upstream.termTag+', '+upstream.str+'}' } "}, {"taggedterm", 10, {"TAG", {"TERMINAL", " upstream.termTag = undefined "}, {"IDENT", "term", 11}}, {"OPTIONAL", {"TAG", {"TERMINAL", " upstream.termTag = upstream.str; upstream.str = '' "}, {"IDENT", "tag", 6}}}}}, 
-{"term", 11, {{"OR", {"TAG", {"TERMINAL", " upstream.str = '{\"IDENT\", \"'+upstream.str+'\", '+getNameIdx(upstream.str)+'}' "}, {"IDENT", "name", 7}}, {{"IDENT", "text", 12}, {"OPTIONAL", {"TERMINAL", "..."}, {"IDENT", "text", 12}}}, {"IDENT", "group", 13}, {"IDENT", "option", 14}, {"IDENT", "repetition", 15}, {"IDENT", "skipspaces", 16}}}}, 
-{"TAG", {"TERMINAL", " upstream.str = '{'+upstream.str+'}' "}, {"group", 13, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "("}}, {"IDENT", "expression", 8}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", ")"}}}}, 
-{"TAG", {"TERMINAL", " upstream.str = '{\"OPTIONAL\", '+upstream.str+'}' "}, {"option", 14, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "["}}, {"IDENT", "expression", 8}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "]"}}}}, 
-{"TAG", {"TERMINAL", " upstream.str = '{\"REPEAT\", '+upstream.str+'}' "}, {"repetition", 15, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "{"}}, {"IDENT", "expression", 8}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "}"}}}}, 
-{"skipspaces", 16, {"OR", {"TAG", {"TERMINAL", " upstream.str = '{\"SKIPSPACES\", true}' "}, {"TERMINAL", "+"}}, {"TAG", {"TERMINAL", " upstream.str = '{\"SKIPSPACES\", false}' "}, {"TERMINAL", "-"}}}}, 
-{"title", 1, {"IDENT", "text", 12}}, 
-{"start", 4, {"TAG", {"TERMINAL", " upstream.str = '{\"IDENT\", \"'+upstream.str+'\", '+getNameIdx(upstream.str)+'}' "}, {"IDENT", "name", 7}}}, 
-{"comment", 5, {"IDENT", "text", 12}}, 
-{"tag", 6, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "<"}}, {"IDENT", "code", 17}, {"REPEAT", {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", ","}}, {"TAG", {"TERMINAL", " upstream.str = ', '+upstream.str "}, {"IDENT", "code", 17}}}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", ">"}}}, 
-{"TAG", {"TERMINAL", " upstream.str = '{\"TERMINAL\", '+sprintf(\"%q\",upstream.str)+'}' "}, {"code", 17, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "~~"}}, {"SKIPSPACES", false}, {"REPEAT", {"OPTIONAL", {"TERMINAL", "~"}}, {"IDENT", "codeinner", 18}}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "~~"}}, {"SKIPSPACES", true}}}, 
-{"codeinner", 18, {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"IDENT", "special", 22}, {"TERMINAL", "'"}, {"TERMINAL", "\""}, {"TERMINAL", "\\\\~"}}}, 
-{"name", 7, {{"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}}}, {"SKIPSPACES", false}, {"REPEAT", {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"TERMINAL", "_"}}}, {"SKIPSPACES", true}}, 
-{"TAG", {"TERMINAL", " upstream.str = '{\"TERMINAL\", '+sprintf(\"%q\",upstream.str)+'}' "}, {"text", 12, {"OR", {"IDENT", "dquotetext", 23}, {"IDENT", "squotetext", 24}}}}, 
-{"dquotetext", 23, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "\""}}, {"SKIPSPACES", false}, {"REPEAT", {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"IDENT", "special", 22}, {"TERMINAL", "~"}, {"TERMINAL", "'"}, {"TERMINAL", "\\\\\""}}}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "\""}}, {"SKIPSPACES", true}}, 
-{"squotetext", 24, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "'"}}, {"SKIPSPACES", false}, {"REPEAT", {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"IDENT", "special", 22}, {"TERMINAL", "~"}, {"TERMINAL", "\""}, {"TERMINAL", "\\\\'"}}}, {"TAG", {"TERMINAL", " upstream.str = '' "}, {"TERMINAL", "'"}}, {"SKIPSPACES", true}}, 
-{"digit", 21, {"OR", {"TERMINAL", "0"}, {"TERMINAL", "1"}, {"TERMINAL", "2"}, {"TERMINAL", "3"}, {"TERMINAL", "4"}, {"TERMINAL", "5"}, {"TERMINAL", "6"}, {"TERMINAL", "7"}, {"TERMINAL", "8"}, {"TERMINAL", "9"}}}, 
-{"small", 19, {"OR", {"TERMINAL", "a"}, {"TERMINAL", "b"}, {"TERMINAL", "c"}, {"TERMINAL", "d"}, {"TERMINAL", "e"}, {"TERMINAL", "f"}, {"TERMINAL", "g"}, {"TERMINAL", "h"}, {"TERMINAL", "i"}, {"TERMINAL", "j"}, {"TERMINAL", "k"}, {"TERMINAL", "l"}, {"TERMINAL", "m"}, {"TERMINAL", "n"}, {"TERMINAL", "o"}, {"TERMINAL", "p"}, {"TERMINAL", "q"}, {"TERMINAL", "r"}, {"TERMINAL", "s"}, {"TERMINAL", "t"}, {"TERMINAL", "u"}, {"TERMINAL", "v"}, {"TERMINAL", "w"}, {"TERMINAL", "x"}, {"TERMINAL", "y"}, {"TERMINAL", "z"}}}, 
-{"caps", 20, {"OR", {"TERMINAL", "A"}, {"TERMINAL", "B"}, {"TERMINAL", "C"}, {"TERMINAL", "D"}, {"TERMINAL", "E"}, {"TERMINAL", "F"}, {"TERMINAL", "G"}, {"TERMINAL", "H"}, {"TERMINAL", "I"}, {"TERMINAL", "J"}, {"TERMINAL", "K"}, {"TERMINAL", "L"}, {"TERMINAL", "M"}, {"TERMINAL", "N"}, {"TERMINAL", "O"}, {"TERMINAL", "P"}, {"TERMINAL", "Q"}, {"TERMINAL", "R"}, {"TERMINAL", "S"}, {"TERMINAL", "T"}, {"TERMINAL", "U"}, {"TERMINAL", "V"}, {"TERMINAL", "W"}, {"TERMINAL", "X"}, {"TERMINAL", "Y"}, {"TERMINAL", "Z"}}}, 
-{"special", 22, {"OR", {"TERMINAL", "_"}, {"TERMINAL", " "}, {"TERMINAL", "."}, {"TERMINAL", ","}, {"TERMINAL", ":"}, {"TERMINAL", ";"}, {"TERMINAL", "!"}, {"TERMINAL", "?"}, {"TERMINAL", "+"}, {"TERMINAL", "-"}, {"TERMINAL", "*"}, {"TERMINAL", "/"}, {"TERMINAL", "="}, {"TERMINAL", "("}, {"TERMINAL", ")"}, {"TERMINAL", "{"}, {"TERMINAL", "}"}, {"TERMINAL", "["}, {"TERMINAL", "]"}, {"TERMINAL", "<"}, {"TERMINAL", ">"}, {"TERMINAL", "\\\\\\\\"}, {"TERMINAL", "\\\\n"}, {"TERMINAL", "\\n"}, {"TERMINAL", "\\\\t"}, {"TERMINAL", "\\t"}, {"TERMINAL", "|"}, {"TERMINAL", "%"}, {"TERMINAL", "$"}, {"TERMINAL", "&"}, {"TERMINAL", "#"}, {"TERMINAL", "@"}}}, 
+{"TAG", {"TERMINAL", "push(up.in)"}, {"program", 0, {"OPTIONAL", {"TAG", {"TERMINAL", " up.in += ', \\\\n' "}, {"IDENT", "title", 1}}}, {"IDENT", "programtag", 2}, {"TAG", {"TERMINAL", " up.in = '\\\\n{\\\\n\\\\n' "}, {"TERMINAL", "{"}}, {"REPEAT", {"IDENT", "production", 3}}, {"TAG", {"TERMINAL", " up.in = '\\\\n}, \\\\n\\\\n' "}, {"TERMINAL", "}"}}, {"IDENT", "programtag", 2}, {"IDENT", "start", 4}, {"OPTIONAL", {"TAG", {"TERMINAL", " up.in = ', \\\\n'+up.in+'\\\\n' "}, {"IDENT", "comment", 5}}}}},
+{"programtag", 2, {"OPTIONAL", {"TAG", {"TERMINAL", " up.in = '{\"TAG\", '+up.in+'}, \\\\n' "}, {"IDENT", "tag", 6}}}},
+{"TAG", {"TERMINAL", " var productionTag = pop();\n                                        if (productionTag != undefined) {\n                                            pop()/*=undefined*/;\n                                            up.in = '{\"TAG\", '+productionTag+', '+up.in+'}'\n                                        };\n                                        up.in += ',\\\\n' "}, {"production", 3, {"TAG", {"TERMINAL", " up.in = '{\"'+up.in+'\", '+getNameIdx(up.in)+', ';\n                                        push(undefined) "}, {"IDENT", "name", 7}}, {"OPTIONAL", {"TAG", {"TERMINAL", " push(up.in); up.in = '' "}, {"IDENT", "tag", 6}}}, {"TAG", {"TERMINAL", "up.in=''"}, {"TERMINAL", "="}}, {"OPTIONAL", {"IDENT", "expression", 8}}, {"TAG", {"TERMINAL", " up.in = '}' "}, {{"OR", {"TERMINAL", "."}, {"TERMINAL", ";"}}}}}},
+{"TAG", {"TERMINAL", " if (/*or*/ pop()) {\n                                            up.in = '{\"OR\", '+up.in+'}'\n                                        } "}, {"expression", 8, {"TAG", {"TERMINAL", " /*or=false*/ push(false); "}, {"IDENT", "alternative", 9}}, {"REPEAT", {"TAG", {"TERMINAL", "up.in=''"}, {"TERMINAL", "|"}}, {"TAG", {"TERMINAL", " /*or=true*/ pop();push(true); up.in = ', '+up.in "}, {"IDENT", "alternative", 9}}}}},
+{"alternative", 9, {"IDENT", "taggedterm", 10}, {"REPEAT", {"TAG", {"TERMINAL", " up.in = ', '+up.in "}, {"IDENT", "taggedterm", 10}}}},
+{"TAG", {"TERMINAL", "up.in=pop()"}, {"taggedterm", 10, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "term", 11}}, {"OPTIONAL", {"TAG", {"TERMINAL", " push('{\"TAG\", '+up.in+', '+pop()+'}') "}, {"IDENT", "tag", 6}}}}},
+{"term", 11, {{"OR", {"TAG", {"TERMINAL", " up.in = '{\"IDENT\", \"'+up.in+'\", '+getNameIdx(up.in)+'}' "}, {"IDENT", "name", 7}}, {{"IDENT", "text", 12}, {"OPTIONAL", {"TERMINAL", "..."}, {"IDENT", "text", 12}}}, {"IDENT", "group", 13}, {"IDENT", "option", 14}, {"IDENT", "repetition", 15}, {"IDENT", "skipspaces", 16}}}},
+{"TAG", {"TERMINAL", " up.in = '{'+pop()+'}' "}, {"group", 13, {"TERMINAL", "("}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "expression", 8}}, {"TERMINAL", ")"}}},
+{"TAG", {"TERMINAL", " up.in = '{\"OPTIONAL\", '+pop()+'}' "}, {"option", 14, {"TERMINAL", "["}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "expression", 8}}, {"TERMINAL", "]"}}},
+{"TAG", {"TERMINAL", " up.in = '{\"REPEAT\", '+pop()+'}' "}, {"repetition", 15, {"TERMINAL", "{"}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "expression", 8}}, {"TERMINAL", "}"}}},
+{"skipspaces", 16, {"OR", {"TAG", {"TERMINAL", " up.in = '{\"SKIPSPACES\", true}' "}, {"TERMINAL", "+"}}, {"TAG", {"TERMINAL", " up.in = '{\"SKIPSPACES\", false}' "}, {"TERMINAL", "-"}}}},
+{"title", 1, {"IDENT", "text", 12}},
+{"start", 4, {"TAG", {"TERMINAL", " up.in = '{\"IDENT\", \"'+up.in+'\", '+getNameIdx(up.in)+'}' "}, {"IDENT", "name", 7}}},
+{"comment", 5, {"IDENT", "text", 12}},
+{"TAG", {"TERMINAL", "up.in=pop()"}, {"tag", 6, {"TERMINAL", "<"}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "code", 17}}, {"REPEAT", {"TERMINAL", ","}, {"TAG", {"TERMINAL", " push(pop()+', '+up.in) "}, {"IDENT", "code", 17}}}, {"TERMINAL", ">"}}},
+{"TAG", {"TERMINAL", " up.in = '{\"TERMINAL\", '+sprintf(\"%q\",pop())+'}' "}, {"code", 17, {"TERMINAL", "~~"}, {"SKIPSPACES", false}, {"TAG", {"TERMINAL", "push(up.in)"}, {"REPEAT", {"OPTIONAL", {"TERMINAL", "~"}}, {"IDENT", "codeinner", 18}}}, {"TERMINAL", "~~"}, {"SKIPSPACES", true}}},
+{"codeinner", 18, {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"IDENT", "special", 22}, {"TERMINAL", "'"}, {"TERMINAL", "\""}, {"TERMINAL", "\\\\~"}}},
+{"name", 7, {{"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}}}, {"SKIPSPACES", false}, {"REPEAT", {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"TERMINAL", "_"}}}, {"SKIPSPACES", true}},
+{"TAG", {"TERMINAL", " up.in = '{\"TERMINAL\", '+sprintf(\"%q\",pop())+'}' "}, {"text", 12, {"OR", {"IDENT", "dquotetext", 23}, {"IDENT", "squotetext", 24}}}},
+{"dquotetext", 23, {"TERMINAL", "\""}, {"SKIPSPACES", false}, {"TAG", {"TERMINAL", "push(up.in)"}, {"REPEAT", {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"IDENT", "special", 22}, {"TERMINAL", "~"}, {"TERMINAL", "'"}, {"TERMINAL", "\\\\\""}}}}, {"TERMINAL", "\""}, {"SKIPSPACES", true}},
+{"squotetext", 24, {"TERMINAL", "'"}, {"SKIPSPACES", false}, {"TAG", {"TERMINAL", "push(up.in)"}, {"REPEAT", {"OR", {"IDENT", "small", 19}, {"IDENT", "caps", 20}, {"IDENT", "digit", 21}, {"IDENT", "special", 22}, {"TERMINAL", "~"}, {"TERMINAL", "\""}, {"TERMINAL", "\\\\'"}}}}, {"TERMINAL", "'"}, {"SKIPSPACES", true}},
+{"digit", 21, {"OR", {"TERMINAL", "0"}, {"TERMINAL", "1"}, {"TERMINAL", "2"}, {"TERMINAL", "3"}, {"TERMINAL", "4"}, {"TERMINAL", "5"}, {"TERMINAL", "6"}, {"TERMINAL", "7"}, {"TERMINAL", "8"}, {"TERMINAL", "9"}}},
+{"small", 19, {"OR", {"TERMINAL", "a"}, {"TERMINAL", "b"}, {"TERMINAL", "c"}, {"TERMINAL", "d"}, {"TERMINAL", "e"}, {"TERMINAL", "f"}, {"TERMINAL", "g"}, {"TERMINAL", "h"}, {"TERMINAL", "i"}, {"TERMINAL", "j"}, {"TERMINAL", "k"}, {"TERMINAL", "l"}, {"TERMINAL", "m"}, {"TERMINAL", "n"}, {"TERMINAL", "o"}, {"TERMINAL", "p"}, {"TERMINAL", "q"}, {"TERMINAL", "r"}, {"TERMINAL", "s"}, {"TERMINAL", "t"}, {"TERMINAL", "u"}, {"TERMINAL", "v"}, {"TERMINAL", "w"}, {"TERMINAL", "x"}, {"TERMINAL", "y"}, {"TERMINAL", "z"}}},
+{"caps", 20, {"OR", {"TERMINAL", "A"}, {"TERMINAL", "B"}, {"TERMINAL", "C"}, {"TERMINAL", "D"}, {"TERMINAL", "E"}, {"TERMINAL", "F"}, {"TERMINAL", "G"}, {"TERMINAL", "H"}, {"TERMINAL", "I"}, {"TERMINAL", "J"}, {"TERMINAL", "K"}, {"TERMINAL", "L"}, {"TERMINAL", "M"}, {"TERMINAL", "N"}, {"TERMINAL", "O"}, {"TERMINAL", "P"}, {"TERMINAL", "Q"}, {"TERMINAL", "R"}, {"TERMINAL", "S"}, {"TERMINAL", "T"}, {"TERMINAL", "U"}, {"TERMINAL", "V"}, {"TERMINAL", "W"}, {"TERMINAL", "X"}, {"TERMINAL", "Y"}, {"TERMINAL", "Z"}}},
+{"special", 22, {"OR", {"TERMINAL", "_"}, {"TERMINAL", " "}, {"TERMINAL", "."}, {"TERMINAL", ","}, {"TERMINAL", ":"}, {"TERMINAL", ";"}, {"TERMINAL", "!"}, {"TERMINAL", "?"}, {"TERMINAL", "+"}, {"TERMINAL", "-"}, {"TERMINAL", "*"}, {"TERMINAL", "/"}, {"TERMINAL", "="}, {"TERMINAL", "("}, {"TERMINAL", ")"}, {"TERMINAL", "{"}, {"TERMINAL", "}"}, {"TERMINAL", "["}, {"TERMINAL", "]"}, {"TERMINAL", "<"}, {"TERMINAL", ">"}, {"TERMINAL", "|"}, {"TERMINAL", "%"}, {"TERMINAL", "$"}, {"TERMINAL", "&"}, {"TERMINAL", "#"}, {"TERMINAL", "@"}, {"TERMINAL", "\\\\\\\\"}, {"TERMINAL", "\\\\t"}, {"TERMINAL", "\\t"}, {"TERMINAL", "\\\\n"}, {"TERMINAL", "\\n"}, {"TERMINAL", "\\\\r"}, {"TERMINAL", "\\r"}}},
 
 }, 
 
-{"TAG", {"TERMINAL", " print(upstream.str) "}}, 
+{"TAG", {"TERMINAL", " print(pop()) "}}, 
 {"IDENT", "program", 0}, 
-{"TERMINAL", "This aEBNF contains the grammatic and semantic information for annotated EBNF.\n\t\tIt allows to automatically create a compiler for everything described in aEBNF (yes, that format)."}
+{"TERMINAL", "This aEBNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in aEBNF (yes, that format)."}
 ```
 </details>
 
