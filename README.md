@@ -457,3 +457,8 @@ It allows to automatically create a compiler for everything described in aEBNF (
 {"TERMINAL", "This aEBNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in aEBNF (yes, that format)."}
 ```
 </details>
+
+
+## Links
+
+Grammars for many languages: [Grammars written for ANTLR v4](https://github.com/antlr/grammars-v4)
