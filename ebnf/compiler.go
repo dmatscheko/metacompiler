@@ -19,8 +19,9 @@ type compiler struct {
 	stack     []r.Object          // global stack.
 	ltrStream map[string]r.Object // global variables.
 
-	traceEnabled bool
-	traceCount   int
+	traceEnabled         bool
+	traceCount           int
+	preventDefaultOutput bool
 }
 
 // ----------------------------------------------------------------------------
@@ -197,10 +198,17 @@ func (co *compiler) compile(localASG []r.Rule, depth int) map[string]r.Object { 
 }
 
 func (co *compiler) initFuncMap() {
-	co.vm.Set("print", fmt.Print)
-	co.vm.Set("println", fmt.Println)
-	co.vm.Set("printf", fmt.Printf)
-	co.vm.Set("sprintf", fmt.Sprintf)
+	if co.preventDefaultOutput {
+		co.vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
+		co.vm.Set("println", func(a ...interface{}) (n int, err error) { return 0, nil })
+		co.vm.Set("printf", func(format string, a ...interface{}) (n int, err error) { return 0, nil })
+		co.vm.Set("sprintf", func(format string, a ...interface{}) string { return "" })
+	} else {
+		co.vm.Set("print", fmt.Print)
+		co.vm.Set("println", fmt.Println)
+		co.vm.Set("printf", fmt.Printf)
+		co.vm.Set("sprintf", fmt.Sprintf)
+	}
 
 	co.vm.Set("ltr", co.ltrStream)
 
@@ -237,7 +245,7 @@ func (co *compiler) initFuncMap() {
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
-func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res map[string]r.Object, e error) {
+func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object, e error) {
 	defer func() {
 		if err := recover(); err != nil {
 			res = nil
@@ -248,6 +256,7 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res
 	var co compiler
 	co.traceEnabled = traceEnabled
 	co.traceCount = 0
+	co.preventDefaultOutput = preventDefaultOutput
 	co.asg = asg
 	co.extras = extras
 	co.ltrStream = map[string]r.Object{ // Basically like global variables.

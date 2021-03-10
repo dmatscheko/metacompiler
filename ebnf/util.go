@@ -119,7 +119,8 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) strin
 	if len(space) > 0 {
 		sp = space[0]
 	}
-	res := string("\"" + rule.Operator + "\"")
+	res := string("\"" + r.RuleTypes[rule.Operator] + "\"")
+	// res := string("\"" + rule.Operator + "\"")
 
 	switch rule.Operator {
 	case r.Terminal, r.Invalid:

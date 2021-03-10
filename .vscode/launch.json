@@ -8,43 +8,49 @@
             "name": "Launch Calculator Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/calculator.aebnf", "-s", "tests/formula.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.aebnf", "-b", "tests/formula.txt"]
         },
         {
             "name": "Launch Calculator Test (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/calculator.aebnf", "-s", "tests/formula.txt", "-t"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.aebnf", "-b", "tests/formula.txt", "-t"]
         },
         {
             "name": "Launch aEBNF Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.aebnf", "-b", "tests/a-ebnf_to_text-a-grammar.aebnf"]
         },
         {
             "name": "Launch aEBNF Test (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tg"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.aebnf", "-b", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tg"]
         },
         {
             "name": "Launch LLVM IR Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/llvm-ir-tests.aebnf", "-s", "tests/empty.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.aebnf", "-b", "tests/empty.txt"]
         },
         {
             "name": "Launch Tiny Self Parse Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/tiny.aebnf", "-s", "tests/tiny.aebnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tiny.aebnf", "-b", "tests/tiny.aebnf"]
         },
         {
             "name": "Launch Backtracking aEBNF Parse Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/backtracking.aebnf", "-s", "tests/backtracking.aebnf", "-t"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/backtracking.aebnf", "-b", "tests/backtracking.aebnf", "-t"]
+        },
+        {
+            "name": "Launch Speed Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.aebnf", "-b", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s"]
         },
 
     ]
