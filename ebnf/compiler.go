@@ -25,16 +25,6 @@ type compiler struct {
 // ----------------------------------------------------------------------------
 // Dynamic ASG compiler
 
-// TODO: make nicely named constants for all TAG array indizes!!! (also do that for all other constant array indizes)
-// TODO: set and read objVars (in addition to the vars and codeVars)
-// TODO: use the verifier part of the other ebnf-parser project. Also test if every ident is available (exists)!
-// TODO: remoce the integer list of idents and replace with hashmap. also panic if an entry is already in the hashmap!
-
-/// TODO: remove this:
-// type noGroup struct{}    // can be broken apart
-// type oldGroup struct{}   // a group where nils can be deleted
-// type fixedGroup struct{} // keep nil elements in this group
-
 /*
 	// a tag looks like <"CODE">
 	vars["childStr"] = childMatchStrJoined       // (string) The collective matched strings of all child nodes.
@@ -99,11 +89,9 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 	return co.vm.RunProgram(p)
 }
 
-func (co *compiler) handleTagCode(code string, name string, upStream map[string]r.Object, localASG []r.Rule, depth int) { // => (upStream) // TODO: the result should be an object. write a serializer for the end result. maybe it needs multiple passes. For example to be able to call functions that are defined by the EBNF. A good place for functions is e.g. the preamble.J
-
-	co.vm.Set("up", upStream) // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
-
-	co.compilerFuncMap["localAsg"] = localASG
+func (co *compiler) handleTagCode(code string, name string, upStream map[string]r.Object, localASG []r.Rule, depth int) { // => (changes upStream)
+	co.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
+	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
 
 	if co.traceEnabled {
 		co.traceTop(code, depth, upStream)
@@ -114,6 +102,7 @@ func (co *compiler) handleTagCode(code string, name string, upStream map[string]
 	if err != nil {
 		panic(err)
 	}
+
 	if co.traceEnabled {
 		co.traceBottom(upStream)
 	}

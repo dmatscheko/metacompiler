@@ -36,12 +36,17 @@
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tc"]
         },
-
         {
-            "name": "Launch aEBNF Test with old",
+            "name": "Launch LLVM IR Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "../parserparsercompiler_kopie/tests/a-ebnf_to_text-a-grammar.aebnf"]
+            "program": "${workspaceFolder}","args": ["-f", "tests/llvm-ir-tests.aebnf", "-s", "tests/tiny.aebnf"]
+        },
+        {
+            "name": "Launch Tiny Self Parse Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-f", "tests/tiny.aebnf", "-s", "tests/tiny.aebnf"]
         },
 
     ]
