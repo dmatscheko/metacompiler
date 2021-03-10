@@ -139,12 +139,13 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *[]r.
 	var localProductions []r.Rule = nil
 
 	isBlocked, foundRule, foundSdx, foundCh := gp.ruleEnter(rule, doSkipSpaces, depth)
-	if foundRule != nil {
-		gp.sdx = foundSdx
-		gp.ch = foundCh
-		gp.ruleExit(rule, doSkipSpaces, depth, foundRule, wasSdx)
-		return foundRule
-	} else if isBlocked {
+	if isBlocked {
+		if foundRule != nil {
+			gp.sdx = foundSdx
+			gp.ch = foundCh
+			gp.ruleExit(rule, doSkipSpaces, depth, foundRule, wasSdx)
+			return foundRule
+		}
 		gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 		return nil
 	}
@@ -185,7 +186,7 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *[]r.
 		found := false
 		for i := 0; i < len(rule.Childs); i++ {
 			newProductions := gp.apply(&rule.Childs[i], doSkipSpaces, depth+1)
-			if newProductions != nil { // HERE, nil as the result array is used as not found ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil
+			if newProductions != nil { // The nil result is used as ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil.
 				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 				found = true
 				break
