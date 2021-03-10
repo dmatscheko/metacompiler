@@ -229,12 +229,20 @@ go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 
 #### Data Handling
 
-* up (for upstream)
-  * up.in
-  * up.*
-  * up.str*
-  * ltr.in
-  * ltr.*
+* __up__ (for upstream)  
+  All local variables. All _'up.*'_ variables can be changed by the user. This includes _'up.in'_.
+  * __up.in__  
+  (string) The collective matched strings of all child nodes.
+  * __up.\*__  
+  User generated local variables. They can be arbitrary objects. Those objects are concatenated to arrays of objects when being propagated upwards.
+  * __up.str\*__  
+  User generated local variables. All variables that start with _'str'_ must be strings. Those objects are concatenated as strings when being propagated upwards. up.in is an example of such string concatenation.
+* __ltr__ (for left to right)  
+  All global variables (Global JS variables can be used too). All _'ltr.*'_ variables can be changed by the user. This includes _'ltr.in'_.
+  * __ltr.in__  
+  (string) The collective matched strings of all nodes from left to right. Only matched strings of nodes to the right (that are not processed yet), are not included.  
+  * __ltr.\*__  
+  User generated global variables. They can be arbitrary objects. Except for _'ltr.in'_, those objects are not changed by the compiler.
 * pop()
 * push()
 
