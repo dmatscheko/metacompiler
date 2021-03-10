@@ -276,7 +276,7 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
     /|    |
    | | _  |
    T | |  |     (T) The text of a Terminal symbol gets sent to 'up.in'.
-   | X |  |     (X) Here, the script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
+   | X |  |     (X) The script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
    | | O  |     (O) Other Rules are ignored.
    | | |  |
    \ | /  |
