@@ -243,20 +243,31 @@ go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
   (string) The collective matched strings of all nodes from left to right. Only matched strings of nodes to the right (that are not processed yet), are not included.  
   * __ltr.\*__  
   User generated global variables. They can be arbitrary objects. Except for _'ltr.in'_, those objects are not changed by the compiler.
-* pop()
-* push()
+
+##### The stack
+
+This JS API provides an added stack. This is useful to bring data to the other side of EBNF matchers.
+
+* __pop() object__  
+Pops an arbitrary object from the stack.
+* __push(object)__  
+Pushes an arbitrary object onto the stack.
 
 #### Compiler API
 
-* c.asg
-* c.localAsg
-* c.compile()
-  * &nbsp;
+* __c.asg__
+The whole abstract semantic graph.
+* __c.localAsg__
+The local part of the abstract semantic graph.
+* __c.compile(asg, string) string__  
+  Compiles the given ASG and upstream string and returns the combined matched upstream string. Those combined string can have been modified by the annotations.  
+Normally, _'c.compile()'_ is called as `c.compile(asg, up.in);` or even `c.compile(asg, "");`.
+  The compiler works like this:  
 ```
     OUT
      ^
      |
-     C--.      (C) If the Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
+     C--.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
      |   |
    * ^   v     (*) All upstream values are combined.
     /|   |
