@@ -26,7 +26,7 @@ const (
 	Factor
 )
 
-var RuleTypes = [...]string{
+var RuleTypes = []string{
 	// Groups types:
 	"SEQUENCE", // Basic sequence of objects. Can be broken apart.
 	"GROUP",    // A group that must not be broken apart.
