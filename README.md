@@ -215,7 +215,7 @@ Tag         = "<" code { "," code } ">"
 The `Tag` is always responsible for the `Term` right before it.
 
 The only exceptions are:
-* `Repetition`, where the `Tag` would only attach to the last entry of the `Repetition`.
+* `Repetition`, where the `Tag` would only attach to the last entry of the `Repetition` (use bracketing when you want to tag more).
 * The `Tag` after the `Title`. There, the `Tag` is not responsible for the title but it contains the _prolog JS code_. That code is executed automatically.
 * The `Tag` before the `Comment`. That `Tag` contains the _epilog JS code_. That code is executed automatically after the `c.compile()` function is finished with the ASG.
 
