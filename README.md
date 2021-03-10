@@ -271,10 +271,10 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
      |
      C--.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
      |   |
-   * ^   v     (*) All upstream values are combined.
+   * ^   v     (*) All upstream (up.*) values are combined.
     /|   |
    | | _ |
-   T | | |     (T) The text of a terminal gets sent to 'upstream.str'.
+   T | | |     (T) The text of a Terminal symbol gets sent to 'up.in'.
    | X | |     (X) Here, the script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
    | | O |     (O) Other Rules are ignored.
    | | | |
@@ -306,9 +306,10 @@ The functions and constants are exposed to JS as:
 
 ### a-EBNF Syntax
 
+#### EBNF of EBNF
+
 A normal EBNF syntax looks like this:
 
-__EBNF of EBNF:__
 ```javascript
 EBNF        = [ Title ] "{" { Production } "}" [ Comment ] ;
 Production  = name "=" [ Expression ] ";" .
@@ -345,9 +346,10 @@ noskip      = "-" ;  // Do not skip whitspace in the future.
 
 Skip and noskip are additions to be able to parse strings correctly.
 
+#### EBNF of a-EBNF
+
 Annotated EBNF basically only adds tags to the syntax of a normal EBNF:
 
-__EBNF of a-EBNF:__
 ```javascript
 EBNF        = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
 Production  = name [ Tag ] "=" [ Expression ] ";" .
