@@ -271,7 +271,8 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
      |
      C--.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
      |   |
-   * ^   v     (*) All upstream (up.*) values are combined.
+     ^   v
+     *   |     (*) All upstream (up.*) values are combined.
     /|   |
    | | _ |
    T | | |     (T) The text of a Terminal symbol gets sent to 'up.in'.
@@ -279,7 +280,8 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
    | | O |     (O) Other Rules are ignored.
    | | | |
    \ | / |
-  * \|/  |     (*) Childs from one Rule get splitted.
+    \|/  |
+     *   |     (*) Childs from one Rule get splitted.
      |__/
      |
      ^
