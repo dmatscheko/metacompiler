@@ -1,4 +1,4 @@
-"LLVM IR tests"{x={"{"|"x="|'"'|"|"|"'"|"};}x"};}
+"LLVM IR tests" <~~ c.compile(c.asg) ~~> {x="";}
 <~~
 
 println("LLVM IR tests:\\n------------------------------------")

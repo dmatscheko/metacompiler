@@ -36,14 +36,6 @@ type ebnfParser struct {
 	grammar      Grammar
 }
 
-// // call this whenever pos is set before for a new rule is tested
-// func hasBeenTried(rule *r.Rule, pos int) bool {
-// 	// if len(rule.Childs) == 0 { // this is probably only possible in grammarparser
-// 	// 	return true
-// 	// }
-// 	// ...
-// }
-
 // TODO: DEDUPLICATE!!
 func (ep *ebnfParser) skipSpaces() {
 	for {
@@ -164,16 +156,16 @@ func (ep *ebnfParser) getToken() {
 		}
 		ep.token = ep.invalid("no closing quote", tokstart)
 		ep.isSeq = false
-	} else if ep.ch >= 'a' && ep.ch <= 'z' {
+	} else if (ep.ch >= 'a' && ep.ch <= 'z') || (ep.ch >= 'A' && ep.ch <= 'Z') {
 		// To simplify things for the purposes of this task,
-		// identifiers are strictly a-z only, not A-Z or 1-9.
+		// identifiers are strictly a-zA-Z only, not 1-9.
 		for {
 			ep.sdx++
 			if ep.sdx >= len(ep.src) {
 				break
 			}
 			ep.ch = ep.src[ep.sdx]
-			if ep.ch < 'a' || ep.ch > 'z' {
+			if !((ep.ch >= 'a' && ep.ch <= 'z') || (ep.ch >= 'A' && ep.ch <= 'Z')) {
 				break
 			}
 		}
