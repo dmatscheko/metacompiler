@@ -14,14 +14,14 @@ import (
 
 // ==========================================
 
-// public EBNF of EBNF:
-// 	  Production  = name "=" [ Expression ] "." .
-//    Expression  = Alternative { "|" Alternative } .
-//    Alternative = Term { Term } .
-//    Term        = name | token [ "..." token ] | Group | Option | Repetition .
-//    Group       = "(" Expression ")" .
-//    Option      = "[" Expression "]" .
-//    Repetition  = "{" Expression "}" .
+// EBNF of EBNF:
+// Production  = name "=" [ Expression ] ";" .
+// Expression  = Alternative { "|" Alternative } ;
+// Alternative = Term { Term } ;
+// Term        = name | token [ "..." token ] | Group | Option | Repetition ;
+// Group       = "(" Expression ")" ;
+// Option      = "[" Expression "]" ;
+// Repetition  = "{" Expression "}" ;
 
 // ==========================================
 
