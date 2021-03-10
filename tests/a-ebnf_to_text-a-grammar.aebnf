@@ -11,123 +11,131 @@ c.compile(c.asg, up.in)
 
 {
 
-program          <~~push(up.in)~~>
-                 = [ title <~~ up.in += ', \\n' ~~> ] programtag "{" <~~ up.in = '\\n{\\n\\n' ~~> { production } "}" <~~ up.in = '\\n}, \\n\\n' ~~> programtag start [ comment <~~ up.in = ', \\n'+up.in+'\\n' ~~> ] ;
+program								<~~push(up.in)~~>
+				=
+				[
+					title			<~~ up.in += ', \\n' ~~>
+				]
+				programtag
+				"{"					<~~ up.in = '\\n{\\n\\n' ~~>
+				{ production }
+				"}"					<~~ up.in = '\\n}, \\n\\n' ~~>
+				programtag
+				start
+				[
+					comment			<~~ up.in = ', \\n'+up.in+'\\n' ~~>
+				] ;
 
-programtag       = [ tag <~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~> ] ;
+programtag		=
+				[
+					tag				<~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~>
+				] ;
 
-production       <~~ var productionTag = pop(); if (productionTag != undefined) { pop()/*=undefined*/; up.in = '{"TAG", '+productionTag+', '+up.in+'}'}; up.in += ',\\n' ~~>       
-                 = name <~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', '; push(undefined) ~~> [ tag <~~ push(up.in); up.in = '' ~~> ] "=" <~~up.in=''~~> [ expression ] ( "." | ";" ) <~~ up.in = '}' ~~> ;
+production								<~~ var productionTag = pop();
+										if (productionTag != undefined) {
+											pop()/*=undefined*/;
+											up.in = '{"TAG", '+productionTag+', '+up.in+'}'
+										};
+										up.in += ',\\n' ~~>       
+				=
+				name					<~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', ';
+										push(undefined) ~~>
+				[
+					tag					<~~ push(up.in); up.in = '' ~~>
+				]
+				"="						<~~up.in=''~~>
+				[ expression ]
+				( "." | ";" )			<~~ up.in = '}' ~~> ;
 
-expression       <~~ if (/*or*/ pop()) { up.in = '{"OR", '+up.in+'}' } ~~>
-                 = alternative <~~ /*or=false*/ push(false); ~~> { "|" <~~up.in=''~~> alternative <~~ /*or=true*/ pop();push(true); up.in = ', '+up.in ~~> } ;
+expression       						<~~ if (/*or*/ pop()) {
+											up.in = '{"OR", '+up.in+'}'
+										} ~~>
+				=
+				alternative				<~~ /*or=false*/ push(false); ~~>
+				{
+					"|"					<~~up.in=''~~>
+					alternative			<~~ /*or=true*/ pop();push(true); up.in = ', '+up.in ~~>
+				} ;
 
-alternative      = taggedterm { taggedterm <~~ up.in = ', '+up.in ~~> } ;
+alternative		=
+				taggedterm
+				{
+					taggedterm			<~~ up.in = ', '+up.in ~~>
+				} ;
 
-taggedterm       <~~up.in=pop()~~>                                                  = term <~~push(up.in)~~> [ tag <~~ push('{"TAG", '+up.in+', '+pop()+'}') ~~> ] ;
+taggedterm								<~~up.in=pop()~~>
+				=
+				term					<~~push(up.in)~~>
+				[
+					tag					<~~ push('{"TAG", '+up.in+', '+pop()+'}') ~~>
+				] ;
 
-term             = ( name <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> | ( text [ "..." text ] ) | group | option | repetition | skipspaces ) ;
+term			=
+				(
+					name				<~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~>
+					|
+					( text [ "..." text ] )
+					|
+					group
+					|
+					option
+					|
+					repetition
+					|
+					skipspaces
+				) ;
 
-group            <~~ up.in = '{'+pop()+'}' ~~>                                      = "(" expression <~~push(up.in)~~> ")" ;
-option           <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>                          = "[" expression <~~push(up.in)~~> "]" ;
-repetition       <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>                            = "{" expression <~~push(up.in)~~> "}" ;
-skipspaces       = "+" <~~ up.in = '{"SKIPSPACES", true}' ~~> | "-" <~~ up.in = '{"SKIPSPACES", false}' ~~> ;
+group			<~~ up.in = '{'+pop()+'}' ~~>					= "(" expression <~~push(up.in)~~> ")" ;
+option			<~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>		= "[" expression <~~push(up.in)~~> "]" ;
+repetition		<~~ up.in = '{"REPEAT", '+pop()+'}' ~~>			= "{" expression <~~push(up.in)~~> "}" ;
+skipspaces		=
+				"+"						<~~ up.in = '{"SKIPSPACES", true}' ~~>
+				|
+				"-"						<~~ up.in = '{"SKIPSPACES", false}' ~~> ;
 
-title            = text ;
-start            = name <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
-comment          = text ;
+title			= text ;
+start			= name					<~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
+comment			= text ;
 
-tag              <~~up.in=pop()~~>                                                  = "<" code <~~push(up.in)~~> { "," code <~~ push(pop()+', '+up.in) ~~> } ">" ;
+tag										<~~up.in=pop()~~>
+				=
+				"<"
+				code					<~~push(up.in)~~>
+				{
+					","
+					code				<~~ push(pop()+', '+up.in) ~~>
+				}
+				">" ;
 
-code             <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>                  = '~~' - { [ "~" ] codeinner } <~~push(up.in)~~> '~~' + ;
+code									<~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+				=
+				'~~'
+				-
+				{ [ "~" ] codeinner }	<~~push(up.in)~~>
+				'~~'
+				+ ;
+
 codeinner        = small | caps | digit | special | "'" | '"' | "\\~" ;
 
 name             = ( small | caps ) - { small | caps | digit | "_" } + ;
 
-text             <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>                  = dquotetext | squotetext ;
-dquotetext       = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
-squotetext       = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;
+text									<~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+				= dquotetext | squotetext ;
+dquotetext		= '"' - { small | caps | digit | special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
+squotetext		= "'" - { small | caps | digit | special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;
 
-digit            = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-small            = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-caps             = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-special          = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" | "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
+digit			= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+small			= "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
+				  "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+caps			= "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
+				  "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+special			= "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
+				  "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
+				  "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
 
 }
 
-<~~ print(pop())
-
-/*
-println("\\n\\nTHE FOLLOWING IS NOT FROM THE ABOVE CODE BUT ONLY A TEST")
-
-println("\\nLLVM IR test:\\n------------------------------------")
-
-// Create convenience types and constants.
-var i32 = llvm.types.I32
-
-// Create a new LLVM IR module.
-var m = llvm.ir.NewModule()
-
-// -----------------
-
-var zero = llvm.constant.NewInt(i32, 0)
-var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
-var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
-
-// Create an external function declaration and append it to the module.
-//
-//    int abs(int x);
-var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
-
-// Create a global variable definition and append it to the module.
-//
-//    int seed = 0;
-var seed = m.NewGlobalDef("seed", zero)
-
-// Create a function definition and append it to the module.
-//
-//    int rand(void) { ... }
-var rand = m.NewFunc("rand", i32)
-
-// Create an unnamed entry basic block and append it to the 'rand' function.
-var entry = rand.NewBlock("")
-
-// Create instructions and append them to the entry basic block.
-var tmp1 = entry.NewLoad(i32, seed)
-var tmp2 = entry.NewMul(tmp1, a)
-var tmp3 = entry.NewAdd(tmp2, c)
-entry.NewStore(tmp3, seed)
-var tmp4 = entry.NewCall(abs, tmp3)
-entry.NewRet(tmp4)
-
-// -----------------
-
-// int test() { ... }
-var test = m.NewFunc("test", i32)
-
-// Create an unnamed entry basic block and append it to the 'test' function.
-var entry = test.NewBlock("")
-// Create instructions and append them to the entry basic block.
-
-// %3 = add 
-var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 32))
-
-// ret i32 %3
-entry.NewRet(tmp)
-
-// -----------------
-
-// Print the LLVM IR assembly of the module.
-println(m)
-
-println("GRAPH:\\n------------------------------------")
-println(llvm.Callgraph(m))
-
-println("\\nEVAL:\\n------------------------------------")
-println(llvm.Eval(m, "test"))
-*/
-
-~~>
+<~~ print(pop()) ~~>
 program
 "This aEBNF contains the grammatic and semantic information for annotated EBNF.
 It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."
