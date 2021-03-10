@@ -9,15 +9,7 @@ import (
 
 type Grammar = struct {
 	Productions []r.Rule
-	// start       int
-	Extras map[string]r.Rule
-
-	// TODO: var loopStop!! loop prevention (also for grammarparser): whenever the parser steps deeper, get the entry of map[the current position] in a map: the entry is nil or a map of already tried rules. if a rule has been tried already, return false and don't try again
-	// TODO: also make it configurable if it is used (only if it has performance impact)
-	// TODO: implement hasBeenTried() for this:
-	// loopStop map[int]map[r.OperatorID]bool
-	// better: if possible something like this:
-	// loopStop map[int][r.OperatorID]bool
+	Extras      map[string]r.Rule
 }
 
 // ----------------------------------------------------------------------------

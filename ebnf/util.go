@@ -224,3 +224,21 @@ func PprintExtrasShort(extras *map[string]r.Rule, space ...string) string {
 	}
 	return str
 }
+
+func LinePosFromStrPos(data string, pos int) string {
+	lines := strings.Split(data, "\n")
+	chars := 0
+	if pos >= 0 {
+		for i, line := range lines {
+			lineLen := len(line)
+			chars += lineLen
+			if pos < chars { // Its in the last line.
+				if i == 0 {
+					pos += 2 // Correct for missing '\r\n'.
+				}
+				return fmt.Sprintf("ln %d, col %d", i+1, pos-(chars-lineLen)-1)
+			}
+		}
+	}
+	return "position outside of string"
+}

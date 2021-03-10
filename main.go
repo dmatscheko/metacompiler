@@ -13,62 +13,70 @@ import (
 // TODO: Define an EOF symbol for the EBNF syntax.
 // TODO: Add ability to include a-EBNFs from a-EBNFs (like modules).
 
+// rule == production.
+// factors == non-terminal expression. A subgroup of productions/rules.
+// link == ident == name             //  <=  Identifies another rule (== address of the other rule).
+// string == token == terminal == text.
+// or == alternative.
+
 // ==========================================
 
 // "EBNF of EBNF" {
+
 // EBNF        = [ Title ] "{" { Production } "}" [ Comment ] ;
-// Production  = name "=" [ Expression ] ";" .
+// Production  = name "=" [ Expression ] ";" ;
 // Expression  = Alternative { "|" Alternative } ;
 // Alternative = Term { Term } ;
-// Term        = name | token [ "..." token ] | Group | Option | Repetition | skip | noskip ;
+// Term        = name | token [ "..." token ] | Group | Option | Repetition | skipspaces ;
 // Group       = "(" Expression ")" ;
 // Option      = "[" Expression "]" ;
 // Repetition  = "{" Expression "}" ;
-// Title       = token
-// Comment     = token
+// Title       = token ;
+// Comment     = token ;
+
 // }
+// EBNF
 
 // ==========================================
 
 // "EBNF of a-EBNF" {
-// EBNF        = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
-// Production  = name [ Tag ] "=" [ Expression ] ";" .
+
+// AEBNF       = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
+// Production  = name [ Tag ] "=" [ Expression ] ";" ;
 // Expression  = Alternative { "|" Alternative } ;
 // Alternative = Term { Term } ;
-// Term        = ( name | token [ "..." token ] | Group | Option | Repetition | skip | noskip ) [ Tag ] ;
+// Term        = ( name | token [ "..." token ] | Group | Option | Repetition | skipspaces ) [ Tag ] ;
 // Group       = "(" Expression ")" ;
 // Option      = "[" Expression "]" ;
 // Repetition  = "{" Expression "}" ;
-// Title       = token
-// Comment     = token
-// Tag         = "<" code { "," code } ">"
+// Title       = token ;
+// Comment     = token ;
+// Tag         = "<" code { "," code } ">" ;
+
 // }
+// AEBNF
 
 // ==========================================
 
-// "Minimal EBNF of EBNF (can NOT parse without backtracking capable EBNF parser)" {
-// EBNF        = "{" { production } "}" ;
-// production  = name "=" [ expression ] ( "." | ";" ) ;
-// expression  = name | text [ "..." text ] | group | option | repetition | skipspaces | alternative | sequence ;
-// sequence    = expression expression { expression } ;
-// alternative = expression "|" expression { "|" expression } ;
-// group       = "(" expression ")" ;
-// option      = "[" expression "]" ;
-// repetition  = "{" expression "}" ;
-// skipspaces = "+" | "-" ;
+// "'Wrong' EBNF of EBNF (can NOT parse)" {
 
-// name = ( small | caps ) { small | caps | digit | "_" } ;
-// text = "\"" - { small | caps | digit | special } "\"" + ;
+// EBNF        = [ Title ] "{" { Production } "}" name [ Comment ] ;
+// Production  = name "=" [ Expression ] ";" ;
+// Expression  = name | token [ "..." token ] | Group | Option | Repetition | skipspaces | Sequence | Alternative ;
+// Sequence    = Expression Expression { Expression } ;
+// Alternative = Expression "|" Expression { "|" Expression } ;
+// Group       = "(" Expression ")" ;
+// Option      = "[" Expression "]" ;
+// Repetition  = "{" Expression "}" ;
+// Title       = token ;
+// Comment     = token ;
 
-// digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-// small = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-// caps = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" | "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-// special = "_" | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" | "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "\\\\" | "\\\"" | "\\n" | "\\t" | " " | "|" | "%" | "$" | "&" | "'" | "#" | "~" | "@" ;
 // }
+// EBNF
 
 // ==========================================
 
-// Common syntax:
+// "Common syntax" {
 
 // name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
 // token       = Dquotetoken | Squotetoken ;
@@ -85,8 +93,11 @@ import (
 //               "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
 //               "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
 
-// skip        = "+" ;  // Skips all whitespace in the future.
-// noskip      = "-" ;  // Do not skip whitspace in the future.
+// skipspaces  = Skip | Noskip ;
+// Skip        = "+" ;  // Skip all whitespace in the future.
+// Noskip      = "-" ;  // Do not skip whitspace in the future.
+
+// }
 
 // ==========================================
 
@@ -153,7 +164,7 @@ func main() {
 	fmt.Println()
 	fmt.Println()
 	// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
-	asg, err := ebnf.ParseWithGrammar(aGrammar, srcCode, *param_trace_ParseWithAGrammar)
+	asg, err := ebnf.ParseWithGrammar(aGrammar, srcCode, false, *param_trace_ParseWithAGrammar)
 	if err != nil {
 		fmt.Println("\n  ==> Fail")
 		fmt.Println(err)

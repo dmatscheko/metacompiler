@@ -26,7 +26,7 @@
             "name": "Launch aEBNF Test (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tc"]
+            "program": "${workspaceFolder}","args": ["-f", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tg"]
         },
         {
             "name": "Launch LLVM IR Test",
@@ -39,6 +39,12 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-f", "tests/tiny.aebnf", "-s", "tests/tiny.aebnf"]
+        },
+        {
+            "name": "Launch Backtracking aEBNF Parse Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-f", "tests/backtracking.aebnf", "-s", "tests/backtracking.aebnf", "-t"]
         },
 
     ]

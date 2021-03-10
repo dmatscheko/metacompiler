@@ -73,9 +73,12 @@ func AppendPossibleSequence(target []Rule, source Rule) []Rule {
 }
 
 // Appends a Sequence but dissolves basic SEQUENCE groups
-func AppendArrayOfPossibleSequences(target []Rule, source []Rule) []Rule {
-	for i := 0; i < len(source); i++ {
-		target = AppendPossibleSequence(target, source[i])
+func AppendArrayOfPossibleSequences(target []Rule, source *[]Rule) []Rule {
+	if source == nil {
+		return target
+	}
+	for _, rule := range *source {
+		target = AppendPossibleSequence(target, rule)
 	}
 	return target
 }
