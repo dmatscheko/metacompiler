@@ -232,19 +232,19 @@ The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic gr
 #### Data Handling
 
 * __up__ (for upstream)  
-  All local variables. All _'up.*'_ variables can be changed by the user. This includes _'up.in'_.
+  All local variables. All `up.*` variables can be changed by the user. This includes `up.in`.
   * __up.in__  
   (string) The collective matched strings of all child nodes.
   * __up.\*__  
   User generated local variables. They can be arbitrary objects. Those objects are concatenated to arrays of objects when being propagated upwards.
   * __up.str\*__  
-  User generated local variables. All variables that start with _'str'_ must be strings. Those objects are concatenated as strings when being propagated upwards. up.in is an example of such string concatenation.
+  User generated local variables. All variables that start with `str` must be strings. Those objects are concatenated as strings when being propagated upwards. up.in is an example of such string concatenation.
 * __ltr__ (for left to right)  
-  All global variables (Global JS variables can be used too). All _'ltr.*'_ variables can be changed by the user. This includes _'ltr.in'_.
+  All global variables (Global JS variables can be used too). All `ltr.*` variables can be changed by the user. This includes `ltr.in`.
   * __ltr.in__  
   (string) The collective matched strings of all nodes from left to right. Only matched strings of nodes to the right (that are not processed yet), are not included.  
   * __ltr.\*__  
-  User generated global variables. They can be arbitrary objects. Except for _'ltr.in'_, those objects are not changed by the compiler.
+  User generated global variables. They can be arbitrary objects. Except for `ltr.in`, those objects are not changed by the compiler.
 
 ##### The stack
 
@@ -261,9 +261,9 @@ Pushes an arbitrary object onto the stack.
 The whole abstract semantic graph.
 * __c.localAsg__
 The local part of the abstract semantic graph.
-* __c.compile(asg, string) string__  
-  Compiles the given ASG and upstream string and returns the combined matched upstream string. Those combined string can have been modified by the annotations.  
-Normally, _'c.compile()'_ is called as `c.compile(asg, up.in);` or even `c.compile(asg, "");`.
+* __c.compile(asg []rule) map[string]object__  
+  Compiles the given ASG and returns the map of the combined upstream variables.  
+Normally, `c.compile()` is called as `c.compile(c.asg);`.
   The compiler works like this:  
 ```
     OUT
