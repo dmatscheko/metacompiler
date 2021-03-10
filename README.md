@@ -19,7 +19,7 @@ That new runtime generated parser plus compiler should allow to compile an arbit
 <details>
   <summary>Click to expand!</summary>
 
-```
+```javascript
 "a-EBNF of a-EBNF as text"
 <~~
 var names = [];
@@ -168,7 +168,7 @@ It allows to automatically create a compiler for everything described in aEBNF (
 <details>
   <summary>Click to expand!</summary>
 
-```
+```javascript
 {"TERMINAL", "a-EBNF of a-EBNF as text"}, 
 {"TAG", {"TERMINAL", "\nvar names = [];\nfunction getNameIdx(name) {\n    var pos = names.indexOf(name);\n    if (pos != -1) { return pos };\n    return names.push(name)-1;\n}\nc.compile(c.asg, up.in)\n"}}, 
 
