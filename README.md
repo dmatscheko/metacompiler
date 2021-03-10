@@ -310,6 +310,7 @@ A normal EBNF syntax looks like this:
 
 __EBNF of EBNF:__
 ```javascript
+EBNF        = [ Title ] "{" { Production } "}" [ Comment ] ;
 Production  = name "=" [ Expression ] ";" .
 Expression  = Alternative { "|" Alternative } ;
 Alternative = Term { Term } ;
@@ -317,6 +318,8 @@ Term        = name | token [ "..." token ] | Group | Option | Repetition | skip 
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
+Title       = token
+Comment     = token
 ```
 
 The definition of `name` and `token`, and of `skip` and `noskip` can be seen here:
@@ -338,4 +341,37 @@ Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | 
 
 skip        = "+" ;  // Skips all whitespace in the future.
 noskip      = "-" ;  // Do not skip whitspace in the future.
+```
+
+Skip and noskip are additions to be able to parse strings correctly.
+
+Annotated EBNF basically only adds tags to the syntax of a normal EBNF:
+
+__EBNF of a-EBNF:__
+```javascript
+EBNF        = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
+Production  = name [ Tag ] "=" [ Expression ] ";" .
+Expression  = Alternative { "|" Alternative } ;
+Alternative = Term { Term } ;
+Term        = ( name | token [ "..." token ] | Group | Option | Repetition | skip | noskip ) [ Tag ] ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
+Title       = token
+Comment     = token
+Tag         = "<" code { "," code } ">"
+```
+
+The `Tag` is always responsible for the `Term` right before it.
+
+The only exceptions are:
+* `Repetition`, where the `Tag` would only attach to the last entry of the `Repetition`.
+* The `Tag` after the `Title`. There, the `Tag` is not responsible for the title but it contains the _prolog JS code_. That code is executed automatically.
+* The `Tag` before the `Comment`. That `Tag` contains the _epilog JS code_. That code is executed automatically after the `c.compile()` function is finished with the ASG.
+
+The definition of `code`:
+
+```javascript
+code        = '~~' - { [ "~" ] Codeinner } '~~' + ;
+Codeinner   = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
 ```
