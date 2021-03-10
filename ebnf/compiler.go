@@ -25,17 +25,6 @@ type compiler struct {
 // ----------------------------------------------------------------------------
 // Dynamic ASG compiler
 
-/*
-	// a tag looks like <"CODE">
-	vars["childStr"] = childMatchStrJoined       // (string) The collective matched strings of all child nodes.
-	vars["childCode"] = childCodeResultStrJoined // (string) The collective textual output of all child tag nodes code.
-	vars["childObj"] = childCodeResultObjTree    // ([]r.Sequence) The collective generated list of all child tag nodes code upstream r.Sequence trees. Each TAG node can insert its objects into one of the trees in the list via upstream.
-	vars["locals"] = localVars                   // (objects map) The local (going upstream) variables, that can be set with {{ setLocal "foo" true }}, accessed with {{ .locals.foo }}, or deleted with {{ deleteLocal "foo" }}
-	vars["globals"] = co.globalVars              // (objects map) The global variables, that can be set with {{ setGlobal "foo" true }}, accessed with {{ .globals.foo }}, or deleted with {{ deletGlobal "foo" }}
-	vars["subTree"] = localTree                  // (object tree) The current sub tree of the parser grammar
-	if co.globalVars["idents"] == nil {          // (string list) The global list of unique names. Set by {{ident "someName"}}. It is exposed to the scripting language on purpose.
-*/
-
 func (co *compiler) sprintStack(space string) string {
 	res := ""
 	for _, elem := range co.stack {
@@ -109,24 +98,25 @@ func (co *compiler) handleTagCode(code string, name string, upStream map[string]
 }
 
 //
-//    OUT
-//     ^
-//     |
-//     C--.      (C) If the Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
-//     |   |
-//   * ^   v     (*) All upstream values are combined.
-//    /|   |
-//   | | _ |
-//   T | | |     (T) The text of a terminal gets sent to 'upstream.str'.
-//   | X | |     (X) Here, the script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
-//   | | O |     (O) Other Rules are ignored.
-//   | | | |
-//   \ | / |
-//  * \|/  |     (*) Childs from one Rule get splitted.
-//     |__/
-//     |
-//     ^
-//     IN
+//     OUT
+//      ^
+//      |
+//      C---.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
+//      |    |
+//      ^    v
+//      *    |     (*) All upstream (up.*) values from returning 'compile()'s are combined.
+//     /|    |
+//    | | _  |
+//    T | |  |     (T) The text of a Terminal symbol gets returned and included into 'up.in'.
+//    | X |  |     (X) The script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
+//    | | O  |     (O) Other Rules are ignored.
+//    | | |  |
+//    \ | /  |
+//     \|/   |
+//      *    |     (*) Childs from one Rule get splitted. The splitted path always only processe one rule (That can contain childs).
+//      |    |
+//      ^    |
+//      IN<-'
 //
 // 'upStream' are the variables that go up only. They are basically local variables.
 // 'ltrStream' are basically global variables. The difference betwee ltrStram and global JS variables is, that they ltrStream appends variables of sibling rules when their branches meet while propagating upwards.
