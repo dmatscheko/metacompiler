@@ -324,27 +324,6 @@ Title       = token
 Comment     = token
 ```
 
-The definition of `name` and `token`, and of `skip` and `noskip` can be seen here:
-```javascript
-name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
-token       = Dquotetoken | Squotetoken ;
-
-Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } '"' + ;
-Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } "'" + ;
-
-Digit       = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-Small       = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
-              "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-Caps        = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
-              "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
-              "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
-              "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
-
-skip        = "+" ;  // Skips all whitespace in the future.
-noskip      = "-" ;  // Do not skip whitspace in the future.
-```
-
 Skip and noskip are additions to be able to parse strings correctly.
 
 #### EBNF of a-EBNF
@@ -377,4 +356,27 @@ The definition of `code`:
 ```javascript
 code        = '~~' - { [ "~" ] Codeinner } '~~' + ;
 Codeinner   = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
+```
+
+#### Common syntax
+
+The definition of `name` and `token`, and of `skip` and `noskip` can be seen here:
+```javascript
+name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
+token       = Dquotetoken | Squotetoken ;
+
+Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } '"' + ;
+Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } "'" + ;
+
+Digit       = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+Small       = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
+              "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
+Caps        = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
+              "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
+Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
+              "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
+              "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
+
+skip        = "+" ;  // Skips all whitespace in the future.
+noskip      = "-" ;  // Do not skip whitspace in the future.
 ```
