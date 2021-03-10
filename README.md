@@ -220,12 +220,14 @@ go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 
 ### Exposed JS API
 
+The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic graph) gets processed from the leaves up to the stem. If annotations are encountered on the way, their JS code gets executed.
+
 #### Output
 
-* print [fmt.Print](https://golang.org/pkg/fmt/#Print)
-* println [fmt.Println](https://golang.org/pkg/fmt/#Println)
-* printf [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
-* sprintf [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
+* __print(...)__ [fmt.Print](https://golang.org/pkg/fmt/#Print)
+* __println(...)__ [fmt.Println](https://golang.org/pkg/fmt/#Println)
+* __printf(...)__ [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
+* __sprintf(...)__ [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
 
 #### Data Handling
 
@@ -291,11 +293,13 @@ The API documentation can be found here: [https://pkg.go.dev/github.com/llir/llv
 
 The functions and constants are exposed to JS as:
 
-* [llvm.ir](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir)
-* [llvm.constant](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/constant)
-* [llvm.metadata](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/metadata)
-* [llvm.types](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/types)
+* __llvm.ir.\*__ [llvm.ir](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir)
+* __llvm.constant.\*__ [llvm.constant](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/constant)
+* __llvm.metadata.\*__ [llvm.metadata](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/metadata)
+* __llvm.types.\*__ [llvm.types](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/types)
 
 * Custom functions:
-  * The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. at [http://magjac.com/graphviz-visual-editor/](http://magjac.com/graphviz-visual-editor/)).
-  * The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
+  * __llvm.Callgraph(m ir.Module) string__  
+  The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. at [http://magjac.com/graphviz-visual-editor/](http://magjac.com/graphviz-visual-editor/)).
+  * __llvm.Callgraph(m ir.Module, f string)__  
+  The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
