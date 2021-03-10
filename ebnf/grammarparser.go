@@ -42,14 +42,6 @@ func (gp *grammarParser) skipSpaces() {
 	}
 }
 
-func times(s string, n int) string {
-	res := s
-	for ; n > 0; n-- {
-		res = res + s
-	}
-	return res
-}
-
 func (gp *grammarParser) getRulePosId(rule *r.Rule, pos int) string {
 	return fmt.Sprintf("%d:%d", rule.ID, pos)
 }
@@ -313,13 +305,11 @@ func ParseWithGrammar(grammar Grammar, srcCode string, useFoundList bool, traceE
 		return nil, fmt.Errorf("Not everything could be parsed")
 	}
 
-	newProductions2 := mergeTerminals(*newProductions)
-
 	// gp.blockList = nil
 	// gp.foundList = nil
 	// gp.foundSdxList = nil
 	// gp.foundChList = nil
 	// gp.src = nil
 
-	return newProductions2, nil
+	return mergeTerminals(*newProductions), nil
 }

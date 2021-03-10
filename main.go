@@ -9,6 +9,7 @@ import (
 	"./ebnf"
 )
 
+// TODO: MAybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one value less.
 // TODO: Add possibility to comment the EBNF via '//'.
 // TODO: Allow to state the start rule via JS.
 // TODO: Define an EOF symbol for the EBNF syntax.
@@ -180,7 +181,8 @@ func main() {
 	if *param_trace_ParseWithAGrammar {
 		log.Println("    " + ebnf.PprintProductions(&asg, "    "))
 	} else {
-		log.Println("    " + ebnf.Shorten(ebnf.PprintProductions(&asg, "    ")))
+		log.Println("    " + ebnf.PprintProductions(&asg, "    "))
+		// log.Println("    " + ebnf.Shorten(ebnf.PprintProductions(&asg, "    ")))
 	}
 
 	log.Print("\nCode output:\n\n")
@@ -218,7 +220,7 @@ func speedtestParseAEBNF(src, target string, count int) {
 		_, err = ebnf.ParseAEBNF(src, false)
 	}
 	if err != nil {
-		log.Println("Error")
+		log.Println("Error ParseAEBNF")
 		return
 	}
 }
