@@ -180,16 +180,21 @@ The functions and constants are exposed to JS as:
 A normal EBNF syntax looks like this:
 
 ```javascript
+"EBNF of EBNF" {
+
 EBNF        = [ Title ] "{" { Production } "}" [ Comment ] ;
-Production  = name "=" [ Expression ] ";" .
+Production  = name "=" [ Expression ] ";" ;
 Expression  = Alternative { "|" Alternative } ;
 Alternative = Term { Term } ;
-Term        = name | token [ "..." token ] | Group | Option | Repetition | skip | noskip ;
+Term        = name | token [ "..." token ] | Group | Option | Repetition | skipspaces ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-Title       = token
-Comment     = token
+Title       = token ;
+Comment     = token ;
+
+}
+EBNF
 ```
 
 Skip and noskip are additions to be able to parse strings correctly.
@@ -199,17 +204,22 @@ Skip and noskip are additions to be able to parse strings correctly.
 Annotated EBNF basically only adds tags to the syntax of a normal EBNF:
 
 ```javascript
-EBNF        = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
-Production  = name [ Tag ] "=" [ Expression ] ";" .
+"EBNF of a-EBNF" {
+
+AEBNF       = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
+Production  = name [ Tag ] "=" [ Expression ] ";" ;
 Expression  = Alternative { "|" Alternative } ;
 Alternative = Term { Term } ;
-Term        = ( name | token [ "..." token ] | Group | Option | Repetition | skip | noskip ) [ Tag ] ;
+Term        = ( name | token [ "..." token ] | Group | Option | Repetition | skipspaces ) [ Tag ] ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-Title       = token
-Comment     = token
-Tag         = "<" code { "," code } ">"
+Title       = token ;
+Comment     = token ;
+Tag         = "<" code { "," code } ">" ;
+
+}
+AEBNF
 ```
 
 The `Tag` is always responsible for the `Term` right before it.
@@ -219,20 +229,18 @@ The only exceptions are:
 * The `Tag` after the `Title`. There, the `Tag` is not responsible for the title but it contains the _prolog JS code_. That code is executed automatically.
 * The `Tag` before the `Comment`. That `Tag` contains the _epilog JS code_. That code is executed automatically after the `c.compile()` function is finished with the ASG.
 
-The definition of `code`:
-
-```javascript
-code        = '~~' - { [ "~" ] Codeinner } '~~' + ;
-Codeinner   = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
-```
-
 #### Common syntax
 
-This is the definition of `name` and `token`, and of `skip` and `noskip`. They are common to EBNF and a-EBNF:
+This is the definition of `name` and `token`, of `skipspaces`, and of `code`. Except of `code`, they are common to EBNF and a-EBNF:
 
 ```javascript
+"Common syntax" {
+
 name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
 token       = Dquotetoken | Squotetoken ;
+
+code        = '~~' - { [ "~" ] Codeinner } '~~' + ;
+Codeinner   = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
 
 Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } '"' + ;
 Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } "'" + ;
@@ -246,8 +254,11 @@ Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | 
               "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
               "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
 
-skip        = "+" ;  // Skips all whitespace in the future.
-noskip      = "-" ;  // Do not skip whitspace in the future.
+skipspaces  = Skip | Noskip ;
+Skip        = "+" ;  // Skip all whitespace in the future.
+Noskip      = "-" ;  // Do not skip whitspace in the future.
+
+}
 ```
 
 ## Further Examples
