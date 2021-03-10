@@ -21,16 +21,16 @@ This is a fully working calculator for integer addition and multiplication. It c
   <summary>Click to expand!</summary>
 
 ```
-"math test"
+"Tiny calculator"
 <~~ c.compile(c.asg) ~~>
 
 {
 
-expression  =
-    term                   
+Expression  =
+    Term                   
     {
         ( "+" | "-" )      <~~push(up.in)~~>
-        term               <~~
+        Term               <~~
                            var t2 = parseInt(pop())
                            var op = pop()
                            var t1 = parseInt(pop())
@@ -40,11 +40,11 @@ expression  =
     }
     ;
 
-term        =
-    factor                 
+Term        =
+    Factor                 
     {
         ( "*" | "/" )      <~~push(up.in)~~>
-        factor             <~~
+        Factor             <~~
                            var t2 = parseInt(pop())
                            var op = pop()
                            var t1 = parseInt(pop())
@@ -54,24 +54,24 @@ term        =
     }
     ;
 
-factor      =
+Factor      =
     (
         "("                
-        expression         
+        Expression         
         ")"                
     )
     |
-    number                 <~~push(up.in)~~>
+    Number                 <~~push(up.in)~~>
     ;
 
-number      = "0" | nonzero { "0" | nonzero } ;
-nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+Number      = "0" | Nonzero { "0" | Nonzero } ;
+Nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
 }
 
 <~~ println("\\nRESULT: " + pop()) ~~>
 
-expression
+Expression
 ```
 
 When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
