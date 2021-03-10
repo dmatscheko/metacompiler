@@ -13,7 +13,8 @@ type compiler struct {
 	vm              *goja.Runtime
 	compilerFuncMap map[string]r.Object
 
-	asg []r.Rule
+	asg    []r.Rule
+	extras *map[string]r.Rule
 
 	stack     []r.Object          // global stack.
 	ltrStream map[string]r.Object // global variables.
@@ -218,7 +219,11 @@ func (co *compiler) initFuncMap() {
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
 		"compile": func(localASG []r.Rule) map[string]r.Object {
-			return co.compile(localASG, 0)
+			res := co.compile(localASG, 0)
+			if epilog, ok := (*co.extras)["epilog.code"]; ok {
+				co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", res, localASG, 0)
+			}
+			return res
 		},
 		"asg": co.asg,
 
@@ -244,6 +249,7 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res
 	co.traceEnabled = traceEnabled
 	co.traceCount = 0
 	co.asg = asg
+	co.extras = extras
 	co.ltrStream = map[string]r.Object{ // Basically like global variables.
 		"in": "", // This is the parser input (the terminals).
 	}
@@ -258,12 +264,13 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool) (res
 		co.handleTagCode(prolog.TagChilds[0].String, "prolog.code", upStream, asg, 0)
 	}
 
-	// Is called fom JS.
+	// Is called fom JS compile().
 	// co.compile(asg)
 
-	if epilog, ok := (*extras)["epilog.code"]; ok {
-		co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upStream, asg, 0)
-	}
+	// Is called from JS compile().
+	// if epilog, ok := (*extras)["epilog.code"]; ok {
+	// 	co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upStream, asg, 0)
+	// }
 
 	return upStream, nil
 }
