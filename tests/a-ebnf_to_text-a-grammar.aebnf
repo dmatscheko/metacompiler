@@ -1,4 +1,4 @@
-"a-EBNF of a-EBNF as text"
+"a-EBNF of a-EBNF: Compiles to textual a-grammar"
 <~~
 var names = [];
 function getNameIdx(name) {
@@ -11,70 +11,70 @@ c.compile(c.asg, up.in)
 
 {
 
-program                                 <~~push(up.in)~~>
+Program                                 <~~push(up.in)~~>
                 =
                 [
-                    title               <~~ up.in += ', \\n' ~~>
+                    Title               <~~ up.in += ', \\n' ~~>
                 ]
-                programtag
+                Programtag
                 "{"                     <~~ up.in = '\\n{\\n\\n' ~~>
-                { production }
+                { Production }
                 "}"                     <~~ up.in = '\\n}, \\n\\n' ~~>
-                programtag
+                Programtag
                 start
                 [
-                    comment             <~~ up.in = ', \\n'+up.in+'\\n' ~~>
+                    Comment             <~~ up.in = ', \\n'+up.in+'\\n' ~~>
                 ] ;
 
-programtag      =
+Programtag      =
                 [
-                    tag                 <~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~>
+                    Tag                 <~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~>
                 ] ;
 
-production                              <~~ var productionTag = pop();
+Production                              <~~ var productionTag = pop();
                                         if (productionTag != undefined) {
                                             pop()/*=undefined*/;
                                             up.in = '{"TAG", '+productionTag+', '+up.in+'}'
                                         };
                                         up.in += ',\\n' ~~>       
                 =
-                name                    <~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', ';
+                Name                    <~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', ';
                                         push(undefined) ~~>
                 [
-                    tag                 <~~ push(up.in); up.in = '' ~~>
+                    Tag                 <~~ push(up.in); up.in = '' ~~>
                 ]
                 "="                     <~~up.in=''~~>
-                [ expression ]
+                [ Expression ]
                 ( "." | ";" )           <~~ up.in = '}' ~~> ;
 
-expression                              <~~ if (/*or*/ pop()) {
+Expression                              <~~ if (/*or*/ pop()) {
                                             up.in = '{"OR", '+up.in+'}'
                                         } ~~>
                 =
-                alternative             <~~ /*or=false*/ push(false); ~~>
+                Alternative             <~~ /*or=false*/ push(false); ~~>
                 {
                     "|"                 <~~up.in=''~~>
-                    alternative         <~~ /*or=true*/ pop();push(true); up.in = ', '+up.in ~~>
+                    Alternative         <~~ /*or=true*/ pop();push(true); up.in = ', '+up.in ~~>
                 } ;
 
-alternative     =
-                taggedterm
+Alternative     =
+                Taggedterm
                 {
-                    taggedterm          <~~ up.in = ', '+up.in ~~>
+                    Taggedterm          <~~ up.in = ', '+up.in ~~>
                 } ;
 
-taggedterm                              <~~up.in=pop()~~>
+Taggedterm                              <~~up.in=pop()~~>
                 =
-                term                    <~~push(up.in)~~>
+                Term                    <~~push(up.in)~~>
                 [
-                    tag                 <~~ push('{"TAG", '+up.in+', '+pop()+'}') ~~>
+                    Tag                 <~~ push('{"TAG", '+up.in+', '+pop()+'}') ~~>
                 ] ;
 
-term            =
+Term            =
                 (
-                    name                <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~>
+                    Name                <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~>
                     |
-                    ( text [ "..." text ] )
+                    ( Token [ "..." Token ] )
                     |
                     group
                     |
@@ -85,57 +85,57 @@ term            =
                     skipspaces
                 ) ;
 
-group           <~~ up.in = '{'+pop()+'}' ~~>                    = "(" expression <~~push(up.in)~~> ")" ;
-option          <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>        = "[" expression <~~push(up.in)~~> "]" ;
-repetition      <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>          = "{" expression <~~push(up.in)~~> "}" ;
+group           <~~ up.in = '{'+pop()+'}' ~~>                    = "(" Expression <~~push(up.in)~~> ")" ;
+option          <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>        = "[" Expression <~~push(up.in)~~> "]" ;
+repetition      <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>          = "{" Expression <~~push(up.in)~~> "}" ;
 skipspaces      =
                 "+"                     <~~ up.in = '{"SKIPSPACES", true}' ~~>
                 |
                 "-"                     <~~ up.in = '{"SKIPSPACES", false}' ~~> ;
 
-title           = text ;
-start           = name                  <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
-comment         = text ;
+Title           = Token ;
+start           = Name                  <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
+Comment         = Token ;
 
-tag                                     <~~up.in=pop()~~>
+Tag                                     <~~up.in=pop()~~>
                 =
                 "<"
-                code                    <~~push(up.in)~~>
+                Code                    <~~push(up.in)~~>
                 {
                     ","
-                    code                <~~ push(pop()+', '+up.in) ~~>
+                    Code                <~~ push(pop()+', '+up.in) ~~>
                 }
                 ">" ;
 
-code                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+Code                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
                 =
                 '~~'
                 -
-                { [ "~" ] codeinner }   <~~push(up.in)~~>
+                { [ "~" ] Codeinner }   <~~push(up.in)~~>
                 '~~'
                 + ;
 
-codeinner       = small | caps | digit | special | "'" | '"' | "\\~" ;
+Codeinner       = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
 
-name            = ( small | caps ) - { small | caps | digit | "_" } + ;
+Name            = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
 
-text                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
-                = dquotetext | squotetext ;
-dquotetext      = '"' - { small | caps | digit | special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
-squotetext      = "'" - { small | caps | digit | special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;
+Token                                   <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+                = Dqtoken | Sqtoken ;
+Dqtoken         = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
+Sqtoken         = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;
 
-digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-small           = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
+Digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+Small           = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
                   "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-caps            = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
+Caps            = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
                   "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
+Special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
                   "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
                   "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
 
 }
 
 <~~ print(pop()) ~~>
-program
+Program
 "This aEBNF contains the grammatic and semantic information for annotated EBNF.
 It allows to automatically create a compiler for everything described in aEBNF (yes, that format)."
