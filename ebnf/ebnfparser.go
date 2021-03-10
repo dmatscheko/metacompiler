@@ -21,7 +21,6 @@ type ebnfParser struct {
 	sdx          int
 	token        r.Rule
 	isSeq        bool // Only true if the String in ep.token is valid.
-	err          bool
 	traceEnabled bool
 	ididx        []int
 	idents       []string
@@ -42,12 +41,9 @@ func (ep *ebnfParser) skipSpaces() {
 	}
 }
 
-func (ep *ebnfParser) invalid(msg string, pos int) r.Rule {
-	ep.err = true
-	fmt.Printf("Error at position %d: %s\n", pos, msg)
-	ep.sdx = len(ep.src) // set to eof
-	// ep.token = r.Sequence{Operator: r.Invalid, String: msg} // TODO: maybe store the message later
-	return r.Rule{Operator: r.Invalid, String: msg, Pos: pos}
+func (ep *ebnfParser) error(msg string, pos int) {
+	ep.sdx = len(ep.src)
+	ep.token = r.Rule{Operator: r.Error, String: fmt.Sprintf("Error at %s: %s\n", LinePosFromStrPos(string(ep.src), pos), msg), Pos: pos}
 }
 
 func (ep *ebnfParser) getToken() {
@@ -55,7 +51,7 @@ func (ep *ebnfParser) getToken() {
 	// or {"TERMINAL",string} or {"IDENT", string} or -1.
 	ep.skipSpaces()
 	if ep.sdx >= len(ep.src) {
-		ep.token = r.Rule{Operator: r.Invalid, String: "Error while parsing EBNF (beyond EOF)", Pos: ep.sdx}
+		ep.error("Error while parsing EBNF (beyond EOF)", ep.sdx)
 		ep.isSeq = false
 		return
 	}
@@ -92,7 +88,6 @@ func (ep *ebnfParser) getToken() {
 						}
 					}
 				}
-				// fmt.Printf(">>> %s\n", string(tokenrunes))
 
 				ep.token = r.Rule{Operator: r.Terminal, String: string(tokenrunes), Pos: tokstart}
 				ep.isSeq = true
@@ -103,7 +98,7 @@ func (ep *ebnfParser) getToken() {
 			}
 
 		}
-		ep.token = ep.invalid("no closing quote", tokstart)
+		ep.error("No closing quote", tokstart)
 		ep.isSeq = false
 
 	} else if ep.ch == '~' && len(ep.src) > ep.sdx+1 && ep.src[ep.sdx+1] == '~' {
@@ -135,7 +130,6 @@ func (ep *ebnfParser) getToken() {
 						}
 					}
 				}
-				// fmt.Printf(">>> %s\n", string(tokenrunes))
 
 				ep.token = r.Rule{Operator: r.Terminal, String: string(tokenrunes), Pos: tokstart}
 				ep.isSeq = true
@@ -146,7 +140,7 @@ func (ep *ebnfParser) getToken() {
 			}
 
 		}
-		ep.token = ep.invalid("no closing quote", tokstart)
+		ep.error("No closing quote", tokstart)
 		ep.isSeq = false
 	} else if (ep.ch >= 'a' && ep.ch <= 'z') || (ep.ch >= 'A' && ep.ch <= 'Z') {
 		// To simplify things for the purposes of this task,
@@ -164,7 +158,7 @@ func (ep *ebnfParser) getToken() {
 		ep.token = r.Rule{Operator: r.Ident, String: string(ep.src[tokstart:ep.sdx]), Pos: tokstart}
 		ep.isSeq = true
 	} else {
-		ep.token = ep.invalid(fmt.Sprintf("Invalid char '%c'", ep.ch), ep.sdx)
+		ep.error(fmt.Sprintf("Invalid char '%c'", ep.ch), ep.sdx)
 		ep.isSeq = false
 	}
 }
@@ -174,7 +168,7 @@ func (ep *ebnfParser) matchToken(ch rune) {
 	if ep.token.Operator == r.Factor && ep.token.Rune == ch {
 		ep.getToken()
 	} else {
-		ep.token = ep.invalid(fmt.Sprintf("Invalid char ('%c' expected, '%c' found)", ch, ep.src[ep.sdx]), ep.sdx)
+		ep.error(fmt.Sprintf("Invalid char ('%c' expected, '%c' found)", ch, ep.src[ep.sdx]), ep.sdx)
 		ep.isSeq = false
 	}
 }
@@ -198,7 +192,7 @@ func (ep *ebnfParser) addIdent(ident string) int {
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) factor() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("fact(%d)  ", ep.sdx)
+		fmt.Printf("Fact(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 	var res r.Rule
@@ -259,12 +253,9 @@ func (ep *ebnfParser) factor() r.Rule {
 	}
 
 	if !valid {
-		panic(fmt.Sprintf("invalid token in factor() function (%s)", PprintRuleOnly(&ep.token)))
+		ep.error(fmt.Sprintf("Invalid token in factor() function (%s)", PprintRuleOnly(&ep.token)), ep.sdx)
 	}
 
-	// if res.Operator == r.Basic && len(res.Childs) == 1 {
-	// 	return res.Childs[0]
-	// }
 	return res
 }
 
@@ -272,7 +263,7 @@ func (ep *ebnfParser) factor() r.Rule {
 // TODO: allow multiple strings/text, separated by ";"!
 func (ep *ebnfParser) tag() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("tag(%d)  ", ep.sdx)
+		fmt.Printf("Tag(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 
@@ -293,19 +284,20 @@ func (ep *ebnfParser) tag() r.Rule {
 // also works like getToken(), but advances before that as much as it itself knows (= implements sequence)
 func (ep *ebnfParser) term() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("term(%d)  ", ep.sdx)
+		fmt.Printf("Term(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 
 	firstFactor := ep.factor()
 	if firstFactor.Operator == r.Tag {
-		return ep.invalid("TAG is invalid at this position", pos)
+		ep.error("TAG is invalid at this position", pos)
+		return ep.token
 	}
 
 	res := []r.Rule{firstFactor}
 
 	for {
-		if (ep.token.Operator == r.Factor && strings.IndexRune("})]>|.;", ep.token.Rune) >= 0) || ep.token.Operator == r.Invalid {
+		if (ep.token.Operator == r.Factor && strings.IndexRune("})]>|.;", ep.token.Rune) >= 0) || ep.token.Operator == r.Error {
 			break
 		}
 
@@ -333,7 +325,7 @@ func (ep *ebnfParser) term() r.Rule {
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) expression() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("expr(%d)  ", ep.sdx)
+		fmt.Printf("Expr(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
 	res := ep.term()
@@ -354,18 +346,19 @@ func (ep *ebnfParser) expression() r.Rule {
 // also works like getToken(), but advances before that as much as it itself knows
 func (ep *ebnfParser) production() r.Rule {
 	if ep.traceEnabled {
-		fmt.Printf("prod(%d)  ", ep.sdx)
+		fmt.Printf("Prod(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
-	// Returns a token or r.Invalid; the real result is left in 'productions' etc, ...
 	ep.getToken()
 
 	if !(ep.token.Operator == r.Factor && ep.token.Rune == '}') {
-		if ep.token.Operator == r.Invalid {
-			return ep.invalid("Invalid EBNF (missing closing })", pos)
+		if ep.token.Operator == r.Error {
+			ep.error("Invalid EBNF (missing closing '}')", pos)
+			return ep.token
 		}
 		if ep.token.Operator != r.Ident {
-			return r.Rule{Operator: r.Invalid, String: fmt.Sprintf("Ident expected but got %s", ep.token.Operator), Pos: pos}
+			ep.error(fmt.Sprintf("Ident expected but got %s", PprintRuleOnly(&ep.token)), pos)
+			return ep.token
 		}
 
 		ident := ep.token.String
@@ -380,7 +373,7 @@ func (ep *ebnfParser) production() r.Rule {
 		}
 
 		ep.matchToken('=')
-		if ep.token.Operator == r.Invalid {
+		if ep.token.Operator == r.Error {
 			return ep.token
 		}
 		if foundTag {
@@ -395,9 +388,7 @@ func (ep *ebnfParser) production() r.Rule {
 	return ep.token
 }
 
-// ep.err == false, if the parsing went OK
 func (ep *ebnfParser) parse(srcEbnf string) {
-	ep.err = false
 	ep.src = []rune(srcEbnf)
 	ep.sdx = 0
 	ep.grammar.Extras = make(map[string]r.Rule)
@@ -424,12 +415,12 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 	// Main
 	if !(ep.token.Operator == r.Factor && ep.token.Rune == '{') {
-		ep.invalid("Invalid EBNF (missing opening {)", pos)
+		ep.error("Invalid EBNF (missing opening '{')", pos)
 		return
 	}
 	for {
 		ep.token = ep.production()
-		if (ep.token.Operator == r.Factor && ep.token.Rune == '}') || ep.token.Operator == r.Invalid {
+		if (ep.token.Operator == r.Factor && ep.token.Rune == '}') || ep.token.Operator == r.Error {
 			break
 		}
 	}
@@ -451,7 +442,8 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		pos = ep.sdx
 		ep.getToken()
 	} else {
-		ep.invalid("Invalid EBNF (missing entry point)", pos)
+		ep.error("Invalid EBNF (missing entry point)", pos)
+		return
 	}
 
 	// Comment
@@ -462,15 +454,12 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	}
 
 	// End of parsing
-	if ep.token.Operator != r.Invalid {
-		ep.invalid("Invalid EBNF (missing EOF?)", pos)
-		return
-	}
-	if ep.err {
+	if ep.token.Operator != r.Error {
+		ep.error("Invalid EBNF (Not at EOF)", pos)
 		return
 	}
 
-	ep.token = r.Rule{}
+	ep.token = r.Rule{Operator: r.Success}
 	ep.verifyGrammar()
 	ep.resolveIdIdx(&ep.grammar.Productions)
 
@@ -504,8 +493,8 @@ func ParseAEBNF(srcEbnf string, traceEnabled bool) (g Grammar, e error) {
 	ep.traceEnabled = traceEnabled
 	ep.parse(srcEbnf)
 
-	var err error = nil
-	if ep.err {
+	var err error
+	if ep.token.Operator != r.Success {
 		if ep.token.String != "" {
 			err = fmt.Errorf("%s", ep.token.String)
 		} else {

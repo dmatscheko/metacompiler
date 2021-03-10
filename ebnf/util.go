@@ -8,6 +8,14 @@ import (
 	"./r"
 )
 
+func times(s string, n int) string {
+	res := s
+	for ; n > 0; n-- {
+		res = res + s
+	}
+	return res
+}
+
 func jsonizeObject(ob r.Object) string {
 	pp := fmt.Sprintf("%#v", ob)
 	pp = strings.ReplaceAll(pp, "[]interface {}", "")
@@ -90,16 +98,16 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) strin
 	if len(space) > 0 {
 		sp = space[0]
 	}
-	res := string("\"" + r.RuleTypes[rule.Operator] + "\"")
+	res := string("\"" + rule.Operator.String() + "\"")
 	// res := string("\"" + rule.Operator + "\"")
 
 	switch rule.Operator {
-	case r.Terminal, r.Invalid:
+	case r.Terminal, r.Error:
 		res += fmt.Sprintf(", Pos:%d, %q", rule.Pos, rule.String)
 	case r.Ident, r.Production:
 		res += fmt.Sprintf(", %q:%d, Pos:%d", rule.String, rule.Int, rule.Pos)
-	case r.Range:
-		// TODO:!
+	// case r.Range:
+	// 	// TODO:!
 	case r.SkipSpaces:
 		res += fmt.Sprintf(", Pos:%d, %t", rule.Pos, rule.Bool)
 	case r.Tag:
@@ -196,5 +204,5 @@ func LinePosFromStrPos(data string, pos int) string {
 			}
 		}
 	}
-	return "position outside of string"
+	return "position outside of EBNF"
 }
