@@ -360,7 +360,8 @@ Codeinner   = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
 
 #### Common syntax
 
-The definition of `name` and `token`, and of `skip` and `noskip` can be seen here:
+This is the definition of `name` and `token`, and of `skip` and `noskip`. They are common to EBNF and a-EBNF:
+
 ```javascript
 name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
 token       = Dquotetoken | Squotetoken ;
