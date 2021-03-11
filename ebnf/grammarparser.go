@@ -53,32 +53,38 @@ func (gp *grammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (
 	}
 	id := gp.getRulePosId(rule, gp.sdx)
 
+	var isBlocked bool = false
+	var foundRule *[]r.Rule = nil
+	var foundSdx int = -1
+	var foundCh rune = 0
+
 	if gp.useFoundList {
-		found := gp.foundList[id]
-		if gp.foundList[id] != nil { // TODO: Is really only useful on massive backtracking...
-			if gp.traceEnabled {
-				space := times(" ", depth)
-				fmt.Print(space, ">", depth, "  (", gp.traceCount, ")  ", LinePosFromStrPos(string(gp.src), gp.sdx), rule.ID, ":", PprintRuleOnly(rule, ""), "\n", space, "<INSTANT EXIT (ALREADY FOUND)", "\n")
+		foundRule = gp.foundList[id]
+		if foundRule != nil { // Is really only useful on massive backtracking...
+			foundSdx = gp.foundSdxList[id]
+			foundCh = gp.foundChList[id]
+			isBlocked = true // If the result is there already, block the apply() from trying it again.
+		} else {
+			isBlocked := gp.blockList[id]            // True because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
+			if !isBlocked && rule.Operator != r.Or { // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
+				gp.blockList[id] = true // Enter the current rule rule in the block list because it was not already blocked.
 			}
-			return true, found, gp.foundSdxList[id], gp.foundChList[id] // If the result is there already, block the apply() from trying it again.
 		}
 	}
 
-	isBlocked := gp.blockList[id] // True if the current rule on the current position in the text to parse is its own parent (= loop).
-	if rule.Operator != r.Or {    // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
-		gp.blockList[id] = true // Entry of the rule. Block the current rule in the block list.
+	if !gp.traceEnabled {
+		return isBlocked, foundRule, foundSdx, foundCh
 	}
 
-	if !gp.traceEnabled {
-		return isBlocked, nil, -1, 0
-	}
 	c := "EOF"
 	if gp.sdx < len(gp.src) {
 		c = fmt.Sprintf("%q", gp.src[gp.sdx])
 	}
 	space := times(" ", depth)
 	msg := ""
-	if isBlocked {
+	if foundRule != nil {
+		msg = "\n" + space + "<INSTANT EXIT (ALREADY FOUND)\n"
+	} else if isBlocked {
 		msg = "\n" + space + "<INSTANT EXIT (LOOP)\n"
 	}
 	skip := "  noskip  "
@@ -86,7 +92,7 @@ func (gp *grammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (
 		skip = "  skip  "
 	}
 	fmt.Print(space, ">", depth, "  (", gp.traceCount, ")  ", LinePosFromStrPos(string(gp.src), gp.sdx), "  char:", c, skip, rule.ID, ":", PprintRuleOnly(rule, ""), msg, "\n")
-	return isBlocked, nil, -1, 0
+	return isBlocked, foundRule, foundSdx, foundCh
 }
 
 func (gp *grammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, found *[]r.Rule, pos int) {
@@ -226,9 +232,9 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *[]r.
 	case r.SkipSpaces: // TODO: Modify SKIPSPACES so that the chars to skip can be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		rule.Pos = gp.sdx
 		localProductions = []r.Rule{*rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
-	default: // r.Factor || r.Invalid
+	default: // r.Factor || r.Error
 		gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
-		panic(fmt.Sprintf("invalid rule in applies() function: %#v", rule))
+		panic(fmt.Sprintf("Invalid rule in applies() function: %#v", rule))
 	}
 
 	// All failed matches should have returned already.
@@ -267,11 +273,11 @@ func mergeTerminals(productions []r.Rule) []r.Rule {
 	return productions
 }
 
-func ParseWithGrammar(grammar Grammar, srcCode string, useFoundList bool, traceEnabled bool) (res []r.Rule, err error) { // => (productions, error)
+func ParseWithGrammar(grammar Grammar, srcCode string, useFoundList bool, traceEnabled bool) (res []r.Rule, e error) { // => (productions, error)
 	defer func() {
-		if errRecover := recover(); errRecover != nil {
+		if err := recover(); err != nil {
 			res = nil
-			err = fmt.Errorf(fmt.Sprintf("%s", errRecover))
+			e = fmt.Errorf("%s", err)
 		}
 	}()
 

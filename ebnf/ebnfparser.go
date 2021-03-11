@@ -42,6 +42,9 @@ func (ep *ebnfParser) skipSpaces() {
 }
 
 func (ep *ebnfParser) error(msg string, pos int) {
+	if ep.token.Operator == r.Error { // Keep the first error
+		return
+	}
 	ep.sdx = len(ep.src)
 	ep.token = r.Rule{Operator: r.Error, String: fmt.Sprintf("Error at %s: %s\n", LinePosFromStrPos(string(ep.src), pos), msg), Pos: pos}
 }
@@ -481,15 +484,20 @@ func (ep *ebnfParser) resolveIdIdx(productions *[]r.Rule) {
 	}
 }
 
+var ep ebnfParser
+
 func ParseAEBNF(srcEbnf string, traceEnabled bool) (g Grammar, e error) {
 	defer func() {
 		if err := recover(); err != nil {
-			fmt.Printf("%s\n  ==> Fail\n", err)
-			e = fmt.Errorf("Fail")
+			if ep.token.Operator == r.Error && ep.token.String != "" {
+				e = fmt.Errorf("%s", ep.token.String)
+			} else {
+				e = fmt.Errorf("%s", err)
+			}
 		}
 	}()
 
-	var ep ebnfParser
+	// var ep ebnfParser
 	ep.traceEnabled = traceEnabled
 	ep.parse(srcEbnf)
 
