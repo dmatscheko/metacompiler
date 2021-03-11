@@ -157,8 +157,7 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
 
 #### LLVM IR API
 
-This tool uses [https://github.com/llir/llvm](https://github.com/llir/llvm) to create LLVM IR. 
-The API documentation can be found here: [https://pkg.go.dev/github.com/llir/llvm/](https://pkg.go.dev/github.com/llir/llvm/).
+This tool uses the [Go LLIR/LLVM library](https://github.com/llir/llvm) to create LLVM IR and to interact with it. The API documentation can be found here: [LLIR/LLVM library documentation](https://pkg.go.dev/github.com/llir/llvm/). For more information on LLVM IR go to the [LLVM language reference](https://llvm.org/docs/LangRef.html).
 
 The functions and constants are exposed to JS as:
 
@@ -169,7 +168,7 @@ The functions and constants are exposed to JS as:
 
 * Custom functions:
   * __llvm.Callgraph(m ir.Module) string__  
-  The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. at [http://magjac.com/graphviz-visual-editor/](http://magjac.com/graphviz-visual-editor/)).
+  The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. online with the [Graphviz visual editor](http://magjac.com/graphviz-visual-editor/)).
   * __llvm.Callgraph(m ir.Module, f string)__  
   The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
 
