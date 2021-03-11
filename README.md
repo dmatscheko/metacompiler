@@ -107,6 +107,8 @@ The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic gr
   User generated local variables. They can be arbitrary objects. Those objects are concatenated to arrays of objects when being propagated upwards.
   * __up.str\*__  
   User generated local variables. All variables that start with `str` must be strings. Those objects are concatenated as strings when being propagated upwards. up.in is an example of such string concatenation.
+  * __up.arr\*__  
+  User generated local variables. Those can be arrays of arbitrary objects. They are appended when being propagated upwards. If an object is not an array, it will be put into one.
 * __ltr__ (for left to right)  
   All global variables (Global JS variables can be used too). All `ltr.*` variables can be changed by the user. This includes `ltr.in`.
   * __ltr.in__  
@@ -116,14 +118,14 @@ The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic gr
 
 ##### The stack
 
-This JS API provides an added stack. This is useful to bring data to the other side of EBNF matchers.
+This API provides a hirarchical stack that is handled like the local variables of `up.arr`. This is useful to bring data to the other side of EBNF matchers.
 
 * __pop() object__  
-Pops an arbitrary object from the stack.
+Pops an arbitrary object from the local stack.
 * __push(object)__  
-Pushes an arbitrary object onto the stack.
-
-Note that this stack works locally and abides the hirarchical type of the system. It can also be accessed via the variable `up.stack`.
+Pushes an arbitrary object onto the local stack.
+* __up.stack__  
+This stack can also be accessed via the variable `up.stack`.
 
 There is also a global stack available:
 
