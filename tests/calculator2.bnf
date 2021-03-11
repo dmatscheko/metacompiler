@@ -1,0 +1,55 @@
+"Width first Tiny calculator"
+<~~ c.compile(c.asg) ~~>
+
+{
+
+Expression  =
+    (
+        Term
+        ( "+" | "-" )       <~~push(up.in)~~>
+        Term
+    )                       <~~
+                            var t2 = parseInt(pop())
+                            var op = pop()
+                            var t1 = parseInt(pop())
+                            var res = (op=="+") ? t1 + t2 : t1 - t2
+                            push(res)
+                            ~~>
+    |
+    Term
+    ;
+
+Term        =
+    (
+        Factor
+        ( "*" | "/" )       <~~push(up.in)~~>
+        Factor
+    )                       <~~
+                            var t2 = parseInt(pop())
+                            var op = pop()
+                            var t1 = parseInt(pop())
+                            var res = (op=="*") ? t1 * t2 : t1 / t2
+                            push(res)
+                            ~~>
+    |
+    Factor
+    ;
+
+Factor      =
+    (
+        "("
+        Expression         
+        ")"
+    )
+    |
+    Number                 <~~push(up.in)~~>
+    ;
+
+Number      = "0" | Nonzero { "0" | Nonzero } ;
+Nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+
+}
+
+<~~ println("\\nRESULT: " + pop()) ~~>
+
+Expression

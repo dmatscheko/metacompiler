@@ -249,7 +249,7 @@ func CompileASG(asg []r.Rule, extras *map[string]r.Rule, traceEnabled bool, prev
 	defer func() {
 		if err := recover(); err != nil {
 			res = nil
-			e = fmt.Errorf(fmt.Sprintf("%s", err))
+			e = fmt.Errorf("%s", err)
 		}
 	}()
 

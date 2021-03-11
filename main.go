@@ -2,8 +2,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"io/ioutil"
-	"log"
+	"os"
 	"time"
 
 	"./ebnf"
@@ -123,14 +124,14 @@ func main() {
 
 	dat, err := ioutil.ReadFile(*param_aEbnf)
 	if err != nil {
-		log.Println("Error: ", err)
+		fmt.Fprintln(os.Stderr, "Error: ", err)
 		return
 	}
 	aEbnf := string(dat)
 
 	dat, err = ioutil.ReadFile(*param_srcCode)
 	if err != nil {
-		log.Println("Error: ", err)
+		fmt.Fprintln(os.Stderr, "Error: ", err)
 		return
 	}
 	srcCode := string(dat)
@@ -146,62 +147,62 @@ func main() {
 		*param_trace_CompileASG = true
 	}
 
-	log.Print("\n==================\nParse a-EBNF\n==================\n\n")
-	log.Println("a-EBNF:")
-	log.Print(ebnf.PprintSrc(aEbnf))
+	fmt.Fprint(os.Stderr, "\n==================\nParse a-EBNF\n==================\n\n")
+	fmt.Fprintln(os.Stderr, "a-EBNF:")
+	fmt.Fprint(os.Stderr, ebnf.PprintSrc(aEbnf))
 	// Parses an aEBNF and generates a a-grammar with it.
 	aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
 	if err != nil {
-		log.Println("  ==> Fail")
-		log.Println(err)
+		fmt.Fprintln(os.Stderr, "  ==> Fail")
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	log.Println("  ==> Success\n\n  a-Grammar:")
+	fmt.Fprintln(os.Stderr, "  ==> Success\n\n  a-Grammar:")
 	if *param_trace_ParseAEBNF {
-		log.Println("   => Extras: " + ebnf.PprintExtras(&aGrammar.Extras, "    "))
-		log.Println("   => Productions: " + ebnf.PprintProductions(&aGrammar.Productions, "    "))
+		fmt.Fprintln(os.Stderr, "   => Extras: "+ebnf.PprintExtras(&aGrammar.Extras, "    "))
+		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintProductions(&aGrammar.Productions, "    "))
 	} else {
-		log.Println("   => Extras: " + ebnf.Shorten(ebnf.PprintExtras(&aGrammar.Extras, "    ")))
-		log.Println("   => Productions: " + ebnf.Shorten(ebnf.PprintProductions(&aGrammar.Productions, "    ")))
+		fmt.Fprintln(os.Stderr, "   => Extras: "+ebnf.Shorten(ebnf.PprintExtras(&aGrammar.Extras, "    ")))
+		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.Shorten(ebnf.PprintProductions(&aGrammar.Productions, "    ")))
 	}
 
-	log.Print("\n\n==================\nParse target code\n==================\n\n")
-	log.Println("Parse via a-grammar:")
-	log.Print(ebnf.PprintSrcSingleLine(srcCode))
-	log.Println()
-	log.Println()
+	fmt.Fprint(os.Stderr, "\n\n==================\nParse target code\n==================\n\n")
+	fmt.Fprintln(os.Stderr, "Parse via a-grammar:")
+	fmt.Fprint(os.Stderr, ebnf.PprintSrcSingleLine(srcCode))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr)
 	// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
 	asg, err := ebnf.ParseWithGrammar(aGrammar, srcCode, false, *param_trace_ParseWithAGrammar)
 	if err != nil {
-		log.Println("\n  ==> Fail")
-		log.Println(err)
+		fmt.Fprintln(os.Stderr, "\n  ==> Fail")
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	log.Println("\n  ==> Success\n\n  Abstract semantic graph:")
+	fmt.Fprintln(os.Stderr, "\n  ==> Success\n\n  Abstract semantic graph:")
 	if *param_trace_ParseWithAGrammar {
-		log.Println("    " + ebnf.PprintProductions(&asg, "    "))
+		fmt.Fprintln(os.Stderr, "    "+ebnf.PprintProductions(&asg, "    "))
 	} else {
-		log.Println("    " + ebnf.PprintProductions(&asg, "    "))
-		// log.Println("    " + ebnf.Shorten(ebnf.PprintProductions(&asg, "    ")))
+		// fmt.Fprintln(os.Stderr,"    " + ebnf.PprintProductions(&asg, "    "))
+		fmt.Fprintln(os.Stderr, "    "+ebnf.Shorten(ebnf.PprintProductions(&asg, "    ")))
 	}
 
-	log.Print("\nCode output:\n\n")
+	fmt.Fprint(os.Stderr, "\nCode output:\n\n")
 	// Uses the annotations inside the ASG to compile it.
 	_, err = ebnf.CompileASG(asg, &aGrammar.Extras, *param_trace_CompileASG, false)
 	if err != nil {
-		log.Println("\n  ==> Fail")
-		log.Println(err)
+		fmt.Fprintln(os.Stderr, "\n  ==> Fail")
+		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	log.Print("\n ==> Success\n\n")
+	fmt.Fprint(os.Stderr, "\n ==> Success\n\n")
 	// tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", up)
 
 	// if !*param_trace_CompileASG {
 	// 	tmpStr = ebnf.Shorten(tmpStr)
 	// }
 
-	// log.Print(tmpStr)
-	log.Println()
+	// fmt.Fprint(os.Stderr,tmpStr)
+	fmt.Fprintln(os.Stderr)
 }
 
 func speedtest(src, target string, count int) {
@@ -211,7 +212,7 @@ func speedtest(src, target string, count int) {
 }
 func timeTrack(start time.Time, name string) {
 	elapsed := time.Since(start)
-	log.Printf("%s took %s", name, elapsed)
+	fmt.Fprintf(os.Stderr, "%s took %s", name, elapsed)
 }
 func speedtestParseAEBNF(src, target string, count int) {
 	defer timeTrack(time.Now(), "ParseAEBNF")
@@ -220,14 +221,14 @@ func speedtestParseAEBNF(src, target string, count int) {
 		_, err = ebnf.ParseAEBNF(src, false)
 	}
 	if err != nil {
-		log.Println("Error ParseAEBNF")
+		fmt.Fprintln(os.Stderr, "Error ParseAEBNF")
 		return
 	}
 }
 func speedtestParseWithGrammar(src, target string, count int) {
 	aGrammar, err := ebnf.ParseAEBNF(src, false)
 	if err != nil {
-		log.Println("Error ParseAEBNF")
+		fmt.Fprintln(os.Stderr, "Error ParseAEBNF")
 		return
 	}
 	defer timeTrack(time.Now(), "ParseWithGrammar")
@@ -235,19 +236,19 @@ func speedtestParseWithGrammar(src, target string, count int) {
 		_, err = ebnf.ParseWithGrammar(aGrammar, target, false, false)
 	}
 	if err != nil {
-		log.Println("Error ParseWithGrammar")
+		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
 	}
 }
 func speedtestCompileASG(src, target string, count int) {
 	aGrammar, err := ebnf.ParseAEBNF(src, false)
 	if err != nil {
-		log.Println("Error ParseAEBNF")
+		fmt.Fprintln(os.Stderr, "Error ParseAEBNF")
 		return
 	}
 	asg, err := ebnf.ParseWithGrammar(aGrammar, target, false, false)
 	if err != nil {
-		log.Println("Error ParseWithGrammar")
+		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
 	}
 	defer timeTrack(time.Now(), "CompileASG")
@@ -255,7 +256,7 @@ func speedtestCompileASG(src, target string, count int) {
 		_, err = ebnf.CompileASG(asg, &aGrammar.Extras, false, true)
 	}
 	if err != nil {
-		log.Println("Error CompileASG")
+		fmt.Fprintln(os.Stderr, "Error CompileASG")
 		return
 	}
 }

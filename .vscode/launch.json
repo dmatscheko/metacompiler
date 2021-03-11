@@ -5,52 +5,70 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Launch Calculator Test",
+            "name": "Calculator",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.aebnf", "-b", "tests/formula.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.bnf", "-b", "tests/formula.txt"]
         },
         {
-            "name": "Launch Calculator Test (TRACE)",
+            "name": "Calculator (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.aebnf", "-b", "tests/formula.txt", "-t"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.bnf", "-b", "tests/formula.txt", "-t"]
         },
         {
-            "name": "Launch aEBNF Test",
+            "name": "Width first Calculator",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.aebnf", "-b", "tests/a-ebnf_to_text-a-grammar.aebnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator2.bnf", "-b", "tests/formula.txt"]
         },
         {
-            "name": "Launch aEBNF Test (TRACE)",
+            "name": "Width first Calculator (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.aebnf", "-b", "tests/a-ebnf_to_text-a-grammar.aebnf", "-tg"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator2.bnf", "-b", "tests/formula.txt", "-t"]
         },
         {
-            "name": "Launch LLVM IR Test",
+            "name": "a-EBNF",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.aebnf", "-b", "tests/empty.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_to_text-a-grammar.bnf"]
         },
         {
-            "name": "Launch Tiny Self Parse Test",
+            "name": "a-EBNF (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tiny.aebnf", "-b", "tests/tiny.aebnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_to_text-a-grammar.bnf", "-tg"]
         },
         {
-            "name": "Launch Backtracking aEBNF Parse Test",
+            "name": "LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/backtracking.aebnf", "-b", "tests/backtracking.aebnf", "-t"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.bnf", "-b", "tests/empty.txt"]
         },
         {
-            "name": "Launch Speed Test",
+            "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.aebnf", "-b", "tests/a-ebnf_to_text-a-grammar.aebnf", "-s"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tiny.bnf", "-b", "tests/tiny.bnf"]
+        },
+        {
+            "name": "Backtracking a-EBNF Parse",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/backtracking.bnf", "-b", "tests/backtracking.bnf", "-t"]
+        },
+        {
+            "name": "Infinite Loop",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop-test.bnf", "-b", "tests/aaaaaaa.txt", "-t"]
+        },
+        {
+            "name": "Speed Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_to_text-a-grammar.bnf", "-s"]
         },
 
     ]
