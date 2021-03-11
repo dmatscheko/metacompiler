@@ -115,6 +115,8 @@ The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic gr
   (string) The collective matched strings of all nodes from left to right. Only matched strings of nodes to the right (that are not processed yet), are not included.  
   * __ltr.\*__  
   User generated global variables. They can be arbitrary objects. Except for `ltr.in`, those objects are not changed by the compiler.
+* __append(a array, v1 object, ...) array__  
+The function appends the objects `v1` ... `vn` to the array `a` and returns the combined array.
 
 ##### The stack
 
@@ -122,7 +124,7 @@ This API provides a hirarchical stack that is handled like the local variables o
 
 * __pop() object__  
 Pops an arbitrary object from the local stack.
-* __push(object)__  
+* __push(v object)__  
 Pushes an arbitrary object onto the local stack.
 * __up.stack__  
 This stack can also be accessed via the variable `up.stack`.
@@ -131,7 +133,7 @@ There is also a global stack available. This one is useful to e.g. bring data fr
 
 * __popg() object__  
 Pops an arbitrary object from the stack.
-* __pushg(object)__  
+* __pushg(v object)__  
 Pushes an arbitrary object onto the stack.
 
 #### Compiler API
