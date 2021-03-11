@@ -118,7 +118,7 @@ The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic gr
 
 ##### The stack
 
-This API provides a hirarchical stack that is handled like the local variables of `up.arr`. This is useful to bring data to the other side of EBNF matchers.
+This API provides a hirarchical stack that is handled like the local variables of `up.arr`.
 
 * __pop() object__  
 Pops an arbitrary object from the local stack.
@@ -127,7 +127,7 @@ Pushes an arbitrary object onto the local stack.
 * __up.stack__  
 This stack can also be accessed via the variable `up.stack`.
 
-There is also a global stack available:
+There is also a global stack available. This one is useful to e.g. bring data from one `Term` to a sibling. It is like the `ltr.*` variables:
 
 * __popg() object__  
 Pops an arbitrary object from the stack.
