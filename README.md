@@ -90,6 +90,11 @@ go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 
 The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic graph) gets processed from the leaves up to the stem. If annotations are encountered on the way, their JS code gets executed.
 
+#### General
+
+* __exit(v int)__  
+Terminates the application and returns `v`.
+
 #### Output
 
 * __print(...)__ [fmt.Print](https://golang.org/pkg/fmt/#Print)
