@@ -123,6 +123,15 @@ Pops an arbitrary object from the stack.
 * __push(object)__  
 Pushes an arbitrary object onto the stack.
 
+Note that this stack works locally and abides the hirarchical type of the system. It can also be accessed via the variable `up.stack`.
+
+There is also a global stack available:
+
+* __popg() object__  
+Pops an arbitrary object from the stack.
+* __pushg(object)__  
+Pushes an arbitrary object onto the stack.
+
 #### Compiler API
 
 * __c.asg__
