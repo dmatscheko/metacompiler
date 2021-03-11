@@ -125,7 +125,7 @@ The function appends the objects `v1` ... `vn` to the array `a` and returns the 
 
 ##### The stack
 
-This API provides a hirarchical stack that is handled like the local variables of `up.arr`.
+This API provides a hirarchical stack (LIFO) that is handled like the local variables of `up.arr`.
 
 * __pop() object__  
 Pops an arbitrary object from the local stack.
