@@ -102,9 +102,9 @@ Terminates the application and returns `v`.
 * __printf(...)__ [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
 * __sprintf(...)__ [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
 
-#### Data Handling
+#### Variables
 
-
+##### Local variables
 
 * __up__ (for upstream)  
   All local variables. All `up.*` variables can be changed by the user. This includes `up.in`.
@@ -117,7 +117,10 @@ Terminates the application and returns `v`.
   * __up.arr\*__  
   User generated local variables. Those can be arrays of arbitrary objects. They are appended when being propagated upwards. If an object is not an array, it will be put into one.
   * __up.stack__  
-  See [The local stacks](#up.stack)
+  See [Local stacks](#local-stack)
+
+##### Global variables
+
 * __ltr__ (for left to right)  
   All global variables (global JS variables can be used too). All `ltr.*` variables can be changed by the user. This includes `ltr.in`.
   * __ltr.in__  
@@ -125,28 +128,34 @@ Terminates the application and returns `v`.
   * __ltr.\*__  
   User generated global variables. They can be arbitrary objects. Except for `ltr.in`, those objects are not changed by the compiler.
   * __ltr.stack__  
-  See [The global stacks](#ltr.stack)
+  See [Global stack](#global-stack)
 * __append(a array, v1 object, ...) array__  
 The function appends the objects `v1` ... `vn` to the array `a` and returns the combined array.
 
-##### The stack
+#### The stacks
 
-This API provides a hirarchical stack (LIFO) that is handled like the local variables of `up.arr`.
+This API provides multiple local (LIFO) stacks and one global (LIFO) stack.
+
+##### Local stacks
+
+Each leaf starts with its own local stack. This stacks are combined hirarchically like the local variables of `up.arr`.
 
 * __pop() object__  
 Pops an arbitrary object from the local stack.
 * __push(v object)__  
 Pushes an arbitrary object onto the local stack.
-* <a name="up.stack">__up.stack__  
+* __up.stack__  
 This stack can also be accessed via the variable `up.stack`.
 
-There is also a global stack available. This one is useful to e.g. bring data from one `Term` to a sibling. It is like the `ltr.*` variables:
+##### Global stack
+
+This one global stack is useful to e.g. bring data from one `Term` to a sibling. It is like the `ltr.*` variables:
 
 * __popg() object__  
 Pops an arbitrary object from the stack.
 * __pushg(v object)__  
 Pushes an arbitrary object onto the stack.
-* <a name="ltr.stack">__ltr.stack__  
+* __ltr.stack__  
 This stack can also be accessed via the variable `ltr.stack`.
 
 #### Compiler API
