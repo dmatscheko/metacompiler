@@ -104,6 +104,8 @@ Terminates the application and returns `v`.
 
 #### Data Handling
 
+
+
 * __up__ (for upstream)  
   All local variables. All `up.*` variables can be changed by the user. This includes `up.in`.
   * __up.in__  
@@ -115,7 +117,7 @@ Terminates the application and returns `v`.
   * __up.arr\*__  
   User generated local variables. Those can be arrays of arbitrary objects. They are appended when being propagated upwards. If an object is not an array, it will be put into one.
   * __up.stack__  
-  See [The local stacks][1]
+  See [The local stacks](#up.stack)
 * __ltr__ (for left to right)  
   All global variables (global JS variables can be used too). All `ltr.*` variables can be changed by the user. This includes `ltr.in`.
   * __ltr.in__  
@@ -123,7 +125,7 @@ Terminates the application and returns `v`.
   * __ltr.\*__  
   User generated global variables. They can be arbitrary objects. Except for `ltr.in`, those objects are not changed by the compiler.
   * __ltr.stack__  
-  See [The global stack][2]
+  See [The global stacks](#ltr.stack)
 * __append(a array, v1 object, ...) array__  
 The function appends the objects `v1` ... `vn` to the array `a` and returns the combined array.
 
@@ -135,7 +137,7 @@ This API provides a hirarchical stack (LIFO) that is handled like the local vari
 Pops an arbitrary object from the local stack.
 * __push(v object)__  
 Pushes an arbitrary object onto the local stack.
-* [1]: __up.stack__  
+* <a name="up.stack">__up.stack__  
 This stack can also be accessed via the variable `up.stack`.
 
 There is also a global stack available. This one is useful to e.g. bring data from one `Term` to a sibling. It is like the `ltr.*` variables:
@@ -144,7 +146,7 @@ There is also a global stack available. This one is useful to e.g. bring data fr
 Pops an arbitrary object from the stack.
 * __pushg(v object)__  
 Pushes an arbitrary object onto the stack.
-* [2]: __ltr.stack__  
+* <a name="ltr.stack">__ltr.stack__  
 This stack can also be accessed via the variable `ltr.stack`.
 
 #### Compiler API
