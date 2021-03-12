@@ -1,0 +1,15 @@
+"Infinite Loop"
+<~~ c.compile(c.asg) ~~>
+
+{
+
+TestA       =
+    TestA
+    "A"
+    ;
+
+}
+
+<~~ println("Done") ~~>
+
+TestA

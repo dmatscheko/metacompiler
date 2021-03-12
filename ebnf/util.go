@@ -102,13 +102,13 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) strin
 	// res := string("\"" + rule.Operator + "\"")
 
 	switch rule.Operator {
-	case r.Terminal, r.Error:
+	case r.Token, r.Error:
 		res += fmt.Sprintf(", Pos:%d, %q", rule.Pos, rule.String)
 	case r.Ident, r.Production:
 		res += fmt.Sprintf(", %q:%d, Pos:%d", rule.String, rule.Int, rule.Pos)
 	// case r.Range:
 	// 	// TODO:!
-	case r.SkipSpaces:
+	case r.SkipSpace:
 		res += fmt.Sprintf(", Pos:%d, %t", rule.Pos, rule.Bool)
 	case r.Tag:
 		res += fmt.Sprintf(", Pos:%d, Code:", rule.Pos)
@@ -140,6 +140,16 @@ func PprintRule(rule *r.Rule, space ...string) string {
 	return res
 }
 
+func PprintRuleFlat(rule *r.Rule) string {
+	res := "{"
+	res += PprintSequenceHeader(rule, false)
+	if len(rule.Childs) > 0 {
+		res += ", " + PprintProductionsFlat(&rule.Childs)
+	}
+	res += "}"
+	return res
+}
+
 func PprintRuleOnly(rule *r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
@@ -154,7 +164,7 @@ func PprintRuleOnly(rule *r.Rule, space ...string) string {
 	return res
 }
 
-func PprintProductions(productions *[]r.Rule, space ...string) string {
+func PprintProductions(productions *r.Rules, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -205,4 +215,17 @@ func LinePosFromStrPos(data string, pos int) string {
 		}
 	}
 	return "position outside of EBNF"
+}
+
+func PprintProductionsFlat(productions *r.Rules) string {
+	res := "{ "
+	for i := range *productions {
+		rule := &(*productions)[i]
+		if i > 0 {
+			res += ", "
+		}
+		res += PprintRuleFlat(rule)
+	}
+	res += " }"
+	return res
 }

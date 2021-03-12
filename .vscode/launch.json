@@ -29,22 +29,22 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator2.bnf", "-b", "tests/formula.txt", "-t"]
         },
         {
-            "name": "a-EBNF",
+            "name": "a-EBNF of a-EBNF to text",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_to_text-a-grammar.bnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf"]
         },
         {
-            "name": "a-EBNF (TRACE)",
+            "name": "a-EBNF of a-EBNF to text (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_to_text-a-grammar.bnf", "-tg"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf", "-tg"]
         },
         {
             "name": "LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.bnf", "-b", "tests/empty.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/llvm_ir_tests.bnf", "-b", "tests/empty.txt"]
         },
         {
             "name": "Tiny Self Parse",
@@ -53,22 +53,46 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/tiny.bnf", "-b", "tests/tiny.bnf"]
         },
         {
-            "name": "Backtracking a-EBNF Parse",
+            "name": "---------",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/backtracking.bnf", "-b", "tests/backtracking.bnf", "-t"]
+            "program": "${workspaceFolder}"
+        },
+        {
+            "name": "EBNF of EBNF",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/ebnf_of_ebnf.bnf", "-b", "tests/ebnf_of_ebnf.bnf"]
+        },
+        {
+            "name": "EBNF of a-EBNF",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/ebnf_of_a-ebnf.bnf", "-b", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf"]
+        },
+        {
+            "name": "a-EBNF of a-EBNF to object",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_of_a-ebnf.bnf", "-b", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf"]
+        },
+        {
+            "name": "---------",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}"
         },
         {
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop-test.bnf", "-b", "tests/aaaaaaa.txt", "-t"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop_test.bnf", "-b", "tests/aaaaaaa.txt", "-t"]
         },
         {
             "name": "Speed Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_to_text-a-grammar.bnf", "-s"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf", "-b", "tests/a-ebnf_of_a-ebnf_to_text-a-grammar.bnf", "-s"]
         },
 
     ]
