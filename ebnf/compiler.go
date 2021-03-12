@@ -14,8 +14,8 @@ type compiler struct {
 	vm              *goja.Runtime
 	compilerFuncMap map[string]r.Object
 
-	asg    r.Rules
-	extras *map[string]r.Rule
+	asg      r.Rules
+	aGrammar *r.Rules
 
 	stack     []r.Object          // global stack.
 	ltrStream map[string]r.Object // global variables.
@@ -82,7 +82,7 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 }
 
 func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG r.Rules, depth int) { // => (changes upStream)
-	co.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
+	co.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
 	co.compilerFuncMap["Pos"] = tag.Pos
 
@@ -124,6 +124,8 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 	}
 }
 
+// TODO: correct the wording:
+
 //
 //     OUT
 //      ^
@@ -134,7 +136,7 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 //      *    |     (*) All upstream (up.*) values from returning 'compile()'s are combined.
 //     /|    |
 //    | | _  |
-//    T | |  |     (T) The text of a Terminal symbol gets returned and included into 'up.in'.
+//    T | |  |     (T) The text of a EBNF Terminal symbol (Token) gets returned and included into 'up.in'.
 //    | X |  |     (X) The script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
 //    | | O  |     (O) Other Rules are ignored.
 //    | | |  |
@@ -248,8 +250,16 @@ func (co *compiler) initFuncMap() {
 	co.vm.Set("exit", os.Exit)
 
 	co.vm.Set("append", func(t []interface{}, v ...interface{}) interface{} {
-		return append(t, v...)
+		tmp := append(t, v...)
+		return &tmp
 	})
+
+	// co.vm.Set("writable", func(v interface{}) *interface{} {
+	// 	return &v
+	// })
+	// co.vm.Set("nonwritable", func(v *interface{}) interface{} {
+	// 	return *v
+	// })
 
 	co.vm.Set("ltr", co.ltrStream)
 
@@ -269,75 +279,24 @@ func (co *compiler) initFuncMap() {
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
 		"compile": func(localASG r.Rules) map[string]r.Object {
 			res := co.compile(localASG, 0)
-			if epilog, ok := (*co.extras)["epilog.code"]; ok {
-				co.handleTagCode(&epilog, "epilog.code", res, localASG, 0)
+
+			epilog := GetEpilog(co.aGrammar)
+			if epilog != nil {
+				co.handleTagCode(epilog, "epilog.code", res, localASG, 0)
 			}
 			return res
 		},
 		"asg": co.asg,
-
-		// "newToken": func(String string, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Token, String: String, Pos: Pos}
-		// },
-		// "newName": func(String string, Int int, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Ident, String: String, Int: Int, Pos: Pos}
-		// },
-		// "newTag": func(TagChilds r.Rules, Childs r.Rules, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Tag, TagChilds: TagChilds, Childs: Childs, Pos: Pos}
-		// },
-		// "newSkipSpace": func(Bool bool, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.SkipSpace, Bool: Bool, Pos: Pos}
-		// },
-
-		// "newRepetition": func(Childs r.Rules, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Repeat, Childs: Childs, Pos: Pos}
-		// },
-		// "newOption": func(Childs r.Rules, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Optional, Childs: Childs, Pos: Pos}
-		// },
-		// "newGroup": func(Childs r.Rules, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Group, Childs: Childs, Pos: Pos}
-		// },
-
-		// "newSequence": func(Childs r.Rules, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Sequence, Childs: Childs, Pos: Pos}
-		// },
-		// "newAlternative": func(Childs r.Rules, Pos int) r.Rule {
-		// 	return r.Rule{Operator: r.Or, Childs: Childs, Pos: Pos}
-		// },
-
-		// "newRule": func(Operator r.OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs r.Rules, TagChilds r.Rules) r.Rule {
-		// 	return r.Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
-		// },
-
-		// "oid": map[string]r.OperatorID{
-		// 	"Error":   r.Error,
-		// 	"Success": r.Success,
-		// 	// Groups types:
-		// 	"Sequence": r.Sequence,
-		// 	"Group":    r.Group,
-		// 	// Action types:
-		// 	"Token":     r.Token,
-		// 	"Or":        r.Or,
-		// 	"Optional":  r.Optional,
-		// 	"Repeat":    r.Repeat,
-		// 	"Range":     r.Range,
-		// 	"SkipSpace": r.SkipSpace,
-		// 	"Tag":       r.Tag,
-		// 	// "Factor": r.Factor, // This one is not needed
-		// 	// Link types:
-		// 	"Production": r.Production,
-		// 	"Ident":      r.Ident,
-		// },
 	}
 	co.vm.Set("c", co.compilerFuncMap)
-	r.EbnfFuncMap["sprintProductions"] = PprintProductionsFlat
+	r.EbnfFuncMap["sprintProductions"] = PprintRulesFlat
 	co.vm.Set("ebnf", r.EbnfFuncMap)
 	co.vm.Set("llvm", llvmFuncMap)
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
-func CompileASG(asg r.Rules, extras *map[string]r.Rule, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object, e error) {
+// The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
+func CompileASG(asg r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object, e error) {
 	defer func() {
 		if err := recover(); err != nil {
 			res = nil
@@ -350,7 +309,7 @@ func CompileASG(asg r.Rules, extras *map[string]r.Rule, traceEnabled bool, preve
 	co.traceCount = 0
 	co.preventDefaultOutput = preventDefaultOutput
 	co.asg = asg
-	co.extras = extras
+	co.aGrammar = aGrammar
 	co.ltrStream = map[string]r.Object{ // Basically like global variables.
 		"in":    "", // This is the parser input (the terminals).
 		"stack": &co.stack,
@@ -362,8 +321,10 @@ func CompileASG(asg r.Rules, extras *map[string]r.Rule, traceEnabled bool, preve
 	co.vm = goja.New()
 	co.initFuncMap()
 
-	if prolog, ok := (*extras)["prolog.code"]; ok {
-		co.handleTagCode(&prolog, "prolog.code", upStream, asg, 0)
+	prolog := GetProlog(aGrammar)
+
+	if prolog != nil {
+		co.handleTagCode(prolog, "prolog.code", upStream, asg, 0)
 	}
 
 	// Is called fom JS compile().

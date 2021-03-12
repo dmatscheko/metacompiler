@@ -7,27 +7,27 @@ import (
 )
 
 // ----------------------------------------------------------------------------
-// Grammar verification
+// a-Grammar verification
 
 var reachedNames map[string]bool
 
-func (ep *ebnfParser) collectReachableNames(production r.Rule) {
-	for _, child := range production.Childs {
+func (ep *ebnfParser) collectReachableNames(productions *r.Rules, prod *r.Rule) {
+	for _, child := range prod.Childs {
 		if child.Operator == r.Ident {
 			i := child.Int
-			ii := ep.ididx[i]
-			nextProduction := ep.grammar.Productions[ii]
-			if nextProduction.Operator == r.Production {
-				if reachedNames[nextProduction.String] {
+			// ii := ep.ididx[i]
+			nextProd := &(*productions)[i] // [ii]
+			if nextProd.Operator == r.Production {
+				if reachedNames[nextProd.String] {
 					continue
 				}
-				reachedNames[nextProduction.String] = true
+				reachedNames[nextProd.String] = true
 			} else {
-				panic(fmt.Sprintf("Not a production: '%s' at position %d.", nextProduction.String, nextProduction.Pos))
+				panic(fmt.Sprintf("Not a production: '%s' at position %d.", nextProd.String, nextProd.Pos))
 			}
-			ep.collectReachableNames(nextProduction)
+			ep.collectReachableNames(productions, nextProd)
 		} else if len(child.Childs) > 0 {
-			ep.collectReachableNames(child)
+			ep.collectReachableNames(productions, &child)
 		}
 	}
 }
@@ -36,29 +36,22 @@ func (ep *ebnfParser) collectReachableNames(production r.Rule) {
 func (ep *ebnfParser) verifyAllNamesUsed() {
 	reachedNames = make(map[string]bool)
 
-	startName := ""
 	// Get name of start production.
-	elem, ok := ep.grammar.Extras["start"]
-	if ok {
-		startName = elem.String
-	} else {
+	startRule := GetStartRule(&ep.aGrammar)
+	if startRule == nil {
 		panic("No start production defined.")
 	}
 
-	// Get start production.
-	startProduction := r.Rule{Operator: r.Error}
-	for _, elem := range ep.grammar.Productions {
-		if elem.Operator == r.Production && elem.String == startName {
-			startProduction = elem
-			break
-		}
-	}
+	productions := GetProductions(&ep.aGrammar)
 
-	if startProduction.Operator != r.Production {
-		panic(fmt.Sprintf("Defined start production (%s) not found.", startName))
+	// Get start production.
+	startProduction := &(*productions)[startRule.Int]
+
+	if startProduction.Operator != r.Production && startProduction.String != startRule.String {
+		panic(fmt.Sprintf("Defined start production (%s) not found.", startRule.String))
 	}
 	reachedNames[startProduction.String] = true
-	ep.collectReachableNames(startProduction)
+	ep.collectReachableNames(productions, startProduction)
 
 	for _, name := range ep.idents {
 		if !reachedNames[name] {

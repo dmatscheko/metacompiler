@@ -114,9 +114,9 @@ func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, spa
 		res += fmt.Sprintf(", Pos:%d, Code:", rule.Pos)
 		if printChilds {
 			if printFlat {
-				res += PprintProductionsFlat(&rule.TagChilds)
+				res += PprintRulesFlat(&rule.TagChilds)
 			} else {
-				res += PprintProductions(&rule.TagChilds, sp+"  ")
+				res += PprintRules(&rule.TagChilds, sp+"  ")
 			}
 		} else {
 			res += "[...]"
@@ -151,9 +151,9 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, printFlat bool, space 
 		res += fmt.Sprintf(", Code:")
 		if printChilds {
 			if printFlat {
-				res += PprintProductionsFlat(&rule.TagChilds)
+				res += PprintRulesFlat(&rule.TagChilds)
 			} else {
-				res += PprintProductions(&rule.TagChilds, sp+"  ")
+				res += PprintRules(&rule.TagChilds, sp+"  ")
 			}
 		} else {
 			res += "[...]"
@@ -175,7 +175,7 @@ func PprintRule(rule *r.Rule, space ...string) string {
 	res := "{"
 	res += PprintSequenceHeaderPos(rule, true, false, sp)
 	if len(rule.Childs) > 0 {
-		res += ", " + PprintProductions(&rule.Childs, sp+"  ")
+		res += ", " + PprintRules(&rule.Childs, sp+"  ")
 	}
 	res += "}"
 	return res
@@ -190,7 +190,7 @@ func PprintRuleFlat(rule *r.Rule, printChilds bool, printPos bool) string {
 	}
 	if printChilds {
 		if len(rule.Childs) > 0 {
-			res += ", " + PprintProductionsFlat(&rule.Childs)
+			res += ", " + PprintRulesFlat(&rule.Childs)
 		}
 	} else {
 		res += "[...]"
@@ -213,7 +213,7 @@ func PprintRuleOnly(rule *r.Rule, space ...string) string {
 	return res
 }
 
-func PprintProductions(productions *r.Rules, space ...string) string {
+func PprintRules(productions *r.Rules, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -230,7 +230,7 @@ func PprintProductions(productions *r.Rules, space ...string) string {
 	return res
 }
 
-func PprintProductionsFlat(productions *r.Rules) string {
+func PprintRulesFlat(productions *r.Rules) string {
 	res := "{"
 	for i := range *productions {
 		rule := &(*productions)[i]
@@ -241,24 +241,6 @@ func PprintProductionsFlat(productions *r.Rules) string {
 		// res += PprintRuleFlat(rule, true, true)
 	}
 	res += "}"
-	return res
-}
-
-func PprintExtras(extras *map[string]r.Rule, space ...string) string {
-	sp := ""
-	if len(space) > 0 {
-		sp = space[0]
-	}
-	res := "{\n"
-	comma := false
-	for name, rule := range *extras {
-		if comma {
-			res += ",\n"
-		}
-		res += sp + "  \"" + name + "\":" + PprintRule(&rule, sp+"    ")
-		comma = true
-	}
-	res += "\n" + sp + "}"
 	return res
 }
 
