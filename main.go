@@ -30,7 +30,8 @@ import (
 // Production  = name "=" [ Expression ] ";" ;
 // Expression  = Alternative { "|" Alternative } ;
 // Alternative = Term { Term } ;
-// Term        = name | token [ "..." token ] | Group | Option | Repetition | skipspaces ;
+// Term        = name | Range | Group | Option | Repetition | skipspaces ;
+// Range       = token [ "..." token ] ;
 // Group       = "(" Expression ")" ;
 // Option      = "[" Expression "]" ;
 // Repetition  = "{" Expression "}" ;

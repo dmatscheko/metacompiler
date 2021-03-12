@@ -6,12 +6,12 @@ function getNameIdx(name) {
     if (pos != -1) { return pos };
     return names.push(name)-1;
 }
-c.compile(c.asg, up.in)
+c.compile(c.asg)
 ~~>
 
 {
 
-Program                                 <~~push(up.in)~~>
+AEBNF                                   <~~push(up.in)~~, ~~ TEST ~~>
                 =
                 [
                     Title               <~~ up.in += ', \\n' ~~>
@@ -45,7 +45,7 @@ Production                              <~~ var productionTag = pop();
                 ]
                 "="                     <~~up.in=''~~>
                 [ Expression ]
-                ( "." | ";" )           <~~ up.in = '}' ~~> ;
+                ";"                     <~~ up.in = '}' ~~> ;
 
 Expression                              <~~ if (/*or*/ pop()) {
                                             up.in = '{"OR", '+up.in+'}'
@@ -76,18 +76,18 @@ Term            =
                     |
                     ( Token [ "..." Token ] )
                     |
-                    group
+                    Group
                     |
-                    option
+                    Option
                     |
-                    repetition
+                    Repetition
                     |
                     skipspaces
                 ) ;
 
-group           <~~ up.in = '{'+pop()+'}' ~~>                    = "(" Expression <~~push(up.in)~~> ")" ;
-option          <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>        = "[" Expression <~~push(up.in)~~> "]" ;
-repetition      <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>          = "{" Expression <~~push(up.in)~~> "}" ;
+Group           <~~ up.in = '{'+pop()+'}' ~~>                    = "(" Expression <~~push(up.in)~~> ")" ;
+Option          <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>        = "[" Expression <~~push(up.in)~~> "]" ;
+Repetition      <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>          = "{" Expression <~~push(up.in)~~> "}" ;
 skipspaces      =
                 "+"                     <~~ up.in = '{"SKIPSPACES", true}' ~~>
                 |
@@ -136,6 +136,6 @@ Special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*
 }
 
 <~~ print(pop()) ~~>
-Program
+AEBNF
 "This a-EBNF contains the grammatic and semantic information for annotated EBNF.
 It allows to automatically create a compiler for everything described in a-EBNF (yes, that format)."
