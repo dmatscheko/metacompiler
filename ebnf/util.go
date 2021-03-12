@@ -93,7 +93,7 @@ func PprintSrcSingleLine(pp string) string {
 	return Shorten(pp)
 }
 
-func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) string {
+func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
@@ -113,7 +113,11 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) strin
 	case r.Tag:
 		res += fmt.Sprintf(", Pos:%d, Code:", rule.Pos)
 		if printChilds {
-			res += PprintProductions(&rule.TagChilds, sp+"  ")
+			if printFlat {
+				res += PprintProductionsFlat(&rule.TagChilds)
+			} else {
+				res += PprintProductions(&rule.TagChilds, sp+"  ")
+			}
 		} else {
 			res += "[...]"
 		}
@@ -126,13 +130,50 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, space ...string) strin
 	return res
 }
 
+func PprintSequenceHeader(rule *r.Rule, printChilds bool, printFlat bool, space ...string) string {
+	sp := ""
+	if len(space) > 0 {
+		sp = space[0]
+	}
+	res := string("\"" + rule.Operator.String() + "\"")
+	// res := string("\"" + rule.Operator + "\"")
+
+	switch rule.Operator {
+	case r.Token, r.Error:
+		res += fmt.Sprintf(", %q", rule.String)
+	case r.Ident, r.Production:
+		res += fmt.Sprintf(", %q:%d", rule.String, rule.Int)
+	// case r.Range:
+	// 	// TODO:!
+	case r.SkipSpace:
+		res += fmt.Sprintf(", %t", rule.Bool)
+	case r.Tag:
+		res += fmt.Sprintf(", Code:")
+		if printChilds {
+			if printFlat {
+				res += PprintProductionsFlat(&rule.TagChilds)
+			} else {
+				res += PprintProductions(&rule.TagChilds, sp+"  ")
+			}
+		} else {
+			res += "[...]"
+		}
+	case r.Factor:
+		res += fmt.Sprintf(", Rune:'%c'", rule.Rune)
+	default:
+		// res += fmt.Sprintf("")
+	}
+
+	return res
+}
+
 func PprintRule(rule *r.Rule, space ...string) string {
 	sp := ""
 	if len(space) > 0 {
 		sp = space[0]
 	}
 	res := "{"
-	res += PprintSequenceHeader(rule, true, sp)
+	res += PprintSequenceHeaderPos(rule, true, false, sp)
 	if len(rule.Childs) > 0 {
 		res += ", " + PprintProductions(&rule.Childs, sp+"  ")
 	}
@@ -140,11 +181,19 @@ func PprintRule(rule *r.Rule, space ...string) string {
 	return res
 }
 
-func PprintRuleFlat(rule *r.Rule) string {
+func PprintRuleFlat(rule *r.Rule, printChilds bool, printPos bool) string {
 	res := "{"
-	res += PprintSequenceHeader(rule, false)
-	if len(rule.Childs) > 0 {
-		res += ", " + PprintProductionsFlat(&rule.Childs)
+	if printPos {
+		res += PprintSequenceHeaderPos(rule, true, true)
+	} else {
+		res += PprintSequenceHeader(rule, true, true)
+	}
+	if printChilds {
+		if len(rule.Childs) > 0 {
+			res += ", " + PprintProductionsFlat(&rule.Childs)
+		}
+	} else {
+		res += "[...]"
 	}
 	res += "}"
 	return res
@@ -156,7 +205,7 @@ func PprintRuleOnly(rule *r.Rule, space ...string) string {
 		sp = space[0]
 	}
 	res := "{"
-	res += PprintSequenceHeader(rule, false, sp)
+	res += PprintSequenceHeaderPos(rule, false, false, sp)
 	if len(rule.Childs) > 0 {
 		res += ", [...]"
 	}
@@ -178,6 +227,20 @@ func PprintProductions(productions *r.Rules, space ...string) string {
 		res += sp + "  " + PprintRule(rule, sp)
 	}
 	res += "\n" + sp + "}"
+	return res
+}
+
+func PprintProductionsFlat(productions *r.Rules) string {
+	res := "{"
+	for i := range *productions {
+		rule := &(*productions)[i]
+		if i > 0 {
+			res += ", "
+		}
+		res += PprintRuleFlat(rule, true, false)
+		// res += PprintRuleFlat(rule, true, true)
+	}
+	res += "}"
 	return res
 }
 
@@ -215,17 +278,4 @@ func LinePosFromStrPos(data string, pos int) string {
 		}
 	}
 	return "position outside of EBNF"
-}
-
-func PprintProductionsFlat(productions *r.Rules) string {
-	res := "{ "
-	for i := range *productions {
-		rule := &(*productions)[i]
-		if i > 0 {
-			res += ", "
-		}
-		res += PprintRuleFlat(rule)
-	}
-	res += " }"
-	return res
 }

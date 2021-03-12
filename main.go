@@ -164,7 +164,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintProductions(&aGrammar.Productions, "    "))
 	} else {
 		fmt.Fprintln(os.Stderr, "   => Extras: "+ebnf.Shorten(ebnf.PprintExtras(&aGrammar.Extras, "    ")))
-		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.Shorten(ebnf.PprintProductions(&aGrammar.Productions, "    ")))
+		// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.Shorten(ebnf.PprintProductions(&aGrammar.Productions, "    ")))
+		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintProductionsFlat(&aGrammar.Productions))
 	}
 
 	fmt.Fprint(os.Stderr, "\n\n==================\nParse target code\n==================\n\n")
