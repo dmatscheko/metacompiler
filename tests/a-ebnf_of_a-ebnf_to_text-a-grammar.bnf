@@ -107,7 +107,7 @@ Tag                                     <~~up.in=pop()~~>
                 }
                 ">" ;
 
-Code                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+Code                                    <~~ up.in = '{"TOKEN", '+sprintf("%q",pop())+'}' ~~>
                 =
                 '~~'
                 -
@@ -119,7 +119,7 @@ Codeinner       = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
 
 Name            = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
 
-Token                                   <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
+Token                                   <~~ up.in = '{"TOKEN", '+sprintf("%q",pop())+'}' ~~>
                 = Dqtoken | Sqtoken ;
 Dqtoken         = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
 Sqtoken         = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;

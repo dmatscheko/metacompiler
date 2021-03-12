@@ -24,7 +24,8 @@ type ebnfParser struct {
 	traceEnabled bool
 	ididx        []int
 	idents       []string
-	grammar      Grammar
+	aGrammar     r.Rules
+	productions  r.Rules
 }
 
 // TODO: DEDUPLICATE!!
@@ -381,11 +382,11 @@ func (ep *ebnfParser) production() r.Rule {
 		}
 		if foundTag {
 			tag.Childs = r.AppendPossibleSequence(tag.Childs, ep.expression()) // Fill the TAG.
-			ep.grammar.Productions = append(ep.grammar.Productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: r.Rules{tag}, Pos: pos})
+			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: r.Rules{tag}, Pos: pos})
 		} else {
-			ep.grammar.Productions = append(ep.grammar.Productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: r.Rules{ep.expression()}, Pos: pos})
+			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: r.Rules{ep.expression()}, Pos: pos})
 		}
-		ep.ididx[idx] = len(ep.grammar.Productions) - 1
+		ep.ididx[idx] = len(ep.productions) - 1
 	}
 
 	return ep.token
@@ -394,8 +395,8 @@ func (ep *ebnfParser) production() r.Rule {
 func (ep *ebnfParser) parse(srcEbnf string) {
 	ep.src = []rune(srcEbnf)
 	ep.sdx = 0
-	ep.grammar.Extras = make(map[string]r.Rule)
-	ep.grammar.Productions = ep.grammar.Productions[:0]
+	ep.aGrammar = r.Rules{}
+	ep.productions = ep.productions[:0]
 	ep.ididx = ep.ididx[:0]
 	ep.idents = ep.idents[:0]
 
@@ -404,14 +405,14 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 	// Title
 	if ep.token.Operator == r.Token {
-		ep.grammar.Extras["title"] = ep.token
+		ep.aGrammar = append(ep.aGrammar, ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	}
 
 	// Prolog
 	if ep.token.Operator == r.Factor && ep.token.Rune == '<' {
-		ep.grammar.Extras["prolog.code"] = ep.tag()
+		ep.aGrammar = append(ep.aGrammar, ep.tag())
 		pos = ep.sdx
 		// ep.getToken()
 	}
@@ -427,21 +428,20 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 			break
 		}
 	}
+	ep.aGrammar = append(ep.aGrammar, r.Rule{Operator: r.Sequence, Childs: ep.productions, Pos: pos})
 	pos = ep.sdx
 	ep.getToken()
 
 	// Epilog
 	if ep.token.Operator == r.Factor && ep.token.Rune == '<' {
-		ep.grammar.Extras["epilog.code"] = ep.tag()
+		ep.aGrammar = append(ep.aGrammar, ep.tag())
 		pos = ep.sdx
 		// ep.getToken()
 	}
 
 	// Entry point
 	if ep.token.Operator == r.Ident {
-		start := ep.token
-		start.Int = ep.addIdent(ep.token.String)
-		ep.grammar.Extras["start"] = start
+		ep.aGrammar = append(ep.aGrammar, ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	} else {
@@ -451,7 +451,7 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 	// Comment
 	if ep.token.Operator == r.Token {
-		ep.grammar.Extras["comment"] = ep.token
+		ep.aGrammar = append(ep.aGrammar, ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	}
@@ -463,13 +463,12 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	}
 
 	ep.token = r.Rule{Operator: r.Success}
+	ep.resolveIdIdx(GetProductions(&ep.aGrammar))
 	ep.verifyGrammar()
-	ep.resolveIdIdx(&ep.grammar.Productions)
 
 	// Also resolve the index of the start rule.
-	tmpStart := ep.grammar.Extras["start"]
+	tmpStart := GetStartRule(&ep.aGrammar)
 	tmpStart.Int = ep.ididx[tmpStart.Int]
-	ep.grammar.Extras["start"] = tmpStart
 }
 
 func (ep *ebnfParser) resolveIdIdx(productions *r.Rules) {
@@ -486,7 +485,7 @@ func (ep *ebnfParser) resolveIdIdx(productions *r.Rules) {
 
 var ep ebnfParser
 
-func ParseAEBNF(srcEbnf string, traceEnabled bool) (g Grammar, e error) {
+func ParseAEBNF(srcEbnf string, traceEnabled bool) (g *r.Rules, e error) {
 	defer func() {
 		if err := recover(); err != nil {
 			if ep.token.Operator == r.Error && ep.token.String != "" {
@@ -510,5 +509,5 @@ func ParseAEBNF(srcEbnf string, traceEnabled bool) (g Grammar, e error) {
 		}
 	}
 
-	return ep.grammar, err
+	return &ep.aGrammar, err
 }

@@ -158,14 +158,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
+
+	// TEST:
+	// aGrammar = &ebnf.EbnfAGrammar
+
 	fmt.Fprintln(os.Stderr, "  ==> Success\n\n  a-Grammar:")
 	if *param_trace_ParseAEBNF {
-		fmt.Fprintln(os.Stderr, "   => Extras: "+ebnf.PprintExtras(&aGrammar.Extras, "    "))
-		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintProductions(&aGrammar.Productions, "    "))
+		// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRules(aGrammar, "    "))
+		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRulesFlat(aGrammar))
 	} else {
-		fmt.Fprintln(os.Stderr, "   => Extras: "+ebnf.Shorten(ebnf.PprintExtras(&aGrammar.Extras, "    ")))
-		// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.Shorten(ebnf.PprintProductions(&aGrammar.Productions, "    ")))
-		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintProductionsFlat(&aGrammar.Productions))
+		// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.Shorten(ebnf.PprintRules(aGrammar, "    ")))
+		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRulesFlat(aGrammar))
 	}
 
 	fmt.Fprint(os.Stderr, "\n\n==================\nParse target code\n==================\n\n")
@@ -182,15 +185,15 @@ func main() {
 	}
 	fmt.Fprintln(os.Stderr, "\n  ==> Success\n\n  Abstract semantic graph:")
 	if *param_trace_ParseWithAGrammar {
-		fmt.Fprintln(os.Stderr, "    "+ebnf.PprintProductions(&asg, "    "))
+		fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(&asg, "    "))
 	} else {
-		// fmt.Fprintln(os.Stderr,"    " + ebnf.PprintProductions(&asg, "    "))
-		fmt.Fprintln(os.Stderr, "    "+ebnf.Shorten(ebnf.PprintProductions(&asg, "    ")))
+		// fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(&asg, "    "))
+		fmt.Fprintln(os.Stderr, "    "+ebnf.Shorten(ebnf.PprintRules(&asg, "    ")))
 	}
 
 	fmt.Fprint(os.Stderr, "\nCode output:\n\n")
 	// Uses the annotations inside the ASG to compile it.
-	_, err = ebnf.CompileASG(asg, &aGrammar.Extras, *param_trace_CompileASG, false)
+	_, err = ebnf.CompileASG(asg, aGrammar, *param_trace_CompileASG, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "\n  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -255,7 +258,7 @@ func speedtestCompileASG(src, target string, count int) {
 	}
 	defer timeTrack(time.Now(), "CompileASG")
 	for i := 0; i < count; i++ {
-		_, err = ebnf.CompileASG(asg, &aGrammar.Extras, false, true)
+		_, err = ebnf.CompileASG(asg, aGrammar, false, true)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error CompileASG")

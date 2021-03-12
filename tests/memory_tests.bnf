@@ -78,6 +78,7 @@ c.compile(c.asg)
 
 
 
+
 // resolveProdsPos()
 function resolveIdIdx(productions) {
     // println(productions.length)
@@ -105,16 +106,72 @@ function getProductions(rules) {
 }
 
 
+
+
+/*
+
+var foo = ebnf.newRule(ebnf.oid.Production, "Test", 33)
+print("   => Productions: "+ebnf.sprintProductions([foo])+"\n\n")
+foo.String="Hallo"
+foo.Int=23
+print("   => Productions: "+ebnf.sprintProductions([foo])+"\n\n")
+push(foo)
+var bar=pop(foo)
+bar.Int=2
+bar.String="Trololo"
+print("   => Productions: "+ebnf.sprintProductions([bar])+"\n\n")
+pushg(bar)
+var goo=popg()
+goo.Int=3
+goo.String="Hm..."
+print("   => Productions: "+ebnf.sprintProductions([goo])+"\n\n")
+ltr.test=goo
+var muh=[ltr.test]
+muh[0].Int=123
+muh[0].String="mep"
+print("   => Productions: "+ebnf.sprintProductions(muh)+"\n\n")
+up.test=goo
+var muh=[ltr.test]
+muh[0].Int=789
+muh[0].String="lep"
+print("   => Productions: "+ebnf.sprintProductions(muh)+"\n\n")
+var ooo = []
+ooo=append(ooo, foo, bar, goo)
+print("   => Productions: "+ebnf.sprintProductions(ooo)+"\n\n")
+ooo[1].Int=765
+ooo[1].String="abc"
+print("   => Productions: "+ebnf.sprintProductions(ooo)+"\n\n")
+
+
+up.test2 = ebnf.newRule(ebnf.oid.Production, up.in, 11987)
+up.test2.Childs = ooo
+print("   => Productions: "+ebnf.sprintProductions([up.test2])+"\n\n")
+up.test2.String="12345"
+print("   => Productions: "+ebnf.sprintProductions([up.test2])+"\n\n")
+
+exit(0)
+*/
+
+
 var rules = ltr.stack
+// rules = writable(rules)
+
 var productions = getProductions(rules)
-// resolveIdIdx(productions)
+
+// productions = writable(productions)
+resolveIdIdx(productions)
+// productions = nonwritable(productions)
+// rules = nonwritable(rules)
 
 
+
+// var rules = ltr.stack
 // printf("   => Productions: %#v", rules)
 print("   => Productions: "+ebnf.sprintProductions(rules)+"\n\n")
 
 // printf("   => Productions: %#v", productions)
 // print("   => Productions: "+ebnf.sprintProductions(productions)+"\n\n")
+
 
 
 
