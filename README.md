@@ -117,7 +117,7 @@ Terminates the application and returns `v`.
   * __up.arr\*__  
   User generated local variables. Those can be arrays of arbitrary objects. They are appended when being propagated upwards. If an object is not an array, it will be put into one.
   * __up.stack__  
-  See [Local stacks](#local-stack)
+  See [Local stacks](#local-stacks)
 
 ##### Global variables
 
