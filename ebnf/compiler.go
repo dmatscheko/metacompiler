@@ -84,6 +84,7 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG r.Rules, depth int) { // => (changes upStream)
 	co.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
+	co.compilerFuncMap["Pos"] = tag.Pos
 
 	co.vm.Set("pop", func() interface{} {
 		stack, ok := upStream["stack"].([]interface{})
@@ -115,7 +116,7 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 	// TODO: store precompiled data!
 	_, err := co.Run(name, code)
 	if err != nil {
-		panic(err.Error() + "\nError was in TAG " + PprintRuleOnly(tag) + "\nCode:\n" + PprintSrc(code))
+		panic(err.Error() + "\nError was in " + PprintRuleFlat(tag, false, true))
 	}
 
 	if co.traceEnabled {
@@ -351,7 +352,8 @@ func CompileASG(asg r.Rules, extras *map[string]r.Rule, traceEnabled bool, preve
 	co.asg = asg
 	co.extras = extras
 	co.ltrStream = map[string]r.Object{ // Basically like global variables.
-		"in": "", // This is the parser input (the terminals).
+		"in":    "", // This is the parser input (the terminals).
+		"stack": &co.stack,
 	}
 	upStream := map[string]r.Object{ // Basically the local variables.
 		"in": "", // This is the parser input (the terminals).

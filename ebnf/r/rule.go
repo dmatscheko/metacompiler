@@ -112,6 +112,10 @@ var EbnfFuncMap = map[string]Object{ // The LLVM function will be inside such a 
 		return Rule{Operator: Or, Childs: Childs, Pos: Pos}
 	},
 
+	"newRange": func(Childs Rules, Pos int) Rule { // TODO: implement.
+		return Rule{Operator: Group, Childs: Childs, Pos: Pos}
+	},
+
 	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs Rules, TagChilds Rules) Rule {
 		return Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
 	},
