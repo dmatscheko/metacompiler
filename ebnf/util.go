@@ -114,9 +114,9 @@ func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, spa
 		res += fmt.Sprintf(", Pos:%d, Code:", rule.Pos)
 		if printChilds {
 			if printFlat {
-				res += PprintRulesFlat(&rule.TagChilds)
+				res += PprintRulesFlat(rule.TagChilds)
 			} else {
-				res += PprintRules(&rule.TagChilds, sp+"  ")
+				res += PprintRules(rule.TagChilds, sp+"  ")
 			}
 		} else {
 			res += "[...]"
@@ -151,9 +151,9 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, printFlat bool, space 
 		res += fmt.Sprintf(", Code:")
 		if printChilds {
 			if printFlat {
-				res += PprintRulesFlat(&rule.TagChilds)
+				res += PprintRulesFlat(rule.TagChilds)
 			} else {
-				res += PprintRules(&rule.TagChilds, sp+"  ")
+				res += PprintRules(rule.TagChilds, sp+"  ")
 			}
 		} else {
 			res += "[...]"
@@ -174,8 +174,8 @@ func PprintRule(rule *r.Rule, space ...string) string {
 	}
 	res := "{"
 	res += PprintSequenceHeaderPos(rule, true, false, sp)
-	if len(rule.Childs) > 0 {
-		res += ", " + PprintRules(&rule.Childs, sp+"  ")
+	if rule.Childs != nil && len(*rule.Childs) > 0 {
+		res += ", " + PprintRules(rule.Childs, sp+"  ")
 	}
 	res += "}"
 	return res
@@ -189,8 +189,8 @@ func PprintRuleFlat(rule *r.Rule, printChilds bool, printPos bool) string {
 		res += PprintSequenceHeader(rule, true, true)
 	}
 	if printChilds {
-		if len(rule.Childs) > 0 {
-			res += ", " + PprintRulesFlat(&rule.Childs)
+		if rule.Childs != nil && len(*rule.Childs) > 0 {
+			res += ", " + PprintRulesFlat(rule.Childs)
 		}
 	} else {
 		res += "[...]"
@@ -206,7 +206,7 @@ func PprintRuleOnly(rule *r.Rule, space ...string) string {
 	}
 	res := "{"
 	res += PprintSequenceHeaderPos(rule, false, false, sp)
-	if len(rule.Childs) > 0 {
+	if len(*rule.Childs) > 0 {
 		res += ", [...]"
 	}
 	res += "}"

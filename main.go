@@ -185,10 +185,10 @@ func main() {
 	}
 	fmt.Fprintln(os.Stderr, "\n  ==> Success\n\n  Abstract semantic graph:")
 	if *param_trace_ParseWithAGrammar {
-		fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(&asg, "    "))
+		fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(asg, "    "))
 	} else {
 		// fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(&asg, "    "))
-		fmt.Fprintln(os.Stderr, "    "+ebnf.Shorten(ebnf.PprintRules(&asg, "    ")))
+		fmt.Fprintln(os.Stderr, "    "+ebnf.Shorten(ebnf.PprintRules(asg, "    ")))
 	}
 
 	fmt.Fprint(os.Stderr, "\nCode output:\n\n")

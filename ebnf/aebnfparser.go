@@ -19,7 +19,7 @@ type ebnfParser struct {
 	src          []rune
 	ch           rune
 	sdx          int
-	token        r.Rule
+	token        *r.Rule
 	isSeq        bool // Only true if the String in ep.token is valid.
 	traceEnabled bool
 	ididx        []int
@@ -47,7 +47,7 @@ func (ep *ebnfParser) error(msg string, pos int) {
 		return
 	}
 	ep.sdx = len(ep.src)
-	ep.token = r.Rule{Operator: r.Error, String: fmt.Sprintf("Error at %s: %s\n", LinePosFromStrPos(string(ep.src), pos), msg), Pos: pos}
+	ep.token = &r.Rule{Operator: r.Error, String: fmt.Sprintf("Error at %s: %s\n", LinePosFromStrPos(string(ep.src), pos), msg), Pos: pos}
 }
 
 func (ep *ebnfParser) getToken() {
@@ -61,7 +61,7 @@ func (ep *ebnfParser) getToken() {
 	}
 	tokstart := ep.sdx
 	if strings.IndexRune("{}()[]<>|=.;+-,", ep.ch) >= 0 {
-		ep.token = r.Rule{Operator: r.Factor, Rune: ep.ch, Pos: tokstart}
+		ep.token = &r.Rule{Operator: r.Factor, Rune: ep.ch, Pos: tokstart}
 		ep.isSeq = false
 		ep.sdx++
 	} else if ep.ch == '"' || ep.ch == '\'' {
@@ -93,7 +93,7 @@ func (ep *ebnfParser) getToken() {
 					}
 				}
 
-				ep.token = r.Rule{Operator: r.Token, String: string(tokenrunes), Pos: tokstart}
+				ep.token = &r.Rule{Operator: r.Token, String: string(tokenrunes), Pos: tokstart}
 				ep.isSeq = true
 				return
 			}
@@ -135,7 +135,7 @@ func (ep *ebnfParser) getToken() {
 				// 	}
 				// }
 
-				ep.token = r.Rule{Operator: r.Token, String: string(tokenrunes), Pos: tokstart}
+				ep.token = &r.Rule{Operator: r.Token, String: string(tokenrunes), Pos: tokstart}
 				ep.isSeq = true
 				return
 			}
@@ -159,7 +159,7 @@ func (ep *ebnfParser) getToken() {
 				break
 			}
 		}
-		ep.token = r.Rule{Operator: r.Ident, String: string(ep.src[tokstart:ep.sdx]), Pos: tokstart}
+		ep.token = &r.Rule{Operator: r.Ident, String: string(ep.src[tokstart:ep.sdx]), Pos: tokstart}
 		ep.isSeq = true
 	} else {
 		ep.error(fmt.Sprintf("Invalid char '%c'", ep.ch), ep.sdx)
@@ -194,12 +194,12 @@ func (ep *ebnfParser) addIdent(ident string) int {
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) factor() r.Rule {
+func (ep *ebnfParser) factor() *r.Rule {
 	if ep.traceEnabled {
 		fmt.Printf("Fact(%d)  ", ep.sdx)
 	}
 	pos := ep.sdx
-	var res r.Rule
+	var res *r.Rule
 
 	valid := true
 	if ep.token.Operator == r.Token {
@@ -214,7 +214,7 @@ func (ep *ebnfParser) factor() r.Rule {
 		switch ep.token.Rune {
 		case '[':
 			ep.getToken()
-			res = r.Rule{Operator: r.Optional, Childs: r.Rules{ep.expression()}, Pos: pos}
+			res = &r.Rule{Operator: r.Optional, Childs: &r.Rules{*ep.expression()}, Pos: pos}
 			ep.matchToken(']')
 		case '(':
 			ep.getToken()
@@ -222,13 +222,13 @@ func (ep *ebnfParser) factor() r.Rule {
 			ep.matchToken(')')
 		case '{':
 			ep.getToken()
-			res = r.Rule{Operator: r.Repeat, Childs: r.Rules{ep.expression()}, Pos: pos}
+			res = &r.Rule{Operator: r.Repeat, Childs: &r.Rules{*ep.expression()}, Pos: pos}
 			ep.matchToken('}')
 		case '+':
-			res = r.Rule{Operator: r.SkipSpace, Bool: true, Pos: pos}
+			res = &r.Rule{Operator: r.SkipSpace, Bool: true, Pos: pos}
 			ep.getToken()
 		case '-':
-			res = r.Rule{Operator: r.SkipSpace, Bool: false, Pos: pos}
+			res = &r.Rule{Operator: r.SkipSpace, Bool: false, Pos: pos}
 			ep.getToken()
 		case '<':
 			res = ep.tag()
@@ -257,7 +257,7 @@ func (ep *ebnfParser) factor() r.Rule {
 	}
 
 	if !valid {
-		ep.error(fmt.Sprintf("Invalid token in factor() function (%s)", PprintRuleOnly(&ep.token)), ep.sdx)
+		ep.error(fmt.Sprintf("Invalid token in factor() function (%s)", PprintRuleOnly(ep.token)), ep.sdx)
 	}
 
 	return res
@@ -265,7 +265,7 @@ func (ep *ebnfParser) factor() r.Rule {
 
 // also works like getToken(), but advances before that as much as it itself knows
 // TODO: allow multiple strings/text, separated by ";"!
-func (ep *ebnfParser) tag() r.Rule {
+func (ep *ebnfParser) tag() *r.Rule {
 	if ep.traceEnabled {
 		fmt.Printf("Tag(%d)  ", ep.sdx)
 	}
@@ -282,11 +282,11 @@ func (ep *ebnfParser) tag() r.Rule {
 	}
 
 	ep.matchToken('>')
-	return res
+	return &res
 }
 
 // also works like getToken(), but advances before that as much as it itself knows (= implements sequence)
-func (ep *ebnfParser) term() r.Rule {
+func (ep *ebnfParser) term() *r.Rule {
 	if ep.traceEnabled {
 		fmt.Printf("Term(%d)  ", ep.sdx)
 	}
@@ -298,7 +298,7 @@ func (ep *ebnfParser) term() r.Rule {
 		return ep.token
 	}
 
-	res := r.Rules{firstFactor}
+	res := r.Rules{*firstFactor}
 
 	for {
 		if (ep.token.Operator == r.Factor && strings.IndexRune("})]>|.;", ep.token.Rune) >= 0) || ep.token.Operator == r.Error {
@@ -310,24 +310,24 @@ func (ep *ebnfParser) term() r.Rule {
 		// Move everything that the TAG desribes (which is to the left) into into the TAG.
 		// If newFactor is a TAG, merge this TAG with the last command in firstFactor.
 		if newFactor.Operator == r.Tag {
-			lastFactor := res[len(res)-1]
+			lastFactor := &res[len(res)-1]
 			res = res[:len(res)-1]                                                    // Remove the last factor from the result, because it will be appended again, but as a child of TAG.
 			newFactor.Childs = r.AppendPossibleSequence(newFactor.Childs, lastFactor) // Fill the TAG.
-			res = append(res, newFactor)
+			res = append(res, *newFactor)
 		} else {
 			// If newFactor is not a TAG, only append newFactor to the firstFactor.
-			res = r.AppendPossibleSequence(res, newFactor)
+			res = *r.AppendPossibleSequence(&res, newFactor)
 		}
 	}
 
 	if len(res) == 1 {
-		return res[0]
+		return &res[0]
 	}
-	return r.Rule{Operator: r.Sequence, Childs: res, Pos: pos}
+	return &r.Rule{Operator: r.Sequence, Childs: &res, Pos: pos}
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) expression() r.Rule {
+func (ep *ebnfParser) expression() *r.Rule {
 	if ep.traceEnabled {
 		fmt.Printf("Expr(%d)  ", ep.sdx)
 	}
@@ -335,20 +335,20 @@ func (ep *ebnfParser) expression() r.Rule {
 	res := ep.term()
 
 	if ep.token.Operator == r.Factor && ep.token.Rune == '|' {
-		res = r.Rule{Operator: r.Or, Childs: r.Rules{res}, Pos: pos} // Override the result (a factor) with the command for OR.
+		res = &r.Rule{Operator: r.Or, Childs: &r.Rules{*res}, Pos: pos} // Override the result (a factor) with the command for OR.
 		for ep.token.Operator == r.Factor && ep.token.Rune == '|' {
 			ep.getToken()
-			res.Childs = append(res.Childs, ep.term()) // Append the found alternative to the OR (It must not be ungrouped here, so use normal append() instead of r.AppendPossibleSequence()).
+			*res.Childs = append(*res.Childs, *ep.term()) // Append the found alternative to the OR (It must not be ungrouped here, so use normal append() instead of r.AppendPossibleSequence()).
 		}
-		if len(res.Childs) == 1 {
-			return res.Childs[0]
+		if len(*res.Childs) == 1 {
+			return &(*res.Childs)[0]
 		}
 	}
 	return res
 }
 
 // also works like getToken(), but advances before that as much as it itself knows
-func (ep *ebnfParser) production() r.Rule {
+func (ep *ebnfParser) production() *r.Rule {
 	if ep.traceEnabled {
 		fmt.Printf("Prod(%d)  ", ep.sdx)
 	}
@@ -361,7 +361,7 @@ func (ep *ebnfParser) production() r.Rule {
 			return ep.token
 		}
 		if ep.token.Operator != r.Ident {
-			ep.error(fmt.Sprintf("Ident expected but got %s", PprintRuleOnly(&ep.token)), pos)
+			ep.error(fmt.Sprintf("Ident expected but got %s", PprintRuleOnly(ep.token)), pos)
 			return ep.token
 		}
 
@@ -369,7 +369,7 @@ func (ep *ebnfParser) production() r.Rule {
 		idx := ep.addIdent(ident)
 		ep.getToken()
 
-		var tag r.Rule
+		var tag *r.Rule
 		foundTag := false
 		if ep.token.Operator == r.Factor && ep.token.Rune == '<' {
 			tag = ep.tag()
@@ -382,9 +382,9 @@ func (ep *ebnfParser) production() r.Rule {
 		}
 		if foundTag {
 			tag.Childs = r.AppendPossibleSequence(tag.Childs, ep.expression()) // Fill the TAG.
-			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: r.Rules{tag}, Pos: pos})
+			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: &r.Rules{*tag}, Pos: pos})
 		} else {
-			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: r.Rules{ep.expression()}, Pos: pos})
+			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: &r.Rules{*ep.expression()}, Pos: pos})
 		}
 		ep.ididx[idx] = len(ep.productions) - 1
 	}
@@ -405,14 +405,14 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 	// Title
 	if ep.token.Operator == r.Token {
-		ep.aGrammar = append(ep.aGrammar, ep.token)
+		ep.aGrammar = append(ep.aGrammar, *ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	}
 
 	// Prolog
 	if ep.token.Operator == r.Factor && ep.token.Rune == '<' {
-		ep.aGrammar = append(ep.aGrammar, ep.tag())
+		ep.aGrammar = append(ep.aGrammar, *ep.tag())
 		pos = ep.sdx
 		// ep.getToken()
 	}
@@ -423,25 +423,26 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		return
 	}
 	for {
-		ep.token = ep.production()
+		// ep.token = ep.production()
+		ep.production()
 		if (ep.token.Operator == r.Factor && ep.token.Rune == '}') || ep.token.Operator == r.Error {
 			break
 		}
 	}
-	ep.aGrammar = append(ep.aGrammar, r.Rule{Operator: r.Sequence, Childs: ep.productions, Pos: pos})
+	ep.aGrammar = append(ep.aGrammar, r.Rule{Operator: r.Sequence, Childs: &ep.productions, Pos: pos})
 	pos = ep.sdx
 	ep.getToken()
 
 	// Epilog
 	if ep.token.Operator == r.Factor && ep.token.Rune == '<' {
-		ep.aGrammar = append(ep.aGrammar, ep.tag())
+		ep.aGrammar = append(ep.aGrammar, *ep.tag())
 		pos = ep.sdx
 		// ep.getToken()
 	}
 
 	// Entry point
 	if ep.token.Operator == r.Ident {
-		ep.aGrammar = append(ep.aGrammar, ep.token)
+		ep.aGrammar = append(ep.aGrammar, *ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	} else {
@@ -451,7 +452,7 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 	// Comment
 	if ep.token.Operator == r.Token {
-		ep.aGrammar = append(ep.aGrammar, ep.token)
+		ep.aGrammar = append(ep.aGrammar, *ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	}
@@ -462,7 +463,7 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 		return
 	}
 
-	ep.token = r.Rule{Operator: r.Success}
+	ep.token = &r.Rule{Operator: r.Success}
 	ep.resolveIdIdx(GetProductions(&ep.aGrammar))
 	ep.verifyGrammar()
 
@@ -474,8 +475,8 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 func (ep *ebnfParser) resolveIdIdx(productions *r.Rules) {
 	for i := range *productions {
 		rule := &(*productions)[i]
-		if len(rule.Childs) > 0 {
-			ep.resolveIdIdx(&rule.Childs)
+		if rule.Childs != nil && len(*rule.Childs) > 0 {
+			ep.resolveIdIdx(rule.Childs)
 		}
 		if rule.Operator == r.Production || rule.Operator == r.Ident {
 			rule.Int = ep.ididx[rule.Int]

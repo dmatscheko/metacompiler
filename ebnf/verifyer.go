@@ -12,7 +12,7 @@ import (
 var reachedNames map[string]bool
 
 func (ep *ebnfParser) collectReachableNames(productions *r.Rules, prod *r.Rule) {
-	for _, child := range prod.Childs {
+	for _, child := range *prod.Childs {
 		if child.Operator == r.Ident {
 			i := child.Int
 			// ii := ep.ididx[i]
@@ -26,7 +26,7 @@ func (ep *ebnfParser) collectReachableNames(productions *r.Rules, prod *r.Rule) 
 				panic(fmt.Sprintf("Not a production: '%s' at position %d.", nextProd.String, nextProd.Pos))
 			}
 			ep.collectReachableNames(productions, nextProd)
-		} else if len(child.Childs) > 0 {
+		} else if child.Childs != nil && len(*child.Childs) > 0 {
 			ep.collectReachableNames(productions, &child)
 		}
 	}
@@ -51,6 +51,7 @@ func (ep *ebnfParser) verifyAllNamesUsed() {
 		panic(fmt.Sprintf("Defined start production (%s) not found.", startRule.String))
 	}
 	reachedNames[startProduction.String] = true
+
 	ep.collectReachableNames(productions, startProduction)
 
 	for _, name := range ep.idents {
