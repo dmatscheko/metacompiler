@@ -14,7 +14,7 @@ type compiler struct {
 	vm              *goja.Runtime
 	compilerFuncMap map[string]r.Object
 
-	asg      r.Rules
+	asg      *r.Rules
 	aGrammar *r.Rules
 
 	stack     []r.Object          // global stack.
@@ -44,7 +44,7 @@ func (co *compiler) traceTop(tag *r.Rule, depth int, upStream map[string]r.Objec
 	co.traceCount++
 	space := "  "
 
-	code := tag.TagChilds[0].String
+	code := (*tag.TagChilds)[0].String
 
 	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", co.traceCount, "), ", PprintRuleOnly(tag), "\n")
 	removeSpace1 := regexp.MustCompile(`[ \t]+`)
@@ -81,7 +81,7 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 	return co.vm.RunProgram(p)
 }
 
-func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG r.Rules, depth int) { // => (changes upStream)
+func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, depth int) { // => (changes upStream)
 	co.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
 	co.compilerFuncMap["Pos"] = tag.Pos
@@ -111,7 +111,7 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 		co.traceTop(tag, depth, upStream)
 	}
 
-	code := tag.TagChilds[0].String
+	code := (*tag.TagChilds)[0].String
 
 	// TODO: store precompiled data!
 	_, err := co.Run(name, code)
@@ -149,21 +149,21 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 //
 // 'upStream' are the variables that go up only. They are basically local variables.
 // 'ltrStream' are basically global variables. The difference betwee ltrStram and global JS variables is, that they ltrStream appends variables of sibling rules when their branches meet while propagating upwards.
-func (co *compiler) compile(localASG r.Rules, depth int) map[string]r.Object { // => (upStream)
-	if localASG == nil || len(localASG) == 0 {
+func (co *compiler) compile(localASG *r.Rules, depth int) map[string]r.Object { // => (upStream)
+	if localASG == nil || len(*localASG) == 0 {
 		return map[string]r.Object{"in": ""}
 	}
 
 	// ----------------------------------
 	// Split and collect
 
-	if len(localASG) > 1 { // "SEQUENCE" Iterate through all rules and applies.
+	if len(*localASG) > 1 { // "SEQUENCE" Iterate through all rules and applies.
 
 		upStreamMerged := map[string]r.Object{"in": "", "stack": []interface{}{}}
 
-		for _, rule := range localASG { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
+		for _, rule := range *localASG { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
 			// Compile:
-			upStreamNew := co.compile(r.Rules{rule}, depth+1)
+			upStreamNew := co.compile(&r.Rules{rule}, depth+1)
 
 			for k, v := range upStreamNew {
 				if k == "in" || strings.HasPrefix(k, "str") {
@@ -211,7 +211,7 @@ func (co *compiler) compile(localASG r.Rules, depth int) map[string]r.Object { /
 	// Inside each splitted arm do this
 
 	// There is only one production:
-	rule := localASG[0]
+	rule := (*localASG)[0]
 
 	switch rule.Operator {
 	case r.Token:
@@ -228,7 +228,7 @@ func (co *compiler) compile(localASG r.Rules, depth int) map[string]r.Object { /
 		co.handleTagCode(&rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, depth)
 		return upStream
 	default:
-		if len(rule.Childs) > 0 {
+		if len(*rule.Childs) > 0 {
 			return co.compile(rule.Childs, depth+1) // Evaluate the child productions of groups to collect their values.
 		}
 	}
@@ -277,7 +277,7 @@ func (co *compiler) initFuncMap() {
 	})
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
-		"compile": func(localASG r.Rules) map[string]r.Object {
+		"compile": func(localASG *r.Rules) map[string]r.Object {
 			res := co.compile(localASG, 0)
 
 			epilog := GetEpilog(co.aGrammar)
@@ -296,7 +296,7 @@ func (co *compiler) initFuncMap() {
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
 // The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
-func CompileASG(asg r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object, e error) {
+func CompileASG(asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object, e error) {
 	defer func() {
 		if err := recover(); err != nil {
 			res = nil

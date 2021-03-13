@@ -16,7 +16,7 @@ func GetProductions(aGrammar *r.Rules) *r.Rules {
 	for i := range *aGrammar {
 		rule := &(*aGrammar)[i]
 		if rule.Operator == r.Sequence {
-			return &rule.Childs
+			return rule.Childs
 		}
 	}
 	return nil
@@ -178,7 +178,7 @@ func (gp *grammarParser) applyChildSequence(rules *r.Rules, doSkipSpaces bool, d
 	if len(*rules) == 1 {
 		newProductions = gp.apply(&(*rules)[0], doSkipSpaces, depth)
 	} else {
-		newRule := &r.Rule{Operator: r.Sequence, Childs: *rules, Pos: pos} // Creating a new rule means that the rule.ID will be new. That does not matter because there is always a parent that has a known rule.ID.
+		newRule := &r.Rule{Operator: r.Sequence, Childs: rules, Pos: pos} // Creating a new rule means that the rule.ID will be new. That does not matter because there is always a parent that has a known rule.ID.
 		newProductions = gp.apply(newRule, doSkipSpaces, depth)
 	}
 	return newProductions
@@ -187,7 +187,7 @@ func (gp *grammarParser) applyChildSequence(rules *r.Rules, doSkipSpaces bool, d
 // Apply uses the rules recursive.
 func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Rules { // => (localProductions)
 	wasSdx := gp.sdx // Start position of the rule. Return, if the rule does not match.
-	var localProductions r.Rules = nil
+	localProductions := &r.Rules{}
 
 	isBlocked, foundRule, foundSdx, foundCh := gp.ruleEnter(rule, doSkipSpaces, depth)
 	if isBlocked {
@@ -203,8 +203,8 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 
 	switch rule.Operator {
 	case r.Sequence, r.Group, r.Production: // Those are groups/sequences of rules. Iterate through them and apply.
-		for i := 0; i < len(rule.Childs); i++ {
-			newProductions := gp.apply(&rule.Childs[i], doSkipSpaces, depth+1)
+		for i := 0; i < len(*rule.Childs); i++ {
+			newProductions := gp.apply(&(*rule.Childs)[i], doSkipSpaces, depth+1)
 			if newProductions == nil {
 				gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 				gp.sdx = wasSdx
@@ -216,7 +216,7 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 			if rule.Operator == r.Sequence {
 				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only r.Sequence can be flattened fully
 			} else {
-				localProductions = r.AppendPossibleSequence(localProductions, r.Rule{Operator: r.Group, Childs: (*newProductions), Pos: gp.sdx}) // TODO Childs: (*newProductions) is faster when the pointer is used. Change!
+				localProductions = r.AppendPossibleSequence(localProductions, &r.Rule{Operator: r.Group, Childs: newProductions, Pos: gp.sdx}) // TODO Childs: (*newProductions) is faster when the pointer is used. Change!
 			}
 		}
 	case r.Token:
@@ -232,11 +232,11 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 			}
 			gp.sdx++
 		}
-		localProductions = append(localProductions, *rule)
+		*localProductions = append(*localProductions, *rule)
 	case r.Or:
 		found := false
-		for i := 0; i < len(rule.Childs); i++ {
-			newProductions := gp.apply(&rule.Childs[i], doSkipSpaces, depth+1)
+		for i := 0; i < len(*rule.Childs); i++ {
+			newProductions := gp.apply(&(*rule.Childs)[i], doSkipSpaces, depth+1)
 			if newProductions != nil { // The nil result is used as ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil.
 				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 				found = true
@@ -250,8 +250,8 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 		}
 	case r.Repeat:
 		var newRule *r.Rule
-		if len(rule.Childs) == 1 {
-			newRule = &rule.Childs[0]
+		if len(*rule.Childs) == 1 {
+			newRule = &(*rule.Childs)[0]
 		} else {
 			newRule = &r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: rule.Pos}
 		}
@@ -263,10 +263,10 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
 		}
 	case r.Optional:
-		newProductions := gp.applyChildSequence(&rule.Childs, doSkipSpaces, depth+1, rule.Pos)
+		newProductions := gp.applyChildSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos)
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
 	case r.Ident: // "IDENT" identifies another rule (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-rule which is at position 3: { "IDENT", "expression", 3 }
-		newProductions := gp.applyChildSequence(&(*gp.productions)[rule.Int].Childs, doSkipSpaces, depth+1, rule.Pos)
+		newProductions := gp.applyChildSequence((*gp.productions)[rule.Int].Childs, doSkipSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			gp.sdx = wasSdx
@@ -274,64 +274,61 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 		}
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 	case r.Tag:
-		newProductions := gp.applyChildSequence(&rule.Childs, doSkipSpaces, depth+1, rule.Pos)
+		newProductions := gp.applyChildSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			return nil
 		}
 		newTag := r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Pos: gp.sdx}
 		newTag.Childs = r.AppendArrayOfPossibleSequences(newTag.Childs, newProductions)
-		localProductions = append(localProductions, newTag)
+		*localProductions = append(*localProductions, newTag)
 	case r.SkipSpace: // TODO: Modify SKIPSPACES so that the chars to skip can be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		rule.Pos = gp.sdx
-		localProductions = r.Rules{*rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
+		localProductions = &r.Rules{*rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
 	default: // r.Factor || r.Error
 		gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 		panic(fmt.Sprintf("Invalid rule in applies() function: %#v", rule))
 	}
 
 	// All failed matches should have returned already.
-	// Here must only be matches.
+	// Here must only be matches which means, localProductions MUST NOT be nil here.
 
 	if gp.sdx > gp.lastParsePosition {
 		gp.lastParsePosition = gp.sdx
 	}
 
-	if len(localProductions) == 1 {
-		if localProductions[0].Operator == r.Group || localProductions[0].Operator == r.Sequence {
-			localProductions = localProductions[0].Childs
+	if len(*localProductions) == 1 {
+		if (*localProductions)[0].Operator == r.Group || (*localProductions)[0].Operator == r.Sequence {
+			localProductions = (*localProductions)[0].Childs
 		}
 	}
-	if localProductions == nil { // Must not be nil because nil is for failed match.
-		localProductions = r.Rules{}
-	}
 
-	gp.ruleExit(rule, doSkipSpaces, depth, &localProductions, wasSdx)
-	return &localProductions
+	gp.ruleExit(rule, doSkipSpaces, depth, localProductions, wasSdx)
+	return localProductions
 }
 
-func mergeTerminals(productions r.Rules) r.Rules {
+func mergeTerminals(productions *r.Rules) *r.Rules {
 	lastWasTerminal := false
-	for i := 0; i < len(productions); i++ {
-		if productions[i].Operator == r.Token {
+	for i := 0; i < len(*productions); i++ {
+		if (*productions)[i].Operator == r.Token {
 			if lastWasTerminal {
-				productions[i-1].String += productions[i].String
-				productions = append(productions[0:i], productions[i+1:]...)
+				(*productions)[i-1].String += (*productions)[i].String
+				*productions = append((*productions)[0:i], (*productions)[i+1:]...)
 				i--
 			} else {
 				lastWasTerminal = true
 			}
 		} else {
 			lastWasTerminal = false
-			if len(productions[i].Childs) > 0 {
-				productions[i].Childs = mergeTerminals(productions[i].Childs)
+			if len(*(*productions)[i].Childs) > 0 {
+				(*productions)[i].Childs = mergeTerminals((*productions)[i].Childs)
 			}
 		}
 	}
 	return productions
 }
 
-func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, traceEnabled bool) (res r.Rules, e error) { // => (productions, error)
+func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
 	defer func() {
 		if err := recover(); err != nil {
 			res = nil
@@ -382,5 +379,5 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, trace
 	// gp.foundChList = nil
 	// gp.src = nil
 
-	return mergeTerminals(*newProductions), nil
+	return mergeTerminals(newProductions), nil
 }

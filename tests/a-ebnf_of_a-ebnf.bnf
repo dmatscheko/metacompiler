@@ -43,6 +43,9 @@ function simplifyToArr(rule) {
 
 // Groups with only one child can be broken apart as long as down there is an unbreakable rule. Try to find one.
 function trySimplifyDown(rule) {
+    if (rule.Childs == undefined) {
+        return rule
+    }
     var op = rule.Operator
     if (rule.Childs.length == 1) {
         if (op == ebnf.oid.Sequence || op == ebnf.oid.Group || op == ebnf.oid.Or) {
@@ -81,13 +84,12 @@ c.compile(c.asg)
 // resolveProdsPos()
 function resolveIdIdx(productions) {
     // println(productions.length)
-
 	for (var i = 0; i < productions.length; i++) {
         var rule = productions[i]
 
-		if (rule.Childs.length > 0) {
-			resolveIdIdx(rule.Childs)
-		}
+        if (rule.Childs != undefined && rule.Childs.length > 0) {
+            resolveIdIdx(rule.Childs)
+        }
 
 		if (rule.Operator == ebnf.oid.Production || rule.Operator == ebnf.oid.Ident) {
 			rule.Int = 1000 + prodsPos[rule.Int]
@@ -105,16 +107,26 @@ function getProductions(rules) {
 }
 
 
+var test = "THIS IS A TEST==================================================================================================="
+
+
 var rules = ltr.stack
 var productions = getProductions(rules)
 // resolveIdIdx(productions)
 
 
-// rules[0].String="THIS IS A TEST"  // This is OK
-// productions[0].String="THIS IS A TEST"  // Error because of not getting a pointer here
 
-// printf("   => Productions: %#v", rules)
-print("   => Productions: "+ebnf.sprintProductions(rules)+"\n\n")
+// rules[2].String=test // This is OK
+// rules[2].Operator = ebnf.oid.Token
+
+// rules[2].Childs[0].String=test // Error because of not getting a pointer here
+
+// rules[0].String=test  // This is OK
+// productions[0].String=test  // Error because of not getting a pointer here
+// productions[0].Operator = ebnf.oid.Token
+
+// printf("   => Rules: %#v", rules)
+print("   => Rules: "+ebnf.sprintProductions(rules)+"\n\n")
 
 // printf("   => Productions: %#v", productions)
 // print("   => Productions: "+ebnf.sprintProductions(productions)+"\n\n")
