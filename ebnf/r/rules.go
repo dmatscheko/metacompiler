@@ -1,5 +1,7 @@
 package r
 
+import "fmt"
+
 type Object = interface{}
 type OperatorID int
 
@@ -130,6 +132,9 @@ var EbnfFuncMap = map[string]Object{ // The LLVM function will be inside such a 
 		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
 	},
 
+	"serializeRule":  SerializeRule,
+	"serializeRules": SerializeRules,
+
 	"oid": map[string]OperatorID{
 		"Error":   Error,
 		"Success": Success,
@@ -149,4 +154,60 @@ var EbnfFuncMap = map[string]Object{ // The LLVM function will be inside such a 
 		"Production": Production,
 		"Ident":      Ident,
 	},
+}
+
+func SerializeRule(rule *Rule) string {
+	res := "&r.Rule{"
+
+	op := rule.Operator
+	res += fmt.Sprintf("Operator: %d", op)
+
+	if op == Token || op == Ident || op == Production {
+		res += fmt.Sprintf(", String: %q", rule.String)
+	}
+	if op == Ident || op == Production {
+		res += fmt.Sprintf(", Int: %d", rule.Int)
+	}
+	if op == SkipSpace {
+		res += fmt.Sprintf(", Bool: %t", rule.Bool)
+	}
+	if rule.TagChilds != nil && op == Tag {
+		res += ", TagChilds: &r.Rules{"
+		for i := range *rule.TagChilds {
+			if i > 0 {
+				res += ", "
+			}
+			res += SerializeRule((*rule.TagChilds)[i])
+		}
+		res += "}"
+	}
+	if rule.Childs != nil && (op == Tag || op == Range || op == Ident || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+		res += ", Childs: &r.Rules{"
+		for i := range *rule.Childs {
+			if i > 0 {
+				res += ", "
+			}
+			res += SerializeRule((*rule.Childs)[i])
+		}
+		res += "}"
+	}
+	if !(op == Token || op == Ident || op == Production || op == Tag || op == Range || op == SkipSpace || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+		panic("wrong rule type: " + op.String())
+	}
+
+	res += "}"
+	return res
+}
+
+func SerializeRules(rules *Rules) string {
+	res := "&r.Rules{"
+	for i := range *rules {
+		r := (*rules)[i]
+		if i > 0 {
+			res += ", "
+		}
+		res += SerializeRule(r)
+	}
+	res += "}"
+	return res
 }

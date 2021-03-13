@@ -254,6 +254,25 @@ func (co *compiler) initFuncMap() {
 		return &tmp
 	})
 
+	co.vm.Set("unescape", func(s string) *string {
+		r := []rune(s)
+		for pos := 0; pos+1 < len(r); pos++ {
+			if r[pos] == '\\' {
+				r = append(r[:pos], r[pos+1:]...)
+				switch r[pos] {
+				case 'r':
+					r[pos] = '\r'
+				case 'n':
+					r[pos] = '\n'
+				case 't':
+					r[pos] = '\t'
+				}
+			}
+		}
+		s = string(r)
+		return &s
+	})
+
 	// co.vm.Set("writable", func(v interface{}) *interface{} {
 	// 	return &v
 	// })
@@ -297,12 +316,12 @@ func (co *compiler) initFuncMap() {
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
 // The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
 func CompileASG(asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object, e error) {
-	defer func() {
-		if err := recover(); err != nil {
-			res = nil
-			e = fmt.Errorf("%s", err)
-		}
-	}()
+	// defer func() {
+	// 	if err := recover(); err != nil {
+	// 		res = nil
+	// 		e = fmt.Errorf("%s", err)
+	// 	}
+	// }()
 
 	var co compiler
 	co.traceEnabled = traceEnabled

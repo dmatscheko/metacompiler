@@ -152,15 +152,15 @@ func main() {
 	fmt.Fprintln(os.Stderr, "a-EBNF:")
 	fmt.Fprint(os.Stderr, ebnf.PprintSrc(aEbnf))
 	// Parses an aEBNF and generates a a-grammar with it.
-	aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "  ==> Fail")
-		fmt.Fprintln(os.Stderr, err)
-		return
-	}
+	// aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
+	// if err != nil {
+	// 	fmt.Fprintln(os.Stderr, "  ==> Fail")
+	// 	fmt.Fprintln(os.Stderr, err)
+	// 	return
+	// }
 
 	// TEST:
-	// aGrammar = &ebnf.EbnfAGrammar
+	aGrammar := ebnf.EbnfAGrammar
 
 	fmt.Fprintln(os.Stderr, "  ==> Success\n\n  a-Grammar:")
 	if *param_trace_ParseAEBNF {
@@ -214,10 +214,11 @@ func speedtest(src, target string, count int) {
 	speedtestParseAEBNF(src, target, count)
 	speedtestParseWithGrammar(src, target, count)
 	speedtestCompileASG(src, target, count)
+	fmt.Fprintln(os.Stderr)
 }
 func timeTrack(start time.Time, name string) {
 	elapsed := time.Since(start)
-	fmt.Fprintf(os.Stderr, "%s took %s", name, elapsed)
+	fmt.Fprintf(os.Stderr, "%s took %s\n", name, elapsed)
 }
 func speedtestParseAEBNF(src, target string, count int) {
 	defer timeTrack(time.Now(), "ParseAEBNF")
