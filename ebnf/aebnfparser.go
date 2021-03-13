@@ -464,7 +464,7 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	}
 
 	ep.token = &r.Rule{Operator: r.Success}
-	ep.resolveIdIdx(GetProductions(&ep.aGrammar))
+	ep.resolveNameIdx(GetProductions(&ep.aGrammar))
 	ep.verifyGrammar()
 
 	// Also resolve the index of the start rule.
@@ -472,11 +472,11 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 	tmpStart.Int = ep.ididx[tmpStart.Int]
 }
 
-func (ep *ebnfParser) resolveIdIdx(productions *r.Rules) {
+func (ep *ebnfParser) resolveNameIdx(productions *r.Rules) {
 	for i := range *productions {
 		rule := (*productions)[i]
 		if rule.Childs != nil && len(*rule.Childs) > 0 {
-			ep.resolveIdIdx(rule.Childs)
+			ep.resolveNameIdx(rule.Childs)
 		}
 		if rule.Operator == r.Production || rule.Operator == r.Ident {
 			rule.Int = ep.ididx[rule.Int]
