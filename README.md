@@ -102,6 +102,11 @@ Terminates the application and returns `v`.
 * __printf(...)__ [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
 * __sprintf(...)__ [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
 
+#### Strings
+
+* __unescape(s string) string__  
+Backslash unescapes a string. Necessary for tokens, but not for tags.
+
 #### Variables
 
 ##### Local variables
@@ -207,6 +212,9 @@ The functions and constants are exposed to JS as:
   * __llvm.Callgraph(m ir.Module, f string)__  
   The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
 
+
+
+
 ### a-EBNF Syntax
 
 #### EBNF of EBNF
@@ -294,6 +302,19 @@ Skip        = "+" ;  // Skip all whitespace in the future.
 Noskip      = "-" ;  // Do not skip whitspace in the future.
 
 }
+```
+
+As can be seen in the above EBNF, a `token` consists of one backslash escaped string, quoted in single or double quotes.
+```
+"This is an\nexample\tof a multiline string with one tab"
+```
+A `tag` starts with `<`, ends with `>`, and contain one or multiple comma separated raw strings, quoted in `~~` (two on either side). Inside a raw tag string, `\~` is a special symbol for `~` to be able to write a literal `~~` combination. Single `~` can be written without a backslash escape.
+```
+< ~~This is an
+example of a multiline
+raw string (inside a tag)
+with one tilde: ~
+and then two tildes: ~\~~~, ~~This is a second string inside the Tag~~ >
 ```
 
 ## Further Examples
