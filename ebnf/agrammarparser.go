@@ -233,6 +233,19 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 			gp.sdx++
 		}
 		*localProductions = append(*localProductions, rule)
+	case r.Range:
+		if doSkipSpaces { // There can be white space in strings/text. Do not skip that.
+			gp.skipSpaces()
+		}
+		a := []rune((*rule.Childs)[0].String)[0]
+		b := []rune((*rule.Childs)[1].String)[0]
+		ch := gp.src[gp.sdx]
+		if !(ch >= a && ch <= b) {
+			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+			gp.sdx = wasSdx
+			return nil
+		}
+		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: fmt.Sprintf("%c", ch)})
 	case r.Or:
 		found := false
 		for i := 0; i < len(*rule.Childs); i++ {
@@ -304,28 +317,6 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 	gp.ruleExit(rule, doSkipSpaces, depth, localProductions, wasSdx)
 	return localProductions
 }
-
-// func mergeTerminals(productions *r.Rules) *r.Rules {
-// 	lastWasTerminal := false
-// 	for i := 0; i < len(*productions); i++ {
-// 		if (*productions)[i].Operator == r.Token {
-// 			if lastWasTerminal {
-// 				(*productions)[i-1].String += (*productions)[i].String
-// 				*productions = append((*productions)[0:i], (*productions)[i+1:]...)
-// 				i--
-// 			} else {
-// 				lastWasTerminal = true
-// 			}
-// 		} else {
-// 			lastWasTerminal = false
-// 			if len(*(*productions)[i].Childs) > 0 {
-// 				(*productions)[i].Childs = mergeTerminals((*productions)[i].Childs)
-// 				// mergeTerminals((*productions)[i].Childs)
-// 			}
-// 		}
-// 	}
-// 	return productions
-// }
 
 func mergeTerminals(productions *r.Rules) {
 	lastWasTerminal := false

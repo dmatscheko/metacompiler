@@ -1,9 +1,5 @@
 "a-EBNF of a-EBNF to a-grammar"
-
 <~~
-
-// TODO: Why is the simplify() at TaggedTerm better at removing the Group directly below a production? The function simplifyToArr(prodExpression) at buildProduction() should also do its job here.
-
 var names = [];
 function getNameIdx(name) {
     var pos = names.indexOf(name);
@@ -71,8 +67,6 @@ function simplify(rule) {
     return rule
 }
 
-c.compile(c.asg)
-
 function resolveNameIdx(productions) {
 	for (var i = 0; i < productions.length; i++) {
         var rule = productions[i]
@@ -96,13 +90,12 @@ function getProductions(rules) {
     return []
 }
 
+c.compile(c.asg)
 var rules = ltr.stack
 var productions = getProductions(rules)
 resolveNameIdx(productions)
 
-// printf("   => Rules: %#v", rules)
-print("   => Rules: "+ebnf.sprintProductions(rules)+"\n\n")
-
+print("   => Rules: "+ebnf.serializeRules(rules)+"\n\n")
 ~~>
 {
 
@@ -150,8 +143,8 @@ Name        <~~ push(ebnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
             = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
 Token       = ( Dquotetoken | Squotetoken ) ;
 
-Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' | "\n" | "\r" } <~~ push(ebnf.newToken(up.in, c.Pos)) ~~> '"' + ;
-Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" | "\n" | "\r" } <~~ push(ebnf.newToken(up.in, c.Pos)) ~~> "'" + ;
+Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' | "\n" | "\r" } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> '"' + ;
+Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" | "\n" | "\r" } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> "'" + ;
 
 Digit       = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 Small       = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
