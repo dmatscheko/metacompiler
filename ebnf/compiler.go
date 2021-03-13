@@ -170,10 +170,10 @@ func (co *compiler) compile(localASG *r.Rules, depth int) map[string]r.Object { 
 					str1, ok1 := upStreamMerged[k].(string)
 					str2, ok2 := v.(string)
 					if !ok1 {
-						panic(fmt.Sprintf("Left variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, upStreamMerged[k], PprintRuleOnly(&rule)))
+						panic(fmt.Sprintf("Left variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, upStreamMerged[k], PprintRuleOnly(rule)))
 					}
 					if !ok2 {
-						panic(fmt.Sprintf("Right variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, v, PprintRuleOnly(&rule)))
+						panic(fmt.Sprintf("Right variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, v, PprintRuleOnly(rule)))
 					}
 					upStreamMerged[k] = str1 + str2
 					continue
@@ -225,7 +225,7 @@ func (co *compiler) compile(localASG *r.Rules, depth int) map[string]r.Object { 
 		// First collect all the data.
 		upStream := co.compile(rule.Childs, depth+1) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.handleTagCode(&rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, depth)
+		co.handleTagCode(rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, depth)
 		return upStream
 	default:
 		if len(*rule.Childs) > 0 {

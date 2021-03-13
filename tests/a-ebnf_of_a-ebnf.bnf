@@ -119,7 +119,8 @@ var productions = getProductions(rules)
 // rules[2].String=test // This is OK
 // rules[2].Operator = ebnf.oid.Token
 
-// rules[2].Childs[0].String=test // Error because of not getting a pointer here
+rules[2].Childs[0].String=test // Error because of not getting a pointer here
+rules[2].Childs[0].Operator = ebnf.oid.Token
 
 // rules[0].String=test  // This is OK
 // productions[0].String=test  // Error because of not getting a pointer here

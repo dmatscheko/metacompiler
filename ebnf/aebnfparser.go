@@ -214,7 +214,7 @@ func (ep *ebnfParser) factor() *r.Rule {
 		switch ep.token.Rune {
 		case '[':
 			ep.getToken()
-			res = &r.Rule{Operator: r.Optional, Childs: &r.Rules{*ep.expression()}, Pos: pos}
+			res = &r.Rule{Operator: r.Optional, Childs: &r.Rules{ep.expression()}, Pos: pos}
 			ep.matchToken(']')
 		case '(':
 			ep.getToken()
@@ -222,7 +222,7 @@ func (ep *ebnfParser) factor() *r.Rule {
 			ep.matchToken(')')
 		case '{':
 			ep.getToken()
-			res = &r.Rule{Operator: r.Repeat, Childs: &r.Rules{*ep.expression()}, Pos: pos}
+			res = &r.Rule{Operator: r.Repeat, Childs: &r.Rules{ep.expression()}, Pos: pos}
 			ep.matchToken('}')
 		case '+':
 			res = &r.Rule{Operator: r.SkipSpace, Bool: true, Pos: pos}
@@ -298,7 +298,7 @@ func (ep *ebnfParser) term() *r.Rule {
 		return ep.token
 	}
 
-	res := r.Rules{*firstFactor}
+	res := r.Rules{firstFactor}
 
 	for {
 		if (ep.token.Operator == r.Factor && strings.IndexRune("})]>|.;", ep.token.Rune) >= 0) || ep.token.Operator == r.Error {
@@ -310,10 +310,10 @@ func (ep *ebnfParser) term() *r.Rule {
 		// Move everything that the TAG desribes (which is to the left) into into the TAG.
 		// If newFactor is a TAG, merge this TAG with the last command in firstFactor.
 		if newFactor.Operator == r.Tag {
-			lastFactor := &res[len(res)-1]
+			lastFactor := res[len(res)-1]
 			res = res[:len(res)-1]                                                    // Remove the last factor from the result, because it will be appended again, but as a child of TAG.
 			newFactor.Childs = r.AppendPossibleSequence(newFactor.Childs, lastFactor) // Fill the TAG.
-			res = append(res, *newFactor)
+			res = append(res, newFactor)
 		} else {
 			// If newFactor is not a TAG, only append newFactor to the firstFactor.
 			res = *r.AppendPossibleSequence(&res, newFactor)
@@ -321,7 +321,7 @@ func (ep *ebnfParser) term() *r.Rule {
 	}
 
 	if len(res) == 1 {
-		return &res[0]
+		return res[0]
 	}
 	return &r.Rule{Operator: r.Sequence, Childs: &res, Pos: pos}
 }
@@ -335,13 +335,13 @@ func (ep *ebnfParser) expression() *r.Rule {
 	res := ep.term()
 
 	if ep.token.Operator == r.Factor && ep.token.Rune == '|' {
-		res = &r.Rule{Operator: r.Or, Childs: &r.Rules{*res}, Pos: pos} // Override the result (a factor) with the command for OR.
+		res = &r.Rule{Operator: r.Or, Childs: &r.Rules{res}, Pos: pos} // Override the result (a factor) with the command for OR.
 		for ep.token.Operator == r.Factor && ep.token.Rune == '|' {
 			ep.getToken()
-			*res.Childs = append(*res.Childs, *ep.term()) // Append the found alternative to the OR (It must not be ungrouped here, so use normal append() instead of r.AppendPossibleSequence()).
+			*res.Childs = append(*res.Childs, ep.term()) // Append the found alternative to the OR (It must not be ungrouped here, so use normal append() instead of r.AppendPossibleSequence()).
 		}
 		if len(*res.Childs) == 1 {
-			return &(*res.Childs)[0]
+			return (*res.Childs)[0]
 		}
 	}
 	return res
@@ -382,9 +382,9 @@ func (ep *ebnfParser) production() *r.Rule {
 		}
 		if foundTag {
 			tag.Childs = r.AppendPossibleSequence(tag.Childs, ep.expression()) // Fill the TAG.
-			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: &r.Rules{*tag}, Pos: pos})
+			ep.productions = append(ep.productions, &r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: &r.Rules{tag}, Pos: pos})
 		} else {
-			ep.productions = append(ep.productions, r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: &r.Rules{*ep.expression()}, Pos: pos})
+			ep.productions = append(ep.productions, &r.Rule{Operator: r.Production, String: ident, Int: idx, Childs: &r.Rules{ep.expression()}, Pos: pos})
 		}
 		ep.ididx[idx] = len(ep.productions) - 1
 	}
@@ -405,14 +405,14 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 	// Title
 	if ep.token.Operator == r.Token {
-		ep.aGrammar = append(ep.aGrammar, *ep.token)
+		ep.aGrammar = append(ep.aGrammar, ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	}
 
 	// Prolog
 	if ep.token.Operator == r.Factor && ep.token.Rune == '<' {
-		ep.aGrammar = append(ep.aGrammar, *ep.tag())
+		ep.aGrammar = append(ep.aGrammar, ep.tag())
 		pos = ep.sdx
 		// ep.getToken()
 	}
@@ -429,20 +429,20 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 			break
 		}
 	}
-	ep.aGrammar = append(ep.aGrammar, r.Rule{Operator: r.Sequence, Childs: &ep.productions, Pos: pos})
+	ep.aGrammar = append(ep.aGrammar, &r.Rule{Operator: r.Sequence, Childs: &ep.productions, Pos: pos})
 	pos = ep.sdx
 	ep.getToken()
 
 	// Epilog
 	if ep.token.Operator == r.Factor && ep.token.Rune == '<' {
-		ep.aGrammar = append(ep.aGrammar, *ep.tag())
+		ep.aGrammar = append(ep.aGrammar, ep.tag())
 		pos = ep.sdx
 		// ep.getToken()
 	}
 
 	// Entry point
 	if ep.token.Operator == r.Ident {
-		ep.aGrammar = append(ep.aGrammar, *ep.token)
+		ep.aGrammar = append(ep.aGrammar, ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	} else {
@@ -452,7 +452,7 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 	// Comment
 	if ep.token.Operator == r.Token {
-		ep.aGrammar = append(ep.aGrammar, *ep.token)
+		ep.aGrammar = append(ep.aGrammar, ep.token)
 		pos = ep.sdx
 		ep.getToken()
 	}
@@ -474,7 +474,7 @@ func (ep *ebnfParser) parse(srcEbnf string) {
 
 func (ep *ebnfParser) resolveIdIdx(productions *r.Rules) {
 	for i := range *productions {
-		rule := &(*productions)[i]
+		rule := (*productions)[i]
 		if rule.Childs != nil && len(*rule.Childs) > 0 {
 			ep.resolveIdIdx(rule.Childs)
 		}
