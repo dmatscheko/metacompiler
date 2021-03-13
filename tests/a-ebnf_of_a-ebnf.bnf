@@ -5,14 +5,14 @@
 // TODO: Why is the simplify() at TaggedTerm better at removing the Group directly below a production? The function simplifyToArr(prodExpression) at buildProduction() should also do its job here.
 
 var names = [];
-var prodsPos = {};
-var lastPos = 0
 function getNameIdx(name) {
     var pos = names.indexOf(name);
     if (pos != -1) { return pos };
     return names.push(name)-1;
 }
 
+var prodsPos = {};
+var lastPos = 0
 function buildProduction(prodName, prodTag, prodExpression) {
     prodsPos[prodName.Int] = lastPos++
     if (prodTag != undefined) {
@@ -22,8 +22,6 @@ function buildProduction(prodName, prodTag, prodExpression) {
         return ebnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
     }
 }
-
-// ------
 
 // This breaks up an ebnf.oid.Group. Use only for childs of unbreakable rules.
 function simplifyArr(rules) {
@@ -73,26 +71,18 @@ function simplify(rule) {
     return rule
 }
 
-
-
-
 c.compile(c.asg)
 
-
-
-
-// resolveProdsPos()
-function resolveIdIdx(productions) {
-    // println(productions.length)
+function resolveNameIdx(productions) {
 	for (var i = 0; i < productions.length; i++) {
         var rule = productions[i]
 
         if (rule.Childs != undefined && rule.Childs.length > 0) {
-            resolveIdIdx(rule.Childs)
+            resolveNameIdx(rule.Childs)
         }
 
 		if (rule.Operator == ebnf.oid.Production || rule.Operator == ebnf.oid.Ident) {
-			rule.Int = 1000 + prodsPos[rule.Int]
+			rule.Int = prodsPos[rule.Int]
 		}
 	}
 }
@@ -106,34 +96,12 @@ function getProductions(rules) {
     return []
 }
 
-
-var test = "THIS IS A TEST==================================================================================================="
-
-
 var rules = ltr.stack
 var productions = getProductions(rules)
-// resolveIdIdx(productions)
-
-
-
-// rules[2].String=test // This is OK
-// rules[2].Operator = ebnf.oid.Token
-
-rules[2].Childs[0].String=test // Error because of not getting a pointer here
-rules[2].Childs[0].Operator = ebnf.oid.Token
-
-// rules[0].String=test  // This is OK
-// productions[0].String=test  // Error because of not getting a pointer here
-// productions[0].Operator = ebnf.oid.Token
+resolveNameIdx(productions)
 
 // printf("   => Rules: %#v", rules)
 print("   => Rules: "+ebnf.sprintProductions(rules)+"\n\n")
-
-// printf("   => Productions: %#v", productions)
-// print("   => Productions: "+ebnf.sprintProductions(productions)+"\n\n")
-
-
-
 
 ~~>
 {
