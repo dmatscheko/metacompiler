@@ -16,7 +16,7 @@ func (ep *ebnfParser) collectReachableNames(productions *r.Rules, prod *r.Rule) 
 		if child.Operator == r.Ident {
 			i := child.Int
 			// ii := ep.ididx[i]
-			nextProd := &(*productions)[i] // [ii]
+			nextProd := (*productions)[i] // [ii]
 			if nextProd.Operator == r.Production {
 				if reachedNames[nextProd.String] {
 					continue
@@ -27,7 +27,7 @@ func (ep *ebnfParser) collectReachableNames(productions *r.Rules, prod *r.Rule) 
 			}
 			ep.collectReachableNames(productions, nextProd)
 		} else if child.Childs != nil && len(*child.Childs) > 0 {
-			ep.collectReachableNames(productions, &child)
+			ep.collectReachableNames(productions, child)
 		}
 	}
 }
@@ -45,7 +45,7 @@ func (ep *ebnfParser) verifyAllNamesUsed() {
 	productions := GetProductions(&ep.aGrammar)
 
 	// Get start production.
-	startProduction := &(*productions)[startRule.Int]
+	startProduction := (*productions)[startRule.Int]
 
 	if startProduction.Operator != r.Production && startProduction.String != startRule.String {
 		panic(fmt.Sprintf("Defined start production (%s) not found.", startRule.String))

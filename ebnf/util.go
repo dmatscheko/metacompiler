@@ -220,7 +220,7 @@ func PprintRules(productions *r.Rules, space ...string) string {
 	}
 	res := "{\n"
 	for i := range *productions {
-		rule := &(*productions)[i]
+		rule := (*productions)[i]
 		if i > 0 {
 			res += ",\n"
 		}
@@ -233,7 +233,7 @@ func PprintRules(productions *r.Rules, space ...string) string {
 func PprintRulesFlat(productions *r.Rules) string {
 	res := "{"
 	for i := range *productions {
-		rule := &(*productions)[i]
+		rule := (*productions)[i]
 		if i > 0 {
 			res += ", "
 		}

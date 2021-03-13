@@ -40,10 +40,10 @@ type Rule struct {
 	TagChilds *Rules // Only used when Operator == seq.Tag
 }
 
-func (rule *Rule) CloneShallow() *Rule {
-	var newRule = *rule
-	return &newRule
-}
+// func (rule *Rule) CloneShallow() *Rule {
+// 	var newRule = *rule
+// 	return &newRule
+// }
 
 // func (rule *Rule) CloneDeep() *Rule {
 // 	// TODO:
@@ -51,9 +51,9 @@ func (rule *Rule) CloneShallow() *Rule {
 // 	return &newRule
 // }
 
-type Rules []Rule
+type Rules []*Rule
 
-func (rules *Rules) Append(elems ...Rule) {
+func (rules *Rules) Append(elems ...*Rule) {
 	*rules = append(*rules, elems...)
 }
 
@@ -73,7 +73,7 @@ func AppendPossibleSequence(target *Rules, source *Rule) *Rules {
 	if source.Operator == Sequence {
 		*target = append(*target, *source.Childs...)
 	} else {
-		*target = append(*target, *source)
+		*target = append(*target, source)
 	}
 	return target
 }
@@ -84,7 +84,7 @@ func AppendArrayOfPossibleSequences(target *Rules, source *Rules) *Rules {
 		return target
 	}
 	for _, rule := range *source {
-		target = AppendPossibleSequence(target, &rule)
+		target = AppendPossibleSequence(target, rule)
 	}
 	return target
 }
