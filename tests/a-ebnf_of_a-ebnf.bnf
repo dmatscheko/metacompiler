@@ -110,6 +110,9 @@ var productions = getProductions(rules)
 // resolveIdIdx(productions)
 
 
+// rules[0].String="THIS IS A TEST"  // This is OK
+// productions[0].String="THIS IS A TEST"  // Error because of not getting a pointer here
+
 // printf("   => Productions: %#v", rules)
 print("   => Productions: "+ebnf.sprintProductions(rules)+"\n\n")
 
@@ -136,7 +139,7 @@ Alternative <~~ push(simplify(ebnf.newSequence(popg(), c.Pos))) ~~>
 Term        = Range | TaggedTerm ;
 
 TaggedTerm <~~ push(popg()) ~~>
-            = ( Name | Group | Option | Repetition | Skipspaces ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); pushg(ebnf.newTag(tag.TagChilds, [popg()], tag.Pos)) ~~> ] ;
+            = ( Name | Group | Option | Repetition | Skipspaces ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Range       <~~ push(popg()) ~~>
             = TaggedToken <~~ pushg(pop()) ~~> [ "..." TaggedToken <~~ pushg(ebnf.newRange([popg(), pop()], c.Pos)) ~~> ] ;
@@ -146,7 +149,7 @@ Repetition  = "{" Expression <~~ push(ebnf.newRepetition(simplifyToArr(pop()), c
 Skipspaces  = Skip | Noskip ;
 
 TaggedToken <~~ push(popg()) ~~>
-            = Token <~~ pushg(pop()) ~~> [ Tag <~~ var tag=pop(); pushg(ebnf.newTag(tag.TagChilds, [popg()], tag.Pos)) ~~> ] ;
+            = Token <~~ pushg(pop()) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Start       = Name ;
 Title       = Token ;
