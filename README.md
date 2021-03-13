@@ -169,7 +169,7 @@ This stack can also be accessed via the variable `ltr.stack`.
 The whole abstract semantic graph.
 * __c.localAsg__
 The local part of the abstract semantic graph.
-* __c.compile(asg []rule) map[string]object__  
+* __c.compile(asg []Rule) map[string]object__  
   Compiles the given ASG and returns the map of the combined upstream variables.  
 Normally, `c.compile()` is called as `c.compile(c.asg);`.
   The compiler works like this:  
@@ -183,13 +183,13 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
      *    |     (*) All upstream (up.*) values from returning 'compile()'s are combined.
     /|    |
    | | _  |
-   T | |  |     (T) The text of a Terminal symbol gets sent to 'up.in'.
+   T | |  |     (T) The text of a EBNF Terminal symbol (Token) gets returned and included into 'up.in'.
    | X |  |     (X) The script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
    | | O  |     (O) Other Rules are ignored.
    | | |  |
    \ | /  |
     \|/   |
-     *    |     (*) Childs from one Rule get splitted. The splitted path always only processe one rule (That can contain childs).
+     *    |     (*) Childs from one Rule get splitted. The splitted path always only processe one Rule (That can contain childs).
      |    |
      ^    |
      IN<-'
@@ -212,8 +212,45 @@ The functions and constants are exposed to JS as:
   * __llvm.Callgraph(m ir.Module, f string)__  
   The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
 
+#### Compiler EBNF a-grammar API
 
+The a-grammar can be built from within JS. For this, some simple builder funcions are exposed:
 
+##### Builder functions
+
+* __ebnf.newRule(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []Rule, TagChilds []Rule) Rule__
+* __ebnf.newToken(String string, Pos int) Rule__
+* __ebnf.newName(String string, Int int, Pos int) Rule__
+* __ebnf.newProduction(String string, Int int, Childs []Rule, Pos int) Rule__
+* __ebnf.newTag(TagChilds []Rule, Childs []Rule, Pos int) Rule__
+* __ebnf.newSkipSpace(Bool bool, Pos int) Rule__
+* __ebnf.newRepetition(Childs []Rule, Pos int) Rule__
+* __ebnf.newOption(Childs []Rule, Pos int) Rule__
+* __ebnf.newGroup(Childs []Rule, Pos int) Rule__
+* __ebnf.newSequence(Childs []Rule, Pos int) Rule__
+* __ebnf.newAlternative(Childs []Rule, Pos int) Rule__
+* __ebnf.newRange(Childs []Rule, Pos int) Rule__
+
+##### Text functions
+
+* __ebnf.serializeRule(r Rule)__
+* __ebnf.serializeRules(rs []Rule)__
+
+##### OperatorID Constants
+
+* __ebnf.oid.Error__
+* __ebnf.oid.Success__
+* __ebnf.oid.Sequence__
+* __ebnf.oid.Group__
+* __ebnf.oid.Token__
+* __ebnf.oid.Or__
+* __ebnf.oid.Optional__
+* __ebnf.oid.Repeat__
+* __ebnf.oid.Range__
+* __ebnf.oid.SkipSpace__
+* __ebnf.oid.Tag__
+* __ebnf.oid.Production__
+* __ebnf.oid.Ident__
 
 ### a-EBNF Syntax
 
