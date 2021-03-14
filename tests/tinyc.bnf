@@ -1,0 +1,24 @@
+"Tiny-C language (plus a few small enhancements)"
+
+{
+
+Program     = Statement
+Statement   = "if" ParenExpr Statement
+            | "if" ParenExpr Statement "else" Statement
+            | "while" ParenExpr Statement
+            | "do" Statement "while" ParenExpr ";"
+            | "{" { Statement } "}"
+            | Expr ";"
+            | ";" ;
+
+ParenExpr   =  "(" Expr ")" ;
+Expr        = Test | Id "=" Expr ;
+Test        = Comp | Comp ( "||" | "&&" ) Comp ;
+Comp        = Sum | Sum ( "<" | ">" | "==" | "!=" ) Sum ;
+Sum         = Term | Sum "+" Term | Sum "-" Term ;
+Term        = Id | Int | ParenExpr ;
+Id          = ( "a"..."z" | "A"..."Z" ) { "a"..."z" | "A"..."Z" | "_" } ;
+Int         = "0" | "1"..."9" { "0"..."9" } ;
+
+}
+Program
