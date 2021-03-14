@@ -53,8 +53,9 @@ while (cmds[cpos] != undefined) {
 
 {
 
-Brainfuck = { Opcode } ;
-Opcode = Next | Prev | Inc | Dec | Write | Read | Lparen | Rparen ;
+Brainfuck = { Statement } ;
+Statement = Opcode | Lparen { Statement } Rparen ;
+Opcode = Next | Prev | Inc | Dec | Write | Read ;
 
 Next = '>'          <~~ cmds[cpos++]=next ~~> ;
 Prev = '<'          <~~ cmds[cpos++]=prev ~~> ;
