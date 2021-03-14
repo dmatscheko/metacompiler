@@ -51,7 +51,7 @@ var entry = test.NewBlock("")
 // Create instructions and append them to the entry basic block.
 
 // %3 = add 
-var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 32))
+var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 7))
 
 // ret i32 %3
 entry.NewRet(tmp)

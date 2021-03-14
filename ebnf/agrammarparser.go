@@ -245,6 +245,7 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 			gp.sdx = wasSdx
 			return nil
 		}
+		// TODO: cache the ch == 0 ... 255 part of this rules and reuse them!!!
 		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: fmt.Sprintf("%c", ch)})
 	case r.Or:
 		found := false
@@ -370,8 +371,8 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, trace
 	// os.Exit(0)
 
 	startRule := GetStartRule(gp.grammar)
-	if startRule == nil {
-		return nil, fmt.Errorf("No start rule defined")
+	if startRule == nil || startRule.Int >= len(*gp.productions) || startRule.Int < 0 {
+		return nil, fmt.Errorf("No valid start rule defined")
 	}
 
 	newProductions := gp.apply((*gp.productions)[startRule.Int], true, 0)

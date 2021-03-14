@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"./r"
 	"github.com/dop251/goja"
@@ -40,11 +41,11 @@ func (co *compiler) sprintStack(space string) string {
 	return res
 }
 
-func (co *compiler) traceTop(tag *r.Rule, depth int, upStream map[string]r.Object) {
+func (co *compiler) traceTop(tag *r.Rule, slot int, depth int, upStream map[string]r.Object) {
 	co.traceCount++
 	space := "  "
 
-	code := (*tag.TagChilds)[0].String
+	code := (*tag.TagChilds)[slot].String
 
 	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", co.traceCount, "), ", PprintRuleOnly(tag), "\n")
 	removeSpace1 := regexp.MustCompile(`[ \t]+`)
@@ -81,7 +82,11 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 	return co.vm.RunProgram(p)
 }
 
-func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, depth int) { // => (changes upStream)
+func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) { // => (changes upStream)
+	if !(slot < len(*tag.TagChilds)) { // If the tag has no slot with that number
+		return
+	}
+
 	co.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
 	co.compilerFuncMap["Pos"] = tag.Pos
@@ -108,10 +113,10 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 	})
 
 	if co.traceEnabled {
-		co.traceTop(tag, depth, upStream)
+		co.traceTop(tag, slot, depth, upStream)
 	}
 
-	code := (*tag.TagChilds)[0].String
+	code := (*tag.TagChilds)[slot].String
 
 	// TODO: store precompiled data!
 	_, err := co.Run(name, code)
@@ -149,7 +154,7 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 //
 // 'upStream' are the variables that go up only. They are basically local variables.
 // 'ltrStream' are basically global variables. The difference betwee ltrStram and global JS variables is, that they ltrStream appends variables of sibling rules when their branches meet while propagating upwards.
-func (co *compiler) compile(localASG *r.Rules, depth int) map[string]r.Object { // => (upStream)
+func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r.Object { // => (upStream)
 	if localASG == nil || len(*localASG) == 0 {
 		return map[string]r.Object{"in": ""}
 	}
@@ -163,7 +168,7 @@ func (co *compiler) compile(localASG *r.Rules, depth int) map[string]r.Object { 
 
 		for _, rule := range *localASG { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
 			// Compile:
-			upStreamNew := co.compile(&r.Rules{rule}, depth+1)
+			upStreamNew := co.compile(&r.Rules{rule}, slot, depth+1)
 
 			for k, v := range upStreamNew {
 				if k == "in" || strings.HasPrefix(k, "str") {
@@ -223,13 +228,13 @@ func (co *compiler) compile(localASG *r.Rules, depth int) map[string]r.Object { 
 		return map[string]r.Object{"in": rule.String, "stack": []interface{}{}}
 	case r.Tag:
 		// First collect all the data.
-		upStream := co.compile(rule.Childs, depth+1) // Evaluate the child productions of the TAG to collect their values.
+		upStream := co.compile(rule.Childs, slot, depth+1) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.handleTagCode(rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, depth)
+		co.handleTagCode(rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, slot, depth)
 		return upStream
 	default:
 		if len(*rule.Childs) > 0 {
-			return co.compile(rule.Childs, depth+1) // Evaluate the child productions of groups to collect their values.
+			return co.compile(rule.Childs, slot, depth+1) // Evaluate the child productions of groups to collect their values.
 		}
 	}
 
@@ -248,6 +253,8 @@ func (co *compiler) initFuncMap() {
 	}
 	co.vm.Set("sprintf", fmt.Sprintf) // Sprintf is no output.
 	co.vm.Set("exit", os.Exit)
+
+	co.vm.Set("sleep", func(d time.Duration) { time.Sleep(d * time.Millisecond) })
 
 	co.vm.Set("append", func(t []interface{}, v ...interface{}) interface{} {
 		tmp := append(t, v...)
@@ -296,12 +303,12 @@ func (co *compiler) initFuncMap() {
 	})
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
-		"compile": func(localASG *r.Rules) map[string]r.Object {
-			res := co.compile(localASG, 0)
+		"compile": func(localASG *r.Rules, slot int) map[string]r.Object {
+			res := co.compile(localASG, slot, 0)
 
 			epilog := GetEpilog(co.aGrammar)
 			if epilog != nil {
-				co.handleTagCode(epilog, "epilog.code", res, localASG, 0)
+				co.handleTagCode(epilog, "epilog.code", res, localASG, slot, 0)
 			}
 			return res
 		},
@@ -315,7 +322,7 @@ func (co *compiler) initFuncMap() {
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
 // The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
-func CompileASG(asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
+func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
 	// defer func() {
 	// 	if err := recover(); err != nil {
 	// 		res = nil
@@ -343,15 +350,15 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefau
 	prolog := GetProlog(aGrammar)
 
 	if prolog != nil {
-		co.handleTagCode(prolog, "prolog.code", upStream, asg, 0)
+		co.handleTagCode(prolog, "prolog.code", upStream, asg, slot, 0)
 	}
 
 	// Is called fom JS compile().
-	// co.compile(asg)
+	// co.compile(asg, slot)
 
 	// Is called from JS compile().
 	// if epilog, ok := (*extras)["epilog.code"]; ok {
-	// 	co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upStream, asg, 0)
+	// 	co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upStream, asg, slot, 0)
 	// }
 
 	if co.ltrStream["agrammar"] != nil { // There should be a generated a-grammar in upstream

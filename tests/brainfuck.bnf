@@ -1,0 +1,19 @@
+"Brainfuck"
+
+{
+
+Brainfuck = { Statement } ;
+Statement = Opcode | Lparen { Statement } Rparen ;
+Opcode = Next | Prev | Inc | Dec | Write | Read ;
+
+Next    = '>' ;
+Prev    = '<' ;
+Inc     = '+' ;
+Dec     = '-' ;
+Write   = '.' ;
+Read    = ',' | '?' ;
+Lparen  = '[' ;
+Rparen  = ']' ;
+
+}
+Brainfuck
