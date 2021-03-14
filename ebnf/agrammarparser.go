@@ -340,12 +340,12 @@ func mergeTerminals(productions *r.Rules) {
 }
 
 func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
-	defer func() {
-		if err := recover(); err != nil {
-			res = nil
-			e = fmt.Errorf("%s", err)
-		}
-	}()
+	// defer func() {
+	// 	if err := recover(); err != nil {
+	// 		res = nil
+	// 		e = fmt.Errorf("%s", err)
+	// 	}
+	// }()
 
 	var gp grammarParser
 	gp.grammar = grammar
@@ -359,15 +359,19 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, trace
 	gp.foundChList = make(map[string]rune)
 	gp.useFoundList = useFoundList
 	gp.lastParsePosition = 0
+
 	gp.productions = GetProductions(gp.grammar)
 
-	if len(*gp.productions) <= 0 {
+	if gp.productions == nil || len(*gp.productions) <= 0 {
 		return nil, fmt.Errorf("No productions to parse")
 	}
 
+	// fmt.Println(PprintRulesFlat(gp.grammar))
+	// os.Exit(0)
+
 	startRule := GetStartRule(gp.grammar)
 	if startRule == nil {
-		panic("No start rule defined")
+		return nil, fmt.Errorf("No start rule defined")
 	}
 
 	newProductions := gp.apply((*gp.productions)[startRule.Int], true, 0)

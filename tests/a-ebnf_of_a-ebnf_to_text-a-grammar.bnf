@@ -14,21 +14,21 @@ c.compile(c.asg)
 AEBNF                                   <~~push(up.in)~~, ~~ TEST ~~>
                 =
                 [
-                    Title               <~~ up.in += ', \\n' ~~>
+                    Title               <~~ up.in += ', \n' ~~>
                 ]
                 Programtag
-                "{"                     <~~ up.in = '\\n{\\n\\n' ~~>
+                "{"                     <~~ up.in = '\n{\n\n' ~~>
                 { Production }
-                "}"                     <~~ up.in = '\\n}, \\n\\n' ~~>
+                "}"                     <~~ up.in = '\n}, \n\n' ~~>
                 Programtag
                 start
                 [
-                    Comment             <~~ up.in = ', \\n'+up.in+'\\n' ~~>
+                    Comment             <~~ up.in = ', \n'+up.in+'\n' ~~>
                 ] ;
 
 Programtag      =
                 [
-                    Tag                 <~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~>
+                    Tag                 <~~ up.in = '{"TAG", '+up.in+'}, \n' ~~>
                 ] ;
 
 Production                              <~~ var productionTag = pop();
@@ -36,7 +36,7 @@ Production                              <~~ var productionTag = pop();
                                             pop()/*=undefined*/;
                                             up.in = '{"TAG", '+productionTag+', '+up.in+'}'
                                         };
-                                        up.in += ',\\n' ~~>       
+                                        up.in += ',\n' ~~>       
                 =
                 Name                    <~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', ';
                                         push(undefined) ~~>

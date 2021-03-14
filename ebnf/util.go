@@ -206,7 +206,7 @@ func PprintRuleOnly(rule *r.Rule, space ...string) string {
 	}
 	res := "{"
 	res += PprintSequenceHeaderPos(rule, false, false, sp)
-	if len(*rule.Childs) > 0 {
+	if rule.Childs != nil && len(*rule.Childs) > 0 {
 		res += ", [...]"
 	}
 	res += "}"
