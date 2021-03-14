@@ -150,19 +150,9 @@ func main() {
 
 	// TEST BEGIN ----------------------------------------------------------------------------------------------
 
-	// // Parse an a-EBNF and generate an a-grammar with it.
-	// fmt.Fprintln(os.Stderr, "Parse source a-EBNF file with dedicated parser")
-	// aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
-	// if err != nil {
-	// 	fmt.Fprintln(os.Stderr, "  ==> Fail")
-	// 	fmt.Fprintln(os.Stderr, err)
-	// 	return
-	// }
-	// fmt.Fprintln(os.Stderr, "  ==> Success, generated a-grammar")
-
 	// Use the initial a-grammar to parse an a-EBNF. It generates an ASG (abstract semantic graph) of the a-EBNF.
 	fmt.Fprintln(os.Stderr, "Parse source a-EBNF file with initial a-grammar")
-	asg, err := ebnf.ParseWithGrammar(ebnf.EbnfAGrammar, aEbnf, false, *param_trace_ParseWithAGrammar)
+	asg, err := ebnf.ParseWithGrammar(ebnf.EbnfAGrammar, aEbnf, false, *param_trace_ParseAEBNF)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -172,7 +162,7 @@ func main() {
 
 	// Use the annotations inside the ASG to compile it. This should generate a new a-grammar.
 	fmt.Fprintln(os.Stderr, "Compile ASG of source a-EBNF")
-	aGrammar, err := ebnf.CompileASG(asg, ebnf.EbnfAGrammar, *param_trace_CompileASG, false)
+	aGrammar, err := ebnf.CompileASG(asg, ebnf.EbnfAGrammar, 0, *param_trace_CompileASG, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -198,7 +188,7 @@ func main() {
 
 	// Use the annotations inside the ASG to compile it.
 	fmt.Fprintln(os.Stderr, "Compile ASG")
-	_, err = ebnf.CompileASG(asg, aGrammar, *param_trace_CompileASG, false)
+	_, err = ebnf.CompileASG(asg, aGrammar, 0, *param_trace_CompileASG, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -318,7 +308,7 @@ func speedtestCompileASG(src, target string, count int) {
 	}
 	defer timeTrack(time.Now(), "CompileASG")
 	for i := 0; i < count; i++ {
-		_, err = ebnf.CompileASG(asg, aGrammar, false, true)
+		_, err = ebnf.CompileASG(asg, aGrammar, 0, false, true)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error CompileASG")

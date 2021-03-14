@@ -1,0 +1,69 @@
+"Brainfuck"
+
+<~~
+function check() {
+    if (data[dpos] == undefined) data[dpos] = 0
+}
+
+function next() {
+    dpos++
+}
+function prev() {
+    dpos--
+}
+function inc() {
+    check()
+    data[dpos]++
+}
+function dec() {
+    check()
+    data[dpos]--
+}
+function write() {
+    check()
+    printf("%c", data[dpos])
+}
+function read() {
+    data[dpos] = 42 // Here we could get a char from the command line.
+}
+function lparen() {
+    pushg(cpos)
+}
+function rparen() {
+    check()
+    if (data[dpos] == 0) { popg() } else { cpos = popg()-1 }
+}
+
+var data = []
+var dpos = 0
+var cmds = []
+var cpos = 0
+
+// println("ASG: "+ebnf.serializeRules(c.asg))
+c.compile(c.asg)
+
+cpos = 0
+while (cmds[cpos] != undefined) {
+    // println(cmds[cpos].name)
+    // sleep(10)
+    cmds[cpos]()
+    cpos++
+}
+~~>
+
+{
+
+Brainfuck = { Opcode } ;
+Opcode = Next | Prev | Inc | Dec | Write | Read | Lparen | Rparen ;
+
+Next = '>'          <~~ cmds[cpos++]=next ~~> ;
+Prev = '<'          <~~ cmds[cpos++]=prev ~~> ;
+Inc = '+'           <~~ cmds[cpos++]=inc ~~> ;
+Dec = '-'           <~~ cmds[cpos++]=dec ~~> ;
+Write = '.'         <~~ cmds[cpos++]=write ~~> ;
+Read = ',' | '?'    <~~ cmds[cpos++]=read ~~> ;
+Lparen = '['        <~~ cmds[cpos++]=lparen ~~> ;
+Rparen = ']'        <~~ cmds[cpos++]=rparen ~~> ;
+
+}
+Brainfuck

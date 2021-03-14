@@ -53,6 +53,12 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/tiny.bnf", "-b", "tests/tiny.bnf"]
         },
         {
+            "name": "Brainfuck",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/aebnf_of_brainfuck.bnf", "-b", "tests/brainfuck_test_2.txt", "-tg"]
+        },
+        {
             "name": "---------",
             "type": "go",
             "request": "launch",
