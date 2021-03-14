@@ -94,6 +94,8 @@ The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic gr
 
 * __exit(v int)__  
 Terminates the application and returns `v`.
+* __sleep(d int)__  
+Sleeps for `d` milliseconds.
 
 #### Output
 
@@ -108,6 +110,9 @@ Terminates the application and returns `v`.
 Backslash unescapes a string. Necessary for tokens, but not for tags.
 
 #### Variables
+
+* __append(a []object, v1 object, ...) []object__  
+The function appends the objects `v1` ... `vn` to the array `a` and returns the combined array.
 
 ##### Local variables
 
@@ -134,8 +139,6 @@ Backslash unescapes a string. Necessary for tokens, but not for tags.
   User generated global variables. They can be arbitrary objects. Except for `ltr.in`, those objects are not changed by the compiler.
   * __ltr.stack__  
   See [Global stack](#global-stack)
-* __append(a array, v1 object, ...) array__  
-The function appends the objects `v1` ... `vn` to the array `a` and returns the combined array.
 
 #### The stacks
 
