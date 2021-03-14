@@ -6,30 +6,30 @@
 Expression  =
     Term
     {
-        ( "+" | "-" )      <~~pushg(up.in)~~>
-        Term               <~~
-                           var t2 = popg()
-                           var op = popg()
-                           var t1 = popg()
-                           println("+- calculating " + t1 + " " + op + " " + t2)
-                           var res = (op=="+") ? t1 + t2 : t1 - t2
-                           pushg(res)
-                           ~~>
+        ( "+" | "-" )           <~~pushg(up.in)~~>
+        Term                    <~~
+                                var t2 = popg()
+                                var op = popg()
+                                var t1 = popg()
+                                println("+- calculating " + t1 + " " + op + " " + t2)
+                                var res = (op=="+") ? t1 + t2 : t1 - t2
+                                pushg(res)
+                                ~~>
     }
     ;
 
 Term        =
     Factor
     {
-        ( "*" | "/" )      <~~pushg(up.in)~~>
-        Factor             <~~
-                           var t2 = popg()
-                           var op = popg()
-                           var t1 = popg()
-                           println("*/ calculating " + t1 + " " + op + " " + t2)
-                           var res = (op=="*") ? t1 * t2 : t1 / t2
-                           pushg(res)
-                           ~~>
+        ( "*" | "/" )           <~~pushg(up.in)~~>
+        Factor                  <~~
+                                var t2 = popg()
+                                var op = popg()
+                                var t1 = popg()
+                                println("*/ calculating " + t1 + " " + op + " " + t2)
+                                var res = (op=="*") ? t1 * t2 : t1 / t2
+                                pushg(res)
+                                ~~>
     }
     ;
 
@@ -40,12 +40,11 @@ Factor      =
         ")"
     )
     |
-    Number                 <~~pushg(parseFloat(up.in))~~>
+    Number                      <~~pushg(parseFloat(up.in))~~>
     ;
 
-Number      = ( "0" | Nonzero { "0" | Nonzero } )
-              [ ( "." | "," ) { "0" | Nonzero } ] ;
-Nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+Number      = ( "0" | "1"..."9" { "0"..."9" } )
+              [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
 
 }
 

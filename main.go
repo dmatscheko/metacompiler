@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"./ebnf"
+	"./ebnf/r"
 )
 
 // TODO: MAybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one value less.
@@ -174,7 +175,7 @@ func main() {
 		return
 	}
 	fmt.Fprintln(os.Stderr, " ==> Success, received an a-grammar from compiler")
-	// fmt.Println(r.SerializeRules(aGrammar))
+	fmt.Println(r.SerializeRules(aGrammar))
 
 	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
 	fmt.Fprintln(os.Stderr, "Parse target file with new a-grammar")

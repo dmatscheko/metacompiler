@@ -122,8 +122,8 @@ var EbnfFuncMap = map[string]Object{
 	"newAlternative": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
 	},
-	"newRange": func(Childs *Rules, Pos int) *Rule { // TODO: implement.
-		return &Rule{Operator: Group, Childs: Childs, Pos: Pos}
+	"newRange": func(Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Range, Childs: Childs, Pos: Pos}
 	},
 
 	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, TagChilds *Rules) *Rule {
