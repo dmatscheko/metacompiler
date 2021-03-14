@@ -91,9 +91,7 @@ func AppendArrayOfPossibleSequences(target *Rules, source *Rules) *Rules {
 	return target
 }
 
-// TODO: document the JS methods and vars below
-
-var EbnfFuncMap = map[string]Object{ // The LLVM function will be inside such a map.
+var EbnfFuncMap = map[string]Object{
 	"newToken": func(String string, Pos int) *Rule {
 		return &Rule{Operator: Token, String: String, Pos: Pos}
 	},

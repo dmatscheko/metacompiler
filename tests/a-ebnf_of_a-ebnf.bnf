@@ -95,10 +95,14 @@ var rules = ltr.stack
 var productions = getProductions(rules)
 resolveNameIdx(productions)
 
-print("   => Rules: "+ebnf.serializeRules(rules)+"\n\n")
+// To return the generated a-grammar to the next grammarparser:
+ltr.agrammar = rules
+// To show the initial a-grammar:
+// print("   => Rules: "+ebnf.serializeRules(rules)+"\n\n")
 ~~>
 {
 
+# This is the start rule
 AEBNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | Comment } "}" <~~ pushg(ebnf.newSequence(popg(), c.Pos)) ~~> [ Epilog <~~ pushg(pop()) ~~> ] [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
 
 Production  <~~ push(popg()) ~~>

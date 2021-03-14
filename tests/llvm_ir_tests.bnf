@@ -1,7 +1,7 @@
 "LLVM IR tests" <~~ c.compile(c.asg) ~~> {X="";}
 <~~
 
-println("LLVM IR tests:\\n------------------------------------")
+println("LLVM IR tests:\n------------------------------------")
 
 // Create convenience types and constants.
 var i32 = llvm.types.I32
@@ -61,10 +61,10 @@ entry.NewRet(tmp)
 // Print the LLVM IR assembly of the module.
 println(m)
 
-println("GRAPH:\\n------------------------------------")
+println("GRAPH:\n------------------------------------")
 println(llvm.Callgraph(m))
 
-println("\\nEVAL:\\n------------------------------------")
+println("\nEVAL:\n------------------------------------")
 println(llvm.Eval(m, "test"))
 
 ~~>

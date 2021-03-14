@@ -1,5 +1,5 @@
 "Width first Tiny calculator"
-<~~ c.compile(c.asg) ~~>
+<~~c.compile(c.asg)~~>
 
 {
 
@@ -9,9 +9,10 @@ Expression  =
         ( "+" | "-" )       <~~push(up.in)~~>
         Term
     )                       <~~
-                            var t2 = parseInt(pop())
+                            var t2 = pop()
                             var op = pop()
-                            var t1 = parseInt(pop())
+                            var t1 = pop()
+                            println("calculating " + t1 + " " + op + " " + t2)
                             var res = (op=="+") ? t1 + t2 : t1 - t2
                             push(res)
                             ~~>
@@ -25,9 +26,10 @@ Term        =
         ( "*" | "/" )       <~~push(up.in)~~>
         Factor
     )                       <~~
-                            var t2 = parseInt(pop())
+                            var t2 = pop()
                             var op = pop()
-                            var t1 = parseInt(pop())
+                            var t1 = pop()
+                            println("calculating " + t1 + " " + op + " " + t2)
                             var res = (op=="*") ? t1 * t2 : t1 / t2
                             push(res)
                             ~~>
@@ -38,18 +40,19 @@ Term        =
 Factor      =
     (
         "("
-        Expression         
+        Expression
         ")"
     )
     |
-    Number                 <~~push(up.in)~~>
+    Number                 <~~push(parseFloat(up.in))~~>
     ;
 
-Number      = "0" | Nonzero { "0" | Nonzero } ;
+Number      = ( "0" | Nonzero { "0" | Nonzero } )
+              [ ( "." | "," ) { "0" | Nonzero } ] ;
 Nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
 }
 
-<~~ println("\\nRESULT: " + pop()) ~~>
+<~~println("\nRESULT: " + pop() + "\nFormula was: " + ltr.in)~~>
 
 Expression

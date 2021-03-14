@@ -148,66 +148,125 @@ func main() {
 		*param_trace_CompileASG = true
 	}
 
-	fmt.Fprint(os.Stderr, "\n==================\nParse a-EBNF\n==================\n\n")
-	fmt.Fprintln(os.Stderr, "a-EBNF:")
-	fmt.Fprint(os.Stderr, ebnf.PprintSrc(aEbnf))
-	// Parses an aEBNF and generates a a-grammar with it.
+	// TEST BEGIN ----------------------------------------------------------------------------------------------
+
+	// // Parse an a-EBNF and generate an a-grammar with it.
+	// fmt.Fprintln(os.Stderr, "Parse source a-EBNF file with dedicated parser")
 	// aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
 	// if err != nil {
 	// 	fmt.Fprintln(os.Stderr, "  ==> Fail")
 	// 	fmt.Fprintln(os.Stderr, err)
 	// 	return
 	// }
+	// fmt.Fprintln(os.Stderr, "  ==> Success, generated a-grammar")
 
-	// TEST:
-	aGrammar := ebnf.EbnfAGrammar
-
-	fmt.Fprintln(os.Stderr, "  ==> Success\n\n  a-Grammar:")
-	if *param_trace_ParseAEBNF {
-		// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRules(aGrammar, "    "))
-		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRulesFlat(aGrammar))
-	} else {
-		// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.Shorten(ebnf.PprintRules(aGrammar, "    ")))
-		fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRulesFlat(aGrammar))
-	}
-
-	fmt.Fprint(os.Stderr, "\n\n==================\nParse target code\n==================\n\n")
-	fmt.Fprintln(os.Stderr, "Parse via a-grammar:")
-	fmt.Fprint(os.Stderr, ebnf.PprintSrcSingleLine(srcCode))
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr)
-	// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
-	asg, err := ebnf.ParseWithGrammar(aGrammar, srcCode, false, *param_trace_ParseWithAGrammar)
+	// Use the initial a-grammar to parse an a-EBNF. It generates an ASG (abstract semantic graph) of the a-EBNF.
+	fmt.Fprintln(os.Stderr, "Parse source a-EBNF file with initial a-grammar")
+	asg, err := ebnf.ParseWithGrammar(ebnf.EbnfAGrammar, aEbnf, false, *param_trace_ParseWithAGrammar)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "\n  ==> Fail")
+		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	fmt.Fprintln(os.Stderr, "\n  ==> Success\n\n  Abstract semantic graph:")
-	if *param_trace_ParseWithAGrammar {
-		fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(asg, "    "))
-	} else {
-		// fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(&asg, "    "))
-		fmt.Fprintln(os.Stderr, "    "+ebnf.Shorten(ebnf.PprintRules(asg, "    ")))
-	}
+	fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
 
-	fmt.Fprint(os.Stderr, "\nCode output:\n\n")
-	// Uses the annotations inside the ASG to compile it.
+	// Use the annotations inside the ASG to compile it. This should generate a new a-grammar.
+	fmt.Fprintln(os.Stderr, "Compile ASG of source a-EBNF")
+	aGrammar, err := ebnf.CompileASG(asg, ebnf.EbnfAGrammar, *param_trace_CompileASG, false)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "  ==> Fail")
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	if aGrammar == nil { // There should be a generated a-grammar
+		fmt.Fprintln(os.Stderr, "  ==> Fail")
+		fmt.Fprintln(os.Stderr, "Did not receive a valid a-grammar from compiler")
+		return
+	}
+	fmt.Fprintln(os.Stderr, " ==> Success, received an a-grammar from compiler")
+	// fmt.Println(r.SerializeRules(aGrammar))
+
+	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
+	fmt.Fprintln(os.Stderr, "Parse target file with new a-grammar")
+	asg, err = ebnf.ParseWithGrammar(aGrammar, srcCode, false, *param_trace_ParseWithAGrammar)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "  ==> Fail")
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
+
+	// Use the annotations inside the ASG to compile it.
+	fmt.Fprintln(os.Stderr, "Compile ASG")
 	_, err = ebnf.CompileASG(asg, aGrammar, *param_trace_CompileASG, false)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "\n  ==> Fail")
+		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	fmt.Fprint(os.Stderr, "\n ==> Success\n\n")
-	// tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", up)
+	fmt.Fprintln(os.Stderr, " ==> Success")
 
-	// if !*param_trace_CompileASG {
-	// 	tmpStr = ebnf.Shorten(tmpStr)
-	// }
+	os.Exit(0)
 
-	// fmt.Fprint(os.Stderr,tmpStr)
-	fmt.Fprintln(os.Stderr)
+	// TEST END ----------------------------------------------------------------------------------------------
+	/*
+		fmt.Fprint(os.Stderr, "\n==================\nParse a-EBNF\n==================\n\n")
+		fmt.Fprintln(os.Stderr, "a-EBNF:")
+		fmt.Fprint(os.Stderr, ebnf.PprintSrc(aEbnf))
+		// Parses an aEBNF and generates a a-grammar with it.
+		aGrammar, err := ebnf.ParseAEBNF(aEbnf, *param_trace_ParseAEBNF)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "  ==> Fail")
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		fmt.Fprintln(os.Stderr, "  ==> Success\n\n  a-Grammar:")
+		if *param_trace_ParseAEBNF {
+			// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRules(aGrammar, "    "))
+			fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRulesFlat(aGrammar))
+		} else {
+			// fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.Shorten(ebnf.PprintRules(aGrammar, "    ")))
+			fmt.Fprintln(os.Stderr, "   => Productions: "+ebnf.PprintRulesFlat(aGrammar))
+		}
+
+		fmt.Fprint(os.Stderr, "\n\n==================\nParse target code\n==================\n\n")
+		fmt.Fprintln(os.Stderr, "Parse via a-grammar:")
+		fmt.Fprint(os.Stderr, ebnf.PprintSrcSingleLine(srcCode))
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr)
+		// Uses the grammar to parse the by it described text. It generates the ASG (abstract semantic graph) of the parsed text.
+		asg, err := ebnf.ParseWithGrammar(aGrammar, srcCode, false, *param_trace_ParseWithAGrammar)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "\n  ==> Fail")
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		fmt.Fprintln(os.Stderr, "\n  ==> Success\n\n  Abstract semantic graph:")
+		if *param_trace_ParseWithAGrammar {
+			fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(asg, "    "))
+		} else {
+			// fmt.Fprintln(os.Stderr, "    "+ebnf.PprintRules(&asg, "    "))
+			fmt.Fprintln(os.Stderr, "    "+ebnf.Shorten(ebnf.PprintRules(asg, "    ")))
+		}
+
+		fmt.Fprint(os.Stderr, "\nCode output:\n\n")
+		// Uses the annotations inside the ASG to compile it.
+		_, err = ebnf.CompileASG(asg, aGrammar, *param_trace_CompileASG, false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "\n  ==> Fail")
+			fmt.Fprintln(os.Stderr, err)
+			return
+		}
+		fmt.Fprint(os.Stderr, "\n ==> Success\n\n")
+		// tmpStr := fmt.Sprintf("  Upstream Vars:\n    %#v\n\n", up)
+
+		// if !*param_trace_CompileASG {
+		// 	tmpStr = ebnf.Shorten(tmpStr)
+		// }
+
+		// fmt.Fprint(os.Stderr,tmpStr)
+		fmt.Fprintln(os.Stderr)
+	*/
 }
 
 func speedtest(src, target string, count int) {

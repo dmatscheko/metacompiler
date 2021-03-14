@@ -315,7 +315,7 @@ func (co *compiler) initFuncMap() {
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
 // The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
-func CompileASG(asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object, e error) {
+func CompileASG(asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
 	// defer func() {
 	// 	if err := recover(); err != nil {
 	// 		res = nil
@@ -354,5 +354,19 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefau
 	// 	co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upStream, asg, 0)
 	// }
 
-	return upStream, nil
+	if co.ltrStream["agrammar"] != nil { // There should be a generated a-grammar in upstream
+		resultAGrammar, ok := co.ltrStream["agrammar"].([]interface{})
+		if !ok {
+			return nil, nil
+		}
+		res = &r.Rules{}
+		for _, rule := range resultAGrammar {
+			if r, ok := rule.(*r.Rule); ok {
+				*res = append(*res, r)
+			} else {
+				return nil, nil
+			}
+		}
+	}
+	return res, nil
 }

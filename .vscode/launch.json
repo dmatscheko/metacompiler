@@ -14,7 +14,7 @@
             "name": "Calculator (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.bnf", "-b", "tests/formula.txt", "-t"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator.bnf", "-b", "tests/formula.txt", "-tc"]
         },
         {
             "name": "Width first Calculator",
