@@ -36,17 +36,15 @@ function rparen() {
 
 var data = []
 var dpos = 0
-var cmds = []
-var cpos = 0
 
 // println("ASG: "+ebnf.serializeRules(c.asg))
 c.compile(c.asg)
 
-cpos = 0
-while (cmds[cpos] != undefined) {
-    // println(cmds[cpos].name)
+var cpos = 0
+while (ltr.stack[cpos] != undefined) {
+    // println(ltr.stack[cpos].name)
     // sleep(10)
-    cmds[cpos]()
+    ltr.stack[cpos]()
     cpos++
 }
 ~~>
@@ -57,14 +55,14 @@ Brainfuck = { Statement } ;
 Statement = Opcode | Lparen { Statement } Rparen ;
 Opcode = Next | Prev | Inc | Dec | Write | Read ;
 
-Next = '>'          <~~ cmds[cpos++]=next ~~> ;
-Prev = '<'          <~~ cmds[cpos++]=prev ~~> ;
-Inc = '+'           <~~ cmds[cpos++]=inc ~~> ;
-Dec = '-'           <~~ cmds[cpos++]=dec ~~> ;
-Write = '.'         <~~ cmds[cpos++]=write ~~> ;
-Read = ',' | '?'    <~~ cmds[cpos++]=read ~~> ;
-Lparen = '['        <~~ cmds[cpos++]=lparen ~~> ;
-Rparen = ']'        <~~ cmds[cpos++]=rparen ~~> ;
+Next = '>'          <~~ pushg(next) ~~> ;
+Prev = '<'          <~~ pushg(prev) ~~> ;
+Inc = '+'           <~~ pushg(inc) ~~> ;
+Dec = '-'           <~~ pushg(dec) ~~> ;
+Write = '.'         <~~ pushg(write) ~~> ;
+Read = ',' | '?'    <~~ pushg(read) ~~> ;
+Lparen = '['        <~~ pushg(lparen) ~~> ;
+Rparen = ']'        <~~ pushg(rparen) ~~> ;
 
 }
 Brainfuck
