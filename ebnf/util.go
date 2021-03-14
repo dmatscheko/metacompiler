@@ -106,8 +106,6 @@ func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, spa
 		res += fmt.Sprintf(", Pos:%d, %q", rule.Pos, rule.String)
 	case r.Ident, r.Production:
 		res += fmt.Sprintf(", %q:%d, Pos:%d", rule.String, rule.Int, rule.Pos)
-	// case r.Range:
-	// 	// TODO:!
 	case r.SkipSpace:
 		res += fmt.Sprintf(", Pos:%d, %t", rule.Pos, rule.Bool)
 	case r.Tag:
@@ -143,8 +141,6 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, printFlat bool, space 
 		res += fmt.Sprintf(", %q", rule.String)
 	case r.Ident, r.Production:
 		res += fmt.Sprintf(", %q:%d", rule.String, rule.Int)
-	// case r.Range:
-	// 	// TODO:!
 	case r.SkipSpace:
 		res += fmt.Sprintf(", %t", rule.Bool)
 	case r.Tag:

@@ -74,6 +74,8 @@ type grammarParser struct {
 
 	lastParsePosition int
 
+	rangeCache [256]*r.Rule
+
 	traceEnabled bool
 	traceCount   int
 }
@@ -239,14 +241,21 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 		}
 		a := []rune((*rule.Childs)[0].String)[0]
 		b := []rune((*rule.Childs)[1].String)[0]
-		ch := gp.src[gp.sdx]
-		if !(ch >= a && ch <= b) {
+		if gp.sdx >= len(gp.src) || !(gp.src[gp.sdx] >= a && gp.src[gp.sdx] <= b) {
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			gp.sdx = wasSdx
 			return nil
 		}
-		// TODO: cache the ch == 0 ... 255 part of this rules and reuse them!!!
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: fmt.Sprintf("%c", ch)})
+		ch := gp.src[gp.sdx]
+		gp.sdx++
+		if ch >= 0 && ch <= 255 { // Cache the ch == 0...255 part of this rules and reuse them.
+			if gp.rangeCache[ch] == nil {
+				gp.rangeCache[ch] = &r.Rule{Operator: r.Token, String: fmt.Sprintf("%c", ch)}
+			}
+			*localProductions = append(*localProductions, gp.rangeCache[ch])
+		} else {
+			*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: fmt.Sprintf("%c", ch)})
+		}
 	case r.Or:
 		found := false
 		for i := 0; i < len(*rule.Childs); i++ {
