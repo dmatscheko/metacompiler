@@ -1,4 +1,4 @@
-"a-EBNF of a-EBNF to a-grammar"
+"ABNF of ABNF to a-grammar"
 <~~
 var names = [];
 function getNameIdx(name) {
@@ -103,7 +103,7 @@ print("   => Rules: "+ebnf.serializeRules(rules)+"\n\n")
 {
 
 # This is the start rule
-AEBNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | Comment } "}" <~~ pushg(ebnf.newSequence(popg(), c.Pos)) ~~> [ Epilog <~~ pushg(pop()) ~~> ] [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
+ABNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | Comment } "}" <~~ pushg(ebnf.newSequence(popg(), c.Pos)) ~~> [ Epilog <~~ pushg(pop()) ~~> ] [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
 
 Production  <~~ push(popg()) ~~>
             = Name <~~ pushg(pop()) ~~> [ Tag <~~ ltr.prodTag=pop() ~~> ] "=" [ Expression <~~ pushg(buildProduction(popg(), ltr.prodTag, pop())); ltr.prodTag=undefined ~~> ] ";" ;
@@ -141,7 +141,6 @@ Tag         <~~ push(ebnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" Code <~~ pushg([pop()]) ~~> { "," Code <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
 Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(ebnf.newToken(up.in, c.Pos)) ~~> '~~' + ;
-AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ;
 
 Name        <~~ push(ebnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
             = Alphabet - { Alphabet | Digit | "_" } + ;
@@ -152,12 +151,12 @@ Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } <~~ push(ebnf.newToken(unescape(
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-
 AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
 AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII withput line breaks (CR and LF)
+AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
 
 Skip        = "+" <~~ push(ebnf.newSkipSpace(true, c.Pos)) ~~> ;
 Noskip      = "-" <~~ push(ebnf.newSkipSpace(false, c.Pos)) ~~> ;
 
 }
-AEBNF
+ABNF

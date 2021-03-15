@@ -7,14 +7,14 @@ import (
 	"os"
 	"time"
 
-	"./ebnf"
+	"./abnf"
 )
 
 // TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).
 // TODO: Add possibility to comment the EBNF via '//'.
 // TODO: Allow to state the start rule via JS.
 // TODO: Define an EOF symbol for the EBNF syntax.
-// TODO: Add ability to include a-EBNFs from a-EBNFs (like modules).
+// TODO: Add ability to include ABNFs from ABNFs (like modules).
 
 // rule == production.
 // factors == non-terminal expression. A subgroup of productions/rules.
@@ -43,9 +43,9 @@ import (
 
 // ==========================================
 
-// "EBNF of a-EBNF" {
+// "EBNF of ABNF" {
 
-// AEBNF       = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
+// ABNF       = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
 // Production  = name [ Tag ] "=" [ Expression ] ";" ;
 // Expression  = Alternative { "|" Alternative } ;
 // Alternative = Term { Term } ;
@@ -59,24 +59,6 @@ import (
 
 // }
 // AEBNF
-
-// ==========================================
-
-// "'Wrong' EBNF of EBNF (can NOT parse)" {
-
-// EBNF        = [ Title ] "{" { Production } "}" name [ Comment ] ;
-// Production  = name "=" [ Expression ] ";" ;
-// Expression  = name | token [ "..." token ] | Group | Option | Repetition | skipspaces | Sequence | Alternative ;
-// Sequence    = Expression Expression { Expression } ;
-// Alternative = Expression "|" Expression { "|" Expression } ;
-// Group       = "(" Expression ")" ;
-// Option      = "[" Expression "]" ;
-// Repetition  = "{" Expression "}" ;
-// Title       = token ;
-// Comment     = token ;
-
-// }
-// EBNF
 
 // ==========================================
 
@@ -108,10 +90,10 @@ import (
 // This is the default main process:
 // parse(initial-a-grammar, inputA)  = inputA-ASG -->  compile(inputA-ASG)  = new-a-grammar -->  parse(new-a-grammar, inputB)  = inputB-ASG -->  compile(inputB-ASG)  = result
 func main() {
-	param_aEbnf := flag.String("a", "", "The path of the a-EBNF file")
+	param_aEbnf := flag.String("a", "", "The path of the ABNF file")
 	param_srcCode := flag.String("b", "", "The path of the file to process")
 
-	param_verbose_1 := flag.Bool("v1", false, "Show verbose output for step one. The a-grammar parser, parsing the a-EBNF from file -a to an ASG")
+	param_verbose_1 := flag.Bool("v1", false, "Show verbose output for step one. The a-grammar parser, parsing the ABNF from file -a to an ASG")
 	param_verbose_2 := flag.Bool("v2", false, "Show verbose output for step two. The ASG compiler, compiling the ASG generated in step one to an a-grammar")
 	param_verbose_3 := flag.Bool("v3", false, "Show verbose output for step three. The a-grammar parser, parsing the target file -b by applying the in step two generated a-grammar")
 	param_verbose_4 := flag.Bool("v4", false, "Show verbose output for step four. The ASG compiler, compiling the ASG generated in step three")
@@ -170,9 +152,9 @@ func main() {
 
 	// MAIN PROCESS ----------------------------------------------------------------------------------------------
 
-	// Use the initial a-grammar to parse an a-EBNF. It generates an ASG (abstract semantic graph) of the a-EBNF.
-	fmt.Fprintln(os.Stderr, "Parse source a-EBNF file with initial a-grammar")
-	asg, err := ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, aEbnf, useBlockList, useFoundList, *param_trace_1)
+	// Use the initial a-grammar to parse an ABNF. It generates an ASG (abstract semantic graph) of the ABNF.
+	fmt.Fprintln(os.Stderr, "Parse source ABNF file with initial a-grammar")
+	asg, err := abnf.ParseWithGrammar(abnf.AbnfAgrammar, aEbnf, useBlockList, useFoundList, *param_trace_1)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -184,8 +166,8 @@ func main() {
 	}
 
 	// Use the annotations inside the ASG to compile it. This should generate a new a-grammar.
-	fmt.Fprintln(os.Stderr, "Compile ASG of source a-EBNF")
-	aGrammar, err := ebnf.CompileASG(asg, ebnf.AEbnfAGrammar, 0, *param_trace_2, false)
+	fmt.Fprintln(os.Stderr, "Compile ASG of source ABNF")
+	aGrammar, err := abnf.CompileASG(asg, abnf.AbnfAgrammar, 0, *param_trace_2, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -203,7 +185,7 @@ func main() {
 
 	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
 	fmt.Fprintln(os.Stderr, "Parse target file with new a-grammar")
-	asg, err = ebnf.ParseWithGrammar(aGrammar, srcCode, useBlockList, useFoundList, *param_trace_3)
+	asg, err = abnf.ParseWithGrammar(aGrammar, srcCode, useBlockList, useFoundList, *param_trace_3)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -216,7 +198,7 @@ func main() {
 
 	// Use the annotations inside the ASG to compile it.
 	fmt.Fprintln(os.Stderr, "Compile ASG")
-	result, err := ebnf.CompileASG(asg, aGrammar, 0, *param_trace_4, false)
+	result, err := abnf.CompileASG(asg, aGrammar, 0, *param_trace_4, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -244,7 +226,7 @@ func speedtestParseWithGrammar(src, target string, count int) {
 	var err error
 	defer timeTrack(time.Now(), "ParseWithGrammar")
 	for i := 0; i < count; i++ {
-		_, err = ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, target, false, false, false)
+		_, err = abnf.ParseWithGrammar(abnf.AbnfAgrammar, target, false, false, false)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
@@ -252,14 +234,14 @@ func speedtestParseWithGrammar(src, target string, count int) {
 	}
 }
 func speedtestCompileASG(src, target string, count int) {
-	asg, err := ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, target, false, false, false)
+	asg, err := abnf.ParseWithGrammar(abnf.AbnfAgrammar, target, false, false, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
 	}
 	defer timeTrack(time.Now(), "CompileASG")
 	for i := 0; i < count; i++ {
-		_, err = ebnf.CompileASG(asg, ebnf.AEbnfAGrammar, 0, false, true)
+		_, err = abnf.CompileASG(asg, abnf.AbnfAgrammar, 0, false, true)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error CompileASG")
