@@ -19,23 +19,22 @@ const (
 	Range
 	SkipSpace
 	Tag
-	Factor
 	// Link types:
 	Production
 	Ident
 )
 
 func (id OperatorID) String() string {
-	return [...]string{"ERROR", "SUCCESS", "SEQUENCE", "GROUP", "TOKEN", "OR", "OPTIONAL", "REPEAT", "RANGE", "SKIPSPACE", "TAG", "FACTOR", "PRODUCTION", "IDENT"}[id]
+	return [...]string{"ERROR", "SUCCESS", "SEQUENCE", "GROUP", "TOKEN", "OR", "OPTIONAL", "REPEAT", "RANGE", "SKIPSPACE", "TAG", "PRODUCTION", "IDENT"}[id]
 }
 
 // TODO: When reducing the size of Rule: Maybe always convert runes into strings here...
 type Rule struct {
-	Operator  OperatorID
-	String    string // Only used when Operator == seq.Token || seq.Ident || seq.Production. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
-	Int       int    // Only used when Operator == seq.Ident || seq.Production
-	Bool      bool   // Only used when Operator == seq.SkipSpaces
-	Rune      rune   // Only used when Operator == seq.Factor. Maybe use r.String here too if its not too much slower.
+	Operator OperatorID
+	String   string // Only used when Operator == seq.Token || seq.Ident || seq.Production. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
+	Int      int    // Only used when Operator == seq.Ident || seq.Production
+	Bool     bool   // Only used when Operator == seq.SkipSpaces
+	// Rune      rune   // Only used when Operator == seq.Factor. Maybe use r.String here too if its not too much slower.
 	Pos       int    // The position where this Rule has matched.
 	ID        int    // Used for the block list, when applying the rule as grammar.
 	Childs    *Rules // Used by most Operators
@@ -127,11 +126,8 @@ var EbnfFuncMap = map[string]Object{
 	},
 
 	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, TagChilds *Rules) *Rule {
-		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Rune: Rune, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
+		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
 	},
-
-	"serializeRule":  SerializeRule,
-	"serializeRules": SerializeRules,
 
 	"oid": map[string]OperatorID{
 		"Error":   Error,
@@ -147,14 +143,13 @@ var EbnfFuncMap = map[string]Object{
 		"Range":     Range,
 		"SkipSpace": SkipSpace,
 		"Tag":       Tag,
-		// "Factor": Factor, // This one is not needed
 		// Link types:
 		"Production": Production,
 		"Ident":      Ident,
 	},
 }
 
-func SerializeRule(rule *Rule) string {
+func (rule *Rule) Serialize() string {
 	res := "&r.Rule{"
 
 	op := rule.Operator
@@ -175,7 +170,7 @@ func SerializeRule(rule *Rule) string {
 			if i > 0 {
 				res += ", "
 			}
-			res += SerializeRule((*rule.TagChilds)[i])
+			res += ((*rule.TagChilds)[i]).Serialize()
 		}
 		res += "}"
 	}
@@ -185,7 +180,7 @@ func SerializeRule(rule *Rule) string {
 			if i > 0 {
 				res += ", "
 			}
-			res += SerializeRule((*rule.Childs)[i])
+			res += ((*rule.Childs)[i]).Serialize()
 		}
 		res += "}"
 	}
@@ -197,14 +192,14 @@ func SerializeRule(rule *Rule) string {
 	return res
 }
 
-func SerializeRules(rules *Rules) string {
+func (rules *Rules) Serialize() string {
 	res := "&r.Rules{"
 	for i := range *rules {
 		r := (*rules)[i]
 		if i > 0 {
 			res += ", "
 		}
-		res += SerializeRule(r)
+		res += r.Serialize()
 	}
 	res += "}"
 	return res

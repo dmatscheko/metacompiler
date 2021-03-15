@@ -3,9 +3,23 @@ package ebnf
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"./r"
 )
+
+// TODO: switch to "text/scanner".
+
+func RuneToStr(r rune) string {
+	var utf8ChBuf [utf8.UTFMax]byte
+
+	if r > utf8.MaxRune {
+		r = utf8.RuneError
+	}
+	buf := utf8ChBuf[:0]
+	w := utf8.EncodeRune(buf[:utf8.UTFMax], r)
+	return string(buf[:w])
+}
 
 // ----------------------------------------------------------------------------
 // Dynamic grammar parser
@@ -239,8 +253,8 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 		if doSkipSpaces { // There can be white space in strings/text. Do not skip that.
 			gp.skipSpaces()
 		}
-		a := []rune((*rule.Childs)[0].String)[0]
-		b := []rune((*rule.Childs)[1].String)[0]
+		a := rune((*rule.Childs)[0].String[0])
+		b := rune((*rule.Childs)[1].String[0])
 		if gp.sdx >= len(gp.src) || !(gp.src[gp.sdx] >= a && gp.src[gp.sdx] <= b) {
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			gp.sdx = wasSdx
@@ -250,11 +264,11 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 		gp.sdx++
 		if ch >= 0 && ch <= 255 { // Cache the ch == 0...255 part of this rules and reuse them.
 			if gp.rangeCache[ch] == nil {
-				gp.rangeCache[ch] = &r.Rule{Operator: r.Token, String: fmt.Sprintf("%c", ch)}
+				gp.rangeCache[ch] = &r.Rule{Operator: r.Token, String: RuneToStr(ch)}
 			}
 			*localProductions = append(*localProductions, gp.rangeCache[ch])
 		} else {
-			*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: fmt.Sprintf("%c", ch)})
+			*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: RuneToStr(ch)})
 		}
 	case r.Or:
 		found := false

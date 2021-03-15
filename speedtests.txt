@@ -1,0 +1,15 @@
+ParseAEBNF took 6.0006ms
+ParseWithGrammar took 7.5189978s
+CompileASG took 1.6760197s
+
+
+after change to range:
+
+ParseWithGrammar took 2.3520279s
+CompileASG took 1.345s
+
+
+after removal of factor and rune:
+
+ParseWithGrammar took 2.3129895s
+CompileASG took 1.3330605s
