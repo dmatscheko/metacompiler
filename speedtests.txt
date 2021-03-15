@@ -20,3 +20,8 @@ after full modification of alphabet to range:
 ParseWithGrammar took 1.2479999s
 CompileASG took 1.1179996s
 
+
+after removal of loop check and caching of compiled JS code:
+
+ParseWithGrammar took 180.6189ms
+CompileASG took 874.0832ms

@@ -12,8 +12,8 @@ var lastPos = 0
 function buildProduction(prodName, prodTag, prodExpression) {
     prodsPos[prodName.Int] = lastPos++
     if (prodTag != undefined) {
-        var tag = ebnf.newTag(prodTag.TagChilds, simplifyToArr(prodExpression), prodTag.Pos);
-        return ebnf.newProduction(prodName.String, prodName.Int, [tag], prodName.Pos)
+        prodTag.Childs = simplifyToArr(prodExpression)
+        return ebnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)
     } else {
         return ebnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
     }
@@ -98,7 +98,7 @@ resolveNameIdx(productions)
 // To return the generated a-grammar to the next grammarparser:
 ltr.agrammar = rules
 // To show the initial a-grammar:
-print("   => Rules: "+ebnf.arrayToRules(rules).Serialize()+"\n\n")
+print("   => Rules: "+ebnf.serializeRules(rules)+"\n\n")
 ~~>
 {
 

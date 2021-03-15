@@ -23,6 +23,8 @@ type compiler struct {
 	stack     []r.Object          // global stack.
 	ltrStream map[string]r.Object // global variables.
 
+	codeCache map[string]*goja.Program
+
 	traceEnabled         bool
 	traceCount           int
 	preventDefaultOutput bool
@@ -31,6 +33,7 @@ type compiler struct {
 // ----------------------------------------------------------------------------
 // Dynamic ASG compiler
 
+// JsonizeObject is ugly. Remove!
 func (co *compiler) sprintStack(space string) string {
 	res := ""
 	for _, elem := range co.stack {
@@ -73,14 +76,20 @@ func (co *compiler) traceBottom(upStream map[string]r.Object) {
 	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n", space, "--\n\n\n")
 }
 
-// RunScript executes the given string in the global context.
+// Run executes the given string in the global context.
 func (co *compiler) Run(name, src string) (goja.Value, error) {
-	p, err := goja.Compile(name, src, true)
+	p := co.codeCache[src]
 
-	if err != nil {
-		return nil, err
+	if p == nil {
+		var err error
+		p, err = goja.Compile(name, src, true)
+		if err != nil {
+			return nil, err
+		}
+		co.codeCache[src] = p
 	}
 
+	// TODO: store precompiled data!
 	return co.vm.RunProgram(p)
 }
 
@@ -92,6 +101,7 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 	co.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
 	co.compilerFuncMap["Pos"] = tag.Pos
+	co.compilerFuncMap["ID"] = tag.ID
 
 	co.vm.Set("pop", func() interface{} {
 		stack, ok := upStream["stack"].([]interface{})
@@ -120,7 +130,6 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 
 	code := (*tag.TagChilds)[slot].String
 
-	// TODO: store precompiled data!
 	_, err := co.Run(name, code)
 	if err != nil {
 		panic(err.Error() + "\nError was in " + PprintRuleFlat(tag, false, true))
@@ -321,6 +330,7 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 	co.preventDefaultOutput = preventDefaultOutput
 	co.asg = asg
 	co.aGrammar = aGrammar
+	co.codeCache = map[string]*goja.Program{}
 	co.ltrStream = map[string]r.Object{ // Basically like global variables.
 		"in":    "", // This is the parser input (the terminals).
 		"stack": &co.stack,
