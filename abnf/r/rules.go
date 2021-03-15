@@ -30,43 +30,22 @@ func (id OperatorID) String() string {
 	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Or", "Optional", "Repeat", "Range", "SkipSpace", "Tag", "Production", "Ident"}[id]
 }
 
-// TODO: When reducing the size of Rule: Maybe always convert runes into strings here...
 type Rule struct {
-	Operator OperatorID
-	String   string // Only used when Operator == seq.Token || seq.Ident || seq.Production. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
-	Int      int    // Only used when Operator == seq.Ident || seq.Production
-	Bool     bool   // Only used when Operator == seq.SkipSpaces
-	// Rune      rune   // Only used when Operator == seq.Factor. Maybe use r.String here too if its not too much slower.
+	Operator  OperatorID
+	String    string // Only used when Operator == seq.Token || seq.Ident || seq.Production. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
+	Int       int    // Only used when Operator == seq.Ident || seq.Production
+	Bool      bool   // Only used when Operator == seq.SkipSpaces
 	Pos       int    // The position where this Rule has matched.
 	ID        int    // Used for the block list, when applying the rule as grammar.
 	Childs    *Rules // Used by most Operators
 	TagChilds *Rules // Only used when Operator == seq.Tag
 }
 
-// func (rule *Rule) CloneShallow() *Rule {
-// 	var newRule = *rule
-// 	return &newRule
-// }
-
-// func (rule *Rule) CloneDeep() *Rule {
-// 	// TODO:
-// 	var newRule = *rule
-// 	return &newRule
-// }
-
 type Rules []*Rule
 
 func (rules *Rules) Append(elems ...*Rule) {
 	*rules = append(*rules, elems...)
 }
-
-// func (rules *Rules) Pop() *Rule {
-// 	if len(*rules) <= 0 {
-// 		return nil
-// 	}
-// 	rule := &(*rules)[len(*rules)-1]
-// 	return rule
-// }
 
 // Appends a Sequence but dissolves basic SEQUENCE groups
 func AppendPossibleSequence(target *Rules, source *Rule) *Rules {
@@ -90,73 +69,6 @@ func AppendArrayOfPossibleSequences(target *Rules, source *Rules) *Rules {
 		target = AppendPossibleSequence(target, rule)
 	}
 	return target
-}
-
-var EbnfFuncMap = map[string]Object{
-	"newToken": func(String string, Pos int) *Rule {
-		return &Rule{Operator: Token, String: String, Pos: Pos}
-	},
-	"newName": func(String string, Int int, Pos int) *Rule { // This is only the link.
-		return &Rule{Operator: Ident, String: String, Int: Int, Pos: Pos}
-	},
-	"newProduction": func(String string, Int int, Childs *Rules, Pos int) *Rule { // This is the holder of the production. This is where the link points to.
-		return &Rule{Operator: Production, String: String, Int: Int, Childs: Childs, Pos: Pos}
-	},
-	"newTag": func(TagChilds *Rules, Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Tag, TagChilds: TagChilds, Childs: Childs, Pos: Pos}
-	},
-	"newSkipSpace": func(Bool bool, Pos int) *Rule {
-		return &Rule{Operator: SkipSpace, Bool: Bool, Pos: Pos}
-	},
-	"newRepetition": func(Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Repeat, Childs: Childs, Pos: Pos}
-	},
-	"newOption": func(Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Optional, Childs: Childs, Pos: Pos}
-	},
-	"newGroup": func(Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Group, Childs: Childs, Pos: Pos}
-	},
-	"newSequence": func(Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Sequence, Childs: Childs, Pos: Pos}
-	},
-	"newAlternative": func(Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
-	},
-	"newRange": func(Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Range, Childs: Childs, Pos: Pos}
-	},
-	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, TagChilds *Rules) *Rule {
-		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
-	},
-	"arrayToRules": func(rules *Rules) *Rules {
-		return rules
-	},
-	"serializeRule": func(rule *Rule) string {
-		return rule.Serialize()
-	},
-	"serializeRules": func(rules *Rules) string {
-		return rules.Serialize()
-	},
-
-	"oid": map[string]OperatorID{
-		"Error":   Error,
-		"Success": Success,
-		// Groups types:
-		"Sequence": Sequence,
-		"Group":    Group,
-		// Action types:
-		"Token":     Token,
-		"Or":        Or,
-		"Optional":  Optional,
-		"Repeat":    Repeat,
-		"Range":     Range,
-		"SkipSpace": SkipSpace,
-		"Tag":       Tag,
-		// Link types:
-		"Production": Production,
-		"Ident":      Ident,
-	},
 }
 
 func (rule *Rule) Serialize() string {
@@ -218,4 +130,137 @@ func (rules *Rules) Serialize() string {
 	}
 	res += "}"
 	return res
+}
+
+func GetProductions(aGrammar *Rules) *Rules {
+	for i := range *aGrammar {
+		rule := (*aGrammar)[i]
+		if rule.Operator == Sequence {
+			return rule.Childs
+		}
+	}
+	return nil
+}
+
+func GetStartRule(aGrammar *Rules) *Rule {
+	for i := range *aGrammar {
+		rule := (*aGrammar)[i]
+		if rule.Operator == Ident {
+			return rule
+		}
+	}
+	return nil
+}
+
+func GetProlog(aGrammar *Rules) *Rule {
+	for i := range *aGrammar {
+		rule := (*aGrammar)[i]
+		if rule.Operator == Sequence {
+			return nil
+		} else if rule.Operator == Tag {
+			return rule
+		}
+	}
+	return nil
+}
+
+func GetTitle(aGrammar *Rules) *Rule {
+	for i := range *aGrammar {
+		rule := (*aGrammar)[i]
+		if rule.Operator == Sequence {
+			return nil
+		} else if rule.Operator == Token {
+			return rule
+		}
+	}
+	return nil
+}
+
+func GetDescription(aGrammar *Rules) *Rule {
+	afterProductions := false
+	for i := range *aGrammar {
+		rule := (*aGrammar)[i]
+		if rule.Operator == Sequence {
+			afterProductions = true
+		} else if rule.Operator == Token {
+			if afterProductions {
+				return rule
+			}
+		}
+	}
+	return nil
+}
+
+var AbnfFuncMap = map[string]Object{
+	"newToken": func(String string, Pos int) *Rule {
+		return &Rule{Operator: Token, String: String, Pos: Pos}
+	},
+	"newName": func(String string, Int int, Pos int) *Rule { // This is only the link.
+		return &Rule{Operator: Ident, String: String, Int: Int, Pos: Pos}
+	},
+	"newProduction": func(String string, Int int, Childs *Rules, Pos int) *Rule { // This is the holder of the production. This is where the link points to.
+		return &Rule{Operator: Production, String: String, Int: Int, Childs: Childs, Pos: Pos}
+	},
+	"newTag": func(TagChilds *Rules, Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Tag, TagChilds: TagChilds, Childs: Childs, Pos: Pos}
+	},
+	"newSkipSpace": func(Bool bool, Pos int) *Rule {
+		return &Rule{Operator: SkipSpace, Bool: Bool, Pos: Pos}
+	},
+	"newRepetition": func(Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Repeat, Childs: Childs, Pos: Pos}
+	},
+	"newOption": func(Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Optional, Childs: Childs, Pos: Pos}
+	},
+	"newGroup": func(Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Group, Childs: Childs, Pos: Pos}
+	},
+	"newSequence": func(Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Sequence, Childs: Childs, Pos: Pos}
+	},
+	"newAlternative": func(Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
+	},
+	"newRange": func(Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Range, Childs: Childs, Pos: Pos}
+	},
+	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, TagChilds *Rules) *Rule {
+		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
+	},
+	"arrayToRules": func(rules *Rules) *Rules {
+		return rules
+	},
+	"serializeRule": func(rule *Rule) string {
+		return rule.Serialize()
+	},
+
+	"getStartRule":   GetStartRule,
+	"getProductions": GetProductions,
+	"getProlog":      GetProlog,
+	"getTitle":       GetTitle,
+	"getDescription": GetDescription,
+
+	"serializeRules": func(rules *Rules) string {
+		return rules.Serialize()
+	},
+
+	"oid": map[string]OperatorID{
+		"Error":   Error,
+		"Success": Success,
+		// Groups types:
+		"Sequence": Sequence,
+		"Group":    Group,
+		// Action types:
+		"Token":     Token,
+		"Or":        Or,
+		"Optional":  Optional,
+		"Repeat":    Repeat,
+		"Range":     Range,
+		"SkipSpace": SkipSpace,
+		"Tag":       Tag,
+		// Link types:
+		"Production": Production,
+		"Ident":      Ident,
+	},
 }

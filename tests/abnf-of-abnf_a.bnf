@@ -13,24 +13,24 @@ function buildProduction(prodName, prodTag, prodExpression) {
     prodsPos[prodName.Int] = lastPos++
     if (prodTag != undefined) {
         prodTag.Childs = simplifyToArr(prodExpression)
-        return ebnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)
+        return abnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)
     } else {
-        return ebnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
+        return abnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
     }
 }
 
-// This breaks up an ebnf.oid.Group. Use only for childs of unbreakable rules.
+// This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
 function simplifyArr(rules) {
     if (rules.length == 1) {
         var op = rules[0].Operator
-        if ( op == ebnf.oid.Sequence || op == ebnf.oid.Group || (op == ebnf.oid.Or && rules[0].Childs.length <= 1) ) {
+        if ( op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1) ) {
             return simplifyArr(rules[0].Childs)
         }
     }
     return rules
 }
 
-// This also breaks up an ebnf.oid.Group. Use only for childs of unbreakable rules.
+// This also breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
 function simplifyToArr(rule) {
     return simplifyArr([rule])
 }
@@ -42,11 +42,11 @@ function trySimplifyDown(rule) {
     }
     var op = rule.Operator
     if (rule.Childs.length == 1) {
-        if (op == ebnf.oid.Sequence || op == ebnf.oid.Group || op == ebnf.oid.Or) {
+        if (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or) {
             return trySimplifyDown(rule.Childs[0])
         }
     }
-    if (op == ebnf.oid.Sequence) {
+    if (op == abnf.oid.Sequence) {
         return undefined
     } else {
         return rule
@@ -58,9 +58,9 @@ function simplify(rule) {
     if (ruleDown != undefined) {
         return ruleDown
     }
-    if (rule.Childs.length == 1) { // Breaking up ebnf.oid.Group did not work. Getting down only with Sequence and Or.
+    if (rule.Childs.length == 1) { // Breaking up abnf.oid.Group did not work. Getting down only with Sequence and Or.
         var op = rule.Operator
-        if (op == ebnf.oid.Sequence || op == ebnf.oid.Or) {
+        if (op == abnf.oid.Sequence || op == abnf.oid.Or) {
             return simplify(rule.Childs[0])
         }
     }
@@ -75,7 +75,7 @@ function resolveNameIdx(productions) {
             resolveNameIdx(rule.Childs)
         }
 
-		if (rule.Operator == ebnf.oid.Production || rule.Operator == ebnf.oid.Ident) {
+		if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Ident) {
 			rule.Int = prodsPos[rule.Int]
 		}
 	}
@@ -83,7 +83,7 @@ function resolveNameIdx(productions) {
 
 function getProductions(rules) {
     for (var i = 0; i< rules.length; i++) {
-        if (rules[i].Operator == ebnf.oid.Sequence) {
+        if (rules[i].Operator == abnf.oid.Sequence) {
             return rules[i].Childs
         }
     }
@@ -98,20 +98,20 @@ resolveNameIdx(productions)
 // To return the generated a-grammar to the next grammarparser:
 ltr.agrammar = rules
 // To show the initial a-grammar:
-print("   => Rules: "+ebnf.serializeRules(rules)+"\n\n")
+print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
 ~~>
 {
 
 # This is the start rule
-ABNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | Comment } "}" <~~ pushg(ebnf.newSequence(popg(), c.Pos)) ~~> [ Epilog <~~ pushg(pop()) ~~> ] [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
+ABNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | Comment } "}" <~~ pushg(abnf.newSequence(popg(), c.Pos)) ~~> [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
 
 Production  <~~ push(popg()) ~~>
             = Name <~~ pushg(pop()) ~~> [ Tag <~~ ltr.prodTag=pop() ~~> ] "=" [ Expression <~~ pushg(buildProduction(popg(), ltr.prodTag, pop())); ltr.prodTag=undefined ~~> ] ";" ;
 
-Expression  <~~ push(simplify(ebnf.newAlternative(popg(), c.Pos))) ~~>
+Expression  <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
             = Alternative <~~ pushg([pop()]) ~~> { "|" Alternative <~~ pushg(append(popg(), pop())) //2 ~~> } ;
 
-Alternative <~~ push(simplify(ebnf.newSequence(popg(), c.Pos))) ~~>
+Alternative <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
             = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) //1 ~~> } ;
 
 Term        = Range | TaggedTerm ;
@@ -120,10 +120,10 @@ TaggedTerm <~~ push(popg()) ~~>
             = ( Name | Group | Option | Repetition | Skipspaces ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Range       <~~ push(popg()) ~~>
-            = TaggedToken <~~ pushg(pop()) ~~> [ "..." TaggedToken <~~ pushg(ebnf.newRange([popg(), pop()], c.Pos)) ~~> ] ;
-Group       = "(" Expression <~~ push(ebnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
-Option      = "[" Expression <~~ push(ebnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
-Repetition  = "{" Expression <~~ push(ebnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
+            = TaggedToken <~~ pushg(pop()) ~~> [ "..." TaggedToken <~~ pushg(abnf.newRange([popg(), pop()], c.Pos)) ~~> ] ;
+Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
+Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
+Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
 Skipspaces  = Skip | Noskip ;
 
 TaggedToken <~~ push(popg()) ~~>
@@ -135,19 +135,18 @@ Description = Token ;
 Comment     = "#" - { AsciiNoLb } ( "\n" | "\r" ) + ;
 
 Prolog      = Tag ;
-Epilog      = Tag ;
 
-Tag         <~~ push(ebnf.newTag(popg(), undefined, c.Pos)) ~~>
+Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" Code <~~ pushg([pop()]) ~~> { "," Code <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
-Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(ebnf.newToken(up.in, c.Pos)) ~~> '~~' + ;
+Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(abnf.newToken(up.in, c.Pos)) ~~> '~~' + ;
 
-Name        <~~ push(ebnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
+Name        <~~ push(abnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
             = Alphabet - { Alphabet | Digit | "_" } + ;
 Token       = Dquotetoken | Squotetoken ;
 
-Dquotetoken = '"' - { AsciiNoQs | "'" | '\\"' } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> '"' + ;
-Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> "'" + ;
+Dquotetoken = '"' - { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' + ;
+Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" + ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
@@ -155,8 +154,8 @@ AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!"
 AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII withput line breaks (CR and LF)
 AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
 
-Skip        = "+" <~~ push(ebnf.newSkipSpace(true, c.Pos)) ~~> ;
-Noskip      = "-" <~~ push(ebnf.newSkipSpace(false, c.Pos)) ~~> ;
+Skip        = "+" <~~ push(abnf.newSkipSpace(true, c.Pos)) ~~> ;
+Noskip      = "-" <~~ push(abnf.newSkipSpace(false, c.Pos)) ~~> ;
 
 }
 ABNF

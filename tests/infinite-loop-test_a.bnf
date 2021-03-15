@@ -1,5 +1,8 @@
 "Infinite Loop"
-<~~ c.compile(c.asg) ~~>
+<~~
+c.compile(c.asg)
+println("Done")
+~~>
 
 {
 
@@ -9,7 +12,4 @@ TestA       =
     ;
 
 }
-
-<~~ println("Done") ~~>
-
 TestA

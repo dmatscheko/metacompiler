@@ -1,5 +1,8 @@
 "Width first Tiny calculator"
-<~~c.compile(c.asg)~~>
+<~~
+c.compile(c.asg)
+println("\nRESULT: " + pop() + "\nFormula was: " + ltr.in)
+~~>
 
 {
 
@@ -52,7 +55,4 @@ Number      = ( "0" | Nonzero { "0" | Nonzero } )
 Nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 
 }
-
-<~~println("\nRESULT: " + pop() + "\nFormula was: " + ltr.in)~~>
-
 Expression

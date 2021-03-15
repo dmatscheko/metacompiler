@@ -1,5 +1,8 @@
 "Tiny calculator"
-<~~c.compile(c.asg)~~>
+<~~
+c.compile(c.asg)
+println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)
+~~>
 
 {
 
@@ -47,7 +50,4 @@ Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
 
 }
-
-<~~println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)~~>
-
 Expression
