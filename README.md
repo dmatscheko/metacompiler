@@ -107,7 +107,7 @@ Sleeps for `d` milliseconds.
 #### Strings
 
 * __unescape(s string) string__  
-Backslash unescapes a string. Necessary for tokens, but not for tags. It is about the inverse of the `quote(s string) string` or `printf("%q", s)`.
+Backslash unescapes a string. Necessary for tokens, but not for tags. It is about the inverse of `printf("%q", s)` but without the quotation marks.
 
 #### Variables
 
