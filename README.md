@@ -572,6 +572,9 @@ It allows to automatically create a compiler for everything described in a-EBNF 
 ```
 </details>
 
+<br/>
+
+More examples can be found inside the [tests directory](../master/tests).
 
 ## Links
 
