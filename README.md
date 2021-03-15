@@ -99,6 +99,8 @@ This is how that input is processed:
 3. `parse(new-a-grammar, inputB)`  = `inputB-ASG`.
 4. `compile(inputB-ASG)`  = `result`.
 
+Of course, the `result` can again (but doesn't have to) be an `a-grammar` and can be used as input for `parse()`.
+
 ### Exposed JS API
 
 The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic graph) gets processed from the leaves up to the stem. If annotations are encountered on the way, their JS code gets executed.
