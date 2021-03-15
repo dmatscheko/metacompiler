@@ -90,7 +90,7 @@ import (
 // This is the default main process:
 // parse(initial-a-grammar, inputA)  = inputA-ASG -->  compile(inputA-ASG)  = new-a-grammar -->  parse(new-a-grammar, inputB)  = inputB-ASG -->  compile(inputB-ASG)  = result
 func main() {
-	param_aEbnf := flag.String("a", "", "The path of the ABNF file")
+	param_abnf := flag.String("a", "", "The path of the ABNF file")
 	param_srcCode := flag.String("b", "", "The path of the file to process")
 
 	param_verbose_1 := flag.Bool("v1", false, "Show verbose output for step one. The a-grammar parser, parsing the ABNF from file -a to an ASG")
@@ -109,24 +109,27 @@ func main() {
 
 	flag.Parse()
 
-	if *param_aEbnf == "" || *param_srcCode == "" {
+	if *param_abnf == "" {
 		flag.Usage()
 		return
 	}
 
-	dat, err := ioutil.ReadFile(*param_aEbnf)
+	dat, err := ioutil.ReadFile(*param_abnf)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error: ", err)
 		return
 	}
 	aEbnf := string(dat)
 
-	dat, err = ioutil.ReadFile(*param_srcCode)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error: ", err)
-		return
+	srcCode := ""
+	if *param_srcCode != "" {
+		dat, err = ioutil.ReadFile(*param_srcCode)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error: ", err)
+			return
+		}
+		srcCode = string(dat)
 	}
-	srcCode := string(dat)
 
 	if *param_speedTest {
 		speedtest(aEbnf, srcCode, 20)

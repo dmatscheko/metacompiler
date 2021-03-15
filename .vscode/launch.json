@@ -44,7 +44,7 @@
             "name": "LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests_a.bnf", "-b", "tests/empty.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests_a.bnf"]
         },
         {
             "name": "Tiny Self Parse",
@@ -92,7 +92,7 @@
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop-test_a.bnf", "-b", "tests/aaaaaaa.txt", "-vv3", "-vv4"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop_a.bnf", "-b", "tests/infinite-loop_aaaaa.txt", "-vv3", "-vv4"]
         },
         {
             "name": "Speed Test",
