@@ -88,6 +88,11 @@ go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 
 ### Exposed JS API
 
+This is the default main process:
+`parse(initial-a-grammar, inputA)`  = `inputA-ASG` -->  `compile(inputA-ASG)`  = `new-a-grammar` -->  `parse(new-a-grammar, inputB)`  = `inputB-ASG` -->  `compile(inputB-ASG)`  = `result`
+
+### Exposed JS API
+
 The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic graph) gets processed from the leaves up to the stem. If annotations are encountered on the way, their JS code gets executed.
 
 #### General
