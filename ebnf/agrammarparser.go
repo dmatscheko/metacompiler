@@ -400,7 +400,7 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, trace
 
 	newProductions := gp.apply((*gp.productions)[startRule.Int], true, 0)
 
-	// // TODO: only for testing! Multiple launches
+	// // TODO: Maybe include a parse() command in JS. only for testing! Multiple launches
 	// gp.sdx = 0
 	// gp.ch = 0
 	// gp.traceCount = 0

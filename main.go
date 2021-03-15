@@ -105,6 +105,8 @@ import (
 
 // ==========================================
 
+// This is the default main process:
+// parse(initial-a-grammar, inputA)  = inputA-ASG -->  compile(inputA-ASG)  = new-a-grammar -->  parse(new-a-grammar, inputB)  = inputB-ASG -->  compile(inputB-ASG)  = result
 func main() {
 	param_aEbnf := flag.String("a", "", "The path of the a-EBNF file")
 	param_srcCode := flag.String("b", "", "The path of the file to process")
