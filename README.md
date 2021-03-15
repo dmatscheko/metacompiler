@@ -243,6 +243,10 @@ Returns the start rule of the a-grammar. The start rule points to the top level 
 Returns the productions of the a-grammar.
 * __abnf.getProlog(rules []Rule) Rule__  
 Returns the prolog `Tag` of the a-grammar. This contains the JS code that controls the rest.
+* __abnf.getTitle(rules []Rule) []Rule__  
+Returns the title of the a-grammar.
+* __abnf.getDescription(rules []Rule) []Rule__  
+Returns the description of the a-grammar.
 
 ##### Text functions
 
