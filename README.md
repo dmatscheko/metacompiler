@@ -86,10 +86,18 @@ go get "github.com/dop251/goja" "github.com/llir/llvm/ir"
 go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 ```
 
-### Exposed JS API
+### Default main process
 
-This is the default main process:
-`parse(initial-a-grammar, inputA)`  = `inputA-ASG` -->  `compile(inputA-ASG)`  = `new-a-grammar` -->  `parse(new-a-grammar, inputB)`  = `inputB-ASG` -->  `compile(inputB-ASG)`  = `result`
+This is the input to the default main process:
+* `initial-a-grammar` = program-internal annotated grammar of annotated EBNF.
+* `inputA` = the content of the file given with command line parameter `-a`.
+* `inputB` = the content of the file given with command line parameter `-b`.
+
+This is how that input is processed:
+1. `parse(initial-a-grammar, inputA)`  = `inputA-ASG`.
+2. `compile(inputA-ASG)`  = `new-a-grammar`.
+3. `parse(new-a-grammar, inputB)`  = `inputB-ASG`.
+4. `compile(inputB-ASG)`  = `result`.
 
 ### Exposed JS API
 
