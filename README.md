@@ -2,16 +2,16 @@
 
 This is
 * a parser that parses an annotated EBNF
-* and (at runtime) creates a second parser with the EBNF
+* and (at runtime) creates a second parser with that EBNF
 * plus a compiler with the annotations in the EBNF.
 
 That new runtime generated parser plus compiler should allow to compile an arbitrary new language, specified in the EBNF and its annotations.
 
-## What is an annotated EBNF (a-EBNF)?
+## What is an annotated EBNF (ABNF)?
 
 * The EBNF stores the grammar of e.g. a new language.
 * The annotations in the EBNF store the semantic of the new language.
-* The combined format is annotated EBNF or a-EBNF.
+* The combined format is annotated EBNF or ABNF.
 
 ## Small Example
 
@@ -105,7 +105,7 @@ Of course, the `result` can again (but doesn't have to) be an `a-grammar` and ca
 
 ### Exposed JS API
 
-The annotations of the a-EBNF can contain JS code. The ASG (abstract semantic graph) gets processed from the leaves up to the stem. If annotations are encountered on the way, their JS code gets executed.
+The annotations of the ABNF can contain JS code. The ASG (abstract semantic graph) gets processed from the leaves up to the stem. If annotations are encountered on the way, their JS code gets executed.
 
 #### General
 
@@ -273,7 +273,7 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __ebnf.oid.Production__
 * __ebnf.oid.Ident__
 
-### a-EBNF Syntax
+### ABNF Syntax
 
 #### EBNF of EBNF
 
@@ -299,12 +299,12 @@ EBNF
 
 Skip and noskip are additions to be able to parse strings correctly.
 
-#### EBNF of a-EBNF
+#### EBNF of ABNF
 
 Annotated EBNF basically only adds tags to the syntax of a normal EBNF:
 
 ```javascript
-"EBNF of a-EBNF" {
+"EBNF of ABNF" {
 
 AEBNF       = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
 Production  = name [ Tag ] "=" [ Expression ] ";" ;
@@ -332,7 +332,7 @@ The only exceptions are:
 
 #### Common syntax
 
-This is the definition of `name` and `token`, of `skipspaces`, and of `code`. Except of `code`, they are common to EBNF and a-EBNF:
+This is the definition of `name` and `token`, of `skipspaces`, and of `code`. Except of `code`, they are common to EBNF and ABNF:
 
 ```javascript
 "Common syntax" {
@@ -383,7 +383,7 @@ and then two tildes: ~\~~~, ~~This is a second string inside the Tag~~ >
   <summary>Click to expand!</summary>
 
 ```javascript
-"a-EBNF of a-EBNF: Compiles to textual a-grammar"
+"ABNF of ABNF: Compiles to textual a-grammar"
 <~~
 var names = [];
 function getNameIdx(name) {
@@ -522,8 +522,8 @@ Special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*
 
 <~~ print(pop()) ~~>
 Program
-"This a-EBNF contains the grammatic and semantic information for annotated EBNF.
-It allows to automatically create a compiler for everything described in a-EBNF (yes, that format)."
+"This ABNF contains the grammatic and semantic information for annotated EBNF.
+It allows to automatically create a compiler for everything described in ABNF (yes, that format)."
 ```
 </details>
 
@@ -533,7 +533,7 @@ It allows to automatically create a compiler for everything described in a-EBNF 
   <summary>Click to expand!</summary>
 
 ```javascript
-{"TERMINAL", "a-EBNF of a-EBNF: Compiles to textual a-grammar"}, 
+{"TERMINAL", "ABNF of ABNF: Compiles to textual a-grammar"}, 
 {"TAG", {"TERMINAL", "\nvar names = [];\nfunction getNameIdx(name) {\n    var pos = names.indexOf(name);\n    if (pos != -1) { return pos };\n    return names.push(name)-1;\n}\nc.compile(c.asg, up.in)\n"}}, 
 
 {
@@ -568,7 +568,7 @@ It allows to automatically create a compiler for everything described in a-EBNF 
 
 {"TAG", {"TERMINAL", " print(pop()) "}}, 
 {"IDENT", "Program", 0}, 
-{"TERMINAL", "This a-EBNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in a-EBNF (yes, that format)."}
+{"TERMINAL", "This ABNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in ABNF (yes, that format)."}
 ```
 </details>
 
