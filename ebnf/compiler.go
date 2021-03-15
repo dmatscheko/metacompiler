@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"./r"
 	"github.com/dop251/goja"
@@ -261,24 +263,7 @@ func (co *compiler) initFuncMap() {
 		return &tmp
 	})
 
-	co.vm.Set("unescape", func(s string) *string {
-		r := []rune(s)
-		for pos := 0; pos+1 < len(r); pos++ {
-			if r[pos] == '\\' {
-				r = append(r[:pos], r[pos+1:]...)
-				switch r[pos] {
-				case 'r':
-					r[pos] = '\r'
-				case 'n':
-					r[pos] = '\n'
-				case 't':
-					r[pos] = '\t'
-				}
-			}
-		}
-		s = string(r)
-		return &s
-	})
+	co.vm.Set("unescape", Unescape)
 
 	// co.vm.Set("writable", func(v interface{}) *interface{} {
 	// 	return &v
@@ -376,4 +361,31 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 		}
 	}
 	return res, nil
+}
+
+// Stripped down and slightly modified version of stconv.Unquote()
+func Unescape(s string) (string, error) {
+	// Is it trivial? Avoid allocation.
+	if !strings.ContainsRune(s, '\\') {
+		if utf8.ValidString(s) {
+			return s, nil
+		}
+	}
+
+	var runeTmp [utf8.UTFMax]byte
+	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
+	for len(s) > 0 {
+		c, multibyte, ss, err := strconv.UnquoteChar(s, 0)
+		if err != nil {
+			return "", err
+		}
+		s = ss
+		if c < utf8.RuneSelf || !multibyte {
+			buf = append(buf, byte(c))
+		} else {
+			n := utf8.EncodeRune(runeTmp[:], c)
+			buf = append(buf, runeTmp[:n]...)
+		}
+	}
+	return string(buf), nil
 }

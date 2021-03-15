@@ -119,8 +119,6 @@ func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, spa
 		} else {
 			res += "[...]"
 		}
-	case r.Factor:
-		res += fmt.Sprintf(", Pos:%d, Rune:'%c'", rule.Pos, rule.Rune)
 	default:
 		res += fmt.Sprintf(", Pos:%d", rule.Pos)
 	}
@@ -154,8 +152,6 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, printFlat bool, space 
 		} else {
 			res += "[...]"
 		}
-	case r.Factor:
-		res += fmt.Sprintf(", Rune:'%c'", rule.Rune)
 	default:
 		// res += fmt.Sprintf("")
 	}

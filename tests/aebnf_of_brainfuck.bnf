@@ -37,7 +37,7 @@ function rparen() {
 var data = []
 var dpos = 0
 
-// println("ASG: "+ebnf.serializeRules(c.asg))
+// println("ASG: "+c.asg.Serialize())
 c.compile(c.asg)
 
 var cpos = 0
