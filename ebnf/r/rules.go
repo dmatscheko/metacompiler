@@ -124,9 +124,11 @@ var EbnfFuncMap = map[string]Object{
 	"newRange": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Range, Childs: Childs, Pos: Pos}
 	},
-
 	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, TagChilds *Rules) *Rule {
 		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
+	},
+	"arrayToRules": func(rules *Rules) *Rules {
+		return rules
 	},
 
 	"oid": map[string]OperatorID{

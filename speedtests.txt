@@ -13,3 +13,10 @@ after removal of factor and rune:
 
 ParseWithGrammar took 2.3129895s
 CompileASG took 1.3330605s
+
+
+after full modification of alphabet to range:
+
+ParseWithGrammar took 1.2479999s
+CompileASG took 1.1179996s
+

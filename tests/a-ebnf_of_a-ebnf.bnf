@@ -98,7 +98,7 @@ resolveNameIdx(productions)
 // To return the generated a-grammar to the next grammarparser:
 ltr.agrammar = rules
 // To show the initial a-grammar:
-// print("   => Rules: "+rules.Serialize()+"\n\n")
+print("   => Rules: "+ebnf.arrayToRules(rules).Serialize()+"\n\n")
 ~~>
 {
 
@@ -132,7 +132,7 @@ TaggedToken <~~ push(popg()) ~~>
 Start       = Name ;
 Title       = Token ;
 Description = Token ;
-Comment     = "#" - { Small | Caps | Digit | Special | "~" | '"' | "'" } ( "\n" | "\r" ) + ;
+Comment     = "#" - { AsciiNoLb } ( "\n" | "\r" ) + ;
 
 Prolog      = Tag ;
 Epilog      = Tag ;
@@ -140,22 +140,21 @@ Epilog      = Tag ;
 Tag         <~~ push(ebnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" Code <~~ pushg([pop()]) ~~> { "," Code <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
-Code        = '~~' - { [ "~" ] Codeinner } <~~ push(ebnf.newToken(up.in, c.Pos)) ~~> '~~' + ;
-Codeinner   = Small | Caps | Digit | Special | "'" | '"' | "\\~" | "\n" | "\r" ;
+Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(ebnf.newToken(up.in, c.Pos)) ~~> '~~' + ;
+AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ;
 
 Name        <~~ push(ebnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
-            = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
-Token       = ( Dquotetoken | Squotetoken ) ;
+            = Alphabet - { Alphabet | Digit | "_" } + ;
+Token       = Dquotetoken | Squotetoken ;
 
-Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' | "\n" | "\r" } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> '"' + ;
-Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" | "\n" | "\r" } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> "'" + ;
+Dquotetoken = '"' - { AsciiNoQs | "'" | '\\"' } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> '"' + ;
+Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } <~~ push(ebnf.newToken(unescape(up.in), c.Pos)) ~~> "'" + ;
 
-Small       = "a"..."z" ;
-Caps        = "A"..."Z" ;
+Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
-              "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
-              "@" | "\\" | "\t" ;
+
+AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII withput line breaks (CR and LF)
 
 Skip        = "+" <~~ push(ebnf.newSkipSpace(true, c.Pos)) ~~> ;
 Noskip      = "-" <~~ push(ebnf.newSkipSpace(false, c.Pos)) ~~> ;
