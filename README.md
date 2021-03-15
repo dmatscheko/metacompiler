@@ -20,56 +20,58 @@ This is a fully working calculator for integer addition and multiplication. It c
 <details>
   <summary>Click to expand!</summary>
 
-```
+```javascript
 "Tiny calculator"
-<~~ c.compile(c.asg) ~~>
+<~~c.compile(c.asg)~~>
 
 {
 
 Expression  =
-    Term                   
+    Term
     {
-        ( "+" | "-" )      <~~push(up.in)~~>
-        Term               <~~
-                           var t2 = parseInt(pop())
-                           var op = pop()
-                           var t1 = parseInt(pop())
-                           var res = (op=="+") ? t1 + t2 : t1 - t2
-                           push(res)
-                           ~~>
+        ( "+" | "-" )           <~~pushg(up.in)~~>
+        Term                    <~~
+                                var t2 = popg()
+                                var op = popg()
+                                var t1 = popg()
+                                println("calculating " + t1 + " " + op + " " + t2)
+                                var res = (op=="+") ? t1 + t2 : t1 - t2
+                                pushg(res)
+                                ~~>
     }
     ;
 
 Term        =
-    Factor                 
+    Factor
     {
-        ( "*" | "/" )      <~~push(up.in)~~>
-        Factor             <~~
-                           var t2 = parseInt(pop())
-                           var op = pop()
-                           var t1 = parseInt(pop())
-                           var res = (op=="*") ? t1 * t2 : t1 / t2
-                           push(res)
-                           ~~>
+        ( "*" | "/" )           <~~pushg(up.in)~~>
+        Factor                  <~~
+                                var t2 = popg()
+                                var op = popg()
+                                var t1 = popg()
+                                println("calculating " + t1 + " " + op + " " + t2)
+                                var res = (op=="*") ? t1 * t2 : t1 / t2
+                                pushg(res)
+                                ~~>
     }
     ;
 
 Factor      =
     (
-        "("                
-        Expression         
-        ")"                
+        "("
+        Expression
+        ")"
     )
     |
-    Number                 <~~push(up.in)~~>
+    Number                      <~~pushg(parseFloat(up.in))~~>
     ;
 
-Number      = "0" | Nonzero { "0" | Nonzero } ;
-Nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+Number      = ( "0" | "1"..."9" { "0"..."9" } )
+              [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
 
 }
 
-<~~ println("\\nRESULT: " + pop()) ~~>
+<~~println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)~~>
 
 Expression
 ```
