@@ -215,6 +215,56 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
      IN<-'
 ```
 
+#### Parser and Compiler ABNF a-grammar API
+
+The a-grammar can be built from within JS. For this, some simple builder funcions are exposed:
+
+##### Builder functions
+
+* __abnf.arrayToRules(rules []object) []Rule__
+* __abnf.newRule(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []Rule, TagChilds []Rule) Rule__
+* __abnf.newToken(String string, Pos int) Rule__
+* __abnf.newName(String string, Int int, Pos int) Rule__
+* __abnf.newProduction(String string, Int int, Childs []Rule, Pos int) Rule__
+* __abnf.newTag(TagChilds []Rule, Childs []Rule, Pos int) Rule__
+* __abnf.newSkipSpace(Bool bool, Pos int) Rule__
+* __abnf.newRepetition(Childs []Rule, Pos int) Rule__
+* __abnf.newOption(Childs []Rule, Pos int) Rule__
+* __abnf.newGroup(Childs []Rule, Pos int) Rule__
+* __abnf.newSequence(Childs []Rule, Pos int) Rule__
+* __abnf.newAlternative(Childs []Rule, Pos int) Rule__
+* __abnf.newRange(Childs []Rule, Pos int) Rule__
+
+##### Grammar functions
+
+* __abnf.getStartRule(rules []Rule) Rule__  
+Returns the start rule of the a-grammar. The start rule points to the top level production.
+* __abnf.getProductions(rules []Rule) []Rule__  
+Returns the productions of the a-grammar.
+* __abnf.getProlog(rules []Rule) Rule__  
+Returns the prolog `Tag` of the a-grammar. This contains the JS code that controls the rest.
+
+##### Text functions
+
+* __abnf.serializeRule(r Rule)__
+* __abnf.serializeRules(rs []Rule)__
+
+##### OperatorID Constants
+
+* __abnf.oid.Error__
+* __abnf.oid.Success__
+* __abnf.oid.Sequence__
+* __abnf.oid.Group__
+* __abnf.oid.Token__
+* __abnf.oid.Or__
+* __abnf.oid.Optional__
+* __abnf.oid.Repeat__
+* __abnf.oid.Range__
+* __abnf.oid.SkipSpace__
+* __abnf.oid.Tag__
+* __abnf.oid.Production__
+* __abnf.oid.Ident__
+
 #### LLVM IR API
 
 This tool uses the [Go LLIR/LLVM library](https://github.com/llir/llvm) to create LLVM IR and to interact with it. The API documentation can be found here: [LLIR/LLVM library documentation](https://pkg.go.dev/github.com/llir/llvm/). For more information on LLVM IR go to the [LLVM language reference](https://llvm.org/docs/LangRef.html).
@@ -231,47 +281,6 @@ The functions and constants are exposed to JS as:
   The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. online with the [Graphviz visual editor](http://magjac.com/graphviz-visual-editor/)).
   * __llvm.Callgraph(m ir.Module, f string)__  
   The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
-
-#### Compiler EBNF a-grammar API
-
-The a-grammar can be built from within JS. For this, some simple builder funcions are exposed:
-
-##### Builder functions
-
-* __ebnf.arrayToRules(rules []object) []Rule__
-* __ebnf.newRule(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []Rule, TagChilds []Rule) Rule__
-* __ebnf.newToken(String string, Pos int) Rule__
-* __ebnf.newName(String string, Int int, Pos int) Rule__
-* __ebnf.newProduction(String string, Int int, Childs []Rule, Pos int) Rule__
-* __ebnf.newTag(TagChilds []Rule, Childs []Rule, Pos int) Rule__
-* __ebnf.newSkipSpace(Bool bool, Pos int) Rule__
-* __ebnf.newRepetition(Childs []Rule, Pos int) Rule__
-* __ebnf.newOption(Childs []Rule, Pos int) Rule__
-* __ebnf.newGroup(Childs []Rule, Pos int) Rule__
-* __ebnf.newSequence(Childs []Rule, Pos int) Rule__
-* __ebnf.newAlternative(Childs []Rule, Pos int) Rule__
-* __ebnf.newRange(Childs []Rule, Pos int) Rule__
-
-##### Text functions
-
-* __ebnf.serializeRule(r Rule)__
-* __ebnf.serializeRules(rs []Rule)__
-
-##### OperatorID Constants
-
-* __ebnf.oid.Error__
-* __ebnf.oid.Success__
-* __ebnf.oid.Sequence__
-* __ebnf.oid.Group__
-* __ebnf.oid.Token__
-* __ebnf.oid.Or__
-* __ebnf.oid.Optional__
-* __ebnf.oid.Repeat__
-* __ebnf.oid.Range__
-* __ebnf.oid.SkipSpace__
-* __ebnf.oid.Tag__
-* __ebnf.oid.Production__
-* __ebnf.oid.Ident__
 
 ### ABNF Syntax
 
