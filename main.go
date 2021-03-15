@@ -165,11 +165,14 @@ func main() {
 		*param_trace_4 = true
 	}
 
+	useBlockList := false
+	useFoundList := false
+
 	// MAIN PROCESS ----------------------------------------------------------------------------------------------
 
 	// Use the initial a-grammar to parse an a-EBNF. It generates an ASG (abstract semantic graph) of the a-EBNF.
 	fmt.Fprintln(os.Stderr, "Parse source a-EBNF file with initial a-grammar")
-	asg, err := ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, aEbnf, false, *param_trace_1)
+	asg, err := ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, aEbnf, useBlockList, useFoundList, *param_trace_1)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -200,7 +203,7 @@ func main() {
 
 	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
 	fmt.Fprintln(os.Stderr, "Parse target file with new a-grammar")
-	asg, err = ebnf.ParseWithGrammar(aGrammar, srcCode, false, *param_trace_3)
+	asg, err = ebnf.ParseWithGrammar(aGrammar, srcCode, useBlockList, useFoundList, *param_trace_3)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -241,7 +244,7 @@ func speedtestParseWithGrammar(src, target string, count int) {
 	var err error
 	defer timeTrack(time.Now(), "ParseWithGrammar")
 	for i := 0; i < count; i++ {
-		_, err = ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, target, false, false)
+		_, err = ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, target, false, false, false)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
@@ -249,7 +252,7 @@ func speedtestParseWithGrammar(src, target string, count int) {
 	}
 }
 func speedtestCompileASG(src, target string, count int) {
-	asg, err := ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, target, false, false)
+	asg, err := ebnf.ParseWithGrammar(ebnf.AEbnfAGrammar, target, false, false, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return

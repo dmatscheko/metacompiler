@@ -81,6 +81,7 @@ type grammarParser struct {
 	productions *r.Rules
 
 	blockList    map[string]bool
+	useBlockList bool
 	foundList    map[string]*r.Rules
 	foundSdxList map[string]int
 	foundChList  map[string]rune
@@ -94,7 +95,6 @@ type grammarParser struct {
 	traceCount   int
 }
 
-// TODO: DEDUPLICATE!!
 func (gp *grammarParser) skipSpaces() {
 	for {
 		if gp.sdx >= len(gp.src) {
@@ -113,36 +113,38 @@ func (gp *grammarParser) getRulePosId(rule *r.Rule, pos int) string {
 }
 
 func (gp *grammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (bool, *r.Rules, int, rune) { // => (isBlocked, rules, rulesSdx, rulesCh)
-	gp.traceCount++
-	if rule.ID == 0 {
-		rule.ID = gp.traceCount
-	}
-	id := gp.getRulePosId(rule, gp.sdx)
-
 	var isBlocked bool = false
 	var foundRule *r.Rules = nil
 	var foundSdx int = -1
 	var foundCh rune = 0
 
-	if gp.useFoundList {
-		foundRule = gp.foundList[id]
-		if foundRule != nil { // Is really only useful on massive backtracking...
-			foundSdx = gp.foundSdxList[id]
-			foundCh = gp.foundChList[id]
-			isBlocked = true // If the result is there already, block the apply() from trying it again.
+	if gp.useBlockList || gp.useFoundList {
+		if rule.ID == 0 {
+			rule.ID = gp.traceCount
 		}
-	}
-	if !isBlocked {
-		isBlocked = gp.blockList[id] // True because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
-		// TIODO: Maybe only block at idents:
-		if !isBlocked && rule.Operator != r.Or { // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
-			gp.blockList[id] = true // Enter the current rule rule in the block list because it was not already blocked.
+		id := gp.getRulePosId(rule, gp.sdx)
+
+		if gp.useFoundList {
+			foundRule = gp.foundList[id]
+			if foundRule != nil { // Is really only useful on massive backtracking...
+				foundSdx = gp.foundSdxList[id]
+				foundCh = gp.foundChList[id]
+				isBlocked = true // If the result is there already, block the apply() from trying it again.
+			}
+		}
+		if !isBlocked && gp.useBlockList {
+			isBlocked = gp.blockList[id] // True because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
+			// TIODO: Maybe only block at idents:
+			if !isBlocked && rule.Operator != r.Or { // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
+				gp.blockList[id] = true // Enter the current rule rule in the block list because it was not already blocked.
+			}
 		}
 	}
 
 	if !gp.traceEnabled {
 		return isBlocked, foundRule, foundSdx, foundCh
 	}
+	gp.traceCount++
 
 	c := "EOF"
 	if gp.sdx < len(gp.src) {
@@ -164,19 +166,21 @@ func (gp *grammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (
 }
 
 func (gp *grammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, found *r.Rules, pos int) {
-	gp.traceCount++
-	id := gp.getRulePosId(rule, pos)
-
-	gp.blockList[id] = false             // Exit of the rule. It must be unblocked so it can be called again from a parent.
-	if gp.useFoundList && found != nil { // TODO: Make this configurable. On most EBNFs it is not necessary and comes with huge time and memory impact.
-		gp.foundList[id] = found
-		gp.foundSdxList[id] = gp.sdx
-		gp.foundChList[id] = gp.ch
+	if gp.useBlockList || gp.useFoundList {
+		id := gp.getRulePosId(rule, pos)
+		gp.blockList[id] = false             // Exit of the rule. It must be unblocked so it can be called again from a parent.
+		if gp.useFoundList && found != nil { // TODO: Make this configurable. On most EBNFs it is not necessary and comes with huge time and memory impact.
+			gp.foundList[id] = found
+			gp.foundSdxList[id] = gp.sdx
+			gp.foundChList[id] = gp.ch
+		}
 	}
 
 	if !gp.traceEnabled {
 		return
 	}
+	gp.traceCount++
+
 	c := "EOF"
 	if gp.sdx < len(gp.src) {
 		c = fmt.Sprintf("%q", gp.src[gp.sdx])
@@ -219,7 +223,7 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 
 	switch rule.Operator {
 	case r.Sequence, r.Group, r.Production: // Those are groups/sequences of rules. Iterate through them and apply.
-		for i := 0; i < len(*rule.Childs); i++ {
+		for i := range *rule.Childs {
 			newProductions := gp.apply((*rule.Childs)[i], doSkipSpaces, depth+1)
 			if newProductions == nil {
 				gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
@@ -240,7 +244,7 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 			gp.skipSpaces()
 		}
 		text := []rune(rule.String)
-		for i := 0; i < len(text); i++ {
+		for i := range text {
 			if gp.sdx >= len(gp.src) || gp.src[gp.sdx] != text[i] {
 				gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 				gp.sdx = wasSdx
@@ -272,7 +276,7 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 		}
 	case r.Or:
 		found := false
-		for i := 0; i < len(*rule.Childs); i++ {
+		for i := range *rule.Childs {
 			newProductions := gp.apply((*rule.Childs)[i], doSkipSpaces, depth+1)
 			if newProductions != nil { // The nil result is used as ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil.
 				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
@@ -316,7 +320,7 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			return nil
 		}
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Childs: newProductions, Pos: gp.sdx})
+		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Childs: newProductions, ID: rule.ID, Pos: gp.sdx})
 	case r.SkipSpace: // TODO: Modify SKIPSPACES so that the chars to skip can be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		rule.Pos = gp.sdx
 		localProductions = &r.Rules{rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
@@ -363,13 +367,13 @@ func mergeTerminals(productions *r.Rules) {
 	}
 }
 
-func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
-	// defer func() {
-	// 	if err := recover(); err != nil {
-	// 		res = nil
-	// 		e = fmt.Errorf("%s", err)
-	// 	}
-	// }()
+func ParseWithGrammar(grammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
+	defer func() {
+		if err := recover(); err != nil {
+			res = nil
+			e = fmt.Errorf("%s", err)
+		}
+	}()
 
 	var gp grammarParser
 	gp.grammar = grammar
@@ -378,6 +382,7 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, trace
 	gp.traceEnabled = traceEnabled
 	gp.traceCount = 0
 	gp.blockList = make(map[string]bool)
+	gp.useBlockList = useBlockList
 	gp.foundList = make(map[string]*r.Rules)
 	gp.foundSdxList = make(map[string]int)
 	gp.foundChList = make(map[string]rune)
@@ -400,7 +405,7 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useFoundList bool, trace
 
 	newProductions := gp.apply((*gp.productions)[startRule.Int], true, 0)
 
-	// // TODO: Maybe include a parse() command in JS. only for testing! Multiple launches
+	// // TODO: Include the parse() command in JS. only for testing! Multiple launches
 	// gp.sdx = 0
 	// gp.ch = 0
 	// gp.traceCount = 0

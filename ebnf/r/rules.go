@@ -1,6 +1,8 @@
 package r
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Object = interface{}
 type OperatorID int
@@ -25,7 +27,7 @@ const (
 )
 
 func (id OperatorID) String() string {
-	return [...]string{"ERROR", "SUCCESS", "SEQUENCE", "GROUP", "TOKEN", "OR", "OPTIONAL", "REPEAT", "RANGE", "SKIPSPACE", "TAG", "PRODUCTION", "IDENT"}[id]
+	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Or", "Optional", "Repeat", "Range", "SkipSpace", "Tag", "Production", "Ident"}[id]
 }
 
 // TODO: When reducing the size of Rule: Maybe always convert runes into strings here...
@@ -130,6 +132,12 @@ var EbnfFuncMap = map[string]Object{
 	"arrayToRules": func(rules *Rules) *Rules {
 		return rules
 	},
+	"serializeRule": func(rule *Rule) string {
+		return rule.Serialize()
+	},
+	"serializeRules": func(rules *Rules) string {
+		return rules.Serialize()
+	},
 
 	"oid": map[string]OperatorID{
 		"Error":   Error,
@@ -155,7 +163,7 @@ func (rule *Rule) Serialize() string {
 	res := "&r.Rule{"
 
 	op := rule.Operator
-	res += fmt.Sprintf("Operator: %d", op)
+	res += fmt.Sprintf("Operator: r.%s", op.String())
 
 	if op == Token || op == Ident || op == Production {
 		res += fmt.Sprintf(", String: %q", rule.String)
@@ -189,6 +197,11 @@ func (rule *Rule) Serialize() string {
 	if !(op == Token || op == Ident || op == Production || op == Tag || op == Range || op == SkipSpace || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
 		panic("wrong rule type: " + op.String())
 	}
+	// if op == Tag {
+	// 	res += ", ID: " + strconv.Itoa(rule.ID)
+	// }
+
+	// res += ", Pos: " + strconv.Itoa(rule.Pos)
 
 	res += "}"
 	return res
