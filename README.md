@@ -221,6 +221,7 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 
 ##### Builder functions
 
+* __ebnf.arrayToRules(rules []object) []Rule__
 * __ebnf.newRule(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []Rule, TagChilds []Rule) Rule__
 * __ebnf.newToken(String string, Pos int) Rule__
 * __ebnf.newName(String string, Int int, Pos int) Rule__
