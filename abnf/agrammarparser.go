@@ -26,53 +26,6 @@ func RuneToStr(r rune) string {
 //
 // Idea partially taken from: https://rosettacode.org/wiki/Parse_EBNF
 
-func GetProductions(aGrammar *r.Rules) *r.Rules {
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
-		if rule.Operator == r.Sequence {
-			return rule.Childs
-		}
-	}
-	return nil
-}
-
-func GetStartRule(aGrammar *r.Rules) *r.Rule {
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
-		if rule.Operator == r.Ident {
-			return rule
-		}
-	}
-	return nil
-}
-
-func GetProlog(aGrammar *r.Rules) *r.Rule {
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
-		if rule.Operator == r.Sequence {
-			return nil
-		} else if rule.Operator == r.Tag {
-			return rule
-		}
-	}
-	return nil
-}
-
-func GetEpilog(aGrammar *r.Rules) *r.Rule {
-	afterProductions := false
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
-		if rule.Operator == r.Sequence {
-			afterProductions = true
-		} else if rule.Operator == r.Tag {
-			if afterProductions {
-				return rule
-			}
-		}
-	}
-	return nil
-}
-
 type grammarParser struct {
 	src         []rune
 	ch          rune
@@ -194,6 +147,9 @@ func (gp *grammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, fo
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
 func (gp *grammarParser) applyChildSequence(rules *r.Rules, doSkipSpaces bool, depth int, pos int) *r.Rules {
+	if rules == nil {
+		return nil
+	}
 	var newProductions *r.Rules
 	if len(*rules) == 1 {
 		newProductions = gp.apply((*rules)[0], doSkipSpaces, depth)
@@ -347,6 +303,9 @@ func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Ru
 }
 
 func mergeTerminals(productions *r.Rules) {
+	if productions == nil {
+		return
+	}
 	lastWasTerminal := false
 	for i := 0; i < len(*productions); i++ {
 		if (*productions)[i].Operator == r.Token {
@@ -368,12 +327,12 @@ func mergeTerminals(productions *r.Rules) {
 }
 
 func ParseWithGrammar(grammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
-	defer func() {
-		if err := recover(); err != nil {
-			res = nil
-			e = fmt.Errorf("%s", err)
-		}
-	}()
+	// defer func() {
+	// 	if err := recover(); err != nil {
+	// 		res = nil
+	// 		e = fmt.Errorf("%s", err)
+	// 	}
+	// }()
 
 	var gp grammarParser
 	gp.grammar = grammar
@@ -389,21 +348,24 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useBlockList bool, useFo
 	gp.useFoundList = useFoundList
 	gp.lastParsePosition = 0
 
-	gp.productions = GetProductions(gp.grammar)
+	gp.productions = r.GetProductions(gp.grammar)
 
-	if gp.productions == nil || len(*gp.productions) <= 0 {
-		return nil, fmt.Errorf("No productions to parse")
-	}
+	// if gp.productions == nil || len(*gp.productions) <= 0 {
+	// 	return nil, fmt.Errorf("No productions to parse")
+	// }
 
 	// fmt.Println(PprintRulesFlat(gp.grammar))
 	// os.Exit(0)
 
-	startRule := GetStartRule(gp.grammar)
-	if startRule == nil || startRule.Int >= len(*gp.productions) || startRule.Int < 0 {
-		return nil, fmt.Errorf("No valid start rule defined")
-	}
+	var newProductions *r.Rules
+	if !(gp.productions == nil || len(*gp.productions) <= 0) {
+		startRule := r.GetStartRule(gp.grammar)
+		if startRule == nil || startRule.Int >= len(*gp.productions) || startRule.Int < 0 {
+			return nil, fmt.Errorf("No valid start rule defined")
+		}
 
-	newProductions := gp.apply((*gp.productions)[startRule.Int], true, 0)
+		newProductions = gp.apply((*gp.productions)[startRule.Int], true, 0)
+	}
 
 	// // TODO: Include the parse() command in JS. only for testing! Multiple launches
 	// gp.sdx = 0

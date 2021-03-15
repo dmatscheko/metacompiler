@@ -3,7 +3,7 @@
 {
 
 # This is the start rule
-ABNF       = [ Title ] [ Prolog ] "{" { Production | Comment } "}" [ Epilog ] [ Start ] [ Description ] ;
+ABNF       = [ Title ] [ Prolog ] "{" { Production | Comment } "}" [ Start ] [ Description ] ;
 
 Production  = Name [ Tag ] "=" [ Expression ] ";" ;
 
@@ -27,7 +27,6 @@ Description = Token ;
 Comment     = "#" - { AsciiNoLb } ( "\n" | "\r" ) + ;
 
 Prolog      = Tag ;
-Epilog      = Tag ;
 
 Tag         = "<" Code { "," Code } ">" ;
 

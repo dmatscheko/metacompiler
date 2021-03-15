@@ -13,6 +13,36 @@ import (
 	"github.com/dop251/goja"
 )
 
+// Stripped down and slightly modified version of stconv.Unquote()
+func Unescape(s string) (string, error) {
+	// Is it trivial? Avoid allocation.
+	if !strings.ContainsRune(s, '\\') {
+		if utf8.ValidString(s) {
+			return s, nil
+		}
+	}
+
+	var runeTmp [utf8.UTFMax]byte
+	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
+	for len(s) > 0 {
+		c, multibyte, ss, err := strconv.UnquoteChar(s, 0)
+		if err != nil {
+			return "", err
+		}
+		s = ss
+		if c < utf8.RuneSelf || !multibyte {
+			buf = append(buf, byte(c))
+		} else {
+			n := utf8.EncodeRune(runeTmp[:], c)
+			buf = append(buf, runeTmp[:n]...)
+		}
+	}
+	return string(buf), nil
+}
+
+// ----------------------------------------------------------------------------
+// Dynamic ASG compiler
+
 type compiler struct {
 	vm              *goja.Runtime
 	compilerFuncMap map[string]r.Object
@@ -29,9 +59,6 @@ type compiler struct {
 	traceCount           int
 	preventDefaultOutput bool
 }
-
-// ----------------------------------------------------------------------------
-// Dynamic ASG compiler
 
 // JsonizeObject is ugly. Remove!
 func (co *compiler) sprintStack(space string) string {
@@ -298,19 +325,13 @@ func (co *compiler) initFuncMap() {
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
 		"compile": func(localASG *r.Rules, slot int) map[string]r.Object {
-			res := co.compile(localASG, slot, 0)
-
-			epilog := GetEpilog(co.aGrammar)
-			if epilog != nil {
-				co.handleTagCode(epilog, "epilog.code", res, localASG, slot, 0)
-			}
-			return res
+			return co.compile(localASG, slot, 0)
 		},
 		"asg": co.asg,
 	}
 	co.vm.Set("c", co.compilerFuncMap)
-	r.EbnfFuncMap["sprintProductions"] = PprintRulesFlat
-	co.vm.Set("ebnf", r.EbnfFuncMap)
+	r.AbnfFuncMap["sprintProductions"] = PprintRulesFlat
+	co.vm.Set("abnf", r.AbnfFuncMap)
 	co.vm.Set("llvm", llvmFuncMap)
 }
 
@@ -342,7 +363,7 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 	co.vm = goja.New()
 	co.initFuncMap()
 
-	prolog := GetProlog(aGrammar)
+	prolog := r.GetProlog(aGrammar)
 
 	if prolog != nil {
 		co.handleTagCode(prolog, "prolog.code", upStream, asg, slot, 0)
@@ -350,11 +371,6 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 
 	// Is called fom JS compile().
 	// co.compile(asg, slot)
-
-	// Is called from JS compile().
-	// if epilog, ok := (*extras)["epilog.code"]; ok {
-	// 	co.handleTagCode(epilog.TagChilds[0].String, "epilog.code", upStream, asg, slot, 0)
-	// }
 
 	if co.ltrStream["agrammar"] != nil { // There should be a generated a-grammar in upstream
 		resultAGrammar, ok := co.ltrStream["agrammar"].([]interface{})
@@ -371,31 +387,4 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 		}
 	}
 	return res, nil
-}
-
-// Stripped down and slightly modified version of stconv.Unquote()
-func Unescape(s string) (string, error) {
-	// Is it trivial? Avoid allocation.
-	if !strings.ContainsRune(s, '\\') {
-		if utf8.ValidString(s) {
-			return s, nil
-		}
-	}
-
-	var runeTmp [utf8.UTFMax]byte
-	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
-	for len(s) > 0 {
-		c, multibyte, ss, err := strconv.UnquoteChar(s, 0)
-		if err != nil {
-			return "", err
-		}
-		s = ss
-		if c < utf8.RuneSelf || !multibyte {
-			buf = append(buf, byte(c))
-		} else {
-			n := utf8.EncodeRune(runeTmp[:], c)
-			buf = append(buf, runeTmp[:n]...)
-		}
-	}
-	return string(buf), nil
 }
