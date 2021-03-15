@@ -1,4 +1,4 @@
-# ParserParserCompiler
+# MetaCompiler
 
 This is
 * a parser that parses an annotated EBNF
