@@ -1,4 +1,4 @@
-"a-EBNF of a-EBNF: Compiles to textual a-grammar"
+"ABNF of ABNF: Compiles to textual a-grammar"
 <~~
 var names = [];
 function getNameIdx(name) {
@@ -11,7 +11,7 @@ c.compile(c.asg)
 
 {
 
-AEBNF                                   <~~push(up.in)~~, ~~ TEST ~~>
+ABNF                                   <~~push(up.in)~~>
                 =
                 [
                     Title               <~~ up.in += ', \n' ~~>
@@ -136,6 +136,6 @@ Special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*
 }
 
 <~~ print(pop()) ~~>
-AEBNF
-"This a-EBNF contains the grammatic and semantic information for annotated EBNF.
-It allows to automatically create a compiler for everything described in a-EBNF (yes, that format)."
+ABNF
+"This ABNF contains the grammatic and semantic information for annotated EBNF.
+It allows to automatically create a compiler for everything described in ABNF (yes, that format)."

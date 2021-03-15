@@ -1,0 +1,52 @@
+"EBNF of ABNF"
+
+{
+
+# This is the start rule
+ABNF       = [ Title ] [ Prolog ] "{" { Production | Comment } "}" [ Epilog ] [ Start ] [ Description ] ;
+
+Production  = Name [ Tag ] "=" [ Expression ] ";" ;
+
+Expression  = Alternative { "|" Alternative } ;
+Alternative = Term { Term } ;
+
+Term        = Range | TaggedTerm ;
+TaggedTerm  = ( Name | Group | Option | Repetition | Skipspaces ) [ Tag ] ;
+
+Range       = TaggedToken [ "..." TaggedToken ] ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
+Skipspaces  = Skip | Noskip ;
+
+TaggedToken = Token [ Tag ] ;
+
+Start       = Name ;
+Title       = Token ;
+Description = Token ;
+Comment     = "#" - { AsciiNoLb } ( "\n" | "\r" ) + ;
+
+Prolog      = Tag ;
+Epilog      = Tag ;
+
+Tag         = "<" Code { "," Code } ">" ;
+
+Code        = '~~' - { [ "~" ] AllButTilde } '~~' + ;
+
+Name        = Alphabet - { Alphabet | Digit | "_" } + ;
+Token       = Dquotetoken | Squotetoken ;
+
+Dquotetoken = '"' - { AsciiNoQs | "'" | '\\"' } '"' + ;
+Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } "'" + ;
+
+Alphabet    = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII withput line breaks (CR and LF)
+AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
+
+Skip        = "+" ;
+Noskip      = "-" ;
+
+}
+ABNF

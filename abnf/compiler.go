@@ -1,4 +1,4 @@
-package ebnf
+package abnf
 
 import (
 	"fmt"
