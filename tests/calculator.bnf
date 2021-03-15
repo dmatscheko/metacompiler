@@ -11,7 +11,7 @@ Expression  =
                                 var t2 = popg()
                                 var op = popg()
                                 var t1 = popg()
-                                println("+- calculating " + t1 + " " + op + " " + t2)
+                                println("calculating " + t1 + " " + op + " " + t2)
                                 var res = (op=="+") ? t1 + t2 : t1 - t2
                                 pushg(res)
                                 ~~>
@@ -26,7 +26,7 @@ Term        =
                                 var t2 = popg()
                                 var op = popg()
                                 var t1 = popg()
-                                println("*/ calculating " + t1 + " " + op + " " + t2)
+                                println("calculating " + t1 + " " + op + " " + t2)
                                 var res = (op=="*") ? t1 * t2 : t1 / t2
                                 pushg(res)
                                 ~~>
