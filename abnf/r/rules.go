@@ -123,6 +123,9 @@ func (rule *Rule) Serialize() string {
 }
 
 func (rules *Rules) Serialize() string {
+	if rules == nil {
+		return "<nil>"
+	}
 	res := "&r.Rules{"
 	for i := range *rules {
 		r := (*rules)[i]
@@ -136,6 +139,9 @@ func (rules *Rules) Serialize() string {
 }
 
 func GetProductions(aGrammar *Rules) *Rules {
+	if aGrammar == nil {
+		return nil
+	}
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
 		if rule.Operator == Sequence {
@@ -146,6 +152,9 @@ func GetProductions(aGrammar *Rules) *Rules {
 }
 
 func GetStartRule(aGrammar *Rules) *Rule {
+	if aGrammar == nil {
+		return nil
+	}
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
 		if rule.Operator == Ident {
@@ -156,6 +165,9 @@ func GetStartRule(aGrammar *Rules) *Rule {
 }
 
 func GetProlog(aGrammar *Rules) *Rule {
+	if aGrammar == nil {
+		return nil
+	}
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
 		if rule.Operator == Sequence {
@@ -168,6 +180,9 @@ func GetProlog(aGrammar *Rules) *Rule {
 }
 
 func GetTitle(aGrammar *Rules) *Rule {
+	if aGrammar == nil {
+		return nil
+	}
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
 		if rule.Operator == Sequence {
@@ -180,6 +195,9 @@ func GetTitle(aGrammar *Rules) *Rule {
 }
 
 func GetDescription(aGrammar *Rules) *Rule {
+	if aGrammar == nil {
+		return nil
+	}
 	afterProductions := false
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
