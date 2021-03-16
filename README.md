@@ -94,7 +94,7 @@ This is the input to the default main process:
 * `initial-a-grammar` = Default annotated grammar of annotated EBNF.
 * `inputA` = The content of the file given with command line parameter `-a`.
 * `inputB` = The content of the file given with command line parameter `-b`.
-* `*-a-grammar-prolog` = "The code at the beginning of the grammar. This code starts the rest of the compile process during the compile step."
+* `*-a-grammar-prolog` = The code at the beginning of the grammar. This code starts the rest of the compile process during the compile step.
 
 This is how that input is processed:
 1. `parse(initial-a-grammar, inputA)`  = `inputA-ASG`.
