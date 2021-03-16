@@ -185,12 +185,18 @@ This stack can also be accessed via the variable `ltr.stack`.
 
 #### Compiler API
 
-* __c.asg__
+* __c.agrammar__  
+The grammar that produced the current state, that the JS is executed in.
+* __c.ABNFagrammar__  
+A grammar that can parse and compile ABNF. This is the default initial grammar for the tool.
+* __c.parse(agrammar []Rule, target string) []Rule__  
+Parses the string `target` with the `agrammar` and returns an ASG.
+* __c.asg__  
 The whole abstract semantic graph.
-* __c.localAsg__
+* __c.localAsg__  
 The local part of the abstract semantic graph.
 * __c.compile(asg []Rule) map[string]object__  
-  Compiles the given ASG and returns the map of the combined upstream variables.  
+Compiles the given ASG and returns the map of the combined upstream variables.  
 Normally, `c.compile()` is called as `c.compile(c.asg);`.
   The compiler works like this:  
 ```
