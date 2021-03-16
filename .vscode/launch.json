@@ -23,22 +23,10 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator-2_a.bnf", "-b", "tests/calculator_formula.txt"]
         },
         {
-            "name": "Width first Calculator (TRACE)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-2_a.bnf", "-b", "tests/calculator_formula.txt", "-vv4"]
-        },
-        {
             "name": "ABNF of ABNF to text",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf-to-text_a.bnf", "-b", "tests/abnf-of-abnf-to-text_a.bnf"]
-        },
-        {
-            "name": "ABNF of ABNF to text (TRACE)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf-to-text_a.bnf", "-b", "tests/abnf-of-abnf-to-text_a.bnf", "-t4"]
         },
         {
             "name": "LLVM IR",
@@ -63,6 +51,12 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/parse-from-js_a.bnf"]
+        },
+        {
+            "name": "TinyC Variant",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc_a.bnf", "-b", "tests/tinyc-test-1.txt", "-vv3", "-lb"]
         },
         {
             "name": "---------",

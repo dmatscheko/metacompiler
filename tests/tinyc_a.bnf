@@ -1,8 +1,9 @@
 "Tiny-C language (plus a few small enhancements)"
 
+<~~ c.compile(c.asg) ~~>
 {
 
-Program     = Statement ;
+Program     = { Statement } ;
 Statement   = "if" ParenExpr Statement
             | "if" ParenExpr Statement "else" Statement
             | "while" ParenExpr Statement
@@ -12,11 +13,19 @@ Statement   = "if" ParenExpr Statement
             | ";" ;
 
 ParenExpr   =  "(" Expr ")" ;
-Expr        = Test | Id "=" Expr ;
-Test        = Comp | Comp ( "||" | "&&" ) Comp ;
-Comp        = Sum | Sum ( "<" | ">" | "==" | "!=" ) Sum ;
-Sum         = Term | Sum "+" Term | Sum "-" Term ;
-Term        = Id | Int | ParenExpr ;
+
+Expr        = Assignment | Command | Test ;
+
+Test        = Comp ( "||" | "&&" ) Comp | Comp ;
+Comp        = Sum ( "<" | ">" | "==" | "!=" ) Sum | Sum ;
+Sum         = Sum "+" Term | Sum "-" Term | Term ;
+Term        = ParenExpr | Id | Int ;
+
+Assignment  = Id "=" Expr ;
+
+Command     = Id "(" [ Parameter { "," Parameter } ] ")" ;
+Parameter   = Command | Test ;
+
 Id          = ( "a"..."z" | "A"..."Z" ) { "a"..."z" | "A"..."Z" | "_" } ;
 Int         = "0" | "1"..."9" { "0"..."9" } ;
 

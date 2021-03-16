@@ -98,7 +98,7 @@ resolveNameIdx(productions)
 // To return the generated a-grammar to the next grammarparser:
 ltr.agrammar = rules
 // To show the initial a-grammar:
-print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
+// print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
 ~~>
 {
 

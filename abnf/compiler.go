@@ -127,6 +127,7 @@ func (co *compiler) traceBottom(upStream map[string]r.Object) {
 func (co *compiler) Run(name, src string) (goja.Value, error) {
 	p := co.codeCache[src]
 
+	// Cache precompiled data
 	if p == nil {
 		var err error
 		p, err = goja.Compile(name, src, true)
@@ -136,7 +137,6 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 		co.codeCache[src] = p
 	}
 
-	// TODO: store precompiled data!
 	return co.vm.RunProgram(p)
 }
 
@@ -345,15 +345,16 @@ func (co *compiler) initFuncMap() {
 	})
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
-		"parse": func(agrammar *r.Rules, srcCode string) *r.Rules {
-			productions, _ := ParseWithAgrammar(agrammar, srcCode, false, false, false)
+		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules {
+			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
 			return productions
 		},
-		"compile": func(asg *r.Rules, slot int) map[string]r.Object {
+		"compile": func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
+			co.traceEnabled = traceEnabled
 			return co.compile(asg, slot, 0)
 		},
-		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int) map[string]r.Object {
-			return compileASGInternal(asg, aGrammar, slot, false, false)
+		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
+			return compileASGInternal(asg, aGrammar, slot, traceEnabled, false)
 		},
 		"asg":          co.asg,
 		"agrammar":     co.aGrammar,
@@ -365,7 +366,7 @@ func (co *compiler) initFuncMap() {
 	co.vm.Set("llvm", llvmFuncMap)
 }
 
-func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object) {
+func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) map[string]r.Object {
 	var co compiler
 	co.traceEnabled = traceEnabled
 	co.traceCount = 0
