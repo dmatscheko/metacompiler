@@ -93,6 +93,9 @@ func main() {
 	param_abnf := flag.String("a", "", "The path of the ABNF file")
 	param_srcCode := flag.String("b", "", "The path of the file to process")
 
+	param_useBlockList := flag.Bool("lb", false, "Block list. Prevent a second execution of the same rule at the same position (slow)")
+	param_useFoundList := flag.Bool("lf", false, "Found list. Caches all found blocks even if the sourrounding does not match. Immediately return the found block if the same rule would be applied again at the same place (very slow)")
+
 	param_verbose_1 := flag.Bool("v1", false, "Show verbose output for step one. The a-grammar parser, parsing the ABNF from file -a to an ASG")
 	param_verbose_2 := flag.Bool("v2", false, "Show verbose output for step two. The ASG compiler, compiling the ASG generated in step one to an a-grammar")
 	param_verbose_3 := flag.Bool("v3", false, "Show verbose output for step three. The a-grammar parser, parsing the target file -b by applying the in step two generated a-grammar")
@@ -150,14 +153,14 @@ func main() {
 		*param_trace_4 = true
 	}
 
-	useBlockList := false
-	useFoundList := false
+	// *param_useBlockList := false
+	// *param_useFoundList := false
 
 	// MAIN PROCESS ----------------------------------------------------------------------------------------------
 
 	// Use the initial a-grammar to parse an ABNF. It generates an ASG (abstract semantic graph) of the ABNF.
 	fmt.Fprintln(os.Stderr, "Parse source ABNF file with initial a-grammar")
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, aEbnf, useBlockList, useFoundList, *param_trace_1)
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, aEbnf, *param_useBlockList, *param_useFoundList, *param_trace_1)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -188,7 +191,7 @@ func main() {
 
 	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
 	fmt.Fprintln(os.Stderr, "Parse target file with new a-grammar")
-	asg, err = abnf.ParseWithAgrammar(aGrammar, srcCode, useBlockList, useFoundList, *param_trace_3)
+	asg, err = abnf.ParseWithAgrammar(aGrammar, srcCode, *param_useBlockList, *param_useFoundList, *param_trace_3)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)

@@ -43,7 +43,7 @@ c.compile(c.asg)
 var cpos = 0
 while (ltr.stack[cpos] != undefined) {
     // println(ltr.stack[cpos].name)
-    // sleep(10)
+    // sleep(20)
     ltr.stack[cpos]()
     cpos++
 }
