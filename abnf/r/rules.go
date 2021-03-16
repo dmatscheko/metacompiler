@@ -72,6 +72,9 @@ func AppendArrayOfPossibleSequences(target *Rules, source *Rules) *Rules {
 }
 
 func (rule *Rule) Serialize() string {
+	if rule == nil {
+		return "<nil>"
+	}
 	res := "&r.Rule{"
 
 	op := rule.Operator

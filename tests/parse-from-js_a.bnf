@@ -1,0 +1,13 @@
+"Parse test"
+<~~
+
+var myasg = c.parse(c.ABNFagrammar, "<~\~println(\"found me\")~\~>{}")
+println(abnf.serializeRules(myasg))
+// c.compile(myasg)
+
+// println(abnf.serializeRule(abnf.getProductions(myasg)))
+
+~~>
+{
+    # No rules
+}

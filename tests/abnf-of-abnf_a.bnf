@@ -139,7 +139,7 @@ Prolog      = Tag ;
 Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" Code <~~ pushg([pop()]) ~~> { "," Code <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
-Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(abnf.newToken(up.in, c.Pos)) ~~> '~~' + ;
+Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' + ;
 
 Name        <~~ push(abnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
             = Alphabet - { Alphabet | Digit | "_" } + ;

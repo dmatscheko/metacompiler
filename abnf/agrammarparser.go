@@ -26,11 +26,11 @@ func RuneToStr(r rune) string {
 //
 // Idea partially taken from: https://rosettacode.org/wiki/Parse_EBNF
 
-type grammarParser struct {
+type agrammarParser struct {
 	src         []rune
 	ch          rune
 	sdx         int
-	grammar     *r.Rules
+	agrammar    *r.Rules
 	productions *r.Rules
 
 	blockList    map[string]bool
@@ -48,7 +48,7 @@ type grammarParser struct {
 	traceCount   int
 }
 
-func (gp *grammarParser) skipSpaces() {
+func (gp *agrammarParser) skipSpaces() {
 	for {
 		if gp.sdx >= len(gp.src) {
 			break
@@ -61,11 +61,11 @@ func (gp *grammarParser) skipSpaces() {
 	}
 }
 
-func (gp *grammarParser) getRulePosId(rule *r.Rule, pos int) string {
+func (gp *agrammarParser) getRulePosId(rule *r.Rule, pos int) string {
 	return fmt.Sprintf("%d:%d", rule.ID, pos)
 }
 
-func (gp *grammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (bool, *r.Rules, int, rune) { // => (isBlocked, rules, rulesSdx, rulesCh)
+func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (bool, *r.Rules, int, rune) { // => (isBlocked, rules, rulesSdx, rulesCh)
 	var isBlocked bool = false
 	var foundRule *r.Rules = nil
 	var foundSdx int = -1
@@ -118,7 +118,7 @@ func (gp *grammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (
 	return isBlocked, foundRule, foundSdx, foundCh
 }
 
-func (gp *grammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, found *r.Rules, pos int) {
+func (gp *agrammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, found *r.Rules, pos int) {
 	if gp.useBlockList || gp.useFoundList {
 		id := gp.getRulePosId(rule, pos)
 		gp.blockList[id] = false             // Exit of the rule. It must be unblocked so it can be called again from a parent.
@@ -146,7 +146,7 @@ func (gp *grammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, fo
 }
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
-func (gp *grammarParser) applyChildSequence(rules *r.Rules, doSkipSpaces bool, depth int, pos int) *r.Rules {
+func (gp *agrammarParser) applyChildSequence(rules *r.Rules, doSkipSpaces bool, depth int, pos int) *r.Rules {
 	if rules == nil {
 		return nil
 	}
@@ -161,7 +161,7 @@ func (gp *grammarParser) applyChildSequence(rules *r.Rules, doSkipSpaces bool, d
 }
 
 // Apply uses the rules recursive.
-func (gp *grammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Rules { // => (localProductions)
+func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Rules { // => (localProductions)
 	wasSdx := gp.sdx // Start position of the rule. Return, if the rule does not match.
 	localProductions := &r.Rules{}
 
@@ -326,16 +326,16 @@ func mergeTerminals(productions *r.Rules) {
 	}
 }
 
-func ParseWithGrammar(grammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
-	// defer func() {
-	// 	if err := recover(); err != nil {
-	// 		res = nil
-	// 		e = fmt.Errorf("%s", err)
-	// 	}
-	// }()
+func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
+	defer func() {
+		if err := recover(); err != nil {
+			res = nil
+			e = fmt.Errorf("%s", err)
+		}
+	}()
 
-	var gp grammarParser
-	gp.grammar = grammar
+	var gp agrammarParser
+	gp.agrammar = agrammar
 	gp.src = []rune(srcCode)
 	gp.sdx = 0
 	gp.traceEnabled = traceEnabled
@@ -348,18 +348,11 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useBlockList bool, useFo
 	gp.useFoundList = useFoundList
 	gp.lastParsePosition = 0
 
-	gp.productions = r.GetProductions(gp.grammar)
-
-	// if gp.productions == nil || len(*gp.productions) <= 0 {
-	// 	return nil, fmt.Errorf("No productions to parse")
-	// }
-
-	// fmt.Println(PprintRulesFlat(gp.grammar))
-	// os.Exit(0)
+	gp.productions = r.GetProductions(gp.agrammar)
 
 	var newProductions *r.Rules
 	if !(gp.productions == nil || len(*gp.productions) <= 0) {
-		startRule := r.GetStartRule(gp.grammar)
+		startRule := r.GetStartRule(gp.agrammar)
 		if startRule == nil || startRule.Int >= len(*gp.productions) || startRule.Int < 0 {
 			return nil, fmt.Errorf("No valid start rule defined")
 		}
@@ -367,23 +360,11 @@ func ParseWithGrammar(grammar *r.Rules, srcCode string, useBlockList bool, useFo
 		newProductions = gp.apply((*gp.productions)[startRule.Int], true, 0)
 	}
 
-	// // TODO: Include the parse() command in JS. only for testing! Multiple launches
-	// gp.sdx = 0
-	// gp.ch = 0
-	// gp.traceCount = 0
-	// newProductions = gp.apply(&gp.grammar.Productions[0], true, 0)
-
 	// Check if the position is at EOF at end of parsing. There can be spaces left, but otherwise its an error:
 	gp.skipSpaces()
 	if gp.sdx < len(gp.src) {
 		return nil, fmt.Errorf("Not everything could be parsed. Last good parse position was %s", LinePosFromStrPos(string(gp.src), gp.lastParsePosition))
 	}
-
-	// gp.blockList = nil
-	// gp.foundList = nil
-	// gp.foundSdxList = nil
-	// gp.foundChList = nil
-	// gp.src = nil
 
 	mergeTerminals(newProductions)
 	return newProductions, nil

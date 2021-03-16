@@ -59,6 +59,12 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
+            "name": "Parse from JS",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/parse-from-js_a.bnf"]
+        },
+        {
             "name": "---------",
             "type": "go",
             "request": "launch",
