@@ -91,15 +91,16 @@ go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
 ### Default main process
 
 This is the input to the default main process:
-* `initial-a-grammar` = program-internal annotated grammar of annotated EBNF.
-* `inputA` = the content of the file given with command line parameter `-a`.
-* `inputB` = the content of the file given with command line parameter `-b`.
+* `initial-a-grammar` = Default annotated grammar of annotated EBNF.
+* `inputA` = The content of the file given with command line parameter `-a`.
+* `inputB` = The content of the file given with command line parameter `-b`.
+* `*-a-grammar-prolog` = "The code at the beginning of the grammar. This code starts the rest of the compile process during the compile step."
 
 This is how that input is processed:
 1. `parse(initial-a-grammar, inputA)`  = `inputA-ASG`.
-2. `compile(inputA-ASG)`  = `new-a-grammar`.
+2. `compile(inputA-ASG, initial-a-grammar-prolog)`  = `new-a-grammar`.
 3. `parse(new-a-grammar, inputB)`  = `inputB-ASG`.
-4. `compile(inputB-ASG)`  = `result`.
+4. `compile(inputB-ASG, new-a-grammar-prolog)`  = `result`.
 
 Of course, the `result` can again (but doesn't have to) be an `a-grammar` and can be used as input for `parse()`.
 
