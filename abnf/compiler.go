@@ -40,6 +40,26 @@ func Unescape(s string) (string, error) {
 	return string(buf), nil
 }
 
+func UnescapeTilde(s string) string {
+	// Is it trivial? Avoid allocation.
+	if !strings.ContainsRune(s, '\\') {
+		if utf8.ValidString(s) {
+			return s
+		}
+	}
+
+	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
+	for pos := 0; pos+1 < len(s); pos++ {
+		if s[pos] == '\\' && s[pos+1] == '~' {
+			buf = append(buf, s[:pos]...)
+			s = s[pos+1:]
+			pos = 0
+		}
+	}
+	buf = append(buf, s...)
+	return string(buf)
+}
+
 // ----------------------------------------------------------------------------
 // Dynamic ASG compiler
 
@@ -300,6 +320,7 @@ func (co *compiler) initFuncMap() {
 	})
 
 	co.vm.Set("unescape", Unescape)
+	co.vm.Set("unescapeTilde", UnescapeTilde)
 
 	// co.vm.Set("writable", func(v interface{}) *interface{} {
 	// 	return &v
@@ -324,10 +345,16 @@ func (co *compiler) initFuncMap() {
 	})
 
 	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
+		"parse": func(agrammar *r.Rules, srcCode string) *r.Rules {
+			productions, _ := ParseWithAgrammar(agrammar, srcCode, false, false, false)
+			return productions
+		},
 		"compile": func(localASG *r.Rules, slot int) map[string]r.Object {
 			return co.compile(localASG, slot, 0)
 		},
-		"asg": co.asg,
+		"asg":          co.asg,
+		"agrammar":     co.aGrammar,
+		"ABNFagrammar": AbnfAgrammar,
 	}
 	co.vm.Set("c", co.compilerFuncMap)
 	r.AbnfFuncMap["sprintProductions"] = PprintRulesFlat

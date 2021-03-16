@@ -1,7 +1,6 @@
 "LLVM IR tests"
 <~~
 
-c.compile(c.asg)
 println("LLVM IR tests:\n------------------------------------")
 
 // Create convenience types and constants.
