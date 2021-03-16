@@ -104,6 +104,56 @@ This is how that input is processed:
 
 Of course, the `result` can again (but doesn't have to) be an `a-grammar` and can be used as input for `parse()`.
 
+An example of this process, done fully inside the prolog code of an ABNF:
+
+<details>
+  <summary>Click to expand!</summary>
+
+```javascript
+"Parse and compile test"
+<~~
+
+// Lets build a new compiler directly from scratch:
+
+// For this we need an agrammar. This is the information, that the metacompiler needs to actually be a compiler.
+
+// To create an agrammar, we need an ABNF:
+var ABNF = "<~\~ println('found me'); c.compile(c.asg) ~\~> {X = ( 'A' | 'B' | 'C' ) <~\~ println('and found the letter ' + up.in) ~\~>; } X"
+
+// Now we parse the ABNF and create an ASG from it. We use c.ABNFagrammar as agrammar for this parse step, because we wrote our compiler definition in ABNF (the variable above), and the agrammar c.ABNFagrammar understands ABNF:
+var ASG = c.parse(c.ABNFagrammar, ABNF)
+
+// Lets print the resulting ASG:
+println("\nASG: " + abnf.serializeRules(ASG))
+
+// So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF:
+var result = c.compileWithProlog(ASG, c.ABNFagrammar)
+
+// The agrammar c.ABNFagrammar stores its compilation result into ltr.agrammar. The result of the compilation is the whole ltr object. Lets get our new very own agrammar:
+var myAgrammar = result.agrammar
+
+// Lets now print the resulting agrammar:
+println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
+
+// We can now use our own agrammar to parse something new. We parse the letter B and again get an ASG from it:
+var myASG = c.parse(myAgrammar, "B")
+
+// Lets now print the resulting ASG:
+println("\nmyASG: " + abnf.serializeRules(myASG))
+
+// And to see a result, we have to compile our new ASG myASG with our grammar myAgrammar:
+println("\nOutput:")
+c.compileWithProlog(myASG, myAgrammar)
+
+// Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>
+
+~~>
+{
+    # No rules
+}
+```
+</details>
+
 ### Exposed JS API
 
 The annotations of the ABNF can contain JS code. The ASG (abstract semantic graph) gets processed from the leaves up to the stem. If annotations are encountered on the way, their JS code gets executed.
