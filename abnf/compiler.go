@@ -349,8 +349,11 @@ func (co *compiler) initFuncMap() {
 			productions, _ := ParseWithAgrammar(agrammar, srcCode, false, false, false)
 			return productions
 		},
-		"compile": func(localASG *r.Rules, slot int) map[string]r.Object {
-			return co.compile(localASG, slot, 0)
+		"compile": func(asg *r.Rules, slot int) map[string]r.Object {
+			return co.compile(asg, slot, 0)
+		},
+		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int) map[string]r.Object {
+			return compileASGInternal(asg, aGrammar, slot, false, false)
 		},
 		"asg":          co.asg,
 		"agrammar":     co.aGrammar,
@@ -362,16 +365,7 @@ func (co *compiler) initFuncMap() {
 	co.vm.Set("llvm", llvmFuncMap)
 }
 
-// Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
-// The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
-func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
-	// defer func() {
-	// 	if err := recover(); err != nil {
-	// 		res = nil
-	// 		e = fmt.Errorf("%s", err)
-	// 	}
-	// }()
-
+func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res map[string]r.Object) {
 	var co compiler
 	co.traceEnabled = traceEnabled
 	co.traceCount = 0
@@ -396,11 +390,26 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 		co.handleTagCode(prolog, "prolog.code", upStream, asg, slot, 0)
 	}
 
-	// Is called fom JS compile().
+	// Is called fom JS compile():
 	// co.compile(asg, slot)
 
-	if co.ltrStream["agrammar"] != nil { // There should be a generated a-grammar in upstream
-		resultAGrammar, ok := co.ltrStream["agrammar"].([]interface{})
+	return co.ltrStream
+}
+
+// Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
+// The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
+func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
+	defer func() {
+		if err := recover(); err != nil {
+			res = nil
+			e = fmt.Errorf("%s", err)
+		}
+	}()
+
+	resObj := compileASGInternal(asg, aGrammar, slot, traceEnabled, preventDefaultOutput)
+
+	if resObj["agrammar"] != nil { // There should be a generated a-grammar in upstream
+		resultAGrammar, ok := resObj["agrammar"].([]interface{})
 		if !ok {
 			return nil, nil
 		}
