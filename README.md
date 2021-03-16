@@ -195,10 +195,11 @@ Parses the string `target` with the `agrammar` and returns an ASG.
 The whole abstract semantic graph.
 * __c.localAsg__  
 The local part of the abstract semantic graph.
-* __c.compile(asg []Rule) map[string]object__  
+* __c.compile(asg []Rule, slot int) map[string]object__  
 Compiles the given ASG and returns the map of the combined upstream variables.  
-Normally, `c.compile()` is called as `c.compile(c.asg);`.
-  The compiler works like this:  
+Normally, `c.compile()` is called as `c.compile(c.asg)`.<br/>
+The parameter `slot` states the index of the code part inside the `Tags`. It is normally 0.<br/>
+The compiler works like this:  
 ```
     OUT
      ^
@@ -220,6 +221,9 @@ Normally, `c.compile()` is called as `c.compile(c.asg);`.
      ^    |
      IN<-'
 ```
+* __c.compileWithProlog(asg []Rule, aGrammar []Rule, slot int) map[string]object__  
+Instantiates a new compiler with `asg` and `aGrammar` and starts the prolog code of the `aGrammar`. This prolog code has to do the rest, to compile the ASG in parameter `asg`. Specifically, it has to call `c.compile(c.asg)` to compile that ASG. <br/>
+The parameter `slot` states the index of the code part inside the `Tags`. It is normally 0.
 
 #### Parser and Compiler ABNF a-grammar API
 
