@@ -70,6 +70,7 @@ func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) 
 	var foundRule *r.Rules = nil
 	var foundSdx int = -1
 	var foundCh rune = 0
+	gp.traceCount++
 
 	if gp.useBlockList || gp.useFoundList {
 		if rule.ID == 0 {
@@ -97,7 +98,6 @@ func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) 
 	if !gp.traceEnabled {
 		return isBlocked, foundRule, foundSdx, foundCh
 	}
-	gp.traceCount++
 
 	c := "EOF"
 	if gp.sdx < len(gp.src) {
