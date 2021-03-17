@@ -1,33 +1,40 @@
-"Tiny-C language (plus a few small enhancements)"
+"Tiny C-ish language"
 
-<~~ c.compile(c.asg) ~~>
+<~~sleep(50); c.compile(c.asg); sleep(50)~~>
 {
 
 Program     = { Statement } ;
 Statement   = "if" ParenExpr Statement
             | "if" ParenExpr Statement "else" Statement
+            | "for" ParenExpr Statement
             | "while" ParenExpr Statement
             | "do" Statement "while" ParenExpr ";"
             | "{" { Statement } "}"
             | Expr ";"
             | ";" ;
 
-ParenExpr   =  "(" Expr ")" ;
+ParenExpr   =  "(" Expr { ";" Expr } ")" ;
 
-Expr        = Assignment | Command | Test ;
+Expr        = ClosedExpr | ResultExpr ;
+ClosedExpr  = Declaration | Assignment ;
+ResultExpr  = Command | Test ;
+
+Declaration = "var" ( Assignment | Id ) ;
+
+Assignment  = Id "=" ResultExpr ;
+
+Command     = Id "(" [ ResultExpr { "," ResultExpr } ] ")" ;
 
 Test        = Comp ( "||" | "&&" ) Comp | Comp ;
 Comp        = Sum ( "<" | ">" | "==" | "!=" ) Sum | Sum ;
-Sum         = Sum "+" Term | Sum "-" Term | Term ;
-Term        = ParenExpr | Id | Int ;
+Sum         = Term "+" Sum | Term "-" Sum | Term ;
+Term        = ParenExpr | Command | Id | Int ;
 
-Assignment  = Id "=" Expr ;
+Id          = ( "a"..."z" | "A"..."Z" ) - { "a"..."z" | "A"..."Z" | "_" } + ;
+Int         = "0" | "1"..."9" - { "0"..."9" } + ;
 
-Command     = Id "(" [ Parameter { "," Parameter } ] ")" ;
-Parameter   = Command | Test ;
-
-Id          = ( "a"..."z" | "A"..."Z" ) { "a"..."z" | "A"..."Z" | "_" } ;
-Int         = "0" | "1"..."9" { "0"..."9" } ;
+# The first option(s) of an OR must not be the beginning of a later option. Otherwise only the first option would be found and success would be returned.
+# No option of a production can be equal to the production itself. This means that e.g. the production 'Test' must not have an option 'Test'.
 
 }
 Program
