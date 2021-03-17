@@ -62,7 +62,7 @@ func (gp *agrammarParser) skipSpaces() {
 }
 
 func (gp *agrammarParser) getRulePosId(rule *r.Rule, pos int) string {
-	return fmt.Sprintf("%d:%d", rule.ID, pos)
+	return fmt.Sprintf("%d:%d", rule.Int, pos)
 }
 
 func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (bool, *r.Rules, int, rune) { // => (isBlocked, rules, rulesSdx, rulesCh)
@@ -72,10 +72,7 @@ func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) 
 	var foundCh rune = 0
 	gp.traceCount++
 
-	if gp.useBlockList || gp.useFoundList {
-		if rule.ID == 0 {
-			rule.ID = gp.traceCount
-		}
+	if rule.Operator == r.Ident && (gp.useBlockList || gp.useFoundList) {
 		id := gp.getRulePosId(rule, gp.sdx)
 
 		if gp.useFoundList {
@@ -87,11 +84,11 @@ func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) 
 			}
 		}
 		if !isBlocked && gp.useBlockList {
-			isBlocked = gp.blockList[id] // True because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
+			isBlocked = gp.blockList[id] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
 			// TIODO: Maybe only block at idents:
-			if !isBlocked && rule.Operator != r.Or { // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
-				gp.blockList[id] = true // Enter the current rule rule in the block list because it was not already blocked.
-			}
+			// if !isBlocked && rule.Operator != r.Or { // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
+			gp.blockList[id] = true // Enter the current rule rule in the block list because it was not already blocked.
+			// }
 		}
 	}
 
@@ -114,14 +111,16 @@ func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) 
 	if doSkipSpaces {
 		skip = "  spaces:➰  " // Skip spaces.
 	}
-	fmt.Print(space, ">", depth, "  (", gp.traceCount, ")  ", LinePosFromStrPos(string(gp.src), gp.sdx), "  char:", c, skip, rule.ID, ":", PprintRuleOnly(rule, ""), msg, "\n")
+	fmt.Print(space, ">", depth, "  (", gp.traceCount, ")  ", LinePosFromStrPos(string(gp.src), gp.sdx), "  char:", c, skip, PprintRuleOnly(rule, ""), msg, "\n")
 	return isBlocked, foundRule, foundSdx, foundCh
 }
 
 func (gp *agrammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, found *r.Rules, pos int) {
-	if gp.useBlockList || gp.useFoundList {
+	if rule.Operator == r.Ident && (gp.useBlockList || gp.useFoundList) {
 		id := gp.getRulePosId(rule, pos)
-		gp.blockList[id] = false             // Exit of the rule. It must be unblocked so it can be called again from a parent.
+		if gp.useBlockList {
+			gp.blockList[id] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
+		}
 		if gp.useFoundList && found != nil { // TODO: Make this configurable. On most EBNFs it is not necessary and comes with huge time and memory impact.
 			gp.foundList[id] = found
 			gp.foundSdxList[id] = gp.sdx
@@ -142,7 +141,7 @@ func (gp *agrammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, f
 	if doSkipSpaces {
 		skip = "  spaces:➰  " // Skip spaces.
 	}
-	fmt.Print(times(" ", depth), "<", depth, "  (", gp.traceCount, ")  ", LinePosFromStrPos(string(gp.src), gp.sdx), "  char:", c, skip, rule.ID, ":", PprintRuleOnly(rule, ""), " found:", found != nil, "\n")
+	fmt.Print(times(" ", depth), "<", depth, "  (", gp.traceCount, ")  ", LinePosFromStrPos(string(gp.src), gp.sdx), "  char:", c, skip, PprintRuleOnly(rule, ""), " found:", found != nil, "\n")
 }
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
@@ -276,7 +275,7 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.R
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			return nil
 		}
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Childs: newProductions, ID: rule.ID, Pos: gp.sdx})
+		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Childs: newProductions, Pos: gp.sdx})
 	case r.SkipSpace: // TODO: Modify SKIPSPACES so that the chars to skip can be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
 		rule.Pos = gp.sdx
 		localProductions = &r.Rules{rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.

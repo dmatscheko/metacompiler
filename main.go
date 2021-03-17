@@ -135,7 +135,7 @@ func main() {
 	}
 
 	if *param_speedTest {
-		speedtest(aEbnf, srcCode, 20)
+		speedtest(aEbnf, srcCode, 20, *param_useBlockList, *param_useFoundList)
 		return
 	}
 
@@ -218,9 +218,9 @@ func main() {
 	}
 }
 
-func speedtest(src, target string, count int) {
-	speedtestParseWithGrammar(src, target, count)
-	speedtestCompileASG(src, target, count)
+func speedtest(src, target string, count int, useBlockList, useFoundList bool) {
+	speedtestParseWithGrammar(src, target, count, useBlockList, useFoundList)
+	speedtestCompileASG(src, target, count, useBlockList, useFoundList)
 	fmt.Fprintln(os.Stderr)
 }
 func timeTrack(start time.Time, name string) {
@@ -228,19 +228,19 @@ func timeTrack(start time.Time, name string) {
 	fmt.Fprintf(os.Stderr, "%s took %s\n", name, elapsed)
 }
 
-func speedtestParseWithGrammar(src, target string, count int) {
+func speedtestParseWithGrammar(src, target string, count int, useBlockList, useFoundList bool) {
 	var err error
 	defer timeTrack(time.Now(), "ParseWithGrammar")
 	for i := 0; i < count; i++ {
-		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, target, false, false, false)
+		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, target, useBlockList, useFoundList, false)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
 	}
 }
-func speedtestCompileASG(src, target string, count int) {
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, target, false, false, false)
+func speedtestCompileASG(src, target string, count int, useBlockList, useFoundList bool) {
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, target, useBlockList, useFoundList, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
