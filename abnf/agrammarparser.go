@@ -33,11 +33,11 @@ type agrammarParser struct {
 	agrammar    *r.Rules
 	productions *r.Rules
 
-	blockList    map[string]bool
+	blockList    map[int]bool
 	useBlockList bool
-	foundList    map[string]*r.Rules
-	foundSdxList map[string]int
-	foundChList  map[string]rune
+	foundList    map[int]*r.Rules
+	foundSdxList map[int]int
+	foundChList  map[int]rune
 	useFoundList bool
 
 	lastParsePosition int
@@ -61,8 +61,11 @@ func (gp *agrammarParser) skipSpaces() {
 	}
 }
 
-func (gp *agrammarParser) getRulePosId(rule *r.Rule, pos int) string {
-	return fmt.Sprintf("%d:%d", rule.Int, pos)
+func (gp *agrammarParser) getRulePosId(rule *r.Rule, pos int) int {
+	// Cantor pairing function
+	a := rule.Int
+	ab := pos + rule.Int
+	return ((ab * (ab + 1)) >> 1) + a
 }
 
 func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) (bool, *r.Rules, int, rune) { // => (isBlocked, rules, rulesSdx, rulesCh)
@@ -339,11 +342,11 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 	gp.sdx = 0
 	gp.traceEnabled = traceEnabled
 	gp.traceCount = 0
-	gp.blockList = make(map[string]bool)
+	gp.blockList = make(map[int]bool)
 	gp.useBlockList = useBlockList
-	gp.foundList = make(map[string]*r.Rules)
-	gp.foundSdxList = make(map[string]int)
-	gp.foundChList = make(map[string]rune)
+	gp.foundList = make(map[int]*r.Rules)
+	gp.foundSdxList = make(map[int]int)
+	gp.foundChList = make(map[int]rune)
 	gp.useFoundList = useFoundList
 	gp.lastParsePosition = 0
 
