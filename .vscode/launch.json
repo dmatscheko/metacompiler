@@ -80,7 +80,7 @@
             "name": "ABNF of ABNF to object",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf_a.bnf", "-b", "tests/abnf-of-abnf_a.bnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf_a.bnf", "-b", "tests/abnf-of-abnf_a.bnf", "-lb"]
         },
         {
             "name": "---------",
@@ -92,7 +92,7 @@
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop_a.bnf", "-b", "tests/infinite-loop_aaaaa.txt", "-vv3", "-vv4"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop_a.bnf", "-b", "tests/infinite-loop_aaaaa.txt", "-lb", "-vv3", "-vv4"]
         },
         {
             "name": "Speed Test",

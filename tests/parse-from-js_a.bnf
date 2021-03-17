@@ -24,7 +24,7 @@ var myAgrammar = result.agrammar
 println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
 
 // We can now use our own agrammar to parse something new. We parse the letter B and again get an ASG from it:
-var myASG = c.parse(myAgrammar, "B")
+var myASG = c.parse(myAgrammar, "C")
 
 // Lets now print the resulting ASG:
 println("\nmyASG: " + abnf.serializeRules(myASG))
