@@ -42,18 +42,34 @@ type Rule struct {
 
 type Rules []*Rule
 
+// func (rules *Rules) AppendIfNotEmpty(elems ...*Rule) {
+// 	if len(elems) == 1 {
+// 		el := elems[0]
+// 		if el == nil || (len(*el.Childs) == 0 && (el.Operator == Group || el.Operator == Or || el.Operator == Sequence)) {
+// 			return
+// 		}
+// 	}
+// 	*rules = append(*rules, elems...)
+// }
+
 func (rules *Rules) Append(elems ...*Rule) {
 	*rules = append(*rules, elems...)
 }
 
 // Appends a Sequence but dissolves basic SEQUENCE groups
 func AppendPossibleSequence(target *Rules, source *Rule) *Rules {
+	// This costs time and does not make the result that much smaller:
+	// if source.Childs != nil && len(*source.Childs) == 0 && (source.Operator == Sequence || source.Operator == Group) {
+	// 	return target
+	// }
 	if target == nil {
 		target = &Rules{}
 	}
-	if source.Operator == Sequence {
+	if source.Operator == Sequence { // || (source.Operator == Or && len(*source.Childs) == 1)
+		// target.AppendIfNotEmpty(*source.Childs...)
 		*target = append(*target, *source.Childs...)
 	} else {
+		// target.AppendIfNotEmpty(source)
 		*target = append(*target, source)
 	}
 	return target
