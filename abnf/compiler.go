@@ -147,8 +147,8 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 
 	co.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
-	co.compilerFuncMap["Pos"] = tag.Pos
-	co.compilerFuncMap["ID"] = tag.ID
+	// co.compilerFuncMap["Pos"] = tag.Pos
+	// co.compilerFuncMap["ID"] = tag.Int
 
 	co.vm.Set("pop", func() interface{} {
 		stack, ok := upStream["stack"].([]interface{})

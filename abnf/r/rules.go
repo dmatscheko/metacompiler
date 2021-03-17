@@ -36,7 +36,6 @@ type Rule struct {
 	Int       int    // Only used when Operator == seq.Ident || seq.Production
 	Bool      bool   // Only used when Operator == seq.SkipSpaces
 	Pos       int    // The position where this Rule has matched.
-	ID        int    // Used for the block list, when applying the rule as grammar.
 	Childs    *Rules // Used by most Operators
 	TagChilds *Rules // Only used when Operator == seq.Tag
 }

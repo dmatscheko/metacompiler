@@ -98,7 +98,7 @@
             "name": "Speed Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf_a.bnf", "-b", "tests/abnf-of-abnf_a.bnf", "-s"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf_a.bnf", "-b", "tests/abnf-of-abnf_a.bnf", "-s", "-lb"]
         },
 
     ]
