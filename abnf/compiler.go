@@ -344,7 +344,7 @@ func (co *compiler) initFuncMap() {
 		co.stack = append(co.stack, v)
 	})
 
-	co.compilerFuncMap = map[string]r.Object{ // The LLVM function will be inside such a map.
+	co.compilerFuncMap = map[string]r.Object{
 		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules {
 			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
 			return productions
