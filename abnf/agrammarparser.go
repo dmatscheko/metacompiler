@@ -365,6 +365,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 			return nil, fmt.Errorf("No valid start rule defined")
 		}
 
+		// For the parsing, the start rule is necessary. For the compilation not.
 		newProductions = gp.apply((*gp.productions)[startRule.Int], true, 0)
 	}
 

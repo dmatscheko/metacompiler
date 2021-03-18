@@ -13,6 +13,8 @@ import (
 	"github.com/dop251/goja"
 )
 
+// TODO: return an error to JS if the compile and parse functions there have an error.
+
 // Stripped down and slightly modified version of stconv.Unquote()
 func Unescape(s string) (string, error) {
 	// Is it trivial? Avoid allocation.
@@ -224,7 +226,7 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 
 		upStreamMerged := map[string]r.Object{"in": "", "stack": []interface{}{}}
 
-		for _, rule := range *localASG { // TODO: IMPORTANT!!! Optimize this with index to the specific production/rule, like in the grammarparser.go. And also implement a feature to state the starting rule!
+		for _, rule := range *localASG {
 			// Compile:
 			upStreamNew := co.compile(&r.Rules{rule}, slot, depth+1)
 
@@ -345,7 +347,7 @@ func (co *compiler) initFuncMap() {
 	})
 
 	co.compilerFuncMap = map[string]r.Object{
-		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules {
+		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
 			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
 			return productions
 		},
@@ -398,7 +400,7 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled 
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
-// The aGrammar is only needed for its prolog and epilog definition and its start rule definition.
+// The aGrammar is only needed for its prolog code. The start rule is only needed for parsing.
 func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
 	defer func() {
 		if err := recover(); err != nil {
