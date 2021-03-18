@@ -25,3 +25,12 @@ after removal of loop check and caching of compiled JS code:
 
 ParseWithGrammar took 180.6189ms
 CompileASG took 874.0832ms
+
+
+everything x5 and ability for parser commands:
+
+ParseWithGrammar took 1.3441595s
+CompileASG took 5.1620008s
+ParseWithGrammar took 1.3099997s
+CompileASG took 5.0320003s
+

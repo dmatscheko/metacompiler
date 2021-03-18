@@ -7,6 +7,24 @@ function getNameIdx(name) {
     return names.push(name)-1;
 }
 
+function resolveNameIdx(productions) {
+	for (var i = 0; i < productions.length; i++) {
+        var rule = productions[i]
+
+        if (rule.Childs != undefined && rule.Childs.length > 0) {
+            resolveNameIdx(rule.Childs)
+        }
+
+        if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) {
+            resolveNameIdx(rule.CodeChilds)
+        }
+
+		if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) {
+			rule.Int = prodsPos[rule.Int]
+		}
+	}
+}
+
 var prodsPos = {};
 var lastPos = 0
 function buildProduction(prodName, prodTag, prodExpression) {
@@ -17,6 +35,10 @@ function buildProduction(prodName, prodTag, prodExpression) {
     } else {
         return abnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
     }
+}
+function buildLineCommand(cmd) {
+    prodsPos[cmd.Int] = lastPos++
+    return cmd
 }
 
 // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
@@ -67,64 +89,47 @@ function simplify(rule) {
     return rule
 }
 
-function resolveNameIdx(productions) {
-	for (var i = 0; i < productions.length; i++) {
-        var rule = productions[i]
-
-        if (rule.Childs != undefined && rule.Childs.length > 0) {
-            resolveNameIdx(rule.Childs)
-        }
-
-		if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Ident) {
-			rule.Int = prodsPos[rule.Int]
-		}
-	}
-}
-
-function getProductions(rules) {
-    for (var i = 0; i< rules.length; i++) {
-        if (rules[i].Operator == abnf.oid.Sequence) {
-            return rules[i].Childs
-        }
-    }
-    return []
-}
-
 c.compile(c.asg)
 var rules = ltr.stack
-var productions = getProductions(rules)
-resolveNameIdx(productions)
+resolveNameIdx(rules)
 
 // To return the generated a-grammar to the next grammarparser:
 ltr.agrammar = rules
 // To show the initial a-grammar:
-print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
+// print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
 ~~>
 {
 
-# This is the start rule
-ABNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | LineCommand | Comment } "}" <~~ pushg(abnf.newSequence(popg(), c.Pos)) ~~> [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
+# TODO: :skip( WhitespaceA "XY" ) does not work.
+# TODO: <NameOfCode> does not work (is not implemented).
+# TODO: include does not work (is not implemented).
 
+# This is a parser command that sets the possible white space.
+:skip(Whitespace) ;
+
+# This is the start rule.
+ABNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) ~~> | LineCommand <~~ pushg(append(popg(), pop())) ~~> | Comment } "}" <~~ pushg(abnf.newSequence(popg(), c.Pos)) ~~> [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
+
+# Todo: Move buildProduction() outside of Optional clause. Otherwise it is a bug when nothing is given after "=" which is a valid Production.
 Production  <~~ push(popg()) ~~>
             = Name <~~ pushg(pop()) ~~> [ Tag <~~ ltr.prodTag=pop() ~~> ] "=" [ Expression <~~ pushg(buildProduction(popg(), ltr.prodTag, pop())); ltr.prodTag=undefined ~~> ] ";" ;
 
 Expression  <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
-            = Alternative <~~ pushg([pop()]) ~~> { "|" Alternative <~~ pushg(append(popg(), pop())) //2 ~~> } ;
+            = Alternative <~~ pushg([pop()]) ~~> { "|" Alternative <~~ pushg(append(popg(), pop())) ~~> } ;
 
 Alternative <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
-            = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) //1 ~~> } ;
+            = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) ~~> } ;
 
 Term        = Range | TaggedTerm | Command ;
 
 TaggedTerm <~~ push(popg()) ~~>
-            = ( Name | Group | Option | Repetition | Skipspaces ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
+            = ( Name | Group | Option | Repetition ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Range       <~~ push(popg()) ~~>
             = TaggedToken <~~ pushg(pop()) ~~> [ "..." TaggedToken <~~ pushg(abnf.newRange([popg(), pop()], c.Pos)) ~~> ] ;
 Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
 Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
 Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
-Skipspaces  = Skip | Noskip ;
 
 TaggedToken <~~ push(popg()) ~~>
             = Token <~~ pushg(pop()) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
@@ -132,30 +137,28 @@ TaggedToken <~~ push(popg()) ~~>
 Start       = Name ;
 Title       = Token ;
 Description = Token ;
-Comment     = "#" - { AsciiNoLb } ( "\n" | "\r" ) + ;
+Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
 Prolog      = Tag ;
 
 Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
-            = "<" Code <~~ pushg([pop()]) ~~> { "," Code <~~ pushg(append(popg(), pop())) ~~> } ">" ;
+            = "<" ( Name | Token | Code ) <~~ pushg([pop()]) ~~> { "," ( Name | Token | Code ) <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
-Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' + ;
-
-LineCommand = Command ";" ;
+LineCommand = Command <~~ push(buildLineCommand(pop())) ~~> ";" ;
 
 Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
-            = ":" CmdName "(" ( Token | Name ) <~~ pushg([pop()]) ~~> { "," ( Token | Name ) <~~ pushg(append(popg(), pop())) ~~> } ")" ;
-
+            = ":" CmdName "(" ( Name | Token | Code ) <~~ pushg([pop()]) ~~> { "," ( Name | Token | Code ) <~~ pushg(append(popg(), pop())) ~~> } ")" ;
 CmdName     <~~ push(up.in) ~~>
-            = Alphabet - { Alphabet | Digit | "_" } + ;
-CmdToken    = Token <~~ var token = pop(); token.Operator = abnf.oid.CmdToken; push(token) ~~> ;
+            = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
-Name        <~~ push(abnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
-            = Alphabet - { Alphabet | Digit | "_" } + ;
+Name        <~~ push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) ~~>
+            = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken ;
-Dquotetoken = '"' - { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' + ;
-Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" + ;
+Dquotetoken = '"' :skip(Nothing) { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' :skip(Whitespace) ;
+Squotetoken = "'" :skip(Nothing) { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" :skip(Whitespace) ;
+
+Code        = '~~' :skip(Nothing) { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' :skip(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
@@ -163,8 +166,8 @@ AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!"
 AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII withput line breaks (CR and LF)
 AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
 
-Skip        = "+" <~~ push(abnf.newSkipSpace(true, c.Pos)) ~~> ;
-Noskip      = "-" <~~ push(abnf.newSkipSpace(false, c.Pos)) ~~> ;
+Nothing     = "" ;
+Whitespace  = " \t\r\n" ;
 
 }
 ABNF

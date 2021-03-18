@@ -22,14 +22,13 @@ const (
 	SkipSpace
 	Tag
 	Command
-	CmdToken
 	// Link types:
 	Production
 	Identifier
 )
 
 func (id OperatorID) String() string {
-	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "CmdToken", "Or", "Optional", "Repeat", "Range", "SkipSpace", "Tag", "Command", "Production", "Identifier"}[id]
+	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Or", "Optional", "Repeat", "Range", "SkipSpace", "Tag", "Command", "Production", "Identifier"}[id]
 }
 
 type Rule struct {
@@ -97,7 +96,7 @@ func (rule *Rule) Serialize() string {
 	op := rule.Operator
 	res += fmt.Sprintf("Operator: r.%s", op.String())
 
-	if op == Token || op == Identifier || op == Production || op == Command || op == CmdToken {
+	if op == Token || op == Identifier || op == Production || op == Command {
 		res += fmt.Sprintf(", String: %q", rule.String)
 	}
 	if op == Identifier || op == Production {

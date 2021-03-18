@@ -4,7 +4,7 @@ var AbnfFuncMap = map[string]Object{
 	"newToken": func(String string, Pos int) *Rule {
 		return &Rule{Operator: Token, String: String, Pos: Pos}
 	},
-	"newName": func(String string, Int int, Pos int) *Rule { // This is only the link.
+	"newIdentifier": func(String string, Int int, Pos int) *Rule { // This is only the link.
 		return &Rule{Operator: Identifier, String: String, Int: Int, Pos: Pos}
 	},
 	"newProduction": func(String string, Int int, Childs *Rules, Pos int) *Rule { // This is the holder of the production. This is where the link points to.
@@ -16,7 +16,7 @@ var AbnfFuncMap = map[string]Object{
 	"newCommand": func(String string, CodeChilds *Rules, Pos int) *Rule {
 		return &Rule{Operator: Command, String: String, CodeChilds: CodeChilds, Pos: Pos}
 	},
-	"newSkipSpace": func(Bool bool, Pos int) *Rule {
+	"newSkipSpace": func(Bool bool, Pos int) *Rule { // TODO: Remove.
 		return &Rule{Operator: SkipSpace, Bool: Bool, Pos: Pos}
 	},
 	"newRepetition": func(Childs *Rules, Pos int) *Rule {
@@ -71,8 +71,9 @@ var AbnfFuncMap = map[string]Object{
 		"Range":     Range,
 		"SkipSpace": SkipSpace,
 		"Tag":       Tag,
+		"Command":   Command,
 		// Link types:
 		"Production": Production,
-		"Ident":      Identifier,
+		"Identifier": Identifier,
 	},
 }
