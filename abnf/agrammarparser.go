@@ -75,7 +75,7 @@ func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) 
 	var foundCh rune = 0
 	gp.traceCount++
 
-	if rule.Operator == r.Ident && (gp.useBlockList || gp.useFoundList) {
+	if rule.Operator == r.Identifier && (gp.useBlockList || gp.useFoundList) {
 		id := gp.getRulePosId(rule, gp.sdx)
 
 		if gp.useFoundList {
@@ -119,7 +119,7 @@ func (gp *agrammarParser) ruleEnter(rule *r.Rule, doSkipSpaces bool, depth int) 
 }
 
 func (gp *agrammarParser) ruleExit(rule *r.Rule, doSkipSpaces bool, depth int, found *r.Rules, pos int) {
-	if rule.Operator == r.Ident && (gp.useBlockList || gp.useFoundList) {
+	if rule.Operator == r.Identifier && (gp.useBlockList || gp.useFoundList) {
 		id := gp.getRulePosId(rule, pos)
 		if gp.useBlockList {
 			gp.blockList[id] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
@@ -162,7 +162,7 @@ func (gp *agrammarParser) applyAsSequence(rules *r.Rules, doSkipSpaces bool, dep
 	return newProductions
 }
 
-// Apply uses the rules recursively.
+// Apply uses the rules top down and recursively.
 // This is the resolution process of the agrammar. Does the localProductions need to go into a Group or something? No. The grouping was done already in the agrammar.
 // At this point, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules.
 func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.Rules { // => (localProductions)
@@ -269,7 +269,7 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.R
 	case r.Optional:
 		newProductions := gp.applyAsSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos)
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
-	case r.Ident: // "IDENT" identifies another rule (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-rule which is at position 3: { "IDENT", "expression", 3 }
+	case r.Identifier: // "IDENT" identifies another rule (and its index), it is basically a link: This would e.g. be an "IDENT" to the expression-rule which is at position 3: { "IDENT", "expression", 3 }
 		newProductions := gp.applyAsSequence((*gp.productions)[rule.Int].Childs, doSkipSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
@@ -283,8 +283,15 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces bool, depth int) *r.R
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			return nil
 		}
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, TagChilds: rule.TagChilds, Childs: newProductions, Pos: gp.sdx})
+		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: gp.sdx})
 	case r.SkipSpace: // TODO: Modify SKIPSPACES so that the chars to skip can be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
+		rule.Pos = gp.sdx
+		localProductions = &r.Rules{rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
+	case r.Command: // TODO: Modify SKIPSPACES so that the chars to skip can be given to the command. e.g.: {"SKIPSPACES", "\n\t :;"}
+		if rule.String == "space" {
+
+			localProductions = &r.Rules{rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
+		}
 		rule.Pos = gp.sdx
 		localProductions = &r.Rules{rule} // Put the responsibility for skip spaces to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
 	default: // r.Success || r.Error

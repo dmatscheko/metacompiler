@@ -104,7 +104,7 @@ func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, spa
 	switch rule.Operator {
 	case r.Token, r.Error:
 		res += fmt.Sprintf(", Pos:%d, %q", rule.Pos, rule.String)
-	case r.Ident, r.Production:
+	case r.Identifier, r.Production:
 		res += fmt.Sprintf(", %q:%d, Pos:%d", rule.String, rule.Int, rule.Pos)
 	case r.SkipSpace:
 		res += fmt.Sprintf(", Pos:%d, %t", rule.Pos, rule.Bool)
@@ -112,9 +112,9 @@ func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, spa
 		res += fmt.Sprintf(", Pos:%d, Code:", rule.Pos)
 		if printChilds {
 			if printFlat {
-				res += PprintRulesFlat(rule.TagChilds)
+				res += PprintRulesFlat(rule.CodeChilds)
 			} else {
-				res += PprintRules(rule.TagChilds, sp+"  ")
+				res += PprintRules(rule.CodeChilds, sp+"  ")
 			}
 		} else {
 			res += "[...]"
@@ -137,7 +137,7 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, printFlat bool, space 
 	switch rule.Operator {
 	case r.Token, r.Error:
 		res += fmt.Sprintf(", %q", rule.String)
-	case r.Ident, r.Production:
+	case r.Identifier, r.Production:
 		res += fmt.Sprintf(", %q:%d", rule.String, rule.Int)
 	case r.SkipSpace:
 		res += fmt.Sprintf(", %t", rule.Bool)
@@ -145,9 +145,9 @@ func PprintSequenceHeader(rule *r.Rule, printChilds bool, printFlat bool, space 
 		res += fmt.Sprintf(", Code:")
 		if printChilds {
 			if printFlat {
-				res += PprintRulesFlat(rule.TagChilds)
+				res += PprintRulesFlat(rule.CodeChilds)
 			} else {
-				res += PprintRules(rule.TagChilds, sp+"  ")
+				res += PprintRules(rule.CodeChilds, sp+"  ")
 			}
 		} else {
 			res += "[...]"

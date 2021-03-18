@@ -1,11 +1,47 @@
 # MetaCompiler
 
-This is
-* a parser that parses an annotated EBNF
-* and (at runtime) creates a second parser with that EBNF
-* plus a compiler with the annotations in the EBNF.
+A generic compiler frontend.
 
-That new runtime generated parser plus compiler should allow to compile an arbitrary new language, specified in the EBNF and its annotations.
+This is
+* a parser that parses a language specification written as an annotated EBNF
+* and a compiler that (at runtime) compiles the parsing result to a second parser and compiler.
+
+The second parser and compiler are equivalent to the first one and can also be used at runtime.
+
+This system should allow to define and use compiler for arbitrary computer languages, only by specifying them in plain text in annotated EBNF.
+
+- [MetaCompiler](#metacompiler)
+  - [What is an annotated EBNF (ABNF)?](#what-is-an-annotated-ebnf-abnf)
+  - [Small Example](#small-example)
+  - [Documentation](#documentation)
+    - [Installation / Build](#installation--build)
+    - [High level overview](#high-level-overview)
+      - [Default process steps](#default-process-steps)
+    - [Exposed JS API](#exposed-js-api)
+      - [General](#general)
+      - [Output](#output)
+      - [Strings](#strings)
+      - [Variables](#variables)
+        - [Local variables](#local-variables)
+        - [Global variables](#global-variables)
+      - [The stacks](#the-stacks)
+        - [Local stacks](#local-stacks)
+        - [Global stack](#global-stack)
+      - [Compiler API](#compiler-api)
+      - [Parser and Compiler ABNF a-grammar API](#parser-and-compiler-abnf-a-grammar-api)
+        - [Builder functions](#builder-functions)
+        - [Grammar functions](#grammar-functions)
+        - [Text functions](#text-functions)
+        - [OperatorID Constants](#operatorid-constants)
+      - [LLVM IR API](#llvm-ir-api)
+    - [ABNF Syntax](#abnf-syntax)
+      - [EBNF of EBNF](#ebnf-of-ebnf)
+      - [EBNF of ABNF](#ebnf-of-abnf)
+      - [Common syntax](#common-syntax)
+  - [Further Examples](#further-examples)
+    - [Example of an annotated EBNF](#example-of-an-annotated-ebnf)
+    - [Its output, when it gets applied on itself:](#its-output-when-it-gets-applied-on-itself)
+  - [Links](#links)
 
 ## What is an annotated EBNF (ABNF)?
 

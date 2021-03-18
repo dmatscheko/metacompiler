@@ -5,13 +5,16 @@ var AbnfFuncMap = map[string]Object{
 		return &Rule{Operator: Token, String: String, Pos: Pos}
 	},
 	"newName": func(String string, Int int, Pos int) *Rule { // This is only the link.
-		return &Rule{Operator: Ident, String: String, Int: Int, Pos: Pos}
+		return &Rule{Operator: Identifier, String: String, Int: Int, Pos: Pos}
 	},
 	"newProduction": func(String string, Int int, Childs *Rules, Pos int) *Rule { // This is the holder of the production. This is where the link points to.
 		return &Rule{Operator: Production, String: String, Int: Int, Childs: Childs, Pos: Pos}
 	},
-	"newTag": func(TagChilds *Rules, Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Tag, TagChilds: TagChilds, Childs: Childs, Pos: Pos}
+	"newTag": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Tag, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
+	},
+	"newCommand": func(String string, CodeChilds *Rules, Pos int) *Rule {
+		return &Rule{Operator: Command, String: String, CodeChilds: CodeChilds, Pos: Pos}
 	},
 	"newSkipSpace": func(Bool bool, Pos int) *Rule {
 		return &Rule{Operator: SkipSpace, Bool: Bool, Pos: Pos}
@@ -34,8 +37,8 @@ var AbnfFuncMap = map[string]Object{
 	"newRange": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Range, Childs: Childs, Pos: Pos}
 	},
-	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, TagChilds *Rules) *Rule {
-		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Pos: Pos, Childs: Childs, TagChilds: TagChilds}
+	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, CodeChilds *Rules) *Rule {
+		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Pos: Pos, Childs: Childs, CodeChilds: CodeChilds}
 	},
 	"arrayToRules": func(rules *Rules) *Rules {
 		return rules
@@ -70,6 +73,6 @@ var AbnfFuncMap = map[string]Object{
 		"Tag":       Tag,
 		// Link types:
 		"Production": Production,
-		"Ident":      Ident,
+		"Ident":      Identifier,
 	},
 }
