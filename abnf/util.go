@@ -102,7 +102,7 @@ func PprintSequenceHeaderPos(rule *r.Rule, printChilds bool, printFlat bool, spa
 	// res := string("\"" + rule.Operator + "\"")
 
 	switch rule.Operator {
-	case r.Token, r.Error:
+	case r.Token, r.Error, r.Command:
 		res += fmt.Sprintf(", Pos:%d, %q", rule.Pos, rule.String)
 	case r.Identifier, r.Production:
 		res += fmt.Sprintf(", %q:%d, Pos:%d", rule.String, rule.Int, rule.Pos)
