@@ -135,7 +135,7 @@ func main() {
 	}
 
 	if *param_speedTest {
-		speedtest(aEbnf, srcCode, 20, *param_useBlockList, *param_useFoundList)
+		speedtest(aEbnf, srcCode, 100, *param_useBlockList, *param_useFoundList)
 		return
 	}
 
