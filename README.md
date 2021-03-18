@@ -45,8 +45,8 @@ This system should allow to define and use compiler for arbitrary computer langu
 
 ## What is an annotated EBNF (ABNF)?
 
-* The EBNF stores the grammar of another language.
-* The annotations in the EBNF store the semantic of the other language.
+* The EBNF defines the syntax (the grammar) of another language.
+* The annotations in the EBNF define the semantic (the meaning) of the other language.
 * The combined format is therefore called annotated EBNF or ABNF.
 
 This means ABNF is a meta language. A language to describe the syntax and semantic of another language.
