@@ -99,7 +99,7 @@ func (co *compiler) traceTop(tag *r.Rule, slot int, depth int, upStream map[stri
 	co.traceCount++
 	space := "  "
 
-	code := (*tag.TagChilds)[slot].String
+	code := (*tag.CodeChilds)[slot].String
 
 	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", co.traceCount, "), ", PprintRuleOnly(tag), "\n")
 	removeSpace1 := regexp.MustCompile(`[ \t]+`)
@@ -143,7 +143,7 @@ func (co *compiler) Run(name, src string) (goja.Value, error) {
 }
 
 func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) { // => (changes upStream)
-	if !(slot < len(*tag.TagChilds)) { // If the tag has no slot with that number
+	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number
 		return
 	}
 
@@ -177,7 +177,7 @@ func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]
 		co.traceTop(tag, slot, depth, upStream)
 	}
 
-	code := (*tag.TagChilds)[slot].String
+	code := (*tag.CodeChilds)[slot].String
 
 	_, err := co.Run(name, code)
 	if err != nil {

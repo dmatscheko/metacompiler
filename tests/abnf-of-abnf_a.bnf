@@ -103,7 +103,7 @@ print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
 {
 
 # This is the start rule
-ABNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | Comment } "}" <~~ pushg(abnf.newSequence(popg(), c.Pos)) ~~> [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
+ABNF       = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{" <~~ pushg([]) ~~> { Production <~~ pushg(append(popg(), pop())) //3 ~~> | LineCommand | Comment } "}" <~~ pushg(abnf.newSequence(popg(), c.Pos)) ~~> [ Start <~~ pushg(pop()) ~~> ] [ Description <~~ pushg(pop()) ~~> ] ;
 
 Production  <~~ push(popg()) ~~>
             = Name <~~ pushg(pop()) ~~> [ Tag <~~ ltr.prodTag=pop() ~~> ] "=" [ Expression <~~ pushg(buildProduction(popg(), ltr.prodTag, pop())); ltr.prodTag=undefined ~~> ] ";" ;
@@ -114,7 +114,7 @@ Expression  <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
 Alternative <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
             = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) //1 ~~> } ;
 
-Term        = Range | TaggedTerm ;
+Term        = Range | TaggedTerm | Command ;
 
 TaggedTerm <~~ push(popg()) ~~>
             = ( Name | Group | Option | Repetition | Skipspaces ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
@@ -141,10 +141,19 @@ Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
 
 Code        = '~~' - { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' + ;
 
+LineCommand = Command ";" ;
+
+Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
+            = ":" CmdName "(" ( Token | Name ) <~~ pushg([pop()]) ~~> { "," ( Token | Name ) <~~ pushg(append(popg(), pop())) ~~> } ")" ;
+
+CmdName     <~~ push(up.in) ~~>
+            = Alphabet - { Alphabet | Digit | "_" } + ;
+CmdToken    = Token <~~ var token = pop(); token.Operator = abnf.oid.CmdToken; push(token) ~~> ;
+
 Name        <~~ push(abnf.newName(up.in, getNameIdx(up.in), c.Pos)) ~~>
             = Alphabet - { Alphabet | Digit | "_" } + ;
-Token       = Dquotetoken | Squotetoken ;
 
+Token       = Dquotetoken | Squotetoken ;
 Dquotetoken = '"' - { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' + ;
 Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" + ;
 

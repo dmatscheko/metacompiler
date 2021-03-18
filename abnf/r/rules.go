@@ -21,23 +21,25 @@ const (
 	Range
 	SkipSpace
 	Tag
+	Command
+	CmdToken
 	// Link types:
 	Production
-	Ident
+	Identifier
 )
 
 func (id OperatorID) String() string {
-	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Or", "Optional", "Repeat", "Range", "SkipSpace", "Tag", "Production", "Ident"}[id]
+	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "CmdToken", "Or", "Optional", "Repeat", "Range", "SkipSpace", "Tag", "Command", "Production", "Identifier"}[id]
 }
 
 type Rule struct {
-	Operator  OperatorID
-	String    string // Only used when Operator == seq.Token || seq.Ident || seq.Production. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
-	Int       int    // Only used when Operator == seq.Ident || seq.Production
-	Bool      bool   // Only used when Operator == seq.SkipSpaces
-	Pos       int    // The position where this Rule has matched.
-	Childs    *Rules // Used by most Operators
-	TagChilds *Rules // Only used when Operator == seq.Tag
+	Operator   OperatorID
+	String     string // Only used when Operator == seq.Token || seq.Ident || seq.Production || seq.Command. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
+	Int        int    // Only used when Operator == seq.Ident || seq.Production
+	Bool       bool   // Only used when Operator == seq.SkipSpaces
+	Pos        int    // The position where this Rule has matched.
+	Childs     *Rules // Used by most Operators
+	CodeChilds *Rules // Only used when Operator == seq.Tag || seq.Command
 }
 
 type Rules []*Rule
@@ -95,26 +97,26 @@ func (rule *Rule) Serialize() string {
 	op := rule.Operator
 	res += fmt.Sprintf("Operator: r.%s", op.String())
 
-	if op == Token || op == Ident || op == Production {
+	if op == Token || op == Identifier || op == Production || op == Command || op == CmdToken {
 		res += fmt.Sprintf(", String: %q", rule.String)
 	}
-	if op == Ident || op == Production {
+	if op == Identifier || op == Production {
 		res += fmt.Sprintf(", Int: %d", rule.Int)
 	}
 	if op == SkipSpace {
 		res += fmt.Sprintf(", Bool: %t", rule.Bool)
 	}
-	if rule.TagChilds != nil && op == Tag {
-		res += ", TagChilds: &r.Rules{"
-		for i := range *rule.TagChilds {
+	if rule.CodeChilds != nil && (op == Tag || op == Command) {
+		res += ", CodeChilds: &r.Rules{"
+		for i := range *rule.CodeChilds {
 			if i > 0 {
 				res += ", "
 			}
-			res += ((*rule.TagChilds)[i]).Serialize()
+			res += ((*rule.CodeChilds)[i]).Serialize()
 		}
 		res += "}"
 	}
-	if rule.Childs != nil && (op == Tag || op == Range || op == Ident || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if rule.Childs != nil && (op == Tag || op == Range || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
 		res += ", Childs: &r.Rules{"
 		for i := range *rule.Childs {
 			if i > 0 {
@@ -124,7 +126,7 @@ func (rule *Rule) Serialize() string {
 		}
 		res += "}"
 	}
-	if !(op == Token || op == Ident || op == Production || op == Tag || op == Range || op == SkipSpace || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if !(op == Token || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == SkipSpace || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
 		panic("wrong rule type: " + op.String())
 	}
 	// if op == Tag {
@@ -172,7 +174,7 @@ func GetStartRule(aGrammar *Rules) *Rule {
 	}
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
-		if rule.Operator == Ident {
+		if rule.Operator == Identifier {
 			return rule
 		}
 	}
