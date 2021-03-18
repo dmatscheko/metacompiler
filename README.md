@@ -10,7 +10,9 @@ The second parser and compiler are equivalent to the first one and can also be u
 
 This system should allow to define and use compiler for arbitrary computer languages, only by specifying them in plain text in annotated EBNF.
 
+## Table of Contents
 - [MetaCompiler](#metacompiler)
+  - [Table of Contents](#table-of-contents)
   - [What is an annotated EBNF (ABNF)?](#what-is-an-annotated-ebnf-abnf)
   - [Small Example](#small-example)
   - [Documentation](#documentation)
