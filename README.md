@@ -9,9 +9,11 @@ That new runtime generated parser plus compiler should allow to compile an arbit
 
 ## What is an annotated EBNF (ABNF)?
 
-* The EBNF stores the grammar of e.g. a new language.
-* The annotations in the EBNF store the semantic of the new language.
-* The combined format is annotated EBNF or ABNF.
+* The EBNF stores the grammar of another language.
+* The annotations in the EBNF store the semantic of the other language.
+* The combined format is therefore called annotated EBNF or ABNF.
+
+This means ABNF is a meta language. A language to describe the syntax and semantic of another language.
 
 ## Small Example
 
