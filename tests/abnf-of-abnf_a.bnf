@@ -101,9 +101,8 @@ print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
 {
 
 # TODO: include does not work (is not implemented).
-# TODO: aaaa (unknown name does not create error in many cases. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier)
+# TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier)
 # TODO: create a binary equivalent to range, where it does not convert to rune
-# TODO: move op == Range to CodeChilds
 
 # This is a parser command that sets the possible white space.
 :skip(Whitespace) ;
