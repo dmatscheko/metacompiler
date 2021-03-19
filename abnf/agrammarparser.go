@@ -231,6 +231,11 @@ func (gp *agrammarParser) applyCommand(rule *r.Rule) {
 			gp.spaces = ""
 		}
 	case "include":
+		// :include("foo_a.bnf"); How to include only the productions? Maybe overhaul of EBNF format?
+		panic("NOT IMPLEMENTED")
+	case "number":
+		// :number(4, LE) would mean take 4 bytes from the input (gp.src), interpret them as little endian and create a Number from it. This means it should be usable in Times expressions and should allow the parsing of TLV-formats.
+		panic("NOT IMPLEMENTED")
 	default:
 		panic("Unknown command :'" + rule.String + "()'")
 	}

@@ -47,6 +47,12 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
+            "name": "Brainfuck LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
+        },
+        {
             "name": "Parse from JS",
             "type": "go",
             "request": "launch",

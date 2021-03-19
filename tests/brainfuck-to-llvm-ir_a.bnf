@@ -1,0 +1,134 @@
+"Brainfuck to LLVM IR compiler"
+
+<~~
+
+// Create convenience types and constants.
+var i32 = llvm.types.I32
+var t4ki32 = llvm.types.NewArray(4096, i32)
+// var a4ki32 = llvm.constant.NewArray(t4ki32)
+var zero = llvm.constant.NewInt(i32, 0)
+var one = llvm.constant.NewInt(i32, 1)
+
+
+// Create a new LLVM IR module.
+var m = llvm.ir.NewModule()
+
+// Create a global variable definition and append it to the module.
+//
+//    int dpos = 0
+// var dpos = m.NewGlobalDef("dpos", zero)
+//    int cpos = 0
+// var cpos = m.NewGlobalDef("cpos", zero)
+//    var data = int[4096]
+// var data = m.NewGlobalDef("data", a4ki32)
+var a4ki32 = m.NewTypeDef("data", t4ki32)
+
+// int main() { ... }
+var main = m.NewFunc("main", i32)
+
+var blockDeclare = main.NewBlock("declare")
+var blockZerodata = main.NewBlock("zerodata")
+var blockResetDpos = main.NewBlock("resetdpos")
+var blockCode = main.NewBlock("code")
+
+
+//    var data = int[4096]
+var data = blockDeclare.NewAlloca(a4ki32)
+//    int dpos = 0
+var dpos = blockDeclare.NewAlloca(i32)
+blockDeclare.NewStore(llvm.constant.NewInt(i32, 4096), dpos)
+blockDeclare.NewBr(blockZerodata)
+
+
+blockZerodata.NewSub(dpos, one)
+var field = blockZerodata.NewGetElementPtr(i32, data, dpos)
+blockZerodata.NewStore(zero, field)
+blockZerodata.NewICmp(llvm.enum.IPredSGT, field, zero)
+blockZerodata.NewCondBr(dpos, blockZerodata, blockResetDpos)
+
+
+blockResetDpos.NewStore(zero, dpos)
+blockResetDpos.NewBr(blockCode)
+
+
+c.compile(c.asg)
+
+
+blockCode.NewRet()
+println(m)
+
+
+
+/*
+blockCode.NewStore(zero, field)
+blockCode.NewLoad(i32, field)
+blockCode.NewAdd(field, one)
+blockCode.NewAdd(field, negone)
+*/
+
+
+
+function check() {
+//     if (data[dpos] == undefined) data[dpos] = 0
+}
+
+function next() {
+    // dpos++
+    blockCode.NewAdd(dpos, one)
+}
+function prev() {
+    // dpos--
+    blockCode.NewSub(dpos, one)
+}
+function inc() {
+    // data[dpos]++
+    var field = blockCode.NewGetElementPtr(i32, data, dpos)
+    blockCode.NewAdd(field, one)
+}
+function dec() {
+    // data[dpos]--
+    var field = blockCode.NewGetElementPtr(i32, data, dpos)
+    blockCode.NewSub(field, one)
+}
+function write() {
+    // printf("%c", data[dpos])
+    // TODO!
+}
+function read() {
+    // data[dpos] = 42 // Here we could get a char from the command line.
+    // TODO!
+}
+function lparen() {
+    // pushg(cpos)
+    // TODO!
+}
+function rparen() {
+    // if (data[dpos] == 0) { popg() } else { cpos = popg()-1 }
+    // TODO!
+}
+
+// var data = []
+// var dpos = 0
+
+// println("ASG: "+c.asg.Serialize())
+// c.compile(c.asg)
+
+~~>
+
+{
+
+Brainfuck = { Statement } ;
+Statement = Opcode | Lparen { Statement } Rparen ;
+Opcode = Next | Prev | Inc | Dec | Write | Read ;
+
+Next = '>'          <~~ next() ~~> ;
+Prev = '<'          <~~ prev() ~~> ;
+Inc = '+'           <~~ inc() ~~> ;
+Dec = '-'           <~~ dec() ~~> ;
+Write = '.'         <~~ write() ~~> ;
+Read = ',' | '?'    <~~ read() ~~> ;
+Lparen = '['        <~~ lparen() ~~> ;
+Rparen = ']'        <~~ rparen() ~~> ;
+
+}
+Brainfuck
