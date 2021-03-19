@@ -15,11 +15,12 @@ const (
 	Group    // A group that must not be broken apart.
 	// Action types:
 	Token
+	Number
 	Or
 	Optional
 	Repeat
 	Range
-	SkipSpace
+	Times
 	Tag
 	Command
 	// Link types:
@@ -28,14 +29,13 @@ const (
 )
 
 func (id OperatorID) String() string {
-	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Or", "Optional", "Repeat", "Range", "SkipSpace", "Tag", "Command", "Production", "Identifier"}[id]
+	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Number", "Or", "Optional", "Repeat", "Range", "Times", "Tag", "Command", "Production", "Identifier"}[id]
 }
 
 type Rule struct {
 	Operator   OperatorID
 	String     string // Only used when Operator == seq.Token || seq.Ident || seq.Production || seq.Command. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
 	Int        int    // Only used when Operator == seq.Ident || seq.Production
-	Bool       bool   // Only used when Operator == seq.SkipSpaces
 	Pos        int    // The position where this Rule has matched.
 	Childs     *Rules // Used by most Operators
 	CodeChilds *Rules // Only used when Operator == seq.Tag || seq.Command
@@ -99,13 +99,10 @@ func (rule *Rule) Serialize() string {
 	if op == Token || op == Identifier || op == Production || op == Command {
 		res += fmt.Sprintf(", String: %q", rule.String)
 	}
-	if op == Identifier || op == Production {
+	if op == Identifier || op == Production || op == Number {
 		res += fmt.Sprintf(", Int: %d", rule.Int)
 	}
-	if op == SkipSpace {
-		res += fmt.Sprintf(", Bool: %t", rule.Bool)
-	}
-	if rule.CodeChilds != nil && (op == Tag || op == Command) {
+	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
 		res += ", CodeChilds: &r.Rules{"
 		for i := range *rule.CodeChilds {
 			if i > 0 {
@@ -115,7 +112,7 @@ func (rule *Rule) Serialize() string {
 		}
 		res += "}"
 	}
-	if rule.Childs != nil && (op == Tag || op == Range || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
 		res += ", Childs: &r.Rules{"
 		for i := range *rule.Childs {
 			if i > 0 {
@@ -125,7 +122,7 @@ func (rule *Rule) Serialize() string {
 		}
 		res += "}"
 	}
-	if !(op == Token || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == SkipSpace || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
 		panic("wrong rule type: " + op.String())
 	}
 	// if op == Tag {
