@@ -4,6 +4,9 @@ var AbnfFuncMap = map[string]Object{
 	"newToken": func(String string, Pos int) *Rule {
 		return &Rule{Operator: Token, String: String, Pos: Pos}
 	},
+	"newNumber": func(Int int, Pos int) *Rule {
+		return &Rule{Operator: Number, Int: Int, Pos: Pos}
+	},
 	"newIdentifier": func(String string, Int int, Pos int) *Rule { // This is only the link.
 		return &Rule{Operator: Identifier, String: String, Int: Int, Pos: Pos}
 	},
@@ -15,9 +18,6 @@ var AbnfFuncMap = map[string]Object{
 	},
 	"newCommand": func(String string, CodeChilds *Rules, Pos int) *Rule {
 		return &Rule{Operator: Command, String: String, CodeChilds: CodeChilds, Pos: Pos}
-	},
-	"newSkipSpace": func(Bool bool, Pos int) *Rule { // TODO: Remove.
-		return &Rule{Operator: SkipSpace, Bool: Bool, Pos: Pos}
 	},
 	"newRepetition": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Repeat, Childs: Childs, Pos: Pos}
@@ -34,11 +34,14 @@ var AbnfFuncMap = map[string]Object{
 	"newAlternative": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
 	},
-	"newRange": func(Childs *Rules, Pos int) *Rule {
-		return &Rule{Operator: Range, Childs: Childs, Pos: Pos}
+	"newRange": func(CodeChilds *Rules, Pos int) *Rule {
+		return &Rule{Operator: Range, CodeChilds: CodeChilds, Pos: Pos}
 	},
-	"newRule": func(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs *Rules, CodeChilds *Rules) *Rule {
-		return &Rule{Operator: Operator, String: String, Int: Int, Bool: Bool, Pos: Pos, Childs: Childs, CodeChilds: CodeChilds}
+	"newTimes": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
+		return &Rule{Operator: Times, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
+	},
+	"newRule": func(Operator OperatorID, String string, Int int, Pos int, Childs *Rules, CodeChilds *Rules) *Rule {
+		return &Rule{Operator: Operator, String: String, Int: Int, Pos: Pos, Childs: Childs, CodeChilds: CodeChilds}
 	},
 	"arrayToRules": func(rules *Rules) *Rules {
 		return rules
@@ -64,14 +67,15 @@ var AbnfFuncMap = map[string]Object{
 		"Sequence": Sequence,
 		"Group":    Group,
 		// Action types:
-		"Token":     Token,
-		"Or":        Or,
-		"Optional":  Optional,
-		"Repeat":    Repeat,
-		"Range":     Range,
-		"SkipSpace": SkipSpace,
-		"Tag":       Tag,
-		"Command":   Command,
+		"Token":    Token,
+		"Number":   Number,
+		"Or":       Or,
+		"Optional": Optional,
+		"Repeat":   Repeat,
+		"Range":    Range,
+		"Times":    Times,
+		"Tag":      Tag,
+		"Command":  Command,
 		// Link types:
 		"Production": Production,
 		"Identifier": Identifier,

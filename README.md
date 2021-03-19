@@ -6,7 +6,9 @@ This is
 * a parser that parses a language specification written as an annotated EBNF
 * and a compiler that (at runtime) compiles the parsing result to a second parser and compiler.
 
-The second parser and compiler are equivalent to the first one and can also be used at runtime.
+The second parser and compiler are equivalent to the first ones and can replace them at runtime or can be used in parallel.
+
+This means it is a parser and compiler with a polymorphic core.
 
 This system should allow to define and use compiler for arbitrary computer languages, only by specifying them in plain text in annotated EBNF.
 
