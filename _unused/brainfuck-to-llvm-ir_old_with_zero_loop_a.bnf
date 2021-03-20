@@ -26,18 +26,31 @@ var extGetchar = m.NewFunc("getchar", i8)
 var main = m.NewFunc("main", i32)
 
 // Define blocks.
-var blockInit = main.NewBlock("init")
+var blockDeclare = main.NewBlock("declare")
+var blockZerodata = main.NewBlock("zerodata")
 var blockCode = main.NewBlock("code")
 
 //    "declare"()
 //    byte[4096] dataPtr = [0, 0, ...]
-var dataPtr = blockInit.NewAlloca(i8x4096)
-blockInit.NewStore(llvm.constant.NewZeroInitializer(i8x4096), dataPtr)
+var dataPtr = blockDeclare.NewAlloca(i8x4096)
+blockDeclare.NewStore(llvm.constant.NewZeroInitializer(i8x4096), dataPtr)
 //    int dposPtr = 4096
-var dposPtr = blockInit.NewAlloca(i32)
-blockInit.NewStore(llvm.constant.NewInt(i32, 0), dposPtr)
-//    jump("code")
-blockInit.NewBr(blockCode)
+var dposPtr = blockDeclare.NewAlloca(i32)
+blockDeclare.NewStore(llvm.constant.NewInt(i32, 4096), dposPtr)
+//    jump("zerodata")
+blockDeclare.NewBr(blockZerodata)
+
+//    "zerodata"()   do {
+//    dpos = dpos - 1
+var dposSub = blockZerodata.NewSub(blockZerodata.NewLoad(i32, dposPtr), one)
+blockZerodata.NewStore(dposSub, dposPtr)
+//    data[dpos] = 0
+var elementPtr = blockZerodata.NewGetElementPtr(i8x4096, dataPtr, zero, dposSub)
+blockZerodata.NewStore(zeroi8, elementPtr)
+//    } while( *dposPtr > 0 ); jump("code")
+var condition = blockZerodata.NewICmp(llvm.enum.IPredUGT, dposSub, zero)
+blockZerodata.NewCondBr(condition, blockZerodata, blockCode)
+
 
 // Before the block "code" below adds its ret(0), let the compiler-pass add the instructions:
 // A counter for the code blocks created by compile (just to name them nicely).

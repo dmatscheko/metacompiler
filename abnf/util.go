@@ -3,6 +3,7 @@ package abnf
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"./r"
@@ -232,20 +233,42 @@ func PprintRulesFlat(productions *r.Rules) string {
 	return res
 }
 
+// func LinePosFromStrPos(data string, pos int) string {
+// 	lines := strings.Split(data, "\n")
+// 	chars := 0
+// 	if pos >= 0 && pos < len(data) {
+// 		for i, line := range lines {
+// 			lineLen := len(line)
+// 			chars += lineLen
+// 			if pos < chars { // Its in the last line.
+// 				if i == 0 {
+// 					pos += 2 // Correct for missing '\n'.
+// 				}
+// 				return fmt.Sprintf("ln %d, col %d", i+1, pos-(chars-lineLen)-1)
+// 			}
+// 		}
+// 	}
+// 	return "position outside of EBNF (char pos " + strconv.Itoa(pos) + ")"
+// }
+
 func LinePosFromStrPos(data string, pos int) string {
-	lines := strings.Split(data, "\n")
-	chars := 0
-	if pos >= 0 {
-		for i, line := range lines {
-			lineLen := len(line)
-			chars += lineLen
-			if pos < chars { // Its in the last line.
-				if i == 0 {
-					pos += 2 // Correct for missing '\r\n'.
-				}
-				return fmt.Sprintf("ln %d, col %d", i+1, pos-(chars-lineLen)-1)
+	//lines := strings.Split(data, "\n")
+	// chars := 0
+	if pos >= 0 && pos < len(data) {
+		line := 1
+		column := 0
+		for i, ch := range data {
+			if ch != '\r' {
+				column++
+			}
+			if i >= pos {
+				return fmt.Sprintf("ln %d, col %d", line, column)
+			}
+			if ch == '\n' {
+				line++
+				column = 0
 			}
 		}
 	}
-	return "position outside of EBNF"
+	return "position outside of EBNF (char pos " + strconv.Itoa(pos) + ")"
 }
