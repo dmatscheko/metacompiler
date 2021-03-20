@@ -487,8 +487,8 @@ Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | 
               "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
 
 skipspaces  = Skip | Noskip ;
-Skip        = "+" ;  // Skip all whitespace in the future.
-Noskip      = "-" ;  // Do not skip whitspace in the future.
+Skip        = ":skip(Whitespace)" ;  // Skip all whitespace in the future.
+Noskip      = ":skip(Nothing)" ;  // Do not skip whitespace in the future.
 
 }
 ```
@@ -605,9 +605,9 @@ group           <~~ up.in = '{'+pop()+'}' ~~>                    = "(" Expressio
 option          <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>        = "[" Expression <~~push(up.in)~~> "]" ;
 repetition      <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>          = "{" Expression <~~push(up.in)~~> "}" ;
 skipspaces      =
-                "+"                     <~~ up.in = '{"SKIPSPACES", true}' ~~>
+                ":skip(Whitespace)"                     <~~ up.in = '{"SKIPSPACES", true}' ~~>
                 |
-                "-"                     <~~ up.in = '{"SKIPSPACES", false}' ~~> ;
+                ":skip(Nothing)"                     <~~ up.in = '{"SKIPSPACES", false}' ~~> ;
 
 Title           = Token ;
 start           = Name                  <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
@@ -626,19 +626,19 @@ Tag                                     <~~up.in=pop()~~>
 Code                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
                 =
                 '~~'
-                -
+                :skip(Whitespace)
                 { [ "~" ] Codeinner }   <~~push(up.in)~~>
                 '~~'
-                + ;
+                :skip(Nothing) ;
 
 Codeinner       = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
 
-Name            = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
+Name            = ( Small | Caps ) :skip(Whitespace) { Small | Caps | Digit | "_" } :skip(Nothing) ;
 
 Token                                   <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
                 = Dqtoken | Sqtoken ;
-Dqtoken         = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' + ;
-Sqtoken         = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" + ;
+Dqtoken         = '"' :skip(Whitespace) { Small | Caps | Digit | Special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' :skip(Nothing) ;
+Sqtoken         = "'" :skip(Whitespace) { Small | Caps | Digit | Special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" :skip(Nothing) ;
 
 Digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
 Small           = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
