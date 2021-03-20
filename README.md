@@ -384,7 +384,7 @@ Returns the description of the a-grammar.
 
 #### LLVM IR API
 
-This tool uses the [Go LLIR/LLVM library](https://github.com/llir/llvm) to create LLVM IR and to interact with it. The API documentation can be found here: [LLIR/LLVM library documentation](https://pkg.go.dev/github.com/llir/llvm/). For more information on LLVM IR go to the [LLVM language reference](https://llvm.org/docs/LangRef.html).
+This tool uses the [Go LLIR/LLVM library](https://github.com/llir/llvm) to create LLVM IR and to interact with it. The API documentation can be found here: [llir/llvm overview](https://llir.github.io/document/) and here [LLIR/LLVM library documentation](https://pkg.go.dev/github.com/llir/llvm/). For more information on LLVM IR go to the [LLVM language reference](https://llvm.org/docs/LangRef.html).
 
 The functions and constants are exposed to JS as:
 
@@ -392,6 +392,7 @@ The functions and constants are exposed to JS as:
 * __llvm.constant.\*__ [llvm.constant](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/constant)
 * __llvm.metadata.\*__ [llvm.metadata](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/metadata)
 * __llvm.types.\*__ [llvm.types](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/types)
+* __llvm.enum.\*__ [llvm.enum](https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/enum)
 
 * Custom functions:
   * __llvm.Callgraph(m ir.Module) string__  
