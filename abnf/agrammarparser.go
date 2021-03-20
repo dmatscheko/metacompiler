@@ -311,23 +311,12 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r
 		gp.skipSpaces(doSkipSpaces)
 
 		size := len(rule.String)
-		if gp.sdx+size >= len(gp.src) || rule.String != gp.src[gp.sdx:gp.sdx+size] {
+		if gp.sdx+size > len(gp.src) || rule.String != gp.src[gp.sdx:gp.sdx+size] {
 			gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			gp.sdx = wasSdx
 			return nil
 		}
 		gp.sdx += size
-
-		// text := []rune(rule.String)
-		// for i := range text {
-		// 	if gp.sdx >= len(gp.src) || gp.src[gp.sdx] != text[i] {
-		// 		gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
-		// 		gp.sdx = wasSdx
-		// 		return nil
-		// 	}
-		// 	gp.sdx++
-		// }
-
 		*localProductions = append(*localProductions, rule)
 	case r.Range:
 		// Only skip spaces when actually reading from the target text (Tokens)
