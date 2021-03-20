@@ -114,26 +114,25 @@ ABNF        = [ Title <~~ pushg(pop()) ~~> ] [ Prolog <~~ pushg(pop()) ~~> ] "{"
 Production  <~~ push(popg()) ~~>
             = Name <~~ pushg(pop()) ~~> [ Tag <~~ ltr.prodTag=pop() ~~> ] "=" [ Expression <~~ pushg(buildProduction(popg(), ltr.prodTag, pop())); ltr.prodTag=undefined ~~> ] ";" ;
 
-Expression  <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
-            = Alternative <~~ pushg([pop()]) ~~> { "|" Alternative <~~ pushg(append(popg(), pop())) ~~> } ;
+Expression  = Alternative ;
 
-Alternative <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
+Alternative <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
+            = Sequence <~~ pushg([pop()]) ~~> { "|" Sequence <~~ pushg(append(popg(), pop())) ~~> } ;
+
+Sequence    <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
             = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) ~~> } ;
 
-Term        = Range | TaggedTerm | Command ;
+Term        = TaggedTerm | Command ;
 
 TaggedTerm <~~ push(popg()) ~~>
-            = ( Name | Group | Option | Repetition | Times ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
+            = ( Name | Range | Group | Option | Repetition | Times ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Range       <~~ push(popg()) ~~>
-            = TaggedToken <~~ pushg(pop()) ~~> [ "..." TaggedToken <~~ pushg(abnf.newRange([popg(), pop()], c.Pos)) ~~> ] ;
+            = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], c.Pos)) ~~> ] ;
 Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
 Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
 Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
 Times       = Number <~~ pushg([pop()]) ~~> [ "..." ( Number | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
-
-TaggedToken <~~ push(popg()) ~~>
-            = Token <~~ pushg(pop()) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Start       = Name ;
 Title       = Token ;
