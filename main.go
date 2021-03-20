@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"./abnf"
+	"14.gy/mec/abnf"
 )
 
 // TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).

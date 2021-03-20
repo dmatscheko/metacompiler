@@ -6,7 +6,7 @@
 *.so
 *.dylib
 __debug_bin
-metacompiler
+mec
 
 # Test binary, built with `go test -c`
 *.test

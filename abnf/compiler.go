@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"./r"
+	"14.gy/mec/abnf/r"
 	"github.com/dop251/goja"
 )
 

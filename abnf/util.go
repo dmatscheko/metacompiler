@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"./r"
+	"14.gy/mec/abnf/r"
 )
 
 func times(s string, n int) string {
