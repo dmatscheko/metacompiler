@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"./r"
+	"14.gy/mec/abnf/r"
 )
 
 // TODO: switch to "text/scanner".

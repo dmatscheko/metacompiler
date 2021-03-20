@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"./r"
+	"14.gy/mec/abnf/r"
 	"github.com/llir/llvm/ir"
 	"github.com/llir/llvm/ir/constant"
 	"github.com/llir/llvm/ir/enum"
@@ -833,14 +833,12 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 		"FuncAttrNoFree":                      enum.FuncAttrNoFree,                      // nofree
 		"FuncAttrNoImplicitFloat":             enum.FuncAttrNoImplicitFloat,             // noimplicitfloat
 		"FuncAttrNoInline":                    enum.FuncAttrNoInline,                    // noinline
-		"FuncAttrNoMerge":                     enum.FuncAttrNoMerge,                     // nomerge
 		"FuncAttrNonLazyBind":                 enum.FuncAttrNonLazyBind,                 // nonlazybind
 		"FuncAttrNoRecurse":                   enum.FuncAttrNoRecurse,                   // norecurse
 		"FuncAttrNoRedZone":                   enum.FuncAttrNoRedZone,                   // noredzone
 		"FuncAttrNoReturn":                    enum.FuncAttrNoReturn,                    // noreturn
 		"FuncAttrNoSync":                      enum.FuncAttrNoSync,                      // nosync
 		"FuncAttrNoUnwind":                    enum.FuncAttrNoUnwind,                    // nounwind
-		"FuncAttrNullPointerIsValid":          enum.FuncAttrNullPointerIsValid,          // null_pointer_is_valid
 		"FuncAttrOptForFuzzing":               enum.FuncAttrOptForFuzzing,               // optforfuzzing
 		"FuncAttrOptNone":                     enum.FuncAttrOptNone,                     // optnone
 		"FuncAttrOptSize":                     enum.FuncAttrOptSize,                     // optsize
@@ -903,25 +901,23 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 		"OverflowFlagNUW": enum.OverflowFlagNUW, // nuw
 		// ParamAttr is a parameter attribute.
 		// Parameter attributes.
-		"ParamAttrImmArg":             enum.ParamAttrImmArg,             // immarg
-		"ParamAttrInAlloca":           enum.ParamAttrInAlloca,           // inalloca
-		"ParamAttrInReg":              enum.ParamAttrInReg,              // inreg
-		"ParamAttrNest":               enum.ParamAttrNest,               // nest
-		"ParamAttrNoAlias":            enum.ParamAttrNoAlias,            // noalias
-		"ParamAttrNoCapture":          enum.ParamAttrNoCapture,          // nocapture
-		"ParamAttrNoFree":             enum.ParamAttrNoFree,             // nofree
-		"ParamAttrNoMerge":            enum.ParamAttrNoMerge,            // nomerge
-		"ParamAttrNonNull":            enum.ParamAttrNonNull,            // nonnull
-		"ParamAttrNullPointerIsValid": enum.ParamAttrNullPointerIsValid, // null_pointer_is_valid
-		"ParamAttrReadNone":           enum.ParamAttrReadNone,           // readnone
-		"ParamAttrReadOnly":           enum.ParamAttrReadOnly,           // readonly
-		"ParamAttrReturned":           enum.ParamAttrReturned,           // returned
-		"ParamAttrSignExt":            enum.ParamAttrSignExt,            // signext
-		"ParamAttrSRet":               enum.ParamAttrSRet,               // sret
-		"ParamAttrSwiftError":         enum.ParamAttrSwiftError,         // swifterror
-		"ParamAttrSwiftSelf":          enum.ParamAttrSwiftSelf,          // swiftself
-		"ParamAttrWriteOnly":          enum.ParamAttrWriteOnly,          // writeonly
-		"ParamAttrZeroExt":            enum.ParamAttrZeroExt,            // zeroext
+		"ParamAttrImmArg":     enum.ParamAttrImmArg,     // immarg
+		"ParamAttrInAlloca":   enum.ParamAttrInAlloca,   // inalloca
+		"ParamAttrInReg":      enum.ParamAttrInReg,      // inreg
+		"ParamAttrNest":       enum.ParamAttrNest,       // nest
+		"ParamAttrNoAlias":    enum.ParamAttrNoAlias,    // noalias
+		"ParamAttrNoCapture":  enum.ParamAttrNoCapture,  // nocapture
+		"ParamAttrNoFree":     enum.ParamAttrNoFree,     // nofree
+		"ParamAttrNonNull":    enum.ParamAttrNonNull,    // nonnull
+		"ParamAttrReadNone":   enum.ParamAttrReadNone,   // readnone
+		"ParamAttrReadOnly":   enum.ParamAttrReadOnly,   // readonly
+		"ParamAttrReturned":   enum.ParamAttrReturned,   // returned
+		"ParamAttrSignExt":    enum.ParamAttrSignExt,    // signext
+		"ParamAttrSRet":       enum.ParamAttrSRet,       // sret
+		"ParamAttrSwiftError": enum.ParamAttrSwiftError, // swifterror
+		"ParamAttrSwiftSelf":  enum.ParamAttrSwiftSelf,  // swiftself
+		"ParamAttrWriteOnly":  enum.ParamAttrWriteOnly,  // writeonly
+		"ParamAttrZeroExt":    enum.ParamAttrZeroExt,    // zeroext
 		// Preemption specifies the preemtion of a global identifier.
 		// Preemption kinds.
 		"PreemptionNone":           enum.PreemptionNone,           // none
@@ -929,13 +925,11 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 		"PreemptionDSOPreemptable": enum.PreemptionDSOPreemptable, // dso_preemptable
 		// ReturnAttr is a return argument attribute.
 		// Return argument attributes.
-		"ReturnAttrInReg":              enum.ReturnAttrInReg,              // inreg
-		"ReturnAttrNoAlias":            enum.ReturnAttrNoAlias,            // noalias
-		"ReturnAttrNoMerge":            enum.ReturnAttrNoMerge,            // nomerge
-		"ReturnAttrNonNull":            enum.ReturnAttrNonNull,            // nonnull
-		"ReturnAttrNullPointerIsValid": enum.ReturnAttrNullPointerIsValid, // null_pointer_is_valid
-		"ReturnAttrSignExt":            enum.ReturnAttrSignExt,            // signext
-		"ReturnAttrZeroExt":            enum.ReturnAttrZeroExt,            // zeroext
+		"ReturnAttrInReg":   enum.ReturnAttrInReg,   // inreg
+		"ReturnAttrNoAlias": enum.ReturnAttrNoAlias, // noalias
+		"ReturnAttrNonNull": enum.ReturnAttrNonNull, // nonnull
+		"ReturnAttrSignExt": enum.ReturnAttrSignExt, // signext
+		"ReturnAttrZeroExt": enum.ReturnAttrZeroExt, // zeroext
 		// SelectionKind is a Comdat selection kind.
 		// Comdat selection kinds.
 		"SelectionKindAny":          enum.SelectionKindAny,          // any
