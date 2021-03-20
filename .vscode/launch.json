@@ -41,13 +41,25 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/tiny.bnf", "-b", "tests/tiny.bnf"]
         },
         {
-            "name": "Brainfuck",
+            "name": "Brainfuck 1",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_a.bnf", "-b", "tests/brainfuck-test-1.txt"]
+        },
+        {
+            "name": "Brainfuck 2",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
-            "name": "Brainfuck LLVM IR",
+            "name": "Brainfuck LLVM IR 1",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir_a.bnf", "-b", "tests/brainfuck-test-1.txt"]
+        },
+        {
+            "name": "Brainfuck LLVM IR 2",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
