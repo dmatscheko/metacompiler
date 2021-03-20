@@ -23,12 +23,6 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator-2_a.bnf", "-b", "tests/calculator_formula.txt"]
         },
         {
-            "name": "ABNF of ABNF to text",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf-to-text_a.bnf", "-b", "tests/abnf-of-abnf-to-text_a.bnf"]
-        },
-        {
             "name": "LLVM IR",
             "type": "go",
             "request": "launch",
@@ -41,25 +35,13 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/tiny.bnf", "-b", "tests/tiny.bnf"]
         },
         {
-            "name": "Brainfuck 1",
+            "name": "Brainfuck Interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_a.bnf", "-b", "tests/brainfuck-test-1.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_interpreter_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
-            "name": "Brainfuck 2",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
-        },
-        {
-            "name": "Brainfuck LLVM IR 1",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir_a.bnf", "-b", "tests/brainfuck-test-1.txt"]
-        },
-        {
-            "name": "Brainfuck LLVM IR 2",
+            "name": "Brainfuck LLVM IR Compiler",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir_a.bnf", "-b", "tests/brainfuck-test-2.txt"]

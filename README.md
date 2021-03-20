@@ -18,7 +18,7 @@ This system should allow to define and use compiler for arbitrary computer langu
   - [What is an annotated EBNF (ABNF)?](#what-is-an-annotated-ebnf-abnf)
   - [Small Example](#small-example)
   - [Documentation](#documentation)
-    - [Installation / Build](#installation--build)
+    - [Build / Usage](#build--usage)
     - [High level overview](#high-level-overview)
       - [Default process steps](#default-process-steps)
     - [Exposed JS API](#exposed-js-api)
@@ -123,11 +123,15 @@ When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
 
 ## Documentation
 
-### Installation / Build
+### Build / Usage
 
 ```
-go get "github.com/dop251/goja" "github.com/llir/llvm/ir"
-go run . -f tests/llvm-ir-tests.aebnf -s tests/tiny.aebnf
+go build .
+./mec -a tests/brainfuck_a.bnf -b tests/brainfuck-test-2.txt
+```
+or
+```
+go run . -a tests/abnf-of-abnf_a.bnf -b tests/abnf-of-abnf_a.bnf
 ```
 
 ### High level overview

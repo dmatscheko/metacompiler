@@ -3,6 +3,8 @@
 <~~sleep(50); c.compile(c.asg); sleep(50)~~>
 {
 
+:skip(Whitespace) ;
+
 Program     = { Statement } ;
 Statement   = "if" ParenExpr Statement
             | "if" ParenExpr Statement "else" Statement
@@ -30,8 +32,11 @@ Comp        = Sum ( "<" | ">" | "==" | "!=" ) Sum | Sum ;
 Sum         = Term "+" Sum | Term "-" Sum | Term ;
 Term        = ParenExpr | Command | Id | Int ;
 
-Id          = ( "a"..."z" | "A"..."Z" ) - { "a"..."z" | "A"..."Z" | "_" } + ;
-Int         = "0" | "1"..."9" - { "0"..."9" } + ;
+Id          = ( "a"..."z" | "A"..."Z" ) :skip(Nothing) { "a"..."z" | "A"..."Z" | "_" } :skip(Whitespace) ;
+Int         = "0" | "1"..."9" :skip(Nothing) { "0"..."9" } :skip(Whitespace) ;
+
+Nothing     = "" ;
+Whitespace  = " \t\r\n" ;
 
 # The first option(s) of an OR must not be the beginning of a later option. Otherwise only the first option would be found and success would be returned.
 # No option of a production can be equal to the production itself. This means that e.g. the production 'Test' must not have an option 'Test'.

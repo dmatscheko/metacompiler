@@ -1,42 +1,51 @@
-"EBNF of EBNF" {
+"EBNF of EBNF"
+{
 
-EBNF        = [ Title ] "{" { Production | Comment } "}" [ Start ] [ Description ] ;
+# This is a parser command that sets the possible white space.
+:skip(Whitespace) ;
+
+# This is the start rule.
+EBNF        = [ Title ] "{" { Production | LineCommand | Comment } "}" [ Start ] [ Description ] ;
+
 Production  = Name "=" [ Expression ] ";" ;
 
+Expression  = Alternative ;
+Alternative = Sequence { "|" Sequence } ;
+Sequence    = Term { Term } ;
 
-Expression  = Alternative { "|" Alternative } ;
-Alternative = Term { Term } ;
-
-Term        = Name | Range | Group | Option | Repetition | Skipspaces ;
+Term  = Name | Range | Group | Option | Repetition | Times | Command ;
 
 Range       = Token [ "..." Token ] ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-Skipspaces  = Skip | Noskip ;
+Times       = Number [ "..." ( Number | "" ) ] Group ;
 
+Start       = Name ;
 Title       = Token ;
 Description = Token ;
-Start       = Name ;
-Comment     = "#" - { Small | Caps | Digit | Special | "~" | '"' | "'" } ( "\n" | "\r" ) + ;
+Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
-Name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
+LineCommand = Command ";" ;
+
+Command     = ":" CmdName "(" ( Name | Token ) { "," ( Name | Token ) } ")" ;
+CmdName     = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
+
+Name        = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
+
 Token       = Dquotetoken | Squotetoken ;
+Dquotetoken = '"' :skip(Nothing) { AsciiNoQs | "'" | '\\"' } '"' :skip(Whitespace) ;
+Squotetoken = "'" :skip(Nothing) { AsciiNoQs | '"' | "\\'" } "'" :skip(Whitespace) ;
 
-Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' | "\n" | "\r" } '"' + ;
-Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" | "\n" | "\r" } "'" + ;
+Alphabet    = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII without line breaks (CR and LF)
 
-Digit       = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-Small       = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
-              "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-Caps        = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
-              "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
-              "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
-              "@" | "\\" | "\t" ;
+Number      = "0" | "1"..."9" { "0"..."9" } ;
 
-Skip        = "+" ;
-Noskip      = "-" ;
+Nothing     = "" ;
+Whitespace  = " \t\r\n" ;
 
 }
 EBNF

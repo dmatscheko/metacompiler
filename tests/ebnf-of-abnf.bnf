@@ -1,51 +1,61 @@
 "EBNF of ABNF"
-
 {
 
-# This is the start rule
-ABNF       = [ Title ] [ Prolog ] "{" { Production | Comment } "}" [ Start ] [ Description ] ;
+# This is a parser command that sets the possible white space.
+:skip(Whitespace) ;
+
+# This is the start rule.
+ABNF        = [ Title ] [ Prolog ] "{" { Production | LineCommand | Comment } "}" [ Start ] [ Description ] ;
 
 Production  = Name [ Tag ] "=" [ Expression ] ";" ;
 
-Expression  = Alternative { "|" Alternative } ;
-Alternative = Term { Term } ;
+Expression  = Alternative ;
 
-Term        = Range | TaggedTerm ;
-TaggedTerm  = ( Name | Group | Option | Repetition | Skipspaces ) [ Tag ] ;
+Alternative = Sequence { "|" Sequence } ;
 
-Range       = TaggedToken [ "..." TaggedToken ] ;
+Sequence    = Term { Term } ;
+
+Term        = TaggedTerm | Command ;
+
+TaggedTerm  = ( Name | Range | Group | Option | Repetition | Times ) [ Tag ] ;
+
+Range       = Token [ "..." Token ] ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-Skipspaces  = Skip | Noskip ;
-
-TaggedToken = Token [ Tag ] ;
+Times       = Number [ "..." ( Number | "" ) ] Group ;
 
 Start       = Name ;
 Title       = Token ;
 Description = Token ;
-Comment     = "#" - { AsciiNoLb } ( "\n" | "\r" ) + ;
+Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
 Prolog      = Tag ;
 
-Tag         = "<" Code { "," Code } ">" ;
+Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
 
-Code        = '~~' - { [ "~" ] AllButTilde } '~~' + ;
+LineCommand = Command ";" ;
 
-Name        = Alphabet - { Alphabet | Digit | "_" } + ;
-Token       = Dquotetoken | Squotetoken ;
+Command     = ":" CmdName "(" ( Name | Token ) { "," ( Name | Token ) } ")" ;
+CmdName     = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
-Dquotetoken = '"' - { AsciiNoQs | "'" | '\\"' } '"' + ;
-Squotetoken = "'" - { AsciiNoQs | '"' | "\\'" } "'" + ;
+Name        = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
+
+Token       = Dquotetoken | Squotetoken | Code ;
+Dquotetoken = '"' :skip(Nothing) { AsciiNoQs | "'" | '\\"' } '"' :skip(Whitespace) ;
+Squotetoken = "'" :skip(Nothing) { AsciiNoQs | '"' | "\\'" } "'" :skip(Whitespace) ;
+Code        = '~~' :skip(Nothing) { [ "~" ] AllButTilde } '~~' :skip(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
 AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
-AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII withput line breaks (CR and LF)
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII without line breaks (CR and LF)
 AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
 
-Skip        = "+" ;
-Noskip      = "-" ;
+Number      = "0" | "1"..."9" { "0"..."9" } ;
+
+Nothing     = "" ;
+Whitespace  = " \t\r\n" ;
 
 }
 ABNF
