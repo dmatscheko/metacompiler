@@ -20,6 +20,7 @@ Term        = TaggedTerm | Command ;
 TaggedTerm  = ( Name | Range | Group | Option | Repetition | Times ) [ Tag ] ;
 
 Range       = Token [ "..." Token ] ;
+ByteRange   = Token "..b" Token ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;

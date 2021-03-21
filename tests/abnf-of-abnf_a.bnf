@@ -125,14 +125,15 @@ Sequence    <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
 Term        = TaggedTerm | Command ;
 
 TaggedTerm <~~ push(popg()) ~~>
-            = ( Name | Range | Group | Option | Repetition | Times ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
+            = ( Name | ByteRange | Range | Group | Option | Repetition | Times ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Range       <~~ push(popg()) ~~>
-            = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], c.Pos)) ~~> ] ;
+            = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) ~~> ] ;
+ByteRange   = Token <~~ pushg(pop()) ~~> "..b" Token <~~ push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) ~~> ;
 Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
 Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
 Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
-Times       = Number <~~ pushg([pop()]) ~~> [ "..." ( Number | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
+Times       = CmdNumber <~~ pushg([pop()]) ~~> [ "..." ( CmdNumber | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
 
 Start       = Name ;
 Title       = Token ;
@@ -144,10 +145,14 @@ Prolog      = Tag ;
 Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" ( Name | Token ) <~~ pushg([pop()]) ~~> { "," ( Name | Token ) <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
+CmdNumber   = Number | FutureNum ;
+FutureNum   <~~ push(abnf.newCommand("number", popg(), c.Pos)) ~~>
+            = ":" "number" "(" ( Name | Number ) <~~ pushg([pop()]) ~~> { "," ( Name | Number ) <~~ pushg(append(popg(), pop())) ~~> } ")" ;
+
 LineCommand = Command <~~ push(buildLineCommand(pop())) ~~> ";" ;
 
 Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
-            = ":" CmdName "(" ( Name | Token ) <~~ pushg([pop()]) ~~> { "," ( Name | Token ) <~~ pushg(append(popg(), pop())) ~~> } ")" ;
+            = ":" CmdName "(" ( Name | Token | Number ) <~~ pushg([pop()]) ~~> { "," ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> } ")" ;
 CmdName     <~~ push(up.in) ~~>
             = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
@@ -161,9 +166,9 @@ Code        = '~~' :skip(Nothing) { [ "~" ] AllButTilde } <~~ push(abnf.newToken
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
-AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII without line breaks (CR and LF)
-AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
+AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
+AsciiNoLb   = "\x20"..."\x7e" | "\t" ; # Readable ASCII without line breaks (CR and LF)
+AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
 
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
             = "0" | "1"..."9" { "0"..."9" } ;
