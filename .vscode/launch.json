@@ -95,6 +95,12 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/tlv-test_a.bnf", "-b", "tests/tlv-test.txt", "-v"]
         },
         {
+            "name": "Parser Script Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/parser-script-test_a.bnf", "-b", "tests/tlv-test.txt", "-v"]
+        },
+        {
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
