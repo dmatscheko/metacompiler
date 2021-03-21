@@ -41,6 +41,22 @@ type Rule struct {
 	CodeChilds *Rules // Only used when Operator == seq.Tag || seq.Command
 }
 
+// Type of a Range String. JS-Mapping: abnf.rangeType
+const (
+	RangeTypeRune int = iota
+	RangeTypeByte
+)
+
+// Encoding of a :number() in the target text. JS-Mapping: abnf.numberType
+const (
+	NumberTypeLittleEndian int = iota
+	NumberTypeBigEndian
+	NumberTypeBCD
+)
+
+// -----------------------------------------
+// Multiple rules:
+
 type Rules []*Rule
 
 // func (rules *Rules) AppendIfNotEmpty(elems ...*Rule) {
@@ -99,7 +115,7 @@ func (rule *Rule) Serialize() string {
 	if op == Token || op == Identifier || op == Production || op == Command {
 		res += fmt.Sprintf(", String: %q", rule.String)
 	}
-	if op == Identifier || op == Production || op == Number {
+	if op == Identifier || op == Production || op == Number || op == Range {
 		res += fmt.Sprintf(", Int: %d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {

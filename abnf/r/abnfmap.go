@@ -34,8 +34,9 @@ var AbnfFuncMap = map[string]Object{
 	"newAlternative": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
 	},
-	"newRange": func(CodeChilds *Rules, Pos int) *Rule {
-		return &Rule{Operator: Range, CodeChilds: CodeChilds, Pos: Pos}
+	// Int 0 == Rune-Comparison, Int 1 = Byte-Comparison
+	"newRange": func(CodeChilds *Rules, Int int, Pos int) *Rule {
+		return &Rule{Operator: Range, Int: Int, CodeChilds: CodeChilds, Pos: Pos}
 	},
 	"newTimes": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Times, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
@@ -79,5 +80,18 @@ var AbnfFuncMap = map[string]Object{
 		// Link types:
 		"Production": Production,
 		"Identifier": Identifier,
+	},
+
+	// Type of a Range String.
+	"rangeType": map[string]int{
+		"Rune": RangeTypeRune,
+		"Byte": RangeTypeByte,
+	},
+
+	// Encoding of a :number() in the target text.
+	"numberType": map[string]int{
+		"LittleEndian": NumberTypeLittleEndian,
+		"BigEndian":    NumberTypeBigEndian,
+		"BCD":          NumberTypeBCD,
 	},
 }

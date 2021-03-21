@@ -1,0 +1,12 @@
+"TLV"
+<~~ c.compile(c.asg) ~~>
+{
+
+# TODO: create ABNF-constants so things like abnf.numberType.LittleEndian can be used in ABNF (not only inside the JS context)
+
+:skip("") ;
+
+TLV = "\x00"..b"\xff" <~~ println(">" + up.in + "<") ~~> { :number(1, 0)("\x00"..b"\xff") <~~ println(">" + up.in + "<") ~~> } { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~> ;
+
+}
+TLV
