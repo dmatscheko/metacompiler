@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"14.gy/mec/abnf/r"
+	"github.com/dop251/goja"
 )
 
 // TODO: switch to "text/scanner".
@@ -47,7 +48,83 @@ type agrammarParser struct {
 
 	traceEnabled bool
 	traceCount   int
+
+	vm                   *goja.Runtime
+	codeCache            map[string]*goja.Program
+	compilerFuncMap      map[string]r.Object
+	preventDefaultOutput bool
+	stack                []r.Object // global stack.
 }
+
+// ----------------------------------------------------------------------------
+// Dynamic script rule for parser
+
+// Run executes the given string in the global context.
+func (gp *agrammarParser) Run(name, src string) (goja.Value, error) {
+	p := gp.codeCache[src]
+
+	// Cache precompiled data
+	if p == nil {
+		var err error
+		p, err = goja.Compile(name, src, true)
+		if err != nil {
+			return nil, err
+		}
+		gp.codeCache[src] = p
+	}
+
+	return gp.vm.RunProgram(p)
+}
+
+func (gp *agrammarParser) handleScriptRule(rule *r.Rule, localProductions *r.Rules, doSkipSpaces string, depth int) *r.Rule {
+	gp.compilerFuncMap["localAsg"] = localProductions // The local part of the abstract syntax graph.
+
+	if gp.traceEnabled {
+		// co.traceTop(tag, slot, depth, upStream)
+	}
+
+	code := (*rule.CodeChilds)[0].String
+
+	v, err := gp.Run("parserCommand@"+strconv.Itoa(rule.Pos), code)
+	if err != nil {
+		panic(err.Error() + "\nError was in " + PprintRuleFlat(rule, false, true))
+	}
+
+	res, ok := v.Export().(*r.Rule)
+
+	if gp.traceEnabled {
+		// gp.traceBottom(upStream)
+	}
+
+	if ok {
+		return res
+	}
+	return nil
+}
+
+func (gp *agrammarParser) initFuncMap() {
+	initFuncMapCommon(gp.vm, &gp.compilerFuncMap, gp.preventDefaultOutput)
+
+	gp.compilerFuncMap["getSrc"] = func() string { return gp.src }
+	gp.compilerFuncMap["setSrc"] = func(src string) { gp.src = src }
+	gp.compilerFuncMap["getSdx"] = func() int { return gp.sdx }
+	gp.compilerFuncMap["setSdx"] = func(sdx int) { gp.sdx = sdx }
+
+	gp.vm.Set("pop", func() interface{} {
+		if len(gp.stack) > 0 {
+			res := gp.stack[len(gp.stack)-1]
+			gp.stack = gp.stack[:len(gp.stack)-1]
+			return res
+		}
+		return nil
+	})
+
+	gp.vm.Set("push", func(v interface{}) {
+		gp.stack = append(gp.stack, v)
+	})
+}
+
+// ----------------------------------------------------------------------------
 
 func (gp *agrammarParser) skipSpaces(spaces string) {
 	for {
@@ -272,10 +349,11 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r
 				gp.sdx = wasSdx
 				return nil
 			} else if len(*newProductions) > 0 { // Some Commands like :skip() have to be handled inside the sequence.
-				doContinue := false
+				noResult := false
 				for _, prod := range *newProductions { // There should be only one command but just in case for future upgradeability.
 					// The local commands (inside an Expression).
 					if prod.Operator == r.Command {
+						noResult = true
 						switch prod.String {
 						case "skip":
 							// Resolve parameter constants.
@@ -289,10 +367,9 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r
 							// All other commands should have been handled already by apply() and so this should never happen.
 							panic("Unknown command :'" + prod.String + "()'")
 						}
-						doContinue = true
 					}
 				}
-				if doContinue { // TODO: If it not a command, add the result to the localProductions.
+				if noResult { // TODO: If it not a command, add the result to the localProductions.
 					continue outer
 				}
 			}
@@ -424,7 +501,7 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r
 			if child.Operator == r.Number {
 				continue
 			}
-			resRule := gp.apply(child, doSkipSpaces, depth)
+			resRule := gp.apply(child, doSkipSpaces, depth+1)
 			if resRule == nil || len(*resRule) != 1 {
 				panic("Parameter needs to result in exactly one result. Rule: " + PprintRuleOnly(child))
 			}
@@ -557,10 +634,24 @@ func (gp *agrammarParser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r
 			*localProductions = append(*localProductions, &r.Rule{Operator: r.Number, Int: n})
 			gp.sdx += byteCount
 		case "done": // To end the parsing successfully at this place.
+			// TODO: This does not work.
 			gp.sdx = len(gp.src)
-			// panic("NOT IMPLEMENTED")
+			panic("NOT IMPLEMENTED")
 		case "include":
 			panic("NOT IMPLEMENTED")
+		case "script": // TODO: Maybe move upwards like :skip().
+			resRule := gp.handleScriptRule(rule, localProductions, doSkipSpaces, depth) // TODO: localProductions is empty here...
+			if resRule != nil {
+				scriptProductions := gp.apply(resRule, doSkipSpaces, depth+1)
+				if scriptProductions == nil {
+					gp.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+					gp.sdx = wasSdx
+					return nil
+				}
+				if len(*scriptProductions) > 0 {
+					*localProductions = append(*localProductions, *scriptProductions...)
+				}
+			}
 		default:
 			panic("Unknown command :'" + rule.String + "()'")
 		}
@@ -634,6 +725,10 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 	gp.foundSdxList = make(map[int]int)
 	gp.useFoundList = useFoundList
 	gp.lastParsePosition = 0
+
+	gp.vm = goja.New()
+	gp.codeCache = map[string]*goja.Program{}
+	gp.initFuncMap()
 
 	gp.productions = r.GetProductions(gp.agrammar)
 

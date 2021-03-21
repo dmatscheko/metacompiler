@@ -66,20 +66,19 @@ func UnescapeTilde(s string) string {
 // Dynamic ASG compiler
 
 type compiler struct {
-	vm              *goja.Runtime
-	compilerFuncMap map[string]r.Object
-
 	asg      *r.Rules
 	aGrammar *r.Rules
+
+	vm                   *goja.Runtime
+	codeCache            map[string]*goja.Program
+	compilerFuncMap      map[string]r.Object
+	preventDefaultOutput bool
 
 	stack     []r.Object          // global stack.
 	ltrStream map[string]r.Object // global variables.
 
-	codeCache map[string]*goja.Program
-
-	traceEnabled         bool
-	traceCount           int
-	preventDefaultOutput bool
+	traceEnabled bool
+	traceCount   int
 }
 
 // JsonizeObject is ugly. Remove!
@@ -301,35 +300,56 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 	return map[string]r.Object{"in": ""}
 }
 
-func (co *compiler) initFuncMap() {
-	if co.preventDefaultOutput { // Script output disabled.
-		co.vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
-		co.vm.Set("println", func(a ...interface{}) (n int, err error) { return 0, nil })
-		co.vm.Set("printf", func(format string, a ...interface{}) (n int, err error) { return 0, nil })
+// This is used by parser and compiler.
+func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, preventDefaultOutput bool) {
+	if preventDefaultOutput { // Script output disabled.
+		vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
+		vm.Set("println", func(a ...interface{}) (n int, err error) { return 0, nil })
+		vm.Set("printf", func(format string, a ...interface{}) (n int, err error) { return 0, nil })
 	} else { // Script output enabled.
-		co.vm.Set("print", fmt.Print)
-		co.vm.Set("println", fmt.Println)
-		co.vm.Set("printf", fmt.Printf)
+		vm.Set("print", fmt.Print)
+		vm.Set("println", fmt.Println)
+		vm.Set("printf", fmt.Printf)
 	}
-	co.vm.Set("sprintf", fmt.Sprintf) // Sprintf is no output.
-	co.vm.Set("exit", os.Exit)
 
-	co.vm.Set("sleep", func(d time.Duration) { time.Sleep(d * time.Millisecond) })
+	vm.Set("sprintf", fmt.Sprintf) // Sprintf is no output.
+	vm.Set("exit", os.Exit)
 
-	co.vm.Set("append", func(t []interface{}, v ...interface{}) interface{} {
+	vm.Set("sleep", func(d time.Duration) { time.Sleep(d * time.Millisecond) })
+
+	vm.Set("append", func(t []interface{}, v ...interface{}) interface{} {
 		tmp := append(t, v...)
 		return &tmp
 	})
 
-	co.vm.Set("unescape", Unescape)
-	co.vm.Set("unescapeTilde", UnescapeTilde)
+	vm.Set("unescape", Unescape)
+	vm.Set("unescapeTilde", UnescapeTilde)
 
-	// co.vm.Set("writable", func(v interface{}) *interface{} {
+	// vm.Set("writable", func(v interface{}) *interface{} {
 	// 	return &v
 	// })
-	// co.vm.Set("nonwritable", func(v *interface{}) interface{} {
+	// vm.Set("nonwritable", func(v *interface{}) interface{} {
 	// 	return *v
 	// })
+
+	*compilerFuncMap = map[string]r.Object{
+		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
+			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
+			return productions
+		},
+		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
+			return compileASGInternal(asg, aGrammar, slot, traceEnabled, false)
+		},
+		"ABNFagrammar": AbnfAgrammar,
+	}
+	vm.Set("c", compilerFuncMap)
+	vm.Set("abnf", r.AbnfFuncMap)
+	vm.Set("llvm", llvmFuncMap)
+	r.AbnfFuncMap["sprintProductions"] = PprintRulesFlat
+}
+
+func (co *compiler) initFuncMap() {
+	initFuncMapCommon(co.vm, &co.compilerFuncMap, co.preventDefaultOutput)
 
 	co.vm.Set("ltr", co.ltrStream)
 
@@ -346,26 +366,12 @@ func (co *compiler) initFuncMap() {
 		co.stack = append(co.stack, v)
 	})
 
-	co.compilerFuncMap = map[string]r.Object{
-		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
-			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
-			return productions
-		},
-		"compile": func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
-			co.traceEnabled = traceEnabled
-			return co.compile(asg, slot, 0)
-		},
-		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
-			return compileASGInternal(asg, aGrammar, slot, traceEnabled, false)
-		},
-		"asg":          co.asg,
-		"agrammar":     co.aGrammar,
-		"ABNFagrammar": AbnfAgrammar,
+	co.compilerFuncMap["compile"] = func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
+		co.traceEnabled = traceEnabled
+		return co.compile(asg, slot, 0)
 	}
-	co.vm.Set("c", co.compilerFuncMap)
-	r.AbnfFuncMap["sprintProductions"] = PprintRulesFlat
-	co.vm.Set("abnf", r.AbnfFuncMap)
-	co.vm.Set("llvm", llvmFuncMap)
+	co.compilerFuncMap["asg"] = co.asg
+	co.compilerFuncMap["agrammar"] = co.aGrammar
 }
 
 func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) map[string]r.Object {
@@ -375,7 +381,6 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled 
 	co.preventDefaultOutput = preventDefaultOutput
 	co.asg = asg
 	co.aGrammar = aGrammar
-	co.codeCache = map[string]*goja.Program{}
 	co.ltrStream = map[string]r.Object{ // Basically like global variables.
 		"in":    "", // This is the parser input (the terminals).
 		"stack": &co.stack,
@@ -385,6 +390,7 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled 
 	}
 
 	co.vm = goja.New()
+	co.codeCache = map[string]*goja.Program{}
 	co.initFuncMap()
 
 	prolog := r.GetProlog(aGrammar)
