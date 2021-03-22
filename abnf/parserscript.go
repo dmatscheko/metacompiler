@@ -8,7 +8,7 @@ import (
 )
 
 // ----------------------------------------------------------------------------
-// Dynamic script rule for parser
+// Parser scripting subsystem (dynamic script rule for parser)
 
 type parserscript struct {
 	vm                   *goja.Runtime
