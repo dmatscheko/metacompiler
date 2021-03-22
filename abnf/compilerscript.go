@@ -12,7 +12,7 @@ import (
 // TODO: return an error to JS if the compile and parse functions there have an error.
 
 // ----------------------------------------------------------------------------
-// Dynamic ASG compiler scripting subsystem
+// ASG compiler scripting subsystem
 
 type compilerscript struct {
 	vm                   *goja.Runtime
@@ -21,7 +21,7 @@ type compilerscript struct {
 	preventDefaultOutput bool
 
 	LtrStream map[string]r.Object // Global variables (the local variables are in upstream).
-	Stack     []r.Object          // global stack.
+	Stack     []r.Object          // global stack (the local stack is in upstream.stack).
 
 	traceEnabled bool
 	traceCount   int

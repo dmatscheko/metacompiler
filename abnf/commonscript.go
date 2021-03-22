@@ -12,6 +12,9 @@ import (
 	"github.com/dop251/goja"
 )
 
+// ----------------------------------------------------------------------------
+// Scripting subsystem code for parser and compiler
+
 // Stripped down and slightly modified version of stconv.Unquote()
 func Unescape(s string) (string, error) {
 	// Is it trivial? Avoid allocation.

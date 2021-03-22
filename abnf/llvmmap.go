@@ -13,6 +13,9 @@ import (
 	"github.com/llir/llvm/ir/value"
 )
 
+// ----------------------------------------------------------------------------
+// Scripting subsystem mapping for LLVM IR
+
 //
 // See:
 // https://pkg.go.dev/github.com/llir/llvm/
