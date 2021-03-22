@@ -8,7 +8,7 @@ import (
 )
 
 // ----------------------------------------------------------------------------
-// Dynamic ASG compiler
+// ASG compiler
 
 type compiler struct {
 	cs *compilerscript

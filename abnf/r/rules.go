@@ -4,6 +4,9 @@ import (
 	"fmt"
 )
 
+// ----------------------------------------------------------------------------
+// Rule definition for parser and compiler
+
 type Object = interface{}
 type OperatorID int
 

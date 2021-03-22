@@ -1,5 +1,8 @@
 package r
 
+// ----------------------------------------------------------------------------
+// ABNF mapping for LLVM IR
+
 var AbnfFuncMap = map[string]Object{
 	"newToken": func(String string, Pos int) *Rule {
 		return &Rule{Operator: Token, String: String, Pos: Pos}
