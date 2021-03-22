@@ -2,205 +2,29 @@ package abnf
 
 import (
 	"fmt"
-	"os"
-	"regexp"
-	"strconv"
 	"strings"
-	"time"
-	"unicode/utf8"
 
 	"14.gy/mec/abnf/r"
-	"github.com/dop251/goja"
 )
-
-// TODO: return an error to JS if the compile and parse functions there have an error.
-
-// Stripped down and slightly modified version of stconv.Unquote()
-func Unescape(s string) (string, error) {
-	// Is it trivial? Avoid allocation.
-	if !strings.ContainsRune(s, '\\') {
-		if utf8.ValidString(s) {
-			return s, nil
-		}
-	}
-
-	var runeTmp [utf8.UTFMax]byte
-	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
-	for len(s) > 0 {
-		c, multibyte, ss, err := strconv.UnquoteChar(s, 0)
-		if err != nil {
-			return "", err
-		}
-		s = ss
-		if c < utf8.RuneSelf || !multibyte {
-			buf = append(buf, byte(c))
-		} else {
-			n := utf8.EncodeRune(runeTmp[:], c)
-			buf = append(buf, runeTmp[:n]...)
-		}
-	}
-	return string(buf), nil
-}
-
-func UnescapeTilde(s string) string {
-	// Is it trivial? Avoid allocation.
-	if !strings.ContainsRune(s, '\\') {
-		if utf8.ValidString(s) {
-			return s
-		}
-	}
-
-	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
-	for pos := 0; pos+1 < len(s); pos++ {
-		if s[pos] == '\\' && s[pos+1] == '~' {
-			buf = append(buf, s[:pos]...)
-			s = s[pos+1:]
-			pos = 0
-		}
-	}
-	buf = append(buf, s...)
-	return string(buf)
-}
 
 // ----------------------------------------------------------------------------
 // Dynamic ASG compiler
 
 type compiler struct {
-	asg      *r.Rules
-	aGrammar *r.Rules
-
-	vm                   *goja.Runtime
-	codeCache            map[string]*goja.Program
-	compilerFuncMap      map[string]r.Object
-	preventDefaultOutput bool
-
-	stack     []r.Object          // global stack.
-	ltrStream map[string]r.Object // global variables.
-
-	traceEnabled bool
-	traceCount   int
+	cs *compilerscript
 }
-
-// JsonizeObject is ugly. Remove!
-func (co *compiler) sprintStack(space string) string {
-	res := ""
-	for _, elem := range co.stack {
-		if s, ok := elem.(*string); ok {
-			res = res + space + jsonizeObject(*s) + "\n"
-		} else {
-			res = res + space + jsonizeObject(elem) + "\n"
-		}
-	}
-	return res
-}
-
-func (co *compiler) traceTop(tag *r.Rule, slot int, depth int, upStream map[string]r.Object) {
-	co.traceCount++
-	space := "  "
-
-	code := (*tag.CodeChilds)[slot].String
-
-	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", co.traceCount, "), ", PprintRuleOnly(tag), "\n")
-	removeSpace1 := regexp.MustCompile(`[ \t]+`)
-	code = removeSpace1.ReplaceAllString(code, " ")
-	removeSpace2 := regexp.MustCompile(`[\n\r]\s+`)
-	code = removeSpace2.ReplaceAllString(code, "\n")
-	code = strings.ReplaceAll(code, "\n", "\n"+space)
-
-	fmt.Print(space, "--\n", space, code, "\n")
-
-	fmt.Print(space, "---\n", space, ">>>>Before call:\n")
-	fmt.Print(space, ">>stack:\n", co.sprintStack(space), space, "--\n")
-	fmt.Print(space, ">>ltr: ", jsonizeObject(co.ltrStream), "\n", space, "--\n")
-	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n")
-	fmt.Print(space, "---\n", space, ">>>>Code output:\n")
-}
-
-func (co *compiler) traceBottom(upStream map[string]r.Object) {
-	space := "  "
-	fmt.Print(space, "---\n", space, ">>>>After call:\n")
-	fmt.Print(space, ">>stack:\n", co.sprintStack(space), space, "--\n")
-	fmt.Print(space, ">>ltr: ", jsonizeObject(co.ltrStream), "\n", space, "--\n")
-	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n", space, "--\n\n\n")
-}
-
-// Run executes the given string in the global context.
-func (co *compiler) Run(name, src string) (goja.Value, error) {
-	p := co.codeCache[src]
-
-	// Cache precompiled data
-	if p == nil {
-		var err error
-		p, err = goja.Compile(name, src, true)
-		if err != nil {
-			return nil, err
-		}
-		co.codeCache[src] = p
-	}
-
-	return co.vm.RunProgram(p)
-}
-
-func (co *compiler) handleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) { // => (changes upStream)
-	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number
-		return
-	}
-
-	co.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
-	co.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
-	// co.compilerFuncMap["Pos"] = tag.Pos
-	// co.compilerFuncMap["ID"] = tag.Int
-
-	co.vm.Set("pop", func() interface{} {
-		stack, ok := upStream["stack"].([]interface{})
-		if !ok {
-			return nil
-		}
-		if len(stack) > 0 {
-			res := stack[len(stack)-1]
-			upStream["stack"] = stack[:len(stack)-1]
-			return res
-		}
-		return nil
-	})
-
-	co.vm.Set("push", func(v interface{}) {
-		stack, ok := upStream["stack"].([]interface{})
-		if !ok {
-			stack = []interface{}{}
-		}
-		upStream["stack"] = append(stack, v)
-	})
-
-	if co.traceEnabled {
-		co.traceTop(tag, slot, depth, upStream)
-	}
-
-	code := (*tag.CodeChilds)[slot].String
-
-	_, err := co.Run(name, code)
-	if err != nil {
-		panic(err.Error() + "\nError was in " + PprintRuleFlat(tag, false, true))
-	}
-
-	if co.traceEnabled {
-		co.traceBottom(upStream)
-	}
-}
-
-// TODO: correct the wording:
 
 //
 //     OUT
 //      ^
 //      |
-//      C---.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
+//      C---.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of Tag Rules.)
 //      |    |
 //      ^    v
 //      *    |     (*) All upstream (up.*) values from returning 'compile()'s are combined.
 //     /|    |
 //    | | _  |
-//    T | |  |     (T) The text of a EBNF Terminal symbol (Token) gets returned and included into 'up.in'.
+//    T | |  |     (T) The text of an EBNF Terminal symbol (Token) gets returned and included into 'up.in'.
 //    | X |  |     (X) The script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
 //    | | O  |     (O) Other Rules are ignored.
 //    | | |  |
@@ -263,7 +87,7 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 				if arr, ok := upStreamMerged[k].([]interface{}); ok {
 					upStreamMerged[k] = append(arr, v)
 				} else {
-					panic("Array missing in upStreamMerged.")
+					panic("Array missing in upStreamMerged")
 				}
 			}
 		}
@@ -279,17 +103,17 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 
 	switch rule.Operator {
 	case r.Token:
-		if str, ok := co.ltrStream["in"].(string); ok {
-			co.ltrStream["in"] = str + rule.String
+		if str, ok := co.cs.LtrStream["in"].(string); ok {
+			co.cs.LtrStream["in"] = str + rule.String
 		} else {
-			panic("Variable 'ltr.in' must only contain strings.")
+			panic("Variable 'ltr.in' must only contain strings")
 		}
 		return map[string]r.Object{"in": rule.String, "stack": []interface{}{}}
 	case r.Tag:
 		// First collect all the data.
 		upStream := co.compile(rule.Childs, slot, depth+1) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.handleTagCode(rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, slot, depth)
+		co.cs.HandleTagCode(rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, slot, depth)
 		return upStream
 	default:
 		if len(*rule.Childs) > 0 {
@@ -300,120 +124,34 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 	return map[string]r.Object{"in": ""}
 }
 
-// This is used by parser and compiler.
-func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, preventDefaultOutput bool) {
-	if preventDefaultOutput { // Script output disabled.
-		vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
-		vm.Set("println", func(a ...interface{}) (n int, err error) { return 0, nil })
-		vm.Set("printf", func(format string, a ...interface{}) (n int, err error) { return 0, nil })
-	} else { // Script output enabled.
-		vm.Set("print", fmt.Print)
-		vm.Set("println", fmt.Println)
-		vm.Set("printf", fmt.Printf)
-	}
-
-	vm.Set("sprintf", fmt.Sprintf) // Sprintf is no output.
-	vm.Set("exit", os.Exit)
-
-	vm.Set("sleep", func(d time.Duration) { time.Sleep(d * time.Millisecond) })
-
-	vm.Set("append", func(t []interface{}, v ...interface{}) interface{} {
-		tmp := append(t, v...)
-		return &tmp
-	})
-
-	vm.Set("unescape", Unescape)
-	vm.Set("unescapeTilde", UnescapeTilde)
-
-	// vm.Set("writable", func(v interface{}) *interface{} {
-	// 	return &v
-	// })
-	// vm.Set("nonwritable", func(v *interface{}) interface{} {
-	// 	return *v
-	// })
-
-	*compilerFuncMap = map[string]r.Object{
-		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
-			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
-			return productions
-		},
-		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
-			return compileASGInternal(asg, aGrammar, slot, traceEnabled, false)
-		},
-		"ABNFagrammar": AbnfAgrammar,
-	}
-	vm.Set("c", compilerFuncMap)
-	vm.Set("abnf", r.AbnfFuncMap)
-	vm.Set("llvm", llvmFuncMap)
-	r.AbnfFuncMap["sprintProductions"] = PprintRulesFlat
-}
-
-func (co *compiler) initFuncMap() {
-	initFuncMapCommon(co.vm, &co.compilerFuncMap, co.preventDefaultOutput)
-
-	co.vm.Set("ltr", co.ltrStream)
-
-	co.vm.Set("popg", func() interface{} {
-		if len(co.stack) > 0 {
-			res := co.stack[len(co.stack)-1]
-			co.stack = co.stack[:len(co.stack)-1]
-			return res
-		}
-		return nil
-	})
-
-	co.vm.Set("pushg", func(v interface{}) {
-		co.stack = append(co.stack, v)
-	})
-
-	co.compilerFuncMap["compile"] = func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
-		co.traceEnabled = traceEnabled
-		return co.compile(asg, slot, 0)
-	}
-	co.compilerFuncMap["asg"] = co.asg
-	co.compilerFuncMap["agrammar"] = co.aGrammar
-}
-
 func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) map[string]r.Object {
 	var co compiler
-	co.traceEnabled = traceEnabled
-	co.traceCount = 0
-	co.preventDefaultOutput = preventDefaultOutput
-	co.asg = asg
-	co.aGrammar = aGrammar
-	co.ltrStream = map[string]r.Object{ // Basically like global variables.
-		"in":    "", // This is the parser input (the terminals).
-		"stack": &co.stack,
-	}
-	upStream := map[string]r.Object{ // Basically the local variables.
-		"in": "", // This is the parser input (the terminals).
-	}
-
-	co.vm = goja.New()
-	co.codeCache = map[string]*goja.Program{}
-	co.initFuncMap()
+	co.cs = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
 
 	prolog := r.GetProlog(aGrammar)
 
 	if prolog != nil {
-		co.handleTagCode(prolog, "prolog.code", upStream, asg, slot, 0)
+		upStream := map[string]r.Object{ // Basically the local variables.
+			"in": "", // This is the parser input (the terminals).
+		}
+		co.cs.HandleTagCode(prolog, "prolog.code", upStream, asg, slot, 0)
 	}
 
 	// Is called fom JS compile():
 	// co.compile(asg, slot)
 
-	return co.ltrStream
+	return co.cs.LtrStream
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
 // The aGrammar is only needed for its prolog code. The start rule is only needed for parsing.
 func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
-	defer func() {
-		if err := recover(); err != nil {
-			res = nil
-			e = fmt.Errorf("%s", err)
-		}
-	}()
+	// defer func() {
+	// 	if err := recover(); err != nil {
+	// 		res = nil
+	// 		e = fmt.Errorf("%s", err)
+	// 	}
+	// }()
 
 	resObj := compileASGInternal(asg, aGrammar, slot, traceEnabled, preventDefaultOutput)
 
