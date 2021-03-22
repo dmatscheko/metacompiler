@@ -1,0 +1,191 @@
+package abnf
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+
+	"14.gy/mec/abnf/r"
+	"github.com/dop251/goja"
+)
+
+// TODO: return an error to JS if the compile and parse functions there have an error.
+
+// ----------------------------------------------------------------------------
+// Dynamic ASG compiler scripting subsystem
+
+type compilerscript struct {
+	vm                   *goja.Runtime
+	codeCache            map[string]*goja.Program
+	compilerFuncMap      map[string]r.Object
+	preventDefaultOutput bool
+
+	LtrStream map[string]r.Object // Global variables (the local variables are in upstream).
+	Stack     []r.Object          // global stack.
+
+	traceEnabled bool
+	traceCount   int
+
+	asgReference      *r.Rules // Only for reference. Will only be used by compiler if it is passed into the compile() function.
+	aGrammarReference *r.Rules // Only for reference. Will not be used by compiler.
+
+	co *compiler
+}
+
+// JsonizeObject is ugly. Remove!
+func (cs *compilerscript) sprintStack(space string) string {
+	res := ""
+	for _, elem := range cs.Stack {
+		if s, ok := elem.(*string); ok {
+			res = res + space + jsonizeObject(*s) + "\n"
+		} else {
+			res = res + space + jsonizeObject(elem) + "\n"
+		}
+	}
+	return res
+}
+
+func (cs *compilerscript) traceTop(tag *r.Rule, slot int, depth int, upStream map[string]r.Object) {
+	cs.traceCount++
+	space := "  "
+
+	code := (*tag.CodeChilds)[slot].String
+
+	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", cs.traceCount, "), ", PprintRuleOnly(tag), "\n")
+	removeSpace1 := regexp.MustCompile(`[ \t]+`)
+	code = removeSpace1.ReplaceAllString(code, " ")
+	removeSpace2 := regexp.MustCompile(`[\n\r]\s+`)
+	code = removeSpace2.ReplaceAllString(code, "\n")
+	code = strings.ReplaceAll(code, "\n", "\n"+space)
+
+	fmt.Print(space, "--\n", space, code, "\n")
+
+	fmt.Print(space, "---\n", space, ">>>>Before call:\n")
+	fmt.Print(space, ">>stack:\n", cs.sprintStack(space), space, "--\n")
+	fmt.Print(space, ">>ltr: ", jsonizeObject(cs.LtrStream), "\n", space, "--\n")
+	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n")
+	fmt.Print(space, "---\n", space, ">>>>Code output:\n")
+}
+
+func (cs *compilerscript) traceBottom(upStream map[string]r.Object) {
+	space := "  "
+	fmt.Print(space, "---\n", space, ">>>>After call:\n")
+	fmt.Print(space, ">>stack:\n", cs.sprintStack(space), space, "--\n")
+	fmt.Print(space, ">>ltr: ", jsonizeObject(cs.LtrStream), "\n", space, "--\n")
+	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n", space, "--\n\n\n")
+}
+
+// Run executes the given string in the global context.
+func (cs *compilerscript) Run(name, src string) (goja.Value, error) {
+	p := cs.codeCache[src]
+
+	// Cache precompiled data
+	if p == nil {
+		var err error
+		p, err = goja.Compile(name, src, true)
+		if err != nil {
+			return nil, err
+		}
+		cs.codeCache[src] = p
+	}
+
+	return cs.vm.RunProgram(p)
+}
+
+func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) { // => (changes upStream)
+	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number
+		return
+	}
+
+	cs.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables. // TODO: should the upstream be changable by the JS? Otherwise remove the &.
+	cs.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
+	// co.compilerFuncMap["Pos"] = tag.Pos
+	// co.compilerFuncMap["ID"] = tag.Int
+
+	cs.vm.Set("pop", func() interface{} {
+		stack, ok := upStream["stack"].([]interface{})
+		if !ok {
+			return nil
+		}
+		if len(stack) > 0 {
+			res := stack[len(stack)-1]
+			upStream["stack"] = stack[:len(stack)-1]
+			return res
+		}
+		return nil
+	})
+
+	cs.vm.Set("push", func(v interface{}) {
+		stack, ok := upStream["stack"].([]interface{})
+		if !ok {
+			stack = []interface{}{}
+		}
+		upStream["stack"] = append(stack, v)
+	})
+
+	if cs.traceEnabled {
+		cs.traceTop(tag, slot, depth, upStream)
+	}
+
+	code := (*tag.CodeChilds)[slot].String
+
+	_, err := cs.Run(name, code)
+	if err != nil {
+		panic(err.Error() + "\nError was in " + PprintRuleFlat(tag, false, true))
+	}
+
+	if cs.traceEnabled {
+		cs.traceBottom(upStream)
+	}
+}
+
+func (cs *compilerscript) initFuncMap() {
+	initFuncMapCommon(cs.vm, &cs.compilerFuncMap, cs.preventDefaultOutput)
+
+	cs.vm.Set("popg", func() interface{} {
+		if len(cs.Stack) > 0 {
+			res := cs.Stack[len(cs.Stack)-1]
+			cs.Stack = cs.Stack[:len(cs.Stack)-1]
+			return res
+		}
+		return nil
+	})
+
+	cs.vm.Set("pushg", func(v interface{}) {
+		cs.Stack = append(cs.Stack, v)
+	})
+
+	cs.vm.Set("ltr", cs.LtrStream)
+
+	cs.compilerFuncMap["compile"] = func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
+		cs.traceEnabled = traceEnabled
+		return cs.co.compile(asg, slot, 0)
+	}
+
+	cs.compilerFuncMap["asg"] = cs.asgReference           // Just for reference.
+	cs.compilerFuncMap["agrammar"] = cs.aGrammarReference // Just for reference.
+}
+
+func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) *compilerscript {
+	var cs compilerscript
+
+	cs.co = co
+
+	cs.asgReference = asg
+	cs.aGrammarReference = aGrammar
+
+	cs.traceEnabled = traceEnabled
+	cs.traceCount = 0
+	cs.preventDefaultOutput = preventDefaultOutput
+
+	cs.LtrStream = map[string]r.Object{ // Basically like global variables.
+		"in":    "", // This is the parser input (the terminals).
+		"stack": &cs.Stack,
+	}
+
+	cs.vm = goja.New()
+	cs.codeCache = map[string]*goja.Program{}
+	cs.initFuncMap()
+
+	return &cs
+}
