@@ -81,11 +81,13 @@ Whitespace  = " \t\r\n" ;
 
 :startScript(~~
 
-var names = [];
+var names = []
 function getNameIdx(name) {
-    var pos = names.indexOf(name);
-    if (pos != -1) { return pos };
-    return names.push(name)-1;
+    var pos = names.indexOf(name)
+    if (pos != -1) {
+        return pos
+    }
+    return names.push(name)-1
 }
 
 function resolveNameIdx(productions) {
@@ -106,9 +108,13 @@ function resolveNameIdx(productions) {
 	}
 }
 
-var prodsPos = {};
+var prodsPos = {}
 var lastPos = 0
 function buildProduction(prodName, prodTag, prodExpression) {
+    if (prodsPos[prodName.Int] != undefined) {
+        println("Error: Rule " + prodName.String + " is defined multiple times.")
+        exit(0)
+    }
     prodsPos[prodName.Int] = lastPos++
     if (prodTag != undefined) {
         prodTag.Childs = simplifyToArr(prodExpression)
