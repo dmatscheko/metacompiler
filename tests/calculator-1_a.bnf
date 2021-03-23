@@ -1,10 +1,5 @@
-"Tiny calculator"
-<~~
-c.compile(c.asg)
-println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)
-~~>
+:title("Tiny calculator") ;
 
-{
 
 Expression  =
     Term
@@ -49,5 +44,9 @@ Factor      =
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
 
-}
-Expression
+
+:startRule(Expression) ;
+:startScript(~~
+c.compile(c.asg)
+println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)
+~~) ;

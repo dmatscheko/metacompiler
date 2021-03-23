@@ -1,11 +1,12 @@
-"EBNF of EBNF"
-{
+:title("EBNF of EBNF") ;
+:startRule(EBNF) ;
+
 
 # This is a parser command that sets the possible white space.
 :skip(Whitespace) ;
 
 # This is the start rule.
-EBNF        = [ Title ] "{" { Production | LineCommand | Comment } "}" [ Start ] [ Description ] ;
+EBNF        = { Production | LineCommand | Comment } ;
 
 Production  = Name "=" [ Expression ] ";" ;
 
@@ -21,9 +22,6 @@ Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
 Times       = Number [ "..." ( Number | "" ) ] Group ;
 
-Start       = Name ;
-Title       = Token ;
-Description = Token ;
 Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
 LineCommand = Command ";" ;
@@ -46,6 +44,3 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
 
 Nothing     = "" ;
 Whitespace  = " \t\r\n" ;
-
-}
-EBNF

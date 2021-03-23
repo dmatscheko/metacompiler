@@ -26,10 +26,9 @@ import (
 // agrammar parser
 
 type parser struct {
-	Src         string
-	Sdx         int
-	agrammar    *r.Rules
-	productions *r.Rules
+	Src      string
+	Sdx      int
+	agrammar *r.Rules
 
 	blockList    map[int]bool
 	useBlockList bool
@@ -172,7 +171,7 @@ func (pa *parser) resolveRulesToToken(rules *r.Rules) *r.Rules {
 		case r.Token:
 			*newProductions = append(*newProductions, rule)
 		case r.Identifier:
-			newProductions = r.AppendArrayOfPossibleSequences(newProductions, pa.resolveRulesToToken((*pa.productions)[rule.Int].Childs))
+			newProductions = r.AppendArrayOfPossibleSequences(newProductions, pa.resolveRulesToToken((*pa.agrammar)[rule.Int].Childs))
 		default:
 			if rule.Childs != nil && len(*rule.Childs) > 0 {
 				newProductions = r.AppendArrayOfPossibleSequences(newProductions, pa.resolveRulesToToken(rule.Childs))
@@ -223,10 +222,11 @@ func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 }
 
 // The global commands (Production level).
+// TODO: Maybe remove used commands.
 func (pa *parser) applyCommand(rule *r.Rule) {
-	pa.resolveParameterToToken(rule.CodeChilds)
 	switch rule.String {
 	case "skip":
+		pa.resolveParameterToToken(rule.CodeChilds)
 		if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
 			pa.spaces = (*rule.CodeChilds)[0].String
 		} else {
@@ -238,8 +238,16 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 	case "number":
 		// :number(4, LE) would mean take 4 bytes from the input (gp.src), interpret them as little endian and create a Number from it. This means it should be usable in Times expressions and should allow the parsing of TLV-formats.
 		panic("NOT IMPLEMENTED")
+	case "title":
+		// TODO: Maybe use that information.
+	case "description":
+		// TODO: Maybe use that information.
+	case "startRule":
+		// This is used by ParseWithAgrammar().
+	case "startScript":
+		// This is used by ParseWithAgrammar().
 	default:
-		panic("Unknown command :'" + rule.String + "()'")
+		panic("Unknown initial line command :" + rule.String + "()")
 	}
 }
 
@@ -288,7 +296,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 							}
 						default:
 							// All other commands should have been handled already by apply() and so this should never happen.
-							panic("Unknown command :'" + prod.String + "()'")
+							panic("Unknown sequence command :" + prod.String + "()'")
 						}
 					}
 				}
@@ -470,7 +478,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 		newProductions := pa.applyAsSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos)
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
 	case r.Identifier: // This identifies another rule (and its index), it is basically a link: E.g. to the expression-rule which is at position 3: { "Identifier", "expression", 3 }
-		newProductions := pa.applyAsSequence((*pa.productions)[rule.Int].Childs, doSkipSpaces, depth+1, rule.Pos)
+		newProductions := pa.applyAsSequence((*pa.agrammar)[rule.Int].Childs, doSkipSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
 			pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
@@ -575,8 +583,16 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 					*localProductions = append(*localProductions, *scriptProductions...)
 				}
 			}
+		case "title":
+			// TODO: Maybe use that information.
+		case "description":
+			// TODO: Maybe use that information.
+		case "startRule":
+			// This is used by ParseWithAgrammar().
+		case "startScript":
+			// This is used by ParseWithAgrammar().
 		default:
-			panic("Unknown command :'" + rule.String + "()'")
+			panic("Unknown line command :" + rule.String + "()")
 		}
 	default: // r.Success || r.Error
 		panic(fmt.Sprintf("Invalid rule in apply() function: %s", PprintRuleOnly(rule)))
@@ -636,6 +652,12 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 		}
 	}()
 
+	startRule := r.GetStartRule(agrammar)
+	if startRule == nil || startRule.Int >= len(*agrammar) || startRule.Int < 0 {
+		// No valid start rule defined. Imeediately return but this is no error. The startScript() rule of the compiler has to do everything now.
+		return nil, nil
+	}
+
 	var pa parser
 	pa.agrammar = agrammar
 	pa.Src = srcCode
@@ -651,26 +673,16 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 
 	pa.ps = NewParserScript(&pa)
 
-	pa.productions = r.GetProductions(pa.agrammar)
-
 	pa.spaces = " \t\r\n" // TODO: Make this configurable via JS.
 
-	var newProductions *r.Rules
-	if !(pa.productions == nil || len(*pa.productions) <= 0) {
-		startRule := r.GetStartRule(pa.agrammar)
-		if startRule == nil || startRule.Int >= len(*pa.productions) || startRule.Int < 0 {
-			return nil, fmt.Errorf("No valid start rule defined")
+	for _, rule := range *pa.agrammar {
+		if rule.Operator == r.Command {
+			pa.applyCommand(rule)
 		}
-
-		for _, rule := range *pa.productions {
-			if rule.Operator == r.Command {
-				pa.applyCommand(rule)
-			}
-		}
-
-		// For the parsing, the start rule is necessary. For the compilation not.
-		newProductions = pa.apply((*pa.productions)[startRule.Int], pa.spaces, 0)
 	}
+
+	// For the parsing, the start rule is necessary. For the compilation not.
+	newProductions := pa.apply((*pa.agrammar)[startRule.Int], pa.spaces, 0)
 
 	// Check if the position is at EOF at end of parsing. There can be spaces left, but otherwise its an error:
 	pa.skipSpaces(pa.spaces)

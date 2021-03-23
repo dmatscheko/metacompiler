@@ -1,5 +1,7 @@
-"LLVM IR tests"
-<~~
+:title("LLVM IR tests") ;
+
+
+:startScript(~~
 
 println("LLVM IR tests:\n------------------------------------")
 
@@ -67,7 +69,4 @@ println(llvm.Callgraph(m))
 println("\nEVAL:\n------------------------------------")
 println(llvm.Eval(m, "test"))
  
-~~>
-{
-    # No rules
-}
+~~) ;

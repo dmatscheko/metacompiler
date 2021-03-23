@@ -124,23 +124,24 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 	return map[string]r.Object{"in": ""}
 }
 
-func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) map[string]r.Object {
+func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) interface{} {
 	var co compiler
 	co.cs = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
 
-	prolog := r.GetProlog(aGrammar)
+	prolog := r.GetStartScript(aGrammar)
 
+	var res interface{}
 	if prolog != nil {
 		upStream := map[string]r.Object{ // Basically the local variables.
 			"in": "", // This is the parser input (the terminals).
 		}
-		co.cs.HandleTagCode(prolog, "prolog.code", upStream, asg, slot, 0)
+		res = co.cs.HandleTagCode(prolog, "prolog.code", upStream, asg, slot, 0).Export()
 	}
 
 	// Is called fom JS compile():
 	// co.compile(asg, slot)
 
-	return co.cs.LtrStream
+	return res
 }
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
@@ -155,8 +156,8 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 
 	resObj := compileASGInternal(asg, aGrammar, slot, traceEnabled, preventDefaultOutput)
 
-	if resObj["agrammar"] != nil { // There should be a generated a-grammar in upstream
-		resultAGrammar, ok := resObj["agrammar"].([]interface{})
+	if resObj != nil { // There should be a generated a-grammar in upstream
+		resultAGrammar, ok := resObj.([]interface{})
 		if !ok {
 			return nil, nil
 		}

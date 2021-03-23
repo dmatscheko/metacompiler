@@ -1,7 +1,8 @@
-"Tiny C-ish language"
+:title("Tiny C-ish language") ;
 
-<~~sleep(50); c.compile(c.asg); sleep(50)~~>
-{
+:startRule(Program) ;
+:startScript(~~ c.compile(c.asg) ~~) ;
+
 
 :skip(Whitespace) ;
 
@@ -40,6 +41,3 @@ Whitespace  = " \t\r\n" ;
 
 # The first option(s) of an OR must not be the beginning of a later option. Otherwise only the first option would be found and success would be returned.
 # No option of a production can be equal to the production itself. This means that e.g. the production 'Test' must not have an option 'Test'.
-
-}
-Program
