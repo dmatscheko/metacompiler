@@ -5,19 +5,19 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Calculator",
+            "name": "Calculator 1",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1_a.bnf", "-b", "tests/calculator_formula.txt"]
         },
         {
-            "name": "Calculator (TRACE)",
+            "name": "Calculator 1 (TRACE)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1_a.bnf", "-b", "tests/calculator_formula.txt", "-vv4"]
         },
         {
-            "name": "Width first Calculator",
+            "name": "Calculator 2",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator-2_a.bnf", "-b", "tests/calculator_formula.txt"]

@@ -1,36 +1,38 @@
 :title("Parse and compile test") ;
+
+
 :startScript(~~
 
-// Lets build a new compiler directly from scratch:
+    // Lets build a new compiler directly from scratch:
 
-// For this we need an agrammar. This is the information, that the metacompiler needs to actually be a compiler.
+    // For this we need an agrammar. This is the information, that the metacompiler needs to actually be a compiler.
 
-// To create an agrammar, we need an ABNF:
-var ABNF = ":startScript(~\~ println('found me'); c.compile(c.asg) ~\~); :startRule(X); X = ( 'A' | 'B' | 'C' ) <~\~ println('and found the letter ' + up.in) ~\~>;"
+    // To create an agrammar, we need an ABNF:
+    var ABNF = ":startScript(~\~ println('found me'); c.compile(c.asg) ~\~); :startRule(X); X = ( 'A' | 'B' | 'C' ) <~\~ println('and found the letter ' + up.in) ~\~>;"
 
-// Now we parse the ABNF and create an ASG from it. We use c.ABNFagrammar as agrammar for this parse step, because we wrote our compiler definition in ABNF (the variable above), and the agrammar c.ABNFagrammar understands ABNF:
-var ASG = c.parse(c.ABNFagrammar, ABNF)
+    // Now we parse the ABNF and create an ASG from it. We use c.ABNFagrammar as agrammar for this parse step, because we wrote our compiler definition in ABNF (the variable above), and the agrammar c.ABNFagrammar understands ABNF:
+    var ASG = c.parse(c.ABNFagrammar, ABNF)
 
-// Lets print the resulting ASG:
-println("\nASG: " + abnf.serializeRules(ASG))
+    // Lets print the resulting ASG:
+    println("\nASG: " + abnf.serializeRules(ASG))
 
-// So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF.
-// The compile step of c.ABNFagrammar creates the agrammar and returns it:
-var myAgrammar = c.compileWithProlog(ASG, c.ABNFagrammar)
+    // So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF.
+    // The compile step of c.ABNFagrammar creates the agrammar and returns it:
+    var myAgrammar = c.compileWithProlog(ASG, c.ABNFagrammar)
 
-// Lets now print the resulting agrammar:
-println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
+    // Lets now print the resulting agrammar:
+    println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
 
-// We can now use our own agrammar to parse something new. We parse the letter B and again get an ASG from it:
-var myASG = c.parse(myAgrammar, "C")
+    // We can now use our own agrammar to parse something new. We parse the letter B and again get an ASG from it:
+    var myASG = c.parse(myAgrammar, "C")
 
-// Lets now print the resulting ASG:
-println("\nmyASG: " + abnf.serializeRules(myASG))
+    // Lets now print the resulting ASG:
+    println("\nmyASG: " + abnf.serializeRules(myASG))
 
-// And to see a result, we have to compile our new ASG myASG with our grammar myAgrammar:
-println("\nOutput:")
-c.compileWithProlog(myASG, myAgrammar)
+    // And to see a result, we have to compile our new ASG myASG with our grammar myAgrammar:
+    println("\nOutput:")
+    c.compileWithProlog(myASG, myAgrammar)
 
-// Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>
+    // Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>
 
 ~~) ;

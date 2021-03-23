@@ -113,16 +113,16 @@ func (rule *Rule) Serialize() string {
 	res := "&r.Rule{"
 
 	op := rule.Operator
-	res += fmt.Sprintf("Operator: r.%s", op.String())
+	res += fmt.Sprintf("Operator:r.%s", op.String())
 
 	if op == Token || op == Identifier || op == Production || op == Command {
-		res += fmt.Sprintf(", String: %q", rule.String)
+		res += fmt.Sprintf(", String:%q", rule.String)
 	}
 	if op == Identifier || op == Number || op == Range {
-		res += fmt.Sprintf(", Int: %d", rule.Int)
+		res += fmt.Sprintf(", Int:%d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
-		res += ", CodeChilds: &r.Rules{"
+		res += ", CodeChilds:&r.Rules{"
 		for i := range *rule.CodeChilds {
 			if i > 0 {
 				res += ", "
@@ -132,7 +132,7 @@ func (rule *Rule) Serialize() string {
 		res += "}"
 	}
 	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
-		res += ", Childs: &r.Rules{"
+		res += ", Childs:&r.Rules{"
 		for i := range *rule.Childs {
 			if i > 0 {
 				res += ", "
@@ -174,22 +174,45 @@ func (rule *Rule) ToString() string {
 	res := "Rule{"
 
 	op := rule.Operator
-	res += fmt.Sprintf("Operator: r.%s", op.String())
+	res += fmt.Sprintf("Operator:%s", op.String())
 
 	if op == Token || op == Identifier || op == Production || op == Command {
-		res += fmt.Sprintf(", String: %q", rule.String)
+		res += fmt.Sprintf(", String:%q", rule.String)
 	}
 	if op == Identifier || op == Number || op == Range {
-		res += fmt.Sprintf(", Int: %d", rule.Int)
+		res += fmt.Sprintf(", Int:%d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
-		res += ", CodeChilds: [...]"
+		res += ", CodeChilds:[...]"
 	}
 	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
-		res += ", Childs: [...]"
+		res += ", Childs:[...]"
 	}
 	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
-		panic("wrong rule type: " + op.String())
+		res += fmt.Sprintf(", String:%q", rule.String)
+		res += fmt.Sprintf(", Int:%d", rule.Int)
+		if rule.CodeChilds != nil {
+			res += ", CodeChilds:Rules{"
+			for i := range *rule.CodeChilds {
+				if i > 0 {
+					res += ", "
+				}
+				res += ((*rule.CodeChilds)[i]).ToString()
+			}
+			res += "}"
+		}
+		if rule.Childs != nil {
+			res += ", Childs:Rules{"
+			for i := range *rule.Childs {
+				if i > 0 {
+					res += ", "
+				}
+				res += ((*rule.Childs)[i]).ToString()
+			}
+			res += "}"
+		}
+		res += "}"
+		panic("wrong rule type: " + res)
 	}
 
 	// res += ", Pos: " + strconv.Itoa(rule.Pos)

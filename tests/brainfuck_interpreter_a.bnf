@@ -1,8 +1,9 @@
 :title("Brainfuck interpreter") ;
-:startRule(Brainfuck) ;
 
 
 # --- main rules
+
+:startRule(Brainfuck) ;
 
 Brainfuck = { Statement } ;
 Statement = Opcode | Lparen { Statement } Rparen ;
@@ -21,50 +22,52 @@ Rparen = ']'        <~~ pushg(rparen) ~~> ;
 
 
 :startScript(~~
-function check() {
-    if (data[dpos] == undefined) data[dpos] = 0
-}
 
-function next() {
-    dpos++
-}
-function prev() {
-    dpos--
-}
-function inc() {
-    check()
-    data[dpos]++
-}
-function dec() {
-    check()
-    data[dpos]--
-}
-function write() {
-    check()
-    printf("%c", data[dpos])
-}
-function read() {
-    data[dpos] = 42 // Here we could get a char from the command line.
-}
-function lparen() {
-    pushg(cpos)
-}
-function rparen() {
-    check()
-    if (data[dpos] == 0) { popg() } else { cpos = popg()-1 }
-}
+    function check() {
+        if (data[dpos] == undefined) data[dpos] = 0
+    }
 
-var data = []
-var dpos = 0
+    function next() {
+        dpos++
+    }
+    function prev() {
+        dpos--
+    }
+    function inc() {
+        check()
+        data[dpos]++
+    }
+    function dec() {
+        check()
+        data[dpos]--
+    }
+    function write() {
+        check()
+        printf("%c", data[dpos])
+    }
+    function read() {
+        data[dpos] = 42 // Here we could get a char from the command line.
+    }
+    function lparen() {
+        pushg(cpos)
+    }
+    function rparen() {
+        check()
+        if (data[dpos] == 0) { popg() } else { cpos = popg()-1 }
+    }
 
-// println("ASG: "+c.asg.Serialize())
-c.compile(c.asg)
+    var data = []
+    var dpos = 0
 
-var cpos = 0
-while (ltr.stack[cpos] != undefined) {
-    // println(ltr.stack[cpos].name)
-    // sleep(20)
-    ltr.stack[cpos]()
-    cpos++
-}
+    // println("ASG: "+c.asg.Serialize())
+    c.compile(c.asg)
+
+    var cpos = 0
+    while (ltr.stack[cpos] != undefined) {
+        // println(ltr.stack[cpos].name)
+        // sleep(20)
+        ltr.stack[cpos]()
+        cpos++
+    }
+
 ~~) ;

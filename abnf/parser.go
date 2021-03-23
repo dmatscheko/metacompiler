@@ -339,7 +339,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			return nil
 		}
 
-		if rule.Int == 0 { // Rune range for unicode. JS-Mapping: abnf.rangeType.Rune
+		if rule.Int == r.RangeTypeRune { // Rune range for unicode. JS-Mapping: abnf.rangeType.Rune
 
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 			if ch == utf8.RuneError {
@@ -369,7 +369,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 				*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
 			}
 
-		} else if rule.Int == 1 { // Byte range for binary decoding. JS-Mapping: abnf.rangeType.Byte
+		} else if rule.Int == r.RangeTypeByte { // Byte range for binary decoding. JS-Mapping: abnf.rangeType.Byte
 
 			ch := pa.Src[pa.Sdx]
 			from := (*rule.CodeChilds)[0].String[0]
@@ -422,7 +422,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 		}
 	case r.Times:
 		// Copy first! Otherwise it will override all other positions too.
-		cloneRule := &r.Rule{CodeChilds: &r.Rules{}, Childs: rule.Childs}
+		cloneRule := &r.Rule{Operator: r.Times, CodeChilds: &r.Rules{}, Childs: rule.Childs}
 		// The CodeChilds-array will be modified, so copy each entry:
 		*cloneRule.CodeChilds = append(*cloneRule.CodeChilds, *rule.CodeChilds...)
 		// It's not very clean but just pretend, the clone is the original:
@@ -565,7 +565,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			*localProductions = append(*localProductions, &r.Rule{Operator: r.Number, Int: n})
 			pa.Sdx += byteCount
 		case "done": // To end the parsing successfully at this place.
-			// TODO: This does not work.
+			// TODO: This should be implemented better (everything should return).
 			pa.Sdx = len(pa.Src)
 			panic("NOT IMPLEMENTED")
 		case "include":
