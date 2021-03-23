@@ -83,27 +83,15 @@ Whitespace  = " \t\r\n" ;
     var names = []
     function getNameIdx(name) {
         var pos = names.indexOf(name)
-        if (pos != -1) {
-            return pos
-        }
-        return names.push(name)-1
+        if (pos != -1) return pos
+        return names.push(name) - 1
     }
-
     function resolveNameIdx(productions) {
         for (var i = 0; i < productions.length; i++) {
             var rule = productions[i]
-
-            if (rule.Childs != undefined && rule.Childs.length > 0) {
-                resolveNameIdx(rule.Childs)
-            }
-
-            if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) {
-                resolveNameIdx(rule.CodeChilds)
-            }
-
-            if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) {
-                rule.Int = prodsPos[rule.Int]
-            }
+            if (rule.Childs != undefined && rule.Childs.length > 0) resolveNameIdx(rule.Childs)
+            if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) resolveNameIdx(rule.CodeChilds)
+            if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) rule.Int = prodsPos[rule.Int]
         }
     }
 
@@ -132,9 +120,7 @@ Whitespace  = " \t\r\n" ;
     function simplifyArr(rules) {
         if (rules.length == 1) {
             var op = rules[0].Operator
-            if ( op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1) ) {
-                return simplifyArr(rules[0].Childs)
-            }
+            if (op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1)) return simplifyArr(rules[0].Childs)
         }
         return rules
     }
@@ -146,32 +132,19 @@ Whitespace  = " \t\r\n" ;
 
     // Groups with only one child can be broken apart as long as down there is an unbreakable rule. Try to find one.
     function trySimplifyDown(rule) {
-        if (rule.Childs == undefined) {
-            return rule
-        }
+        if (rule.Childs == undefined) return rule
         var op = rule.Operator
-        if (rule.Childs.length == 1) {
-            if (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or) {
-                return trySimplifyDown(rule.Childs[0])
-            }
-        }
-        if (op == abnf.oid.Sequence) {
-            return undefined
-        } else {
-            return rule
-        }
+        if ((rule.Childs.length == 1) && (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or)) return trySimplifyDown(rule.Childs[0])
+        if (op == abnf.oid.Sequence) return undefined
+        return rule
     }
 
     function simplify(rule) {
         var ruleDown = trySimplifyDown(rule)
-        if (ruleDown != undefined) {
-            return ruleDown
-        }
+        if (ruleDown != undefined) return ruleDown
         if (rule.Childs.length == 1) { // Breaking up abnf.oid.Group did not work. Getting down only with Sequence and Or.
             var op = rule.Operator
-            if (op == abnf.oid.Sequence || op == abnf.oid.Or) {
-                return simplify(rule.Childs[0])
-            }
+            if (op == abnf.oid.Sequence || op == abnf.oid.Or) return simplify(rule.Childs[0])
         }
         return rule
     }
@@ -181,7 +154,7 @@ Whitespace  = " \t\r\n" ;
     resolveNameIdx(rules)
 
     // To show the initial a-grammar:
-    print("   => Rules: "+abnf.serializeRules(rules)+"\n\n")
+    println("=> Rules: " + abnf.serializeRules(rules))
 
     // To return the generated a-grammar to the next parser:
     rules

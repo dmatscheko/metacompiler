@@ -44,7 +44,7 @@ Factor      =
         ")"
     )
     |
-    Number                 <~~push(parseFloat(up.in))~~>
+    Number                  <~~push(parseFloat(up.in))~~>
     ;
 
 Number      = ( "0" | Nonzero { "0" | Nonzero } )
