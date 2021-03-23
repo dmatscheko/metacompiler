@@ -1,10 +1,9 @@
 :title("Parser script Test") ;
 
-:startRule(TEST) ;
-:startScript(~~ eval('println("I am the compiler before compiling (inside an eval() because it is possible)\\n")'); c.compile(c.asg); println("\nI am the compiler after compiling") ~~) ;
-
 # TODO: Create ABNF-constants so things like abnf.numberType.LittleEndian can be used in ABNF (not only inside the JS context).
 
+
+:startRule(TEST) ;
 :skip("") ;
 
 # TLV     =
@@ -40,3 +39,10 @@ TEST    =
         { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~>
 
         ;
+
+
+:startScript(~~
+    eval('println("I am the compiler before compiling (inside an eval() because it is possible)\\n")');
+    c.compile(c.asg)
+    println("\nI am the compiler after compiling")
+~~) ;

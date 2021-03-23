@@ -1,14 +1,15 @@
 :title("Infinite Loop") ;
 
 
+:startRule(TestA) ;
+
 TestA       =
     TestA
     "A"
     ;
 
 
-:startRule(TestA) ;
 :startScript(~~
-c.compile(c.asg)
-println("Done")
+    c.compile(c.asg)
+    println("Done")
 ~~) ;

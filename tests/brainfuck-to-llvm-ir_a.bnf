@@ -1,116 +1,9 @@
 :title("Brainfuck to LLVM IR compiler") ;
+
+
+# --- main rules
+
 :startRule(Brainfuck) ;
-
-:startScript(~~
-
-// Compile with:
-// clang test.ll
-
-// Create types.
-var i8 = llvm.types.I8
-var i8x4096 = llvm.types.NewArray(4096, i8)
-var i32 = llvm.types.I32
-
-// Create constants.
-var zeroi8 = llvm.constant.NewInt(i8, 0)
-var zero = llvm.constant.NewInt(i32, 0)
-var one = llvm.constant.NewInt(i32, 1)
-
-// Create a new LLVM IR module.
-var m = llvm.ir.NewModule()
-
-// Define external functions.
-var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i8))
-var extGetchar = m.NewFunc("getchar", i8)
-
-// int main() { ... }
-var main = m.NewFunc("main", i32)
-
-// Define blocks.
-var blockInit = main.NewBlock("init")
-var blockCode = main.NewBlock("code")
-
-//    "declare"()
-//    byte[4096] dataPtr = [0, 0, ...]
-var dataPtr = blockInit.NewAlloca(i8x4096)
-blockInit.NewStore(llvm.constant.NewZeroInitializer(i8x4096), dataPtr)
-//    int dposPtr = 4096
-var dposPtr = blockInit.NewAlloca(i32)
-blockInit.NewStore(llvm.constant.NewInt(i32, 0), dposPtr)
-//    jump("code")
-blockInit.NewBr(blockCode)
-
-// Before the block "code" below adds its ret(0), let the compiler-pass add the instructions:
-// A counter for the code blocks created by compile (just to name them nicely).
-var blockCount = 0
-// Compile the brainfuck instructions.
-c.compile(c.asg)
-
-
-//    "code"
-//    exit(0)
-blockCode.NewRet(zero)
-
-
-function next() {
-    // dpos++
-    var dposAdd = blockCode.NewAdd(blockCode.NewLoad(i32, dposPtr), one)
-    blockCode.NewStore(dposAdd, dposPtr)
-}
-function prev() {
-    // dpos--
-    var dposSub = blockCode.NewSub(blockCode.NewLoad(i32, dposPtr), one)
-    blockCode.NewStore(dposSub, dposPtr)
-}
-function inc() {
-    // data[dpos]++
-    var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-    var elementAdd = blockCode.NewAdd(blockCode.NewLoad(i8, elementPtr), one)
-    blockCode.NewStore(elementAdd, elementPtr)
-}
-function dec() {
-    // data[dpos]--
-    var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-    var elementSub = blockCode.NewSub(blockCode.NewLoad(i8, elementPtr), one)
-    blockCode.NewStore(elementSub, elementPtr)
-}
-function write() {
-    // putchar(data[dpos])
-    var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-    blockCode.NewCall(extPutchar, blockCode.NewLoad(i8, elementPtr))
-}
-function read() {
-    // data[dpos] = getchar()
-    var char = blockCode.NewCall(extGetchar)
-    var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-    blockCode.NewStore(char, elementPtr)
-}
-function lparen() {
-    // pushg(IP)
-    var newBlockCode = main.NewBlock("code"+  ++blockCount)
-    blockCode.NewBr(newBlockCode)
-    blockCode = newBlockCode
-
-    pushg([blockCode, blockCount]);
-}
-function rparen() {
-    // if (data[dpos] == 0) { popg() } else { IP = popg()-1 }
-    var oldPos = popg()
-    var oldBlockCode = oldPos[0]
-    var oldBlockCount = oldPos[1]
-
-    var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-    var element = blockCode.NewLoad(i8, elementPtr)
-    var condition = blockCode.NewICmp(llvm.enum.IPredUGT, element, zeroi8)
-
-    var newBlockCode = main.NewBlock("code"+ oldBlockCount + "exit")
-    blockCode.NewCondBr(condition, oldBlockCode, newBlockCode)
-    blockCode = newBlockCode
-}
-
-println(m)
-
-~~) ;
 
 Brainfuck = { Statement } ;
 Statement = Opcode | Lparen { Statement } Rparen ;
@@ -124,3 +17,117 @@ Write = '.'         <~~ write() ~~> ;
 Read = ',' | '?'    <~~ read() ~~> ;
 Lparen = '['        <~~ lparen() ~~> ;
 Rparen = ']'        <~~ rparen() ~~> ;
+
+# ---
+
+
+:startScript(~~
+
+    // Compile output with:
+    // clang test.ll
+
+    // Create types.
+    var i8 = llvm.types.I8
+    var i8x4096 = llvm.types.NewArray(4096, i8)
+    var i32 = llvm.types.I32
+
+    // Create constants.
+    var zeroi8 = llvm.constant.NewInt(i8, 0)
+    var zero = llvm.constant.NewInt(i32, 0)
+    var one = llvm.constant.NewInt(i32, 1)
+
+    // Create a new LLVM IR module.
+    var m = llvm.ir.NewModule()
+
+    // Define external functions.
+    var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i8))
+    var extGetchar = m.NewFunc("getchar", i8)
+
+    // int main() { ... }
+    var main = m.NewFunc("main", i32)
+
+    // Define blocks.
+    var blockInit = main.NewBlock("init")
+    var blockCode = main.NewBlock("code")
+
+    //    "declare"()
+    //    byte[4096] dataPtr = [0, 0, ...]
+    var dataPtr = blockInit.NewAlloca(i8x4096)
+    blockInit.NewStore(llvm.constant.NewZeroInitializer(i8x4096), dataPtr)
+    //    int dposPtr = 4096
+    var dposPtr = blockInit.NewAlloca(i32)
+    blockInit.NewStore(llvm.constant.NewInt(i32, 0), dposPtr)
+    //    jump("code")
+    blockInit.NewBr(blockCode)
+
+    // Before the block "code" below adds its ret(0), let the compiler-pass add the instructions:
+    // A counter for the code blocks created by compile (just to name them nicely).
+    var blockCount = 0
+    // Compile the brainfuck instructions.
+    c.compile(c.asg)
+
+
+    //    "code"
+    //    exit(0)
+    blockCode.NewRet(zero)
+
+
+    function next() {
+        // dpos++
+        var dposAdd = blockCode.NewAdd(blockCode.NewLoad(i32, dposPtr), one)
+        blockCode.NewStore(dposAdd, dposPtr)
+    }
+    function prev() {
+        // dpos--
+        var dposSub = blockCode.NewSub(blockCode.NewLoad(i32, dposPtr), one)
+        blockCode.NewStore(dposSub, dposPtr)
+    }
+    function inc() {
+        // data[dpos]++
+        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
+        var elementAdd = blockCode.NewAdd(blockCode.NewLoad(i8, elementPtr), one)
+        blockCode.NewStore(elementAdd, elementPtr)
+    }
+    function dec() {
+        // data[dpos]--
+        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
+        var elementSub = blockCode.NewSub(blockCode.NewLoad(i8, elementPtr), one)
+        blockCode.NewStore(elementSub, elementPtr)
+    }
+    function write() {
+        // putchar(data[dpos])
+        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
+        blockCode.NewCall(extPutchar, blockCode.NewLoad(i8, elementPtr))
+    }
+    function read() {
+        // data[dpos] = getchar()
+        var char = blockCode.NewCall(extGetchar)
+        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
+        blockCode.NewStore(char, elementPtr)
+    }
+    function lparen() {
+        // pushg(IP)
+        var newBlockCode = main.NewBlock("code"+  ++blockCount)
+        blockCode.NewBr(newBlockCode)
+        blockCode = newBlockCode
+
+        pushg([blockCode, blockCount]);
+    }
+    function rparen() {
+        // if (data[dpos] == 0) { popg() } else { IP = popg()-1 }
+        var oldPos = popg()
+        var oldBlockCode = oldPos[0]
+        var oldBlockCount = oldPos[1]
+
+        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
+        var element = blockCode.NewLoad(i8, elementPtr)
+        var condition = blockCode.NewICmp(llvm.enum.IPredUGT, element, zeroi8)
+
+        var newBlockCode = main.NewBlock("code"+ oldBlockCount + "exit")
+        blockCode.NewCondBr(condition, oldBlockCode, newBlockCode)
+        blockCode = newBlockCode
+    }
+
+    println(m)
+
+~~) ;

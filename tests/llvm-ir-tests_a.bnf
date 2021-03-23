@@ -3,70 +3,70 @@
 
 :startScript(~~
 
-println("LLVM IR tests:\n------------------------------------")
+    println("LLVM IR tests:\n------------------------------------")
 
-// Create convenience types and constants.
-var i32 = llvm.types.I32
+    // Create convenience types and constants.
+    var i32 = llvm.types.I32
 
-// Create a new LLVM IR module.
-var m = llvm.ir.NewModule()
+    // Create a new LLVM IR module.
+    var m = llvm.ir.NewModule()
 
-// -----------------
+    // -----------------
 
-var zero = llvm.constant.NewInt(i32, 0)
-var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
-var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
+    var zero = llvm.constant.NewInt(i32, 0)
+    var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
+    var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
 
-// Create an external function declaration and append it to the module.
-//
-//    int abs(int x);
-var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
+    // Create an external function declaration and append it to the module.
+    //
+    //    int abs(int x);
+    var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
 
-// Create a global variable definition and append it to the module.
-//
-//    int seed = 0;
-var seed = m.NewGlobalDef("seed", zero)
+    // Create a global variable definition and append it to the module.
+    //
+    //    int seed = 0;
+    var seed = m.NewGlobalDef("seed", zero)
 
-// Create a function definition and append it to the module.
-//
-//    int rand(void) { ... }
-var rand = m.NewFunc("rand", i32)
+    // Create a function definition and append it to the module.
+    //
+    //    int rand(void) { ... }
+    var rand = m.NewFunc("rand", i32)
 
-// Create an unnamed entry basic block and append it to the 'rand' function.
-var entry = rand.NewBlock("")
+    // Create an unnamed entry basic block and append it to the 'rand' function.
+    var entry = rand.NewBlock("")
 
-// Create instructions and append them to the entry basic block.
-var tmp1 = entry.NewLoad(i32, seed)
-var tmp2 = entry.NewMul(tmp1, a)
-var tmp3 = entry.NewAdd(tmp2, c)
-entry.NewStore(tmp3, seed)
-var tmp4 = entry.NewCall(abs, tmp3)
-entry.NewRet(tmp4)
+    // Create instructions and append them to the entry basic block.
+    var tmp1 = entry.NewLoad(i32, seed)
+    var tmp2 = entry.NewMul(tmp1, a)
+    var tmp3 = entry.NewAdd(tmp2, c)
+    entry.NewStore(tmp3, seed)
+    var tmp4 = entry.NewCall(abs, tmp3)
+    entry.NewRet(tmp4)
 
-// -----------------
+    // -----------------
 
-// int test() { ... }
-var test = m.NewFunc("test", i32)
+    // int test() { ... }
+    var test = m.NewFunc("test", i32)
 
-// Create an unnamed entry basic block and append it to the 'test' function.
-var entry = test.NewBlock("")
-// Create instructions and append them to the entry basic block.
+    // Create an unnamed entry basic block and append it to the 'test' function.
+    var entry = test.NewBlock("")
+    // Create instructions and append them to the entry basic block.
 
-// %3 = add 
-var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 7))
+    // %3 = add 
+    var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 7))
 
-// ret i32 %3
-entry.NewRet(tmp)
+    // ret i32 %3
+    entry.NewRet(tmp)
 
-// -----------------
+    // -----------------
 
-// Print the LLVM IR assembly of the module.
-println(m)
+    // Print the LLVM IR assembly of the module.
+    println(m)
 
-println("GRAPH:\n------------------------------------")
-println(llvm.Callgraph(m))
+    println("GRAPH:\n------------------------------------")
+    println(llvm.Callgraph(m))
 
-println("\nEVAL:\n------------------------------------")
-println(llvm.Eval(m, "test"))
+    println("\nEVAL:\n------------------------------------")
+    println(llvm.Eval(m, "test"))
  
 ~~) ;
