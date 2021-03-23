@@ -33,6 +33,6 @@
     println("\nOutput:")
     c.compileWithProlog(myASG, myAgrammar)
 
-    // Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>"
+    // Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>".
 
 ~~) ;

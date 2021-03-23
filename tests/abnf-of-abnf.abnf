@@ -3,7 +3,7 @@
 It allows to automatically create a compiler for everything described in ABNF (yes, that format).") ;
 
 // TODO: include does not work (is not implemented).
-// TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier)
+// TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier).
 
 
 // --- main rules
@@ -65,9 +65,9 @@ Code        = '~~' :skip(Nothing) { [ "~" ] AllButTilde } <~~ push(abnf.newToken
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes
-AsciiNoLb   = "\x20"..."\x7e" | "\t" ; // Readable ASCII without line breaks (CR and LF)
-AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped
+AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes.
+AsciiNoLb   = "\x20"..."\x7e" | "\t" ; // Readable ASCII without line breaks (CR and LF).
+AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
 
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
             = "0" | "1"..."9" { "0"..."9" } ;
