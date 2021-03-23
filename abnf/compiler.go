@@ -58,10 +58,10 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 					str1, ok1 := upStreamMerged[k].(string)
 					str2, ok2 := v.(string)
 					if !ok1 {
-						panic(fmt.Sprintf("Left variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, upStreamMerged[k], PprintRuleOnly(rule)))
+						panic(fmt.Sprintf("Left variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, upStreamMerged[k], rule.ToString()))
 					}
 					if !ok2 {
-						panic(fmt.Sprintf("Right variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, v, PprintRuleOnly(rule)))
+						panic(fmt.Sprintf("Right variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, v, rule.ToString()))
 					}
 					upStreamMerged[k] = str1 + str2
 					continue

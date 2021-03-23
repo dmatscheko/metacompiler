@@ -32,14 +32,13 @@ type compilerscript struct {
 	co *compiler
 }
 
-// JsonizeObject is ugly. Remove!
 func (cs *compilerscript) sprintStack(space string) string {
 	res := ""
 	for _, elem := range cs.Stack {
 		if s, ok := elem.(*string); ok {
-			res = res + space + jsonizeObject(*s) + "\n"
+			res += space + fmt.Sprintf("%v", *s) + "\n"
 		} else {
-			res = res + space + jsonizeObject(elem) + "\n"
+			res += space + fmt.Sprintf("%v", elem) + "\n"
 		}
 	}
 	return res
@@ -51,7 +50,7 @@ func (cs *compilerscript) traceTop(tag *r.Rule, slot int, depth int, upStream ma
 
 	code := (*tag.CodeChilds)[slot].String
 
-	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", cs.traceCount, "), ", PprintRuleOnly(tag), "\n")
+	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", cs.traceCount, "), ", tag.ToString(), "\n")
 	removeSpace1 := regexp.MustCompile(`[ \t]+`)
 	code = removeSpace1.ReplaceAllString(code, " ")
 	removeSpace2 := regexp.MustCompile(`[\n\r]\s+`)
@@ -62,8 +61,8 @@ func (cs *compilerscript) traceTop(tag *r.Rule, slot int, depth int, upStream ma
 
 	fmt.Print(space, "---\n", space, ">>>>Before call:\n")
 	fmt.Print(space, ">>stack:\n", cs.sprintStack(space), space, "--\n")
-	fmt.Print(space, ">>ltr: ", jsonizeObject(cs.LtrStream), "\n", space, "--\n")
-	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n")
+	fmt.Print(space, ">>ltr: ", fmt.Sprintf("%v", cs.LtrStream), "\n", space, "--\n")
+	fmt.Print(space, ">>up: ", fmt.Sprintf("%v", upStream), "\n")
 	fmt.Print(space, "---\n", space, ">>>>Code output:\n")
 }
 
@@ -71,8 +70,8 @@ func (cs *compilerscript) traceBottom(upStream map[string]r.Object) {
 	space := "  "
 	fmt.Print(space, "---\n", space, ">>>>After call:\n")
 	fmt.Print(space, ">>stack:\n", cs.sprintStack(space), space, "--\n")
-	fmt.Print(space, ">>ltr: ", jsonizeObject(cs.LtrStream), "\n", space, "--\n")
-	fmt.Print(space, ">>up: ", jsonizeObject(upStream), "\n", space, "--\n\n\n")
+	fmt.Print(space, ">>ltr: ", fmt.Sprintf("%v", cs.LtrStream), "\n", space, "--\n")
+	fmt.Print(space, ">>up: ", fmt.Sprintf("%v", upStream), "\n", space, "--\n\n\n")
 }
 
 // Run executes the given string in the global context.
@@ -131,7 +130,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 
 	v, err := cs.Run(name, code)
 	if err != nil {
-		panic(err.Error() + "\nError was in " + PprintRuleFlat(tag, false, true))
+		panic(err.Error() + "\nError was in " + tag.ToString() + ", Code: '" + code + "'")
 	}
 
 	if cs.traceEnabled {

@@ -107,5 +107,4 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 	vm.Set("c", compilerFuncMap)
 	vm.Set("abnf", r.AbnfFuncMap)
 	vm.Set("llvm", llvmFuncMap)
-	r.AbnfFuncMap["sprintProductions"] = PprintRulesFlat
 }

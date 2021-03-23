@@ -144,9 +144,6 @@ func (rule *Rule) Serialize() string {
 	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
 		panic("wrong rule type: " + op.String())
 	}
-	// if op == Tag {
-	// 	res += ", ID: " + strconv.Itoa(rule.ID)
-	// }
 
 	// res += ", Pos: " + strconv.Itoa(rule.Pos)
 
@@ -159,6 +156,53 @@ func (rules *Rules) Serialize() string {
 		return "<nil>"
 	}
 	res := "&r.Rules{"
+	for i := range *rules {
+		r := (*rules)[i]
+		if i > 0 {
+			res += ", "
+		}
+		res += r.Serialize()
+	}
+	res += "}"
+	return res
+}
+
+func (rule *Rule) ToString() string {
+	if rule == nil {
+		return "<nil>"
+	}
+	res := "Rule{"
+
+	op := rule.Operator
+	res += fmt.Sprintf("Operator: r.%s", op.String())
+
+	if op == Token || op == Identifier || op == Production || op == Command {
+		res += fmt.Sprintf(", String: %q", rule.String)
+	}
+	if op == Identifier || op == Number || op == Range {
+		res += fmt.Sprintf(", Int: %d", rule.Int)
+	}
+	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
+		res += ", CodeChilds: [...]"
+	}
+	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+		res += ", Childs: [...]"
+	}
+	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+		panic("wrong rule type: " + op.String())
+	}
+
+	// res += ", Pos: " + strconv.Itoa(rule.Pos)
+
+	res += "}"
+	return res
+}
+
+func (rules *Rules) ToString() string {
+	if rules == nil {
+		return "<nil>"
+	}
+	res := "[]{"
 	for i := range *rules {
 		r := (*rules)[i]
 		if i > 0 {
@@ -187,8 +231,7 @@ func GetStartRule(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
 	}
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
+	for _, rule := range *aGrammar {
 		if rule.Operator == Command && rule.String == "startRule" {
 			return (*rule.CodeChilds)[0]
 		}
@@ -200,8 +243,7 @@ func GetStartScript(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
 	}
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
+	for _, rule := range *aGrammar {
 		if rule.Operator == Command && rule.String == "startScript" {
 			return &Rule{Operator: Tag, CodeChilds: rule.CodeChilds} // Convert to something Tag-like.
 		}
@@ -213,12 +255,9 @@ func GetTitle(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
 	}
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
-		if rule.Operator == Sequence {
-			return nil
-		} else if rule.Operator == Token {
-			return rule
+	for _, rule := range *aGrammar {
+		if rule.Operator == Command && rule.String == "title" {
+			return (*rule.CodeChilds)[0]
 		}
 	}
 	return nil
@@ -228,15 +267,9 @@ func GetDescription(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
 	}
-	afterProductions := false
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
-		if rule.Operator == Sequence {
-			afterProductions = true
-		} else if rule.Operator == Token {
-			if afterProductions {
-				return rule
-			}
+	for _, rule := range *aGrammar {
+		if rule.Operator == Command && rule.String == "description" {
+			return (*rule.CodeChilds)[0]
 		}
 	}
 	return nil
