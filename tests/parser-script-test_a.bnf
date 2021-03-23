@@ -1,7 +1,7 @@
 :title("Parser script Test") ;
 
 :startRule(TEST) ;
-:startScript(~~ c.compile(c.asg) ~~) ;
+:startScript(~~ eval('println("I am the compiler before compiling (inside an eval() because it is possible)\\n")'); c.compile(c.asg); println("\nI am the compiler after compiling") ~~) ;
 
 # TODO: Create ABNF-constants so things like abnf.numberType.LittleEndian can be used in ABNF (not only inside the JS context).
 
@@ -31,9 +31,9 @@ TEST    =
 
         "\x00"..b"\xff"
 
-        :script(~~ println(c.getSdx()); c.setSdx(50) ~~)
+        :script(~~ println("I am the parser at position " + c.getSdx()); c.setSdx(50) ~~)
 
-        { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~>
+        { "\x00"..b"\xff" } <~~ println(">I am the compiler during compiling and just found this: " + up.in + "<") ~~>
 
         :script(~~ c.setSdx(2); abnf.newRepetition([abnf.newRange([abnf.newToken("0", 0), abnf.newToken("9", 0)], abnf.rangeType.Byte, 0)], 0) ~~)
 
