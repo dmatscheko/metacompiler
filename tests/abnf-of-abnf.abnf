@@ -2,20 +2,20 @@
 :description("This ABNF contains the grammatic and semantic information for annotated EBNF.
 It allows to automatically create a compiler for everything described in ABNF (yes, that format).") ;
 
-# TODO: include does not work (is not implemented).
-# TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier)
+// TODO: include does not work (is not implemented).
+// TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier)
 
 
-# --- main rules
+// --- main rules
 
 :startRule(ABNF) ;
-# This is a parser command that sets the possible white space.
+// This is a parser command that sets the possible white space.
 :skip(Whitespace) ;
 
-# This is the start rule.
+// This is the start rule.
 ABNF        = { Production | LineCommand | Comment } ;
 
-# Todo: Move buildProduction() outside of Optional clause. Otherwise it is a bug when nothing is given after "=" which is a valid Production.
+// TODO: Move buildProduction() outside of Optional clause. Otherwise it is a bug when nothing is given after "=" which is a valid Production.
 Production  = Name <~~ pushg(pop()) ~~> [ Tag <~~ ltr.prodTag=pop() ~~> ] "=" [ Expression <~~ pushg(buildProduction(popg(), ltr.prodTag, pop())); ltr.prodTag=undefined ~~> ] ";" ;
 
 Expression  = Alternative ;
@@ -39,7 +39,7 @@ Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos
 Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
 Times       = CmdNumber <~~ pushg([pop()]) ~~> [ "..." ( CmdNumber | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
 
-Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+Comment     = "//" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
 Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" ( Name | Token ) <~~ pushg([pop()]) ~~> { "," ( Name | Token ) <~~ pushg(append(popg(), pop())) ~~> } ">" ;
@@ -65,9 +65,9 @@ Code        = '~~' :skip(Nothing) { [ "~" ] AllButTilde } <~~ push(abnf.newToken
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
-AsciiNoLb   = "\x20"..."\x7e" | "\t" ; # Readable ASCII without line breaks (CR and LF)
-AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
+AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes
+AsciiNoLb   = "\x20"..."\x7e" | "\t" ; // Readable ASCII without line breaks (CR and LF)
+AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped
 
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
             = "0" | "1"..."9" { "0"..."9" } ;
@@ -75,28 +75,28 @@ Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
 Nothing     = "" ;
 Whitespace  = " \t\r\n" ;
 
-# ---
+// ---
 
 
 :startScript(~~
 
-    var names = []
+    let names = []
+    let prodsPos = {}
+    let lastPos = 0
+
     function getNameIdx(name) {
-        var pos = names.indexOf(name)
+        const pos = names.indexOf(name)
         if (pos != -1) return pos
         return names.push(name) - 1
     }
     function resolveNameIdx(productions) {
-        for (var i = 0; i < productions.length; i++) {
-            var rule = productions[i]
+        for (let i = 0; i < productions.length; i++) {
+            let rule = productions[i]
             if (rule.Childs != undefined && rule.Childs.length > 0) resolveNameIdx(rule.Childs)
             if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) resolveNameIdx(rule.CodeChilds)
             if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) rule.Int = prodsPos[rule.Int]
         }
     }
-
-    var prodsPos = {}
-    var lastPos = 0
     function buildProduction(prodName, prodTag, prodExpression) {
         if (prodsPos[prodName.Int] != undefined) {
             println("Error: Rule " + prodName.String + " is defined multiple times.")
@@ -119,7 +119,7 @@ Whitespace  = " \t\r\n" ;
     // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
     function simplifyArr(rules) {
         if (rules.length == 1) {
-            var op = rules[0].Operator
+            const op = rules[0].Operator
             if (op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1)) return simplifyArr(rules[0].Childs)
         }
         return rules
@@ -133,24 +133,24 @@ Whitespace  = " \t\r\n" ;
     // Groups with only one child can be broken apart as long as down there is an unbreakable rule. Try to find one.
     function trySimplifyDown(rule) {
         if (rule.Childs == undefined) return rule
-        var op = rule.Operator
+        const op = rule.Operator
         if ((rule.Childs.length == 1) && (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or)) return trySimplifyDown(rule.Childs[0])
         if (op == abnf.oid.Sequence) return undefined
         return rule
     }
 
     function simplify(rule) {
-        var ruleDown = trySimplifyDown(rule)
+        let ruleDown = trySimplifyDown(rule)
         if (ruleDown != undefined) return ruleDown
         if (rule.Childs.length == 1) { // Breaking up abnf.oid.Group did not work. Getting down only with Sequence and Or.
-            var op = rule.Operator
+            const op = rule.Operator
             if (op == abnf.oid.Sequence || op == abnf.oid.Or) return simplify(rule.Childs[0])
         }
         return rule
     }
 
     c.compile(c.asg)
-    var rules = ltr.stack
+    let rules = ltr.stack
     resolveNameIdx(rules)
 
     // To show the initial a-grammar:

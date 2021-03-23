@@ -1,7 +1,5 @@
 :title("TLV Test") ;
 
-# TODO: create ABNF-constants so things like abnf.numberType.LittleEndian can be used in ABNF (not only inside the JS context)
-
 
 :startRule(TLV) ;
 :skip("") ;

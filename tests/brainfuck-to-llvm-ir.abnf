@@ -1,7 +1,7 @@
 :title("Brainfuck to LLVM IR compiler") ;
 
 
-# --- main rules
+// --- main rules
 
 :startRule(Brainfuck) ;
 
@@ -18,7 +18,7 @@ Read = ',' | '?'    <~~ read() ~~> ;
 Lparen = '['        <~~ lparen() ~~> ;
 Rparen = ']'        <~~ rparen() ~~> ;
 
-# ---
+// ---
 
 
 :startScript(~~

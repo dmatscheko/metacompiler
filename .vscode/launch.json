@@ -8,25 +8,25 @@
             "name": "Calculator 1",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1_a.bnf", "-b", "tests/calculator_formula.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1.abnf", "-b", "tests/calculator_formula.txt"]
         },
         {
             "name": "Calculator 1 (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1_a.bnf", "-b", "tests/calculator_formula.txt", "-vv4"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1.abnf", "-b", "tests/calculator_formula.txt", "-vv4"]
         },
         {
             "name": "Calculator 2",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-2_a.bnf", "-b", "tests/calculator_formula.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-2.abnf", "-b", "tests/calculator_formula.txt"]
         },
         {
             "name": "LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests_a.bnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.abnf"]
         },
         {
             "name": "Tiny Self Parse",
@@ -38,25 +38,25 @@
             "name": "Brainfuck Interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_interpreter_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_interpreter.abnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
             "name": "Brainfuck LLVM IR Compiler",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir_a.bnf", "-b", "tests/brainfuck-test-2.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir.abnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
             "name": "Parse from JS",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/parse-from-js_a.bnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/parse-from-js.abnf"]
         },
         {
             "name": "TinyC Variant",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc_a.bnf", "-b", "tests/tinyc-test-1.txt", "-vv3"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt", "-vv3"]
         },
         {
             "name": "---------",
@@ -74,13 +74,13 @@
             "name": "EBNF of ABNF",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/ebnf-of-abnf.bnf", "-b", "tests/abnf-of-abnf_a.bnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/ebnf-of-abnf.bnf", "-b", "tests/abnf-of-abnf.abnf"]
         },
         {
             "name": "ABNF of ABNF to object",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf_a.bnf", "-b", "tests/abnf-of-abnf_a.bnf", "-lb"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf", "-lb"]
         },
         {
             "name": "---------",
@@ -92,25 +92,25 @@
             "name": "TLV Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tlv-test_a.bnf", "-b", "tests/tlv-test.txt", "-vv"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tlv-test.abnf", "-b", "tests/tlv-test.txt", "-vv"]
         },
         {
             "name": "Parser Script Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/parser-script-test_a.bnf", "-b", "tests/tlv-test.txt", "-v"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/parser-script-test.abnf", "-b", "tests/tlv-test.txt", "-v"]
         },
         {
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop_a.bnf", "-b", "tests/infinite-loop_aaaaa.txt", "-lb", "-vv3", "-vv4"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop.abnf", "-b", "tests/infinite-loop_aaaaa.txt", "-lb", "-vv3", "-vv4"]
         },
         {
             "name": "Speed Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf_a.bnf", "-b", "tests/abnf-of-abnf_a.bnf", "-s", "-lb"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf", "-s", "-lb"]
         },
 
     ]

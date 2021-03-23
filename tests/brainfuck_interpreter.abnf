@@ -1,7 +1,7 @@
 :title("Brainfuck interpreter") ;
 
 
-# --- main rules
+// --- main rules
 
 :startRule(Brainfuck) ;
 
@@ -18,7 +18,7 @@ Read = ',' | '?'    <~~ pushg(read) ~~> ;
 Lparen = '['        <~~ pushg(lparen) ~~> ;
 Rparen = ']'        <~~ pushg(rparen) ~~> ;
 
-# ---
+// ---
 
 
 :startScript(~~

@@ -2,10 +2,10 @@
 :startRule(ABNF) ;
 
 
-# This is a parser command that sets the possible white space.
+// This is a parser command that sets the possible white space.
 :skip(Whitespace) ;
 
-# This is the start rule.
+// This is the start rule.
 ABNF        = { Production | LineCommand | Comment } ;
 
 Production  = Name [ Tag ] "=" [ Expression ] ";" ;
@@ -27,7 +27,7 @@ Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
 Times       = Number [ "..." ( Number | "" ) ] Group ;
 
-Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+Comment     = "//" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
 Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
 
@@ -45,9 +45,9 @@ Code        = '~~' :skip(Nothing) { [ "~" ] AllButTilde } '~~' :skip(Whitespace)
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
-AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII without line breaks (CR and LF)
-AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; # All ASCII and unicode chars. Only tilde is escaped
+AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; // Readable ASCII without line breaks (CR and LF)
+AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped
 
 Number      = "0" | "1"..."9" { "0"..."9" } ;
 
