@@ -112,7 +112,7 @@ func (pa *parser) ruleEnter(rule *r.Rule, doSkipSpaces string, depth int) (bool,
 	if doSkipSpaces != "" {
 		skip = "  spaces:➰  " // Skip spaces.
 	}
-	fmt.Print(space, ">", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, PprintRuleOnly(rule, ""), msg, "\n")
+	fmt.Print(space, ">", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, rule.ToString(), msg, "\n")
 	return isBlocked, foundRule, foundSdx
 }
 
@@ -141,7 +141,7 @@ func (pa *parser) ruleExit(rule *r.Rule, doSkipSpaces string, depth int, found *
 	if doSkipSpaces != "" {
 		skip = "  spaces:➰  " // Skip spaces.
 	}
-	fmt.Print(times(" ", depth), "<", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, PprintRuleOnly(rule, ""), " found:", found != nil, "\n")
+	fmt.Print(times(" ", depth), "<", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, rule.ToString(), " found:", found != nil, "\n")
 }
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
@@ -195,7 +195,7 @@ func flattenToken(rules *r.Rules) *r.Rule {
 	length := 0
 	for _, rule := range *rules {
 		if rule.Operator != r.Token {
-			panic("Const must only contain Token. Contains: " + PprintRuleOnly(rule))
+			panic("Const must only contain Token. Contains: " + rule.ToString())
 		}
 		length += len(rule.String)
 	}
@@ -215,7 +215,7 @@ func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 	for i := range *rules {
 		resRule := flattenToken(pa.resolveRulesToToken(&r.Rules{(*rules)[i]}))
 		if resRule == nil {
-			panic("Parameter is empty. Rule: " + PprintRuleOnly((*rules)[i]))
+			panic("Parameter is empty. Rule: " + (*rules)[i].ToString())
 		}
 		(*rules)[i] = resRule
 	}
@@ -434,7 +434,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			}
 			resRule := pa.apply(child, doSkipSpaces, depth+1)
 			if resRule == nil || len(*resRule) != 1 {
-				panic("Parameter needs to result in exactly one result. Rule: " + PprintRuleOnly(child))
+				panic("Parameter needs to result in exactly one result. Rule: " + child.ToString())
 			}
 			(*rule.CodeChilds)[i] = (*resRule)[0]
 		}
@@ -595,7 +595,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			panic("Unknown line command :" + rule.String + "()")
 		}
 	default: // r.Success || r.Error
-		panic(fmt.Sprintf("Invalid rule in apply() function: %s", PprintRuleOnly(rule)))
+		panic(fmt.Sprintf("Invalid rule in apply() function: %s", rule.ToString()))
 	}
 
 	// All failed matches should have returned already.

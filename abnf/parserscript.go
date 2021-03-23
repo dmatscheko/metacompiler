@@ -51,7 +51,7 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 
 	v, err := ps.Run("parserCommand@"+strconv.Itoa(rule.Pos), code)
 	if err != nil {
-		panic(err.Error() + "\nError was in " + PprintRuleFlat(rule, false, true))
+		panic(err.Error() + "\nError was in " + rule.ToString() + ", Code: '" + code + "'")
 	}
 
 	res, ok := v.Export().(*r.Rule)
