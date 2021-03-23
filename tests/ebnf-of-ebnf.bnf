@@ -2,10 +2,10 @@
 :startRule(EBNF) ;
 
 
-# This is a parser command that sets the possible white space.
+// This is a parser command that sets the possible white space.
 :skip(Whitespace) ;
 
-# This is the start rule.
+// This is the start rule.
 EBNF        = { Production | LineCommand | Comment } ;
 
 Production  = Name "=" [ Expression ] ";" ;
@@ -22,7 +22,7 @@ Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
 Times       = Number [ "..." ( Number | "" ) ] Group ;
 
-Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+Comment     = "//" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
 LineCommand = Command ";" ;
 
@@ -37,8 +37,8 @@ Squotetoken = "'" :skip(Nothing) { AsciiNoQs | '"' | "\\'" } "'" :skip(Whitespac
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; # Readable ASCII without double and single quotes
-AsciiNoLb   = "\x20"..."\x7E" | "\t" ; # Readable ASCII without line breaks (CR and LF)
+AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; // Readable ASCII without line breaks (CR and LF)
 
 Number      = "0" | "1"..."9" { "0"..."9" } ;
 
