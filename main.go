@@ -13,8 +13,9 @@ import (
 // TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).
 // TODO: Add possibility to comment the EBNF via '//'.
 // TODO: Allow to state the start rule via JS.
-// TODO: Define an EOF symbol for the EBNF syntax.
+// TODO: Define an :EOF() symbol for the EBNF syntax.
 // TODO: Add ability to include ABNFs from ABNFs (like modules).
+// TODO: add -c -d , ... to the cmd line
 
 // rule == production.
 // factors == non-terminal expression. A subgroup of productions/rules.

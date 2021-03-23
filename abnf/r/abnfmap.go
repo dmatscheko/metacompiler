@@ -56,7 +56,7 @@ var AbnfFuncMap = map[string]Object{
 
 	"getStartRule":   GetStartRule,
 	"getProductions": GetProductions,
-	"getProlog":      GetProlog,
+	"getProlog":      GetStartScript,
 	"getTitle":       GetTitle,
 	"getDescription": GetDescription,
 

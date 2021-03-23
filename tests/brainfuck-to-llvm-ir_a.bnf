@@ -1,6 +1,7 @@
-"Brainfuck to LLVM IR compiler"
+:title("Brainfuck to LLVM IR compiler") ;
+:startRule(Brainfuck) ;
 
-<~~
+:startScript(~~
 
 // Compile with:
 // clang test.ll
@@ -109,9 +110,7 @@ function rparen() {
 
 println(m)
 
-~~>
-
-{
+~~) ;
 
 Brainfuck = { Statement } ;
 Statement = Opcode | Lparen { Statement } Rparen ;
@@ -125,6 +124,3 @@ Write = '.'         <~~ write() ~~> ;
 Read = ',' | '?'    <~~ read() ~~> ;
 Lparen = '['        <~~ lparen() ~~> ;
 Rparen = ']'        <~~ rparen() ~~> ;
-
-}
-Brainfuck

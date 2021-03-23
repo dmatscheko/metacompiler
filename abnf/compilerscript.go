@@ -92,9 +92,9 @@ func (cs *compilerscript) Run(name, src string) (goja.Value, error) {
 	return cs.vm.RunProgram(p)
 }
 
-func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) { // => (changes upStream)
+func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) goja.Value { // => (changes upStream)
 	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number
-		return
+		return nil
 	}
 
 	cs.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables. // TODO: should the upstream be changable by the JS? Otherwise remove the &.
@@ -129,7 +129,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 
 	code := (*tag.CodeChilds)[slot].String
 
-	_, err := cs.Run(name, code)
+	v, err := cs.Run(name, code)
 	if err != nil {
 		panic(err.Error() + "\nError was in " + PprintRuleFlat(tag, false, true))
 	}
@@ -137,6 +137,8 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 	if cs.traceEnabled {
 		cs.traceBottom(upStream)
 	}
+
+	return v
 }
 
 func (cs *compilerscript) initFuncMap() {

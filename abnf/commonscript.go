@@ -99,7 +99,7 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
 			return productions
 		},
-		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
+		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
 			return compileASGInternal(asg, aGrammar, slot, traceEnabled, false)
 		},
 		"ABNFagrammar": AbnfAgrammar,

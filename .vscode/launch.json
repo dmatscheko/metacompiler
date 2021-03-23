@@ -92,7 +92,7 @@
             "name": "TLV Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tlv-test_a.bnf", "-b", "tests/tlv-test.txt", "-v"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tlv-test_a.bnf", "-b", "tests/tlv-test.txt", "-vv"]
         },
         {
             "name": "Parser Script Test",

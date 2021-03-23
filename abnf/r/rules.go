@@ -118,7 +118,7 @@ func (rule *Rule) Serialize() string {
 	if op == Token || op == Identifier || op == Production || op == Command {
 		res += fmt.Sprintf(", String: %q", rule.String)
 	}
-	if op == Identifier || op == Production || op == Number || op == Range {
+	if op == Identifier || op == Number || op == Range {
 		res += fmt.Sprintf(", Int: %d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
@@ -189,23 +189,21 @@ func GetStartRule(aGrammar *Rules) *Rule {
 	}
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
-		if rule.Operator == Identifier {
-			return rule
+		if rule.Operator == Command && rule.String == "startRule" {
+			return (*rule.CodeChilds)[0]
 		}
 	}
 	return nil
 }
 
-func GetProlog(aGrammar *Rules) *Rule {
+func GetStartScript(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
 	}
 	for i := range *aGrammar {
 		rule := (*aGrammar)[i]
-		if rule.Operator == Sequence {
-			return nil
-		} else if rule.Operator == Tag {
-			return rule
+		if rule.Operator == Command && rule.String == "startScript" {
+			return &Rule{Operator: Tag, CodeChilds: rule.CodeChilds} // Convert to something Tag-like.
 		}
 	}
 	return nil

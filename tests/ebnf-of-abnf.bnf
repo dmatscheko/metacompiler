@@ -1,11 +1,12 @@
-"EBNF of ABNF"
-{
+:title("EBNF of ABNF") ;
+:startRule(ABNF) ;
+
 
 # This is a parser command that sets the possible white space.
 :skip(Whitespace) ;
 
 # This is the start rule.
-ABNF        = [ Title ] [ Prolog ] "{" { Production | LineCommand | Comment } "}" [ Start ] [ Description ] ;
+ABNF        = { Production | LineCommand | Comment } ;
 
 Production  = Name [ Tag ] "=" [ Expression ] ";" ;
 
@@ -26,12 +27,7 @@ Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
 Times       = Number [ "..." ( Number | "" ) ] Group ;
 
-Start       = Name ;
-Title       = Token ;
-Description = Token ;
 Comment     = "#" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
-
-Prolog      = Tag ;
 
 Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
 
@@ -57,6 +53,3 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
 
 Nothing     = "" ;
 Whitespace  = " \t\r\n" ;
-
-}
-ABNF

@@ -1,12 +1,12 @@
-"Parse and compile test"
-<~~
+:title("Parse and compile test") ;
+:startScript(~~
 
 // Lets build a new compiler directly from scratch:
 
 // For this we need an agrammar. This is the information, that the metacompiler needs to actually be a compiler.
 
 // To create an agrammar, we need an ABNF:
-var ABNF = "<~\~ println('found me'); c.compile(c.asg) ~\~> {X = ( 'A' | 'B' | 'C' ) <~\~ println('and found the letter ' + up.in) ~\~>; } X"
+var ABNF = ":startScript(~\~ println('found me'); c.compile(c.asg) ~\~); :startRule(X); X = ( 'A' | 'B' | 'C' ) <~\~ println('and found the letter ' + up.in) ~\~>;"
 
 // Now we parse the ABNF and create an ASG from it. We use c.ABNFagrammar as agrammar for this parse step, because we wrote our compiler definition in ABNF (the variable above), and the agrammar c.ABNFagrammar understands ABNF:
 var ASG = c.parse(c.ABNFagrammar, ABNF)
@@ -14,11 +14,9 @@ var ASG = c.parse(c.ABNFagrammar, ABNF)
 // Lets print the resulting ASG:
 println("\nASG: " + abnf.serializeRules(ASG))
 
-// So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF:
-var result = c.compileWithProlog(ASG, c.ABNFagrammar)
-
-// The agrammar c.ABNFagrammar stores its compilation result into ltr.agrammar. The result of the compilation is the whole ltr object. Lets get our new very own agrammar:
-var myAgrammar = result.agrammar
+// So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF.
+// The compile step of c.ABNFagrammar creates the agrammar and returns it:
+var myAgrammar = c.compileWithProlog(ASG, c.ABNFagrammar)
 
 // Lets now print the resulting agrammar:
 println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
@@ -35,7 +33,4 @@ c.compileWithProlog(myASG, myAgrammar)
 
 // Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>
 
-~~>
-{
-    # No rules
-}
+~~) ;

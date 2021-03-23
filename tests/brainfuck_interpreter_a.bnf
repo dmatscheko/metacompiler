@@ -1,6 +1,26 @@
-"Brainfuck interpreter"
+:title("Brainfuck interpreter") ;
+:startRule(Brainfuck) ;
 
-<~~
+
+# --- main rules
+
+Brainfuck = { Statement } ;
+Statement = Opcode | Lparen { Statement } Rparen ;
+Opcode = Next | Prev | Inc | Dec | Write | Read ;
+
+Next = '>'          <~~ pushg(next) ~~> ;
+Prev = '<'          <~~ pushg(prev) ~~> ;
+Inc = '+'           <~~ pushg(inc) ~~> ;
+Dec = '-'           <~~ pushg(dec) ~~> ;
+Write = '.'         <~~ pushg(write) ~~> ;
+Read = ',' | '?'    <~~ pushg(read) ~~> ;
+Lparen = '['        <~~ pushg(lparen) ~~> ;
+Rparen = ']'        <~~ pushg(rparen) ~~> ;
+
+# ---
+
+
+:startScript(~~
 function check() {
     if (data[dpos] == undefined) data[dpos] = 0
 }
@@ -47,22 +67,4 @@ while (ltr.stack[cpos] != undefined) {
     ltr.stack[cpos]()
     cpos++
 }
-~~>
-
-{
-
-Brainfuck = { Statement } ;
-Statement = Opcode | Lparen { Statement } Rparen ;
-Opcode = Next | Prev | Inc | Dec | Write | Read ;
-
-Next = '>'          <~~ pushg(next) ~~> ;
-Prev = '<'          <~~ pushg(prev) ~~> ;
-Inc = '+'           <~~ pushg(inc) ~~> ;
-Dec = '-'           <~~ pushg(dec) ~~> ;
-Write = '.'         <~~ pushg(write) ~~> ;
-Read = ',' | '?'    <~~ pushg(read) ~~> ;
-Lparen = '['        <~~ pushg(lparen) ~~> ;
-Rparen = ']'        <~~ pushg(rparen) ~~> ;
-
-}
-Brainfuck
+~~) ;

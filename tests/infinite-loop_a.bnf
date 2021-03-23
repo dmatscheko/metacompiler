@@ -1,15 +1,14 @@
-"Infinite Loop"
-<~~
-c.compile(c.asg)
-println("Done")
-~~>
+:title("Infinite Loop") ;
 
-{
 
 TestA       =
     TestA
     "A"
     ;
 
-}
-TestA
+
+:startRule(TestA) ;
+:startScript(~~
+c.compile(c.asg)
+println("Done")
+~~) ;
