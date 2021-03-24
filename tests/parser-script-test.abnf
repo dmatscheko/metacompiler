@@ -4,38 +4,23 @@
 
 
 :startRule(TEST) ;
-:skip("") ;
-
-// TLV     =
-
-        // Move the parser forward one byte.
-        // "\x00"..b"\xff"
-
-        // Print the position and set the parse-position to 50 via the parser.
-        // :script(~~ println(c.getSdx()); c.setSdx(50) ~~)
-
-        // Find all remaining chars via the parser. Print them via the compiler using the Tag.
-        // { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~>
-
-        // Set the parser-position to 2, return a parser rule to the parser that instructs to find all digits.
-        // :script(~~ c.setSdx(2); abnf.newRepetition([abnf.newRange([abnf.newToken("0", 0), abnf.newToken("9", 0)], abnf.rangeType.Byte, 0)], 0) ~~)
-
-        // Continue with the parser after the last of the digits after position 2. Print the captured result via the Tag from the compiler.
-        // { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~>
-
-        // ;
-
+:skip() ;
 
 TEST    =
 
+        // Move the parser forward one byte.
         "\x00"..b"\xff"
 
+        // Print the position and set the parse-position to 50 via the parser.
         :script(~~ println("I am the parser at position " + c.getSdx()); c.setSdx(50) ~~)
 
+        // Find all remaining chars via the parser. Print them via the compiler using the Tag.
         { "\x00"..b"\xff" } <~~ println(">I am the compiler during compiling and just found this: " + up.in + "<") ~~>
 
+        // Set the parser-position to 2, return a parser rule to the parser that instructs to find all digits.
         :script(~~ c.setSdx(2); abnf.newRepetition([abnf.newRange([abnf.newToken("0", 0), abnf.newToken("9", 0)], abnf.rangeType.Byte, 0)], 0) ~~)
 
+        // Continue with the parser after the last of the digits after position 2. Print the captured result via the Tag from the compiler.
         { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~>
 
         ;

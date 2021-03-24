@@ -514,147 +514,166 @@ and then two tildes: ~\~~~, ~~This is a second string inside the Tag~~ >
   <summary>Click to expand!</summary>
 
 ```javascript
-"ABNF of ABNF: Compiles to textual a-grammar"
-<~~
-var names = [];
-function getNameIdx(name) {
-    var pos = names.indexOf(name);
-    if (pos != -1) { return pos };
-    return names.push(name)-1;
-}
-c.compile(c.asg, up.in)
-~~>
+:title("ABNF of ABNF to a-grammar") ;
+:description("This ABNF contains the grammatic and semantic information for annotated EBNF.
+It allows to automatically create a compiler for everything described in ABNF (yes, that format).") ;
 
-{
 
-Program                                 <~~push(up.in)~~>
-                =
-                [
-                    Title               <~~ up.in += ', \\n' ~~>
-                ]
-                Programtag
-                "{"                     <~~ up.in = '\\n{\\n\\n' ~~>
-                { Production }
-                "}"                     <~~ up.in = '\\n}, \\n\\n' ~~>
-                Programtag
-                start
-                [
-                    Comment             <~~ up.in = ', \\n'+up.in+'\\n' ~~>
-                ] ;
+// --- main rules
 
-Programtag      =
-                [
-                    Tag                 <~~ up.in = '{"TAG", '+up.in+'}, \\n' ~~>
-                ] ;
+:startRule(ABNF) ;
+// This is a parser command that sets the possible white space.
+:skip(Whitespace) ;
 
-Production                              <~~ var productionTag = pop();
-                                        if (productionTag != undefined) {
-                                            pop()/*=undefined*/;
-                                            up.in = '{"TAG", '+productionTag+', '+up.in+'}'
-                                        };
-                                        up.in += ',\\n' ~~>       
-                =
-                Name                    <~~ up.in = '{"'+up.in+'", '+getNameIdx(up.in)+', ';
-                                        push(undefined) ~~>
-                [
-                    Tag                 <~~ push(up.in); up.in = '' ~~>
-                ]
-                "="                     <~~up.in=''~~>
-                [ Expression ]
-                ( "." | ";" )           <~~ up.in = '}' ~~> ;
+// This is the start rule.
+ABNF        = { Production | LineCommand } ;
 
-Expression                              <~~ if (/*or*/ pop()) {
-                                            up.in = '{"OR", '+up.in+'}'
-                                        } ~~>
-                =
-                Alternative             <~~ /*or=false*/ push(false); ~~>
-                {
-                    "|"                 <~~up.in=''~~>
-                    Alternative         <~~ /*or=true*/ pop();push(true); up.in = ', '+up.in ~~>
-                } ;
+Production  = Name <~~ var prodTag=undefined; var prodExpression=undefined; pushg(pop()) ~~> [ Tag <~~ prodTag=pop() ~~> ] "=" [ Expression <~~ prodExpression=pop() ~~> ] ";" <~~  pushg(buildProduction(popg(), prodTag, prodExpression)) ~~> ;
 
-Alternative     =
-                Taggedterm
-                {
-                    Taggedterm          <~~ up.in = ', '+up.in ~~>
-                } ;
+Expression  = Alternative ;
 
-Taggedterm                              <~~up.in=pop()~~>
-                =
-                Term                    <~~push(up.in)~~>
-                [
-                    Tag                 <~~ push('{"TAG", '+up.in+', '+pop()+'}') ~~>
-                ] ;
+Alternative <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
+            = Sequence <~~ pushg([pop()]) ~~> { "|" Sequence <~~ pushg(append(popg(), pop())) ~~> } ;
 
-Term            =
-                (
-                    Name                <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~>
-                    |
-                    ( Token [ "..." Token ] )
-                    |
-                    group
-                    |
-                    option
-                    |
-                    repetition
-                    |
-                    skipspaces
-                ) ;
+Sequence    <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
+            = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) ~~> } ;
 
-group           <~~ up.in = '{'+pop()+'}' ~~>                    = "(" Expression <~~push(up.in)~~> ")" ;
-option          <~~ up.in = '{"OPTIONAL", '+pop()+'}' ~~>        = "[" Expression <~~push(up.in)~~> "]" ;
-repetition      <~~ up.in = '{"REPEAT", '+pop()+'}' ~~>          = "{" Expression <~~push(up.in)~~> "}" ;
-skipspaces      =
-                ":skip(Whitespace)"                     <~~ up.in = '{"SKIPSPACES", true}' ~~>
-                |
-                ":skip(Nothing)"                     <~~ up.in = '{"SKIPSPACES", false}' ~~> ;
+Term        = TaggedTerm | Command ;
 
-Title           = Token ;
-start           = Name                  <~~ up.in = '{"IDENT", "'+up.in+'", '+getNameIdx(up.in)+'}' ~~> ;
-Comment         = Token ;
+TaggedTerm <~~ push(popg()) ~~>
+            = ( Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
-Tag                                     <~~up.in=pop()~~>
-                =
-                "<"
-                Code                    <~~push(up.in)~~>
-                {
-                    ","
-                    Code                <~~ push(pop()+', '+up.in) ~~>
-                }
-                ">" ;
+Range       <~~ push(popg()) ~~>
+            = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) ~~> ] ;
+ByteRange   = Token <~~ pushg(pop()) ~~> "..b" Token <~~ push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) ~~> ;
+CharsOf     = "@" Token <~~ push(abnf.newCharsOf(pop().String, c.Pos)) ~~> "+" ;
+CharOf      = "@" Token <~~ push(abnf.newCharOf(pop().String, c.Pos)) ~~> ;
+Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
+Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
+Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
+Times       = CmdNumber <~~ pushg([pop()]) ~~> [ "..." ( CmdNumber | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
 
-Code                                    <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
-                =
-                '~~'
-                :skip(Whitespace)
-                { [ "~" ] Codeinner }   <~~push(up.in)~~>
-                '~~'
-                :skip(Nothing) ;
+Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
+            = "<" ( Name | Token ) <~~ pushg([pop()]) ~~> { "," ( Name | Token ) <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
-Codeinner       = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
+CmdNumber   = Number | Command ;
 
-Name            = ( Small | Caps ) :skip(Whitespace) { Small | Caps | Digit | "_" } :skip(Nothing) ;
+LineCommand = Command <~~ pushg(buildLineCommand(pop())) ~~> ";" ;
 
-Token                                   <~~ up.in = '{"TERMINAL", '+sprintf("%q",pop())+'}' ~~>
-                = Dqtoken | Sqtoken ;
-Dqtoken         = '"' :skip(Whitespace) { Small | Caps | Digit | Special | "~" | "'" | '\\"' } <~~push(up.in)~~> '"' :skip(Nothing) ;
-Sqtoken         = "'" :skip(Whitespace) { Small | Caps | Digit | Special | "~" | '"' | "\\'" } <~~push(up.in)~~> "'" :skip(Nothing) ;
+Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
+            = ":" CmdName "(" <~~ pushg([]) ~~> [ ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> { "," ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> } ] ")" ;
+CmdName     <~~ push(up.in) ~~>
+            = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
-Digit           = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-Small           = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
-                  "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-Caps            = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
-                  "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-Special         = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
-                  "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
-                  "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
+Name        <~~ push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) ~~>
+            = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
-}
+Token       = Dquotetoken | Squotetoken | Code ;
+Dquotetoken = '"' :skip() { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' :skip(Whitespace) ;
+Squotetoken = "'" :skip() { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" :skip(Whitespace) ;
+Code        = '~~' :skip() { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' :skip(Whitespace) ;
 
-<~~ print(pop()) ~~>
-Program
-"This ABNF contains the grammatic and semantic information for annotated EBNF.
-It allows to automatically create a compiler for everything described in ABNF (yes, that format)."
+Alphabet    = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | @"\t\n\r !" ; // Readable ASCII without double and single quotes.
+AsciiNoLb   = " "..."~" | "\t" ; // Readable ASCII without line breaks (CR and LF).
+AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
+AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
+
+Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
+            = "0" | "1"..."9" { "0"..."9" } ;
+
+Whitespace  = { @"\t\n\r "+ | Comment } ;
+
+Comment     = LineComment | "/*" :skip() { { "*" } AsciiNoStSl { "/" } } "*/" :skip(Whitespace) ;
+LineComment = "//" :skip() { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+
+// ---
+
+
+:startScript(~~
+
+    let names = []
+    let prodsPos = {}
+    let lastPos = 0
+
+    function getNameIdx(name) {
+        const pos = names.indexOf(name)
+        if (pos != -1) return pos
+        return names.push(name) - 1
+    }
+    function resolveNameIdx(productions) {
+        for (let i = 0; i < productions.length; i++) {
+            let rule = productions[i]
+            if (rule.Childs != undefined && rule.Childs.length > 0) resolveNameIdx(rule.Childs)
+            if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) resolveNameIdx(rule.CodeChilds)
+            if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) rule.Int = prodsPos[rule.Int]
+        }
+    }
+    function buildProduction(prodName, prodTag, prodExpression) {
+        if (prodsPos[prodName.Int] != undefined) {
+            println("Error: Rule " + prodName.String + " is defined multiple times.")
+            exit(0)
+        }
+        prodsPos[prodName.Int] = lastPos++
+        if (prodTag != undefined) {
+            prodTag.Childs = simplifyToArr(prodExpression)
+            return abnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)
+        } else {
+            return abnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
+        }
+    }
+    function buildLineCommand(cmd) {
+        cmd.Int = getNameIdx(cmd.String)
+        prodsPos[cmd.Int] = lastPos++
+        return cmd
+    }
+
+    // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
+    function simplifyArr(rules) {
+        if (rules.length == 1) {
+            const op = rules[0].Operator
+            if (op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1)) return simplifyArr(rules[0].Childs)
+        }
+        return rules
+    }
+
+    // This also breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
+    function simplifyToArr(rule) {
+        if (rule == undefined) return undefined
+        return simplifyArr([rule])
+    }
+
+    // Groups with only one child can be broken apart as long as down there is an unbreakable rule. Try to find one.
+    function trySimplifyDown(rule) {
+        if (rule.Childs == undefined) return rule
+        const op = rule.Operator
+        if ((rule.Childs.length == 1) && (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or)) return trySimplifyDown(rule.Childs[0])
+        if (op == abnf.oid.Sequence) return undefined
+        return rule
+    }
+
+    function simplify(rule) {
+        let ruleDown = trySimplifyDown(rule)
+        if (ruleDown != undefined) return ruleDown
+        if (rule.Childs.length == 1) { // Breaking up abnf.oid.Group did not work. Getting down only with Sequence and Or.
+            const op = rule.Operator
+            if (op == abnf.oid.Sequence || op == abnf.oid.Or) return simplify(rule.Childs[0])
+        }
+        return rule
+    }
+
+    c.compile(c.asg)
+    let rules = ltr.stack
+    resolveNameIdx(rules)
+
+    // To show the initial a-grammar:
+    println("=> Rules: " + abnf.serializeRules(rules))
+
+    // To return the generated a-grammar to the next parser:
+    rules
+
+~~) ;
 ```
 </details>
 
@@ -664,42 +683,546 @@ It allows to automatically create a compiler for everything described in ABNF (y
   <summary>Click to expand!</summary>
 
 ```javascript
-{"TERMINAL", "ABNF of ABNF: Compiles to textual a-grammar"}, 
-{"TAG", {"TERMINAL", "\nvar names = [];\nfunction getNameIdx(name) {\n    var pos = names.indexOf(name);\n    if (pos != -1) { return pos };\n    return names.push(name)-1;\n}\nc.compile(c.asg, up.in)\n"}}, 
-
-{
-
-{"TAG", {"TERMINAL", "push(up.in)"}, {"Program", 0, {"OPTIONAL", {"TAG", {"TERMINAL", " up.in += ', \\\\n' "}, {"IDENT", "Title", 1}}}, {"IDENT", "Programtag", 2}, {"TAG", {"TERMINAL", " up.in = '\\\\n{\\\\n\\\\n' "}, {"TERMINAL", "{"}}, {"REPEAT", {"IDENT", "Production", 3}}, {"TAG", {"TERMINAL", " up.in = '\\\\n}, \\\\n\\\\n' "}, {"TERMINAL", "}"}}, {"IDENT", "Programtag", 2}, {"IDENT", "start", 4}, {"OPTIONAL", {"TAG", {"TERMINAL", " up.in = ', \\\\n'+up.in+'\\\\n' "}, {"IDENT", "Comment", 5}}}}},
-{"Programtag", 2, {"OPTIONAL", {"TAG", {"TERMINAL", " up.in = '{\"TAG\", '+up.in+'}, \\\\n' "}, {"IDENT", "Tag", 6}}}},
-{"TAG", {"TERMINAL", " var productionTag = pop();\n                                        if (productionTag != undefined) {\n                                            pop()/*=undefined*/;\n                                            up.in = '{\"TAG\", '+productionTag+', '+up.in+'}'\n                                        };\n                                        up.in += ',\\\\n' "}, {"Production", 3, {"TAG", {"TERMINAL", " up.in = '{\"'+up.in+'\", '+getNameIdx(up.in)+', ';\n                                        push(undefined) "}, {"IDENT", "Name", 7}}, {"OPTIONAL", {"TAG", {"TERMINAL", " push(up.in); up.in = '' "}, {"IDENT", "Tag", 6}}}, {"TAG", {"TERMINAL", "up.in=''"}, {"TERMINAL", "="}}, {"OPTIONAL", {"IDENT", "Expression", 8}}, {"TAG", {"TERMINAL", " up.in = '}' "}, {{"OR", {"TERMINAL", "."}, {"TERMINAL", ";"}}}}}},
-{"TAG", {"TERMINAL", " if (/*or*/ pop()) {\n                                            up.in = '{\"OR\", '+up.in+'}'\n                                        } "}, {"Expression", 8, {"TAG", {"TERMINAL", " /*or=false*/ push(false); "}, {"IDENT", "Alternative", 9}}, {"REPEAT", {"TAG", {"TERMINAL", "up.in=''"}, {"TERMINAL", "|"}}, {"TAG", {"TERMINAL", " /*or=true*/ pop();push(true); up.in = ', '+up.in "}, {"IDENT", "Alternative", 9}}}}},
-{"Alternative", 9, {"IDENT", "Taggedterm", 10}, {"REPEAT", {"TAG", {"TERMINAL", " up.in = ', '+up.in "}, {"IDENT", "Taggedterm", 10}}}},
-{"TAG", {"TERMINAL", "up.in=pop()"}, {"Taggedterm", 10, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "Term", 11}}, {"OPTIONAL", {"TAG", {"TERMINAL", " push('{\"TAG\", '+up.in+', '+pop()+'}') "}, {"IDENT", "Tag", 6}}}}},
-{"Term", 11, {{"OR", {"TAG", {"TERMINAL", " up.in = '{\"IDENT\", \"'+up.in+'\", '+getNameIdx(up.in)+'}' "}, {"IDENT", "Name", 7}}, {{"IDENT", "Token", 12}, {"OPTIONAL", {"TERMINAL", "..."}, {"IDENT", "Token", 12}}}, {"IDENT", "group", 13}, {"IDENT", "option", 14}, {"IDENT", "repetition", 15}, {"IDENT", "skipspaces", 16}}}},
-{"TAG", {"TERMINAL", " up.in = '{'+pop()+'}' "}, {"group", 13, {"TERMINAL", "("}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "Expression", 8}}, {"TERMINAL", ")"}}},
-{"TAG", {"TERMINAL", " up.in = '{\"OPTIONAL\", '+pop()+'}' "}, {"option", 14, {"TERMINAL", "["}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "Expression", 8}}, {"TERMINAL", "]"}}},
-{"TAG", {"TERMINAL", " up.in = '{\"REPEAT\", '+pop()+'}' "}, {"repetition", 15, {"TERMINAL", "{"}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "Expression", 8}}, {"TERMINAL", "}"}}},
-{"skipspaces", 16, {"OR", {"TAG", {"TERMINAL", " up.in = '{\"SKIPSPACES\", true}' "}, {"TERMINAL", "+"}}, {"TAG", {"TERMINAL", " up.in = '{\"SKIPSPACES\", false}' "}, {"TERMINAL", "-"}}}},
-{"Title", 1, {"IDENT", "Token", 12}},
-{"start", 4, {"TAG", {"TERMINAL", " up.in = '{\"IDENT\", \"'+up.in+'\", '+getNameIdx(up.in)+'}' "}, {"IDENT", "Name", 7}}},
-{"Comment", 5, {"IDENT", "Token", 12}},
-{"TAG", {"TERMINAL", "up.in=pop()"}, {"Tag", 6, {"TERMINAL", "<"}, {"TAG", {"TERMINAL", "push(up.in)"}, {"IDENT", "Code", 17}}, {"REPEAT", {"TERMINAL", ","}, {"TAG", {"TERMINAL", " push(pop()+', '+up.in) "}, {"IDENT", "Code", 17}}}, {"TERMINAL", ">"}}},
-{"TAG", {"TERMINAL", " up.in = '{\"TERMINAL\", '+sprintf(\"%q\",pop())+'}' "}, {"Code", 17, {"TERMINAL", "~~"}, {"SKIPSPACES", false}, {"TAG", {"TERMINAL", "push(up.in)"}, {"REPEAT", {"OPTIONAL", {"TERMINAL", "~"}}, {"IDENT", "Codeinner", 18}}}, {"TERMINAL", "~~"}, {"SKIPSPACES", true}}},
-{"Codeinner", 18, {"OR", {"IDENT", "Small", 19}, {"IDENT", "Caps", 20}, {"IDENT", "Digit", 21}, {"IDENT", "Special", 22}, {"TERMINAL", "'"}, {"TERMINAL", "\""}, {"TERMINAL", "\\\\~"}}},
-{"Name", 7, {{"OR", {"IDENT", "Small", 19}, {"IDENT", "Caps", 20}}}, {"SKIPSPACES", false}, {"REPEAT", {"OR", {"IDENT", "Small", 19}, {"IDENT", "Caps", 20}, {"IDENT", "Digit", 21}, {"TERMINAL", "_"}}}, {"SKIPSPACES", true}},
-{"TAG", {"TERMINAL", " up.in = '{\"TERMINAL\", '+sprintf(\"%q\",pop())+'}' "}, {"Token", 12, {"OR", {"IDENT", "Dqtoken", 23}, {"IDENT", "Sqtoken", 24}}}},
-{"Dqtoken", 23, {"TERMINAL", "\""}, {"SKIPSPACES", false}, {"TAG", {"TERMINAL", "push(up.in)"}, {"REPEAT", {"OR", {"IDENT", "Small", 19}, {"IDENT", "Caps", 20}, {"IDENT", "Digit", 21}, {"IDENT", "Special", 22}, {"TERMINAL", "~"}, {"TERMINAL", "'"}, {"TERMINAL", "\\\\\""}}}}, {"TERMINAL", "\""}, {"SKIPSPACES", true}},
-{"Sqtoken", 24, {"TERMINAL", "'"}, {"SKIPSPACES", false}, {"TAG", {"TERMINAL", "push(up.in)"}, {"REPEAT", {"OR", {"IDENT", "Small", 19}, {"IDENT", "Caps", 20}, {"IDENT", "Digit", 21}, {"IDENT", "Special", 22}, {"TERMINAL", "~"}, {"TERMINAL", "\""}, {"TERMINAL", "\\\\'"}}}}, {"TERMINAL", "'"}, {"SKIPSPACES", true}},
-{"Digit", 21, {"OR", {"TERMINAL", "0"}, {"TERMINAL", "1"}, {"TERMINAL", "2"}, {"TERMINAL", "3"}, {"TERMINAL", "4"}, {"TERMINAL", "5"}, {"TERMINAL", "6"}, {"TERMINAL", "7"}, {"TERMINAL", "8"}, {"TERMINAL", "9"}}},
-{"Small", 19, {"OR", {"TERMINAL", "a"}, {"TERMINAL", "b"}, {"TERMINAL", "c"}, {"TERMINAL", "d"}, {"TERMINAL", "e"}, {"TERMINAL", "f"}, {"TERMINAL", "g"}, {"TERMINAL", "h"}, {"TERMINAL", "i"}, {"TERMINAL", "j"}, {"TERMINAL", "k"}, {"TERMINAL", "l"}, {"TERMINAL", "m"}, {"TERMINAL", "n"}, {"TERMINAL", "o"}, {"TERMINAL", "p"}, {"TERMINAL", "q"}, {"TERMINAL", "r"}, {"TERMINAL", "s"}, {"TERMINAL", "t"}, {"TERMINAL", "u"}, {"TERMINAL", "v"}, {"TERMINAL", "w"}, {"TERMINAL", "x"}, {"TERMINAL", "y"}, {"TERMINAL", "z"}}},
-{"Caps", 20, {"OR", {"TERMINAL", "A"}, {"TERMINAL", "B"}, {"TERMINAL", "C"}, {"TERMINAL", "D"}, {"TERMINAL", "E"}, {"TERMINAL", "F"}, {"TERMINAL", "G"}, {"TERMINAL", "H"}, {"TERMINAL", "I"}, {"TERMINAL", "J"}, {"TERMINAL", "K"}, {"TERMINAL", "L"}, {"TERMINAL", "M"}, {"TERMINAL", "N"}, {"TERMINAL", "O"}, {"TERMINAL", "P"}, {"TERMINAL", "Q"}, {"TERMINAL", "R"}, {"TERMINAL", "S"}, {"TERMINAL", "T"}, {"TERMINAL", "U"}, {"TERMINAL", "V"}, {"TERMINAL", "W"}, {"TERMINAL", "X"}, {"TERMINAL", "Y"}, {"TERMINAL", "Z"}}},
-{"Special", 22, {"OR", {"TERMINAL", "_"}, {"TERMINAL", " "}, {"TERMINAL", "."}, {"TERMINAL", ","}, {"TERMINAL", ":"}, {"TERMINAL", ";"}, {"TERMINAL", "!"}, {"TERMINAL", "?"}, {"TERMINAL", "+"}, {"TERMINAL", "-"}, {"TERMINAL", "*"}, {"TERMINAL", "/"}, {"TERMINAL", "="}, {"TERMINAL", "("}, {"TERMINAL", ")"}, {"TERMINAL", "{"}, {"TERMINAL", "}"}, {"TERMINAL", "["}, {"TERMINAL", "]"}, {"TERMINAL", "<"}, {"TERMINAL", ">"}, {"TERMINAL", "|"}, {"TERMINAL", "%"}, {"TERMINAL", "$"}, {"TERMINAL", "&"}, {"TERMINAL", "#"}, {"TERMINAL", "@"}, {"TERMINAL", "\\\\\\\\"}, {"TERMINAL", "\\\\t"}, {"TERMINAL", "\\t"}, {"TERMINAL", "\\\\n"}, {"TERMINAL", "\\n"}, {"TERMINAL", "\\\\r"}, {"TERMINAL", "\\r"}}},
-
-}, 
-
-{"TAG", {"TERMINAL", " print(pop()) "}}, 
-{"IDENT", "Program", 0}, 
-{"TERMINAL", "This ABNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in ABNF (yes, that format)."}
+&r.Rules{&r.Rule{ Operator: r.Command, String: "title", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "ABNF of ABNF to a-grammar"
+            }
+        }
+    }, &r.Rule{ Operator: r.Command, String: "description", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "This ABNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in ABNF (yes, that format)."
+            }
+        }
+    }, &r.Rule{ Operator: r.Command, String: "startRule", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "ABNF", Int: 4
+            }
+        }
+    }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "ABNF", Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Production", Int: 5
+                            }, &r.Rule{ Operator: r.Identifier, String: "LineCommand", Int: 21
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Production", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " var prodTag=undefined; var prodExpression=undefined; pushg(pop()) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
+                    }
+                }
+            }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " prodTag=pop() "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Tag", Int: 19
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "="
+            }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " prodExpression=pop() "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "  pushg(buildProduction(popg(), prodTag, prodExpression)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ";"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Expression", Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alternative", Int: 7
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Alternative", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(simplify(abnf.newAlternative(popg(), c.Pos))) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Sequence", Int: 8
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "|"
+                            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                                    }
+                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Sequence", Int: 8
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Sequence", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(simplify(abnf.newSequence(popg(), c.Pos))) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Term", Int: 9
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                                    }
+                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Term", Int: 9
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Term", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "TaggedTerm", Int: 10
+                    }, &r.Rule{ Operator: r.Identifier, String: "Command", Int: 22
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "TaggedTerm", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(popg()) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(simplify(pop())) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
+                                    }, &r.Rule{ Operator: r.Identifier, String: "ByteRange", Int: 12
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Range", Int: 11
+                                    }, &r.Rule{ Operator: r.Identifier, String: "CharsOf", Int: 13
+                                    }, &r.Rule{ Operator: r.Identifier, String: "CharOf", Int: 14
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Group", Int: 15
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Option", Int: 16
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Repetition", Int: 17
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Times", Int: 18
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) "
+                                    }
+                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Tag", Int: 19
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Range", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(popg()) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(pop()) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "..."
+                            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) "
+                                    }
+                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "ByteRange", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(pop()) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "..b"
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "CharsOf", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "@"
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newCharsOf(pop().String, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "+"
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "CharOf", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "@"
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newCharOf(pop().String, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Group", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "("
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: ")"
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Option", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "["
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newOption(simplifyToArr(pop()), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "]"
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Repetition", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "{"
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "}"
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Times", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "CmdNumber", Int: 20
+                    }
+                }
+            }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "..."
+                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "CmdNumber", Int: 20
+                                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(\"...\")) "
+                                            }
+                                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ""
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Group", Int: 15
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Tag", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newTag(popg(), undefined, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "<"
+                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ","
+                            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                                    }
+                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
+                                            }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Token, String: ">"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "CmdNumber", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Number", Int: 35
+                    }, &r.Rule{ Operator: r.Identifier, String: "Command", Int: 22
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "LineCommand", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(buildLineCommand(pop())) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Command", Int: 22
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: ";"
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Command", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newCommand(pop(), popg(), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ":"
+                    }, &r.Rule{ Operator: r.Identifier, String: "CmdName", Int: 23
+                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([]) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "("
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                                    }
+                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
+                                            }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                                            }, &r.Rule{ Operator: r.Identifier, String: "Number", Int: 35
+                                            }
+                                        }
+                                    }
+                                }
+                            }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ","
+                                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                                            }
+                                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
+                                                    }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                                                    }, &r.Rule{ Operator: r.Identifier, String: "Number", Int: 35
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Token, String: ")"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "CmdName", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(up.in) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
+                    }, &r.Rule{ Operator: r.Command, String: "skip"
+                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Digit", Int: 30
+                                    }, &r.Rule{ Operator: r.Token, String: "_"
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Name", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
+                    }, &r.Rule{ Operator: r.Command, String: "skip"
+                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
+                                    }, &r.Rule{ Operator: r.Identifier, String: "Digit", Int: 30
+                                    }, &r.Rule{ Operator: r.Token, String: "_"
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Token", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Dquotetoken", Int: 26
+                    }, &r.Rule{ Operator: r.Identifier, String: "Squotetoken", Int: 27
+                    }, &r.Rule{ Operator: r.Identifier, String: "Code", Int: 28
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Dquotetoken", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "\""
+            }, &r.Rule{ Operator: r.Command, String: "skip"
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(unescape(up.in), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "AsciiNoQs", Int: 31
+                                    }, &r.Rule{ Operator: r.Token, String: "'"
+                                    }, &r.Rule{ Operator: r.Token, String: "\\\""
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "\""
+            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Squotetoken", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "'"
+            }, &r.Rule{ Operator: r.Command, String: "skip"
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(unescape(up.in), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "AsciiNoQs", Int: 31
+                                    }, &r.Rule{ Operator: r.Token, String: "\""
+                                    }, &r.Rule{ Operator: r.Token, String: "\\'"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "'"
+            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Code", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "~~"
+            }, &r.Rule{ Operator: r.Command, String: "skip"
+            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(unescapeTilde(up.in), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "~"
+                                    }
+                                }
+                            }, &r.Rule{ Operator: r.Identifier, String: "AllButTilde", Int: 34
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{ Operator: r.Token, String: "~~"
+            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Alphabet", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "a"
+                            }, &r.Rule{ Operator: r.Token, String: "z"
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "A"
+                            }, &r.Rule{ Operator: r.Token, String: "Z"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Digit", Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
+                    }, &r.Rule{ Operator: r.Token, String: "9"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "AsciiNoQs", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "("
+                            }, &r.Rule{ Operator: r.Token, String: "~"
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "#"
+                            }, &r.Rule{ Operator: r.Token, String: "&"
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.CharOf, String: "\t\n\r !"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "AsciiNoLb", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " "
+                            }, &r.Rule{ Operator: r.Token, String: "~"
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Token, String: "\t"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "AsciiNoStSl", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\x00"
+                            }, &r.Rule{ Operator: r.Token, String: ")"
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "+"
+                            }, &r.Rule{ Operator: r.Token, String: "."
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
+                            }, &r.Rule{ Operator: r.Token, String: "~"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "AllButTilde", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\x00"
+                            }, &r.Rule{ Operator: r.Token, String: "}"
+                            }
+                        }
+                    }, &r.Rule{ Operator: r.Token, String: "\\~"
+                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\u007f"
+                            }, &r.Rule{ Operator: r.Token, String: "\uffff"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Number", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newNumber(up.in, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
+                            }, &r.Rule{ Operator: r.Sequence, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "1"
+                                            }, &r.Rule{ Operator: r.Token, String: "9"
+                                            }
+                                        }
+                                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
+                                                    }, &r.Rule{ Operator: r.Token, String: "9"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Whitespace", Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.CharsOf, String: "\t\n\r "
+                            }, &r.Rule{ Operator: r.Identifier, String: "Comment", Int: 37
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "Comment", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "LineComment", Int: 38
+                    }, &r.Rule{ Operator: r.Sequence, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "/*"
+                            }, &r.Rule{ Operator: r.Command, String: "skip"
+                            }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "*"
+                                            }
+                                        }
+                                    }, &r.Rule{ Operator: r.Identifier, String: "AsciiNoStSl", Int: 33
+                                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "/"
+                                            }
+                                        }
+                                    }
+                                }
+                            }, &r.Rule{ Operator: r.Token, String: "*/"
+                            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Production, String: "LineComment", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "//"
+            }, &r.Rule{ Operator: r.Command, String: "skip"
+            }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "AsciiNoLb", Int: 32
+                    }
+                }
+            }, &r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "\n"
+                    }, &r.Rule{ Operator: r.Token, String: "\r"
+                    }
+                }
+            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                    }
+                }
+            }
+        }
+    }, &r.Rule{ Operator: r.Command, String: "startScript", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\n\n    let names = []\n    let prodsPos = {}\n    let lastPos = 0\n\n    function getNameIdx(name) {\n        const pos = names.indexOf(name)\n        if (pos != -1) return pos\n        return names.push(name) - 1\n    }\n    function resolveNameIdx(productions) {\n        for (let i = 0; i < productions.length; i++) {\n            let rule = productions[i]\n            if (rule.Childs != undefined && rule.Childs.length > 0) resolveNameIdx(rule.Childs)\n            if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) resolveNameIdx(rule.CodeChilds)\n            if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) rule.Int = prodsPos[rule.Int]\n        }\n    }\n    function buildProduction(prodName, prodTag, prodExpression) {\n        if (prodsPos[prodName.Int] != undefined) {\n            println(\"Error: Rule \" + prodName.String + \" is defined multiple times.\")\n            exit(0)\n        }\n        prodsPos[prodName.Int] = lastPos++\n        if (prodTag != undefined) {\n            prodTag.Childs = simplifyToArr(prodExpression)\n            return abnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)\n        } else {\n            return abnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)\n        }\n    }\n    function buildLineCommand(cmd) {\n        cmd.Int = getNameIdx(cmd.String)\n        prodsPos[cmd.Int] = lastPos++\n        return cmd\n    }\n\n    // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.\n    function simplifyArr(rules) {\n        if (rules.length == 1) {\n            const op = rules[0].Operator\n            if (op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1)) return simplifyArr(rules[0].Childs)\n        }\n        return rules\n    }\n\n    // This also breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.\n    function simplifyToArr(rule) {\n        if (rule == undefined) return undefined\n        return simplifyArr([rule])\n    }\n\n    // Groups with only one child can be broken apart as long as down there is an unbreakable rule. Try to find one.\n    function trySimplifyDown(rule) {\n        if (rule.Childs == undefined) return rule\n        const op = rule.Operator\n        if ((rule.Childs.length == 1) && (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or)) return trySimplifyDown(rule.Childs[0])\n        if (op == abnf.oid.Sequence) return undefined\n        return rule\n    }\n\n    function simplify(rule) {\n        let ruleDown = trySimplifyDown(rule)\n        if (ruleDown != undefined) return ruleDown\n        if (rule.Childs.length == 1) { // Breaking up abnf.oid.Group did not work. Getting down only with Sequence and Or.\n            const op = rule.Operator\n            if (op == abnf.oid.Sequence || op == abnf.oid.Or) return simplify(rule.Childs[0])\n        }\n        return rule\n    }\n\n    c.compile(c.asg)\n    let rules = ltr.stack\n    resolveNameIdx(rules)\n\n    // To show the initial a-grammar:\n    println(\"=> Rules: \" + abnf.serializeRules(rules))\n\n    // To return the generated a-grammar to the next parser:\n    rules\n\n"
+            }
+        }
+    }
+}
 ```
 </details>
 
