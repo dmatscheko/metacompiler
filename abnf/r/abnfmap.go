@@ -44,6 +44,12 @@ var AbnfFuncMap = map[string]Object{
 	"newTimes": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Times, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
 	},
+	"newCharOf": func(String string, Pos int) *Rule {
+		return &Rule{Operator: CharOf, String: String, Pos: Pos}
+	},
+	"newCharsOf": func(String string, Pos int) *Rule {
+		return &Rule{Operator: CharsOf, String: String, Pos: Pos}
+	},
 	"newRule": func(Operator OperatorID, String string, Int int, Pos int, Childs *Rules, CodeChilds *Rules) *Rule {
 		return &Rule{Operator: Operator, String: String, Int: Int, Pos: Pos, Childs: Childs, CodeChilds: CodeChilds}
 	},

@@ -40,7 +40,7 @@ func (ps *parserscript) Run(name, src string) (goja.Value, error) {
 	return ps.vm.RunProgram(p)
 }
 
-func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules, doSkipSpaces string, depth int) *r.Rule {
+func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules, depth int) *r.Rule {
 	ps.compilerFuncMap["localAsg"] = localProductions // The local part of the abstract syntax graph.
 
 	if ps.traceEnabled {

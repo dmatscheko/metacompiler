@@ -13,10 +13,9 @@ It allows to automatically create a compiler for everything described in ABNF (y
 :skip(Whitespace) ;
 
 // This is the start rule.
-ABNF        = { Production | LineCommand | Comment } ;
+ABNF        = { Production | LineCommand | LineComment } ;
 
-// TODO: Move buildProduction() outside of Optional clause. Otherwise it is a bug when nothing is given after "=" which is a valid Production.
-Production  = Name <~~ pushg(pop()) ~~> [ Tag <~~ ltr.prodTag=pop() ~~> ] "=" [ Expression <~~ pushg(buildProduction(popg(), ltr.prodTag, pop())); ltr.prodTag=undefined ~~> ] ";" ;
+Production  = Name <~~ var prodTag=undefined; var prodExpression=undefined; pushg(pop()) ~~> [ Tag <~~ prodTag=pop() ~~> ] "=" [ Expression <~~ prodExpression=pop() ~~> ] ";" <~~  pushg(buildProduction(popg(), prodTag, prodExpression)) ~~> ;
 
 Expression  = Alternative ;
 
@@ -29,7 +28,7 @@ Sequence    <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
 Term        = TaggedTerm | Command ;
 
 TaggedTerm <~~ push(popg()) ~~>
-            = ( Name | ByteRange | Range | Group | Option | Repetition | Times ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
+            = ( Name | ByteRange | Range | Group | Option | Repetition | Times | CharOf | CharsOf ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Range       <~~ push(popg()) ~~>
             = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) ~~> ] ;
@@ -38,8 +37,11 @@ Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)
 Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
 Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
 Times       = CmdNumber <~~ pushg([pop()]) ~~> [ "..." ( CmdNumber | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
+CharOf      = "@" Token <~~ push(abnf.newCharOf(pop().String, c.Pos)) ~~> ;
+CharsOf      = "@@" Token <~~ push(abnf.newCharsOf(pop().String, c.Pos)) ~~> ;
 
-Comment     = "//" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+Comment     = LineComment | "/*" :skip(Nothing) { { "*" } AsciiNoStSl { "/" } } "*/" :skip(Whitespace) ;
+LineComment = "//" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
 Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" ( Name | Token ) <~~ pushg([pop()]) ~~> { "," ( Name | Token ) <~~ pushg(append(popg(), pop())) ~~> } ">" ;
@@ -65,15 +67,16 @@ Code        = '~~' :skip(Nothing) { [ "~" ] AllButTilde } <~~ push(abnf.newToken
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes.
-AsciiNoLb   = "\x20"..."\x7e" | "\t" ; // Readable ASCII without line breaks (CR and LF).
-AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
+AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | @"\t\n\r !" ; // Readable ASCII without double and single quotes.
+AsciiNoLb   = " "..."~" | "\t" ; // Readable ASCII without line breaks (CR and LF).
+AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
+AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
 
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
             = "0" | "1"..."9" { "0"..."9" } ;
 
-Nothing     = "" ;
-Whitespace  = " \t\r\n" ;
+Nothing     = ;
+Whitespace  = { @@"\t\n\r " | Comment } ;
 
 // ---
 
@@ -127,6 +130,7 @@ Whitespace  = " \t\r\n" ;
 
     // This also breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
     function simplifyToArr(rule) {
+        if (rule == undefined) return undefined
         return simplifyArr([rule])
     }
 
