@@ -10,11 +10,12 @@ import (
 	"14.gy/mec/abnf"
 )
 
+// TODO: Implement include() for JS.
+// TODO: Implement include() for ABNF. Add ability to include ABNFs from ABNFs (like modules).
+
 // TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).
-// TODO: Add possibility to comment the EBNF via '//'.
-// TODO: Allow to state the start rule via JS.
 // TODO: Define an :EOF() symbol for the EBNF syntax.
-// TODO: Add ability to include ABNFs from ABNFs (like modules).
+// TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier).
 // TODO: add -c -d , ... to the cmd line
 
 // rule == production.

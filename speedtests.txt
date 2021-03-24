@@ -55,3 +55,9 @@ ParseWithGrammar took 3.1889995s
 CompileASG took 5.9679991s
 
 
+after disabling infinite loop check for speed test:
+
+ParseWithGrammar took 2.2440184s
+CompileASG took 5.9389994s
+
+
