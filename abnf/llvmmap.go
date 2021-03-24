@@ -1127,7 +1127,7 @@ func (e *evaluator) evalValue(v value.Value) uint32 {
 
 // signExt sign extends x.
 func signExt(x uint32) uint32 {
-	for i := uint32(31); i >= 0; i-- {
+	for i := 31; i >= 0; i-- {
 		mask := uint32(1 << i)
 		if x&mask != 0 {
 			break

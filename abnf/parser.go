@@ -317,6 +317,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			return nil
 		}
 		pa.Sdx += size
+		if skippingSpaces {
+			return &r.Rules{}
+		}
 		*localProductions = append(*localProductions, rule)
 	case r.CharOf:
 		// Only skip spaces when actually reading from the target text (Tokens)
@@ -329,13 +332,15 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			return nil
 		}
 		ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
-		if strings.IndexRune(rule.String, ch) == -1 {
+		if !strings.ContainsRune(rule.String, ch) {
 			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
 			return nil
 		}
 		pa.Sdx += size
-
+		if skippingSpaces {
+			return &r.Rules{}
+		}
 		if ch >= 0 && ch <= 127 { // Cache the rune == 0...127 part of this rules and reuse them, because those are the most used chars and they are binary compatible with bytes. 128...255 are NOT compatible.
 			if pa.rangeCache[ch] == nil {
 				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
@@ -356,7 +361,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				break
 			}
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
-			if strings.IndexRune(rule.String, ch) == -1 {
+			if !strings.ContainsRune(rule.String, ch) {
 				break
 			}
 			pa.Sdx += size
@@ -366,6 +371,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
 			return nil
+		}
+		if skippingSpaces {
+			return &r.Rules{}
 		}
 		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: pa.Src[startPos:pa.Sdx]})
 	case r.Range:
@@ -401,6 +409,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 
 			pa.Sdx += size
 
+			if skippingSpaces {
+				return &r.Rules{}
+			}
 			if ch >= 0 && ch <= 127 { // Cache the rune == 0...127 part of this rules and reuse them, because those are the most used chars and they are binary compatible with bytes. 128...255 are NOT compatible.
 				if pa.rangeCache[ch] == nil {
 					pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
@@ -425,6 +436,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 
 			pa.Sdx++
 
+			if skippingSpaces {
+				return &r.Rules{}
+			}
 			// Cache all bytes (0...255) of this rules and reuse them.
 			if pa.rangeCache[ch] == nil {
 				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]byte{ch})}
