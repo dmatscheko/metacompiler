@@ -3,7 +3,7 @@
 
 
 // This is a parser command that sets the possible white space.
-:skip(Whitespace) ;
+:whitespace(Whitespace) ;
 
 // This is the start rule.
 ABNF        = { Production | LineCommand } ;
@@ -34,14 +34,14 @@ Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
 LineCommand = Command ";" ;
 
 Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
-CmdName     = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
+CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
-Name        = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
+Name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken | Code ;
-Dquotetoken = '"' :skip() { AsciiNoQs | "'" | '\\"' } '"' :skip(Whitespace) ;
-Squotetoken = "'" :skip() { AsciiNoQs | '"' | "\\'" } "'" :skip(Whitespace) ;
-Code        = '~~' :skip() { [ "~" ] AllButTilde } '~~' :skip(Whitespace) ;
+Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(Whitespace) ;
+Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } "'" :whitespace(Whitespace) ;
+Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
@@ -54,5 +54,5 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
 
 Whitespace  = { @"\t\n\r "+ | Comment } ;
 
-Comment     = LineComment | "/*" :skip() { { "*" } AsciiNoStSl { "/" } } "*/" :skip(Whitespace) ;
-LineComment = "//" :skip() { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(Whitespace) ;
+LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(Whitespace) ;

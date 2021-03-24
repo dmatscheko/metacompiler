@@ -7,7 +7,7 @@ It allows to automatically create a compiler for everything described in ABNF (y
 
 :startRule(ABNF) ;
 // This is a parser command that sets the possible white space.
-:skip(Whitespace) ;
+:whitespace(Whitespace) ;
 
 // This is the start rule.
 ABNF        = { Production | LineCommand } ;
@@ -47,15 +47,15 @@ LineCommand = Command <~~ pushg(buildLineCommand(pop())) ~~> ";" ;
 Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
             = ":" CmdName "(" <~~ pushg([]) ~~> [ ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> { "," ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> } ] ")" ;
 CmdName     <~~ push(up.in) ~~>
-            = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
+            = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Name        <~~ push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) ~~>
-            = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
+            = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken | Code ;
-Dquotetoken = '"' :skip() { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' :skip(Whitespace) ;
-Squotetoken = "'" :skip() { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" :skip(Whitespace) ;
-Code        = '~~' :skip() { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' :skip(Whitespace) ;
+Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' :whitespace(Whitespace) ;
+Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" :whitespace(Whitespace) ;
+Code        = '~~' :whitespace() { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' :whitespace(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
@@ -69,8 +69,8 @@ Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
 
 Whitespace  = { @"\t\n\r "+ | Comment } ;
 
-Comment     = LineComment | "/*" :skip() { { "*" } AsciiNoStSl { "/" } } "*/" :skip(Whitespace) ;
-LineComment = "//" :skip() { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(Whitespace) ;
+LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(Whitespace) ;
 
 // ---
 
