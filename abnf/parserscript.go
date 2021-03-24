@@ -17,8 +17,8 @@ type parserscript struct {
 	preventDefaultOutput bool
 	stack                []r.Object // global stack.
 
-	traceEnabled bool
-	traceCount   int
+	// traceEnabled bool
+	// traceCount   int
 
 	pa *parser
 }
@@ -43,9 +43,9 @@ func (ps *parserscript) Run(name, src string) (goja.Value, error) {
 func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules, depth int) *r.Rule {
 	ps.compilerFuncMap["localAsg"] = localProductions // The local part of the abstract syntax graph.
 
-	if ps.traceEnabled {
-		// co.traceTop(tag, slot, depth, upStream)
-	}
+	// if ps.traceEnabled {
+	// co.traceTop(tag, slot, depth, upStream)
+	// }
 
 	code := (*rule.CodeChilds)[0].String
 
@@ -56,9 +56,9 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 
 	res, ok := v.Export().(*r.Rule)
 
-	if ps.traceEnabled {
-		// gp.traceBottom(upStream)
-	}
+	// if ps.traceEnabled {
+	// gp.traceBottom(upStream)
+	// }
 
 	if ok {
 		return res
