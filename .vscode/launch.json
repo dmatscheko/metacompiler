@@ -80,7 +80,7 @@
             "name": "ABNF of ABNF to object",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf", "-lb"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf"]
         },
         {
             "name": "---------",
@@ -110,7 +110,7 @@
             "name": "Speed Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf", "-s", "-lb"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf", "-s"]
         },
 
     ]
