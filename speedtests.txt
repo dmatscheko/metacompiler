@@ -34,3 +34,24 @@ CompileASG took 5.1620008s
 ParseWithGrammar took 1.3099997s
 CompileASG took 5.0320003s
 
+
+after more parser commands, new syntax and byte range:
+
+ParseWithGrammar took 1.6790175s
+CompileASG took 5.3849987s
+ParseWithGrammar took 1.6450008s
+CompileASG took 5.2800383s
+
+
+after inclusion of comments as whitespace (sucks a bit but comments are important):
+
+ParseWithGrammar took 3.4480606s
+CompileASG took 5.9520749s
+
+
+after change of whitespace Rule "Nothing" to nil:
+
+ParseWithGrammar took 3.1889995s
+CompileASG took 5.9679991s
+
+

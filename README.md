@@ -3,10 +3,10 @@
 A generic compiler frontend.
 
 This is
-* a parser that parses a language specification written as an annotated EBNF
-* and a compiler that (at runtime) compiles the parsing result to a second parser and compiler.
+* a parser that parses a language specification written in annotated EBNF
+* and a compiler that (at runtime) compiles the parsing result to a new parser and compiler.
 
-The second parser and compiler are equivalent to the first ones and can replace them at runtime or can be used in parallel.
+The new parser and compiler are equivalent to the first ones and can replace them at runtime or can be used in parallel.
 
 This means it is a parser and compiler with a polymorphic core.
 

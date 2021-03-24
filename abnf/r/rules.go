@@ -26,13 +26,15 @@ const (
 	Times
 	Tag
 	Command
+	CharOf
+	CharsOf
 	// Link types:
 	Production
 	Identifier
 )
 
 func (id OperatorID) String() string {
-	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Number", "Or", "Optional", "Repeat", "Range", "Times", "Tag", "Command", "Production", "Identifier"}[id]
+	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Number", "Or", "Optional", "Repeat", "Range", "Times", "Tag", "Command", "CharOf", "CharsOf", "Production", "Identifier"}[id]
 }
 
 type Rule struct {
@@ -115,7 +117,7 @@ func (rule *Rule) Serialize() string {
 	op := rule.Operator
 	res += fmt.Sprintf("Operator:r.%s", op.String())
 
-	if op == Token || op == Identifier || op == Production || op == Command {
+	if op == Token || op == Identifier || op == Production || op == Command || op == CharOf || op == CharsOf {
 		res += fmt.Sprintf(", String:%q", rule.String)
 	}
 	if op == Identifier || op == Number || op == Range {
@@ -141,7 +143,7 @@ func (rule *Rule) Serialize() string {
 		}
 		res += "}"
 	}
-	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == CharOf || op == CharsOf) {
 		panic("wrong rule type: " + op.String())
 	}
 
@@ -176,7 +178,7 @@ func (rule *Rule) ToString() string {
 	op := rule.Operator
 	res += fmt.Sprintf("Operator:%s", op.String())
 
-	if op == Token || op == Identifier || op == Production || op == Command {
+	if op == Token || op == Identifier || op == Production || op == Command || op == CharOf || op == CharsOf {
 		res += fmt.Sprintf(", String:%q", rule.String)
 	}
 	if op == Identifier || op == Number || op == Range {
@@ -188,7 +190,7 @@ func (rule *Rule) ToString() string {
 	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
 		res += ", Childs:[...]"
 	}
-	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == CharOf || op == CharsOf) {
 		res += fmt.Sprintf(", String:%q", rule.String)
 		res += fmt.Sprintf(", Int:%d", rule.Int)
 		if rule.CodeChilds != nil {

@@ -36,7 +36,7 @@ type parser struct {
 	foundSdxList map[int]int
 	useFoundList bool
 
-	spaces string
+	spaces *r.Rule
 
 	lastParsePosition int
 
@@ -48,19 +48,6 @@ type parser struct {
 	ps *parserscript
 }
 
-func (pa *parser) skipSpaces(spaces string) {
-	for {
-		if pa.Sdx >= len(pa.Src) {
-			break
-		}
-		ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
-		if strings.IndexRune(spaces, ch) == -1 {
-			break
-		}
-		pa.Sdx += size
-	}
-}
-
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
 	// Cantor pairing function
 	a := rule.Int
@@ -68,7 +55,7 @@ func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
 	return ((ab * (ab + 1)) >> 1) + a
 }
 
-func (pa *parser) ruleEnter(rule *r.Rule, doSkipSpaces string, depth int) (bool, *r.Rules, int) { // => (isBlocked, rules, rulesSdx, rulesCh)
+func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (bool, *r.Rules, int) { // => (isBlocked, rules, rulesSdx, rulesCh)
 	var isBlocked bool = false
 	var foundRule *r.Rules = nil
 	var foundSdx int = -1
@@ -109,14 +96,14 @@ func (pa *parser) ruleEnter(rule *r.Rule, doSkipSpaces string, depth int) (bool,
 		msg = "\n" + space + "<INSTANT EXIT (LOOP)\n"
 	}
 	skip := "  spaces:〰️  " // Read spaces.
-	if doSkipSpaces != "" {
+	if skipSpaceRule != nil {
 		skip = "  spaces:➰  " // Skip spaces.
 	}
 	fmt.Print(space, ">", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, rule.ToString(), msg, "\n")
 	return isBlocked, foundRule, foundSdx
 }
 
-func (pa *parser) ruleExit(rule *r.Rule, doSkipSpaces string, depth int, found *r.Rules, pos int) {
+func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found *r.Rules, pos int) {
 	if rule.Operator == r.Identifier && (pa.useBlockList || pa.useFoundList) {
 		id := pa.getRulePosId(rule, pos)
 		if pa.useBlockList {
@@ -138,23 +125,23 @@ func (pa *parser) ruleExit(rule *r.Rule, doSkipSpaces string, depth int, found *
 		c = fmt.Sprintf("%q", pa.Src[pa.Sdx])
 	}
 	skip := "  spaces:〰️  " // Read spaces.
-	if doSkipSpaces != "" {
+	if skipSpaceRule != nil {
 		skip = "  spaces:➰  " // Skip spaces.
 	}
 	fmt.Print(times(" ", depth), "<", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, rule.ToString(), " found:", found != nil, "\n")
 }
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
-func (pa *parser) applyAsSequence(rules *r.Rules, doSkipSpaces string, depth int, pos int) *r.Rules {
+func (pa *parser) applyAsSequence(rules *r.Rules, skipSpaceRule *r.Rule, skipSpaces bool, depth int, pos int) *r.Rules {
 	if rules == nil {
 		return nil
 	}
 	var newProductions *r.Rules // = nil
 	if len(*rules) == 1 {
-		newProductions = pa.apply((*rules)[0], doSkipSpaces, depth)
+		newProductions = pa.apply((*rules)[0], skipSpaceRule, skipSpaces, depth)
 	} else {
 		newRule := &r.Rule{Operator: r.Sequence, Childs: rules, Pos: pos}
-		newProductions = pa.apply(newRule, doSkipSpaces, depth)
+		newProductions = pa.apply(newRule, skipSpaceRule, skipSpaces, depth)
 	}
 	return newProductions
 }
@@ -226,11 +213,11 @@ func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 func (pa *parser) applyCommand(rule *r.Rule) {
 	switch rule.String {
 	case "skip":
-		pa.resolveParameterToToken(rule.CodeChilds)
+		// pa.resolveParameterToToken(rule.CodeChilds)
 		if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
-			pa.spaces = (*rule.CodeChilds)[0].String
+			pa.spaces = (*rule.CodeChilds)[0]
 		} else {
-			pa.spaces = ""
+			pa.spaces = nil
 		}
 	case "include":
 		// :include("foo_a.bnf"); How to include only the productions? Maybe overhaul of EBNF format?
@@ -255,18 +242,18 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 // This is the resolution process of the agrammar. Does the localProductions need to go into a Group or something? No. The grouping was done already in the agrammar.
 // At this point, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules.
 // Rules can be reused. So whatever you do, NEVER change a rule here.
-func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules { // => (localProductions)
+func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) *r.Rules { // => (localProductions)
 	wasSdx := pa.Sdx // Start position of the rule. Return, if the rule does not match.
 	localProductions := &r.Rules{}
 
-	isBlocked, foundRule, foundSdx := pa.ruleEnter(rule, doSkipSpaces, depth)
+	isBlocked, foundRule, foundSdx := pa.ruleEnter(rule, skipSpaceRule, depth)
 	if isBlocked {
 		if foundRule != nil {
 			pa.Sdx = foundSdx
-			pa.ruleExit(rule, doSkipSpaces, depth, foundRule, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, foundRule, wasSdx)
 			return foundRule
 		}
-		pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+		pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 		return nil
 	}
 
@@ -274,9 +261,9 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 	case r.Sequence, r.Group, r.Production: // Those are groups/sequences of rules. Iterate through them and apply.
 	outer:
 		for i := range *rule.Childs {
-			newProductions := pa.apply((*rule.Childs)[i], doSkipSpaces, depth+1)
+			newProductions := pa.apply((*rule.Childs)[i], skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
-				pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			} else if len(*newProductions) > 0 { // Some Commands like :skip() have to be handled inside the sequence.
@@ -288,11 +275,11 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 						switch prod.String {
 						case "skip":
 							// Resolve parameter constants.
-							pa.resolveParameterToToken(prod.CodeChilds)
+							// pa.resolveParameterToToken(prod.CodeChilds)
 							if prod.CodeChilds != nil && len(*prod.CodeChilds) > 0 {
-								doSkipSpaces = (*prod.CodeChilds)[0].String
+								skipSpaceRule = (*prod.CodeChilds)[0]
 							} else {
-								doSkipSpaces = ""
+								skipSpaceRule = nil
 							}
 						default:
 							// All other commands should have been handled already by apply() and so this should never happen.
@@ -319,22 +306,76 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 		}
 	case r.Token:
 		// Only skip spaces when actually reading from the target text (Tokens)
-		pa.skipSpaces(doSkipSpaces)
+		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+		}
 
 		size := len(rule.String)
 		if pa.Sdx+size > len(pa.Src) || rule.String != pa.Src[pa.Sdx:pa.Sdx+size] {
-			pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
 			return nil
 		}
 		pa.Sdx += size
 		*localProductions = append(*localProductions, rule)
+	case r.CharOf:
+		// Only skip spaces when actually reading from the target text (Tokens)
+		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+		}
+		if pa.Sdx+1 > len(pa.Src) {
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.Sdx = wasSdx
+			return nil
+		}
+		ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
+		if strings.IndexRune(rule.String, ch) == -1 {
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.Sdx = wasSdx
+			return nil
+		}
+		pa.Sdx += size
+
+		if ch >= 0 && ch <= 127 { // Cache the rune == 0...127 part of this rules and reuse them, because those are the most used chars and they are binary compatible with bytes. 128...255 are NOT compatible.
+			if pa.rangeCache[ch] == nil {
+				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
+			}
+			*localProductions = append(*localProductions, pa.rangeCache[ch])
+		} else {
+			*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
+		}
+	case r.CharsOf:
+		// Only skip spaces when actually reading from the target text (Tokens)
+		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+		}
+		length := len(pa.Src)
+		startPos := pa.Sdx
+		for {
+			if pa.Sdx >= length {
+				break
+			}
+			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
+			if strings.IndexRune(rule.String, ch) == -1 {
+				break
+			}
+			pa.Sdx += size
+		}
+		size := pa.Sdx - startPos
+		if size == 0 {
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.Sdx = wasSdx
+			return nil
+		}
+		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: pa.Src[startPos:pa.Sdx]})
 	case r.Range:
 		// Only skip spaces when actually reading from the target text (Tokens)
-		pa.skipSpaces(doSkipSpaces)
+		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+		}
 
 		if pa.Sdx >= len(pa.Src) {
-			pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -343,7 +384,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 			if ch == utf8.RuneError {
-				pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -353,7 +394,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			// TODO: check if len of rune is len of string. Panic otherwise. Or better: Do that in verifier.
 
 			if !(ch >= from && ch <= to) {
-				pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -377,7 +418,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			// TODO: check if len of string is 1. Panic otherwise. Or better: Do that in verifier.
 
 			if !(ch >= from && ch <= to) {
-				pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -394,7 +435,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 	case r.Or:
 		found := false
 		for i := range *rule.Childs {
-			newProductions := pa.apply((*rule.Childs)[i], doSkipSpaces, depth+1)
+			newProductions := pa.apply((*rule.Childs)[i], skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions != nil { // The nil result is used as ERROR. So if a match is successful but has nothing to return, it should only return something empty but not nil.
 				localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 				found = true
@@ -402,7 +443,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			}
 		}
 		if !found {
-			pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -414,7 +455,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			newRule = &r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: rule.Pos}
 		}
 		for { // Repeat as often as possible.
-			newProductions := pa.apply(newRule, doSkipSpaces, depth+1)
+			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
 				break
 			}
@@ -432,7 +473,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			if child.Operator == r.Number {
 				continue
 			}
-			resRule := pa.apply(child, doSkipSpaces, depth+1)
+			resRule := pa.apply(child, skipSpaceRule, skippingSpaces, depth+1)
 			if resRule == nil || len(*resRule) != 1 {
 				panic("Parameter needs to result in exactly one result. Rule: " + child.ToString())
 			}
@@ -459,36 +500,36 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 			newRule = &r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: rule.Pos}
 		}
 		for i := 0; i < from; i++ { // Repeat as often as possible.
-			newProductions := pa.apply(newRule, doSkipSpaces, depth+1)
+			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
-				pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
 			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
 		}
 		for i := from; i < to; i++ { // Repeat as often as possible.
-			newProductions := pa.apply(newRule, doSkipSpaces, depth+1)
+			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
 				break
 			}
 			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
 		}
 	case r.Optional:
-		newProductions := pa.applyAsSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos)
+		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
 	case r.Identifier: // This identifies another rule (and its index), it is basically a link: E.g. to the expression-rule which is at position 3: { "Identifier", "expression", 3 }
-		newProductions := pa.applyAsSequence((*pa.agrammar)[rule.Int].Childs, doSkipSpaces, depth+1, rule.Pos)
+		newProductions := pa.applyAsSequence((*pa.agrammar)[rule.Int].Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
-			pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
 			return nil
 		}
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 	case r.Tag:
-		newProductions := pa.applyAsSequence(rule.Childs, doSkipSpaces, depth+1, rule.Pos) // TODO: resolveRulesToToken for constants
+		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos) // TODO: resolveRulesToToken for constants
 		if newProductions == nil {
-			pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			return nil
 		}
 		pa.resolveParameterToToken(rule.CodeChilds)
@@ -510,7 +551,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 				}
 			}
 			if pa.Sdx+byteCount > len(pa.Src) {
-				pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -571,11 +612,11 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 		case "include":
 			panic("NOT IMPLEMENTED")
 		case "script": // TODO: Maybe move upwards like :skip().
-			resRule := pa.ps.HandleScriptRule(rule, localProductions, doSkipSpaces, depth) // TODO: localProductions is empty here...
+			resRule := pa.ps.HandleScriptRule(rule, localProductions, depth) // TODO: localProductions is empty here...
 			if resRule != nil {
-				scriptProductions := pa.apply(resRule, doSkipSpaces, depth+1)
+				scriptProductions := pa.apply(resRule, skipSpaceRule, skippingSpaces, depth+1)
 				if scriptProductions == nil {
-					pa.ruleExit(rule, doSkipSpaces, depth, nil, wasSdx)
+					pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 					pa.Sdx = wasSdx
 					return nil
 				}
@@ -612,7 +653,7 @@ func (pa *parser) apply(rule *r.Rule, doSkipSpaces string, depth int) *r.Rules {
 		}
 	}
 
-	pa.ruleExit(rule, doSkipSpaces, depth, localProductions, wasSdx)
+	pa.ruleExit(rule, skipSpaceRule, depth, localProductions, wasSdx)
 	return localProductions
 }
 
@@ -673,7 +714,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 
 	pa.ps = NewParserScript(&pa)
 
-	pa.spaces = " \t\r\n" // TODO: Make this configurable via JS.
+	pa.spaces = &r.Rule{Operator: r.CharsOf, String: "\t\n\r "} // TODO: Make this configurable via JS.
 
 	for _, rule := range *pa.agrammar {
 		if rule.Operator == r.Command {
@@ -682,10 +723,10 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 	}
 
 	// For the parsing, the start rule is necessary. For the compilation not.
-	newProductions := pa.apply((*pa.agrammar)[startRule.Int], pa.spaces, 0)
+	newProductions := pa.apply((*pa.agrammar)[startRule.Int], pa.spaces, false, 0)
 
 	// Check if the position is at EOF at end of parsing. There can be spaces left, but otherwise its an error:
-	pa.skipSpaces(pa.spaces)
+	pa.apply(pa.spaces, pa.spaces, true, 0) // Skip spaces.
 	if pa.Sdx < len(pa.Src) {
 		return nil, fmt.Errorf("Not everything could be parsed. Last good parse position was %s\nFailed productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), newProductions.Serialize())
 	}
