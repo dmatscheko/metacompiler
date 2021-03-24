@@ -2,7 +2,7 @@
 
 
 :startRule(Program) ;
-:skip(Whitespace) ;
+:whitespace(Whitespace) ;
 
 Program     = { Statement } ;
 Statement   = "if" ParenExpr Statement
@@ -31,8 +31,8 @@ Comp        = Sum ( "<" | ">" | "==" | "!=" ) Sum | Sum ;
 Sum         = Term "+" Sum | Term "-" Sum | Term ;
 Term        = ParenExpr | Command | Id | Int ;
 
-Id          = ( "a"..."z" | "A"..."Z" ) :skip() { "a"..."z" | "A"..."Z" | "_" } :skip(Whitespace) ;
-Int         = "0" | "1"..."9" :skip() { "0"..."9" } :skip(Whitespace) ;
+Id          = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
+Int         = "0" | "1"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 Whitespace  = @" \t\r\n"+ ;
 

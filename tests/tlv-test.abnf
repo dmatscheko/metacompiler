@@ -2,7 +2,7 @@
 
 
 :startRule(TLV) ;
-:skip() ;
+:whitespace() ;
 
 TLV = "\x00"..b"\xff" <~~ println(">" + up.in + "<") ~~> { :number(1, 0)("\x00"..b"\xff") <~~ println(">" + up.in + "<") ~~> } { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~> ;
 

@@ -212,7 +212,7 @@ func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 // TODO: Maybe remove used commands.
 func (pa *parser) applyCommand(rule *r.Rule) {
 	switch rule.String {
-	case "skip":
+	case "whitespace":
 		// pa.resolveParameterToToken(rule.CodeChilds)
 		if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
 			pa.spaces = (*rule.CodeChilds)[0]
@@ -273,7 +273,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 					if prod.Operator == r.Command {
 						noResult = true
 						switch prod.String {
-						case "skip":
+						case "whitespace":
 							// Resolve parameter constants.
 							// pa.resolveParameterToToken(prod.CodeChilds)
 							if prod.CodeChilds != nil && len(*prod.CodeChilds) > 0 {
@@ -550,7 +550,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx})
 	case r.Command:
 		switch rule.String {
-		case "skip":
+		case "whitespace":
 			rule.Pos = pa.Sdx
 			localProductions = &r.Rules{rule} // Put the responsibility for the Command :skip() to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
 		case "number": // Mainly to dynamically create Times rules.
