@@ -23,12 +23,6 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator-2.abnf", "-b", "tests/calculator_formula.txt"]
         },
         {
-            "name": "LLVM IR",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.abnf"]
-        },
-        {
             "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",
@@ -41,7 +35,7 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck_interpreter.abnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
-            "name": "Brainfuck LLVM IR Compiler",
+            "name": "Brainfuck to LLVM IR",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir.abnf", "-b", "tests/brainfuck-test-2.txt"]
@@ -87,6 +81,12 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}"
+        },
+        {
+            "name": "LLVM IR Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.abnf"]
         },
         {
             "name": "TLV Test",

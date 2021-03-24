@@ -20,6 +20,9 @@ var AbnfFuncMap = map[string]Object{
 		return &Rule{Operator: Tag, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
 	},
 	"newCommand": func(String string, CodeChilds *Rules, Pos int) *Rule {
+		if CodeChilds != nil && len(*CodeChilds) == 0 {
+			CodeChilds = nil
+		}
 		return &Rule{Operator: Command, String: String, CodeChilds: CodeChilds, Pos: Pos}
 	},
 	"newRepetition": func(Childs *Rules, Pos int) *Rule {

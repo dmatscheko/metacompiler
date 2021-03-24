@@ -6,7 +6,7 @@
 :skip(Whitespace) ;
 
 // This is the start rule.
-EBNF        = { Production | LineCommand | Comment } ;
+EBNF        = { Production | LineCommand } ;
 
 Production  = Name "=" [ Expression ] ";" ;
 
@@ -14,33 +14,37 @@ Expression  = Alternative ;
 Alternative = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
-Term  = Name | Range | Group | Option | Repetition | Times | Command ;
+Term        = Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ;
 
+ByteRange   = Token "..b" Token ;
 Range       = Token [ "..." Token ] ;
+CharsOf     = "@" Token "+" ;
+CharOf      = "@" Token ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
 Times       = Number [ "..." ( Number | "" ) ] Group ;
 
-Comment     = "//" :skip(Nothing) { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
-
 LineCommand = Command ";" ;
 
-Command     = ":" CmdName "(" ( Name | Token ) { "," ( Name | Token ) } ")" ;
-CmdName     = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
+Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
+CmdName     = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
-Name        = Alphabet :skip(Nothing) { Alphabet | Digit | "_" } :skip(Whitespace) ;
+Name        = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken ;
-Dquotetoken = '"' :skip(Nothing) { AsciiNoQs | "'" | '\\"' } '"' :skip(Whitespace) ;
-Squotetoken = "'" :skip(Nothing) { AsciiNoQs | '"' | "\\'" } "'" :skip(Whitespace) ;
+Dquotetoken = '"' :skip() { AsciiNoQs | "'" | '\\"' } '"' :skip(Whitespace) ;
+Squotetoken = "'" :skip() { AsciiNoQs | '"' | "\\'" } "'" :skip(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
 AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes.
 AsciiNoLb   = "\x20"..."\x7E" | "\t" ; // Readable ASCII without line breaks (CR and LF).
+AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
 
 Number      = "0" | "1"..."9" { "0"..."9" } ;
 
-Nothing     = "" ;
-Whitespace  = " \t\r\n" ;
+Whitespace  = { @"\t\n\r "+ | Comment } ;
+
+Comment     = LineComment | "/*" :skip() { { "*" } AsciiNoStSl { "/" } } "*/" :skip(Whitespace) ;
+LineComment = "//" :skip() { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;

@@ -306,7 +306,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 	case r.Token:
 		// Only skip spaces when actually reading from the target text (Tokens)
-		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 
@@ -320,7 +320,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		*localProductions = append(*localProductions, rule)
 	case r.CharOf:
 		// Only skip spaces when actually reading from the target text (Tokens)
-		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 		if pa.Sdx+1 > len(pa.Src) {
@@ -346,7 +346,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 	case r.CharsOf:
 		// Only skip spaces when actually reading from the target text (Tokens)
-		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 		length := len(pa.Src)
@@ -370,7 +370,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: pa.Src[startPos:pa.Sdx]})
 	case r.Range:
 		// Only skip spaces when actually reading from the target text (Tokens)
-		if !skippingSpaces { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
+		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 
@@ -686,12 +686,12 @@ func mergeTerminals(productions *r.Rules) {
 }
 
 func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
-	defer func() {
-		if err := recover(); err != nil {
-			res = nil
-			e = fmt.Errorf("%s", err)
-		}
-	}()
+	// defer func() {
+	// 	if err := recover(); err != nil {
+	// 		res = nil
+	// 		e = fmt.Errorf("%s", err)
+	// 	}
+	// }()
 
 	startRule := r.GetStartRule(agrammar)
 	if startRule == nil || startRule.Int >= len(*agrammar) || startRule.Int < 0 {
@@ -726,7 +726,9 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 	newProductions := pa.apply((*pa.agrammar)[startRule.Int], pa.spaces, false, 0)
 
 	// Check if the position is at EOF at end of parsing. There can be spaces left, but otherwise its an error:
-	pa.apply(pa.spaces, pa.spaces, true, 0) // Skip spaces.
+	if pa.spaces != nil {
+		pa.apply(pa.spaces, pa.spaces, true, 0) // Skip spaces.
+	}
 	if pa.Sdx < len(pa.Src) {
 		return nil, fmt.Errorf("Not everything could be parsed. Last good parse position was %s\nFailed productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), newProductions.Serialize())
 	}
