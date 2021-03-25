@@ -3,7 +3,10 @@ package abnf
 import (
 	"encoding/binary"
 	"fmt"
+	"io/ioutil"
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -46,6 +49,8 @@ type parser struct {
 	traceCount   int
 
 	ps *parserscript
+
+	fileName string
 }
 
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
@@ -146,6 +151,39 @@ func (pa *parser) applyAsSequence(rules *r.Rules, skipSpaceRule *r.Rule, skipSpa
 	return newProductions
 }
 
+func collectReferencesSlow(rules *r.Rules, references map[string]int) {
+	if rules == nil {
+		return
+	}
+	for i, rule := range *rules {
+		if rule.Operator != r.Production {
+			continue
+		}
+		references[rule.String] = i
+	}
+}
+func correctReferencesSlow(rules *r.Rules, references map[string]int) {
+	if rules == nil {
+		return
+	}
+	if references == nil {
+		references = map[string]int{}
+		collectReferencesSlow(rules, references)
+	}
+	for i := 0; i < len(*rules); i++ {
+		if (*rules)[i].Operator == r.Identifier {
+			ref, ok := references[(*rules)[i].String]
+			if !ok {
+				panic("Production " + (*rules)[i].String + "not found")
+			}
+			(*rules)[i].Int = ref
+		}
+		if (*rules)[i].Childs != nil && len(*(*rules)[i].Childs) > 0 {
+			correctReferencesSlow((*rules)[i].Childs, references)
+		}
+	}
+}
+
 // Almost like apply() but without parsing the target text.
 func (pa *parser) resolveRulesToToken(rules *r.Rules) *r.Rules {
 	if rules == nil {
@@ -220,8 +258,40 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 			pa.spaces = nil
 		}
 	case "include":
-		// :include("foo_a.bnf"); How to include only the productions? Maybe overhaul of EBNF format?
-		panic("NOT IMPLEMENTED")
+		// Resolve parameter constants.
+		pa.resolveParameterToToken(rule.CodeChilds)
+		if rule.CodeChilds == nil || len(*rule.CodeChilds) == 0 || (*rule.CodeChilds)[0].Operator != r.Token {
+			panic("Command :include() needs at least a constant string as file name parameter.")
+		}
+		if len(*rule.CodeChilds) > 2 {
+			panic("Too many parameters for Command :include().")
+		}
+		paramFileName := (*rule.CodeChilds)[0].String
+		slot := 0
+		if len(*rule.CodeChilds) == 2 && (*rule.CodeChilds)[1].Operator == r.Number {
+			slot = (*rule.CodeChilds)[1].Int
+		}
+		if paramFileName == "" {
+			panic("The file parameter for Command :include() must not be empty.")
+		}
+		fullFileName := filepath.Dir(pa.fileName) + string(os.PathSeparator) + paramFileName
+		dat, err := ioutil.ReadFile(fullFileName)
+		if err != nil {
+			panic(err)
+		}
+		srcCode := string(dat)
+
+		asg, err := ParseWithAgrammar(AbnfAgrammar, srcCode, fullFileName, pa.useBlockList, pa.useFoundList, pa.traceEnabled)
+		if err != nil {
+			panic(err)
+		}
+		aGrammar, err := CompileASG(asg, AbnfAgrammar, fullFileName, slot, false, false)
+		if err != nil {
+			panic(err)
+		}
+		*pa.agrammar = append(*pa.agrammar, *aGrammar...)
+		// Correct all references
+		correctReferencesSlow(pa.agrammar, nil)
 	case "number":
 		// :number(4, LE) would mean take 4 bytes from the input (gp.src), interpret them as little endian and create a Number from it. This means it should be usable in Times expressions and should allow the parsing of TLV-formats.
 		panic("NOT IMPLEMENTED")
@@ -712,6 +782,8 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 	pa.foundSdxList = make(map[int]int)
 	pa.useFoundList = useFoundList
 	pa.lastParsePosition = 0
+
+	pa.fileName = fileName
 
 	pa.ps = NewParserScript(&pa, fileName)
 

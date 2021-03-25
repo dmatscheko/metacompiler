@@ -110,7 +110,7 @@
             "name": "Include Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/include-test.abnf"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/include-test.abnf", "-b", "tests/include-test.txt", "-v"]
         },
         {
             "name": "Infinite Loop",

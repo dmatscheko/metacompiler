@@ -94,6 +94,10 @@ import (
 func main() {
 	param_a := flag.String("a", "", "The path of the ABNF file")
 	param_b := flag.String("b", "", "The path of the file to process")
+	// param_c := flag.String("c", "", "The path of the file to process with the grammar from file b")
+
+	param_slot_a := flag.Int("sa", 0, "The tag slot to use when compiling (default is 0)")
+	// param_slot_b := flag.Int("sb", 0, "The tag slot to use when compiling (default is 0)")
 
 	param_useBlockList := flag.Bool("lb", false, "Block list. Prevent a second execution of the same rule at the same position (slow)")
 	param_useFoundList := flag.Bool("lf", false, "Found list. Caches all found blocks even if the sourrounding does not match. Immediately return the found block if the same rule would be applied again at the same place (very slow)")
@@ -175,7 +179,7 @@ func main() {
 
 	// Use the annotations inside the ASG to compile it. This should generate a new a-grammar.
 	fmt.Fprintln(os.Stderr, "Compile ASG of source ABNF")
-	aGrammar, err := abnf.CompileASG(asg, abnf.AbnfAgrammar, *param_a, 0, *param_trace_2, false)
+	aGrammar, err := abnf.CompileASG(asg, abnf.AbnfAgrammar, *param_a, *param_slot_a, *param_trace_2, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -206,7 +210,7 @@ func main() {
 
 	// Use the annotations inside the ASG to compile it.
 	fmt.Fprintln(os.Stderr, "Compile ASG")
-	result, err := abnf.CompileASG(asg, aGrammar, *param_a, 0, *param_trace_4, false)
+	result, err := abnf.CompileASG(asg, aGrammar, *param_a, *param_slot_a, *param_trace_4, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
