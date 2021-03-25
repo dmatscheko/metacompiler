@@ -1,4 +1,4 @@
-:title("Parse and compile test") ;
+:title("Parse and compile from JS") ;
 
 
 :startScript(~~

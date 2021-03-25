@@ -12,7 +12,7 @@ import (
 
 type parserscript struct {
 	vm                   *goja.Runtime
-	codeCache            map[string]*goja.Program
+	common               *commonscript
 	compilerFuncMap      map[string]r.Object
 	preventDefaultOutput bool
 	stack                []r.Object // global stack.
@@ -21,23 +21,6 @@ type parserscript struct {
 	// traceCount   int
 
 	pa *parser
-}
-
-// Run executes the given string in the global context.
-func (ps *parserscript) Run(name, src string) (goja.Value, error) {
-	p := ps.codeCache[src]
-
-	// Cache precompiled data
-	if p == nil {
-		var err error
-		p, err = goja.Compile(name, src, true)
-		if err != nil {
-			return nil, err
-		}
-		ps.codeCache[src] = p
-	}
-
-	return ps.vm.RunProgram(p)
 }
 
 func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules, depth int) *r.Rule {
@@ -49,7 +32,7 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 
 	code := (*rule.CodeChilds)[0].String
 
-	v, err := ps.Run("parserCommand@"+strconv.Itoa(rule.Pos), code)
+	v, err := ps.common.Run("parserCommand@"+strconv.Itoa(rule.Pos), code)
 	if err != nil {
 		panic(err.Error() + "\nError was in " + rule.ToString() + ", Code: '" + code + "'")
 	}
@@ -66,8 +49,8 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 	return nil
 }
 
-func (ps *parserscript) initFuncMap() {
-	initFuncMapCommon(ps.vm, &ps.compilerFuncMap, ps.preventDefaultOutput)
+func (ps *parserscript) initFuncMap(fileName string) {
+	ps.common = initFuncMapCommon(ps.vm, &ps.compilerFuncMap, fileName, ps.preventDefaultOutput)
 
 	ps.compilerFuncMap["getSrc"] = func() string { return ps.pa.Src }
 	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.Src = src }
@@ -88,13 +71,12 @@ func (ps *parserscript) initFuncMap() {
 	})
 }
 
-func NewParserScript(pa *parser) *parserscript {
+func NewParserScript(pa *parser, fileName string) *parserscript {
 	var ps parserscript
 	ps.pa = pa
 
 	ps.vm = goja.New()
-	ps.codeCache = map[string]*goja.Program{}
-	ps.initFuncMap()
+	ps.initFuncMap(fileName)
 
 	return &ps
 }

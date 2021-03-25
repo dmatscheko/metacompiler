@@ -686,7 +686,7 @@ func mergeTerminals(productions *r.Rules) {
 	}
 }
 
-func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
+func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList, useFoundList, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
 	// defer func() {
 	// 	if err := recover(); err != nil {
 	// 		res = nil
@@ -713,7 +713,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 	pa.useFoundList = useFoundList
 	pa.lastParsePosition = 0
 
-	pa.ps = NewParserScript(&pa)
+	pa.ps = NewParserScript(&pa, fileName)
 
 	pa.spaces = &r.Rule{Operator: r.CharsOf, String: "\t\n\r "} // TODO: Make this configurable via JS.
 
