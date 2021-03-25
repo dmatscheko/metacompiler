@@ -92,8 +92,8 @@ import (
 // This is the default main process:
 // parse(initial-a-grammar, inputA)  = inputA-ASG -->  compile(inputA-ASG)  = new-a-grammar -->  parse(new-a-grammar, inputB)  = inputB-ASG -->  compile(inputB-ASG)  = result
 func main() {
-	param_abnf := flag.String("a", "", "The path of the ABNF file")
-	param_srcCode := flag.String("b", "", "The path of the file to process")
+	param_a := flag.String("a", "", "The path of the ABNF file")
+	param_b := flag.String("b", "", "The path of the file to process")
 
 	param_useBlockList := flag.Bool("lb", false, "Block list. Prevent a second execution of the same rule at the same position (slow)")
 	param_useFoundList := flag.Bool("lf", false, "Found list. Caches all found blocks even if the sourrounding does not match. Immediately return the found block if the same rule would be applied again at the same place (very slow)")
@@ -114,30 +114,30 @@ func main() {
 
 	flag.Parse()
 
-	if *param_abnf == "" {
+	if *param_a == "" {
 		flag.Usage()
 		return
 	}
 
-	dat, err := ioutil.ReadFile(*param_abnf)
+	dat, err := ioutil.ReadFile(*param_a)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error: ", err)
 		return
 	}
-	aEbnf := string(dat)
+	srcA := string(dat) // This should be an ABNF.
 
-	srcCode := ""
-	if *param_srcCode != "" {
-		dat, err = ioutil.ReadFile(*param_srcCode)
+	srcB := ""
+	if *param_b != "" {
+		dat, err = ioutil.ReadFile(*param_b)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error: ", err)
 			return
 		}
-		srcCode = string(dat)
+		srcB = string(dat) // This can be anything that the ABNF understands.
 	}
 
 	if *param_speedTest {
-		speedtest(aEbnf, srcCode, 100, *param_useBlockList, *param_useFoundList)
+		speedtest(srcA, *param_a, 100, *param_useBlockList, *param_useFoundList)
 		return
 	}
 
@@ -162,7 +162,7 @@ func main() {
 
 	// Use the initial a-grammar to parse an ABNF. It generates an ASG (abstract semantic graph) of the ABNF.
 	fmt.Fprintln(os.Stderr, "Parse source ABNF file with initial a-grammar")
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, aEbnf, *param_useBlockList, *param_useFoundList, *param_trace_1)
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, *param_a, *param_useBlockList, *param_useFoundList, *param_trace_1)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -175,7 +175,7 @@ func main() {
 
 	// Use the annotations inside the ASG to compile it. This should generate a new a-grammar.
 	fmt.Fprintln(os.Stderr, "Compile ASG of source ABNF")
-	aGrammar, err := abnf.CompileASG(asg, abnf.AbnfAgrammar, 0, *param_trace_2, false)
+	aGrammar, err := abnf.CompileASG(asg, abnf.AbnfAgrammar, *param_a, 0, *param_trace_2, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -193,7 +193,7 @@ func main() {
 
 	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
 	fmt.Fprintln(os.Stderr, "Parse target file with new a-grammar")
-	asg, err = abnf.ParseWithAgrammar(aGrammar, srcCode, *param_useBlockList, *param_useFoundList, *param_trace_3)
+	asg, err = abnf.ParseWithAgrammar(aGrammar, srcB, *param_a, *param_useBlockList, *param_useFoundList, *param_trace_3)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -206,7 +206,7 @@ func main() {
 
 	// Use the annotations inside the ASG to compile it.
 	fmt.Fprintln(os.Stderr, "Compile ASG")
-	result, err := abnf.CompileASG(asg, aGrammar, 0, *param_trace_4, false)
+	result, err := abnf.CompileASG(asg, aGrammar, *param_a, 0, *param_trace_4, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -220,9 +220,9 @@ func main() {
 	}
 }
 
-func speedtest(src, target string, count int, useBlockList, useFoundList bool) {
-	speedtestParseWithGrammar(src, target, count, useBlockList, useFoundList)
-	speedtestCompileASG(src, target, count, useBlockList, useFoundList)
+func speedtest(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
+	speedtestParseWithGrammar(srcA, fileNameA, count, useBlockList, useFoundList)
+	speedtestCompileASG(srcA, fileNameA, count, useBlockList, useFoundList)
 	fmt.Fprintln(os.Stderr)
 }
 func timeTrack(start time.Time, name string) {
@@ -230,26 +230,26 @@ func timeTrack(start time.Time, name string) {
 	fmt.Fprintf(os.Stderr, "%s took %s\n", name, elapsed)
 }
 
-func speedtestParseWithGrammar(src, target string, count int, useBlockList, useFoundList bool) {
+func speedtestParseWithGrammar(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
 	var err error
 	defer timeTrack(time.Now(), "ParseWithGrammar")
 	for i := 0; i < count; i++ {
-		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, target, useBlockList, useFoundList, false)
+		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
 	}
 }
-func speedtestCompileASG(src, target string, count int, useBlockList, useFoundList bool) {
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, target, useBlockList, useFoundList, false)
+func speedtestCompileASG(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
 	}
 	defer timeTrack(time.Now(), "CompileASG")
 	for i := 0; i < count; i++ {
-		_, err = abnf.CompileASG(asg, abnf.AbnfAgrammar, 0, false, true)
+		_, err = abnf.CompileASG(asg, abnf.AbnfAgrammar, fileNameA, 0, false, true)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error CompileASG")

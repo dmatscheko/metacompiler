@@ -2,7 +2,9 @@ package abnf
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +16,11 @@ import (
 
 // ----------------------------------------------------------------------------
 // Scripting subsystem code for parser and compiler
+
+type commonscript struct {
+	vm        *goja.Runtime
+	codeCache map[string]*goja.Program
+}
 
 // Stripped down and slightly modified version of stconv.Unquote()
 func Unescape(s string) (string, error) {
@@ -62,8 +69,30 @@ func UnescapeTilde(s string) string {
 	return string(buf)
 }
 
+// Run executes the given string in the global context.
+func (cs *commonscript) Run(name, src string) (goja.Value, error) {
+	p := cs.codeCache[src]
+
+	// Cache precompiled data
+	if p == nil {
+		var err error
+		p, err = goja.Compile(name, src, true)
+		if err != nil {
+			return nil, err
+		}
+		cs.codeCache[src] = p
+	}
+
+	return cs.vm.RunProgram(p)
+}
+
 // This is used by parser and compiler.
-func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, preventDefaultOutput bool) {
+func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, currentFileName string, preventDefaultOutput bool) *commonscript {
+	var common commonscript
+
+	common.vm = vm
+	common.codeCache = map[string]*goja.Program{}
+
 	if preventDefaultOutput { // Script output disabled.
 		vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
 		vm.Set("println", func(a ...interface{}) (n int, err error) { return 0, nil })
@@ -87,6 +116,25 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 	vm.Set("unescape", Unescape)
 	vm.Set("unescapeTilde", UnescapeTilde)
 
+	vm.Set("include", func(fileName string) bool {
+		if fileName == "" {
+			return false
+		}
+		fullFileName := filepath.Dir(currentFileName) + string(os.PathSeparator) + fileName
+		dat, err := ioutil.ReadFile(fullFileName)
+		if err != nil {
+			panic(err)
+		}
+		srcCode := string(dat)
+
+		_, err = common.Run(fullFileName, srcCode)
+		if err != nil {
+			panic(err.Error() + "\nError was in " + fullFileName)
+		}
+
+		return true
+	})
+
 	// vm.Set("writable", func(v interface{}) *interface{} {
 	// 	return &v
 	// })
@@ -96,15 +144,17 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 
 	*compilerFuncMap = map[string]r.Object{
 		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
-			productions, _ := ParseWithAgrammar(agrammar, srcCode, useBlockList, useFoundList, traceEnabled)
+			productions, _ := ParseWithAgrammar(agrammar, srcCode, currentFileName, useBlockList, useFoundList, traceEnabled)
 			return productions
 		},
 		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
-			return compileASGInternal(asg, aGrammar, slot, traceEnabled, false)
+			return compileASGInternal(asg, aGrammar, currentFileName, slot, traceEnabled, false)
 		},
 		"ABNFagrammar": AbnfAgrammar,
 	}
 	vm.Set("c", compilerFuncMap)
 	vm.Set("abnf", r.AbnfFuncMap)
 	vm.Set("llvm", llvmFuncMap)
+
+	return &common
 }

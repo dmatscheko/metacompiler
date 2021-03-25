@@ -124,9 +124,10 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 	return map[string]r.Object{"in": ""}
 }
 
-func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) interface{} {
+func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, traceEnabled bool, preventDefaultOutput bool) interface{} {
 	var co compiler
-	co.cs = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
+
+	co.cs = NewCompilerScript(&co, asg, aGrammar, fileName, traceEnabled, preventDefaultOutput)
 
 	prolog := r.GetStartScript(aGrammar)
 
@@ -146,7 +147,7 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled 
 
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
 // The aGrammar is only needed for its prolog code. The start rule is only needed for parsing.
-func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, preventDefaultOutput bool) (res *r.Rules, e error) {
+func CompileASG(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, traceEnabled, preventDefaultOutput bool) (res *r.Rules, e error) {
 	defer func() {
 		if err := recover(); err != nil {
 			res = nil
@@ -154,7 +155,7 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool, pr
 		}
 	}()
 
-	resObj := compileASGInternal(asg, aGrammar, slot, traceEnabled, preventDefaultOutput)
+	resObj := compileASGInternal(asg, aGrammar, fileName, slot, traceEnabled, preventDefaultOutput)
 
 	if resObj != nil { // There should be a generated a-grammar in upstream
 		resultAGrammar, ok := resObj.([]interface{})

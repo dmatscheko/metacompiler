@@ -1,0 +1,12 @@
+:title("Parse and compile from JS") ;
+
+
+:startScript(~~
+
+    include("include-test.js")
+
+    println("The file should be included now.")
+
+    println(something())
+
+~~) ;

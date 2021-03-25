@@ -41,12 +41,6 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir.abnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
-            "name": "Parse from JS",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/parse-from-js.abnf"]
-        },
-        {
             "name": "TinyC Variant",
             "type": "go",
             "request": "launch",
@@ -101,10 +95,22 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/tlv-test.abnf", "-b", "tests/tlv-test.txt", "-vv"]
         },
         {
+            "name": "Parse and compile from JS",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/parse-and-compile-from-js.abnf"]
+        },
+        {
             "name": "Parser Script Test",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["-a", "tests/parser-script-test.abnf", "-b", "tests/tlv-test.txt", "-v"]
+        },
+        {
+            "name": "Include Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/include-test.abnf"]
         },
         {
             "name": "Infinite Loop",

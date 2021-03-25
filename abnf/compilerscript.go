@@ -16,7 +16,7 @@ import (
 
 type compilerscript struct {
 	vm                   *goja.Runtime
-	codeCache            map[string]*goja.Program
+	common               *commonscript
 	compilerFuncMap      map[string]r.Object
 	preventDefaultOutput bool
 
@@ -74,23 +74,6 @@ func (cs *compilerscript) traceBottom(upStream map[string]r.Object) {
 	fmt.Print(space, ">>up: ", fmt.Sprintf("%v", upStream), "\n", space, "--\n\n\n")
 }
 
-// Run executes the given string in the global context.
-func (cs *compilerscript) Run(name, src string) (goja.Value, error) {
-	p := cs.codeCache[src]
-
-	// Cache precompiled data
-	if p == nil {
-		var err error
-		p, err = goja.Compile(name, src, true)
-		if err != nil {
-			return nil, err
-		}
-		cs.codeCache[src] = p
-	}
-
-	return cs.vm.RunProgram(p)
-}
-
 func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) goja.Value { // => (changes upStream)
 	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number
 		return nil
@@ -128,7 +111,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 
 	code := (*tag.CodeChilds)[slot].String
 
-	v, err := cs.Run(name, code)
+	v, err := cs.common.Run(name, code)
 	if err != nil {
 		panic(err.Error() + "\nError was in " + tag.ToString() + ", Code: '" + code + "'")
 	}
@@ -140,8 +123,8 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 	return v
 }
 
-func (cs *compilerscript) initFuncMap() {
-	initFuncMapCommon(cs.vm, &cs.compilerFuncMap, cs.preventDefaultOutput)
+func (cs *compilerscript) initFuncMap(fileName string) {
+	cs.common = initFuncMapCommon(cs.vm, &cs.compilerFuncMap, fileName, cs.preventDefaultOutput)
 
 	cs.vm.Set("popg", func() interface{} {
 		if len(cs.Stack) > 0 {
@@ -167,7 +150,7 @@ func (cs *compilerscript) initFuncMap() {
 	cs.compilerFuncMap["agrammar"] = cs.aGrammarReference // Just for reference.
 }
 
-func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled bool, preventDefaultOutput bool) *compilerscript {
+func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, fileName string, traceEnabled, preventDefaultOutput bool) *compilerscript {
 	var cs compilerscript
 
 	cs.co = co
@@ -185,8 +168,7 @@ func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabl
 	}
 
 	cs.vm = goja.New()
-	cs.codeCache = map[string]*goja.Program{}
-	cs.initFuncMap()
+	cs.initFuncMap(fileName)
 
 	return &cs
 }
