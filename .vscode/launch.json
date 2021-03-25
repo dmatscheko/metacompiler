@@ -83,6 +83,12 @@
             "program": "${workspaceFolder}"
         },
         {
+            "name": "Smaller match first Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/smaller-match-first-test.abnf", "-b", "tests/smaller-match-first-test.txt"]
+        },
+        {
             "name": "LLVM IR Test",
             "type": "go",
             "request": "launch",

@@ -731,7 +731,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 		pa.apply(pa.spaces, pa.spaces, true, 0) // Skip spaces.
 	}
 	if pa.Sdx < len(pa.Src) {
-		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position was %s\nFailed productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), Shorten(newProductions.Serialize())))
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position was %s\nCreated productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), Shorten(newProductions.Serialize())))
 	}
 
 	mergeTerminals(newProductions)

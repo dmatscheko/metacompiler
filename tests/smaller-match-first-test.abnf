@@ -1,0 +1,11 @@
+:title("Smaller match first test") ;
+:description("If there are rules, where one rule is the first part of another, then the longer rule MUST be the first to be tried.
+Otherwise the shorter rule would be found first, and the search position would be set to the char after the found rule.
+In that wrong positioning, the second rule could therefore never be found and the first rule would often match without being the correct one.") ;
+
+:startRule(TEST) ;
+
+TEST    = Foo | Bar ;
+
+Foo     = "a" ;
+Bar     = "a" "b" ;
