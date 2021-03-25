@@ -129,14 +129,14 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 
 	co.cs = NewCompilerScript(&co, asg, aGrammar, fileName, traceEnabled, preventDefaultOutput)
 
-	prolog := r.GetStartScript(aGrammar)
+	startScript := r.GetStartScript(aGrammar)
 
 	var res interface{}
-	if prolog != nil {
+	if startScript != nil {
 		upStream := map[string]r.Object{ // Basically the local variables.
 			"in": "", // This is the parser input (the terminals).
 		}
-		res = co.cs.HandleTagCode(prolog, "prolog.code", upStream, asg, slot, 0).Export()
+		res = co.cs.HandleTagCode(startScript, fileName+":startScript", upStream, asg, slot, 0).Export()
 	}
 
 	// Is called fom JS compile():

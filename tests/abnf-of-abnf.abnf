@@ -30,7 +30,7 @@ TaggedTerm <~~ push(popg()) ~~>
 Range       <~~ push(popg()) ~~>
             = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) ~~> ] ;
 ByteRange   = Token <~~ pushg(pop()) ~~> "..b" Token <~~ push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) ~~> ;
-CharsOf     = "@" Token <~~ push(abnf.newCharsOf(pop().String, c.Pos)) ~~> "+" ;
+CharsOf     = "@+" Token <~~ push(abnf.newCharsOf(pop().String, c.Pos)) ~~> ;
 CharOf      = "@" Token <~~ push(abnf.newCharOf(pop().String, c.Pos)) ~~> ;
 Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
 Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
@@ -67,7 +67,7 @@ AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicod
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
             = "0" | "1"..."9" { "0"..."9" } ;
 
-Whitespace  = { @"\t\n\r "+ | Comment } ;
+Whitespace  = { @+"\t\n\r " | Comment } ;
 
 Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(Whitespace) ;
 LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(Whitespace) ;

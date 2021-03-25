@@ -116,7 +116,8 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, c
 	vm.Set("unescape", Unescape)
 	vm.Set("unescapeTilde", UnescapeTilde)
 
-	vm.Set("include", func(fileName string) bool {
+	vm.Set("include", func(fileName string) bool { // It seems impossible to get the file name of the currently calling script. So the base directory is always the directory of the first ABNF.
+
 		if fileName == "" {
 			return false
 		}

@@ -1,7 +1,16 @@
 :title("Parse and compile from JS") ;
 
+// This includes the rule that can resolve include-test.txt:
+:include("include-test-lib.abnf") ;
+
+:startRule(Test) ;
+Test = "A" | Foo <~~ println("The included rule found: " + up.in) ~~> ; // Foo would be missing if it would not be included.
 
 :startScript(~~
+
+    c.compile(c.asg)
+
+    // require("foo.js")
 
     include("include-test.js")
 
