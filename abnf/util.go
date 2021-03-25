@@ -16,9 +16,10 @@ func times(s string, n int) string {
 }
 
 func Shorten(s string) string {
-	const maxLen = 800
+	const maxLen = 2000
 	if len(s) > maxLen {
-		s = s[:maxLen-5] + " ..."
+		midpos := maxLen/2 - 4
+		s = s[:midpos] + "\n[...]\n" + s[len(s)-midpos:]
 	}
 	return s
 }
