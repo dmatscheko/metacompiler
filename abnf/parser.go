@@ -103,9 +103,9 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (boo
 	return isBlocked, foundRule, foundSdx
 }
 
-func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found *r.Rules, pos int) {
+func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found *r.Rules, wasSdx int) {
 	if rule.Operator == r.Identifier && (pa.useBlockList || pa.useFoundList) {
-		id := pa.getRulePosId(rule, pos)
+		id := pa.getRulePosId(rule, wasSdx)
 		if pa.useBlockList {
 			pa.blockList[id] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
 		}
@@ -242,6 +242,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 // This is the resolution process of the agrammar. Does the localProductions need to go into a Group or something? No. The grouping was done already in the agrammar.
 // At this point, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules.
 // Rules can be reused. So whatever you do, NEVER change a rule here.
+// TODO: If in a rule that does not change pa.Sdx, then the rule does not change pa.Sdx back. EXCEPT if the rule is in a loop that has to apply all or multiple elements!
 func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) *r.Rules { // => (localProductions)
 	wasSdx := pa.Sdx // Start position of the rule. Return, if the rule does not match.
 	localProductions := &r.Rules{}
@@ -259,19 +260,17 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 
 	switch rule.Operator {
 	case r.Sequence, r.Group, r.Production: // Those are groups/sequences of rules. Iterate through them and apply.
-	outer:
 		for i := range *rule.Childs {
 			newProductions := pa.apply((*rule.Childs)[i], skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
 				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
-			} else if len(*newProductions) > 0 { // Some Commands like :skip() have to be handled inside the sequence.
-				noResult := false
-				for _, prod := range *newProductions { // There should be only one command but just in case for future upgradeability.
+			}
+			if len(*newProductions) > 0 { // Some Commands like :skip() have to be handled inside the sequence.
+				for _, prod := range *newProductions {
 					// The local commands (inside an Expression).
 					if prod.Operator == r.Command {
-						noResult = true
 						switch prod.String {
 						case "whitespace":
 							// Resolve parameter constants.
@@ -281,35 +280,22 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 							} else {
 								skipSpaceRule = nil
 							}
+							continue // Don't store the result of the :whitespace() command as Token or Tag-output.
 						default:
 							// All other commands should have been handled already by apply() and so this should never happen.
-							panic("Unknown sequence command :" + prod.String + "()'")
+							panic("Unknown inline command :" + prod.String + "()'")
 						}
 					}
-				}
-				if noResult { // TODO: If it not a command, add the result to the localProductions.
-					continue outer
+					// During parsing, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules. Text could be combined.. maybe in a []byte buffer like unescape.
+					localProductions = r.AppendPossibleSequence(localProductions, prod)
 				}
 			}
-
-			// During parsing, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules. Text could be combined.. maybe in a []byte buffer like unescape.
-			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only r.Sequence can be flattened fully
-
-			// if rule.Operator == r.Sequence {
-			// 	localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only r.Sequence can be flattened fully
-			// } else {
-			// 	// The compiler does not use groups. It could still stay inside a group to signify that it belongs together:
-			// 	// localProductions = r.AppendPossibleSequence(localProductions, &r.Rule{Operator: r.Group, Childs: newProductions, Pos: gp.sdx})
-			// 	// However, at this point, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules.
-			// 	localProductions = r.AppendPossibleSequence(localProductions, &r.Rule{Operator: r.Sequence, Childs: newProductions, Pos: gp.sdx})
-			// }
 		}
 	case r.Token:
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
-
 		size := len(rule.String)
 		if pa.Sdx+size > len(pa.Src) || rule.String != pa.Src[pa.Sdx:pa.Sdx+size] {
 			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
@@ -381,34 +367,27 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
-
 		if pa.Sdx >= len(pa.Src) {
 			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 			pa.Sdx = wasSdx
 			return nil
 		}
-
 		if rule.Int == r.RangeTypeRune { // Rune range for unicode. JS-Mapping: abnf.rangeType.Rune
-
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 			if ch == utf8.RuneError {
 				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
-
 			from, _ := utf8.DecodeRuneInString((*rule.CodeChilds)[0].String)
 			to, _ := utf8.DecodeRuneInString((*rule.CodeChilds)[1].String)
 			// TODO: check if len of rune is len of string. Panic otherwise. Or better: Do that in verifier.
-
 			if !(ch >= from && ch <= to) {
 				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
-
 			pa.Sdx += size
-
 			if skippingSpaces {
 				return &r.Rules{}
 			}
@@ -420,22 +399,17 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			} else {
 				*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
 			}
-
 		} else if rule.Int == r.RangeTypeByte { // Byte range for binary decoding. JS-Mapping: abnf.rangeType.Byte
-
 			ch := pa.Src[pa.Sdx]
 			from := (*rule.CodeChilds)[0].String[0]
 			to := (*rule.CodeChilds)[1].String[0]
 			// TODO: check if len of string is 1. Panic otherwise. Or better: Do that in verifier.
-
 			if !(ch >= from && ch <= to) {
 				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
 				pa.Sdx = wasSdx
 				return nil
 			}
-
 			pa.Sdx++
-
 			if skippingSpaces {
 				return &r.Rules{}
 			}
@@ -444,7 +418,8 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]byte{ch})}
 			}
 			*localProductions = append(*localProductions, pa.rangeCache[ch])
-
+		} else {
+			panic(fmt.Sprintf("Not a valid Range mode: %d", rule.Int))
 		}
 	case r.Or:
 		found := false
@@ -455,6 +430,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				found = true
 				break
 			}
+			// pa.Sdx = wasSdx // Should not be necessary, because each apply returns to wasSdx if the rule could not be fully applied.
 		}
 		if !found {
 			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
@@ -482,10 +458,17 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		*cloneRule.CodeChilds = append(*cloneRule.CodeChilds, *rule.CodeChilds...)
 		// It's not very clean but just pretend, the clone is the original:
 		rule = cloneRule
-
+		// Resolve parameters:
 		for i, child := range *rule.CodeChilds {
 			if child.Operator == r.Number {
 				continue
+			}
+			// TODO: When command is something else as :number(), resolve without checking or forwarding in pa.Src. Those parameters should only exist in and be fetched from agrammar. Make a distinction between forward (pa.Src) looking parameter and backwards (agrammar) looking parameters.
+			if child.Operator != r.Command {
+				panic(fmt.Sprintf("Parameter can not be used for Times: %s", rule.ToString()))
+			}
+			if child.String != "number" {
+				panic(fmt.Sprintf("Only Command :number() can be used for Times. Command is: %s", rule.ToString()))
 			}
 			resRule := pa.apply(child, skipSpaceRule, skippingSpaces, depth+1)
 			if resRule == nil || len(*resRule) != 1 {
@@ -493,7 +476,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			(*rule.CodeChilds)[i] = (*resRule)[0]
 		}
-
+		// Define "from" and "to" range:
 		from := (*rule.CodeChilds)[0].Int
 		var to int
 		if len(*rule.CodeChilds) > 1 {
@@ -506,13 +489,14 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		} else { // If there is only one number, it must occur exactly that often.
 			to = from
 		}
-
+		// Define rule to apply:
 		var newRule *r.Rule
 		if len(*rule.Childs) == 1 {
 			newRule = (*rule.Childs)[0]
 		} else {
 			newRule = &r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: rule.Pos}
 		}
+		// Repeat from zero to "from" -> here it HAS TO be found:
 		for i := 0; i < from; i++ { // Repeat as often as possible.
 			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
@@ -522,6 +506,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
 		}
+		// Repeat from "from" to "to" -> here it CAN be found:
 		for i := from; i < to; i++ { // Repeat as often as possible.
 			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
@@ -544,6 +529,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos) // TODO: resolveRulesToToken for constants
 		if newProductions == nil {
 			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.Sdx = wasSdx
 			return nil
 		}
 		pa.resolveParameterToToken(rule.CodeChilds)
@@ -572,50 +558,51 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			n := 0
 			switch numberType { // TODO: Everything for singed numbers too!
 			case r.NumberTypeLittleEndian:
-				if byteCount == 0 {
-					panic(":number() needs at least the byte count. ( e.g. :number(4) )")
-				} else if byteCount == 1 {
+				switch byteCount {
+				case 1:
 					n = int(pa.Src[pa.Sdx])
-				} else if byteCount == 2 {
+				case 2:
 					n = int(binary.LittleEndian.Uint16([]byte(pa.Src[pa.Sdx:])))
-				} else if byteCount == 3 {
+				case 3:
 					n = int(binary.LittleEndian.Uint32([]byte(pa.Src[pa.Sdx : pa.Sdx+3])))
-				} else if byteCount == 4 {
+				case 4:
 					n = int(binary.LittleEndian.Uint32([]byte(pa.Src[pa.Sdx:])))
-				} else if byteCount == 8 {
+				case 8:
 					n = int(binary.LittleEndian.Uint64([]byte(pa.Src[pa.Sdx:])))
-				} else {
+				default:
 					panic(":number() needs byte count of 1, 2, 3, 4, 8. ( e.g. :number(4) )")
 				}
 			case r.NumberTypeBigEndian:
-				if byteCount == 0 {
-					panic(":number() needs at least the byte count. ( e.g. :number(4) )")
-				} else if byteCount == 1 {
+				switch byteCount {
+				case 1:
 					n = int(pa.Src[pa.Sdx])
-				} else if byteCount == 2 {
+				case 2:
 					n = int(binary.BigEndian.Uint16([]byte(pa.Src[pa.Sdx:])))
-				} else if byteCount == 3 {
+				case 3:
 					n = int(binary.BigEndian.Uint32([]byte(pa.Src[pa.Sdx : pa.Sdx+3])))
-				} else if byteCount == 4 {
+				case 4:
 					n = int(binary.BigEndian.Uint32([]byte(pa.Src[pa.Sdx:])))
-				} else if byteCount == 8 {
+				case 8:
 					n = int(binary.BigEndian.Uint64([]byte(pa.Src[pa.Sdx:])))
-				} else {
+				default:
 					panic(":number() needs byte count of 1, 2, 3, 4, 8. ( e.g. :number(4) )")
 				}
 			case r.NumberTypeBCD:
-				if byteCount == 0 { // Automatically read the number as long as it is in the target text.
+				switch byteCount {
+				case 0: // Automatically read the number as long as it is in the target text.
 					panic("NOT IMPLEMENTED")
 					// tmp := gp.apply(&r.Rule{Number rule.....}, doSkipSpaces, depth)
 					// n = tmp[0].Int
 					// gp.sdx += foundBytes
-				} else {
+				default:
 					res, err := strconv.ParseInt(pa.Src[pa.Sdx:pa.Sdx+byteCount], 10, 64)
 					if err != nil {
 						panic("Can not parse int: '" + pa.Src[pa.Sdx:pa.Sdx+byteCount] + "'")
 					}
 					n = int(res)
 				}
+			default:
+				panic(fmt.Sprintf("Invalid number type: %d", numberType))
 			}
 			*localProductions = append(*localProductions, &r.Rule{Operator: r.Number, Int: n})
 			pa.Sdx += byteCount
@@ -744,7 +731,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode string, useBlockList bool, use
 		pa.apply(pa.spaces, pa.spaces, true, 0) // Skip spaces.
 	}
 	if pa.Sdx < len(pa.Src) {
-		return nil, fmt.Errorf("Not everything could be parsed. Last good parse position was %s\nFailed productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), newProductions.Serialize())
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position was %s\nFailed productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), Shorten(newProductions.Serialize())))
 	}
 
 	mergeTerminals(newProductions)
