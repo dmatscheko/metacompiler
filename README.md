@@ -377,7 +377,7 @@ This defines a JS, that is executed instead of a parser rule. It can emit parser
 
 #### Line commands
 
-* __:include(name | token)__  
+* __:include(fileName name | token)__  
 This includes another ABNF into the current one.
 * __:title(title token)__  
 The title of the ABNF.
