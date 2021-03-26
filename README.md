@@ -65,7 +65,7 @@ This means ABNF is a meta language. A language to describe the syntax and semant
 
 ## Small Example
 
-This is a fully working calculator for integer addition and multiplication. It can parse its input and calculate the output, all while taking into account point before line calculation and bracketing:
+This is a fully working calculator for addition and multiplication. It can parse its input and calculate the output, all while taking into account point before line calculation and bracketing:
 
 <details>
   <summary>Click to expand!</summary>
