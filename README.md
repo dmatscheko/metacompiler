@@ -236,7 +236,7 @@ The title of the ABNF.
 The description of the ABNF.
 * __:startRule(rule name)__  
 The start rule of the ABNF. This is the top level rule for the parser.
-* __:startScript(script name | token)__  
+* __:startScript(script name | token {, script name | token})__  
 The start script of the ABNF. The compiler runs the start script that must specify what to compile (usually `c.asg`) and what to do with the result.
 
 #### Inline commands
@@ -346,19 +346,19 @@ The compiler works like this:
     OUT
      ^
      |
-     C---.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of TAG Rules.)
+     C---.      (C) If the current Rule has childs, the childs get sent to 'compile()'. (Also the childs of Tag Rules.)
      |    |
      ^    v
      *    |     (*) All upstream (up.*) values from returning 'compile()'s are combined.
     /|    |
    | | _  |
-   T | |  |     (T) The text of a EBNF Terminal symbol (Token) gets returned and included into 'up.in'.
-   | X |  |     (X) The script of a single TAG Rule script gets executed. This is after their childs came back from being splitted at (C).
+   T | |  |     (T) The text of an EBNF Terminal symbol (Token) gets returned and included into 'up.in'.
+   | X |  |     (X) The script of a single Tag Rule script gets executed. This is after their childs came back from being splitted at (C).
    | | O  |     (O) Other Rules are ignored.
    | | |  |
    \ | /  |
     \|/   |
-     *    |     (*) Childs from one Rule get splitted. The splitted path always only processe one Rule (That can contain childs).
+     *    |     (*) Childs from one Rule get splitted. The splitted path always only processe one rule (That can contain childs).
      |    |
      ^    |
      IN<-'
