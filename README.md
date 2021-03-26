@@ -391,7 +391,7 @@ The start script of the ABNF. The compiler runs the start script that must speci
 #### Inline commands
 
 * __:number(size number, type number)__  
-`:number(size, type)` This reads `size` bytes from the target text, interprets is as `type` and returns it to the parser, as if it would have been written as number in the ABNF. This allows to parse e.g. TLV formats. `type` can be `0` for little endian, `1` for big endian, `2` for BCD, and `3` for ASCII (see [NumberType Constants](#numbertype-constants)).
+`:number(size, type)` This reads `size` bytes from the target text, interprets is as `type` and returns it to the parser, as if it would have been written as `Number` in the ABNF. This allows to parse e.g. TLV formats. `type` can be `0` for little endian, `1` for big endian, `2` for BCD, and `3` for ASCII (see [NumberType Constants](#numbertype-constants)).
 
 
 ### Exposed JS API
