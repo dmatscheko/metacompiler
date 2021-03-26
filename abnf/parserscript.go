@@ -32,7 +32,7 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 
 	code := (*rule.CodeChilds)[0].String
 
-	v, err := ps.common.Run("parserCommand@"+strconv.Itoa(rule.Pos), code)
+	v, err := ps.common.Run(ps.pa.fileName+":parserCommand:"+strconv.Itoa(rule.Pos), code)
 	if err != nil {
 		panic(err.Error() + "\nError was in " + rule.ToString() + ", Code: '" + code + "'")
 	}
@@ -49,8 +49,8 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 	return nil
 }
 
-func (ps *parserscript) initFuncMap(fileName string) {
-	ps.common = initFuncMapCommon(ps.vm, &ps.compilerFuncMap, fileName, ps.preventDefaultOutput)
+func (ps *parserscript) initFuncMap() {
+	ps.common = initFuncMapCommon(ps.vm, &ps.compilerFuncMap, ps.preventDefaultOutput)
 
 	ps.compilerFuncMap["getSrc"] = func() string { return ps.pa.Src }
 	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.Src = src }
@@ -71,12 +71,12 @@ func (ps *parserscript) initFuncMap(fileName string) {
 	})
 }
 
-func NewParserScript(pa *parser, fileName string) *parserscript {
+func NewParserScript(pa *parser) *parserscript {
 	var ps parserscript
 	ps.pa = pa
 
 	ps.vm = goja.New()
-	ps.initFuncMap(fileName)
+	ps.initFuncMap()
 
 	return &ps
 }

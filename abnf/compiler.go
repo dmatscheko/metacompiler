@@ -2,6 +2,7 @@ package abnf
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"14.gy/mec/abnf/r"
@@ -127,7 +128,7 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, traceEnabled bool, preventDefaultOutput bool) interface{} {
 	var co compiler
 
-	co.cs = NewCompilerScript(&co, asg, aGrammar, fileName, traceEnabled, preventDefaultOutput)
+	co.cs = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
 
 	startScript := r.GetStartScript(aGrammar)
 
@@ -136,7 +137,7 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 		upStream := map[string]r.Object{ // Basically the local variables.
 			"in": "", // This is the parser input (the terminals).
 		}
-		res = co.cs.HandleTagCode(startScript, fileName+":startScript", upStream, asg, slot, 0).Export()
+		res = co.cs.HandleTagCode(startScript, filepath.Clean(fileName)+":startScript", upStream, asg, slot, 0).Export()
 	}
 
 	// Is called fom JS compile():

@@ -86,8 +86,17 @@ func (cs *commonscript) Run(name, src string) (goja.Value, error) {
 	return cs.vm.RunProgram(p)
 }
 
+func (cs *commonscript) getCurrentModuleFileName() string {
+	var buf [2]goja.StackFrame
+	frames := cs.vm.CaptureCallStack(2, buf[:0])
+	if len(frames) < 2 {
+		return "."
+	}
+	return frames[1].SrcName()
+}
+
 // This is used by parser and compiler.
-func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, currentFileName string, preventDefaultOutput bool) *commonscript {
+func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, preventDefaultOutput bool) *commonscript {
 	var common commonscript
 
 	common.vm = vm
@@ -116,25 +125,26 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, c
 	vm.Set("unescape", Unescape)
 	vm.Set("unescapeTilde", UnescapeTilde)
 
-	vm.Set("include", func(fileName string) bool { // It seems impossible to get the file name of the currently calling script. So the base directory is always the directory of the first ABNF.
-
+	vm.Set("include", func(fileName string) bool {
 		if fileName == "" {
 			return false
 		}
-		fullFileName := filepath.Dir(currentFileName) + string(os.PathSeparator) + fileName
-		dat, err := ioutil.ReadFile(fullFileName)
+		includeFileName := filepath.Dir(common.getCurrentModuleFileName()) + string(os.PathSeparator) + filepath.Clean(fileName)
+		dat, err := ioutil.ReadFile(includeFileName)
 		if err != nil {
 			panic(err)
 		}
 		srcCode := string(dat)
 
-		_, err = common.Run(fullFileName, srcCode)
+		_, err = common.Run(includeFileName, srcCode)
 		if err != nil {
-			panic(err.Error() + "\nError was in " + fullFileName)
+			panic(err.Error() + "\nError was in " + includeFileName)
 		}
 
 		return true
 	})
+
+	vm.Set("moduleName", common.getCurrentModuleFileName)
 
 	// vm.Set("writable", func(v interface{}) *interface{} {
 	// 	return &v
@@ -145,11 +155,11 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, c
 
 	*compilerFuncMap = map[string]r.Object{
 		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
-			productions, _ := ParseWithAgrammar(agrammar, srcCode, currentFileName, useBlockList, useFoundList, traceEnabled)
+			productions, _ := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), useBlockList, useFoundList, traceEnabled)
 			return productions
 		},
-		"compileWithProlog": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
-			return compileASGInternal(asg, aGrammar, currentFileName, slot, traceEnabled, false)
+		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
+			return compileASGInternal(asg, aGrammar, common.getCurrentModuleFileName(), slot, traceEnabled, false)
 		},
 		"ABNFagrammar": AbnfAgrammar,
 	}

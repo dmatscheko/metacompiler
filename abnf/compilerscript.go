@@ -123,8 +123,8 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 	return v
 }
 
-func (cs *compilerscript) initFuncMap(fileName string) {
-	cs.common = initFuncMapCommon(cs.vm, &cs.compilerFuncMap, fileName, cs.preventDefaultOutput)
+func (cs *compilerscript) initFuncMap() {
+	cs.common = initFuncMapCommon(cs.vm, &cs.compilerFuncMap, cs.preventDefaultOutput)
 
 	cs.vm.Set("popg", func() interface{} {
 		if len(cs.Stack) > 0 {
@@ -150,7 +150,7 @@ func (cs *compilerscript) initFuncMap(fileName string) {
 	cs.compilerFuncMap["agrammar"] = cs.aGrammarReference // Just for reference.
 }
 
-func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, fileName string, traceEnabled, preventDefaultOutput bool) *compilerscript {
+func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled, preventDefaultOutput bool) *compilerscript {
 	var cs compilerscript
 
 	cs.co = co
@@ -168,7 +168,7 @@ func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, fileName s
 	}
 
 	cs.vm = goja.New()
-	cs.initFuncMap(fileName)
+	cs.initFuncMap()
 
 	return &cs
 }
