@@ -415,7 +415,7 @@ Sleeps for `d` milliseconds.
 #### Strings
 
 * __unescape(s string) string__  
-Backslash unescapes a `Token` string. It is about the inverse of `printf("%q", s)` but without the quotation marks.
+Backslash unescapes the content of a `Dquotetoken` or a `Squotetoken` string. It is about the inverse of `printf("%q", s)` but without the quotation marks.
 * __unescapeTilde(s string) string__  
 Backslash unescapes a tags `Code` string. It basically only unescapes a `\~` into a `~` (tilde) and leaves everything else untouched.
 
