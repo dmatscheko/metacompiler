@@ -21,6 +21,11 @@ This system should allow to define and use compiler for arbitrary computer langu
     - [Build / Usage](#build--usage)
     - [High level overview](#high-level-overview)
       - [Default process steps](#default-process-steps)
+    - [ABNF Syntax](#abnf-syntax)
+      - [EBNF of EBNF](#ebnf-of-ebnf)
+      - [EBNF of non-context-free EBNF](#ebnf-of-non-context-free-ebnf)
+      - [EBNF of ABNF](#ebnf-of-abnf)
+      - [Common syntax](#common-syntax)
     - [Parser commands](#parser-commands)
       - [Line plus inline commands](#line-plus-inline-commands)
       - [Line commands](#line-commands)
@@ -45,11 +50,6 @@ This system should allow to define and use compiler for arbitrary computer langu
         - [RangeType Constants](#rangetype-constants)
         - [NumberType Constants](#numbertype-constants)
       - [LLVM IR API](#llvm-ir-api)
-    - [ABNF Syntax](#abnf-syntax)
-      - [EBNF of EBNF](#ebnf-of-ebnf)
-      - [EBNF of non-context-free EBNF](#ebnf-of-non-context-free-ebnf)
-      - [EBNF of ABNF](#ebnf-of-abnf)
-      - [Common syntax](#common-syntax)
   - [Further Examples](#further-examples)
     - [Example of an annotated EBNF](#example-of-an-annotated-ebnf)
     - [Its output, when it gets applied on itself:](#its-output-when-it-gets-applied-on-itself)
@@ -214,6 +214,146 @@ An example of this process, done fully inside the `:startScript()` code of an AB
 ~~) ;
 ```
 </details>
+
+### ABNF Syntax
+
+#### EBNF of EBNF
+
+A basic EBNF syntax looks like this:
+
+```javascript
+EBNF        = { Production } ;
+Production  = name "=" [ Expression ] ";" ;
+
+Expression  = Sequence { "|" Sequence } ;
+Sequence    = Term { Term } ;
+
+Term        = name | token | Group | Option | Repetition ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
+Title       = token ;
+Comment     = token ;
+```
+
+* A `token` is just a quoted string that should occour like that in the EBNF. E.g. all quoted strings inside this EBNF are `token`.
+* A `name` is also a string, but without quotes. In the case of EBNF, it defines the name of a `Production` or identifies one, when it is used inside of an `Expression`.
+
+#### EBNF of non-context-free EBNF
+
+This system uses an EBNF syntax that is a bit more capable:
+
+```javascript
+:title("EBNF of EBNF") ;
+:startRule(EBNF) ;
+:whitespace(whitespace) ;
+
+EBNF        = { Production | LineCommand } ;
+Production  = name "=" [ Expression ] ";" ;
+
+Expression  = Sequence { "|" Sequence } ;
+Sequence    = Term { Term } ;
+
+Term        = name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ;
+ByteRange   = token "..b" token ;
+Range       = token [ "..." token ] ;
+CharsOf     = "@+" token ;
+CharOf      = "@" token ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
+Times       = number [ "..." ( number | "" ) ] Group ;
+
+LineCommand = Command ";" ;
+Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
+```
+
+* `:title()` is a `Command`. Those commands normally inform the parser about context, but not necessarily influence what has to be parsed in the target text (but they can). This means, the EBNF-variant that is used by this system is _not_ context free. There are commands that can be inline in an `Expression` and there are commands that have to be in their own line, terminated with semicolon (`LineCommands`). Some commands, like the `:whitespace()` command can occour either as inline command or as `LineCommand`. In the case of whitespace, this allows to change what is seen as whitespace and therefore allows to parse strings correctly.
+  * The `:title()` command only describes the EBNF via a short title. There is a `:description()` command available that describes the EBNF in more detail.
+  * The `:startRule()` command defines the top level EBNF rule.
+  * The `:whitespace()` command defines what can be skipped in the target text as whitespace between `token` and `numbers`.
+  * See [Parser commands](#parser-commands) for more.
+* `number` is a new type of content in the EBNF. It stands for plain unquoted numbers.
+* `ByteRange` defines that the a char between (and including) the two `token` should be in the target text. The comparison is done for exactly that single byte.
+* `Range` with only one parameter is the same as a `token`. `Range` when used as two `token` with the `...` between, defines that the a char between (and including) the two `token` should be in the target text. That char can be any UTF8 symbol and therefore can use more than one byte.
+* `CharOf` is not strictly necessary but shortens some EBNF quite a lot. It stands for any one of the UTF8-chars of the `token`. Exactly one of the chars has to be in the target text.
+* `CharsOf` is the same as `CharOf`, but the chars contained in the `token` can occour in any order from zero to infinite times. At least one char has to be in the target text.
+
+#### EBNF of ABNF
+
+Annotated EBNF basically only adds tags to the syntax of the above EBNF:
+
+```javascript
+:title("EBNF of ABNF") ;
+:startRule(ABNF) ;
+:whitespace(whitespace) ;
+
+ABNF        = { Production | LineCommand } ;
+Production  = name [ Tag ] "=" [ Expression ] ";" ;
+
+Expression  = Sequence { "|" Sequence } ;
+Sequence    = Term { Term } ;
+
+Term        = TaggedTerm | Command ;
+TaggedTerm  = ( name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times ) [ Tag ] ;
+
+ByteRange   = token "..b" token ;
+Range       = token [ "..." token ] ;
+CharsOf     = "@+" token ;
+CharOf      = "@" token ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
+Times       = number [ "..." ( number | "" ) ] Group ;
+
+Tag         = "<" ( name | token ) { "," ( name | token ) } ">" ;
+
+LineCommand = Command ";" ;
+Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
+```
+
+* The `Tag` is always responsible for the `Term` right before it.
+* `Commands` can have no tags.
+
+#### Common syntax
+
+This is the definition of `name` and `token`, of `number`, and of `whitespace`:
+
+```javascript
+name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(whitespace) ;
+
+token       = Dquotetoken | Squotetoken | Code ;
+Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(whitespace) ;
+Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } "'" :whitespace(whitespace) ;
+Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(whitespace) ;
+
+Alphabet    = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes.
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; // Readable ASCII without line breaks (CR and LF).
+AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
+AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
+
+number      = "0" | "1"..."9" { "0"..."9" } ;
+
+whitespace  = { @+"\t\n\r " | Comment } ;
+
+Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(whitespace) ;
+LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(whitespace) ;
+```
+
+As can be seen in the above EBNF, a `token` consists of one backslash escaped string, quoted in single or double quotes.
+```
+"This is an\nexample\tof a multiline string with one tab"
+```
+A `tag` starts with `<`, ends with `>`, and normally contain one or multiple comma separated raw strings (`Code`), quoted in `~~` (two on either side). Inside a raw tag string, `\~` is a special symbol for `~` to be able to write a literal `~~` combination. Single `~` can be written without a backslash escape.
+```
+< ~~This is an
+example of a multiline
+raw string (inside a tag)
+with one tilde: ~
+and then two tildes: ~\~~~, ~~This is a second string inside the Tag~~ >
+```
 
 ### Parser commands
 
@@ -459,145 +599,6 @@ The functions and constants are exposed to JS as:
   The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. online with the [Graphviz visual editor](http://magjac.com/graphviz-visual-editor/)).
   * __llvm.Callgraph(m ir.Module, f string)__  
   The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
-
-### ABNF Syntax
-
-#### EBNF of EBNF
-
-A basic EBNF syntax looks like this:
-
-```javascript
-EBNF        = { Production } ;
-Production  = name "=" [ Expression ] ";" ;
-
-Expression  = Sequence { "|" Sequence } ;
-Sequence    = Term { Term } ;
-
-Term        = name | token | Group | Option | Repetition ;
-Group       = "(" Expression ")" ;
-Option      = "[" Expression "]" ;
-Repetition  = "{" Expression "}" ;
-Title       = token ;
-Comment     = token ;
-```
-
-* A `token` is just a quoted string that should occour like that in the EBNF. E.g. all quoted strings inside this EBNF are `token`.
-* A `name` is also a string, but without quotes. In the case of EBNF, it defines the name of a `Production` or identifies one, when it is used inside of an `Expression`.
-
-#### EBNF of non-context-free EBNF
-
-This system uses an EBNF syntax that is a bit more capable:
-
-```javascript
-:title("EBNF of EBNF") ;
-:startRule(EBNF) ;
-:whitespace(whitespace) ;
-
-EBNF        = { Production | LineCommand } ;
-Production  = name "=" [ Expression ] ";" ;
-
-Expression  = Sequence { "|" Sequence } ;
-Sequence    = Term { Term } ;
-
-Term        = name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ;
-ByteRange   = token "..b" token ;
-Range       = token [ "..." token ] ;
-CharsOf     = "@+" token ;
-CharOf      = "@" token ;
-Group       = "(" Expression ")" ;
-Option      = "[" Expression "]" ;
-Repetition  = "{" Expression "}" ;
-Times       = number [ "..." ( number | "" ) ] Group ;
-
-LineCommand = Command ";" ;
-Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
-```
-
-* `:title()` is a `Command`. Those commands normally inform the parser about context, but not necessarily influence what has to be parsed in the target text (but they can). This means, the EBNF-variant that is used by this system is _not_ context free. There are commands that can be inline in an `Expression` and there are commands that have to be in their own line, terminated with semicolon (`LineCommands`). Some commands, like the `:whitespace()` command can occour either as inline command or as `LineCommand`. In the case of whitespace, this allows to change what is seen as whitespace and therefore allows to parse strings correctly.
-  * The `:title()` command only describes the EBNF via a short title. There is a `:description()` command available that describes the EBNF in more detail.
-  * The `:startRule()` command defines the top level EBNF rule.
-  * The `:whitespace()` command defines what can be skipped in the target text as whitespace between `token` and `numbers`.
-* `number` is a new type of content in the EBNF. It stands for plain unquoted numbers.
-* `ByteRange` defines that the a char between (and including) the two `token` should be in the target text. The comparison is done for exactly that single byte.
-* `Range` with only one parameter is the same as a `token`. `Range` when used as two `token` with the `...` between, defines that the a char between (and including) the two `token` should be in the target text. That char can be any UTF8 symbol and therefore can use more than one byte.
-* `CharOf` is not strictly necessary but shortens some EBNF quite a lot. It stands for any one of the UTF8-chars of the `token`. Exactly one of the chars has to be in the target text.
-* `CharsOf` is the same as `CharOf`, but the chars contained in the `token` can occour in any order from zero to infinite times. At least one char has to be in the target text.
-
-#### EBNF of ABNF
-
-Annotated EBNF basically only adds tags to the syntax of the above EBNF:
-
-```javascript
-:title("EBNF of ABNF") ;
-:startRule(ABNF) ;
-:whitespace(whitespace) ;
-
-ABNF        = { Production | LineCommand } ;
-Production  = name [ Tag ] "=" [ Expression ] ";" ;
-
-Expression  = Sequence { "|" Sequence } ;
-Sequence    = Term { Term } ;
-
-Term        = TaggedTerm | Command ;
-TaggedTerm  = ( name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times ) [ Tag ] ;
-
-ByteRange   = token "..b" token ;
-Range       = token [ "..." token ] ;
-CharsOf     = "@+" token ;
-CharOf      = "@" token ;
-Group       = "(" Expression ")" ;
-Option      = "[" Expression "]" ;
-Repetition  = "{" Expression "}" ;
-Times       = number [ "..." ( number | "" ) ] Group ;
-
-Tag         = "<" ( name | token ) { "," ( name | token ) } ">" ;
-
-LineCommand = Command ";" ;
-Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
-```
-
-* The `Tag` is always responsible for the `Term` right before it.
-* `Commands` can have no tags.
-
-#### Common syntax
-
-This is the definition of `name` and `token`, of `number`, and of `whitespace`:
-
-```javascript
-name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(whitespace) ;
-
-token       = Dquotetoken | Squotetoken | Code ;
-Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(whitespace) ;
-Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } "'" :whitespace(whitespace) ;
-Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(whitespace) ;
-
-Alphabet    = "a"..."z" | "A"..."Z" ;
-Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes.
-AsciiNoLb   = "\x20"..."\x7E" | "\t" ; // Readable ASCII without line breaks (CR and LF).
-AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
-AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
-
-number      = "0" | "1"..."9" { "0"..."9" } ;
-
-whitespace  = { @+"\t\n\r " | Comment } ;
-
-Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(whitespace) ;
-LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(whitespace) ;
-```
-
-As can be seen in the above EBNF, a `token` consists of one backslash escaped string, quoted in single or double quotes.
-```
-"This is an\nexample\tof a multiline string with one tab"
-```
-A `tag` starts with `<`, ends with `>`, and normally contain one or multiple comma separated raw strings (`Code`), quoted in `~~` (two on either side). Inside a raw tag string, `\~` is a special symbol for `~` to be able to write a literal `~~` combination. Single `~` can be written without a backslash escape.
-```
-< ~~This is an
-example of a multiline
-raw string (inside a tag)
-with one tilde: ~
-and then two tildes: ~\~~~, ~~This is a second string inside the Tag~~ >
-```
 
 ## Further Examples
 
