@@ -8,13 +8,13 @@
             "name": "Calculator 1",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1.abnf", "-b", "tests/calculator_formula.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1.abnf", "-b", "tests/calculator_formula.txt", "-q"]
         },
         {
             "name": "Calculator 1 (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1.abnf", "-b", "tests/calculator_formula.txt", "-vv4"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-1.abnf", "-b", "tests/calculator_formula.txt", "-vvb2"]
         },
         {
             "name": "Calculator 2",
@@ -44,7 +44,7 @@
             "name": "TinyC Variant",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt", "-vv3"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt", "-vvb1"]
         },
         {
             "name": "---------",
@@ -116,7 +116,7 @@
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop.abnf", "-b", "tests/infinite-loop_aaaaa.txt", "-lb", "-vv3", "-vv4"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop.abnf", "-b", "tests/infinite-loop_aaaaa.txt", "-lb", "-vvb1", "-vvb2"]
         },
         {
             "name": "Speed Test",
