@@ -1,4 +1,4 @@
-:title("Infinite Loop") ;
+:title("Infinite Loop") ; // Note: This ABNF SHOULD throw an error!
 
 
 :startRule(TestA) ;
