@@ -16,7 +16,7 @@ This system should allow to define and use compiler for arbitrary computer langu
 - [MetaCompiler](#metacompiler)
   - [Table of Contents](#table-of-contents)
   - [What is an annotated EBNF (ABNF)?](#what-is-an-annotated-ebnf-abnf)
-  - [Small Example](#small-example)
+    - [Small Example](#small-example)
   - [Documentation](#documentation)
     - [Build / Usage](#build--usage)
     - [High level overview](#high-level-overview)
@@ -63,7 +63,7 @@ This system should allow to define and use compiler for arbitrary computer langu
 
 This means ABNF is a meta language. A language to describe the syntax and semantic of another language.
 
-## Small Example
+### Small Example
 
 This is a fully working calculator for addition and multiplication. It can parse its input and calculate the output, all while taking into account point before line calculation and bracketing:
 
