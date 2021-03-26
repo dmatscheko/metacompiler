@@ -22,7 +22,7 @@ TaggedTerm  = ( Name | ByteRange | Range | CharsOf | CharOf | Group | Option | R
 
 ByteRange   = Token "..b" Token ;
 Range       = Token [ "..." Token ] ;
-CharsOf     = "@" Token "+" ;
+CharsOf     = "@+" Token ;
 CharOf      = "@" Token ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
@@ -32,11 +32,10 @@ Times       = Number [ "..." ( Number | "" ) ] Group ;
 Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
 
 LineCommand = Command ";" ;
-
 Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
-CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
+CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken | Code ;
 Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(Whitespace) ;
@@ -52,7 +51,7 @@ AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and uni
 
 Number      = "0" | "1"..."9" { "0"..."9" } ;
 
-Whitespace  = { @"\t\n\r "+ | Comment } ;
+Whitespace  = { @+"\t\n\r " | Comment } ;
 
 Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(Whitespace) ;
 LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(Whitespace) ;

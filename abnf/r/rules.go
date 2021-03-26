@@ -57,6 +57,7 @@ const (
 	NumberTypeLittleEndian int = iota
 	NumberTypeBigEndian
 	NumberTypeBCD
+	NumberTypeASCII
 )
 
 // -----------------------------------------
@@ -237,19 +238,6 @@ func (rules *Rules) ToString() string {
 	}
 	res += "}"
 	return res
-}
-
-func GetProductions(aGrammar *Rules) *Rules {
-	if aGrammar == nil {
-		return nil
-	}
-	for i := range *aGrammar {
-		rule := (*aGrammar)[i]
-		if rule.Operator == Sequence {
-			return rule.Childs
-		}
-	}
-	return nil
 }
 
 func GetStartRule(aGrammar *Rules) *Rule {

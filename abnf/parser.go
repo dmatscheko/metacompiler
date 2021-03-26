@@ -14,7 +14,7 @@ import (
 	"14.gy/mec/abnf/r"
 )
 
-// TODO: switch to "text/scanner".
+// TODO: Maybe switch to "text/scanner" (If it improves performance).
 
 // func RuneToStr(r rune) string {
 // 	if r > utf8.MaxRune {
@@ -114,7 +114,7 @@ func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found
 		if pa.useBlockList {
 			pa.blockList[id] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
 		}
-		if pa.useFoundList && found != nil { // TODO: Make this configurable. On most EBNFs it is not necessary and comes with huge time and memory impact.
+		if pa.useFoundList && found != nil {
 			pa.foundList[id] = found
 			pa.foundSdxList[id] = pa.Sdx
 		}
@@ -294,7 +294,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		correctReferencesSlow(pa.agrammar, nil)
 	case "number":
 		// :number(4, LE) would mean take 4 bytes from the input (gp.src), interpret them as little endian and create a Number from it. This means it should be usable in Times expressions and should allow the parsing of TLV-formats.
-		panic("NOT IMPLEMENTED")
+		panic(":number() is only allowed as inline command.")
 	case "title":
 		// TODO: Maybe use that information.
 	case "description":
@@ -626,7 +626,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				return nil
 			}
 			n := 0
-			switch numberType { // TODO: Everything for singed numbers too!
+			switch numberType { // TODO: Everything for signed numbers too!
 			case r.NumberTypeLittleEndian:
 				switch byteCount {
 				case 1:
@@ -658,6 +658,8 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 					panic(":number() needs byte count of 1, 2, 3, 4, 8. ( e.g. :number(4) )")
 				}
 			case r.NumberTypeBCD:
+				panic("NOT IMPLEMENTED")
+			case r.NumberTypeASCII:
 				switch byteCount {
 				case 0: // Automatically read the number as long as it is in the target text.
 					panic("NOT IMPLEMENTED")

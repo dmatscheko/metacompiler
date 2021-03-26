@@ -21,6 +21,10 @@ This system should allow to define and use compiler for arbitrary computer langu
     - [Build / Usage](#build--usage)
     - [High level overview](#high-level-overview)
       - [Default process steps](#default-process-steps)
+    - [Parser commands](#parser-commands)
+      - [Line plus inline commands](#line-plus-inline-commands)
+      - [Line commands](#line-commands)
+      - [Inline commands](#inline-commands)
     - [Exposed JS API](#exposed-js-api)
       - [General](#general)
       - [Output](#output)
@@ -34,12 +38,16 @@ This system should allow to define and use compiler for arbitrary computer langu
       - [Compiler API](#compiler-api)
       - [Parser and Compiler ABNF a-grammar API](#parser-and-compiler-abnf-a-grammar-api)
         - [Builder functions](#builder-functions)
+        - [ToString functions](#tostring-functions)
         - [Grammar functions](#grammar-functions)
         - [Text functions](#text-functions)
         - [OperatorID Constants](#operatorid-constants)
+        - [RangeType Constants](#rangetype-constants)
+        - [NumberType Constants](#numbertype-constants)
       - [LLVM IR API](#llvm-ir-api)
     - [ABNF Syntax](#abnf-syntax)
       - [EBNF of EBNF](#ebnf-of-ebnf)
+      - [EBNF of non-context-free EBNF](#ebnf-of-non-context-free-ebnf)
       - [EBNF of ABNF](#ebnf-of-abnf)
       - [Common syntax](#common-syntax)
   - [Further Examples](#further-examples)
@@ -63,10 +71,10 @@ This is a fully working calculator for integer addition and multiplication. It c
   <summary>Click to expand!</summary>
 
 ```javascript
-"Tiny calculator"
-<~~c.compile(c.asg)~~>
+:title("Tiny calculator") ;
 
-{
+
+:startRule(Expression) ;
 
 Expression  =
     Term
@@ -111,11 +119,11 @@ Factor      =
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
 
-}
 
-<~~println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)~~>
-
-Expression
+:startScript(~~
+    c.compile(c.asg)
+    println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)
+~~) ;
 ```
 
 When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
@@ -150,65 +158,92 @@ This is the input to the default main process:
 * `initial-a-grammar` = Default annotated grammar of annotated EBNF.
 * `inputA` = The content of the file given with command line parameter `-a`.
 * `inputB` = The content of the file given with command line parameter `-b`.
-* `*-a-grammar-prolog` = The code at the beginning of the grammar. This code starts the rest of the compile process during the compile step.
+* `*-a-grammar-startScript` = The code, defined via `:startScript()` inside the grammar / the ABNF. This code starts the rest of the compile process during the compile step.
 
 This is how that input is processed:
 1. `parse(initial-a-grammar, inputA)`  = `inputA-ASG`.
-2. `compile(inputA-ASG, initial-a-grammar-prolog)`  = `new-a-grammar`.
+2. `compile(inputA-ASG, initial-a-grammar-startScript)`  = `new-a-grammar`.
 3. `parse(new-a-grammar, inputB)`  = `inputB-ASG`.
-4. `compile(inputB-ASG, new-a-grammar-prolog)`  = `result`.
+4. `compile(inputB-ASG, new-a-grammar-startScript)`  = `result`.
 
 Of course, the `result` can again (but doesn't have to) be an `a-grammar` and can be used as input for `parse()`.
 
-An example of this process, done fully inside the prolog code of an ABNF:
+An example of this process, done fully inside the `:startScript()` code of an ABNF:
 
 <details>
   <summary>Click to expand!</summary>
 
 ```javascript
-"Parse and compile test"
-<~~
+:title("Parse and compile from JS") ;
 
-// Lets build a new compiler directly from scratch:
 
-// For this we need an agrammar. This is the information, that the metacompiler needs to actually be a compiler.
+:startScript(~~
 
-// To create an agrammar, we need an ABNF:
-var ABNF = "<~\~ println('found me'); c.compile(c.asg) ~\~> {X = ( 'A' | 'B' | 'C' ) <~\~ println('and found the letter ' + up.in) ~\~>; } X"
+    // Lets build a new compiler directly from scratch:
 
-// Now we parse the ABNF and create an ASG from it. We use c.ABNFagrammar as agrammar for this parse step, because we wrote our compiler definition in ABNF (the variable above), and the agrammar c.ABNFagrammar understands ABNF:
-var ASG = c.parse(c.ABNFagrammar, ABNF)
+    // For this we need an agrammar. This is the information, that the metacompiler needs to actually be a compiler.
 
-// Lets print the resulting ASG:
-println("\nASG: " + abnf.serializeRules(ASG))
+    // To create an agrammar, we need an ABNF:
+    var ABNF = ":startScript(~\~ println('found me'); c.compile(c.asg) ~\~); :startRule(X); X = ( 'A' | 'B' | 'C' ) <~\~ println('and found the letter ' + up.in) ~\~>;"
 
-// So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF:
-var result = c.compileWithProlog(ASG, c.ABNFagrammar)
+    // Now we parse the ABNF and create an ASG from it. We use c.ABNFagrammar as agrammar for this parse step, because we wrote our compiler definition in ABNF (the variable above), and the agrammar c.ABNFagrammar understands ABNF:
+    var ASG = c.parse(c.ABNFagrammar, ABNF)
 
-// The agrammar c.ABNFagrammar stores its compilation result into ltr.agrammar. The result of the compilation is the whole ltr object. Lets get our new very own agrammar:
-var myAgrammar = result.agrammar
+    // Lets print the resulting ASG:
+    println("\nASG: " + abnf.serializeRules(ASG))
 
-// Lets now print the resulting agrammar:
-println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
+    // So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF.
+    // The compile step of c.ABNFagrammar creates the agrammar and returns it:
+    var myAgrammar = c.compileRunStartScript(ASG, c.ABNFagrammar)
 
-// We can now use our own agrammar to parse something new. We parse the letter B and again get an ASG from it:
-var myASG = c.parse(myAgrammar, "B")
+    // Lets now print the resulting agrammar:
+    println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
 
-// Lets now print the resulting ASG:
-println("\nmyASG: " + abnf.serializeRules(myASG))
+    // We can now use our own agrammar to parse something new. We parse the letter B and again get an ASG from it:
+    var myASG = c.parse(myAgrammar, "C")
 
-// And to see a result, we have to compile our new ASG myASG with our grammar myAgrammar:
-println("\nOutput:")
-c.compileWithProlog(myASG, myAgrammar)
+    // Lets now print the resulting ASG:
+    println("\nmyASG: " + abnf.serializeRules(myASG))
 
-// Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>
+    // And to see a result, we have to compile our new ASG myASG with our grammar myAgrammar:
+    println("\nOutput:")
+    c.compileRunStartScript(myASG, myAgrammar)
 
-~~>
-{
-    # No rules
-}
+    // Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>".
+
+~~) ;
 ```
 </details>
+
+### Parser commands
+
+The following parser commands are available:
+
+#### Line plus inline commands
+
+* __:whitespace(whitespace name | token)__  
+This defines the used whitespace for the following token and numbers.
+* __:script(script name | token)__  
+This defines a JS, that is executed instead of a parser rule. It can emit parser rules depending on the target text and is therefore a dynamic parser rule.
+
+#### Line commands
+
+* __:include(name | token)__  
+This includes another ABNF into the current one.
+* __:title(title token)__  
+The title of the ABNF.
+* __:description(description token)__  
+The description of the ABNF.
+* __:startRule(rule name)__  
+The start rule of the ABNF. This is the top level rule for the parser.
+* __:startScript(script name | token)__  
+The start script of the ABNF. The compiler runs the start script that must specify what to compile (usually `c.asg`) and what to do with the result.
+
+#### Inline commands
+
+* __:number(size number, type number)__  
+`:number(size, type)` This reads `size` bytes from the target text, interprets is as `type` and returns it to the parser, as if it would have been written as number in the ABNF. This allows to parse e.g. TLV formats. `type` can be `0` for little endian, `1` for big endian, `2` for BCD, and `3` for ASCII (see [NumberType Constants](#numbertype-constants)).
+
 
 ### Exposed JS API
 
@@ -328,8 +363,8 @@ The compiler works like this:
      ^    |
      IN<-'
 ```
-* __c.compileWithProlog(asg []Rule, aGrammar []Rule, slot int) map[string]object__  
-Instantiates a new compiler with `asg` and `aGrammar` and starts the prolog code of the `aGrammar`. This prolog code has to do the rest, to compile the ASG in parameter `asg`. Specifically, it has to call `c.compile(c.asg)` to compile that ASG. <br/>
+* __c.compileRunStartScript(asg []Rule, aGrammar []Rule, slot int) map[string]object__  
+Instantiates a new compiler with `asg` and `aGrammar` and starts the :startScript() code of the `aGrammar`. This start script code has to do the rest, to compile the ASG in parameter `asg`. Specifically, it has to call `c.compile(c.asg)` to compile that ASG. And it has to handle the result of the compilation if necessary.<br/>
 The parameter `slot` states the index of the code part inside the `Tags`. It is normally 0.
 
 #### Parser and Compiler ABNF a-grammar API
@@ -341,25 +376,34 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __abnf.arrayToRules(rules []object) []Rule__
 * __abnf.newRule(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []Rule, TagChilds []Rule) Rule__
 * __abnf.newToken(String string, Pos int) Rule__
-* __abnf.newName(String string, Int int, Pos int) Rule__
+* __abnf.newNumber(Int int, Pos int) Rule__
+* __abnf.newIdentifier(String string, Int int, Pos int) Rule__
 * __abnf.newProduction(String string, Int int, Childs []Rule, Pos int) Rule__
-* __abnf.newTag(TagChilds []Rule, Childs []Rule, Pos int) Rule__
-* __abnf.newSkipSpace(Bool bool, Pos int) Rule__
+* __abnf.newTag(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
+* __abnf.newCommand(String string, CodeChilds []Rule, Pos int) Rule__
 * __abnf.newRepetition(Childs []Rule, Pos int) Rule__
 * __abnf.newOption(Childs []Rule, Pos int) Rule__
 * __abnf.newGroup(Childs []Rule, Pos int) Rule__
 * __abnf.newSequence(Childs []Rule, Pos int) Rule__
 * __abnf.newAlternative(Childs []Rule, Pos int) Rule__
 * __abnf.newRange(Childs []Rule, Pos int) Rule__
+* __abnf.newTimes(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
+* __abnf.newCharOf(String string, Pos int) Rule__
+* __abnf.newCharsOf(String string, Pos int) Rule__
+
+##### ToString functions
+
+* __abnf.serializeRule(rule Rule) string__
+* __abnf.serializeRules(rules []Rule) string__
+* __abnf.toStringRule(rule Rule) string__
+* __abnf.toStringRules(rules []Rule) string__
 
 ##### Grammar functions
 
 * __abnf.getStartRule(rules []Rule) Rule__  
-Returns the start rule of the a-grammar. The start rule points to the top level production.
-* __abnf.getProductions(rules []Rule) []Rule__  
-Returns the productions of the a-grammar.
-* __abnf.getProlog(rules []Rule) Rule__  
-Returns the prolog `Tag` of the a-grammar. This contains the JS code that controls the rest.
+Returns the start rule of the a-grammar. The start rule points to the top level production for the parser.
+* __abnf.getStartScript(rules []Rule) Rule__  
+Returns the :startScript() of the a-grammar. This contains the JS code that controls the compile step.
 * __abnf.getTitle(rules []Rule) []Rule__  
 Returns the title of the a-grammar.
 * __abnf.getDescription(rules []Rule) []Rule__  
@@ -386,6 +430,18 @@ Returns the description of the a-grammar.
 * __abnf.oid.Production__
 * __abnf.oid.Ident__
 
+##### RangeType Constants
+
+* __abnf.rangeType.Rune__
+* __abnf.rangeType.Byte__
+
+##### NumberType Constants
+
+* __abnf.numberType.LittleEndian__
+* __abnf.numberType.BigEndian__
+* __abnf.numberType.BCD__
+* __abnf.numberType.ASCII__
+
 #### LLVM IR API
 
 This tool uses the [Go LLIR/LLVM library](https://github.com/llir/llvm) to create LLVM IR and to interact with it. The API documentation can be found here: [llir/llvm overview](https://llir.github.io/document/) and here [LLIR/LLVM library documentation](https://pkg.go.dev/github.com/llir/llvm/). For more information on LLVM IR go to the [LLVM language reference](https://llvm.org/docs/LangRef.html).
@@ -408,96 +464,133 @@ The functions and constants are exposed to JS as:
 
 #### EBNF of EBNF
 
-A normal EBNF syntax looks like this:
+A basic EBNF syntax looks like this:
 
 ```javascript
-"EBNF of EBNF" {
-
-EBNF        = [ Title ] "{" { Production } "}" [ Comment ] ;
+EBNF        = { Production } ;
 Production  = name "=" [ Expression ] ";" ;
-Expression  = Alternative { "|" Alternative } ;
-Alternative = Term { Term } ;
-Term        = name | token [ "..." token ] | Group | Option | Repetition | skipspaces ;
+
+Expression  = Sequence { "|" Sequence } ;
+Sequence    = Term { Term } ;
+
+Term        = name | token | Group | Option | Repetition ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
 Title       = token ;
 Comment     = token ;
-
-}
-EBNF
 ```
 
-Skip and noskip are additions to be able to parse strings correctly.
+* A `token` is just a quoted string that should occour like that in the EBNF. E.g. all quoted strings inside this EBNF are `token`.
+* A `name` is also a string, but without quotes. In the case of EBNF, it defines the name of a `Production` or identifies one, when it is used inside of an `Expression`.
+
+#### EBNF of non-context-free EBNF
+
+This system uses an EBNF syntax that is a bit more capable:
+
+```javascript
+:title("EBNF of EBNF") ;
+:startRule(EBNF) ;
+:whitespace(whitespace) ;
+
+EBNF        = { Production | LineCommand } ;
+Production  = name "=" [ Expression ] ";" ;
+
+Expression  = Sequence { "|" Sequence } ;
+Sequence    = Term { Term } ;
+
+Term        = name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ;
+ByteRange   = token "..b" token ;
+Range       = token [ "..." token ] ;
+CharsOf     = "@+" token ;
+CharOf      = "@" token ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
+Times       = number [ "..." ( number | "" ) ] Group ;
+
+LineCommand = Command ";" ;
+Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
+```
+
+* `:title()` is a `Command`. Those commands normally inform the parser about context, but not necessarily influence what has to be parsed in the target text (but they can). This means, the EBNF-variant that is used by this system is _not_ context free. There are commands that can be inline in an `Expression` and there are commands that have to be in their own line, terminated with semicolon (`LineCommands`). Some commands, like the `:whitespace()` command can occour either as inline command or as `LineCommand`. In the case of whitespace, this allows to change what is seen as whitespace and therefore allows to parse strings correctly.
+  * The `:title()` command only describes the EBNF via a short title. There is a `:description()` command available that describes the EBNF in more detail.
+  * The `:startRule()` command defines the top level EBNF rule.
+  * The `:whitespace()` command defines what can be skipped in the target text as whitespace between `token` and `numbers`.
+* `number` is a new type of content in the EBNF. It stands for plain unquoted numbers.
+* `ByteRange` defines that the a char between (and including) the two `token` should be in the target text. The comparison is done for exactly that single byte.
+* `Range` with only one parameter is the same as a `token`. `Range` when used as two `token` with the `...` between, defines that the a char between (and including) the two `token` should be in the target text. That char can be any UTF8 symbol and therefore can use more than one byte.
+* `CharOf` is not strictly necessary but shortens some EBNF quite a lot. It stands for any one of the UTF8-chars of the `token`. Exactly one of the chars has to be in the target text.
+* `CharsOf` is the same as `CharOf`, but the chars contained in the `token` can occour in any order from zero to infinite times. At least one char has to be in the target text.
 
 #### EBNF of ABNF
 
-Annotated EBNF basically only adds tags to the syntax of a normal EBNF:
+Annotated EBNF basically only adds tags to the syntax of the above EBNF:
 
 ```javascript
-"EBNF of ABNF" {
+:title("EBNF of ABNF") ;
+:startRule(ABNF) ;
+:whitespace(whitespace) ;
 
-AEBNF       = [ Title ] [ Tag ] "{" { Production } "}" [ Tag ] [ Comment ] ;
+ABNF        = { Production | LineCommand } ;
 Production  = name [ Tag ] "=" [ Expression ] ";" ;
-Expression  = Alternative { "|" Alternative } ;
-Alternative = Term { Term } ;
-Term        = ( name | token [ "..." token ] | Group | Option | Repetition | skipspaces ) [ Tag ] ;
+
+Expression  = Sequence { "|" Sequence } ;
+Sequence    = Term { Term } ;
+
+Term        = TaggedTerm | Command ;
+TaggedTerm  = ( name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times ) [ Tag ] ;
+
+ByteRange   = token "..b" token ;
+Range       = token [ "..." token ] ;
+CharsOf     = "@+" token ;
+CharOf      = "@" token ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-Title       = token ;
-Comment     = token ;
-Tag         = "<" code { "," code } ">" ;
+Times       = number [ "..." ( number | "" ) ] Group ;
 
-}
-AEBNF
+Tag         = "<" ( name | token ) { "," ( name | token ) } ">" ;
+
+LineCommand = Command ";" ;
+Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
 ```
 
-The `Tag` is always responsible for the `Term` right before it.
-
-The only exceptions are:
-* `Repetition`, where the `Tag` would only attach to the last entry of the `Repetition` (use bracketing when you want to tag more).
-* `Range`, where the `Tag` would also only attach to the second `Token` of the `Range` term.
-* The `Tag` after the `Title`. There, the `Tag` is not responsible for the title but it contains the _prolog JS code_. That code is executed automatically.
-* The `Tag` before the `Comment`. That `Tag` contains the _epilog JS code_. That code is executed automatically after the `c.compile()` function is finished with the ASG.
+* The `Tag` is always responsible for the `Term` right before it.
+* `Commands` can have no tags.
 
 #### Common syntax
 
-This is the definition of `name` and `token`, of `skipspaces`, and of `code`. Except of `code`, they are common to EBNF and ABNF:
+This is the definition of `name` and `token`, of `number`, and of `whitespace`:
 
 ```javascript
-"Common syntax" {
+name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(whitespace) ;
 
-name        = ( Small | Caps ) - { Small | Caps | Digit | "_" } + ;
-token       = Dquotetoken | Squotetoken ;
+token       = Dquotetoken | Squotetoken | Code ;
+Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(whitespace) ;
+Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } "'" :whitespace(whitespace) ;
+Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(whitespace) ;
 
-code        = '~~' - { [ "~" ] Codeinner } '~~' + ;
-Codeinner   = Small | Caps | Digit | Special | "'" | '"' | "\\~" ;
+Alphabet    = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes.
+AsciiNoLb   = "\x20"..."\x7E" | "\t" ; // Readable ASCII without line breaks (CR and LF).
+AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
+AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
 
-Dquotetoken = '"' - { Small | Caps | Digit | Special | "~" | "'" | '\\"' } '"' + ;
-Squotetoken = "'" - { Small | Caps | Digit | Special | "~" | '"' | "\\'" } "'" + ;
+number      = "0" | "1"..."9" { "0"..."9" } ;
 
-Digit       = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
-Small       = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" |
-              "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z" ;
-Caps        = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H" | "I" | "J" | "K" | "L" | "M" |
-              "N" | "O" | "P" | "Q" | "R" | "S" | "T" | "U" | "V" | "W" | "X" | "Y" | "Z" ;
-Special     = "_" | " " | "." | "," | ":" | ";" | "!" | "?" | "+" | "-" | "*" | "/" | "=" |
-              "(" | ")" | "{" | "}" | "[" | "]" | "<" | ">" | "|" | "%" | "$" | "&" | "#" |
-              "@" | "\\\\" | "\\t" | "\t" | "\\n" | "\n" | "\\r" | "\r" ;
+whitespace  = { @+"\t\n\r " | Comment } ;
 
-skipspaces  = Skip | Noskip ;
-Skip        = ":skip(Whitespace)" ;  // Skip all whitespace in the future.
-Noskip      = ":skip(Nothing)" ;  // Do not skip whitespace in the future.
-
-}
+Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(whitespace) ;
+LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(whitespace) ;
 ```
 
 As can be seen in the above EBNF, a `token` consists of one backslash escaped string, quoted in single or double quotes.
 ```
 "This is an\nexample\tof a multiline string with one tab"
 ```
-A `tag` starts with `<`, ends with `>`, and contain one or multiple comma separated raw strings, quoted in `~~` (two on either side). Inside a raw tag string, `\~` is a special symbol for `~` to be able to write a literal `~~` combination. Single `~` can be written without a backslash escape.
+A `tag` starts with `<`, ends with `>`, and normally contain one or multiple comma separated raw strings (`Code`), quoted in `~~` (two on either side). Inside a raw tag string, `\~` is a special symbol for `~` to be able to write a literal `~~` combination. Single `~` can be written without a backslash escape.
 ```
 < ~~This is an
 example of a multiline

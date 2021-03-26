@@ -18,7 +18,7 @@ Term        = Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Rep
 
 ByteRange   = Token "..b" Token ;
 Range       = Token [ "..." Token ] ;
-CharsOf     = "@" Token "+" ;
+CharsOf     = "@+" Token ;
 CharOf      = "@" Token ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
@@ -26,11 +26,10 @@ Repetition  = "{" Expression "}" ;
 Times       = Number [ "..." ( Number | "" ) ] Group ;
 
 LineCommand = Command ";" ;
-
 Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
-CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
+CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken ;
 Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(Whitespace) ;
@@ -44,7 +43,7 @@ AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (
 
 Number      = "0" | "1"..."9" { "0"..."9" } ;
 
-Whitespace  = { @"\t\n\r "+ | Comment } ;
+Whitespace  = { @+"\t\n\r " | Comment } ;
 
 Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(Whitespace) ;
 LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(Whitespace) ;
