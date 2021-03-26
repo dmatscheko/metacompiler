@@ -11,28 +11,25 @@ ABNF        = { Production | LineCommand } ;
 Production  = Name [ Tag ] "=" [ Expression ] ";" ;
 
 Expression  = Alternative ;
-
 Alternative = Sequence { "|" Sequence } ;
-
 Sequence    = Term { Term } ;
 
-Term        = TaggedTerm | Command ;
-
-TaggedTerm  = ( Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times ) [ Tag ] ;
-
+Term        = ( Name | Group | Option | Repetition | ByteRange | Range | CharsOf | CharOf | Times | Command ) [ Tag ] ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
 ByteRange   = Token "..b" Token ;
 Range       = Token [ "..." Token ] ;
 CharsOf     = "@+" Token ;
 CharOf      = "@" Token ;
-Group       = "(" Expression ")" ;
-Option      = "[" Expression "]" ;
-Repetition  = "{" Expression "}" ;
-Times       = Number [ "..." ( Number | "" ) ] Group ;
+Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
 
-Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
+CmdNumber   = Number | Command ;
 
 LineCommand = Command ";" ;
 Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
+
+Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
 
 Name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;

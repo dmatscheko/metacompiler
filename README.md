@@ -236,8 +236,6 @@ Term        = name | token | Group | Option | Repetition ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-Title       = token ;
-Comment     = token ;
 ```
 
 * A `token` is just a quoted string that should occour like that in the EBNF. E.g. all quoted strings inside this EBNF are `token`.
@@ -258,15 +256,17 @@ Production  = name "=" [ Expression ] ";" ;
 Expression  = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
-Term        = name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ;
+Term        = name | Group | Option | Repetition | ByteRange | Range | CharsOf | CharOf | Times | Command ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
 ByteRange   = token "..b" token ;
 Range       = token [ "..." token ] ;
 CharsOf     = "@+" token ;
 CharOf      = "@" token ;
-Group       = "(" Expression ")" ;
-Option      = "[" Expression "]" ;
-Repetition  = "{" Expression "}" ;
-Times       = number [ "..." ( number | "" ) ] Group ;
+Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
+
+CmdNumber   = number | Command ;
 
 LineCommand = Command ";" ;
 Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
@@ -282,6 +282,10 @@ Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | nu
 * `Range` with only one parameter is the same as a `token`. `Range` when used as two `token` with the `...` between, defines that the a char between (and including) the two `token` should be in the target text. That char can be any UTF8 symbol and therefore can use more than one byte.
 * `CharOf` is not strictly necessary but shortens some EBNF quite a lot. It stands for any one of the UTF8-chars of the `token`. Exactly one of the chars has to be in the target text.
 * `CharsOf` is the same as `CharOf`, but the chars contained in the `token` can occour in any order from zero to infinite times. At least one char has to be in the target text.
+* `Times` is a number, or a number and `...`, or a number and `...` and another number. Each of the three options followed by a `Group`.
+  * __number ( Expression )__: The Expression must occur exactly _number_ times.
+  * __number ... ( Expression )__: The Expression must occur _number_ to infinite times.
+  * __numberA ... numberB ( Expression )__: The Expression must occur _numberA_ to _numberB_ times.
 
 #### EBNF of ABNF
 
@@ -299,25 +303,26 @@ Expression  = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
 Term        = TaggedTerm | Command ;
-TaggedTerm  = ( name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times ) [ Tag ] ;
+TaggedTerm  = ( name | Group | Option | Repetition | ByteRange | Range | CharsOf | CharOf | Times ) [ Tag ] ;
 
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
 ByteRange   = token "..b" token ;
 Range       = token [ "..." token ] ;
 CharsOf     = "@+" token ;
 CharOf      = "@" token ;
-Group       = "(" Expression ")" ;
-Option      = "[" Expression "]" ;
-Repetition  = "{" Expression "}" ;
-Times       = number [ "..." ( number | "" ) ] Group ;
+Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
 
-Tag         = "<" ( name | token ) { "," ( name | token ) } ">" ;
+CmdNumber   = number | Command ;
 
 LineCommand = Command ";" ;
 Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
+
+Tag         = "<" ( name | token ) { "," ( name | token ) } ">" ;
 ```
 
 * The `Tag` is always responsible for the `Term` right before it.
-* `Commands` can have no tags.
 
 #### Common syntax
 
@@ -331,19 +336,19 @@ Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(whit
 Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } "'" :whitespace(whitespace) ;
 Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(whitespace) ;
 
-Alphabet    = "a"..."z" | "A"..."Z" ;
-Digit       = "0"..."9" ;
-AsciiNoQs   = "\x28"..."\x7E" | "\x23"..."\x26" | "\t" | "\n" | "\r" | " " | "!" ; // Readable ASCII without double and single quotes.
-AsciiNoLb   = "\x20"..."\x7E" | "\t" ; // Readable ASCII without line breaks (CR and LF).
-AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
-AllButTilde = "\x00"..."\x7D" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
-
 number      = "0" | "1"..."9" { "0"..."9" } ;
 
 whitespace  = { @+"\t\n\r " | Comment } ;
 
 Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(whitespace) ;
 LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(whitespace) ;
+
+Alphabet    = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | @"\t\n\r !" ; // Readable ASCII without double and single quotes.
+AsciiNoLb   = "\x20"..."\x7e" | "\t" ; // Readable ASCII without line breaks (CR and LF).
+AsciiNoStSl = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\x7e" ; // All ASCII without star (*) and slash (/).
+AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
 ```
 
 As can be seen in the above EBNF, a `token` consists of one backslash escaped string, quoted in single or double quotes.
