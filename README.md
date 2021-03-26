@@ -1,6 +1,6 @@
 # MetaCompiler
 
-A generic compiler frontend. A runtime compiler-compiler.
+A generic compiler frontend or in other words an at-runtime compiler-compiler.
 
 This is
 * a parser that parses a language specification written in annotated EBNF
