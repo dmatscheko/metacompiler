@@ -14,16 +14,17 @@ Expression  = Alternative ;
 Alternative = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
-Term        = Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ;
-
+Term        = Name | Group | Option | Repetition | ByteRange | Range | CharsOf | CharOf | Times | Command ;
+Group       = "(" Expression ")" ;
+Option      = "[" Expression "]" ;
+Repetition  = "{" Expression "}" ;
 ByteRange   = Token "..b" Token ;
 Range       = Token [ "..." Token ] ;
 CharsOf     = "@+" Token ;
 CharOf      = "@" Token ;
-Group       = "(" Expression ")" ;
-Option      = "[" Expression "]" ;
-Repetition  = "{" Expression "}" ;
-Times       = Number [ "..." ( Number | "" ) ] Group ;
+Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
+
+CmdNumber   = Number | Command ;
 
 LineCommand = Command ";" ;
 Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
