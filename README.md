@@ -355,7 +355,7 @@ As can be seen in the above EBNF, a `token` consists of one backslash escaped st
 ```
 "This is an\nexample\tof a multiline string with one tab"
 ```
-A `tag` starts with `<`, ends with `>`, and normally contain one or multiple comma separated raw strings (`Code`), quoted in `~~` (two on either side). Inside a raw tag string, `\~` is a special symbol for `~` to be able to write a literal `~~` combination. Single `~` can be written without a backslash escape.
+A `tag` starts with `<`, ends with `>`, and normally contains one or multiple comma separated raw strings (`Code`), quoted in `~~` (two on either side). Inside a raw tag string, `\~` is a special symbol for `~` to be able to write a literal `~~` combination. Single `~` can be written without a backslash escape.
 ```
 < ~~This is an
 example of a multiline
