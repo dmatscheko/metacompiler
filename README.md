@@ -1320,6 +1320,8 @@ LineComment = "//" :skip() { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 ```
 </details>
 
+This output is exactly the data structure that controls the parser when it is used as an ABNF parser. It is what makes the parser to an ABNF parser.
+
 <br/>
 
 More examples can be found inside the [tests directory](../master/tests).
