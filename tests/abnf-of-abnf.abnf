@@ -43,13 +43,12 @@ Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
 CmdNumber   = Number | Command ;
 
 LineCommand = Command <~~ pushg(buildLineCommand(pop())) ~~> ";" ;
-
 Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
             = ":" CmdName "(" <~~ pushg([]) ~~> [ ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> { "," ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> } ] ")" ;
-CmdName     <~~ push(up.in) ~~>
-            = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Name        <~~ push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) ~~>
+            = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
+CmdName     <~~ push(up.in) ~~>
             = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken | Code ;

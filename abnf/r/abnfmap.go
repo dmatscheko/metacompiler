@@ -4,6 +4,12 @@ package r
 // ABNF mapping for LLVM IR
 
 var AbnfFuncMap = map[string]Object{
+	"arrayToRules": func(rules *Rules) *Rules {
+		return rules
+	},
+	"newRule": func(Operator OperatorID, String string, Int int, Pos int, Childs *Rules, CodeChilds *Rules) *Rule {
+		return &Rule{Operator: Operator, String: String, Int: Int, Pos: Pos, Childs: Childs, CodeChilds: CodeChilds}
+	},
 	"newToken": func(String string, Pos int) *Rule {
 		return &Rule{Operator: Token, String: String, Pos: Pos}
 	},
@@ -19,6 +25,7 @@ var AbnfFuncMap = map[string]Object{
 	"newTag": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Tag, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
 	},
+	// Command :number() -> Int == numberType.LittleEndian | Int == numberType.BigEndian | Int == numberType.BCD
 	"newCommand": func(String string, CodeChilds *Rules, Pos int) *Rule {
 		if CodeChilds != nil && len(*CodeChilds) == 0 {
 			CodeChilds = nil
@@ -40,8 +47,8 @@ var AbnfFuncMap = map[string]Object{
 	"newAlternative": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
 	},
-	// Int 0 == Rune-Comparison, Int 1 = Byte-Comparison
-	"newRange": func(CodeChilds *Rules, Int int, Pos int) *Rule {
+	// Int == rangeType.Rune | Int == rangeType.Byte
+	"newRange": func(CodeChilds *Rules, Int int, Pos int) *Rule { // TODO: Why do the parameter have to be in that (wrong) order?
 		return &Rule{Operator: Range, Int: Int, CodeChilds: CodeChilds, Pos: Pos}
 	},
 	"newTimes": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
@@ -53,25 +60,23 @@ var AbnfFuncMap = map[string]Object{
 	"newCharsOf": func(String string, Pos int) *Rule {
 		return &Rule{Operator: CharsOf, String: String, Pos: Pos}
 	},
-	"newRule": func(Operator OperatorID, String string, Int int, Pos int, Childs *Rules, CodeChilds *Rules) *Rule {
-		return &Rule{Operator: Operator, String: String, Int: Int, Pos: Pos, Childs: Childs, CodeChilds: CodeChilds}
-	},
-	"arrayToRules": func(rules *Rules) *Rules {
-		return rules
-	},
 	"serializeRule": func(rule *Rule) string {
 		return rule.Serialize()
 	},
-
-	"getStartRule":   GetStartRule,
-	"getProductions": GetProductions,
-	"getProlog":      GetStartScript,
-	"getTitle":       GetTitle,
-	"getDescription": GetDescription,
-
 	"serializeRules": func(rules *Rules) string {
 		return rules.Serialize()
 	},
+	"toStringRule": func(rule *Rule) string {
+		return rule.ToString()
+	},
+	"toStringRules": func(rules *Rules) string {
+		return rules.ToString()
+	},
+
+	"getStartRule":   GetStartRule,
+	"getStartScript": GetStartScript,
+	"getTitle":       GetTitle,
+	"getDescription": GetDescription,
 
 	"oid": map[string]OperatorID{
 		"Error":   Error,
@@ -105,5 +110,6 @@ var AbnfFuncMap = map[string]Object{
 		"LittleEndian": NumberTypeLittleEndian,
 		"BigEndian":    NumberTypeBigEndian,
 		"BCD":          NumberTypeBCD,
+		"ASCII":        NumberTypeASCII,
 	},
 }
