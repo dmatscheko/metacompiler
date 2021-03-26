@@ -51,7 +51,7 @@ This system should allow to define and use compiler for arbitrary computer langu
         - [NumberType Constants](#numbertype-constants)
       - [LLVM IR API](#llvm-ir-api)
   - [Further Examples](#further-examples)
-    - [Example of an annotated EBNF](#example-of-an-annotated-ebnf)
+    - [ABNF of ABNF to a-grammar](#abnf-of-abnf-to-a-grammar)
     - [Its output, when it gets applied on itself:](#its-output-when-it-gets-applied-on-itself)
   - [Links](#links)
 
@@ -323,6 +323,8 @@ Tag         = "<" ( name | token ) { "," ( name | token ) } ">" ;
 ```
 
 * The `Tag` is always responsible for the `Term` right before it.
+
+Note: If you want to see an ABNF of an ABNF, this is here: [ABNF of ABNF to a-grammar](#abnf-of-abnf-to-a-grammar).
 
 #### Common syntax
 
@@ -613,7 +615,7 @@ The functions and constants are exposed to JS as:
 
 ## Further Examples
 
-### Example of an annotated EBNF
+### ABNF of ABNF to a-grammar
 
 <details>
   <summary>Click to expand!</summary>
