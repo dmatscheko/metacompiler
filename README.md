@@ -353,7 +353,7 @@ The compiler works like this:
     /|    |
    | | _  |
    T | |  |     (T) The text of an EBNF Terminal symbol (Token) gets returned and included into 'up.in'.
-   | X |  |     (X) The script of a single Tag Rule script gets executed. This is after their childs came back from being splitted at (C).
+   | X |  |     (X) The script of a single Tag Rule gets executed. This is after its childs came back from being splitted at (C).
    | | O  |     (O) Other Rules are ignored.
    | | |  |
    \ | /  |
