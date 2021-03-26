@@ -2,6 +2,7 @@ package abnf
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -625,54 +626,54 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				pa.Sdx = wasSdx
 				return nil
 			}
+			if byteCount == 0 { // TODO: Automatically read the number as long as it is in the target text. Also implement negative number parsing for BCD and binary.
+				panic("NOT IMPLEMENTED")
+			}
+			bytes := []byte(pa.Src[pa.Sdx : pa.Sdx+byteCount]) // An if would probably be slower.
 			n := 0
 			switch numberType { // TODO: Everything for signed numbers too!
 			case r.NumberTypeLittleEndian:
 				switch byteCount {
 				case 1:
-					n = int(pa.Src[pa.Sdx])
+					n = int(bytes[0])
 				case 2:
-					n = int(binary.LittleEndian.Uint16([]byte(pa.Src[pa.Sdx:])))
-				case 3:
-					n = int(binary.LittleEndian.Uint32([]byte(pa.Src[pa.Sdx : pa.Sdx+3])))
-				case 4:
-					n = int(binary.LittleEndian.Uint32([]byte(pa.Src[pa.Sdx:])))
-				case 8:
-					n = int(binary.LittleEndian.Uint64([]byte(pa.Src[pa.Sdx:])))
+					n = int(binary.LittleEndian.Uint16(bytes))
+				case 3, 4:
+					n = int(binary.LittleEndian.Uint32(bytes))
+				case 5, 6, 7, 8:
+					n = int(binary.LittleEndian.Uint64(bytes))
 				default:
-					panic(":number() needs byte count of 1, 2, 3, 4, 8. ( e.g. :number(4) )")
+					panic(":number() needs byte count of 1 ... 8. ( e.g. :number(4) )")
 				}
 			case r.NumberTypeBigEndian:
 				switch byteCount {
 				case 1:
-					n = int(pa.Src[pa.Sdx])
+					n = int(bytes[0])
 				case 2:
-					n = int(binary.BigEndian.Uint16([]byte(pa.Src[pa.Sdx:])))
-				case 3:
-					n = int(binary.BigEndian.Uint32([]byte(pa.Src[pa.Sdx : pa.Sdx+3])))
-				case 4:
-					n = int(binary.BigEndian.Uint32([]byte(pa.Src[pa.Sdx:])))
-				case 8:
-					n = int(binary.BigEndian.Uint64([]byte(pa.Src[pa.Sdx:])))
+					n = int(binary.BigEndian.Uint16(bytes))
+				case 3, 4:
+					n = int(binary.BigEndian.Uint32(bytes))
+				case 5, 6, 7, 8:
+					n = int(binary.BigEndian.Uint64(bytes))
 				default:
-					panic(":number() needs byte count of 1, 2, 3, 4, 8. ( e.g. :number(4) )")
+					panic(":number() needs byte count of 1 ... 8. ( e.g. :number(4) )")
 				}
 			case r.NumberTypeBCD:
-				panic("NOT IMPLEMENTED")
-			case r.NumberTypeASCII:
-				switch byteCount {
-				case 0: // Automatically read the number as long as it is in the target text.
-					panic("NOT IMPLEMENTED")
-					// tmp := gp.apply(&r.Rule{Number rule.....}, doSkipSpaces, depth)
-					// n = tmp[0].Int
-					// gp.sdx += foundBytes
-				default:
-					res, err := strconv.ParseInt(pa.Src[pa.Sdx:pa.Sdx+byteCount], 10, 64)
-					if err != nil {
-						panic("Can not parse int: '" + pa.Src[pa.Sdx:pa.Sdx+byteCount] + "'")
-					}
-					n = int(res)
+				s := hex.EncodeToString(bytes)
+				if s[len(s)-1] == 'f' {
+					s = s[:len(s)-1]
 				}
+				res, err := strconv.ParseUint(s, 10, 64)
+				if err != nil {
+					panic("Can not convert number: '" + string(bytes) + "'. Error: " + err.Error())
+				}
+				n = int(res)
+			case r.NumberTypeASCII:
+				res, err := strconv.ParseInt(string(bytes), 10, 64)
+				if err != nil {
+					panic("Can not parse int: '" + string(bytes) + "'")
+				}
+				n = int(res)
 			default:
 				panic(fmt.Sprintf("Invalid number type: %d", numberType))
 			}
