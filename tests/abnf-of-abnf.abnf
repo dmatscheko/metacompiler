@@ -3,6 +3,9 @@
 It allows to automatically create a compiler for everything described in ABNF (yes, that format).") ;
 
 
+// TODO: implement !"asdf", !@"asdf", and !@+"asdf", and maybe @b"asdf", and @b+"asdf", and !@b"asdf", and !@b+"asdf".
+
+
 // --- main rules
 
 :startRule(ABNF) ;
