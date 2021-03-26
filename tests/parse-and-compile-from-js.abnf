@@ -18,7 +18,7 @@
 
     // So far we have only parsed our ABNF into an ASG. Now we have to compile the ASG into something useful. We again use the agrammar c.ABNFagrammar, because this is - as stated above - the agrammar that understands ABNF.
     // The compile step of c.ABNFagrammar creates the agrammar and returns it:
-    var myAgrammar = c.compileWithProlog(ASG, c.ABNFagrammar)
+    var myAgrammar = c.compileRunStartScript(ASG, c.ABNFagrammar)
 
     // Lets now print the resulting agrammar:
     println("\nmyAgrammar: " + abnf.serializeRules(myAgrammar))
@@ -31,7 +31,7 @@
 
     // And to see a result, we have to compile our new ASG myASG with our grammar myAgrammar:
     println("\nOutput:")
-    c.compileWithProlog(myASG, myAgrammar)
+    c.compileRunStartScript(myASG, myAgrammar)
 
     // Note that the ASG already includes almost all information for compiling. The agrammar is only used for its preamble. In our case this would be the Tag: "<~\~ println('found me'); c.compile(c.asg) ~\~>".
 

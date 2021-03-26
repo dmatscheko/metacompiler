@@ -783,9 +783,9 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 	pa.useFoundList = useFoundList
 	pa.lastParsePosition = 0
 
-	pa.fileName = fileName
+	pa.fileName = filepath.Clean(fileName)
 
-	pa.ps = NewParserScript(&pa, fileName)
+	pa.ps = NewParserScript(&pa)
 
 	pa.spaces = &r.Rule{Operator: r.CharsOf, String: "\t\n\r "} // TODO: Make this configurable via JS.
 
