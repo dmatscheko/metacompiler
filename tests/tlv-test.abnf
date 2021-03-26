@@ -4,7 +4,11 @@
 :startRule(TLV) ;
 :whitespace() ;
 
-TLV = "\x00"..b"\xff" <~~ println(">" + up.in + "<") ~~> { :number(1, 0)("\x00"..b"\xff") <~~ println(">" + up.in + "<") ~~> } { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~> ;
+TLV           = InitialByte { TLVEntry } Preamble ;
+
+InitialByte   = "\x00"..b"\xff" <~~ println(">" + up.in + "<") ~~> ;
+TLVEntry      = :number(1, 0)("\x00"..b"\xff") <~~ println(">" + up.in + "<") ~~> ;
+Preamble      = { "\x00"..b"\xff" } <~~ println(">" + up.in + "<") ~~> ;
 
 
 :startScript(~~ c.compile(c.asg) ~~) ;
