@@ -371,7 +371,7 @@ The following parser commands are available:
 #### Line plus inline commands
 
 * __:whitespace(whitespace name | token)__  
-This defines the used whitespace for the following token and numbers.
+This defines the allowed whitespace between the following token and numbers.
 * __:script(script name | token)__  
 This defines a JS, that is executed instead of a parser rule. It can emit parser rules depending on the target text and is therefore a dynamic parser rule.
 
