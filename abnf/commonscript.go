@@ -171,7 +171,10 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 
 	*compilerFuncMap = map[string]r.Object{
 		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
-			productions, _ := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), useBlockList, useFoundList, traceEnabled, preventDefaultOutput)
+			productions, err := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), useBlockList, useFoundList, traceEnabled, preventDefaultOutput)
+			if err != nil {
+				panic(err)
+			}
 			return productions
 		},
 		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {

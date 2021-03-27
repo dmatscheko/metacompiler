@@ -80,10 +80,7 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (boo
 		}
 		if !isBlocked && pa.useBlockList {
 			isBlocked = pa.blockList[id] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
-			// TODO: Maybe only block at identifier:
-			// if !isBlocked && rule.Operator != r.Or { // Could r.Or in r.Or's loop forever? No because only r.Ident's can create loops and they would be marked. But the result could be found very late because the r.Or can get stuck for a long time if there is another r.Or as child (it would not get blocked from list of the first r.Or options).
-			pa.blockList[id] = true // Enter the current rule rule in the block list because it was not already blocked.
-			// }
+			pa.blockList[id] = true      // Enter the current rule rule in the block list because it was not already blocked.
 		}
 	}
 
@@ -314,7 +311,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 // This is the resolution process of the agrammar. Does the localProductions need to go into a Group or something? No. The grouping was done already in the agrammar.
 // At this point, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules.
 // Rules can be reused. So whatever you do, NEVER change a rule here.
-// TODO: If in a rule that does not change pa.Sdx, then the rule does not change pa.Sdx back. EXCEPT if the rule is in a loop that has to apply all or multiple elements!
+// TODO: If in a rule that does not change pa.Sdx, then the rule does not change pa.Sdx back. EXCEPT if the rule is in a loop that has to apply all of multiple rules (because each rule on its own only knows if it itself was successful and would not change back the position)!
 func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) *r.Rules { // => (localProductions)
 	wasSdx := pa.Sdx // Start position of the rule. Return, if the rule does not match.
 	localProductions := &r.Rules{}

@@ -61,3 +61,8 @@ ParseWithGrammar took 2.2440184s
 CompileASG took 5.9389994s
 
 
+after returning without creating content when being in whitespace parse mode:
+
+ParseWithGrammar took 1.9642357s
+CompileASG took 5.6250004s
+

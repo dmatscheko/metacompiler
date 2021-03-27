@@ -9,8 +9,6 @@ import (
 	"github.com/dop251/goja"
 )
 
-// TODO: return an error to JS if the compile and parse functions there have an error.
-
 // ----------------------------------------------------------------------------
 // ASG compiler scripting subsystem
 
@@ -79,7 +77,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 		return nil
 	}
 
-	cs.vm.Set("up", &upStream)                // Basically the local variables. The map 'ltr' (left to right) holds the global variables. // TODO: should the upstream be changable by the JS? Otherwise remove the &.
+	cs.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	cs.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
 	// co.compilerFuncMap["Pos"] = tag.Pos
 	// co.compilerFuncMap["ID"] = tag.Int
