@@ -108,8 +108,7 @@ LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(White
         }
     }
     function buildLineCommand(cmd) {
-        cmd.Int = getNameIdx(cmd.String)
-        prodsPos[cmd.Int] = lastPos++
+        prodsPos[getNameIdx(cmd.String)] = lastPos++
         return cmd
     }
 
