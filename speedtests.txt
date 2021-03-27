@@ -72,3 +72,9 @@ after some random changes (smaller JS, ...):
 ParseWithGrammar took 1.9540538s
 CompileASG took 5.1019999s
 
+
+after storing agrammar without references and creating them in the parser on loading the agrammar:
+
+ParseWithGrammar took 1.7339967s
+CompileASG took 3.8861034s
+

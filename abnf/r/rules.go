@@ -24,13 +24,13 @@ const (
 	Repeat
 	Range
 	Times
-	Tag
+	Tag // Int is reserved for the UID for caching.
 	Command
 	CharOf
 	CharsOf
 	// Link types:
-	Production
-	Identifier
+	Production // Int is reserved for the position of the Production.
+	Identifier // Int is reserved for the position of the identified Production.
 )
 
 func (id OperatorID) String() string {
@@ -121,7 +121,7 @@ func (rule *Rule) Serialize() string {
 	if op == Token || op == Identifier || op == Production || op == Command || op == CharOf || op == CharsOf {
 		res += fmt.Sprintf(", String:%q", rule.String)
 	}
-	if op == Identifier || op == Number || op == Range {
+	if op == Number || op == Range {
 		res += fmt.Sprintf(", Int:%d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {

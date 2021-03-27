@@ -53,6 +53,9 @@ type parser struct {
 	ps *parserscript
 
 	fileName string
+
+	tagReferences map[string]int // The tag code references have to stay stable over multiple calls.
+	lastTag       int
 }
 
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
@@ -257,7 +260,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		}
 		*pa.agrammar = append(*pa.agrammar, *aGrammar...)
 		// Correct all references
-		correctReferencesSlow(pa.agrammar, nil)
+		pa.correctReferencesSlow(pa.agrammar, nil)
 	case "number":
 		// :number(4, LE) would mean take 4 bytes from the input (gp.src), interpret them as little endian and create a Number from it. This means it should be usable in Times expressions and should allow the parsing of TLV-formats.
 		panic(":number() is only allowed as inline command.")
@@ -569,7 +572,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			return nil
 		}
 		pa.resolveParameterToToken(rule.CodeChilds)
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx})
+		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, Int: rule.Int, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx}) // Int contains a UID of the script for later caching.
 	case r.Command:
 		switch rule.String {
 		case "whitespace":
@@ -696,7 +699,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	return localProductions
 }
 
-func collectReferencesSlow(rules *r.Rules, references map[string]int) {
+func collectProductionReferencesSlow(rules *r.Rules, references map[string]int) {
 	if rules == nil {
 		return
 	}
@@ -704,27 +707,50 @@ func collectReferencesSlow(rules *r.Rules, references map[string]int) {
 		if rule.Operator != r.Production {
 			continue
 		}
+		if _, ok := references[rule.String]; ok {
+			panic("Error: Rule " + rule.String + " is defined multiple times.")
+		}
 		references[rule.String] = i
 	}
 }
-func correctReferencesSlow(rules *r.Rules, references map[string]int) {
+func (pa *parser) correctReferencesSlow(rules *r.Rules, productionReferences map[string]int) {
 	if rules == nil {
 		return
 	}
-	if references == nil {
-		references = map[string]int{}
-		collectReferencesSlow(rules, references)
+	if productionReferences == nil { // If this is nil, it is the outermost recursion of correctReferencesSlow(). This means, parameter rules holds all productions.
+		productionReferences = map[string]int{}
+		collectProductionReferencesSlow(rules, productionReferences)
 	}
 	for i := 0; i < len(*rules); i++ {
 		if (*rules)[i].Operator == r.Identifier {
-			ref, ok := references[(*rules)[i].String]
+			ref, ok := productionReferences[(*rules)[i].String]
 			if !ok {
 				panic("Production " + (*rules)[i].String + "not found")
 			}
 			(*rules)[i].Int = ref
+		} else if (*rules)[i].Operator == r.Tag {
+			var allCode string
+			if len(*(*rules)[i].CodeChilds) == 1 {
+				allCode = (*(*rules)[i].CodeChilds)[0].String
+			} else {
+				allCode = ""
+				for _, child := range *(*rules)[i].CodeChilds {
+					allCode += child.String
+				}
+			}
+			if pos, ok := pa.tagReferences[allCode]; ok {
+				(*rules)[i].Int = pos
+			} else {
+				pa.lastTag++
+				pa.tagReferences[allCode] = pa.lastTag
+				(*rules)[i].Int = pa.lastTag
+			}
 		}
 		if (*rules)[i].Childs != nil && len(*(*rules)[i].Childs) > 0 {
-			correctReferencesSlow((*rules)[i].Childs, references)
+			pa.correctReferencesSlow((*rules)[i].Childs, productionReferences)
+		}
+		if (*rules)[i].CodeChilds != nil && len(*(*rules)[i].CodeChilds) > 0 {
+			pa.correctReferencesSlow((*rules)[i].CodeChilds, productionReferences)
 		}
 	}
 }
@@ -784,8 +810,11 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 	pa.foundSdxList = make(map[int]int)
 	pa.useFoundList = useFoundList
 	pa.lastParsePosition = 0
-
 	pa.fileName = filepath.Clean(fileName)
+	pa.tagReferences = map[string]int{}
+	pa.lastTag = 0
+
+	pa.correctReferencesSlow(pa.agrammar, nil)
 
 	pa.ps = NewParserScript(&pa, preventDefaultOutput)
 
