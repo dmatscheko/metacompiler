@@ -124,7 +124,7 @@ func main() {
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "Parse source ABNF file A with initial a-grammar")
 	}
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, *param_a, *param_useBlockList, *param_useFoundList, *param_trace_Ap)
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, *param_a, *param_useBlockList, *param_useFoundList, *param_trace_Ap, *param_quiet_Full)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -164,7 +164,7 @@ func main() {
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "Parse target file B with new a-grammar")
 	}
-	asg, err = abnf.ParseWithAgrammar(aGrammar, srcB, *param_b, *param_useBlockList, *param_useFoundList, *param_trace_Bp)
+	asg, err = abnf.ParseWithAgrammar(aGrammar, srcB, *param_b, *param_useBlockList, *param_useFoundList, *param_trace_Bp, *param_quiet_Full)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -205,7 +205,7 @@ func main() {
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "Parse target file C with new a-grammar")
 	}
-	asg, err = abnf.ParseWithAgrammar(result, srcC, *param_c, *param_useBlockList, *param_useFoundList, *param_trace_Cp)
+	asg, err = abnf.ParseWithAgrammar(result, srcC, *param_c, *param_useBlockList, *param_useFoundList, *param_trace_Cp, *param_quiet_Full)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -251,7 +251,7 @@ func speedtestParseWithGrammar(srcA, fileNameA string, count int, useBlockList, 
 	var err error
 	defer timeTrack(time.Now(), "ParseWithGrammar")
 	for i := 0; i < count; i++ {
-		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false)
+		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false, true)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
@@ -259,7 +259,7 @@ func speedtestParseWithGrammar(srcA, fileNameA string, count int, useBlockList, 
 	}
 }
 func speedtestCompileASG(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false)
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false, true)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return

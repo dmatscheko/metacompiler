@@ -46,8 +46,9 @@ type parser struct {
 
 	rangeCache [256]*r.Rule
 
-	traceEnabled bool
-	traceCount   int
+	traceEnabled         bool
+	traceCount           int
+	preventDefaultOutput bool
 
 	ps *parserscript
 
@@ -282,7 +283,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		}
 		srcCode := string(dat)
 
-		asg, err := ParseWithAgrammar(AbnfAgrammar, srcCode, fullFileName, pa.useBlockList, pa.useFoundList, pa.traceEnabled)
+		asg, err := ParseWithAgrammar(AbnfAgrammar, srcCode, fullFileName, pa.useBlockList, pa.useFoundList, pa.traceEnabled, pa.preventDefaultOutput)
 		if err != nil {
 			panic(err)
 		}
@@ -759,7 +760,7 @@ func mergeTerminals(productions *r.Rules) {
 	}
 }
 
-func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList, useFoundList, traceEnabled bool) (res *r.Rules, e error) { // => (productions, error)
+func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList, useFoundList, traceEnabled, preventDefaultOutput bool) (res *r.Rules, e error) { // => (productions, error)
 	// defer func() {
 	// 	if err := recover(); err != nil {
 	// 		res = nil
@@ -778,6 +779,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 	pa.Src = srcCode
 	pa.Sdx = 0
 	pa.traceEnabled = traceEnabled
+	pa.preventDefaultOutput = preventDefaultOutput
 	pa.traceCount = 0
 	pa.blockList = make(map[int]bool)
 	pa.useBlockList = useBlockList
@@ -788,7 +790,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 
 	pa.fileName = filepath.Clean(fileName)
 
-	pa.ps = NewParserScript(&pa)
+	pa.ps = NewParserScript(&pa, preventDefaultOutput)
 
 	pa.spaces = &r.Rule{Operator: r.CharsOf, String: "\t\n\r "} // TODO: Make this configurable via JS.
 
