@@ -30,9 +30,9 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 	// co.traceTop(tag, slot, depth, upStream)
 	// }
 
-	code := (*rule.CodeChilds)[0].String
+	code := (*rule.CodeChilds)[0].String // TODO: Handle slot!
 
-	v, err := ps.common.Run(ps.pa.fileName+":parserCommand:"+strconv.Itoa(rule.Pos), code)
+	v, err := ps.common.Run(ps.pa.fileName+":parserCommand:"+strconv.Itoa(rule.Pos), code, rule.Int)
 	if err != nil {
 		panic(err.Error() + "\nError was in " + rule.ToString() + ", Code: '" + code + "'")
 	}

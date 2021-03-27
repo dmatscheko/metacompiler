@@ -653,7 +653,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			panic("NOT IMPLEMENTED")
 		case "include":
 			panic("NOT IMPLEMENTED")
-		case "script": // TODO: Maybe move upwards like :skip().
+		case "script": // Int is reserved for UID for JS cache. // TODO: Maybe move upwards like :skip().
 			resRule := pa.ps.HandleScriptRule(rule, localProductions, depth) // TODO: localProductions is empty here...
 			if resRule != nil {
 				scriptProductions := pa.apply(resRule, skipSpaceRule, skippingSpaces, depth+1)
@@ -721,36 +721,36 @@ func (pa *parser) correctReferencesSlow(rules *r.Rules, productionReferences map
 		productionReferences = map[string]int{}
 		collectProductionReferencesSlow(rules, productionReferences)
 	}
-	for i := 0; i < len(*rules); i++ {
-		if (*rules)[i].Operator == r.Identifier {
-			ref, ok := productionReferences[(*rules)[i].String]
-			if !ok {
-				panic("Production " + (*rules)[i].String + "not found")
-			}
-			(*rules)[i].Int = ref
-		} else if (*rules)[i].Operator == r.Tag {
+	for _, rule := range *rules {
+		if rule.Operator == r.Identifier {
+			// ref, ok := productionReferences[rule.String]
+			// if !ok {	// This test cannot be done, because it could be included in the future.
+			// 	panic("Production " + rule.String + "not found")
+			// }
+			rule.Int = productionReferences[rule.String]
+		} else if rule.Operator == r.Tag || (rule.Operator == r.Command && rule.String == "script") {
 			var allCode string
-			if len(*(*rules)[i].CodeChilds) == 1 {
-				allCode = (*(*rules)[i].CodeChilds)[0].String
+			if len(*rule.CodeChilds) == 1 {
+				allCode = (*rule.CodeChilds)[0].String
 			} else {
 				allCode = ""
-				for _, child := range *(*rules)[i].CodeChilds {
+				for _, child := range *rule.CodeChilds {
 					allCode += child.String
 				}
 			}
 			if pos, ok := pa.tagReferences[allCode]; ok {
-				(*rules)[i].Int = pos
+				rule.Int = pos
 			} else {
 				pa.lastTag++
 				pa.tagReferences[allCode] = pa.lastTag
-				(*rules)[i].Int = pa.lastTag
+				rule.Int = pa.lastTag
 			}
 		}
-		if (*rules)[i].Childs != nil && len(*(*rules)[i].Childs) > 0 {
-			pa.correctReferencesSlow((*rules)[i].Childs, productionReferences)
+		if rule.Childs != nil && len(*rule.Childs) > 0 {
+			pa.correctReferencesSlow(rule.Childs, productionReferences)
 		}
-		if (*rules)[i].CodeChilds != nil && len(*(*rules)[i].CodeChilds) > 0 {
-			pa.correctReferencesSlow((*rules)[i].CodeChilds, productionReferences)
+		if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
+			pa.correctReferencesSlow(rule.CodeChilds, productionReferences)
 		}
 	}
 }
