@@ -71,9 +71,10 @@ func (ps *parserscript) initFuncMap() {
 	})
 }
 
-func NewParserScript(pa *parser) *parserscript {
+func NewParserScript(pa *parser, preventDefaultOutput bool) *parserscript {
 	var ps parserscript
 	ps.pa = pa
+	ps.preventDefaultOutput = preventDefaultOutput
 
 	ps.vm = goja.New()
 	ps.initFuncMap()
