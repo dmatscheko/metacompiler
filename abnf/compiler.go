@@ -12,7 +12,8 @@ import (
 // ASG compiler
 
 type compiler struct {
-	cs *compilerscript
+	cs       *compilerscript
+	fileName string
 }
 
 //
@@ -114,7 +115,7 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 		// First collect all the data.
 		upStream := co.compile(rule.Childs, slot, depth+1) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.cs.HandleTagCode(rule, fmt.Sprintf("TAG(at char %d)", rule.Pos), upStream, localASG, slot, depth)
+		co.cs.HandleTagCode(rule, fmt.Sprintf("%s:tag:pos:%d", co.fileName, rule.Pos), upStream, localASG, slot, depth)
 		return upStream
 	default:
 		if len(*rule.Childs) > 0 {
@@ -129,6 +130,7 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 	var co compiler
 
 	co.cs = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
+	co.fileName = filepath.Clean(fileName)
 
 	startScript := r.GetStartScript(aGrammar)
 
@@ -137,7 +139,7 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 		upStream := map[string]r.Object{ // Basically the local variables.
 			"in": "", // This is the parser input (the terminals).
 		}
-		res = co.cs.HandleTagCode(startScript, filepath.Clean(fileName)+":startScript", upStream, asg, slot, 0).Export()
+		res = co.cs.HandleTagCode(startScript, co.fileName+":startScript", upStream, asg, slot, 0).Export()
 	}
 
 	// Is called fom JS compile():
