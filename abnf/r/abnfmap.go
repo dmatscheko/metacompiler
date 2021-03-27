@@ -16,13 +16,13 @@ var AbnfFuncMap = map[string]Object{
 	"newNumber": func(Int int, Pos int) *Rule {
 		return &Rule{Operator: Number, Int: Int, Pos: Pos}
 	},
-	"newIdentifier": func(String string, Int int, Pos int) *Rule { // This is only the link.
-		return &Rule{Operator: Identifier, String: String, Int: Int, Pos: Pos}
+	"newIdentifier": func(String string, Pos int) *Rule { // This is only the link. Int is reserved for the position of the identified Production.
+		return &Rule{Operator: Identifier, String: String, Pos: Pos}
 	},
-	"newProduction": func(String string, Int int, Childs *Rules, Pos int) *Rule { // This is the holder of the production. This is where the link points to.
-		return &Rule{Operator: Production, String: String, Int: Int, Childs: Childs, Pos: Pos}
+	"newProduction": func(String string, Childs *Rules, Pos int) *Rule { // This is the holder of the Production. This is where the link points to. Int is reserved for the position of the Production.
+		return &Rule{Operator: Production, String: String, Childs: Childs, Pos: Pos}
 	},
-	"newTag": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
+	"newTag": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule { // Int is reserved for the UID for caching.
 		return &Rule{Operator: Tag, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
 	},
 	// Command :number() -> Int == numberType.LittleEndian | Int == numberType.BigEndian | Int == numberType.BCD

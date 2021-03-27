@@ -40,14 +40,14 @@ Times       = CmdNumber <~~ pushg([pop()]) ~~> [ "..." ( CmdNumber | "" <~~ push
 
 CmdNumber   = Number | Command ;
 
-LineCommand = Command <~~ pushg(buildLineCommand(pop())) ~~> ";" ;
+LineCommand = Command <~~ pushg(pop()) ~~> ";" ;
 Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
             = ":" CmdName "(" <~~ pushg([]) ~~> [ ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> { "," ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> } ] ")" ;
 
 Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" ( Name | Token ) <~~ pushg([pop()]) ~~> { "," ( Name | Token ) <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
-Name        <~~ push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) ~~>
+Name        <~~ push(abnf.newIdentifier(up.in, c.Pos)) ~~>
             = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 CmdName     <~~ push(up.in) ~~>
             = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
@@ -77,39 +77,13 @@ LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(White
 
 :startScript(~~
 
-    let names = []
-    let prodsPos = {}
-    let lastPos = 0
-
-    function getNameIdx(name) {
-        const pos = names.indexOf(name)
-        if (pos != -1) return pos
-        return names.push(name) - 1
-    }
-    function resolveNameIdx(productions) {
-        for (let i = 0; i < productions.length; i++) {
-            let rule = productions[i]
-            if (rule.Childs != undefined && rule.Childs.length > 0) resolveNameIdx(rule.Childs)
-            if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) resolveNameIdx(rule.CodeChilds)
-            if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) rule.Int = prodsPos[rule.Int]
-        }
-    }
     function buildProduction(prodName, prodTag, prodExpression) {
-        if (prodsPos[prodName.Int] != undefined) {
-            println("Error: Rule " + prodName.String + " is defined multiple times.")
-            exit(0)
-        }
-        prodsPos[prodName.Int] = lastPos++
         if (prodTag != undefined) {
             prodTag.Childs = simplifyToArr(prodExpression)
-            return abnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)
+            return abnf.newProduction(prodName.String, [prodTag], prodName.Pos)
         } else {
-            return abnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
+            return abnf.newProduction(prodName.String, simplifyToArr(prodExpression), prodName.Pos)
         }
-    }
-    function buildLineCommand(cmd) {
-        prodsPos[getNameIdx(cmd.String)] = lastPos++
-        return cmd
     }
 
     // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
@@ -148,7 +122,6 @@ LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(White
 
     c.compile(c.asg)
     let rules = ltr.stack
-    resolveNameIdx(rules)
 
     // To show the initial a-grammar:
     println("=> Rules: " + abnf.serializeRules(rules))
