@@ -19,8 +19,9 @@ import (
 
 type commonscript struct {
 	vm               *goja.Runtime
-	codeCache        map[int]*goja.Program
+	codeCache        []*goja.Program
 	codeCacheInclude map[string]*goja.Program
+	referencesCache  *references
 }
 
 // Stripped down and slightly modified version of stconv.Unquote()
@@ -74,7 +75,12 @@ func UnescapeTilde(s string) string {
 func (cs *commonscript) Run(name, src string, ID int) (goja.Value, error) {
 	var p *goja.Program
 	if ID >= 0 {
-		p = cs.codeCache[ID]
+		if ID >= len(cs.codeCache) {
+			tmp := make([]*goja.Program, ID*2)
+			cs.codeCache = append(cs.codeCache, tmp...)
+		} else {
+			p = cs.codeCache[ID]
+		}
 	} else {
 		p = cs.codeCacheInclude[name]
 	}
@@ -106,11 +112,11 @@ func (cs *commonscript) getCurrentModuleFileName() string {
 }
 
 // This is used by parser and compiler.
-func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, preventDefaultOutput bool) *commonscript {
+func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, preventDefaultOutput bool) *commonscript {
 	var common commonscript
 
 	common.vm = vm
-	common.codeCache = map[int]*goja.Program{}
+	common.codeCache = make([]*goja.Program, 100)
 	common.codeCacheInclude = map[string]*goja.Program{}
 
 	if preventDefaultOutput { // Script output disabled.
@@ -171,6 +177,11 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 		if err != nil {
 			panic(err)
 		}
+	})
+
+	vm.Set("correctReferencesAndIDs", func(agrammar *r.Rules) {
+		common.referencesCache = NewReferences()
+		common.referencesCache.correctReferencesAndIDs(agrammar)
 	})
 
 	// vm.Set("writable", func(v interface{}) *interface{} {

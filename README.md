@@ -32,7 +32,8 @@ This system should allow to define and use compiler for arbitrary computer langu
       - [Inline commands](#inline-commands)
     - [Exposed JS API](#exposed-js-api)
       - [General](#general)
-      - [Output](#output)
+      - [Console output](#console-output)
+      - [Storage](#storage)
       - [Strings](#strings)
       - [Variables](#variables)
         - [Local variables](#local-variables)
@@ -407,12 +408,19 @@ Terminates the application and returns `v`.
 * __sleep(d int)__  
 Sleeps for `d` milliseconds.
 
-#### Output
+#### Console output
 
 * __print(...)__ [fmt.Print](https://golang.org/pkg/fmt/#Print)
 * __println(...)__ [fmt.Println](https://golang.org/pkg/fmt/#Println)
 * __printf(...)__ [fmt.Printf](https://golang.org/pkg/fmt/#Printf)
 * __sprintf(...)__ [fmt.Sprintf](https://golang.org/pkg/fmt/#Sprintf)
+
+#### Storage
+
+* __load(fileName) string__  
+Loads a file from the disk.
+* __store(fileName, data string)__  
+Stores a file to the disk.
 
 #### Strings
 
@@ -543,6 +551,8 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __abnf.newTimes(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
 * __abnf.newCharOf(String string, Pos int) Rule__
 * __abnf.newCharsOf(String string, Pos int) Rule__
+* __abnf.correctReferencesAndIDs(agrammar []Rule)__  
+This fills the array position of `Productions` into their `Identifier`. It also identifies each different `Tag` with another UID. The array position of the productions and the UIDs of the Tags is stored in the rules Int field. This method must be used on newly created a-grammars, if they are directly used for compilation. The parser applies this method automatically.
 
 ##### ToString functions
 

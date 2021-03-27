@@ -122,7 +122,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 }
 
 func (cs *compilerscript) initFuncMap() {
-	cs.common = initFuncMapCommon(cs.vm, &cs.compilerFuncMap, cs.preventDefaultOutput)
+	cs.common = NewCommonScript(cs.vm, &cs.compilerFuncMap, cs.preventDefaultOutput)
 
 	cs.vm.Set("popg", func() interface{} {
 		if len(cs.Stack) > 0 {

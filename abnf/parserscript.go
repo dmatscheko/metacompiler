@@ -50,7 +50,7 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 }
 
 func (ps *parserscript) initFuncMap() {
-	ps.common = initFuncMapCommon(ps.vm, &ps.compilerFuncMap, ps.preventDefaultOutput)
+	ps.common = NewCommonScript(ps.vm, &ps.compilerFuncMap, ps.preventDefaultOutput)
 
 	ps.compilerFuncMap["getSrc"] = func() string { return ps.pa.Src }
 	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.Src = src }

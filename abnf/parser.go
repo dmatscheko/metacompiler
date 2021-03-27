@@ -54,8 +54,7 @@ type parser struct {
 
 	fileName string
 
-	tagReferences map[string]int // The tag code references have to stay stable over multiple calls.
-	lastTag       int
+	referencesCache *references
 }
 
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
@@ -260,7 +259,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		}
 		*pa.agrammar = append(*pa.agrammar, *aGrammar...)
 		// Correct all references
-		pa.correctReferencesSlow(pa.agrammar, nil)
+		pa.referencesCache.correctReferencesAndIDs(pa.agrammar)
 	case "number":
 		// :number(4, LE) would mean take 4 bytes from the input (gp.src), interpret them as little endian and create a Number from it. This means it should be usable in Times expressions and should allow the parsing of TLV-formats.
 		panic(":number() is only allowed as inline command.")
@@ -699,7 +698,21 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	return localProductions
 }
 
-func collectProductionReferencesSlow(rules *r.Rules, references map[string]int) {
+// References ---------------
+
+type references struct {
+	productionReferences map[string]int
+	tagReferences        map[string]int // The tag code references have to stay stable over multiple calls.
+	lastTag              int
+}
+
+func NewReferences() *references {
+	var re references
+	re.tagReferences = map[string]int{}
+	re.lastTag = 0
+	return &re
+}
+func (re *references) collectProductionReferences(rules *r.Rules) {
 	if rules == nil {
 		return
 	}
@@ -707,19 +720,21 @@ func collectProductionReferencesSlow(rules *r.Rules, references map[string]int) 
 		if rule.Operator != r.Production {
 			continue
 		}
-		if _, ok := references[rule.String]; ok {
+		if _, ok := re.productionReferences[rule.String]; ok {
 			panic("Error: Rule " + rule.String + " is defined multiple times.")
 		}
-		references[rule.String] = i
+		re.productionReferences[rule.String] = i
 	}
 }
-func (pa *parser) correctReferencesSlow(rules *r.Rules, productionReferences map[string]int) {
+func (re *references) correctReferencesAndIDs(rules *r.Rules) {
 	if rules == nil {
 		return
 	}
-	if productionReferences == nil { // If this is nil, it is the outermost recursion of correctReferencesSlow(). This means, parameter rules holds all productions.
-		productionReferences = map[string]int{}
-		collectProductionReferencesSlow(rules, productionReferences)
+	clear := false
+	if re.productionReferences == nil { // If this is nil, it is the outermost recursion of correctReferences(). This means, parameter rules holds all productions.
+		re.productionReferences = map[string]int{}
+		re.collectProductionReferences(rules)
+		clear = true
 	}
 	for _, rule := range *rules {
 		if rule.Operator == r.Identifier {
@@ -727,7 +742,7 @@ func (pa *parser) correctReferencesSlow(rules *r.Rules, productionReferences map
 			// if !ok {	// This test cannot be done, because it could be included in the future.
 			// 	panic("Production " + rule.String + "not found")
 			// }
-			rule.Int = productionReferences[rule.String]
+			rule.Int = re.productionReferences[rule.String]
 		} else if rule.Operator == r.Tag || (rule.Operator == r.Command && rule.String == "script") {
 			var allCode string
 			if len(*rule.CodeChilds) == 1 {
@@ -738,22 +753,28 @@ func (pa *parser) correctReferencesSlow(rules *r.Rules, productionReferences map
 					allCode += child.String
 				}
 			}
-			if pos, ok := pa.tagReferences[allCode]; ok {
+			if pos, ok := re.tagReferences[allCode]; ok {
 				rule.Int = pos
 			} else {
-				pa.lastTag++
-				pa.tagReferences[allCode] = pa.lastTag
-				rule.Int = pa.lastTag
+				re.lastTag++
+				re.tagReferences[allCode] = re.lastTag
+				rule.Int = re.lastTag
 			}
 		}
 		if rule.Childs != nil && len(*rule.Childs) > 0 {
-			pa.correctReferencesSlow(rule.Childs, productionReferences)
+			re.correctReferencesAndIDs(rule.Childs)
 		}
 		if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
-			pa.correctReferencesSlow(rule.CodeChilds, productionReferences)
+			re.correctReferencesAndIDs(rule.CodeChilds)
 		}
 	}
+
+	if clear { // This must be recreated everytime, because there could be new entries and then some IDs are probably wrong.
+		re.productionReferences = nil
+	}
 }
+
+// ---------------
 
 func mergeTerminals(productions *r.Rules) {
 	if productions == nil {
@@ -811,10 +832,9 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 	pa.useFoundList = useFoundList
 	pa.lastParsePosition = 0
 	pa.fileName = filepath.Clean(fileName)
-	pa.tagReferences = map[string]int{}
-	pa.lastTag = 0
 
-	pa.correctReferencesSlow(pa.agrammar, nil)
+	pa.referencesCache = NewReferences()
+	pa.referencesCache.correctReferencesAndIDs(pa.agrammar)
 
 	pa.ps = NewParserScript(&pa, preventDefaultOutput)
 
