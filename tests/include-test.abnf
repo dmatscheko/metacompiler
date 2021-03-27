@@ -20,4 +20,8 @@ Test = "A" | Foo <~~ println("The included rule found: " + up.in) ~~> ; // Foo w
 
     println(something())
 
+    println("include-test.txt contains: " + load("include-test.txt"))
+
+    store("include-test-create.out", "something")
+
 ~~) ;

@@ -146,6 +146,22 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 
 	vm.Set("moduleName", common.getCurrentModuleFileName)
 
+	vm.Set("load", func(fileName string) string {
+		loadFileName := filepath.Dir(common.getCurrentModuleFileName()) + string(os.PathSeparator) + filepath.Clean(fileName)
+		dat, err := ioutil.ReadFile(loadFileName)
+		if err != nil {
+			panic(err)
+		}
+		return string(dat)
+	})
+	vm.Set("store", func(fileName, data string) {
+		storeFileName := filepath.Dir(common.getCurrentModuleFileName()) + string(os.PathSeparator) + filepath.Clean(fileName)
+		err := ioutil.WriteFile(storeFileName, []byte(data), 0644)
+		if err != nil {
+			panic(err)
+		}
+	})
+
 	// vm.Set("writable", func(v interface{}) *interface{} {
 	// 	return &v
 	// })
