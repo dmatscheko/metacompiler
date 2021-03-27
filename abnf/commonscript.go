@@ -18,8 +18,9 @@ import (
 // Scripting subsystem code for parser and compiler
 
 type commonscript struct {
-	vm        *goja.Runtime
-	codeCache map[string]*goja.Program
+	vm               *goja.Runtime
+	codeCache        map[int]*goja.Program
+	codeCacheInclude map[string]*goja.Program
 }
 
 // Stripped down and slightly modified version of stconv.Unquote()
@@ -70,8 +71,13 @@ func UnescapeTilde(s string) string {
 }
 
 // Run executes the given string in the global context.
-func (cs *commonscript) Run(name, src string) (goja.Value, error) {
-	p := cs.codeCache[src]
+func (cs *commonscript) Run(name, src string, ID int) (goja.Value, error) {
+	var p *goja.Program
+	if ID >= 0 {
+		p = cs.codeCache[ID]
+	} else {
+		p = cs.codeCacheInclude[name]
+	}
 
 	// Cache precompiled data
 	if p == nil {
@@ -80,7 +86,11 @@ func (cs *commonscript) Run(name, src string) (goja.Value, error) {
 		if err != nil {
 			return nil, err
 		}
-		cs.codeCache[src] = p
+		if ID >= 0 {
+			cs.codeCache[ID] = p
+		} else {
+			cs.codeCacheInclude[name] = p
+		}
 	}
 
 	return cs.vm.RunProgram(p)
@@ -100,7 +110,8 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 	var common commonscript
 
 	common.vm = vm
-	common.codeCache = map[string]*goja.Program{}
+	common.codeCache = map[int]*goja.Program{}
+	common.codeCacheInclude = map[string]*goja.Program{}
 
 	if preventDefaultOutput { // Script output disabled.
 		vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
@@ -136,7 +147,7 @@ func initFuncMapCommon(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, p
 		}
 		srcCode := string(dat)
 
-		_, err = common.Run(includeFileName, srcCode)
+		_, err = common.Run(includeFileName, srcCode, -1)
 		if err != nil {
 			panic(err.Error() + "\nError was in " + includeFileName)
 		}
