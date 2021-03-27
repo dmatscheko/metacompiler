@@ -66,3 +66,9 @@ after returning without creating content when being in whitespace parse mode:
 ParseWithGrammar took 1.9642357s
 CompileASG took 5.6250004s
 
+
+after some random changes (smaller JS, ...):
+
+ParseWithGrammar took 1.9540538s
+CompileASG took 5.1019999s
+

@@ -150,39 +150,6 @@ func (pa *parser) applyAsSequence(rules *r.Rules, skipSpaceRule *r.Rule, skipSpa
 	return newProductions
 }
 
-func collectReferencesSlow(rules *r.Rules, references map[string]int) {
-	if rules == nil {
-		return
-	}
-	for i, rule := range *rules {
-		if rule.Operator != r.Production {
-			continue
-		}
-		references[rule.String] = i
-	}
-}
-func correctReferencesSlow(rules *r.Rules, references map[string]int) {
-	if rules == nil {
-		return
-	}
-	if references == nil {
-		references = map[string]int{}
-		collectReferencesSlow(rules, references)
-	}
-	for i := 0; i < len(*rules); i++ {
-		if (*rules)[i].Operator == r.Identifier {
-			ref, ok := references[(*rules)[i].String]
-			if !ok {
-				panic("Production " + (*rules)[i].String + "not found")
-			}
-			(*rules)[i].Int = ref
-		}
-		if (*rules)[i].Childs != nil && len(*(*rules)[i].Childs) > 0 {
-			correctReferencesSlow((*rules)[i].Childs, references)
-		}
-	}
-}
-
 // Almost like apply() but without parsing the target text.
 func (pa *parser) resolveRulesToToken(rules *r.Rules) *r.Rules {
 	if rules == nil {
@@ -727,6 +694,39 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 
 	pa.ruleExit(rule, skipSpaceRule, depth, localProductions, wasSdx)
 	return localProductions
+}
+
+func collectReferencesSlow(rules *r.Rules, references map[string]int) {
+	if rules == nil {
+		return
+	}
+	for i, rule := range *rules {
+		if rule.Operator != r.Production {
+			continue
+		}
+		references[rule.String] = i
+	}
+}
+func correctReferencesSlow(rules *r.Rules, references map[string]int) {
+	if rules == nil {
+		return
+	}
+	if references == nil {
+		references = map[string]int{}
+		collectReferencesSlow(rules, references)
+	}
+	for i := 0; i < len(*rules); i++ {
+		if (*rules)[i].Operator == r.Identifier {
+			ref, ok := references[(*rules)[i].String]
+			if !ok {
+				panic("Production " + (*rules)[i].String + "not found")
+			}
+			(*rules)[i].Int = ref
+		}
+		if (*rules)[i].Childs != nil && len(*(*rules)[i].Childs) > 0 {
+			correctReferencesSlow((*rules)[i].Childs, references)
+		}
+	}
 }
 
 func mergeTerminals(productions *r.Rules) {
