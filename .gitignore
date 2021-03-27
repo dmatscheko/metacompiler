@@ -14,6 +14,9 @@ mec
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
+# Output of tests
+tests/*.out
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
