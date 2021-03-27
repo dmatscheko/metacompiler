@@ -552,7 +552,7 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __abnf.newCharOf(String string, Pos int) Rule__
 * __abnf.newCharsOf(String string, Pos int) Rule__
 * __abnf.correctReferencesAndIDs(agrammar []Rule)__  
-This fills the array position of `Productions` into their `Identifier`. It also identifies each different `Tag` with another UID. The array position of the productions and the UIDs of the Tags is stored in the rules Int field. This method must be used on newly created a-grammars, if they are directly used for compilation. The parser applies this method automatically.
+This fills the array position of `Productions` into their `Identifier`. It also identifies each different `Tag` with another UID. The array positions of the productions and the UIDs of the Tags are stored in the rules Int field. This method must be used on newly created a-grammars, if they are directly used for compilation. The parser applies this method automatically.
 
 ##### ToString functions
 
