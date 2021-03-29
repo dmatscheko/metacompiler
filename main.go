@@ -115,6 +115,8 @@ func main() {
 		*param_quiet_Most = true
 	}
 
+	parseropts := &abnf.Parseropts{*param_useBlockList, *param_useFoundList, *param_trace_Ap, *param_quiet_Full}
+
 	// MAIN PROCESS ----------------------------------------------------------------------------------------------
 
 	// Part A:
@@ -123,7 +125,7 @@ func main() {
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "Parse source ABNF file A with initial a-grammar")
 	}
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, *param_a, *param_useBlockList, *param_useFoundList, *param_trace_Ap, *param_quiet_Full)
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, *param_a, parseropts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -163,7 +165,8 @@ func main() {
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "Parse target file B with new a-grammar")
 	}
-	asg, err = abnf.ParseWithAgrammar(aGrammar, srcB, *param_b, *param_useBlockList, *param_useFoundList, *param_trace_Bp, *param_quiet_Full)
+	parseropts.TraceEnabled = *param_trace_Bp
+	asg, err = abnf.ParseWithAgrammar(aGrammar, srcB, *param_b, parseropts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -204,7 +207,8 @@ func main() {
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "Parse target file C with new a-grammar")
 	}
-	asg, err = abnf.ParseWithAgrammar(result, srcC, *param_c, *param_useBlockList, *param_useFoundList, *param_trace_Cp, *param_quiet_Full)
+	parseropts.TraceEnabled = *param_trace_Cp
+	asg, err = abnf.ParseWithAgrammar(result, srcC, *param_c, parseropts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -237,8 +241,9 @@ func main() {
 }
 
 func speedtest(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
-	speedtestParseWithGrammar(srcA, fileNameA, count, useBlockList, useFoundList)
-	speedtestCompileASG(srcA, fileNameA, count, useBlockList, useFoundList)
+	parseropts := &abnf.Parseropts{useBlockList, useFoundList, false, true}
+	speedtestParseWithGrammar(srcA, fileNameA, count, parseropts)
+	speedtestCompileASG(srcA, fileNameA, count, parseropts)
 	fmt.Fprintln(os.Stderr)
 }
 func timeTrack(start time.Time, name string) {
@@ -246,19 +251,19 @@ func timeTrack(start time.Time, name string) {
 	fmt.Fprintf(os.Stderr, "%s took %s\n", name, elapsed)
 }
 
-func speedtestParseWithGrammar(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
+func speedtestParseWithGrammar(srcA, fileNameA string, count int, parseropts *abnf.Parseropts) {
 	var err error
 	defer timeTrack(time.Now(), "ParseWithGrammar")
 	for i := 0; i < count; i++ {
-		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false, true)
+		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, parseropts)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return
 	}
 }
-func speedtestCompileASG(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, useBlockList, useFoundList, false, true)
+func speedtestCompileASG(srcA, fileNameA string, count int, parseropts *abnf.Parseropts) {
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, parseropts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
 		return

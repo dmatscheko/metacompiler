@@ -192,8 +192,11 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// })
 
 	*compilerFuncMap = map[string]r.Object{
-		"parse": func(agrammar *r.Rules, srcCode string, useBlockList bool, useFoundList bool, traceEnabled bool) *r.Rules { // TODO: Implement a feature to state the start rule.
-			productions, err := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), useBlockList, useFoundList, traceEnabled, preventDefaultOutput)
+		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules { // TODO: Implement a feature to state the start rule.
+			if options == nil {
+				options = &Parseropts{}
+			}
+			productions, err := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), options)
 			if err != nil {
 				panic(err)
 			}
