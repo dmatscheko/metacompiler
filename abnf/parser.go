@@ -34,27 +34,26 @@ type parser struct {
 	Sdx      int
 	agrammar *r.Rules
 
+	opts         *Parseropts
 	blockList    map[int]bool
-	useBlockList bool
 	foundList    map[int]*r.Rules
 	foundSdxList map[int]int
-	useFoundList bool
+	traceCount   int
 
-	spaces *r.Rule
+	initialSpaces *r.Rule
 
 	lastParsePosition int
-
-	rangeCache [256]*r.Rule
-
-	traceEnabled         bool
-	traceCount           int
-	preventDefaultOutput bool
 
 	ps *parserscript
 
 	fileName string
 
+	rangeCache      [256]*r.Rule
 	referencesCache *references
+}
+
+type Parseropts struct {
+	UseBlockList, UseFoundList, TraceEnabled, PreventDefaultOutput bool
 }
 
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
@@ -70,23 +69,23 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (boo
 	var foundSdx int = -1
 	pa.traceCount++
 
-	if rule.Operator == r.Identifier && (pa.useBlockList || pa.useFoundList) {
+	if rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
 		id := pa.getRulePosId(rule, pa.Sdx)
 
-		if pa.useFoundList {
+		if pa.opts.UseFoundList {
 			foundRule = pa.foundList[id]
 			if foundRule != nil { // Is really only useful on massive backtracking...
 				foundSdx = pa.foundSdxList[id]
 				isBlocked = true // If the result is there already, block the apply() from trying it again.
 			}
 		}
-		if !isBlocked && pa.useBlockList {
+		if !isBlocked && pa.opts.UseBlockList {
 			isBlocked = pa.blockList[id] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
 			pa.blockList[id] = true      // Enter the current rule rule in the block list because it was not already blocked.
 		}
 	}
 
-	if !pa.traceEnabled {
+	if !pa.opts.TraceEnabled {
 		return isBlocked, foundRule, foundSdx
 	}
 
@@ -110,18 +109,18 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (boo
 }
 
 func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found *r.Rules, wasSdx int) {
-	if rule.Operator == r.Identifier && (pa.useBlockList || pa.useFoundList) {
+	if rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
 		id := pa.getRulePosId(rule, wasSdx)
-		if pa.useBlockList {
+		if pa.opts.UseBlockList {
 			pa.blockList[id] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
 		}
-		if pa.useFoundList && found != nil {
+		if pa.opts.UseFoundList && found != nil {
 			pa.foundList[id] = found
 			pa.foundSdxList[id] = pa.Sdx
 		}
 	}
 
-	if !pa.traceEnabled {
+	if !pa.opts.TraceEnabled {
 		return
 	}
 	pa.traceCount++
@@ -221,9 +220,9 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 	case "whitespace":
 		// pa.resolveParameterToToken(rule.CodeChilds)
 		if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
-			pa.spaces = (*rule.CodeChilds)[0]
+			pa.initialSpaces = (*rule.CodeChilds)[0]
 		} else {
-			pa.spaces = nil
+			pa.initialSpaces = nil
 		}
 	case "include":
 		// Resolve parameter constants.
@@ -249,7 +248,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		}
 		srcCode := string(dat)
 
-		asg, err := ParseWithAgrammar(AbnfAgrammar, srcCode, fullFileName, pa.useBlockList, pa.useFoundList, pa.traceEnabled, pa.preventDefaultOutput)
+		asg, err := ParseWithAgrammar(AbnfAgrammar, srcCode, fullFileName, pa.opts)
 		if err != nil {
 			panic(err)
 		}
@@ -804,7 +803,7 @@ func mergeTerminals(productions *r.Rules) {
 	}
 }
 
-func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList, useFoundList, traceEnabled, preventDefaultOutput bool) (res *r.Rules, e error) { // => (productions, error)
+func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Parseropts) (res *r.Rules, e error) { // => (productions, error)
 	// defer func() {
 	// 	if err := recover(); err != nil {
 	// 		res = nil
@@ -822,23 +821,18 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 	pa.agrammar = agrammar
 	pa.Src = srcCode
 	pa.Sdx = 0
-	pa.traceEnabled = traceEnabled
-	pa.preventDefaultOutput = preventDefaultOutput
+	pa.opts = options
 	pa.traceCount = 0
 	pa.blockList = make(map[int]bool)
-	pa.useBlockList = useBlockList
 	pa.foundList = make(map[int]*r.Rules)
 	pa.foundSdxList = make(map[int]int)
-	pa.useFoundList = useFoundList
 	pa.lastParsePosition = 0
 	pa.fileName = filepath.Clean(fileName)
-
 	pa.referencesCache = NewReferences()
 	pa.referencesCache.correctReferencesAndIDs(pa.agrammar)
+	pa.initialSpaces = &r.Rule{Operator: r.CharsOf, String: "\t\n\r "} // TODO: Make this configurable via JS.
 
-	pa.ps = NewParserScript(&pa, preventDefaultOutput)
-
-	pa.spaces = &r.Rule{Operator: r.CharsOf, String: "\t\n\r "} // TODO: Make this configurable via JS.
+	pa.ps = NewParserScript(&pa, options.PreventDefaultOutput)
 
 	for _, rule := range *pa.agrammar {
 		if rule.Operator == r.Command {
@@ -847,11 +841,11 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, useBlockList
 	}
 
 	// For the parsing, the start rule is necessary. For the compilation not.
-	newProductions := pa.apply((*pa.agrammar)[startRule.Int], pa.spaces, false, 0)
+	newProductions := pa.apply((*pa.agrammar)[startRule.Int], pa.initialSpaces, false, 0)
 
 	// Check if the position is at EOF at end of parsing. There can be spaces left, but otherwise its an error:
-	if pa.spaces != nil {
-		pa.apply(pa.spaces, pa.spaces, true, 0) // Skip spaces.
+	if pa.initialSpaces != nil {
+		pa.apply(pa.initialSpaces, pa.initialSpaces, true, 0) // Skip spaces.
 	}
 	if pa.Sdx < len(pa.Src) {
 		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position was %s\nCreated productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), Shorten(newProductions.Serialize())))
