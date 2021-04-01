@@ -151,12 +151,12 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 // Compiles an "abstract semantic graph". This is similar to an AST, but it also contains the semantic of the language.
 // The aGrammar is only needed for its prolog code. The start rule is only needed for parsing.
 func CompileASG(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, traceEnabled, preventDefaultOutput bool) (res *r.Rules, e error) {
-	// defer func() {
-	// 	if err := recover(); err != nil {
-	// 		res = nil
-	// 		e = fmt.Errorf("%s", err)
-	// 	}
-	// }()
+	defer func() {
+		if err := recover(); err != nil {
+			res = nil
+			e = fmt.Errorf("%s", err)
+		}
+	}()
 
 	resObj := compileASGInternal(asg, aGrammar, fileName, slot, traceEnabled, preventDefaultOutput)
 

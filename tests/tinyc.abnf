@@ -4,14 +4,32 @@
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { Statement } ;
-Statement   = IfElse | If | For | While | Do | Block | SingleStmt | ZeroStmt ;
+Program     = { Function } ;
+
+Function    =
+            "func"
+            Id              <~~ var id = pop(); ~~>
+            Parameter       <~~ var f = m.NewFunc(id, i32, params); var b = f.NewBlock(""); ~~>
+            Statement ;
+
+Parameter   =
+            "(" <~~ pushg([]) ~~>
+                [
+                    ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ; pop() /* BUG!! */  ~~>
+                    { "," ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ~~> }
+                ]
+            ")" <~~ var params=popg(); ~~> ;
+ParamDecl   = "int" Id <~~ push(up.in) ~~> ;
+
+Statement   <~~ b.NewRet(zero) ~~>
+            = IfElse | If | For | While | Do | Return | Block | SingleStmt | ZeroStmt ;
 
 IfElse      = "if" ParenExpr Statement "else" Statement ;
 If          = "if" ParenExpr Statement ;
 For         = "for" ParenExpr Statement ;
 While       = "while" ParenExpr Statement ;
 Do          = "do" Statement "while" ParenExpr ";" ;
+Return      = "return" [ ResultExpr ] ";" ;
 Block       = "{" { Statement } "}" ;
 SingleStmt  = Expression ";" ;
 ZeroStmt    = ";" ;
@@ -22,19 +40,23 @@ Expression  = VoidExpr | ResultExpr ;
 VoidExpr    = Declaration | Assignment ;
 ResultExpr  = Call | Test ;
 
-Declaration = "var" ( Assignment | Id ) ;
+Declaration = AssignDecl | OnlyDecl ;
+AssignDecl  = "int" Assignment ;  // TODO
+OnlyDecl    = "int" Id <~~ vars[pop()] = m.NewGlobalDef(id, llvm.constant.NewInt(i32, 0)); ~~> ;
 
 Assignment  = Id "=" ResultExpr ;
 
-Call        = Id "(" [ ResultExpr { "," ResultExpr } ] ")" ;
+Call        = Id "(" [ ResultExpr { "," ResultExpr } ] ")" <~~ b.NewCall(m.NewFunc(id, i32, paramsInterface), params) ~~> ;
 
 Test        = Comp ( "||" | "&&" ) Comp | Comp ;
 Comp        = Sum ( "<" | ">" | "==" | "!=" ) Sum | Sum ;
 Sum         = Term "+" Term | Term "-" Term | Id "++" | Id "--" | Term ;
 Term        = ParenExpr | Call | Id | Int ;
 
-Id          = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
-Int         = "0" | "1"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+Id          <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
+Int         <~~ push(llvm.constant.NewInt(i32, parseInt(up.in))) ~~>
+            = "0" | "1"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 Whitespace  = @+" \t\r\n" ;
 
@@ -42,4 +64,25 @@ Whitespace  = @+" \t\r\n" ;
 // No option of a production can be equal to the production itself. This means that e.g. the production 'Test' must not have an option 'Test'.
 
 
-:startScript(~~ c.compile(c.asg) ~~) ;
+:startScript(~~
+
+var i32 = llvm.types.I32
+var zero = llvm.constant.NewInt(i32, 0)
+var one = llvm.constant.NewInt(i32, 1)
+
+var m = llvm.ir.NewModule()
+var vars = {}
+
+// var func = m.NewFunc("name", i32)
+// var block = func.NewBlock("name")
+
+// function buildFunction(stmt, params, id) {
+//     var f = m.NewFunc(id, i32, params)
+//     f.NewBlock("").NewBr(stmt)
+//     push(f)
+// }
+
+c.compile(c.asg)
+println(m)
+
+~~) ;

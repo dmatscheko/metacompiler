@@ -1,7 +1,9 @@
-var i=0;
-while (i>20) {
-    var a=33;
-    a=1;
-    foo(22);
-    i = i+1;
+func main(int tst) {
+    int i=0;
+    while (i>20) {
+        int a=33;
+        a=1;
+        foo(22);
+        i = i+1;
+    }
 }
