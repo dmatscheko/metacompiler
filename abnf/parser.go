@@ -804,12 +804,12 @@ func mergeTerminals(productions *r.Rules) {
 }
 
 func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Parseropts) (res *r.Rules, e error) { // => (productions, error)
-	// defer func() {
-	// 	if err := recover(); err != nil {
-	// 		res = nil
-	// 		e = fmt.Errorf("%s", err)
-	// 	}
-	// }()
+	defer func() {
+		if err := recover(); err != nil {
+			res = nil
+			e = fmt.Errorf("%s", err)
+		}
+	}()
 
 	startRule := r.GetStartRule(agrammar)
 	if startRule == nil || startRule.Int >= len(*agrammar) || startRule.Int < 0 {
