@@ -10,6 +10,9 @@ import (
 	"14.gy/mec/abnf"
 )
 
+// The first option(s) of an OR must not be the beginning of a later option. Otherwise only the first option would be found and success would be returned.
+// No option of a production can be equal to the production itself. This means that e.g. the production 'Test' must not have an option 'Test'.
+
 // TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).
 // TODO: Define an :EOF() symbol for the EBNF syntax.
 // TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier).

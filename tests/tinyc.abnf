@@ -8,18 +8,18 @@ Program     = { Function } ;
 
 Function    =
             "func"
-            Id              <~~ var id = pop(); ~~>
-            Parameter       <~~ var f = m.NewFunc(id, i32, params); var b = f.NewBlock(""); ~~>
+            Id              <~~ pushg(pop()) ~~>
+            Parameter       <~~ var params = popg(); var fid = popg(); var f = m.NewFunc(fid, i32, params); var b = f.NewBlock(""); ~~>
             Statement ;
 
 Parameter   =
             "(" <~~ pushg([]) ~~>
                 [
-                    ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ; pop() /* BUG!! */  ~~>
+                    ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ~~>
                     { "," ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ~~> }
                 ]
-            ")" <~~ var params=popg(); ~~> ;
-ParamDecl   = "int" Id <~~ push(up.in) ~~> ;
+            ")" ;
+ParamDecl   = "int" Id ;
 
 Statement   <~~ b.NewRet(zero) ~~>
             = IfElse | If | For | While | Do | Return | Block | SingleStmt | ZeroStmt ;
@@ -38,40 +38,112 @@ ParenExpr   =  "(" Expression { ";" Expression } ")" ;
 
 Expression  = VoidExpr | ResultExpr ;
 VoidExpr    = Declaration | Assignment ;
-ResultExpr  = Call | Test ;
+ResultExpr  = Test ;
 
 Declaration = AssignDecl | OnlyDecl ;
-AssignDecl  = "int" Assignment ;  // TODO
-OnlyDecl    = "int" Id <~~ vars[pop()] = m.NewGlobalDef(id, llvm.constant.NewInt(i32, 0)); ~~> ;
 
-Assignment  = Id "=" ResultExpr ;
+AssignDecl  <~~ var vp = null; ~~>
+            = "int" <~~ var vp = newVar(zero); /* vp is necessary here, because it is used at Assignment */ ~~>
+            Assignment ;
 
-Call        = Id "(" [ ResultExpr { "," ResultExpr } ] ")" <~~ b.NewCall(m.NewFunc(id, i32, paramsInterface), params) ~~> ;
+OnlyDecl    = "int" Id <~~ setVar(pop(), newVar(zero)); ~~> ;
 
-Test        = Comp ( "||" | "&&" ) Comp | Comp ;
-Comp        = Sum ( "<" | ">" | "==" | "!=" ) Sum | Sum ;
-Sum         = Term "+" Term | Term "-" Term | Id "++" | Id "--" | Term ;
-Term        = ParenExpr | Call | Id | Int ;
+Assignment  <~~ var expr = pop(); var id = pop(); if (!vp) { vp = getVar(id) }; b.NewStore(expr, vp); setVar(id, vp) ~~>
+            = Id "=" ResultExpr ;
+
+Test        = Comp ( "||" | "&&" ) Comp
+            | Comp ;
+
+Comp        = Sum                               <~~ pushg(pop()) ~~>
+                ( "<" | ">" | "==" | "!=" )     <~~ pushg(up.in) ~~>
+                Sum                             <~~ var vb = pop(); var op = popg(); var va = popg(); push(compare(va, vb, op)) ~~>
+            | Sum ;
+
+Sum         = Term <~~ pushg(pop()) ~~> "+" Term <~~ var v1 = popg(); var v2 = pop(); var v = b.NewAdd(b.NewLoad(i32, v1), b.NewLoad(i32, v2)); var vp = newVar(v); push(vp); ~~>
+            | Term <~~ pushg(pop()) ~~> "-" Term <~~ var v1 = popg(); var v2 = pop(); var v = b.NewSub(b.NewLoad(i32, v1), b.NewLoad(i32, v2)); var vp = newVar(v); push(vp); ~~>
+            | Id <~~ pushg(pop()) ~~> "++" <~~ var vp = getVar(popg()); var v = b.NewAdd(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
+            | Id <~~ pushg(pop()) ~~> "--" <~~ var vp = getVar(popg()); var v = b.NewSub(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
+            | Term ;
+
+Term        = ParenExpr
+            | Call
+            | Id    <~~ push(getVar(pop())) ~~>
+            | Int ;
+
+Call        = Id        <~~ pushg(pop()) ~~> 
+            "("         <~~ pushg([]); var paramsInterface = []; ~~>
+                [
+                    ResultExpr      <~~ pushg(append(popg(), pop())); paramsInterface.push(llvm.ir.NewParam("", i32)); ~~>
+                    {
+                        ","
+                        ResultExpr  <~~ pushg(append(popg(), pop())); paramsInterface.push(llvm.ir.NewParam("", i32)); ~~>
+                    }
+                ]
+            ")" <~~ var params = popg(); var id = popg(); push(b.NewCall(m.NewFunc(id, i32, paramsInterface), params)); ~~> ;
 
 Id          <~~ push(up.in) ~~>
             = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
-Int         <~~ push(llvm.constant.NewInt(i32, parseInt(up.in))) ~~>
+Int         <~~ push(newVar(llvm.constant.NewInt(i32, parseInt(up.in)))) ~~>
             = "0" | "1"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 Whitespace  = @+" \t\r\n" ;
-
-// The first option(s) of an OR must not be the beginning of a later option. Otherwise only the first option would be found and success would be returned.
-// No option of a production can be equal to the production itself. This means that e.g. the production 'Test' must not have an option 'Test'.
 
 
 :startScript(~~
 
 var i32 = llvm.types.I32
+var i32p = llvm.types.I32Ptr
 var zero = llvm.constant.NewInt(i32, 0)
 var one = llvm.constant.NewInt(i32, 1)
 
 var m = llvm.ir.NewModule()
+
+var f = m.NewFunc("_init", i32, null)
+var b = f.NewBlock("")
+b.NewCall(m.NewFunc("main", i32, null))
+b.NewRet(zero)
+
+// TODO: Push scoped variables into up.arrXYZ.
 var vars = {}
+
+function newVar(v) {
+    var vx = b.NewAlloca(i32)
+    var vp = b.NewGetElementPtr(i32, vx, zero)
+    b.NewStore(v, vp);
+    return vp
+}
+
+function getVar(id) {
+    for (var i = 0; i<f.Params.length; i++) {
+        if (f.Params[i].LocalName == id) {
+            var vx = b.NewAlloca(i32)
+            var vp = b.NewGetElementPtr(i32, vx, zero)
+            b.NewStore(f.Params[i], vp)
+            return vp
+        } 
+    }
+    if (vars[id] != null) return vars[id]
+    println("Error: Variable not defined: " + id)
+    exit(1)
+}
+
+function setVar(id, vp) {
+    vars[id] = vp
+}
+
+function compare(va, vb, op) {
+    if (va == null) {
+        println("Error in compare(): va is not defined.")
+    }
+    if (vb == null) {
+        println("Error in compare(): vb is not defined.")
+    }
+    printf("testA")
+    var condition = b.NewICmp(llvm.enum.IPredUGT, va, vb)
+    printf("%#v", condition)
+    printf("testB")
+    return condition
+}
 
 // var func = m.NewFunc("name", i32)
 // var block = func.NewBlock("name")

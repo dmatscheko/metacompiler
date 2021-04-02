@@ -44,7 +44,7 @@
             "name": "TinyC Variant",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt", "-vvb1"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt"]
         },
         {
             "name": "---------",
