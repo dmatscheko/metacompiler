@@ -8,7 +8,7 @@ Program     = { Function } ;
 
 Function    =
             "func"
-            Id              <~~ pushg(pop()) ~~>
+            Id              <~~ pushg(up.in) ~~>
             Parameter       <~~ var params = popg(); var fid = popg(); var f = m.NewFunc(fid, i32, params); var b = f.NewBlock(""); ~~>
             Statement ;
 
@@ -19,7 +19,7 @@ Parameter   =
                     { "," ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ~~> }
                 ]
             ")" ;
-ParamDecl   = "int" Id ;
+ParamDecl   = "int" Id <~~ push(up.in) ~~> ;
 
 Statement   <~~ b.NewRet(zero) ~~>
             = IfElse | If | For | While | Do | Return | Block | SingleStmt | ZeroStmt ;
@@ -46,10 +46,10 @@ AssignDecl  <~~ var vp = null; ~~>
             = "int" <~~ var vp = newVar(zero); /* vp is necessary here, because it is used at Assignment */ ~~>
             Assignment ;
 
-OnlyDecl    = "int" Id <~~ setVar(pop(), newVar(zero)); ~~> ;
+OnlyDecl    = "int" Id <~~ setVar(up.in, newVar(zero)); ~~> ;
 
-Assignment  <~~ var expr = pop(); var id = pop(); if (!vp) { vp = getVar(id) }; b.NewStore(expr, vp); setVar(id, vp) ~~>
-            = Id "=" ResultExpr ;
+Assignment  <~~ var expr = pop(); var id = pop(); if (!vp) { vp = getVar(id) }; var exprv = b.NewLoad(i32, expr); b.NewStore(exprv, vp); setVar(id, vp) ~~>
+            = Id <~~ push(up.in) ~~> "=" ResultExpr ;
 
 Test        = Comp ( "||" | "&&" ) Comp
             | Comp ;
@@ -61,16 +61,16 @@ Comp        = Sum                               <~~ pushg(pop()) ~~>
 
 Sum         = Term <~~ pushg(pop()) ~~> "+" Term <~~ var v1 = popg(); var v2 = pop(); var v = b.NewAdd(b.NewLoad(i32, v1), b.NewLoad(i32, v2)); var vp = newVar(v); push(vp); ~~>
             | Term <~~ pushg(pop()) ~~> "-" Term <~~ var v1 = popg(); var v2 = pop(); var v = b.NewSub(b.NewLoad(i32, v1), b.NewLoad(i32, v2)); var vp = newVar(v); push(vp); ~~>
-            | Id <~~ pushg(pop()) ~~> "++" <~~ var vp = getVar(popg()); var v = b.NewAdd(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
-            | Id <~~ pushg(pop()) ~~> "--" <~~ var vp = getVar(popg()); var v = b.NewSub(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
+            | Id <~~ pushg(up.in) ~~> "++" <~~ var vp = getVar(popg()); var v = b.NewAdd(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
+            | Id <~~ pushg(up.in) ~~> "--" <~~ var vp = getVar(popg()); var v = b.NewSub(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
             | Term ;
 
 Term        = ParenExpr
             | Call
-            | Id    <~~ push(getVar(pop())) ~~>
+            | Id    <~~ push(getVar(up.in)) ~~>
             | Int ;
 
-Call        = Id        <~~ pushg(pop()) ~~> 
+Call        = Id        <~~ pushg(up.in) ~~> 
             "("         <~~ pushg([]); var paramsInterface = []; ~~>
                 [
                     ResultExpr      <~~ pushg(append(popg(), pop())); paramsInterface.push(llvm.ir.NewParam("", i32)); ~~>
@@ -81,8 +81,7 @@ Call        = Id        <~~ pushg(pop()) ~~>
                 ]
             ")" <~~ var params = popg(); var id = popg(); push(b.NewCall(m.NewFunc(id, i32, paramsInterface), params)); ~~> ;
 
-Id          <~~ push(up.in) ~~>
-            = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
+Id          = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
 Int         <~~ push(newVar(llvm.constant.NewInt(i32, parseInt(up.in)))) ~~>
             = "0" | "1"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
@@ -92,7 +91,7 @@ Whitespace  = @+" \t\r\n" ;
 :startScript(~~
 
 var i32 = llvm.types.I32
-var i32p = llvm.types.I32Ptr
+// var i32p = llvm.types.I32Ptr
 var zero = llvm.constant.NewInt(i32, 0)
 var one = llvm.constant.NewInt(i32, 1)
 
@@ -138,10 +137,18 @@ function compare(va, vb, op) {
     if (vb == null) {
         println("Error in compare(): vb is not defined.")
     }
-    printf("testA")
-    var condition = b.NewICmp(llvm.enum.IPredUGT, va, vb)
-    printf("%#v", condition)
-    printf("testB")
+    var comperator = null
+    if (op == "<") {
+        comperator = llvm.enum.IPredULT
+    } else if (op == ">") {
+        comperator = llvm.enum.IPredUGT
+    } else if (op == "==") {
+        comperator = llvm.enum.IPredUEQ
+    } else if (op == "!=") {
+        comperator = llvm.enum.IPredUNE
+    }
+    var condition = b.NewICmp(comperator, va, vb)
+    // printf("%#v\n", condition)
     return condition
 }
 

@@ -10,4 +10,7 @@ func main(int tst) {
         foo(22);
         i = i+1;
     }
+    if (i==20) {
+        i=10;
+    }
 }
