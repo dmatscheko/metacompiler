@@ -1,3 +1,7 @@
+func foo(int param) {
+    param++;
+}
+
 func main(int tst) {
     int i=0;
     while (i>20) {
