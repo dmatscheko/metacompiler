@@ -21,26 +21,29 @@ Parameter   =
             ")" ;
 ParamDecl   = "int" Id <~~ push(up.in) ~~> ;
 
-Statement   <~~ b.NewRet(zero) ~~>
+Statement   <~~ push({inB: f.NewBlock(""), outB: f.NewBlock("")}); b.NewRet(zero) ~~> // TODO
             = IfElse | If | For | While | Do | Return | Block | SingleStmt | ZeroStmt ;
 
-IfElse      = "if" ParenExpr Statement "else" Statement ;
-If          = "if" ParenExpr Statement ;
-For         = "for" ParenExpr Statement ;
-While       = "while" ParenExpr Statement ;
-Do          = "do" Statement "while" ParenExpr ";" ;
+// TODO: each sub-block and also if, for, ... is a new scope. New scope: pushScope(), return to parent scope: popScope().
+// Each statement must add (and push) itself as new block.
+IfElse      = "if" ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ pushg(pop()) ~~> "else" Statement <~~ var trueB = popg(); var falseB = pop(); var comp = popg(); push(newIf(comp, trueB, falseB)) ~~> ;
+If          = "if" ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ push(newIf(popg(), pop())) ~~> ;
+For         = "for" ParenExpr3 Statement ;
+While       = "while" ParenExpr1 Statement ;
+Do          = "do" Statement "while" ParenExpr1 ";" ;
 Return      = "return" [ ResultExpr ] ";" ;
 Block       = "{" { Statement } "}" ;
 SingleStmt  = Expression ";" ;
 ZeroStmt    = ";" ;
 
-ParenExpr   =  "(" Expression { ";" Expression } ")" ;
+ParenExpr1  =  "(" ResultExpr ")" ;
+ParenExpr3  =  "(" [ Declaration ] ";" [ ResultExpr ] ";" [ Expression ] ")" ;
 
 Expression  = VoidExpr | ResultExpr ;
 VoidExpr    = Declaration | Assignment ;
 ResultExpr  = Test ;
 
-Declaration = AssignDecl | OnlyDecl ;
+Declaration = ( AssignDecl | OnlyDecl ) { "," Declaration } ; // The ugly comma-declaration-method only because of the stupid decision to separate the entries in a for-loop with semicolon instead of comma.
 
 AssignDecl  <~~ var vp = null; ~~>
             = "int" <~~ var vp = newVar(zero); /* vp is necessary here, because it is used at Assignment */ ~~>
@@ -51,12 +54,14 @@ OnlyDecl    = "int" Id <~~ setVar(up.in, newVar(zero)); ~~> ;
 Assignment  <~~ var expr = pop(); var id = pop(); if (!vp) { vp = getVar(id) }; var exprv = b.NewLoad(i32, expr); b.NewStore(exprv, vp); setVar(id, vp) ~~>
             = Id <~~ push(up.in) ~~> "=" ResultExpr ;
 
-Test        = Comp ( "||" | "&&" ) Comp
+Test        = Comp                  <~~ pushg(pop()) ~~>
+                ( "||" | "&&" )     <~~ pushg(pop()) ~~>
+                Comp                <~~ var vb = pop(); var op = popg(); var va = popg(); push(boolean(va, vb, op)) ~~>
             | Comp ;
 
-Comp        = Sum                               <~~ pushg(pop()) ~~>
-                ( "<" | ">" | "==" | "!=" )     <~~ pushg(up.in) ~~>
-                Sum                             <~~ var vb = pop(); var op = popg(); var va = popg(); push(compare(va, vb, op)) ~~>
+Comp        = Sum                                           <~~ pushg(pop()) ~~>
+                ( "<" | ">" | "<=" | ">=" | "==" | "!=" )   <~~ pushg(up.in) ~~>
+                Sum                                         <~~ var vb = pop(); var op = popg(); var va = popg(); push(compare(va, vb, op)) ~~>
             | Sum ;
 
 Sum         = Term <~~ pushg(pop()) ~~> "+" Term <~~ var v1 = popg(); var v2 = pop(); var v = b.NewAdd(b.NewLoad(i32, v1), b.NewLoad(i32, v2)); var vp = newVar(v); push(vp); ~~>
@@ -65,7 +70,7 @@ Sum         = Term <~~ pushg(pop()) ~~> "+" Term <~~ var v1 = popg(); var v2 = p
             | Id <~~ pushg(up.in) ~~> "--" <~~ var vp = getVar(popg()); var v = b.NewSub(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
             | Term ;
 
-Term        = ParenExpr
+Term        = ParenExpr1
             | Call
             | Id    <~~ push(getVar(up.in)) ~~>
             | Int ;
@@ -130,11 +135,11 @@ function setVar(id, vp) {
     vars[id] = vp
 }
 
-function compare(va, vb, op) {
-    if (va == null) {
+function compare(vpa, vpb, op) {
+    if (vpa == null) {
         println("Error in compare(): va is not defined.")
     }
-    if (vb == null) {
+    if (vpb == null) {
         println("Error in compare(): vb is not defined.")
     }
     var comperator = null
@@ -142,15 +147,98 @@ function compare(va, vb, op) {
         comperator = llvm.enum.IPredULT
     } else if (op == ">") {
         comperator = llvm.enum.IPredUGT
+    } else if (op == "<=") {
+        comperator = llvm.enum.IPredULE
+    } else if (op == ">=") {
+        comperator = llvm.enum.IPredUGE
     } else if (op == "==") {
-        comperator = llvm.enum.IPredUEQ
+        comperator = llvm.enum.IPredEQ
     } else if (op == "!=") {
-        comperator = llvm.enum.IPredUNE
+        comperator = llvm.enum.IPredNE
     }
+
+    var va = vpa
+    var vb = vpb
+    if (llvm.types.IsPointer(vpa.Typ)) {
+        va = b.NewLoad(i32, vpa)
+    }
+    if (llvm.types.IsPointer(vpb.Typ)) {
+        vb = b.NewLoad(i32, vpb)
+    }
+
     var condition = b.NewICmp(comperator, va, vb)
-    // printf("%#v\n", condition)
+    // printf("Cond: %#v\n", condition)
     return condition
 }
+
+function boolean(vpa, vpb, op) {
+    if (vpa == null) {
+        println("Error in compare(): va is not defined.")
+    }
+    if (vpb == null) {
+        println("Error in compare(): vb is not defined.")
+    }
+    var operator = null
+    if (op == "&&") {
+        operator = "=="
+    } else if (op == "||") {
+        operator = "!="
+    }
+
+    var va = vpa
+    if (llvm.types.IsPointer(vpa.Typ)) {
+        va = b.NewLoad(i32, vpa)
+    }
+
+    var resultp = newVar(va)
+
+    var conditionVa = compare(va, zero, operator)
+
+    var endB = f.NewBlock("")   // every block of this function must end here
+    var secondB = f.NewBlock("")
+
+    b.NewCondBr(conditionVa, endB, secondB)
+
+    // inside second branch
+    b = secondB
+
+    var vb = vpb
+    if (llvm.types.IsPointer(vpb.Typ)) {
+        vb = b.NewLoad(i32, vpb)
+    }
+    b.NewStore(vb, resultp)
+    b.NewBr(endB)
+
+    // inside end branch
+    b = endB
+    return resultp
+
+    // https://stackoverflow.com/questions/11485531/what-exactly-phi-instruction-does-and-how-to-use-it-in-llvm
+}
+
+// All Statements must return two values: {inB, outB}
+function newIf(test, trueStmt, falseStmt) {        // TODO: stmt = {inB, outB}
+    var inB = f.NewBlock("")
+    var outB = f.NewBlock("")
+
+    var origB = b
+    b = inB
+
+    var condition = compare(test, zero, "!=")
+
+    trueStmt.outB.NewBr(outB)
+    if (falseStmt == null) {
+        b.NewCondBr(condition, trueStmt.InB, outB)
+    } else {
+        falseStmt.outB.NewBr(outB)
+        b.NewCondBr(condition, trueStmt.InB, falseStmt.inB)
+    }
+
+    b = origB
+
+    return {inB: inB, outB: outB}
+}
+
 
 // var func = m.NewFunc("name", i32)
 // var block = func.NewBlock("name")
