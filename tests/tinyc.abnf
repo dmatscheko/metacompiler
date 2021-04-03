@@ -24,15 +24,15 @@ ParamDecl   = "int" Id <~~ push(up.in) ~~> ;
 Statement   <~~ push({inB: f.NewBlock(""), outB: f.NewBlock("")}); b.NewRet(zero) ~~> // TODO
             = IfElse | If | For | While | Do | Return | Block | SingleStmt | ZeroStmt ;
 
-// TODO: each sub-block and also if, for, ... is a new scope. New scope: pushScope(), return to parent scope: popScope().
-// Each statement must add (and push) itself as new block.
-IfElse      = "if" ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ pushg(pop()) ~~> "else" Statement <~~ var trueB = popg(); var falseB = pop(); var comp = popg(); push(newIf(comp, trueB, falseB)) ~~> ;
-If          = "if" ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ push(newIf(popg(), pop())) ~~> ;
-For         = "for" ParenExpr3 Statement ;
-While       = "while" ParenExpr1 Statement ;
-Do          = "do" Statement "while" ParenExpr1 ";" ;
+// Each Statement, except the ones that are blank expressions, is a new variable scope. New scope: pushScope(), return to parent scope: popScope().
+// Each Statement must push itself on local stack and must consist of two blocks: {inB: beginBlock, outB: endblock}.
+IfElse      = "if" <~~ pushScope() ~~> ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ pushg(pop()) ~~> "else" Statement <~~ var trueB = popg(); var falseB = pop(); var comp = popg(); push(newIf(comp, trueB, falseB)); popScope() ~~> ;
+If          = "if" <~~ pushScope() ~~> ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ push(newIf(popg(), pop())); popScope() ~~> ;
+For         = "for" <~~ pushScope() ~~> ParenExpr3 Statement <~~ popScope() ~~> ;
+While       = "while" <~~ pushScope() ~~> ParenExpr1 Statement <~~ popScope() ~~> ;
+Do          = "do" <~~ pushScope() ~~> Statement "while" ParenExpr1 ";" <~~ popScope() ~~> ;
 Return      = "return" [ ResultExpr ] ";" ;
-Block       = "{" { Statement } "}" ;
+Block       = "{" <~~ pushScope() ~~> { Statement } "}" <~~ popScope() ~~> ;
 SingleStmt  = Expression ";" ;
 ZeroStmt    = ";" ;
 
