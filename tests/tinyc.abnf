@@ -107,8 +107,15 @@ var b = f.NewBlock("")
 b.NewCall(m.NewFunc("main", i32, null))
 b.NewRet(zero)
 
-// TODO: Push scoped variables into up.arrXYZ.
 var vars = {}
+var varsStack = []
+function pushScope() {
+    varsStack.push(vars)
+    vars = {}
+}
+function popScope() {
+    vars = varsStack.pop()
+}
 
 function newVar(v) {
     var vx = b.NewAlloca(i32)
@@ -118,7 +125,16 @@ function newVar(v) {
 }
 
 function getVar(id) {
-    for (var i = 0; i<f.Params.length; i++) {
+    // vars[id] is always the innermost vars context.
+    if (vars[id] != null) return vars[id]
+
+    // varsStack[0] is global vars and is skipped here.
+    for (var i = varsStack.length-1; i >= 1; i--) {
+        if (varsStack[i][id] != null) return varsStack[i][id]
+    }
+
+    // The function params are before the global vars.
+    for (var i = 0; i < f.Params.length; i++) {
         if (f.Params[i].LocalName == id) {
             var vx = b.NewAlloca(i32)
             var vp = b.NewGetElementPtr(i32, vx, zero)
@@ -126,7 +142,12 @@ function getVar(id) {
             return vp
         } 
     }
-    if (vars[id] != null) return vars[id]
+
+    // varsStack[0] is global vars and is now evaluated.
+    if (varsStack.length > 0) { // varsStack.length == 0 would mean it is in the global scope. Then vars[id] would have contained the var already.
+        if (varsStack[0][id] != null) return varsStack[0][id]
+    }
+
     println("Error: Variable not defined: " + id)
     exit(1)
 }
@@ -238,7 +259,6 @@ function newIf(test, trueStmt, falseStmt) {        // TODO: stmt = {inB, outB}
 
     return {inB: inB, outB: outB}
 }
-
 
 // var func = m.NewFunc("name", i32)
 // var block = func.NewBlock("name")
