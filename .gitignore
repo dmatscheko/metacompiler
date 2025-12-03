@@ -20,3 +20,5 @@ tests/*.out
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Apple
+.DS_Store
