@@ -1,0 +1,472 @@
+:title("C99") ;
+:description("A full annotated EBNF for the C programming language (ISO/IEC 9899:1999, Annex A).
+
+The phrase and lexical grammar follow the standard, transformed for this parser:
+* Left recursion is rewritten as iteration (e.g. postfix-expression, direct-declarator).
+* Alternatives are ordered so that the first-match-wins strategy of the parser picks the
+  correct one, and so that wrong choices fail locally (two-char operators before their
+  one-char prefixes, cast before parenthesized expression, declaration before statement).
+* Keywords are delimited with a negative lookahead (KwEnd), so identifiers that merely
+  start with a keyword (doubled, interned, format, ...) are never split.
+* Preprocessor lines and comments are consumed as whitespace, so ordinary (unpreprocessed)
+  C source files can be parsed directly.
+
+Known deviations, all rooted in parsing C without a symbol table (the typedef problem):
+* 'T * x ;' and casts like '(x) - 1' parse with the typedef interpretation of the standard's
+  ambiguity (declaration / cast), even if T or x is not really a typedef name.
+* A block-scope declaration that starts with a bare typedef name must declare something that
+  starts with '*', an identifier, or '(*'. This keeps calls like 'f(x);' expressions.
+* declaration-specifiers must contain a type specifier (C89 implicit int is not supported),
+  and once a typedef name is used as the type, only qualifiers may follow.
+* Digraphs, trigraphs and line continuations outside of preprocessor lines are not supported.
+* The grammar accepts a superset of C: Constraint violations (e.g. 'x + int') are not
+  detected, exactly like in the standard's own grammar.") ;
+
+
+:startRule(TranslationUnit) ;
+:whitespace(Whitespace) ;
+
+
+// ===========================================================================
+// A.2.4 External definitions
+// ===========================================================================
+
+TranslationUnit     = { ExternalDeclaration } ;
+
+// The function definition is tried first: A declaration would consume its specifiers and
+// declarator too, but then fails locally at the '{' of the body.
+ExternalDeclaration = FunctionDefinition | Declaration ;
+
+// The declarator text of every function definition is collected for the summary.
+FunctionDefinition  = DeclarationSpecifiers Declarator <~~ pushg(up.in) ~~>
+                      [ DeclarationList ] CompoundStatement <~~ funcs.push(popg()) ~~> ;
+
+// Old style (K&R) parameter declarations between declarator and body.
+DeclarationList     = Declaration { Declaration } ;
+
+
+// ===========================================================================
+// A.2.2 Declarations
+// ===========================================================================
+
+Declaration         <~~ declCount++ ~~>
+                    = DeclarationSpecifiers [ InitDeclaratorList ] ";" ;
+
+// declaration-specifiers, restructured so that the greedy repetition can never swallow the
+// declarator: Type keywords may repeat (unsigned long long), but a typedef name is a
+// complete type on its own, so after it only keyword-led specifiers (qualifiers, storage
+// classes) are allowed. Without this restriction, 'int x;' would parse 'x' as a second
+// type specifier and the parser could not back out of a greedy repetition.
+DeclarationSpecifiers = { NonTypeSpecifier }
+                        ( KwTypeSpecifier { NonTypeSpecifier | KwTypeSpecifier }
+                        | TypedefName { NonTypeSpecifier }
+                        ) ;
+
+NonTypeSpecifier    = StorageClassSpecifier | TypeQualifier | FunctionSpecifier ;
+
+StorageClassSpecifier = KwTypedef | KwExtern | KwStatic | KwAuto | KwRegister ;
+TypeQualifier         = KwConst | KwRestrict | KwVolatile ;
+FunctionSpecifier     = KwInline ;
+
+// All type specifiers that start with a keyword. A typedef name (the only non-keyword
+// type specifier) is handled separately, see DeclarationSpecifiers.
+KwTypeSpecifier     = KwVoid | KwChar | KwShort | KwInt | KwLong | KwFloat | KwDouble
+                    | KwSigned | KwUnsigned | KwBool | KwComplex | KwImaginary
+                    | StructOrUnionSpecifier | EnumSpecifier ;
+
+// Without a symbol table, every identifier can be a typedef name. The contexts where this
+// rule is used are ordered so that the misinterpretations fail and get backtracked.
+TypedefName         = Identifier ;
+
+InitDeclaratorList  = InitDeclarator { "," InitDeclarator } ;
+InitDeclarator      = Declarator [ "=" Initializer ] ;
+
+StructOrUnionSpecifier = ( KwStruct | KwUnion )
+                         ( [ Identifier ] "{" StructDeclarationList "}" | Identifier ) ;
+
+StructDeclarationList = StructDeclaration { StructDeclaration } ;
+StructDeclaration     = SpecifierQualifierList StructDeclaratorList ";" ;
+
+// Like DeclarationSpecifiers, but only type specifiers and qualifiers (see there for the
+// reason of the keyword / typedef name split).
+SpecifierQualifierList = { TypeQualifier }
+                         ( KwTypeSpecifier { TypeQualifier | KwTypeSpecifier }
+                         | TypedefName { TypeQualifier }
+                         ) ;
+
+StructDeclaratorList  = StructDeclarator { "," StructDeclarator } ;
+StructDeclarator      = Declarator [ ":" ConstantExpression ]
+                      | ":" ConstantExpression ;
+
+EnumSpecifier       = KwEnum ( [ Identifier ] "{" EnumeratorList [ "," ] "}" | Identifier ) ;
+EnumeratorList      = Enumerator { "," Enumerator } ;
+Enumerator          = Identifier [ "=" ConstantExpression ] ;
+
+Declarator          = [ Pointer ] DirectDeclarator ;
+DirectDeclarator    = ( Identifier | "(" Declarator ")" ) { DeclaratorSuffix } ;
+
+// The array form is a small superset of C99: it also accepts 'static' combined with '*'.
+DeclaratorSuffix    = "[" { TypeQualifier | KwStatic } [ AssignmentExpression | "*" ] "]"
+                    | "(" ParameterTypeList ")"
+                    | "(" [ IdentifierList ] ")" ;
+
+Pointer             = "*" { TypeQualifier } [ Pointer ] ;
+
+ParameterTypeList   = ParameterList [ "," "..." ] ;
+ParameterList       = ParameterDeclaration { "," ParameterDeclaration } ;
+
+// The standard resolves the declarator / abstract-declarator ambiguity towards the
+// declarator, so it is tried first here too.
+ParameterDeclaration = DeclarationSpecifiers ( Declarator | [ AbstractDeclarator ] ) ;
+
+// Old style (K&R) parameter names. Mostly unreachable, because a lone identifier already
+// parses as a parameter declaration with a typedef name type (the standard's ambiguity).
+IdentifierList      = Identifier { "," Identifier } ;
+
+TypeName            = SpecifierQualifierList [ AbstractDeclarator ] ;
+
+AbstractDeclarator  = Pointer [ DirectAbstractDeclarator ]
+                    | DirectAbstractDeclarator ;
+
+DirectAbstractDeclarator = ( "(" ( AbstractDeclarator | [ ParameterTypeList ] ) ")"
+                           | AbstractArraySuffix
+                           )
+                           { AbstractDeclaratorSuffix } ;
+AbstractDeclaratorSuffix = AbstractArraySuffix
+                         | "(" [ ParameterTypeList ] ")" ;
+AbstractArraySuffix      = "[" { TypeQualifier | KwStatic } [ AssignmentExpression | "*" ] "]" ;
+
+// The brace form is tried first because it fails immediately for everything else.
+Initializer         = "{" InitializerList [ "," ] "}"
+                    | AssignmentExpression ;
+InitializerList     = [ Designation ] Initializer { "," [ Designation ] Initializer } ;
+Designation         = Designator { Designator } "=" ;
+Designator          = "[" ConstantExpression "]"
+                    | "." Identifier ;
+
+
+// ===========================================================================
+// A.2.3 Statements
+// ===========================================================================
+
+// The expression statement must be the last alternative: Every keyword led statement would
+// otherwise be consumed as expression first (e.g. 'while (x);' as a call to 'while').
+Statement           <~~ stmtCount++ ~~>
+                    = LabeledStatement
+                    | CompoundStatement
+                    | SelectionStatement
+                    | IterationStatement
+                    | JumpStatement
+                    | ExpressionStatement ;
+
+LabeledStatement    = KwCase ConstantExpression ":" Statement
+                    | KwDefault ":" Statement
+                    | Identifier ":" Statement ;
+
+CompoundStatement   = "{" { BlockItem } "}" ;
+
+// The declaration is tried first: 'T *p;' must be a declaration although it would also
+// parse as a multiplication statement. See BlockDeclaration for the opposite protection.
+BlockItem           = BlockDeclaration | Statement ;
+
+// Block scope declarations. A declaration that starts with a keyword is unambiguous. A
+// declaration that starts with a bare typedef name is restricted, so that function calls
+// like 'f(x);' stay expression statements (a general declarator would accept '(x)' as a
+// parenthesized declarator and turn every such call into a declaration of x with type f).
+BlockDeclaration    <~~ declCount++ ~~>
+                    = { NonTypeSpecifier } KwTypeSpecifier { NonTypeSpecifier | KwTypeSpecifier } [ InitDeclaratorList ] ";"
+                    | NonTypeSpecifier { NonTypeSpecifier } TypedefName { NonTypeSpecifier } [ InitDeclaratorList ] ";"
+                    | TypedefName { NonTypeSpecifier } [ RestrictedInitDeclaratorList ] ";" ;
+
+RestrictedInitDeclaratorList = RestrictedInitDeclarator { "," InitDeclarator } ;
+RestrictedInitDeclarator     = RestrictedDeclarator [ "=" Initializer ] ;
+
+// A declarator that cannot be confused with a function call: it has to start with '*',
+// with '(*' (function pointer), or directly with the declared identifier.
+RestrictedDeclarator = Pointer DirectDeclarator
+                     | "(" Pointer DirectDeclarator ")" { DeclaratorSuffix }
+                     | Identifier { DeclaratorSuffix } ;
+
+ExpressionStatement = [ Expression ] ";" ;
+
+SelectionStatement  = KwIf "(" Expression ")" Statement [ KwElse Statement ]
+                    | KwSwitch "(" Expression ")" Statement ;
+
+IterationStatement  = KwWhile "(" Expression ")" Statement
+                    | KwDo Statement KwWhile "(" Expression ")" ";"
+                    | KwFor "(" ( BlockDeclaration | [ Expression ] ";" ) [ Expression ] ";" [ Expression ] ")" Statement ;
+
+JumpStatement       = KwGoto Identifier ";"
+                    | KwContinue ";"
+                    | KwBreak ";"
+                    | KwReturn [ Expression ] ";" ;
+
+
+// ===========================================================================
+// A.2.1 Expressions
+// ===========================================================================
+
+Expression          = AssignmentExpression { "," AssignmentExpression } ;
+
+// The assignment form is tried first. For a non-assignment it fails cheaply at the missing
+// assignment operator and falls back to the conditional expression.
+AssignmentExpression = UnaryExpression AssignmentOperator AssignmentExpression
+                     | ConditionalExpression ;
+
+AssignmentOperator  = "=" | "*=" | "/=" | "%=" | "+=" | "-=" | "<<=" | ">>=" | "&=" | "^=" | "|=" ;
+
+ConstantExpression  = ConditionalExpression ;
+
+ConditionalExpression = LogicalOrExpression [ "?" Expression ":" ConditionalExpression ] ;
+
+LogicalOrExpression  = LogicalAndExpression { "||" LogicalAndExpression } ;
+LogicalAndExpression = InclusiveOrExpression { "&&" InclusiveOrExpression } ;
+InclusiveOrExpression = ExclusiveOrExpression { "|" ExclusiveOrExpression } ;
+ExclusiveOrExpression = AndExpression { "^" AndExpression } ;
+
+// The '&' operator needs the AmpEnd lookahead: In 'a && b' a plain '&' would match and the
+// rest '& b' would still parse as taking the address of b, hiding the logical and.
+AndExpression       = EqualityExpression { "&" AmpEnd EqualityExpression } ;
+
+// Two-char operators before their one-char prefixes ("<=" before "<").
+EqualityExpression   = RelationalExpression { ( "==" | "!=" ) RelationalExpression } ;
+RelationalExpression = ShiftExpression { ( "<=" | ">=" | "<" | ">" ) ShiftExpression } ;
+ShiftExpression      = AdditiveExpression { ( "<<" | ">>" ) AdditiveExpression } ;
+AdditiveExpression   = MultiplicativeExpression { ( "+" | "-" ) MultiplicativeExpression } ;
+MultiplicativeExpression = CastExpression { ( "*" | "/" | "%" ) CastExpression } ;
+
+// The cast form must be tried first: If '(int)x' parsed its '(int)' as a parenthesized
+// expression, the parser would commit to it and could never come back for the cast. The
+// price of this order is the standard's cast ambiguity: '(x) - 1' becomes a cast to the
+// (possible) typedef name x, as in every parser without a symbol table.
+CastExpression      = "(" TypeName ")" CastExpression
+                    | UnaryExpression ;
+
+// "++" and "--" before the unary operators, otherwise '+' and '-' would split them.
+UnaryExpression     = "++" UnaryExpression
+                    | "--" UnaryExpression
+                    | UnaryOperator CastExpression
+                    | KwSizeof ( "(" TypeName ")" | UnaryExpression )
+                    | PostfixExpression ;
+
+UnaryOperator       = @"&*+-~!" ;
+
+// The compound literal is tried first because a parenthesized expression would consume its
+// '(...)' and then strand the '{' (the parser cannot reconsider a committed alternative).
+PostfixExpression   = ( CompoundLiteral | PrimaryExpression ) { PostfixSuffix } ;
+
+CompoundLiteral     = "(" TypeName ")" "{" InitializerList [ "," ] "}" ;
+
+PostfixSuffix       = "[" Expression "]"
+                    | "(" [ ArgumentExpressionList ] ")"
+                    | "." Identifier
+                    | "->" Identifier
+                    | "++"
+                    | "--" ;
+
+ArgumentExpressionList = AssignmentExpression { "," AssignmentExpression } ;
+
+// Constants and strings first: They fail fast for identifiers, but an identifier would
+// eat the 'L' prefix of a wide string or char.
+PrimaryExpression   = Constant
+                    | StringLiteralSequence
+                    | Identifier
+                    | "(" Expression ")" ;
+
+// Adjacent string literals are concatenated in C, so they form one primary expression.
+StringLiteralSequence = StringLiteral { StringLiteral } ;
+
+
+// ===========================================================================
+// A.1 Lexical grammar
+// ===========================================================================
+// All multi-char lexical elements switch off the automatic whitespace skipping inside
+// themselves (the ':whitespace()' / ':whitespace(Whitespace)' pairs), because '1 2' must
+// not become the number '12' and 'a b' not the identifier 'ab'.
+
+// --- A.1.3 / A.1.4 Identifiers ---
+
+Identifier          = IdentifierStart :whitespace() { IdentifierChar } :whitespace(Whitespace) ;
+IdentifierStart     = "a"..."z" | "A"..."Z" | "_" | UniversalCharacterName ;
+IdentifierChar      = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | UniversalCharacterName ;
+
+UniversalCharacterName = "\\u" HexQuad | "\\U" HexQuad HexQuad ;
+HexQuad             = HexDigit HexDigit HexDigit HexDigit ;
+
+// --- A.1.5 Constants ---
+
+// The floating constant is tried first: An integer would consume the digits before the
+// '.' or exponent. For a plain integer the floating alternative fails at the missing
+// '.' / exponent and gets backtracked.
+Constant            = FloatingConstant
+                    | IntegerConstant
+                    | CharacterConstant ;
+
+IntegerConstant     = ( HexadecimalConstant | OctalConstant | DecimalConstant )
+                      :whitespace() [ IntegerSuffix ] :whitespace(Whitespace) ;
+
+// Hex before octal: Octal would already match the '0' of '0x'.
+HexadecimalConstant = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+OctalConstant       = "0" :whitespace() { "0"..."7" } :whitespace(Whitespace) ;
+DecimalConstant     = "1"..."9" :whitespace() { Digit } :whitespace(Whitespace) ;
+
+IntegerSuffix       = ( "u" | "U" ) [ "ll" | "LL" | "l" | "L" ]
+                    | ( "ll" | "LL" | "l" | "L" ) [ "u" | "U" ] ;
+
+FloatingConstant    = HexadecimalFloatingConstant | DecimalFloatingConstant ;
+
+DecimalFloatingConstant = FractionalConstant :whitespace() [ ExponentPart ] [ FloatingSuffix ] :whitespace(Whitespace)
+                        | DigitSequence :whitespace() ExponentPart [ FloatingSuffix ] :whitespace(Whitespace) ;
+
+// '1.5' and '.5' are matched by the first alternative, '1.' only by the second.
+FractionalConstant  = [ DigitSequence ] "." :whitespace() DigitSequence :whitespace(Whitespace)
+                    | DigitSequence "." ;
+
+ExponentPart        = ( "e" | "E" ) :whitespace() [ "+" | "-" ] DigitSequence :whitespace(Whitespace) ;
+
+// Note: The mantissa is a separate production, because an inline command directly followed
+// by a group ( :whitespace() (...) ) would be parsed as a counted repetition by the ABNF.
+HexadecimalFloatingConstant = ( "0x" | "0X" ) :whitespace() HexMantissa
+                              ( "p" | "P" ) [ "+" | "-" ] DigitSequence
+                              [ FloatingSuffix ] :whitespace(Whitespace) ;
+HexMantissa         = [ HexDigits ] "." HexDigits
+                    | HexDigits [ "." ] ;
+
+FloatingSuffix      = @"flFL" ;
+
+DigitSequence       = Digit :whitespace() { Digit } :whitespace(Whitespace) ;
+HexDigits           = HexDigit :whitespace() { HexDigit } :whitespace(Whitespace) ;
+Digit               = "0"..."9" ;
+HexDigit            = "0"..."9" | "a"..."f" | "A"..."F" ;
+
+CharacterConstant   = ( "L" :whitespace() "'" | "'" ) :whitespace()
+                      CChar { CChar }
+                      "'" :whitespace(Whitespace) ;
+// Any character except ', \ and newline; or an escape sequence.
+CChar               = EscapeSequence
+                    | "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."&" | "("..."[" | "]"..."\U0010ffff" ;
+
+// --- A.1.6 String literals ---
+
+StringLiteral       = ( "L" :whitespace() '"' | '"' ) :whitespace()
+                      { SChar }
+                      '"' :whitespace(Whitespace) ;
+// Any character except ", \ and newline; or an escape sequence.
+SChar               = EscapeSequence
+                    | "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."!" | "#"..."[" | "]"..."\U0010ffff" ;
+
+// Simple, octal, hex and universal escapes. The octal form takes at most three digits.
+// The char set of the simple escapes also contains the backslash itself.
+EscapeSequence      = "\\" ( @~~'"?\abfnrtv~~
+                           | "x" HexDigit { HexDigit }
+                           | "u" HexQuad | "U" HexQuad HexQuad
+                           | "0"..."7" [ "0"..."7" [ "0"..."7" ] ]
+                           ) ;
+
+// --- A.1.2 Keywords ---
+// Every keyword is followed by the KwEnd lookahead, so it never matches the beginning of
+// a longer identifier ('doubled' is not 'double' 'd'). This also makes the keywords
+// independent of their order inside alternatives.
+
+KwAuto      = "auto" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwChar      = "char" KwEnd ;
+KwConst     = "const" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwDefault   = "default" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwDouble    = "double" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwExtern    = "extern" KwEnd ;
+KwFloat     = "float" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwGoto      = "goto" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwInline    = "inline" KwEnd ;
+KwInt       = "int" KwEnd ;
+KwLong      = "long" KwEnd ;
+KwRegister  = "register" KwEnd ;
+KwRestrict  = "restrict" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwShort     = "short" KwEnd ;
+KwSigned    = "signed" KwEnd ;
+KwSizeof    = "sizeof" KwEnd ;
+KwStatic    = "static" KwEnd ;
+KwStruct    = "struct" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwTypedef   = "typedef" KwEnd ;
+KwUnion     = "union" KwEnd ;
+KwUnsigned  = "unsigned" KwEnd ;
+KwVoid      = "void" KwEnd ;
+KwVolatile  = "volatile" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwBool      = "_Bool" KwEnd ;
+KwComplex   = "_Complex" KwEnd ;
+KwImaginary = "_Imaginary" KwEnd ;
+
+// The negative lookahead for the keyword boundary: If the next char would continue an
+// identifier, a token is returned that can never match (real C source contains no \x01),
+// which makes the keyword fail and the parser backtrack. Otherwise nothing is returned
+// and the parsing just continues.
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+// The same technique for '&': fail if another '&' follows (then it is the logical and).
+AmpEnd = :script(~~
+    (function() {
+        return (c.peek(0) === 38) ? abnf.newToken("\x01amp-boundary", 0) : undefined
+    })()
+~~) ;
+
+
+// ===========================================================================
+// Whitespace: spaces, comments and preprocessor lines
+// ===========================================================================
+
+Whitespace          = { @+" \t\r\n" | Comment | PreprocessorLine } ;
+
+Comment             = LineComment | BlockComment ;
+
+LineComment         = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+
+// The body consumes stars only when they are not part of the closing '*/'. A failing body
+// iteration is rolled back, so comments like '/* foo **/' close correctly.
+BlockComment        = "/*" :whitespace()
+                      { NotStar | "*" { "*" } NotStarSlash }
+                      "*" { "*" } "/" :whitespace(Whitespace) ;
+
+// A preprocessor directive is skipped up to the end of its (possibly continued) line.
+// Note: A block comment that spans lines inside a directive is not supported.
+PreprocessorLine    = "#" :whitespace() { LineContinuation | NotNewline } :whitespace(Whitespace) ;
+LineContinuation    = "\\" [ "\r" ] "\n" ;
+
+NotNewline          = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar             = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash        = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+
+// ===========================================================================
+// Compile step: print a small summary of the parsed translation unit
+// ===========================================================================
+
+:startScript(~~
+    var funcs = []
+    var declCount = 0
+    var stmtCount = 0
+
+    c.compile(c.asg)
+
+    println("C parse OK: " + funcs.length + " function definition(s), "
+            + declCount + " declaration(s), " + stmtCount + " statement(s).")
+    for (var i = 0; i < funcs.length; i++) {
+        println("  function: " + funcs[i])
+    }
+~~) ;

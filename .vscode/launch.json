@@ -47,6 +47,12 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt"]
         },
         {
+            "name": "C99",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/c.abnf", "-b", "tests/c-test-1.c", "-q"]
+        },
+        {
             "name": "---------",
             "type": "go",
             "request": "launch",
