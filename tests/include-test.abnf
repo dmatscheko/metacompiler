@@ -1,4 +1,4 @@
-:title("Parse and compile from JS") ;
+:title("Include test") ;
 
 // This includes the rule that can resolve include-test.txt:
 :include("include-test-lib.abnf") ;

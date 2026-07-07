@@ -41,10 +41,46 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir.abnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
-            "name": "TinyC Variant",
+            "name": "TinyC compiler",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt", "-q"]
+        },
+        {
+            "name": "TinyC compiler (primes)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-2.txt", "-q"]
+        },
+        {
+            "name": "TinyC interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc_interpreter.abnf", "-b", "tests/tinyc-test-1.txt", "-q"]
+        },
+        {
+            "name": "Lisp interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/lisp_interpreter.abnf", "-b", "tests/lisp-test-1.txt", "-q"]
+        },
+        {
+            "name": "Lisp to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/lisp-to-llvm-ir.abnf", "-b", "tests/lisp-test-1.txt", "-q"]
+        },
+        {
+            "name": "Calculator to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-to-llvm-ir.abnf", "-b", "tests/calculator_formula.txt", "-q"]
+        },
+        {
+            "name": "Brainfuck (syntax only)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck.bnf", "-b", "tests/brainfuck-test-1.txt", "-q"]
         },
         {
             "name": "C99",

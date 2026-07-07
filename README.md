@@ -115,7 +115,8 @@ Factor      =
         ")"
     )
     |
-    Number                      <~~pushg(parseFloat(up.in))~~>
+    // The grammar allows a comma as decimal separator, parseFloat() does not.
+    Number                      <~~pushg(parseFloat(up.in.replace(",", ".")))~~>
     ;
 
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
@@ -147,6 +148,26 @@ or, to parse a C file with the full C99 grammar:
 ```
 go run . -a tests/c.abnf -b tests/c-test-1.c -q
 ```
+
+#### The examples in tests/
+
+Every language in `tests/` has at least one interpreter and one compiler. The compilers
+generate LLVM IR and immediately execute it with the built-in IR interpreter (`llvm.Run`),
+and the test programs are self checking: the exit code of the run is 0 on success.
+
+| Language   | Interpreter                              | Compiler (to LLVM IR)        | Test inputs                                 |
+| ---------- | ---------------------------------------- | ---------------------------- | ------------------------------------------- |
+| Calculator | calculator-1.abnf, calculator-2.abnf     | calculator-to-llvm-ir.abnf   | calculator_formula.txt                      |
+| Brainfuck  | brainfuck_interpreter.abnf               | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt  |
+| TinyC      | tinyc_interpreter.abnf                   | tinyc.abnf                   | tinyc-test-1.txt, tinyc-test-2.txt          |
+| Lisp       | lisp_interpreter.abnf                    | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                             |
+| C (C99)    | (grammar only)                           | (grammar only)               | c.abnf parses c-test-1.c                    |
+
+Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
+ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck.bnf as syntax only variant), the feature
+demos (tlv-test, parser-script-test, include-test, parse-and-compile-from-js, llvm-ir-tests),
+and two grammars that deliberately fail to demonstrate the parser limits
+(smaller-match-first-test, infinite-loop).
 
 ### High level overview
 
@@ -642,7 +663,9 @@ The functions and constants are exposed to JS as:
   * __llvm.Callgraph(m ir.Module) string__  
   The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. online with the [Graphviz visual editor](http://magjac.com/graphviz-visual-editor/)).
   * __llvm.Eval(m ir.Module, f string) uint32__  
-  The function `llvm.Eval(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
+  The function `llvm.Eval(m ir.Module, f string)` executes the function `f` inside the IR module `m` with the built-in IR interpreter and returns the resulting uint32.
+  * __llvm.Run(m ir.Module, f string, input string) {Ret uint32, Out string}__  
+  Like `llvm.Eval()`, but `input` is what `getchar()` reads (can be left out), `Out` is everything the program wrote via `putchar()`/`puts()`, and `Ret` is the return value. The interpreter supports the integer subset of LLVM IR that the compiler grammars generate: alloca/load/store, getelementptr into arrays, integer arithmetic and comparisons, zext/sext/trunc, select, phi, branches, calls, and the externals putchar, getchar, puts and abs.
 
 ## Further Examples
 
@@ -714,17 +737,23 @@ Code        = '~~' :whitespace() { [ "~" ] AllButTilde } <~~ push(abnf.newToken(
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
 AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | @"\t\n\r !" ; // Readable ASCII without double and single quotes.
-AsciiNoLb   = " "..."~" | "\t" ; // Readable ASCII without line breaks (CR and LF).
-AsciiNoStSl = "\x00"...")" | "+"..."." | "0"..."~" ; // All ASCII without star (*) and slash (/).
-AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
+NoLinebreak = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ; // All chars except the line feed.
+NoStar      = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ; // All chars except the star (*).
+NoStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ; // All chars except star (*) and slash (/).
+AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\U0010ffff" ; // All chars. Only tilde is escaped.
 
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
             = "0" | "1"..."9" { "0"..."9" } ;
 
 Whitespace  = { @+"\t\n\r " | Comment } ;
 
-Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(Whitespace) ;
-LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(Whitespace) ;
+Comment     = LineComment | BlockComment ;
+// The body consumes stars only when they are not part of the closing */. A failing body
+// iteration is rolled back, so comments like /* foo **/ close correctly.
+BlockComment = "/*" :whitespace() { NoStar | "*" { "*" } NoStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+// The line feed is not part of the comment; it is consumed as ordinary whitespace, so a
+// line comment can also end at the end of the file.
+LineComment = "//" :whitespace() { NoLinebreak } :whitespace(Whitespace) ;
 
 // ---
 
@@ -1221,16 +1250,31 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"AsciiNoLb", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" "
-                            }, &r.Rule{Operator:r.Token, String:"~"
+    }, &r.Rule{Operator:r.Production, String:"NoLinebreak", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
+                            }, &r.Rule{Operator:r.Token, String:"\t"
                             }
                         }
-                    }, &r.Rule{Operator:r.Token, String:"\t"
+                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\v"
+                            }, &r.Rule{Operator:r.Token, String:"\U0010ffff"
+                            }
+                        }
                     }
                 }
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"AsciiNoStSl", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
+    }, &r.Rule{Operator:r.Production, String:"NoStar", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
+                            }, &r.Rule{Operator:r.Token, String:")"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"+"
+                            }, &r.Rule{Operator:r.Token, String:"\U0010ffff"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"NoStarSlash", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
                             }, &r.Rule{Operator:r.Token, String:")"
                             }
                         }
@@ -1239,7 +1283,7 @@ This output is exactly the data structure that controls the parser when it is us
                             }
                         }
                     }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"0"
-                            }, &r.Rule{Operator:r.Token, String:"~"
+                            }, &r.Rule{Operator:r.Token, String:"\U0010ffff"
                             }
                         }
                     }
@@ -1252,7 +1296,7 @@ This output is exactly the data structure that controls the parser when it is us
                         }
                     }, &r.Rule{Operator:r.Token, String:"\\~"
                     }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x7f"
-                            }, &r.Rule{Operator:r.Token, String:"\uffff"
+                            }, &r.Rule{Operator:r.Token, String:"\U0010ffff"
                             }
                         }
                     }
@@ -1289,34 +1333,38 @@ This output is exactly the data structure that controls the parser when it is us
             }
         }
     }, &r.Rule{Operator:r.Production, String:"Comment", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"LineComment"
-                    }, &r.Rule{Operator:r.Sequence, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"/*"
-                            }, &r.Rule{Operator:r.Command, String:"whitespace"
-                            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"*"
+                    }, &r.Rule{Operator:r.Identifier, String:"BlockComment"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"BlockComment", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"/*"
+            }, &r.Rule{Operator:r.Command, String:"whitespace"
+            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"NoStar"
+                            }, &r.Rule{Operator:r.Sequence, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"*"
+                                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"*"
                                             }
                                         }
-                                    }, &r.Rule{Operator:r.Identifier, String:"AsciiNoStSl"
-                                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"/"
-                                            }
-                                        }
-                                    }
-                                }
-                            }, &r.Rule{Operator:r.Token, String:"*/"
-                            }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
+                                    }, &r.Rule{Operator:r.Identifier, String:"NoStarSlash"
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }, &r.Rule{Operator:r.Token, String:"*"
+            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"*"
+                    }
+                }
+            }, &r.Rule{Operator:r.Token, String:"/"
+            }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
+                    }
+                }
             }
         }
     }, &r.Rule{Operator:r.Production, String:"LineComment", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"//"
             }, &r.Rule{Operator:r.Command, String:"whitespace"
-            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"AsciiNoLb"
-                    }
-                }
-            }, &r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"\n"
-                    }, &r.Rule{Operator:r.Token, String:"\r"
+            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"NoLinebreak"
                     }
                 }
             }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"

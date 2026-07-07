@@ -1,41 +1,46 @@
 :title("LLVM IR tests") ;
+:description("Builds an LLVM IR module by hand and checks the built-in IR interpreter:
+straight arithmetic (llvm.Eval), globals with loads and stores, external functions,
+control flow with blocks and phi, and putchar/getchar via llvm.Run. Exits with 1 on the
+first mismatch, so this file is a self checking test.") ;
 
 
 :startScript(~~
 
     println("LLVM IR tests:\n------------------------------------")
 
+    var failures = 0
+    function check(name, got, want) {
+        if (got == want) {
+            println("ok   " + name + " = " + got)
+        } else {
+            println("FAIL " + name + " = " + got + ", wanted " + want)
+            failures++
+        }
+    }
+
     // Create convenience types and constants.
     var i32 = llvm.types.I32
+    var zero = llvm.constant.NewInt(i32, 0)
+    var one = llvm.constant.NewInt(i32, 1)
 
     // Create a new LLVM IR module.
     var m = llvm.ir.NewModule()
 
     // -----------------
-
-    var zero = llvm.constant.NewInt(i32, 0)
-    var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
-    var c = llvm.constant.NewInt(i32, 1)         // increment of the PRNG.
-
-    // Create an external function declaration and append it to the module.
-    //
-    //    int abs(int x);
-    var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
-
-    // Create a global variable definition and append it to the module.
+    // A linear congruential PRNG around a global variable and the external abs():
     //
     //    int seed = 0;
+    //    int rand(void) { seed = seed * 0x15A4E35 + 1; return abs(seed); }
+
+    var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
+    var c = one                                  // increment of the PRNG.
+
+    var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
     var seed = m.NewGlobalDef("seed", zero)
 
-    // Create a function definition and append it to the module.
-    //
-    //    int rand(void) { ... }
     var rand = m.NewFunc("rand", i32)
-
-    // Create an unnamed entry basic block and append it to the 'rand' function.
     var entry = rand.NewBlock("")
-
-    // Create instructions and append them to the entry basic block.
     var tmp1 = entry.NewLoad(i32, seed)
     var tmp2 = entry.NewMul(tmp1, a)
     var tmp3 = entry.NewAdd(tmp2, c)
@@ -44,19 +49,83 @@
     entry.NewRet(tmp4)
 
     // -----------------
+    //    int test(void) { return 32 + 7; }
 
-    // int test() { ... }
     var test = m.NewFunc("test", i32)
-
-    // Create an unnamed entry basic block and append it to the 'test' function.
     var entry = test.NewBlock("")
-    // Create instructions and append them to the entry basic block.
-
-    // %3 = add 
     var tmp = entry.NewAdd(llvm.constant.NewInt(i32, 32), llvm.constant.NewInt(i32, 7))
-
-    // ret i32 %3
     entry.NewRet(tmp)
+
+    // -----------------
+    //    int sum(int n) { int s = 0; int i = 1; while (i <= n) { s += i; i++; } return s; }
+    // Exercises alloca, load, store, icmp, br and condbr.
+
+    var n = llvm.ir.NewParam("n", i32)
+    var sum = m.NewFunc("sum", i32, n)
+    var sumEntry = sum.NewBlock("entry")
+    var sPtr = sumEntry.NewAlloca(i32)
+    var iPtr = sumEntry.NewAlloca(i32)
+    sumEntry.NewStore(zero, sPtr)
+    sumEntry.NewStore(one, iPtr)
+    var head = sum.NewBlock("head")
+    sumEntry.NewBr(head)
+    var iv = head.NewLoad(i32, iPtr)
+    var cond = head.NewICmp(llvm.enum.IPredSLE, iv, n)
+    var body = sum.NewBlock("body")
+    var exit = sum.NewBlock("exit")
+    head.NewCondBr(cond, body, exit)
+    body.NewStore(body.NewAdd(body.NewLoad(i32, sPtr), body.NewLoad(i32, iPtr)), sPtr)
+    body.NewStore(body.NewAdd(body.NewLoad(i32, iPtr), one), iPtr)
+    body.NewBr(head)
+    exit.NewRet(exit.NewLoad(i32, sPtr))
+
+    // -----------------
+    //    int max(int x, int y) { return (x > y) ? x : y; }
+    // Exercises the phi instruction.
+
+    var px = llvm.ir.NewParam("x", i32)
+    var py = llvm.ir.NewParam("y", i32)
+    var max = m.NewFunc("max", i32, px, py)
+    var maxEntry = max.NewBlock("")
+    var isGt = maxEntry.NewICmp(llvm.enum.IPredSGT, px, py)
+    var takeX = max.NewBlock("")
+    var takeY = max.NewBlock("")
+    var merge = max.NewBlock("")
+    maxEntry.NewCondBr(isGt, takeX, takeY)
+    takeX.NewBr(merge)
+    takeY.NewBr(merge)
+    var phi = merge.NewPhi(llvm.ir.NewIncoming(px, takeX), llvm.ir.NewIncoming(py, takeY))
+    merge.NewRet(phi)
+
+    // -----------------
+    // Wrappers with constant arguments, because Eval()/Run() start their function with
+    // zero filled parameters:
+    //    int callSum(void)  { return sum(10); }
+    //    int callMax1(void) { return max(3, 9); }
+    //    int callMax2(void) { return max(9, 3); }
+
+    var callSum = m.NewFunc("callSum", i32)
+    var csb = callSum.NewBlock("")
+    csb.NewRet(csb.NewCall(sum, llvm.constant.NewInt(i32, 10)))
+
+    var callMax1 = m.NewFunc("callMax1", i32)
+    var cm1b = callMax1.NewBlock("")
+    cm1b.NewRet(cm1b.NewCall(max, llvm.constant.NewInt(i32, 3), llvm.constant.NewInt(i32, 9)))
+
+    var callMax2 = m.NewFunc("callMax2", i32)
+    var cm2b = callMax2.NewBlock("")
+    cm2b.NewRet(cm2b.NewCall(max, llvm.constant.NewInt(i32, 9), llvm.constant.NewInt(i32, 3)))
+
+    // -----------------
+    //    int main(void) { putchar(getchar()); putchar(getchar()); return 0; }
+
+    var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
+    var extGetchar = m.NewFunc("getchar", i32)
+    var main = m.NewFunc("main", i32)
+    var mb = main.NewBlock("")
+    mb.NewCall(extPutchar, mb.NewCall(extGetchar))
+    mb.NewCall(extPutchar, mb.NewCall(extGetchar))
+    mb.NewRet(zero)
 
     // -----------------
 
@@ -66,7 +135,16 @@
     println("GRAPH:\n------------------------------------")
     println(llvm.Callgraph(m))
 
-    println("\nEVAL:\n------------------------------------")
-    println(llvm.Eval(m, "test"))
- 
+    println("\nEVAL / RUN:\n------------------------------------")
+    check("test()", llvm.Eval(m, "test"), 39)
+    check("rand()", llvm.Eval(m, "rand"), 1)   // The global seed starts fresh for every Eval/Run.
+    check("sum(10)", llvm.Eval(m, "callSum"), 55)
+    check("max(3, 9)", llvm.Eval(m, "callMax1"), 9)
+    check("max(9, 3)", llvm.Eval(m, "callMax2"), 9)
+    var res = llvm.Run(m, "main", "Hi")
+    check("main() echo", res.Out, "Hi")
+
+    if (failures > 0) { exit(1) }
+    println("All LLVM IR tests OK")
+
 ~~) ;
