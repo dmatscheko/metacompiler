@@ -40,7 +40,8 @@ Factor      =
         ")"
     )
     |
-    Number                      <~~pushg(parseFloat(up.in))~~>
+    // The grammar allows a comma as decimal separator, parseFloat() does not.
+    Number                      <~~pushg(parseFloat(up.in.replace(",", ".")))~~>
     ;
 
 Number      = ( "0" | "1"..."9" { "0"..."9" } )

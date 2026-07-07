@@ -1,0 +1,123 @@
+:title("Calculator to LLVM IR compiler") ;
+:description("Compiles a formula with + - * / and brackets into an LLVM IR module whose main()
+returns the result, runs that module with the built-in IR interpreter, and checks the
+machine result against a direct JS evaluation of the same formula.
+
+In contrast to the interpreting calculators (calculator-1.abnf, calculator-2.abnf) this
+variant works on integers, like C: '/' is a signed integer division that truncates.
+Every tag therefore pushes a pair {gen, val}: 'gen' emits the LLVM instructions for the
+subformula into a basic block, 'val' is the reference value computed directly in JS.
+
+The exit code is 0 exactly when the compiled result matches the reference value.") ;
+
+
+:startRule(Expression) ;
+
+Expression  =
+    (
+        Term
+        {
+            ( "+" | "-" )       <~~push(up.in)~~>
+            Term
+        }
+    )                           <~~
+                                // The local stack holds [pair, op, pair, op, pair, ...].
+                                push(foldChain(takeAll()))
+                                ~~>
+    ;
+
+Term        =
+    (
+        Factor
+        {
+            ( "*" | "/" )       <~~push(up.in)~~>
+            Factor
+        }
+    )                           <~~
+                                push(foldChain(takeAll()))
+                                ~~>
+    ;
+
+Factor      =
+    (
+        "("
+        Expression
+        ")"
+    )
+    |
+    Number                      <~~push(makeNumber(parseInt(up.in)))~~>
+    ;
+
+// Only integers: This calculator computes like C.
+Number      = "0" | "1"..."9" { "0"..."9" } ;
+
+
+:startScript(~~
+    // takeAll empties the local stack of the current tag and returns its items in push order.
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    var i32 = llvm.types.I32
+
+    function makeNumber(n) {
+        return {
+            gen: function(b) { return llvm.constant.NewInt(i32, n) },
+            val: n
+        }
+    }
+
+    // items = [pair, op, pair, op, pair, ...] -> one left folded pair.
+    function foldChain(items) {
+        return {
+            gen: function(b) {
+                var v = items[0].gen(b)
+                for (var i = 1; i < items.length; i += 2) {
+                    var w = items[i + 1].gen(b)
+                    if (items[i] == "+") { v = b.NewAdd(v, w) }
+                    if (items[i] == "-") { v = b.NewSub(v, w) }
+                    if (items[i] == "*") { v = b.NewMul(v, w) }
+                    if (items[i] == "/") { v = b.NewSDiv(v, w) }
+                }
+                return v
+            },
+            val: (function() {
+                var v = items[0].val
+                for (var i = 1; i < items.length; i += 2) {
+                    var w = items[i + 1].val
+                    if (items[i] == "+") { v = v + w }
+                    if (items[i] == "-") { v = v - w }
+                    if (items[i] == "*") { v = v * w }
+                    if (items[i] == "/") { v = (v / w) | 0 } // Truncate like LLVM sdiv.
+                }
+                return v
+            })()
+        }
+    }
+
+    var res = c.compile(c.asg)
+    var formula = res.stack[0] // The {gen, val} pair of the whole formula.
+
+    // int main() { return <formula>; }
+    var m = llvm.ir.NewModule()
+    var main = m.NewFunc("main", i32)
+    var b = main.NewBlock("")
+    b.NewRet(formula.gen(b))
+
+    // Show the compiler output (the LLVM IR module).
+    println(m)
+
+    // Run it and compare against the reference value.
+    var got = llvm.Run(m, "main").Ret | 0 // Ret is unsigned; reinterpret as int32.
+    println("Formula was:         " + ltr.in)
+    println("Compiled result:     " + got)
+    println("JS reference result: " + formula.val)
+    if (got != formula.val) {
+        println("MISMATCH!")
+        exit(1)
+    }
+    println("OK")
+~~) ;

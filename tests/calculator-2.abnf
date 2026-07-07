@@ -1,4 +1,8 @@
 :title("Other Tiny calculator") ;
+:description("Like calculator-1.abnf, but built on the local stacks (push/pop) instead of the
+global one (pushg/popg): The tag of a group sees the merged pushes of everything inside
+the group, so the whole chain 'Term op Term op Term ...' can be collected and folded
+left to right in one place.") ;
 
 
 :startRule(Expression) ;
@@ -6,35 +10,26 @@
 Expression  =
     (
         Term
-        ( "+" | "-" )       <~~push(up.in)~~>
-        Term
-    )                       <~~
-                            var t2 = pop()
-                            var op = pop()
-                            var t1 = pop()
-                            println("calculating " + t1 + " " + op + " " + t2)
-                            var res = (op=="+") ? t1 + t2 : t1 - t2
-                            push(res)
-                            ~~>
-    |
-    Term
+        {
+            ( "+" | "-" )       <~~push(up.in)~~>
+            Term
+        }
+    )                           <~~
+                                // The local stack now holds [value, op, value, op, value, ...].
+                                push(foldChain(takeAll()))
+                                ~~>
     ;
 
 Term        =
     (
         Factor
-        ( "*" | "/" )       <~~push(up.in)~~>
-        Factor
-    )                       <~~
-                            var t2 = pop()
-                            var op = pop()
-                            var t1 = pop()
-                            println("calculating " + t1 + " " + op + " " + t2)
-                            var res = (op=="*") ? t1 * t2 : t1 / t2
-                            push(res)
-                            ~~>
-    |
-    Factor
+        {
+            ( "*" | "/" )       <~~push(up.in)~~>
+            Factor
+        }
+    )                           <~~
+                                push(foldChain(takeAll()))
+                                ~~>
     ;
 
 Factor      =
@@ -44,15 +39,40 @@ Factor      =
         ")"
     )
     |
-    Number                  <~~push(parseFloat(up.in))~~>
+    // The grammar allows a comma as decimal separator, parseFloat() does not.
+    Number                      <~~push(parseFloat(up.in.replace(",", ".")))~~>
     ;
 
-Number      = ( "0" | Nonzero { "0" | Nonzero } )
-              [ ( "." | "," ) { "0" | Nonzero } ] ;
-Nonzero     = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+Number      = ( "0" | "1"..."9" { "0"..."9" } )
+              [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
 
 
 :startScript(~~
-    c.compile(c.asg)
-    println("\nRESULT: " + pop() + "\nFormula was: " + ltr.in)
+    // takeAll empties the local stack of the current tag and returns its items in push order.
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    // items = [value, op, value, op, value, ...] -> the left folded result.
+    function foldChain(items) {
+        var v = items[0]
+        for (var i = 1; i < items.length; i += 2) {
+            var op = items[i]
+            var w = items[i + 1]
+            println("calculating " + v + " " + op + " " + w)
+            if (op == "+") { v = v + w }
+            if (op == "-") { v = v - w }
+            if (op == "*") { v = v * w }
+            if (op == "/") { v = v / w }
+        }
+        return v
+    }
+
+    var res = c.compile(c.asg)
+    // The final value lies on the local stack of the topmost expression,
+    // which arrives here as the combined up.stack of the whole compilation.
+    println("\nRESULT: " + res.stack[0] + "\nFormula was: " + ltr.in)
 ~~) ;
