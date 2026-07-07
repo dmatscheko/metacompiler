@@ -1,277 +1,403 @@
-:title("Tiny C-ish language") ;
+:title("TinyC to LLVM IR compiler") ;
+:description("Compiles TinyC to an LLVM IR module and runs its main() with the built-in IR interpreter.
 
+TinyC is a small C like language: functions with int parameters, int variables with block
+scoping, if/else, while, do-while, for, return, assignments, ++/--, the operators
+|| && == != <= >= < > + - * / % and unary minus, calls (also recursive), and putchar(x)
+for output. Every function returns int. || and && evaluate both sides (no short circuit).
+
+The compilation works with closures: Every tag composes a small code generator function
+(a 'thunk') out of the thunks of its children. Expression thunks get the current basic
+block and return an LLVM value; statement thunks get the current block and return the
+block that the following code has to continue in. The Function rule finally runs the
+composed body thunk. This deferred style is needed because e.g. a while condition has to
+be emitted into the loop head block, which does not exist yet while the condition is parsed.
+
+The exit code of the metacompiler run is the value that main() returns, so TinyC test
+programs are self checking: they return 0 on success.
+The same language with the same semantics is interpreted directly by tinyc_interpreter.abnf.") ;
+
+
+// --- main rules
 
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
 Program     = { Function } ;
 
-Function    =
-            "func"
-            Id              <~~ pushg(up.in) ~~>
-            Parameter       <~~ var params = popg(); var fid = popg(); var f = m.NewFunc(fid, i32, params); var b = f.NewBlock(""); ~~>
-            Statement ;
+// The production level tag sees the merged pushes of all childs: [name, [params...], bodyThunk].
+Function    <~~ buildFunction() ~~>
+            = KwFunc Id <~~ push(up.in) ~~> Parameter Statement ;
 
-Parameter   =
-            "(" <~~ pushg([]) ~~>
-                [
-                    ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ~~>
-                    { "," ParamDecl <~~ pushg(append(popg(), llvm.ir.NewParam(pop(), i32))) ~~> }
-                ]
-            ")" ;
-ParamDecl   = "int" Id <~~ push(up.in) ~~> ;
+Parameter   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
+            = "(" [ ParamDecl { "," ParamDecl } ] ")" ;
+ParamDecl   = KwInt Id <~~ push(up.in) ~~> ;
 
-Statement   <~~ push({inB: f.NewBlock(""), outB: f.NewBlock("")}); b.NewRet(zero) ~~> // TODO
-            = IfElse | If | For | While | Do | Return | Block | SingleStmt | ZeroStmt ;
+// Every statement production pushes exactly one thunk: function(block) -> nextBlock.
+Statement   = Block | If | While | Do | For | Return | Declaration | Empty | ExprStmt ;
 
-// Each Statement, except the ones that are blank expressions, is a new variable scope. New scope: pushScope(), return to parent scope: popScope().
-// Each Statement must push itself on local stack and must consist of two blocks: {inB: beginBlock, outB: endblock}.
-IfElse      = "if" <~~ pushScope() ~~> ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ pushg(pop()) ~~> "else" Statement <~~ var trueB = popg(); var falseB = pop(); var comp = popg(); push(newIf(comp, trueB, falseB)); popScope() ~~> ;
-If          = "if" <~~ pushScope() ~~> ParenExpr1 <~~ pushg(pop()) ~~> Statement <~~ push(newIf(popg(), pop())); popScope() ~~> ;
-For         = "for" <~~ pushScope() ~~> ParenExpr3 Statement <~~ popScope() ~~> ;
-While       = "while" <~~ pushScope() ~~> ParenExpr1 Statement <~~ popScope() ~~> ;
-Do          = "do" <~~ pushScope() ~~> Statement "while" ParenExpr1 ";" <~~ popScope() ~~> ;
-Return      = "return" [ ResultExpr ] ";" ;
-Block       = "{" <~~ pushScope() ~~> { Statement } "}" <~~ popScope() ~~> ;
-SingleStmt  = Expression ";" ;
-ZeroStmt    = ";" ;
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
 
-ParenExpr1  =  "(" ResultExpr ")" ;
-ParenExpr3  =  "(" [ Declaration ] ";" [ ResultExpr ] ";" [ Expression ] ")" ;
+// [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
 
-Expression  = VoidExpr | ResultExpr ;
-VoidExpr    = Declaration | Assignment ;
-ResultExpr  = Test ;
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
 
-Declaration = ( AssignDecl | OnlyDecl ) { "," Declaration } ; // The ugly comma-declaration-method only because of the stupid decision to separate the entries in a for-loop with semicolon instead of comma.
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" ";" ;
 
-AssignDecl  <~~ var vp = null; ~~>
-            = "int" <~~ var vp = newVar(zero); /* vp is necessary here, because it is used at Assignment */ ~~>
-            Assignment ;
+// The three optional parts are wrapped with a kind marker, otherwise e.g.
+// 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = Declaration1 | Assignment ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:pop()}) ~~> = Assignment | Expression ;
 
-OnlyDecl    = "int" Id <~~ setVar(up.in, newVar(zero)); ~~> ;
+// [] or [exprThunk].
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
 
-Assignment  <~~ var expr = pop(); var id = pop(); if (!vp) { vp = getVar(id) }; var exprv = b.NewLoad(i32, expr); b.NewStore(exprv, vp); setVar(id, vp) ~~>
-            = Id <~~ push(up.in) ~~> "=" ResultExpr ;
+Declaration = Declaration1 ";" ;
+// int a = 1, b, c = a;  -- every InitDecl pushes one thunk, they get chained.
+Declaration1 <~~ push(makeSeq(takeAll())) ~~>
+            = KwInt InitDecl { "," InitDecl } ;
+InitDecl    <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
 
-Test        = Comp                  <~~ pushg(pop()) ~~>
-                ( "||" | "&&" )     <~~ pushg(pop()) ~~>
-                Comp                <~~ var vb = pop(); var op = popg(); var va = popg(); push(boolean(va, vb, op)) ~~>
-            | Comp ;
+Empty       <~~ push(function(b) { return b }) ~~>
+            = ";" ;
 
-Comp        = Sum                                           <~~ pushg(pop()) ~~>
-                // The two-char operators must be tried before their one-char prefixes ("<=" before "<"),
-                // because the parser always keeps the first match.
-                ( "<=" | ">=" | "==" | "!=" | "<" | ">" )   <~~ pushg(up.in) ~~>
-                Sum                                         <~~ var vb = pop(); var op = popg(); var va = popg(); push(compare(va, vb, op)) ~~>
-            | Sum ;
+ExprStmt    <~~ push(makeExprStmt(pop())) ~~>
+            = ( Assignment | Expression ) ";" ;
 
-Sum         = Term <~~ pushg(pop()) ~~> "+" Term <~~ var v1 = popg(); var v2 = pop(); var v = b.NewAdd(b.NewLoad(i32, v1), b.NewLoad(i32, v2)); var vp = newVar(v); push(vp); ~~>
-            | Term <~~ pushg(pop()) ~~> "-" Term <~~ var v1 = popg(); var v2 = pop(); var v = b.NewSub(b.NewLoad(i32, v1), b.NewLoad(i32, v2)); var vp = newVar(v); push(vp); ~~>
-            | Id <~~ pushg(up.in) ~~> "++" <~~ var vp = getVar(popg()); var v = b.NewAdd(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
-            | Id <~~ pushg(up.in) ~~> "--" <~~ var vp = getVar(popg()); var v = b.NewSub(b.NewLoad(i32, vp), one); b.NewStore(v, vp); push(vp); ~~>
-            | Term ;
+// Assignment is a statement (and a for clause), not a nested expression.
+Assignment  <~~ push(makeAssign(pop(), pop())) ~~>
+            = Id <~~ push(up.in) ~~> "=" Expression ;
 
-Term        = ParenExpr1
-            | Call
-            | Id    <~~ push(getVar(up.in)) ~~>
-            | Int ;
+// Every expression production pushes exactly one thunk: function(block) -> value.
+Expression  = OrExpr ;
 
-Call        = Id        <~~ pushg(up.in) ~~> 
-            "("         <~~ pushg([]); var paramsInterface = []; ~~>
-                [
-                    ResultExpr      <~~ pushg(append(popg(), pop())); paramsInterface.push(llvm.ir.NewParam("", i32)); ~~>
-                    {
-                        ","
-                        ResultExpr  <~~ pushg(append(popg(), pop())); paramsInterface.push(llvm.ir.NewParam("", i32)); ~~>
-                    }
-                ]
-            ")" <~~ var params = popg(); var id = popg(); push(b.NewCall(m.NewFunc(id, i32, paramsInterface), params)); ~~> ;
+OrExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = AndExpr { "||" <~~ push("||") ~~> AndExpr } ;
 
-Id          = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
-Int         <~~ push(newVar(llvm.constant.NewInt(i32, parseInt(up.in)))) ~~>
-            = "0" | "1"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+AndExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = CmpExpr { "&&" <~~ push("&&") ~~> CmpExpr } ;
 
-Whitespace  = @+" \t\r\n" ;
+// The two-char operators must be tried before their one-char prefixes ("<=" before "<"),
+// because the parser always keeps the first match.
+CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = Sum [ ( "<=" | ">=" | "==" | "!=" | "<" | ">" ) <~~ push(up.in) ~~> Sum ] ;
+
+Sum         <~~ push(foldBinary(takeAll())) ~~>
+            = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
+
+Term        <~~ push(foldBinary(takeAll())) ~~>
+            = Unary { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> Unary } ;
+
+Unary       = Neg | Primary ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" Unary ;
+
+Primary     = "(" Expression ")" | Call | IncDec | VarRef | Int ;
+
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+IncDec      <~~ push(makeIncDec(pop(), pop())) ~~>
+            = Id <~~ push(up.in) ~~> ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+Int         <~~ push(makeInt(parseInt(up.in))) ~~>
+            = ( "0" | "1"..."9" :whitespace() { "0"..."9" } ) :whitespace(Whitespace) ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+// The keywords end with a negative lookahead, so that e.g. 'interned' or 'iffy' stay identifiers.
+KwFunc      = "func" KwEnd ;
+KwInt       = "int" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// ---
 
 
 :startScript(~~
 
-var i32 = llvm.types.I32
-// var i32p = llvm.types.I32Ptr
-var zero = llvm.constant.NewInt(i32, 0)
-var one = llvm.constant.NewInt(i32, 1)
-
-var m = llvm.ir.NewModule()
-
-var f = m.NewFunc("_init", i32, null)
-var b = f.NewBlock("")
-b.NewCall(m.NewFunc("main", i32, null))
-b.NewRet(zero)
-
-var vars = {}
-var varsStack = []
-function pushScope() {
-    varsStack.push(vars)
-    vars = {}
-}
-function popScope() {
-    vars = varsStack.pop()
-}
-
-function newVar(v) {
-    var vx = b.NewAlloca(i32)
-    var vp = b.NewGetElementPtr(i32, vx, zero)
-    b.NewStore(v, vp);
-    return vp
-}
-
-function getVar(id) {
-    // vars[id] is always the innermost vars context.
-    if (vars[id] != null) return vars[id]
-
-    // varsStack[0] is global vars and is skipped here.
-    for (var i = varsStack.length-1; i >= 1; i--) {
-        if (varsStack[i][id] != null) return varsStack[i][id]
+    // takeAll empties the local stack of the current tag and returns its items in push
+    // order as a plain JS array. It only uses pop(), so it works independently of how
+    // the runtime wraps the Go slice behind up.stack.
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
     }
 
-    // The function params are before the global vars.
-    for (var i = 0; i < f.Params.length; i++) {
-        if (f.Params[i].LocalName == id) {
-            var vx = b.NewAlloca(i32)
-            var vp = b.NewGetElementPtr(i32, vx, zero)
-            b.NewStore(f.Params[i], vp)
-            return vp
-        } 
+    var i32 = llvm.types.I32
+    var zero = llvm.constant.NewInt(i32, 0)
+    var one = llvm.constant.NewInt(i32, 1)
+
+    var m = llvm.ir.NewModule()
+
+    // All known functions by name. A call to a not yet defined function creates the
+    // declaration; when its definition arrives later, blocks are added to the same object.
+    var funcs = {}
+    function getFunc(name, paramCount) {
+        var f = funcs[name]
+        if (f != undefined) return f
+        if (name == "putchar") { // The only builtin: int putchar(int).
+            f = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
+        } else {
+            var params = []
+            for (var i = 0; i < paramCount; i++) params.push(llvm.ir.NewParam("", i32))
+            f = m.NewFunc(name, i32, params)
+        }
+        funcs[name] = f
+        return f
     }
 
-    // varsStack[0] is global vars and is now evaluated.
-    if (varsStack.length > 0) { // varsStack.length == 0 would mean it is in the global scope. Then vars[id] would have contained the var already.
-        if (varsStack[0][id] != null) return varsStack[0][id]
+    // The function that is being built right now, and its counter for unreachable blocks.
+    var curF = null
+    var deadCount = 0
+
+    // The variable scopes (innermost last). Each scope maps a name to its alloca.
+    var scopes = []
+    function declVar(b, name) {
+        var ptr = b.NewAlloca(i32)
+        scopes[scopes.length - 1][name] = ptr
+        return ptr
+    }
+    function getVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (scopes[i][name] != undefined) return scopes[i][name]
+        }
+        println("Error: Variable not defined: " + name)
+        exit(1)
     }
 
-    println("Error: Variable not defined: " + id)
-    exit(1)
-}
+    // An i1 for conditional branches: value != 0.
+    function truth(b, v) { return b.NewICmp(llvm.enum.IPredNE, v, zero) }
+    // An i32 0/1 from an i1.
+    function toInt(b, v) { return b.NewZExt(v, i32) }
 
-function setVar(id, vp) {
-    vars[id] = vp
-}
+    // ----- Expression thunks: function(block) -> LLVM value -----
 
-function compare(vpa, vpb, op) {
-    if (vpa == null) {
-        println("Error in compare(): va is not defined.")
+    function makeInt(n) {
+        var c = llvm.constant.NewInt(i32, n)
+        return function(b) { return c }
     }
-    if (vpb == null) {
-        println("Error in compare(): vb is not defined.")
+    function makeVarRef(name) {
+        return function(b) { return b.NewLoad(i32, getVar(name)) }
     }
-    var comperator = null
-    if (op == "<") {
-        comperator = llvm.enum.IPredULT
-    } else if (op == ">") {
-        comperator = llvm.enum.IPredUGT
-    } else if (op == "<=") {
-        comperator = llvm.enum.IPredULE
-    } else if (op == ">=") {
-        comperator = llvm.enum.IPredUGE
-    } else if (op == "==") {
-        comperator = llvm.enum.IPredEQ
-    } else if (op == "!=") {
-        comperator = llvm.enum.IPredNE
+    function makeNeg(t) {
+        return function(b) { return b.NewSub(zero, t(b)) }
     }
-
-    var va = vpa
-    var vb = vpb
-    if (llvm.types.IsPointer(vpa.Typ)) {
-        va = b.NewLoad(i32, vpa)
+    function binOp(b, op, l, r) {
+        if (op == "+") return b.NewAdd(l, r)
+        if (op == "-") return b.NewSub(l, r)
+        if (op == "*") return b.NewMul(l, r)
+        if (op == "/") return b.NewSDiv(l, r)
+        if (op == "%") return b.NewSRem(l, r)
+        if (op == "||") return toInt(b, b.NewOr(truth(b, l), truth(b, r)))
+        if (op == "&&") return toInt(b, b.NewAnd(truth(b, l), truth(b, r)))
+        var pred = { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredSLT,
+                     ">": llvm.enum.IPredSGT, "<=": llvm.enum.IPredSLE, ">=": llvm.enum.IPredSGE }[op]
+        return toInt(b, b.NewICmp(pred, l, r))
     }
-    if (llvm.types.IsPointer(vpb.Typ)) {
-        vb = b.NewLoad(i32, vpb)
+    // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
+    function foldBinary(items) {
+        return function(b) {
+            var v = items[0](b)
+            for (var i = 1; i < items.length; i += 2) {
+                v = binOp(b, items[i], v, items[i + 1](b))
+            }
+            return v
+        }
     }
-
-    var condition = b.NewICmp(comperator, va, vb)
-    // printf("Cond: %#v\n", condition)
-    return condition
-}
-
-function boolean(vpa, vpb, op) {
-    if (vpa == null) {
-        println("Error in compare(): va is not defined.")
+    // items = [name, argThunk...] -> call thunk.
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function(b) {
+            var argValues = []
+            for (var i = 0; i < args.length; i++) argValues.push(args[i](b))
+            return b.NewCall(getFunc(name, args.length), argValues)
+        }
     }
-    if (vpb == null) {
-        println("Error in compare(): vb is not defined.")
-    }
-    var operator = null
-    if (op == "&&") {
-        operator = "=="
-    } else if (op == "||") {
-        operator = "!="
-    }
-
-    var va = vpa
-    if (llvm.types.IsPointer(vpa.Typ)) {
-        va = b.NewLoad(i32, vpa)
+    function makeIncDec(op, name) {
+        return function(b) {
+            var ptr = getVar(name)
+            var oldValue = b.NewLoad(i32, ptr)
+            b.NewStore(op == "++" ? b.NewAdd(oldValue, one) : b.NewSub(oldValue, one), ptr)
+            return oldValue // Post increment: the expression value is the old one.
+        }
     }
 
-    var resultp = newVar(va)
+    // ----- Statement thunks: function(block) -> block to continue in -----
 
-    var conditionVa = compare(va, zero, operator)
-
-    var endB = f.NewBlock("")   // every block of this function must end here
-    var secondB = f.NewBlock("")
-
-    b.NewCondBr(conditionVa, endB, secondB)
-
-    // inside second branch
-    b = secondB
-
-    var vb = vpb
-    if (llvm.types.IsPointer(vpb.Typ)) {
-        vb = b.NewLoad(i32, vpb)
+    function makeExprStmt(t) {
+        return function(b) { t(b); return b }
     }
-    b.NewStore(vb, resultp)
-    b.NewBr(endB)
-
-    // inside end branch
-    b = endB
-    return resultp
-
-    // https://stackoverflow.com/questions/11485531/what-exactly-phi-instruction-does-and-how-to-use-it-in-llvm
-}
-
-// All Statements must return two values: {inB, outB}
-function newIf(test, trueStmt, falseStmt) {        // TODO: stmt = {inB, outB}
-    var inB = f.NewBlock("")
-    var outB = f.NewBlock("")
-
-    var origB = b
-    b = inB
-
-    var condition = compare(test, zero, "!=")
-
-    trueStmt.outB.NewBr(outB)
-    if (falseStmt == null) {
-        b.NewCondBr(condition, trueStmt.InB, outB)
-    } else {
-        falseStmt.outB.NewBr(outB)
-        b.NewCondBr(condition, trueStmt.InB, falseStmt.inB)
+    function makeAssign(valueThunk, name) {
+        return function(b) { b.NewStore(valueThunk(b), getVar(name)); return b }
+    }
+    // items = [name] or [name, initThunk].
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeInt(0)
+        return function(b) { b.NewStore(init(b), declVar(b, name)); return b }
+    }
+    function makeSeq(items) {
+        return function(b) {
+            for (var i = 0; i < items.length; i++) b = items[i](b)
+            return b
+        }
+    }
+    function makeBlockStmt(items) {
+        var seq = makeSeq(items)
+        return function(b) {
+            scopes.push({}) // A block is a new variable scope.
+            b = seq(b)
+            scopes.pop()
+            return b
+        }
+    }
+    // items = [cond, then] or [cond, then, else].
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function(b) {
+            var thenB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            var elseB = elseT != null ? curF.NewBlock("") : mergeB
+            b.NewCondBr(truth(b, cond(b)), thenB, elseB)
+            thenT(thenB).NewBr(mergeB)
+            if (elseT != null) elseT(elseB).NewBr(mergeB)
+            return mergeB
+        }
+    }
+    // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
+    function makeWhile(bodyT, condT) {
+        return function(b) {
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            headB.NewCondBr(truth(headB, condT(headB)), bodyB, exitB)
+            bodyT(bodyB).NewBr(headB)
+            return exitB
+        }
+    }
+    function makeDo(condT, bodyT) {
+        return function(b) {
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(bodyB)
+            var endB = bodyT(bodyB)
+            endB.NewCondBr(truth(endB, condT(endB)), bodyB, exitB)
+            return exitB
+        }
+    }
+    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function(b) {
+            scopes.push({}) // The for header is its own scope (for the loop variable).
+            if (init != null) b = init(b)
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var condV = cond != null ? truth(headB, cond(headB)) : truth(headB, one)
+            headB.NewCondBr(condV, bodyB, exitB)
+            var endB = bodyT(bodyB)
+            if (post != null) post(endB)
+            endB.NewBr(headB)
+            scopes.pop()
+            return exitB
+        }
+    }
+    // items = [] or [exprThunk].
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeInt(0)
+        return function(b) {
+            b.NewRet(t(b))
+            // Code behind a return is unreachable but must still land in a valid block.
+            deadCount++
+            return curF.NewBlock("dead" + deadCount)
+        }
     }
 
-    b = origB
+    // Local stack = [name, [paramNames...], bodyThunk] -- creates the function and runs its body thunk.
+    function buildFunction() {
+        var bodyT = pop()
+        var paramNames = pop()
+        var name = pop()
+        var f = getFunc(name, paramNames.length)
+        curF = f
+        var b = f.NewBlock("entry")
+        // The parameters become ordinary (assignable) variables.
+        scopes.push({})
+        for (var i = 0; i < paramNames.length; i++) {
+            var ptr = b.NewAlloca(i32)
+            b.NewStore(f.Params[i], ptr)
+            scopes[scopes.length - 1][paramNames[i]] = ptr
+        }
+        b = bodyT(b)
+        b.NewRet(zero) // A function without return returns 0. Dead blocks end here too.
+        scopes.pop()
+    }
 
-    return {inB: inB, outB: outB}
-}
+    // Build the module out of the parsed program.
+    c.compile(c.asg)
 
-// var func = m.NewFunc("name", i32)
-// var block = func.NewBlock("name")
+    if (funcs["main"] == undefined || funcs["main"].Blocks.length == 0) {
+        println("Error: TinyC programs need a main() function.")
+        exit(1)
+    }
 
-// function buildFunction(stmt, params, id) {
-//     var f = m.NewFunc(id, i32, params)
-//     f.NewBlock("").NewBr(stmt)
-//     push(f)
-// }
+    // Show the compiler output (the LLVM IR module).
+    println(m)
 
-c.compile(c.asg)
-println(m)
+    // Run main() with the built-in IR interpreter. The exit code of this metacompiler
+    // run is what main() returned, so test programs are self checking.
+    var res = llvm.Run(m, "main")
+    print(res.Out)
+    println("tinyc: main() returned " + res.Ret)
+    exit(res.Ret)
 
 ~~) ;

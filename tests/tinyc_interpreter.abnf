@@ -1,0 +1,354 @@
+:title("TinyC interpreter") ;
+:description("Parses TinyC and executes it directly, without generating code.
+
+The language is exactly the one of tinyc.abnf (the LLVM IR compiler); see there for a
+description. The semantics match too: int is 32 bit, / and % truncate towards zero,
+|| and && evaluate both sides, ++/-- are post operators, and the exit code of the
+metacompiler run is the value that main() returns.
+
+Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
+Expression thunks return the value, statement thunks return undefined or, when a return
+statement has fired, the wrapper {ret: value}, which every enclosing statement passes on
+so that the function call can unwrap it.") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     = { Function } ;
+
+// The production level tag sees the merged pushes of all childs: [name, [params...], bodyThunk].
+Function    <~~ defineFunction() ~~>
+            = KwFunc Id <~~ push(up.in) ~~> Parameter Statement ;
+
+Parameter   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
+            = "(" [ ParamDecl { "," ParamDecl } ] ")" ;
+ParamDecl   = KwInt Id <~~ push(up.in) ~~> ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | {ret: value}.
+Statement   = Block | If | While | Do | For | Return | Declaration | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+// [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+
+// The three optional parts are wrapped with a kind marker, otherwise e.g.
+// 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = Declaration1 | Assignment ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:pop()}) ~~> = Assignment | Expression ;
+
+// [] or [exprThunk].
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+
+Declaration = Declaration1 ";" ;
+// int a = 1, b, c = a;  -- every InitDecl pushes one thunk, they get chained.
+Declaration1 <~~ push(makeSeq(takeAll())) ~~>
+            = KwInt InitDecl { "," InitDecl } ;
+InitDecl    <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
+
+Empty       <~~ push(function() {}) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(makeExprStmt(pop())) ~~>
+            = ( Assignment | Expression ) ";" ;
+
+// Assignment is a statement (and a for clause), not a nested expression.
+Assignment  <~~ push(makeAssign(pop(), pop())) ~~>
+            = Id <~~ push(up.in) ~~> "=" Expression ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = OrExpr ;
+
+OrExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = AndExpr { "||" <~~ push("||") ~~> AndExpr } ;
+
+AndExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = CmpExpr { "&&" <~~ push("&&") ~~> CmpExpr } ;
+
+// The two-char operators must be tried before their one-char prefixes ("<=" before "<"),
+// because the parser always keeps the first match.
+CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = Sum [ ( "<=" | ">=" | "==" | "!=" | "<" | ">" ) <~~ push(up.in) ~~> Sum ] ;
+
+Sum         <~~ push(foldBinary(takeAll())) ~~>
+            = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
+
+Term        <~~ push(foldBinary(takeAll())) ~~>
+            = Unary { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> Unary } ;
+
+Unary       = Neg | Primary ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" Unary ;
+
+Primary     = "(" Expression ")" | Call | IncDec | VarRef | Int ;
+
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+IncDec      <~~ push(makeIncDec(pop(), pop())) ~~>
+            = Id <~~ push(up.in) ~~> ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+Int         <~~ push(makeInt(parseInt(up.in))) ~~>
+            = ( "0" | "1"..."9" :whitespace() { "0"..."9" } ) :whitespace(Whitespace) ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+// The keywords end with a negative lookahead, so that e.g. 'interned' or 'iffy' stay identifiers.
+KwFunc      = "func" KwEnd ;
+KwInt       = "int" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    // takeAll empties the local stack of the current tag and returns its items in push
+    // order as a plain JS array. It only uses pop(), so it works independently of how
+    // the runtime wraps the Go slice behind up.stack.
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    // All user defined functions by name: {params: [names...], body: thunk}.
+    var funcs = {}
+
+    // The variable scopes of the currently running function (innermost last).
+    var scopes = []
+    function declVar(name, value) {
+        scopes[scopes.length - 1][name] = value
+    }
+    function findScope(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (scopes[i][name] != undefined) return scopes[i]
+        }
+        println("Error: Variable not defined: " + name)
+        exit(1)
+    }
+    function getVar(name) { return findScope(name)[name] }
+    function setVar(name, value) { findScope(name)[name] = value }
+
+    function callFunction(name, argValues) {
+        if (name == "putchar") { // The only builtin: int putchar(int).
+            printf("%c", argValues[0])
+            return argValues[0]
+        }
+        var f = funcs[name]
+        if (f == undefined) {
+            println("Error: Function not defined: " + name)
+            exit(1)
+        }
+        // Every call gets a fresh scope chain: TinyC has no global variables.
+        var callerScopes = scopes
+        scopes = [{}]
+        for (var i = 0; i < f.params.length; i++) {
+            declVar(f.params[i], i < argValues.length ? argValues[i] : 0)
+        }
+        var r = f.body()
+        scopes = callerScopes
+        return (r != undefined) ? r.ret : 0 // A function without return returns 0.
+    }
+
+    // ----- Expression thunks: function() -> 32 bit int value -----
+
+    function makeInt(n) { return function() { return n | 0 } }
+    function makeVarRef(name) { return function() { return getVar(name) } }
+    function makeNeg(t) { return function() { return (0 - t()) | 0 } }
+    function binOp(op, l, r) {
+        if (op == "+") return (l + r) | 0
+        if (op == "-") return (l - r) | 0
+        if (op == "*") return Math.imul(l, r)   // 32 bit multiplication like in the compiled version.
+        if (op == "/") return (l / r) | 0       // Truncates towards zero, like LLVM sdiv.
+        if (op == "%") return (l % r) | 0
+        if (op == "||") return (l != 0 || r != 0) ? 1 : 0
+        if (op == "&&") return (l != 0 && r != 0) ? 1 : 0
+        if (op == "==") return (l == r) ? 1 : 0
+        if (op == "!=") return (l != r) ? 1 : 0
+        if (op == "<")  return (l < r) ? 1 : 0
+        if (op == ">")  return (l > r) ? 1 : 0
+        if (op == "<=") return (l <= r) ? 1 : 0
+        if (op == ">=") return (l >= r) ? 1 : 0
+    }
+    // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
+    // Both operands are evaluated before the operator is applied (no short circuit),
+    // exactly like in the compiled version.
+    function foldBinary(items) {
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i += 2) {
+                v = binOp(items[i], v, items[i + 1]())
+            }
+            return v
+        }
+    }
+    // items = [name, argThunk...] -> call thunk.
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function() {
+            var argValues = []
+            for (var i = 0; i < args.length; i++) argValues.push(args[i]())
+            return callFunction(name, argValues)
+        }
+    }
+    function makeIncDec(op, name) {
+        return function() {
+            var oldValue = getVar(name)
+            setVar(name, (op == "++" ? oldValue + 1 : oldValue - 1) | 0)
+            return oldValue // Post increment: the expression value is the old one.
+        }
+    }
+
+    // ----- Statement thunks: function() -> undefined | {ret: value} -----
+
+    function makeExprStmt(t) {
+        return function() { t() }
+    }
+    function makeAssign(valueThunk, name) {
+        return function() { setVar(name, valueThunk()) }
+    }
+    // items = [name] or [name, initThunk].
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeInt(0)
+        return function() { declVar(name, init()) }
+    }
+    function makeSeq(items) {
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i]()
+                if (r != undefined) return r // A return statement has fired: pass it on.
+            }
+        }
+    }
+    function makeBlockStmt(items) {
+        var seq = makeSeq(items)
+        return function() {
+            scopes.push({}) // A block is a new variable scope.
+            var r = seq()
+            scopes.pop()
+            return r
+        }
+    }
+    // items = [cond, then] or [cond, then, else].
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function() {
+            if (cond() != 0) return thenT()
+            if (elseT != null) return elseT()
+        }
+    }
+    // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
+    function makeWhile(bodyT, condT) {
+        return function() {
+            while (condT() != 0) {
+                var r = bodyT()
+                if (r != undefined) return r
+            }
+        }
+    }
+    function makeDo(condT, bodyT) {
+        return function() {
+            do {
+                var r = bodyT()
+                if (r != undefined) return r
+            } while (condT() != 0)
+        }
+    }
+    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function() {
+            scopes.push({}) // The for header is its own scope (for the loop variable).
+            if (init != null) init()
+            var r = undefined
+            while (cond == null || cond() != 0) {
+                r = bodyT()
+                if (r != undefined) break
+                if (post != null) post()
+            }
+            scopes.pop()
+            return r
+        }
+    }
+    // items = [] or [exprThunk].
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeInt(0)
+        return function() { return {ret: t()} }
+    }
+
+    // Local stack = [name, [paramNames...], bodyThunk] -- registers the function.
+    function defineFunction() {
+        var bodyT = pop()
+        var paramNames = pop()
+        var name = pop()
+        funcs[name] = {params: paramNames, body: bodyT}
+    }
+
+    // Collect all function definitions.
+    c.compile(c.asg)
+
+    if (funcs["main"] == undefined) {
+        println("Error: TinyC programs need a main() function.")
+        exit(1)
+    }
+
+    // Run main(). The exit code of this metacompiler run is what main() returned,
+    // so test programs are self checking.
+    var ret = callFunction("main", [])
+    println("tinyc interpreter: main() returned " + ret)
+    exit(ret)
+
+~~) ;

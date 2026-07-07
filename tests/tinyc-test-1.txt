@@ -1,16 +1,93 @@
-func foo(int param) {
-    param++;
+/* TinyC self test.
+ * Exercises every language construct. main() counts the failed checks and
+ * returns that count, so the metacompiler run exits with 0 exactly when
+ * everything works. **/
+
+func add(int a, int b) {
+    return a + b;
 }
 
-func main(int tst) {
-    int i=0 || 1;
-    while (i>20) {
-        int a=33;
-        a=1;
-        foo(22);
-        i = i+1;
+func fib(int n) {                       // recursion
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+func gcd(int a, int b) {                // while, assignment, %
+    while (b != 0) {
+        int t = b;                      // block scoped variable
+        b = a % b;
+        a = t;
     }
-    if (i==20) {
-        i=10;
+    return a;
+}
+
+func sumTo(int n) {                     // for with declaration, ++
+    int s = 0;
+    for (int i = 1; i <= n; i++) {
+        s = s + i;
     }
+    return s;
+}
+
+func countDown(int n) {                 // do-while, --
+    int c = 0;
+    do {
+        n--;
+        c++;
+    } while (n > 0);
+    return c;
+}
+
+func classify(int n) {                  // if / else if / else
+    if (n < 0) {
+        return 0 - 1;
+    } else if (n == 0) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+func shadow() {                         // scoping: the inner x must not leak
+    int x = 1;
+    {
+        int x = 2;
+        x = x + 10;                     // changes only the inner x
+    }
+    return x;                           // 1
+}
+
+func main() {
+    int failures = 0;
+    int interned = 42;                  // identifiers may start with a keyword
+    int iffy = 2, elsewhere = 3, format = 0;
+
+    if (add(2, 3) != 5)                        { failures++; }
+    if (fib(10) != 55)                         { failures++; }
+    if (gcd(48, 36) != 12)                     { failures++; }
+    if (sumTo(10) != 55)                       { failures++; }
+    if (countDown(5) != 5)                     { failures++; }
+    if (classify(0 - 7) != -1)                 { failures++; }
+    if (classify(0) != 0)                      { failures++; }
+    if (classify(9) != 1)                      { failures++; }
+    if (shadow() != 1)                         { failures++; }
+
+    if (2 + 3 * 4 != 14)                       { failures++; }  // precedence
+    if ((2 + 3) * 4 != 20)                     { failures++; }  // grouping
+    if (-6 / 4 != -1)                          { failures++; }  // division truncates towards zero
+    if (17 % 5 != 2)                           { failures++; }
+    if (interned != 42 || iffy + elsewhere != 5) { failures++; }
+    if (1 && 2)                                { format = 1; } else { failures++; }
+    if (0 || format == 1)                      { ; } else { failures++; }
+
+    int i = 5;
+    int old = i++;                              // post increment yields the old value
+    if (old != 5 || i != 6)                    { failures++; }
+
+    // Output: TinyC can talk via putchar (79 75 10 = "OK\n").
+    if (failures == 0) {
+        putchar(79); putchar(75); putchar(10);
+    }
+
+    return failures;
 }

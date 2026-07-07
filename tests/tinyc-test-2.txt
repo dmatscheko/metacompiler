@@ -1,0 +1,32 @@
+/* Prints the primes below 50 and returns 0 exactly when it found the right amount,
+ * so the metacompiler run exits with 0 on success. **/
+
+func isPrime(int n) {
+    if (n < 2) { return 0; }
+    for (int d = 2; d * d <= n; d++) {
+        if (n % d == 0) { return 0; }
+    }
+    return 1;
+}
+
+func printNumber(int n) {               // prints n in decimal (n >= 0)
+    if (n >= 10) {
+        printNumber(n / 10);
+    }
+    putchar(48 + n % 10);
+    return 0;
+}
+
+func main() {
+    int count = 0;
+    for (int n = 2; n < 50; n++) {
+        if (isPrime(n)) {
+            if (count > 0) { putchar(32); }
+            printNumber(n);
+            count++;
+        }
+    }
+    putchar(10);
+    if (count != 15) { return 1; }      // there are 15 primes below 50
+    return 0;
+}
