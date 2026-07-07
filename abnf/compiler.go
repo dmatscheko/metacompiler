@@ -11,8 +11,19 @@ import (
 // ----------------------------------------------------------------------------
 // ASG compiler
 
+// scriptEngine executes the annotation scripts of an ASG. There are two
+// implementations: compilerscript runs them with goja, frozenEngine compiles
+// them with the frozen MetaJS bootstrap and executes the resulting IR.
+type scriptEngine interface {
+	// RunTagCode executes the code of the given slot of a Tag. It returns the
+	// completion value of the code and whether the tag had code for that slot.
+	RunTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool)
+	// Ltr returns the global (left to right) variables, e.g. ltr.in.
+	Ltr() map[string]r.Object
+}
+
 type compiler struct {
-	cs       *compilerscript
+	eng      scriptEngine
 	fileName string
 }
 
@@ -112,8 +123,9 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 
 	switch rule.Operator {
 	case r.Token:
-		if str, ok := co.cs.LtrStream["in"].(string); ok {
-			co.cs.LtrStream["in"] = str + rule.String
+		ltr := co.eng.Ltr()
+		if str, ok := ltr["in"].(string); ok {
+			ltr["in"] = str + rule.String
 		} else {
 			panic("Variable 'ltr.in' must only contain strings")
 		}
@@ -122,7 +134,7 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 		// First collect all the data.
 		upStream := co.compile(rule.Childs, slot, depth+1) // Evaluate the child productions of the TAG to collect their values.
 		// Then run the script on it.
-		co.cs.HandleTagCode(rule, fmt.Sprintf("%s:tag:pos:%d", co.fileName, rule.Pos), upStream, localASG, slot, depth)
+		co.eng.RunTagCode(rule, fmt.Sprintf("%s:tag:pos:%d", co.fileName, rule.Pos), upStream, localASG, slot, depth)
 		return upStream
 	default:
 		// Not all rules have childs. E.g. a Number (from :number()) is a leaf like a Token, but without text.
@@ -137,7 +149,11 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, traceEnabled bool, preventDefaultOutput bool) interface{} {
 	var co compiler
 
-	co.cs = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
+	if UseFrozenScripts {
+		co.eng = newFrozenEngine(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
+	} else {
+		co.eng = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
+	}
 	co.fileName = filepath.Clean(fileName)
 
 	startScript := r.GetStartScript(aGrammar)
@@ -148,9 +164,9 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 			"in": "", // This is the parser input (the terminals).
 		}
 		// The actual co.compile() of the ASG is called from inside the start script (via the JS function c.compile()).
-		v := co.cs.HandleTagCode(startScript, co.fileName+":startScript", upStream, asg, slot, 0)
-		if v != nil { // HandleTagCode() returns nil if the start script has no code for the requested slot.
-			res = v.Export()
+		v, ran := co.eng.RunTagCode(startScript, co.fileName+":startScript", upStream, asg, slot, 0)
+		if ran { // False if the start script has no code for the requested slot.
+			res = v
 		}
 	}
 

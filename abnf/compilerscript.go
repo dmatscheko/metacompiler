@@ -126,6 +126,21 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 	return v
 }
 
+// RunTagCode adapts HandleTagCode to the scriptEngine interface: it exports the
+// goja result value to a plain Go value.
+func (cs *compilerscript) RunTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool) {
+	v := cs.HandleTagCode(tag, name, upStream, localASG, slot, depth)
+	if v == nil {
+		return nil, false
+	}
+	return v.Export(), true
+}
+
+// Ltr returns the global (left to right) variables.
+func (cs *compilerscript) Ltr() map[string]r.Object {
+	return cs.LtrStream
+}
+
 // initFuncMap installs the compiler specific JS API on top of the common one:
 // the local and global stack functions, 'ltr', and the c.compile()/c.asg/c.agrammar entries.
 func (cs *compilerscript) initFuncMap() {

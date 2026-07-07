@@ -1,0 +1,661 @@
+:title("JS (MetaJS) interpreter") ;
+:description("Parses MetaJS and executes it directly, without generating code.
+
+MetaJS is the restricted JavaScript subset that the annotation scripts of the grammars in
+tests/ are written in. It has: var/let/const (all block scoped), function declarations and
+anonymous function expressions with real closures and an 'arguments' array, if/else, while,
+do-while, for(;;), break, continue, return, throw (terminates, there is no try/catch),
+numbers (doubles), strings, booleans, null, undefined, arrays, object literals, member
+access (.name and [expr]), method calls, assignment (= += -= *= /= %=) as an expression
+(the target may reach through calls: findScope(name)[name] = v), postfix ++/--, the
+ternary operator, || and && (short circuit, returning the operand),
+== != === !== < > <= >= + - * / % | ^ & << >> >>> and unary - ! typeof.
+
+Deliberately not in the subset: this, new, prototypes, try/catch, switch, regex, for-in,
+prefix ++/--, getters/setters, and hoisting (a binding must be executed before it is used;
+main() is called after the whole top level ran, so mutual recursion works anyway).
+Semicolons are optional at statement ends, but a statement must not begin with '(' or '['
+(write an explicit ';' before it in that rare case).
+
+Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
+Expression thunks return the value, statement thunks return undefined or a signal object
+(return/break/continue) that the enclosing statements route.
+
+The program must define main(); the exit code of the metacompiler run is what main()
+returns, so MetaJS test programs are self checking: they return 0 on success.
+The same language is compiled to LLVM IR by js-to-llvm-ir.abnf.") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// The merged pushes of all top level statements become one program thunk on the global stack.
+Program     <~~ pushg(makeSeq(takeAll())) ~~>
+            = { Statement } ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   = Block | VarDecl | If | While | Do | For | Return | Break | Continue | Throw
+            | FuncDecl | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+// var, let and const all declare a block scoped variable in the current scope.
+VarDecl     = VarDeclCore [ ";" ] ;
+VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
+            = KwVar Declarator { "," Declarator } ;
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+
+// [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
+
+// The three optional parts are wrapped with a kind marker, otherwise e.g.
+// 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      = VarDeclCore ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+// [] or [exprThunk].
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] [ ";" ] ;
+
+Break       <~~ push(makeBreak()) ~~>
+            = KwBreak [ ";" ] ;
+
+Continue    <~~ push(makeContinue()) ~~>
+            = KwContinue [ ";" ] ;
+
+Throw       <~~ push(makeThrow(pop())) ~~>
+            = KwThrow Expression [ ";" ] ;
+
+// A function declaration binds the closure in the current scope when it executes.
+FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
+            = KwFunction Id <~~ push(up.in) ~~> ParamList Block ;
+
+ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
+            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+
+Empty       <~~ push(function() {}) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression [ ";" ] ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = AssignExpr ;
+
+// Assignment is an expression and associates to the right: a = b = c.
+// If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
+AssignExpr  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+
+// An assignable place: a variable, or a member path that may reach through calls
+// but must end in a member: findScope(name)[name] = value.
+// The local stack holds [name, suffix marker, suffix marker, ...].
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { CallSuffix | DotSuffix | IndexSuffix } ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+
+OrExpr      <~~ push(makeOr(takeAll())) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeAnd(takeAll())) ~~>
+            = BitOrExpr { "&&" BitOrExpr } ;
+
+// The bitwise levels sit between && and equality, like in JS. A single "|" that
+// actually starts a "||" fails its right side, the iteration rolls back, and the
+// enclosing || level picks it up.
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { "|" <~~ push("|") ~~> BitXorExpr } ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push("^") ~~> BitAndExpr } ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
+
+// The longer operators must be tried before their prefixes ("===" before "==").
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
+
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Neg | Not | Typeof | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+Typeof      <~~ push(makeTypeof(pop())) ~~>
+            = KwTypeof UnaryExpr ;
+
+// Only the postfix forms exist: i++ evaluates to the old value.
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
+// A call after a member access is a method call: the object becomes 'this' of the callee
+// (that is what makes items.slice(1) or str.charCodeAt(0) work on the native values).
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { CallSuffix | DotSuffix | IndexSuffix } ;
+CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+DotSuffix   = "." Id <~~ push({kind:"member", key: makeStr(up.in)}) ~~> ;
+IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | FunctionExpr | ObjectLit | ArrayLit | StringLit | NumberLit
+            | True | False | Null | Undefined | VarRef ;
+
+// The optional name of a function expression is accepted but not bound.
+FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
+            = KwFunction [ Id ] ParamList Block ;
+
+ObjectLit   <~~ push(makeObject(takeAll())) ~~>
+            = "{" [ PropDef { "," PropDef } ] "}" ;
+PropDef     <~~ push(makeProp(pop(), pop())) ~~>
+            = PropKey ":" AssignExpr ;
+PropKey     = Id <~~ push(up.in) ~~> | StringLit ;
+
+ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+            = "[" [ AssignExpr { "," AssignExpr } ] "]" ;
+
+True        <~~ push(makeConst(true)) ~~>      = "true" KwEnd ;
+False       <~~ push(makeConst(false)) ~~>     = "false" KwEnd ;
+Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
+Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+StringLit   = DqString | SqString ;
+// The escape pair is tried before the plain chars, so \" and \\ do not end the string early.
+DqString    = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeStr(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+SqString    = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeStr(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+StrEsc      = "\\" "\x20"..b"\x7e" ;
+DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+NumberLit   <~~ push(makeNum(parseFloat(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" | "$" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" } :whitespace(Whitespace) ;
+
+// The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
+KwVar       = ( "var" | "let" | "const" ) KwEnd ;
+KwFunction  = "function" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwTypeof    = "typeof" KwEnd ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    // takeAll empties the local stack of the current tag and returns its items in push
+    // order as a plain JS array. It only uses pop(), so it works independently of how
+    // the runtime wraps the Go slice behind up.stack.
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    function fail(msg) {
+        println("js interpreter error: " + msg)
+        exit(1)
+    }
+
+    // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
+    // The host unescape() is for the grammar token syntax and rejects \' and \", so the
+    // JS string literals bring their own unescaper.
+    function hexAt(s, pos, len) {
+        var v = 0
+        for (var i = 0; i < len; i++) {
+            var c = s.charCodeAt(pos + i)
+            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
+            v = v * 16 + d
+        }
+        return v
+    }
+    function unescapeJs(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out += String.fromCharCode(c); i++; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 48)  { out += String.fromCharCode(0); i += 2; continue }
+            if (e == 120) { out += String.fromCharCode(hexAt(s, i + 2, 2)); i += 4; continue }
+            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
+            out += String.fromCharCode(e) // \\ \" \' and everything else: the char itself.
+            i += 2
+        }
+        return out
+    }
+
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
+    // ----- Scopes -----
+    // 'scopes' is the active scope chain (innermost last). Every closure captures a copy
+    // of the chain array; the scope objects inside stay shared, so later declarations in
+    // an already captured scope are visible to the closure (that is what allows mutual
+    // recursion between top level functions).
+    var globalScope = {}
+    var scopes = [globalScope]
+
+    // The host names that a MetaJS program can use. Everything resolves to the goja
+    // natives, so e.g. Math.imul or the string/array methods behave exactly like in JS.
+    var hostGlobals = {
+        "println": println, "print": print, "printf": printf, "sprintf": sprintf,
+        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
+        "exit": exit
+    }
+
+    function getVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
+        }
+        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
+        fail("variable not defined: " + name)
+    }
+    function setVar(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        fail("assignment to undeclared variable: " + name)
+    }
+    function declVar(name, value) {
+        scopes[scopes.length - 1][name] = value
+    }
+
+    // ----- Statement signals -----
+    // Statement thunks return undefined (fall through), BRK, CONT, or {isRet:true, v:...}.
+    var BRK = {sig: "break"}
+    var CONT = {sig: "continue"}
+
+    // ----- Functions -----
+    // A MetaJS function value is a real (goja) JS function, so typeof, passing it around,
+    // and calling it work natively. It closes over the scope chain of its creation.
+    function makeClosure(params, bodyT, defScopes) {
+        var env = defScopes.slice()
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+            var saved = scopes
+            scopes = env.slice()
+            var sc = {}
+            for (var j = 0; j < params.length; j++) sc[params[j]] = args[j]
+            sc["arguments"] = args
+            scopes.push(sc)
+            var r = bodyT()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+
+    function getMember(o, k) {
+        if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
+        return o[k]
+    }
+
+    // ----- Expression thunks: function() -> value -----
+
+    function makeNum(n) { return function() { return n } }
+    function makeConst(v) { return function() { return v } }
+    function makeStr(s) { return function() { return s } }
+    function makeVarRef(name) { return function() { return getVar(name) } }
+    function makeNeg(t) { return function() { return -t() } }
+    function makeNot(t) { return function() { return !t() } }
+    function makeTypeof(t) { return function() { return typeof t() } }
+
+    function makeArray(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            return a
+        }
+    }
+    // PropDef pops [valueThunk, key]; the key is an Id string or a constant string thunk
+    // (calling the pure thunk once at build time yields the key text).
+    function makeProp(valT, key) {
+        return {k: (typeof key == "string") ? key : key(), t: valT}
+    }
+    function makeObject(props) {
+        return function() {
+            var o = {}
+            for (var i = 0; i < props.length; i++) o[props[i].k] = props[i].t()
+            return o
+        }
+    }
+
+    function makeFunctionExpr(bodyT, params) {
+        return function() { return makeClosure(params, bodyT, scopes) }
+    }
+
+    function binOp(op, l, r) {
+        if (op == "+") return l + r
+        if (op == "-") return l - r
+        if (op == "*") return l * r
+        if (op == "/") return l / r
+        if (op == "%") return l % r
+        if (op == "==") return l == r
+        if (op == "!=") return l != r
+        if (op == "===") return l === r
+        if (op == "!==") return l !== r
+        if (op == "<")  return l < r
+        if (op == ">")  return l > r
+        if (op == "<=") return l <= r
+        if (op == ">=") return l >= r
+        if (op == "|")  return l | r
+        if (op == "^")  return l ^ r
+        if (op == "&")  return l & r
+        if (op == "<<") return l << r
+        if (op == ">>") return l >> r
+        if (op == ">>>") return l >>> r
+    }
+    // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
+    function foldBinary(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i += 2) {
+                v = binOp(items[i], v, items[i + 1]())
+            }
+            return v
+        }
+    }
+    // || and && evaluate lazily and return the deciding operand, like in JS.
+    function makeOr(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (v) return v
+                v = items[i]()
+            }
+            return v
+        }
+    }
+    function makeAnd(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (!v) return v
+                v = items[i]()
+            }
+            return v
+        }
+    }
+    // items = [thunk] or [condThunk, thenThunk, elseThunk].
+    function makeCond(items) {
+        if (items.length == 1) return items[0]
+        return function() { return items[0]() ? items[1]() : items[2]() }
+    }
+
+    // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
+    // its object, so that a directly following call uses it as 'this'.
+    function foldCallMember(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = primary()
+            var curThis = undefined
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "member") {
+                    curThis = cur
+                    cur = getMember(cur, s.key())
+                } else {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    if (typeof cur != "function") fail("call of a non function value: " + cur)
+                    cur = cur.apply(curThis, argv)
+                    curThis = undefined
+                }
+            }
+            return cur
+        }
+    }
+
+    // Target items = [nameString, suffix marker...] -> reference descriptor.
+    function makeTargetRef(items) {
+        return {name: items[0], path: items.slice(1)}
+    }
+    // Walks a target path (members and calls) up to the last element and returns
+    // the assignable place {obj, key}. The last element must be a member.
+    function resolveRef(ref) {
+        var cur = getVar(ref.name)
+        var curThis = undefined
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.kind == "member") {
+                curThis = cur
+                cur = getMember(cur, s.key())
+            } else {
+                var argv = []
+                for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                if (typeof cur != "function") fail("call of a non function value: " + cur)
+                cur = cur.apply(curThis, argv)
+                curThis = undefined
+            }
+        }
+        var last = ref.path[ref.path.length - 1]
+        if (last.kind != "member") fail("assignment target must end in a member")
+        if (cur == undefined) fail("member assignment on " + cur)
+        return {obj: cur, key: last.key()}
+    }
+    function applyOp(op, a, b) {
+        if (op == "+=") return a + b
+        if (op == "-=") return a - b
+        if (op == "*=") return a * b
+        if (op == "/=") return a / b
+        if (op == "%=") return a % b
+    }
+    // items = [ref, opString, valueThunk]. Returns the assigned value (assignment is an expression).
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                setVar(ref.name, v)
+            } else {
+                var p = resolveRef(ref)
+                if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                p.obj[p.key] = v
+            }
+            return v
+        }
+    }
+    // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
+    function makeIncDec(items) {
+        var ref = items[0]
+        var delta = (items[1] == "++") ? 1 : -1
+        return function() {
+            if (ref.path.length == 0) {
+                var n = getVar(ref.name) - 0
+                setVar(ref.name, n + delta)
+                return n
+            }
+            var p = resolveRef(ref)
+            var m = p.obj[p.key] - 0
+            p.obj[p.key] = m + delta
+            return m
+        }
+    }
+
+    // ----- Statement thunks: function() -> undefined | BRK | CONT | {isRet, v} -----
+
+    // An expression in statement position: evaluate and discard the value.
+    function exprToStmt(t) {
+        return function() { t() }
+    }
+    // items = [name] or [name, initThunk].
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeConst(undefined)
+        return function() { declVar(name, init()) }
+    }
+    function makeSeq(items) {
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i]()
+                if (r != undefined) return r // A signal: pass it on.
+            }
+        }
+    }
+    function makeBlockStmt(items) {
+        var seq = makeSeq(items)
+        return function() {
+            scopes.push({}) // A block is a new variable scope.
+            var r = seq()
+            scopes.pop()
+            return r
+        }
+    }
+    // items = [cond, then] or [cond, then, else].
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function() {
+            if (cond()) return thenT()
+            if (elseT != null) return elseT()
+        }
+    }
+    // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
+    function makeWhile(bodyT, condT) {
+        return function() {
+            while (condT()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r // A return signal.
+                }
+            }
+        }
+    }
+    function makeDo(condT, bodyT) {
+        return function() {
+            do {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            } while (condT())
+        }
+    }
+    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function() {
+            scopes.push({}) // The for header is its own scope (for the loop variable).
+            var res = undefined
+            if (init != null) init()
+            while (cond == null || cond()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break } // A return signal.
+                }
+                if (post != null) post()
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    // items = [] or [exprThunk].
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { return {isRet: true, v: t()} }
+    }
+    function makeBreak() { return function() { return BRK } }
+    function makeContinue() { return function() { return CONT } }
+    function makeThrow(t) { return function() { fail("thrown: " + t()) } }
+
+    // Local stack = [name, [paramNames...], bodyThunk] -- binds the closure when executed.
+    function makeFuncDecl(bodyT, paramNames, name) {
+        return function() { declVar(name, makeClosure(paramNames, bodyT, scopes)) }
+    }
+
+    // Build the program thunk out of the parsed source.
+    c.compile(c.asg)
+    var progT = popg()
+
+    // Run the top level (it binds the functions), then call main(). The exit code of
+    // this metacompiler run is what main() returned, so test programs are self checking.
+    progT()
+    if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
+        fail("MetaJS programs need a main() function.")
+    }
+    var ret = globalScope["main"]()
+    println("js interpreter: main() returned " + ret)
+    exit(ret | 0)
+
+~~) ;

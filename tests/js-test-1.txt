@@ -1,0 +1,313 @@
+/* MetaJS self test.
+ * Exercises the whole restricted JS subset that the annotation scripts use.
+ * main() counts the failed checks and returns that count, so the metacompiler
+ * run exits with 0 exactly when everything works. **/
+
+var failures = 0;
+var checks = 0;
+
+function check(name, got, want) {
+    checks = checks + 1;
+    if (got !== want) {
+        println("FAIL " + name + ": got " + got + " want " + want);
+        failures = failures + 1;
+    }
+}
+
+// ----- helpers defined before main() runs, in various styles -----
+
+function fib(n) {                       // recursion
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+function isEven(n) { return n == 0 ? true : isOdd(n - 1); }
+function isOdd(n)  { return n == 0 ? false : isEven(n - 1); }   // mutual recursion
+
+function makeCounter(start) {           // closures with own state
+    var count = start;
+    return function() {
+        count = count + 1;
+        return count;
+    };
+}
+
+function makeAdder(n) {                 // closure factory used in a loop below
+    return function(x) { return x + n; };
+}
+
+function sum() {                        // varargs via the arguments array
+    var s = 0;
+    for (var i = 0; i < arguments.length; i++) { s += arguments[i]; }
+    return s;
+}
+
+function second(a, b) { return b; }     // missing arguments become undefined
+
+function noSemi(x) {                    // statement ends without semicolons,
+    var a = x + 1                       // exactly like the real tag scripts
+    var b = a * 2
+    return b
+}
+
+function main() {
+
+    // ----- numbers and operators -----
+    check("add mul precedence", 1 + 2 * 3, 7);
+    check("parens", (1 + 2) * 3, 9);
+    check("left assoc", 10 - 3 - 2, 5);
+    check("division", 7 / 2, 3.5);
+    check("modulo", 7 % 3, 1);
+    check("negative modulo", -7 % 3, -1);
+    check("unary minus", -(-5), 5);
+    check("float math", 0.5 * 4, 2);
+    check("string of float", "" + 0.5, "0.5");
+    check("string of int", "" + 42, "42");
+
+    // ----- comparisons and equality -----
+    check("lt", 2 < 3, true);
+    check("ge", 3 >= 3, true);
+    check("loose eq", 1 == "1", true);
+    check("strict eq", 1 === "1", false);
+    check("loose null", null == undefined, true);
+    check("strict null", null === undefined, false);
+    check("loose zero", 0 == "", true);
+    check("ne", 1 != 2, true);
+    check("strict ne", 1 !== "1", true);
+    check("string lt", "apple" < "banana", true);
+
+    // ----- truthiness, || and && -----
+    check("or value", 0 || "x", "x");
+    check("or last", "" || 0, 0);
+    check("and value", 5 && 7, 7);
+    check("and stop", null && 1, null);
+    check("not", !0, true);
+    check("not str", !"", true);
+    check("not full", !"0", false);
+
+    var calls = 0;
+    function bump() { calls++; return true; }
+    var t1 = false && bump();
+    var t2 = true || bump();
+    check("short circuit skipped", calls, 0);
+    var t3 = bump() && true;
+    check("short circuit ran", calls, 1);
+    check("unused", t1 || t3, true);
+    check("unused2", t2, true);
+
+    // ----- variables, assignment as expression, compound ops -----
+    var q;
+    check("undef init", q, undefined);
+    check("assign expr", (q = 5) + 1, 6);
+    var a = 0;
+    var b = 0;
+    a = b = 3;
+    check("chained assign", a + b, 6);
+    a += 4;  check("plus assign", a, 7);
+    a -= 2;  check("minus assign", a, 5);
+    a *= 3;  check("times assign", a, 15);
+    a /= 2;  check("div assign", a, 7.5);
+    a = 17; a %= 5;
+    check("mod assign", a, 2);
+    var s = "hi";
+    s += "!";
+    check("string plus assign", s, "hi!");
+
+    // ----- blocks and shadowing -----
+    var sh = 1;
+    {
+        var sh = 2;
+        check("inner shadow", sh, 2);
+    }
+    check("outer after shadow", sh, 1);
+
+    // ----- control flow -----
+    var w = 0;
+    while (w < 5) { w++; }
+    check("while", w, 5);
+
+    var dc = 0;
+    do { dc++; } while (false);
+    check("do runs once", dc, 1);
+
+    var fsum = 0;
+    for (var i = 1; i <= 10; i++) { fsum += i; }
+    check("for", fsum, 55);
+
+    var odd = 0;
+    for (var j = 0; j < 100; j++) {
+        if (j % 2 == 0) { continue; }
+        if (j > 10) { break; }
+        odd += j;
+    }
+    check("break continue", odd, 25);
+
+    var grid = 0;
+    for (var y = 0; y < 3; y++) {
+        for (var x = 0; x < 3; x++) {
+            if (x == 2) { break; }
+            grid++;
+        }
+    }
+    check("nested break", grid, 6);
+
+    check("ternary", 2 > 1 ? "a" : "b", "a");
+    check("nested ternary", 1 > 2 ? "a" : 3 > 2 ? "c" : "b", "c");
+
+    // ----- functions and closures -----
+    check("fib", fib(10), 55);
+    check("mutual recursion", isOdd(7), true);
+    check("no semicolons", noSemi(4), 10);
+
+    var c1 = makeCounter(0);
+    var c2 = makeCounter(100);
+    c1(); c1();
+    check("counter one", c1(), 3);
+    check("counter two", c2(), 101);
+    check("counters independent", c1(), 4);
+
+    var anon = function(v) { return v * v; };
+    check("function expression", anon(9), 81);
+    check("typeof function", typeof anon, "function");
+
+    check("varargs sum", sum(1, 2, 3, 4), 10);
+    check("varargs empty", sum(), 0);
+    check("missing arg", second(1), undefined);
+
+    var adders = [];
+    for (var k = 0; k < 3; k++) { adders.push(makeAdder(k * 10)); }
+    check("closures in array", adders[0](1) + adders[1](1) + adders[2](1), 33);
+
+    // ----- arrays -----
+    var arr = [3, 1, 4];
+    check("array length", arr.length, 3);
+    check("array index", arr[2], 4);
+    arr[1] = 10;
+    check("array store", arr[1], 10);
+    check("array push", arr.push(7), 4);
+    check("array after push", arr[3], 7);
+    check("array pop", arr.pop(), 7);
+    check("array pop len", arr.length, 3);
+    check("array out of range", arr[99], undefined);
+    var sl = arr.slice(1);
+    check("slice", sl.length, 2);
+    check("slice content", sl[0], 10);
+    var sl2 = [1, 2, 3, 4].slice(1, 3);
+    check("slice two args", sl2[0] + sl2[1], 5);
+    check("unshift", sl.unshift(9), 3);
+    check("unshift content", sl[0], 9);
+    check("indexOf", [5, 6, 7].indexOf(7), 2);
+    check("indexOf missing", [5, 6, 7].indexOf(8), -1);
+
+    var drain = [3, 2, 1];
+    var got = [];
+    var t;
+    while ((t = drain.pop()) != undefined) { got.push(t); }
+    check("drain pattern", got[0] * 100 + got[1] * 10 + got[2], 123);
+
+    var nested = [[1, 2], [3, 4]];
+    check("nested arrays", nested[1][0], 3);
+    check("typeof array", typeof nested, "object");
+
+    // ----- objects -----
+    var obj = {n: 1, name: "thing", "spaced key": true};
+    check("object get", obj.n, 1);
+    check("object computed", obj["name"], "thing");
+    check("string key", obj["spaced key"], true);
+    obj.n = 5;
+    check("object set", obj.n, 5);
+    obj.fresh = "new";
+    check("object add", obj.fresh, "new");
+    obj["k" + 1] = 11;
+    check("computed key set", obj.k1, 11);
+    check("missing prop", obj.nothing, undefined);
+
+    var deep = {a: {b: [{c: 42}]}};
+    check("deep access", deep.a.b[0].c, 42);
+    deep.a.b[0].c = 43;
+    check("deep set", deep.a.b[0].c, 43);
+
+    var calc = {add: function(p, r) { return p + r; }, base: 100};
+    check("function property", calc.add(2, 3), 5);
+    check("mixed object", calc.base + calc.add(1, 1), 102);
+
+    var marker = {k: "init", t: 7};
+    check("marker object", marker.k == "init" ? marker.t : 0, 7);
+
+    // ----- inc/dec (postfix) -----
+    var n = 5;
+    check("post inc value", n++, 5);
+    check("post inc effect", n, 6);
+    check("post dec value", n--, 6);
+    check("post dec effect", n, 5);
+    obj.n++;
+    check("member inc", obj.n, 6);
+    var cnt = [10];
+    cnt[0]--;
+    check("array element dec", cnt[0], 9);
+
+    // ----- strings -----
+    var str = "hello";
+    check("string length", str.length, 5);
+    check("charCodeAt", "A".charCodeAt(0), 65);
+    check("charCodeAt pos", str.charCodeAt(1), 101);
+    check("replace first", str.replace("l", "_"), "he_lo");
+    check("string indexOf", str.indexOf("ll"), 2);
+    check("string indexOf missing", str.indexOf("z"), -1);
+    check("concat num", str + 1, "hello1");
+    check("escape tab", "\t".length, 1);
+    check("escape hex", "\x41", "A");
+    check("escape unicode", "A", "A");
+    check("escape backslash", "a\\b".length, 3);
+    check("quotes in quotes", 'it\'s' + " " + "say \"hi\"", "it's say \"hi\"");
+    check("single double", 'single "quoted"', "single \"quoted\"");
+
+    // ----- bitwise operators -----
+    check("or zero idiom", (7 / 2) | 0, 3);
+    check("or negative", (-7 / 2) | 0, -3);
+    check("or string", "12" | 0, 12);
+    check("and mask", 255 & 300, 44);
+    check("xor", 5 ^ 1, 4);
+    check("shift left", 1 << 4, 16);
+    check("shift right", -8 >> 1, -4);
+    check("shift right unsigned", -8 >>> 28, 15);
+    check("bit precedence", 1 | 2 & 3, 3);
+    check("bit vs eq", (4 & 4) == 4, true);
+    check("bit or in logic", (0 | 0) || "empty", "empty");
+
+    // ----- assignment through call targets -----
+    var boxData = {n: 1, arr: [0, 0]};
+    function box() { return boxData; }
+    box().n = 99;
+    check("call target member", boxData.n, 99);
+    box()["k" + 1] = 5;
+    check("call target computed", boxData.k1, 5);
+    box().arr[1] = 7;
+    check("call target nested", boxData.arr[1], 7);
+    box().n++;
+    check("call target incdec", boxData.n, 100);
+    box().n += 10;
+    check("call target compound", boxData.n, 110);
+
+    // ----- typeof -----
+    check("typeof number", typeof 1, "number");
+    check("typeof string", typeof "", "string");
+    check("typeof bool", typeof true, "boolean");
+    check("typeof undefined", typeof undefined, "undefined");
+    check("typeof null", typeof null, "object");
+    check("typeof object", typeof {}, "object");
+
+    // ----- host builtins -----
+    check("parseInt", parseInt("42"), 42);
+    check("parseInt stops", parseInt("7.9"), 7);
+    check("parseFloat", parseFloat("2.5"), 2.5);
+    check("Math.imul", Math.imul(3, 4), 12);
+    check("Math.imul wraps", Math.imul(2147483647, 2), -2);
+    check("sprintf", sprintf("x=%d", 7), "x=7");
+
+    ;;; // empty statements are fine
+
+    printf("%c%c %d checks\n", 79, 75, checks);
+    if (failures == 0) { println("MetaJS self test passed"); }
+    return failures;
+}

@@ -10,6 +10,13 @@ import (
 // ----------------------------------------------------------------------------
 // Parser scripting subsystem (dynamic script rule for parser)
 
+// scriptRuleRunner executes the code of an inline :script() command. There are
+// two implementations: parserscript runs it with goja, frozenParserScript
+// compiles it with the frozen MetaJS bootstrap and executes the resulting IR.
+type scriptRuleRunner interface {
+	HandleScriptRule(rule *r.Rule, localProductions *r.Rules, depth int) *r.Rule
+}
+
 type parserscript struct {
 	vm                   *goja.Runtime
 	common               *commonscript

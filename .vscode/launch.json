@@ -77,6 +77,36 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/calculator-to-llvm-ir.abnf", "-b", "tests/calculator_formula.txt", "-q"]
         },
         {
+            "name": "JS interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/js_interpreter.abnf", "-b", "tests/js-test-1.txt", "-q"]
+        },
+        {
+            "name": "JS to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/js-to-llvm-ir.abnf", "-b", "tests/js-test-1.txt", "-q"]
+        },
+        {
+            "name": "TinyC compiler (FROZEN, goja free)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc.abnf", "-b", "tests/tinyc-test-1.txt", "-q", "-frozen"]
+        },
+        {
+            "name": "JS to LLVM IR (FROZEN, goja free)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/js-to-llvm-ir.abnf", "-b", "tests/js-test-1.txt", "-q", "-frozen"]
+        },
+        {
+            "name": "Freeze the MetaJS bootstrap",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-freeze", "tests/js-to-llvm-ir.abnf"]
+        },
+        {
             "name": "Brainfuck (syntax only)",
             "type": "go",
             "request": "launch",

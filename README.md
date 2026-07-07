@@ -161,6 +161,7 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | Brainfuck  | brainfuck_interpreter.abnf               | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt  |
 | TinyC      | tinyc_interpreter.abnf                   | tinyc.abnf                   | tinyc-test-1.txt, tinyc-test-2.txt          |
 | Lisp       | lisp_interpreter.abnf                    | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                             |
+| JS (MetaJS)| js_interpreter.abnf                      | js-to-llvm-ir.abnf           | js-test-1.txt                               |
 | C (C99)    | (grammar only)                           | (grammar only)               | c.abnf parses c-test-1.c                    |
 
 Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
@@ -168,6 +169,37 @@ ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck.bnf as syntax only variant), th
 demos (tlv-test, parser-script-test, include-test, parse-and-compile-from-js, llvm-ir-tests),
 and two grammars that deliberately fail to demonstrate the parser limits
 (smaller-match-first-test, infinite-loop).
+
+MetaJS is special: it is the restricted JavaScript subset that the annotation scripts of all
+grammars in tests/ are written in (see the description in js_interpreter.abnf for the exact
+language). That closes the loop for the frozen bootstrap below.
+
+#### The frozen bootstrap (running without goja)
+
+Normally the annotation scripts run on goja (a JS engine in Go). The frozen mode replaces it:
+
+```
+./mec -freeze tests/js-to-llvm-ir.abnf     # snapshot: abnf/jsagrammar.go + abnf/jsbootstrap.ll
+go build .                                 # embed the snapshot
+./mec -a tests/tinyc.abnf -b tests/tinyc-test-1.txt -q -frozen
+```
+
+`-freeze` runs js-to-llvm-ir.abnf once under goja and lets it compile its *own* tag scripts
+(plus its emitter library) to one LLVM IR module, keyed by tag source text. With `-frozen`,
+the Go core then executes every annotation script goja free:
+
+1. The script is parsed with the frozen a-grammar (pure Go).
+2. Its ASG is walked bottom up; each tag of that walk runs a snapshotted compiler closure on
+   the built-in IR machine, which emits the IR module of the script.
+3. The emitted module runs on the MetaJS handle runtime (abnf/jsrt.go): every dynamic value
+   is an i64 handle into a Go side table, the js_* externals implement the JS semantics, and
+   a reflection bridge exposes the whole host API (up/ltr, the stacks, c.*, abnf.*, and the
+   llvm.* builder objects with their methods) - including JS closures that scripts push onto
+   the stacks, which survive as IR function handles.
+
+All grammars in tests/ pass their self checking runs with identical output in both modes;
+frozen mode is roughly an order of magnitude slower (threaded IR on an interpreter instead
+of a JS VM). goja is only needed to (re)create the snapshot after changing js-to-llvm-ir.abnf.
 
 ### High level overview
 
@@ -666,6 +698,8 @@ The functions and constants are exposed to JS as:
   The function `llvm.Eval(m ir.Module, f string)` executes the function `f` inside the IR module `m` with the built-in IR interpreter and returns the resulting uint32.
   * __llvm.Run(m ir.Module, f string, input string) {Ret uint32, Out string}__  
   Like `llvm.Eval()`, but `input` is what `getchar()` reads (can be left out), `Out` is everything the program wrote via `putchar()`/`puts()`, and `Ret` is the return value. The interpreter supports the integer subset of LLVM IR that the compiler grammars generate: alloca/load/store, getelementptr into arrays, integer arithmetic and comparisons, zext/sext/trunc, select, phi, branches, calls, and the externals putchar, getchar, puts and abs.
+  * __llvm.RunJS(m ir.Module, f string) {Ret uint32, Out string}__  
+  Executes a MetaJS module (IR emitted by `tests/js-to-llvm-ir.abnf`, where every value is an i64 handle and the `js_*` externals implement the JS semantics on the Go side). `f` is the module entry, normally `jsmain`; its handle result is converted to an int32 and returned as `Ret`.
 
 ## Further Examples
 

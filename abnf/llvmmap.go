@@ -976,6 +976,11 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// Run executes the named function with the given stdin content for getchar() and
 	// returns {Ret, Out}. The input parameter can be left out.
 	"Run": run,
+	// RunJS executes a MetaJS module (IR emitted by js-to-llvm-ir.abnf, where every
+	// value is an i64 handle and the js_* externals implement the semantics). The
+	// named function is the module entry (usually "jsmain"); its i64 handle result
+	// is converted to an int32 and returned as Ret.
+	"RunJS": runJSModule,
 }
 
 // callgraph returns the callgraph in Graphviz DOT format of the given LLVM IR module.
@@ -1036,10 +1041,16 @@ const machineMaxSteps = 100000000 // Emergency brake against endless loops.
 type machine struct {
 	mem     []byte                // One flat memory arena for globals and allocas. Offset 0 is reserved as null.
 	globals map[*ir.Global]uint64 // The memory offset of every global.
+	funcs   map[string]*ir.Func   // All module functions by name (for host initiated calls).
 	input   []byte                // The stdin content for getchar().
 	inPos   int
 	out     strings.Builder // The stdout content written by putchar() / puts().
 	steps   int
+
+	// externs resolves calls to declared functions before the built-in ones
+	// (putchar etc.) are tried. The JS runtime (jsrt.go) plugs its js_* host
+	// functions in here.
+	externs map[string]func(args []uint64) uint64
 }
 
 // frame holds the SSA values of one function invocation.
@@ -1047,12 +1058,13 @@ type frame struct {
 	vals map[value.Value]uint64
 }
 
-// run executes the function with the given name inside the module and returns
-// its return value together with the produced output.
-func run(m *ir.Module, start string, input string) *RunResult {
+// newMachine loads a module into a fresh machine: it allocates and initializes
+// the globals and indexes the functions.
+func newMachine(m *ir.Module, input string) *machine {
 	ma := &machine{
 		mem:     make([]byte, 8), // Offset 0 stays unused, so 0 can act as null pointer.
 		globals: map[*ir.Global]uint64{},
+		funcs:   map[string]*ir.Func{},
 		input:   []byte(input),
 	}
 	for _, g := range m.Globals {
@@ -1063,14 +1075,32 @@ func run(m *ir.Module, start string, input string) *RunResult {
 		}
 	}
 	for _, f := range m.Funcs {
-		if f.Name() == start {
-			// The start function is called with zero values for all of its parameters
-			// (e.g. a main(int argc) still runs).
-			ret := ma.call(f, make([]uint64, len(f.Params)))
-			return &RunResult{Ret: uint32(ret), Out: ma.out.String()}
-		}
+		ma.funcs[f.Name()] = f
 	}
-	panic("llvm.Run(): function not found in module: " + start)
+	return ma
+}
+
+// callByName executes a module function with the given arguments.
+func (ma *machine) callByName(name string, args []uint64) uint64 {
+	f, ok := ma.funcs[name]
+	if !ok {
+		panic("IR interpreter: function not found in module: " + name)
+	}
+	return ma.call(f, args)
+}
+
+// run executes the function with the given name inside the module and returns
+// its return value together with the produced output.
+func run(m *ir.Module, start string, input string) *RunResult {
+	ma := newMachine(m, input)
+	f, ok := ma.funcs[start]
+	if !ok {
+		panic("llvm.Run(): function not found in module: " + start)
+	}
+	// The start function is called with zero values for all of its parameters
+	// (e.g. a main(int argc) still runs).
+	ret := ma.call(f, make([]uint64, len(f.Params)))
+	return &RunResult{Ret: uint32(ret), Out: ma.out.String()}
 }
 
 // alloc reserves size bytes of zeroed memory and returns their offset.
@@ -1173,8 +1203,28 @@ func (ma *machine) constValue(c constant.Constant) uint64 {
 		return c.X.Uint64()
 	case *constant.Null:
 		return 0
+	case *ir.Global:
+		return ma.globals[c]
+	case *constant.Index:
+		// The asm parser wraps getelementptr indices into constant.Index.
+		return ma.constValue(c.Constant)
+	case *constant.ExprGetElementPtr:
+		// The same address computation as the getelementptr instruction:
+		// the first index scales by the whole element type, the following
+		// ones step into arrays.
+		off := ma.constValue(c.Src) + ma.constValue(c.Indices[0])*ma.sizeOf(c.ElemType)
+		t := c.ElemType
+		for _, index := range c.Indices[1:] {
+			arr, ok := t.(*types.ArrayType)
+			if !ok {
+				panic("IR interpreter: getelementptr expression only supports arrays, not " + t.LLString())
+			}
+			off += ma.constValue(index) * ma.sizeOf(arr.ElemType)
+			t = arr.ElemType
+		}
+		return off
 	default:
-		panic("IR interpreter: unsupported constant: " + c.String())
+		panic(fmt.Sprintf("IR interpreter: unsupported constant (%T): %s", c, c.String()))
 	}
 }
 
@@ -1434,6 +1484,11 @@ func (ma *machine) icmp(pred enum.IPred, x, y uint64, bits uint64) bool {
 // extern implements the external (libc like) functions that the compiler grammars use.
 // getchar() reads from the input given to run() and returns 0 at its end.
 func (ma *machine) extern(f *ir.Func, args []uint64) uint64 {
+	if ma.externs != nil {
+		if fn, ok := ma.externs[f.Name()]; ok {
+			return fn(args)
+		}
+	}
 	switch f.Name() {
 	case "putchar":
 		ma.out.WriteByte(byte(args[0]))

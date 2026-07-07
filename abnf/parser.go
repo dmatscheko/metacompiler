@@ -44,7 +44,7 @@ type parser struct {
 
 	lastParsePosition int // The furthest position that could be parsed. Only used for error messages.
 
-	ps *parserscript // The JS subsystem for dynamic :script() rules.
+	ps scriptRuleRunner // The JS subsystem for dynamic :script() rules.
 
 	fileName string // Where Src came from. Used for messages and to resolve relative paths.
 
@@ -911,7 +911,11 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	pa.referencesCache.correctReferencesAndIDs(pa.agrammar)
 	pa.initialSpaces = &r.Rule{Operator: r.CharsOf, String: "\t\n\r "} // TODO: Make this configurable via JS.
 
-	pa.ps = NewParserScript(&pa, options.PreventDefaultOutput)
+	if UseFrozenScripts {
+		pa.ps = newFrozenParserScript(&pa)
+	} else {
+		pa.ps = NewParserScript(&pa, options.PreventDefaultOutput)
+	}
 
 	for _, rule := range *pa.agrammar {
 		if rule.Operator == r.Command {
