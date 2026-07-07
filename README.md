@@ -41,6 +41,7 @@ This system should allow to define and use compiler for arbitrary computer langu
       - [The stacks](#the-stacks)
         - [Local stacks](#local-stacks)
         - [Global stack](#global-stack)
+      - [Parser script API](#parser-script-api)
       - [Compiler API](#compiler-api)
       - [Parser and Compiler ABNF a-grammar API](#parser-and-compiler-abnf-a-grammar-api)
         - [Builder functions](#builder-functions)
@@ -136,11 +137,15 @@ When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
 
 ```
 go build .
-./mec -a tests/brainfuck_a.bnf -b tests/brainfuck-test-2.txt
+./mec -a tests/brainfuck_interpreter.abnf -b tests/brainfuck-test-2.txt
 ```
 or
 ```
-go run . -a tests/abnf-of-abnf_a.bnf -b tests/abnf-of-abnf_a.bnf
+go run . -a tests/abnf-of-abnf.abnf -b tests/abnf-of-abnf.abnf
+```
+or, to parse a C file with the full C99 grammar:
+```
+go run . -a tests/c.abnf -b tests/c-test-1.c -q
 ```
 
 ### High level overview
@@ -486,22 +491,37 @@ Pushes an arbitrary object onto the stack.
 * __ltr.stack__  
 This stack can also be accessed via the variable `ltr.stack`.
 
+#### Parser script API
+
+Inside the code of an inline `:script()` command, the JS runs while the parser is working. There, the object `c` gives access to the parser state instead of the compiler:
+
+* __c.getSrc() string__ / __c.setSrc(src string)__  
+Reads / replaces the whole target text.
+* __c.getSdx() int__ / __c.setSdx(sdx int)__  
+Reads / moves the current parse position.
+* __c.peek(offset int) int__  
+Returns the byte at the current parse position plus `offset`, or `-1` outside of the target text. Unlike `c.getSrc()` this does not copy the target text, so it is the cheap way to look ahead (see the keyword boundary check `KwEnd` in `tests/c.abnf` for a negative lookahead built with it).
+* __push(v object)__ / __pop() object__  
+A stack that survives between the `:script()` calls of one parse run.
+
+If the script returns a rule (built with the `abnf.*` functions), the parser applies that rule at the current position; any other return value means there is nothing to apply.
+
 #### Compiler API
 
 * __c.agrammar__  
 The grammar that produced the current state, that the JS is executed in.
 * __c.ABNFagrammar__  
 A grammar that can parse and compile ABNF. This is the default initial grammar for the tool.
-* __c.parse(agrammar []Rule, target string) []Rule__  
-Parses the string `target` with the `agrammar` and returns an ASG.
+* __c.parse(agrammar []Rule, target string, options Parseropts) []Rule__  
+Parses the string `target` with the `agrammar` and returns an ASG. The parameter `options` can be left out.
 * __c.asg__  
 The whole abstract semantic graph.
 * __c.localAsg__  
 The local part of the abstract semantic graph.
-* __c.compile(asg []Rule, slot int) map[string]object__  
+* __c.compile(asg []Rule, slot int, traceEnabled bool) map[string]object__  
 Compiles the given ASG and returns the map of the combined upstream variables.  
 Normally, `c.compile()` is called as `c.compile(c.asg)`.<br/>
-The parameter `slot` states the index of the code part inside the `Tags`. It is normally 0.<br/>
+The parameter `slot` states the index of the code part inside the `Tags`. It is normally 0. The parameter `traceEnabled` can additionally switch on the compiler trace output.<br/>
 The compiler works like this:  
 ```
     OUT
@@ -524,7 +544,7 @@ The compiler works like this:
      ^    |
      IN<-'
 ```
-* __c.compileRunStartScript(asg []Rule, aGrammar []Rule, slot int) map[string]object__  
+* __c.compileRunStartScript(asg []Rule, aGrammar []Rule, slot int, traceEnabled bool) map[string]object__  
 Instantiates a new compiler with `asg` and `aGrammar` and starts the :startScript() code of the `aGrammar`. This start script code has to do the rest, to compile the ASG in parameter `asg`. Specifically, it has to call `c.compile(c.asg)` to compile that ASG. And it has to handle the result of the compilation if necessary.<br/>
 The parameter `slot` states the index of the code part inside the `Tags`. It is normally 0.
 
@@ -535,11 +555,11 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 ##### Builder functions
 
 * __abnf.arrayToRules(rules []object) []Rule__
-* __abnf.newRule(Operator OperatorID, String string, Int int, Bool bool, Rune rune, Pos int, Childs []Rule, TagChilds []Rule) Rule__
+* __abnf.newRule(Operator OperatorID, String string, Int int, Pos int, Childs []Rule, CodeChilds []Rule) Rule__
 * __abnf.newToken(String string, Pos int) Rule__
 * __abnf.newNumber(Int int, Pos int) Rule__
-* __abnf.newIdentifier(String string, Int int, Pos int) Rule__
-* __abnf.newProduction(String string, Int int, Childs []Rule, Pos int) Rule__
+* __abnf.newIdentifier(String string, Pos int) Rule__
+* __abnf.newProduction(String string, Childs []Rule, Pos int) Rule__
 * __abnf.newTag(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
 * __abnf.newCommand(String string, CodeChilds []Rule, Pos int) Rule__
 * __abnf.newRepetition(Childs []Rule, Pos int) Rule__
@@ -547,12 +567,13 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __abnf.newGroup(Childs []Rule, Pos int) Rule__
 * __abnf.newSequence(Childs []Rule, Pos int) Rule__
 * __abnf.newAlternative(Childs []Rule, Pos int) Rule__
-* __abnf.newRange(Childs []Rule, Pos int) Rule__
+* __abnf.newRange(CodeChilds []Rule, RangeType int, Pos int) Rule__  
+  `CodeChilds` holds the two Token `[from, to]`, `RangeType` is one of the [RangeType Constants](#rangetype-constants).
 * __abnf.newTimes(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
 * __abnf.newCharOf(String string, Pos int) Rule__
 * __abnf.newCharsOf(String string, Pos int) Rule__
-* __abnf.correctReferencesAndIDs(agrammar []Rule)__  
-This fills the array position of `Productions` into their `Identifier`. It also identifies each different `Tag` with another UID. The array positions of the productions and the UIDs of the Tags are stored in the rules Int field. This method must be used on newly created a-grammars, if they are directly used for compilation. The parser applies this method automatically.
+* __correctReferencesAndIDs(agrammar []Rule)__ (a global function, not part of `abnf.*`)  
+This fills the array position of `Productions` into their `Identifier` (-1 if the production does not exist). It also identifies each different `Tag` with another UID. The array positions of the productions and the UIDs of the Tags are stored in the rules Int field. This method must be used on newly created a-grammars, if they are directly used for compilation. The parser applies this method automatically.
 
 ##### ToString functions
 
@@ -620,8 +641,8 @@ The functions and constants are exposed to JS as:
 * Custom functions:
   * __llvm.Callgraph(m ir.Module) string__  
   The function `llvm.Callgraph(m ir.Module) string` creates the callgraph of the given LLVM IR module in Graphviz DOT format (can be viewed e.g. online with the [Graphviz visual editor](http://magjac.com/graphviz-visual-editor/)).
-  * __llvm.Callgraph(m ir.Module, f string)__  
-  The function `llvm.Callgraph(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
+  * __llvm.Eval(m ir.Module, f string) uint32__  
+  The function `llvm.Eval(m ir.Module, f string)` tries to execute the function `f` inside the IR module `m` and returns the resulting uint32.
 
 ## Further Examples
 
@@ -636,11 +657,14 @@ The functions and constants are exposed to JS as:
 It allows to automatically create a compiler for everything described in ABNF (yes, that format).") ;
 
 
+// TODO: implement !"asdf", !@"asdf", and !@+"asdf", and maybe @b"asdf", and @b+"asdf", and !@b"asdf", and !@b+"asdf".
+
+
 // --- main rules
 
 :startRule(ABNF) ;
 // This is a parser command that sets the possible white space.
-:skip(Whitespace) ;
+:whitespace(Whitespace) ;
 
 // This is the start rule.
 ABNF        = { Production | LineCommand } ;
@@ -655,40 +679,37 @@ Alternative <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
 Sequence    <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
             = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) ~~> } ;
 
-Term        = TaggedTerm | Command ;
+Term        <~~ push(popg()) ~~>
+            = ( Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
-TaggedTerm <~~ push(popg()) ~~>
-            = ( Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
-
-Range       <~~ push(popg()) ~~>
-            = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) ~~> ] ;
-ByteRange   = Token <~~ pushg(pop()) ~~> "..b" Token <~~ push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) ~~> ;
-CharsOf     = "@" Token <~~ push(abnf.newCharsOf(pop().String, c.Pos)) ~~> "+" ;
-CharOf      = "@" Token <~~ push(abnf.newCharOf(pop().String, c.Pos)) ~~> ;
 Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
 Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
 Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) ~~> "}" ;
+Range       <~~ push(popg()) ~~>
+            = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) ~~> ] ;
+ByteRange   = Token <~~ pushg(pop()) ~~> "..b" Token <~~ push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) ~~> ;
+CharsOf     = "@+" Token <~~ push(abnf.newCharsOf(pop().String, c.Pos)) ~~> ;
+CharOf      = "@" Token <~~ push(abnf.newCharOf(pop().String, c.Pos)) ~~> ;
 Times       = CmdNumber <~~ pushg([pop()]) ~~> [ "..." ( CmdNumber | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
+
+CmdNumber   = Number | Command ;
+
+LineCommand = Command <~~ pushg(pop()) ~~> ";" ;
+Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
+            = ":" CmdName "(" <~~ pushg([]) ~~> [ ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> { "," ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> } ] ")" ;
 
 Tag         <~~ push(abnf.newTag(popg(), undefined, c.Pos)) ~~>
             = "<" ( Name | Token ) <~~ pushg([pop()]) ~~> { "," ( Name | Token ) <~~ pushg(append(popg(), pop())) ~~> } ">" ;
 
-CmdNumber   = Number | Command ;
-
-LineCommand = Command <~~ pushg(buildLineCommand(pop())) ~~> ";" ;
-
-Command     <~~ push(abnf.newCommand(pop(), popg(), c.Pos)) ~~>
-            = ":" CmdName "(" <~~ pushg([]) ~~> [ ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> { "," ( Name | Token | Number ) <~~ pushg(append(popg(), pop())) ~~> } ] ")" ;
+Name        <~~ push(abnf.newIdentifier(up.in, c.Pos)) ~~>
+            = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 CmdName     <~~ push(up.in) ~~>
-            = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
-
-Name        <~~ push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) ~~>
-            = Alphabet :skip() { Alphabet | Digit | "_" } :skip(Whitespace) ;
+            = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken | Code ;
-Dquotetoken = '"' :skip() { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' :skip(Whitespace) ;
-Squotetoken = "'" :skip() { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" :skip(Whitespace) ;
-Code        = '~~' :skip() { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' :skip(Whitespace) ;
+Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' :whitespace(Whitespace) ;
+Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" :whitespace(Whitespace) ;
+Code        = '~~' :whitespace() { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' :whitespace(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
@@ -700,50 +721,23 @@ AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicod
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>
             = "0" | "1"..."9" { "0"..."9" } ;
 
-Whitespace  = { @"\t\n\r "+ | Comment } ;
+Whitespace  = { @+"\t\n\r " | Comment } ;
 
-Comment     = LineComment | "/*" :skip() { { "*" } AsciiNoStSl { "/" } } "*/" :skip(Whitespace) ;
-LineComment = "//" :skip() { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
+Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(Whitespace) ;
+LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(Whitespace) ;
 
 // ---
 
 
 :startScript(~~
 
-    let names = []
-    let prodsPos = {}
-    let lastPos = 0
-
-    function getNameIdx(name) {
-        const pos = names.indexOf(name)
-        if (pos != -1) return pos
-        return names.push(name) - 1
-    }
-    function resolveNameIdx(productions) {
-        for (let i = 0; i < productions.length; i++) {
-            let rule = productions[i]
-            if (rule.Childs != undefined && rule.Childs.length > 0) resolveNameIdx(rule.Childs)
-            if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) resolveNameIdx(rule.CodeChilds)
-            if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) rule.Int = prodsPos[rule.Int]
-        }
-    }
     function buildProduction(prodName, prodTag, prodExpression) {
-        if (prodsPos[prodName.Int] != undefined) {
-            println("Error: Rule " + prodName.String + " is defined multiple times.")
-            exit(0)
-        }
-        prodsPos[prodName.Int] = lastPos++
         if (prodTag != undefined) {
             prodTag.Childs = simplifyToArr(prodExpression)
-            return abnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)
+            return abnf.newProduction(prodName.String, [prodTag], prodName.Pos)
         } else {
-            return abnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)
+            return abnf.newProduction(prodName.String, simplifyToArr(prodExpression), prodName.Pos)
         }
-    }
-    function buildLineCommand(cmd) {
-        cmd.Int = getNameIdx(cmd.String)
-        prodsPos[cmd.Int] = lastPos++
-        return cmd
     }
 
     // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.
@@ -782,7 +776,6 @@ LineComment = "//" :skip() { AsciiNoLb } ( "\n" | "\r" ) :skip(Whitespace) ;
 
     c.compile(c.asg)
     let rules = ltr.stack
-    resolveNameIdx(rules)
 
     // To show the initial a-grammar:
     println("=> Rules: " + abnf.serializeRules(rules))
@@ -802,85 +795,67 @@ This output is exactly the data structure that controls the parser when it is us
   <summary>Click to expand!</summary>
 
 ```javascript
-&r.Rules{&r.Rule{ Operator: r.Command, String: "title", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "ABNF of ABNF to a-grammar"
+&r.Rules{&r.Rule{Operator:r.Command, String:"title", CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"ABNF of ABNF to a-grammar"
             }
         }
-    }, &r.Rule{ Operator: r.Command, String: "description", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "This ABNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in ABNF (yes, that format)."
+    }, &r.Rule{Operator:r.Command, String:"description", CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"This ABNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in ABNF (yes, that format)."
             }
         }
-    }, &r.Rule{ Operator: r.Command, String: "startRule", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "ABNF", Int: 4
+    }, &r.Rule{Operator:r.Command, String:"startRule", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"ABNF"
             }
         }
-    }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+    }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "ABNF", Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Production", Int: 5
-                            }, &r.Rule{ Operator: r.Identifier, String: "LineCommand", Int: 21
+    }, &r.Rule{Operator:r.Production, String:"ABNF", Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Production"
+                            }, &r.Rule{Operator:r.Identifier, String:"LineCommand"
                             }
                         }
                     }
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Production", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " var prodTag=undefined; var prodExpression=undefined; pushg(pop()) "
+    }, &r.Rule{Operator:r.Production, String:"Production", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" var prodTag=undefined; var prodExpression=undefined; pushg(pop()) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Name"
                     }
                 }
-            }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " prodTag=pop() "
+            }, &r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" prodTag=pop() "
                             }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Tag", Int: 19
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Tag"
                             }
                         }
                     }
                 }
-            }, &r.Rule{ Operator: r.Token, String: "="
-            }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " prodExpression=pop() "
+            }, &r.Rule{Operator:r.Token, String:"="
+            }, &r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" prodExpression=pop() "
                             }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Expression"
                             }
                         }
                     }
                 }
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "  pushg(buildProduction(popg(), prodTag, prodExpression)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"  pushg(buildProduction(popg(), prodTag, prodExpression)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ";"
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:";"
                     }
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Expression", Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alternative", Int: 7
+    }, &r.Rule{Operator:r.Production, String:"Expression", Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Alternative"
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Alternative", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(simplify(abnf.newAlternative(popg(), c.Pos))) "
+    }, &r.Rule{Operator:r.Production, String:"Alternative", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(simplify(abnf.newAlternative(popg(), c.Pos))) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([pop()]) "
                             }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Sequence", Int: 8
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Sequence"
                             }
                         }
-                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "|"
-                            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"|"
+                            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(append(popg(), pop())) "
                                     }
-                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Sequence", Int: 8
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Sequence", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(simplify(abnf.newSequence(popg(), c.Pos))) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
-                            }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Term", Int: 9
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
-                                    }
-                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Term", Int: 9
+                                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Sequence"
                                     }
                                 }
                             }
@@ -889,32 +864,16 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Term", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "TaggedTerm", Int: 10
-                    }, &r.Rule{ Operator: r.Identifier, String: "Command", Int: 22
+    }, &r.Rule{Operator:r.Production, String:"Sequence", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(simplify(abnf.newSequence(popg(), c.Pos))) "
                     }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "TaggedTerm", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(popg()) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(simplify(pop())) "
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([pop()]) "
                             }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
-                                    }, &r.Rule{ Operator: r.Identifier, String: "ByteRange", Int: 12
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Range", Int: 11
-                                    }, &r.Rule{ Operator: r.Identifier, String: "CharsOf", Int: 13
-                                    }, &r.Rule{ Operator: r.Identifier, String: "CharOf", Int: 14
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Group", Int: 15
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Option", Int: 16
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Repetition", Int: 17
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Times", Int: 18
-                                    }
-                                }
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Term"
                             }
                         }
-                    }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) "
+                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(append(popg(), pop())) "
                                     }
-                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Tag", Int: 19
+                                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Term"
                                     }
                                 }
                             }
@@ -923,17 +882,27 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Range", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(popg()) "
+    }, &r.Rule{Operator:r.Production, String:"Term", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(popg()) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(pop()) "
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(simplify(pop())) "
                             }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Name"
+                                    }, &r.Rule{Operator:r.Identifier, String:"ByteRange"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Range"
+                                    }, &r.Rule{Operator:r.Identifier, String:"CharsOf"
+                                    }, &r.Rule{Operator:r.Identifier, String:"CharOf"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Group"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Option"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Repetition"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Times"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Command"
+                                    }
+                                }
                             }
                         }
-                    }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "..."
-                            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) "
+                    }, &r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) "
                                     }
-                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Tag"
                                     }
                                 }
                             }
@@ -942,75 +911,93 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "ByteRange", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(pop()) "
+    }, &r.Rule{Operator:r.Production, String:"Group", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"("
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: "..b"
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Expression"
                     }
                 }
+            }, &r.Rule{Operator:r.Token, String:")"
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "CharsOf", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "@"
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newCharsOf(pop().String, c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"Option", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"["
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newOption(simplifyToArr(pop()), c.Pos)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Expression"
                     }
                 }
-            }, &r.Rule{ Operator: r.Token, String: "+"
+            }, &r.Rule{Operator:r.Token, String:"]"
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "CharOf", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "@"
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newCharOf(pop().String, c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"Repetition", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"{"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Expression"
                     }
                 }
+            }, &r.Rule{Operator:r.Token, String:"}"
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Group", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "("
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"Range", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(popg()) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: ")"
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Option", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "["
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newOption(simplifyToArr(pop()), c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: "]"
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Repetition", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "{"
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Expression", Int: 6
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: "}"
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Times", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "CmdNumber", Int: 20
-                    }
-                }
-            }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "..."
-                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(pop()) "
                             }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "CmdNumber", Int: 20
-                                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(\"...\")) "
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"..."
+                            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) "
+                                    }
+                                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"ByteRange", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(pop()) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }, &r.Rule{Operator:r.Token, String:"..b"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"CharsOf", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"@+"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharsOf(pop().String, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"CharOf", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"@"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharOf(pop().String, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Times", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([pop()]) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"CmdNumber"
+                    }
+                }
+            }, &r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"..."
+                    }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(append(popg(), pop())) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"CmdNumber"
+                                    }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(\"...\")) "
                                             }
-                                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ""
+                                        }, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:""
                                             }
                                         }
                                     }
@@ -1019,78 +1006,51 @@ This output is exactly the data structure that controls the parser when it is us
                         }
                     }
                 }
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Group", Int: 15
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Group"
                     }
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Tag", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newTag(popg(), undefined, c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"CmdNumber", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Number"
+                    }, &r.Rule{Operator:r.Identifier, String:"Command"
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "<"
-                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([pop()]) "
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"LineCommand", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(pop()) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Command"
+                    }
+                }
+            }, &r.Rule{Operator:r.Token, String:";"
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Command", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCommand(pop(), popg(), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:":"
+                    }, &r.Rule{Operator:r.Identifier, String:"CmdName"
+                    }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([]) "
                             }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
-                                    }
-                                }
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"("
                             }
                         }
-                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ","
-                            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
+                    }, &r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(append(popg(), pop())) "
                                     }
-                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
-                                            }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
+                                }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Name"
+                                            }, &r.Rule{Operator:r.Identifier, String:"Token"
+                                            }, &r.Rule{Operator:r.Identifier, String:"Number"
                                             }
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Token, String: ">"
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "CmdNumber", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Number", Int: 35
-                    }, &r.Rule{ Operator: r.Identifier, String: "Command", Int: 22
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "LineCommand", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(buildLineCommand(pop())) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Command", Int: 22
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: ";"
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Command", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newCommand(pop(), popg(), c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ":"
-                    }, &r.Rule{ Operator: r.Identifier, String: "CmdName", Int: 23
-                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg([]) "
-                            }
-                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "("
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
-                                    }
-                                }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
-                                            }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
-                                            }, &r.Rule{ Operator: r.Identifier, String: "Number", Int: 35
+                            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:","
+                                    }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(append(popg(), pop())) "
                                             }
-                                        }
-                                    }
-                                }
-                            }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: ","
-                                    }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " pushg(append(popg(), pop())) "
-                                            }
-                                        }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Name", Int: 24
-                                                    }, &r.Rule{ Operator: r.Identifier, String: "Token", Int: 25
-                                                    }, &r.Rule{ Operator: r.Identifier, String: "Number", Int: 35
+                                        }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Name"
+                                                    }, &r.Rule{Operator:r.Identifier, String:"Token"
+                                                    }, &r.Rule{Operator:r.Identifier, String:"Number"
                                                     }
                                                 }
                                             }
@@ -1099,188 +1059,215 @@ This output is exactly the data structure that controls the parser when it is us
                                 }
                             }
                         }
-                    }, &r.Rule{ Operator: r.Token, String: ")"
+                    }, &r.Rule{Operator:r.Token, String:")"
                     }
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "CmdName", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(up.in) "
+    }, &r.Rule{Operator:r.Production, String:"Tag", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTag(popg(), undefined, c.Pos)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
-                    }, &r.Rule{ Operator: r.Command, String: "skip"
-                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Digit", Int: 30
-                                    }, &r.Rule{ Operator: r.Token, String: "_"
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"<"
+                    }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([pop()]) "
+                            }
+                        }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Name"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Token"
                                     }
                                 }
                             }
                         }
-                    }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Name", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newIdentifier(up.in, getNameIdx(up.in), c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
-                    }, &r.Rule{ Operator: r.Command, String: "skip"
-                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Alphabet", Int: 29
-                                    }, &r.Rule{ Operator: r.Identifier, String: "Digit", Int: 30
-                                    }, &r.Rule{ Operator: r.Token, String: "_"
+                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:","
+                            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(append(popg(), pop())) "
                                     }
-                                }
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Token", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Dquotetoken", Int: 26
-                    }, &r.Rule{ Operator: r.Identifier, String: "Squotetoken", Int: 27
-                    }, &r.Rule{ Operator: r.Identifier, String: "Code", Int: 28
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Dquotetoken", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "\""
-            }, &r.Rule{ Operator: r.Command, String: "skip"
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(unescape(up.in), c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "AsciiNoQs", Int: 31
-                                    }, &r.Rule{ Operator: r.Token, String: "'"
-                                    }, &r.Rule{ Operator: r.Token, String: "\\\""
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: "\""
-            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Squotetoken", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "'"
-            }, &r.Rule{ Operator: r.Command, String: "skip"
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(unescape(up.in), c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "AsciiNoQs", Int: 31
-                                    }, &r.Rule{ Operator: r.Token, String: "\""
-                                    }, &r.Rule{ Operator: r.Token, String: "\\'"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: "'"
-            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Code", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "~~"
-            }, &r.Rule{ Operator: r.Command, String: "skip"
-            }, &r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newToken(unescapeTilde(up.in), c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Optional, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "~"
-                                    }
-                                }
-                            }, &r.Rule{ Operator: r.Identifier, String: "AllButTilde", Int: 34
-                            }
-                        }
-                    }
-                }
-            }, &r.Rule{ Operator: r.Token, String: "~~"
-            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Alphabet", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "a"
-                            }, &r.Rule{ Operator: r.Token, String: "z"
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "A"
-                            }, &r.Rule{ Operator: r.Token, String: "Z"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Digit", Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
-                    }, &r.Rule{ Operator: r.Token, String: "9"
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "AsciiNoQs", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "("
-                            }, &r.Rule{ Operator: r.Token, String: "~"
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "#"
-                            }, &r.Rule{ Operator: r.Token, String: "&"
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.CharOf, String: "\t\n\r !"
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "AsciiNoLb", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " "
-                            }, &r.Rule{ Operator: r.Token, String: "~"
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Token, String: "\t"
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "AsciiNoStSl", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\x00"
-                            }, &r.Rule{ Operator: r.Token, String: ")"
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "+"
-                            }, &r.Rule{ Operator: r.Token, String: "."
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
-                            }, &r.Rule{ Operator: r.Token, String: "~"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "AllButTilde", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\x00"
-                            }, &r.Rule{ Operator: r.Token, String: "}"
-                            }
-                        }
-                    }, &r.Rule{ Operator: r.Token, String: "\\~"
-                    }, &r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\u007f"
-                            }, &r.Rule{ Operator: r.Token, String: "\uffff"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }, &r.Rule{ Operator: r.Production, String: "Number", Childs:&r.Rules{&r.Rule{ Operator: r.Tag, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: " push(abnf.newNumber(up.in, c.Pos)) "
-                    }
-                }, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
-                            }, &r.Rule{ Operator: r.Sequence, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "1"
-                                            }, &r.Rule{ Operator: r.Token, String: "9"
+                                }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Name"
+                                            }, &r.Rule{Operator:r.Identifier, String:"Token"
                                             }
                                         }
-                                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Range, Int: 0, CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "0"
-                                                    }, &r.Rule{ Operator: r.Token, String: "9"
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Token, String:">"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Name", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newIdentifier(up.in, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Alphabet"
+                    }, &r.Rule{Operator:r.Command, String:"whitespace"
+                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Alphabet"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Digit"
+                                    }, &r.Rule{Operator:r.Token, String:"_"
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"CmdName", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(up.in) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Alphabet"
+                    }, &r.Rule{Operator:r.Command, String:"whitespace"
+                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Alphabet"
+                                    }, &r.Rule{Operator:r.Identifier, String:"Digit"
+                                    }, &r.Rule{Operator:r.Token, String:"_"
+                                    }
+                                }
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Token", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Dquotetoken"
+                    }, &r.Rule{Operator:r.Identifier, String:"Squotetoken"
+                    }, &r.Rule{Operator:r.Identifier, String:"Code"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Dquotetoken", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"\""
+            }, &r.Rule{Operator:r.Command, String:"whitespace"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(unescape(up.in), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"AsciiNoQs"
+                                    }, &r.Rule{Operator:r.Token, String:"'"
+                                    }, &r.Rule{Operator:r.Token, String:"\\\""
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{Operator:r.Token, String:"\""
+            }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Squotetoken", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"'"
+            }, &r.Rule{Operator:r.Command, String:"whitespace"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(unescape(up.in), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"AsciiNoQs"
+                                    }, &r.Rule{Operator:r.Token, String:"\""
+                                    }, &r.Rule{Operator:r.Token, String:"\\'"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{Operator:r.Token, String:"'"
+            }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Code", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"~~"
+            }, &r.Rule{Operator:r.Command, String:"whitespace"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(unescapeTilde(up.in), c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"~"
+                                    }
+                                }
+                            }, &r.Rule{Operator:r.Identifier, String:"AllButTilde"
+                            }
+                        }
+                    }
+                }
+            }, &r.Rule{Operator:r.Token, String:"~~"
+            }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Alphabet", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"a"
+                            }, &r.Rule{Operator:r.Token, String:"z"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"A"
+                            }, &r.Rule{Operator:r.Token, String:"Z"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Digit", Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"0"
+                    }, &r.Rule{Operator:r.Token, String:"9"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"AsciiNoQs", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"("
+                            }, &r.Rule{Operator:r.Token, String:"~"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"#"
+                            }, &r.Rule{Operator:r.Token, String:"&"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.CharOf, String:"\t\n\r !"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"AsciiNoLb", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" "
+                            }, &r.Rule{Operator:r.Token, String:"~"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Token, String:"\t"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"AsciiNoStSl", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
+                            }, &r.Rule{Operator:r.Token, String:")"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"+"
+                            }, &r.Rule{Operator:r.Token, String:"."
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"0"
+                            }, &r.Rule{Operator:r.Token, String:"~"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"AllButTilde", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
+                            }, &r.Rule{Operator:r.Token, String:"}"
+                            }
+                        }
+                    }, &r.Rule{Operator:r.Token, String:"\\~"
+                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x7f"
+                            }, &r.Rule{Operator:r.Token, String:"\uffff"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"Number", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newNumber(up.in, c.Pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"0"
+                            }, &r.Rule{Operator:r.Sequence, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"1"
+                                            }, &r.Rule{Operator:r.Token, String:"9"
+                                            }
+                                        }
+                                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"0"
+                                                    }, &r.Rule{Operator:r.Token, String:"9"
                                                     }
                                                 }
                                             }
@@ -1293,28 +1280,28 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Whitespace", Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.CharsOf, String: "\t\n\r "
-                            }, &r.Rule{ Operator: r.Identifier, String: "Comment", Int: 37
+    }, &r.Rule{Operator:r.Production, String:"Whitespace", Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.CharsOf, String:"\t\n\r "
+                            }, &r.Rule{Operator:r.Identifier, String:"Comment"
                             }
                         }
                     }
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "Comment", Childs:&r.Rules{&r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "LineComment", Int: 38
-                    }, &r.Rule{ Operator: r.Sequence, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "/*"
-                            }, &r.Rule{ Operator: r.Command, String: "skip"
-                            }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "*"
+    }, &r.Rule{Operator:r.Production, String:"Comment", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"LineComment"
+                    }, &r.Rule{Operator:r.Sequence, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"/*"
+                            }, &r.Rule{Operator:r.Command, String:"whitespace"
+                            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"*"
                                             }
                                         }
-                                    }, &r.Rule{ Operator: r.Identifier, String: "AsciiNoStSl", Int: 33
-                                    }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "/"
+                                    }, &r.Rule{Operator:r.Identifier, String:"AsciiNoStSl"
+                                    }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"/"
                                             }
                                         }
                                     }
                                 }
-                            }, &r.Rule{ Operator: r.Token, String: "*/"
-                            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+                            }, &r.Rule{Operator:r.Token, String:"*/"
+                            }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
                                     }
                                 }
                             }
@@ -1323,21 +1310,21 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Production, String: "LineComment", Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "//"
-            }, &r.Rule{ Operator: r.Command, String: "skip"
-            }, &r.Rule{ Operator: r.Repeat, Childs:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "AsciiNoLb", Int: 32
+    }, &r.Rule{Operator:r.Production, String:"LineComment", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"//"
+            }, &r.Rule{Operator:r.Command, String:"whitespace"
+            }, &r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"AsciiNoLb"
                     }
                 }
-            }, &r.Rule{ Operator: r.Or, Childs:&r.Rules{&r.Rule{ Operator: r.Token, String: "\n"
-                    }, &r.Rule{ Operator: r.Token, String: "\r"
+            }, &r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"\n"
+                    }, &r.Rule{Operator:r.Token, String:"\r"
                     }
                 }
-            }, &r.Rule{ Operator: r.Command, String: "skip", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Identifier, String: "Whitespace", Int: 36
+            }, &r.Rule{Operator:r.Command, String:"whitespace", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Whitespace"
                     }
                 }
             }
         }
-    }, &r.Rule{ Operator: r.Command, String: "startScript", CodeChilds:&r.Rules{&r.Rule{ Operator: r.Token, String: "\n\n    let names = []\n    let prodsPos = {}\n    let lastPos = 0\n\n    function getNameIdx(name) {\n        const pos = names.indexOf(name)\n        if (pos != -1) return pos\n        return names.push(name) - 1\n    }\n    function resolveNameIdx(productions) {\n        for (let i = 0; i < productions.length; i++) {\n            let rule = productions[i]\n            if (rule.Childs != undefined && rule.Childs.length > 0) resolveNameIdx(rule.Childs)\n            if (rule.CodeChilds != undefined && rule.CodeChilds.length > 0) resolveNameIdx(rule.CodeChilds)\n            if (rule.Operator == abnf.oid.Production || rule.Operator == abnf.oid.Identifier) rule.Int = prodsPos[rule.Int]\n        }\n    }\n    function buildProduction(prodName, prodTag, prodExpression) {\n        if (prodsPos[prodName.Int] != undefined) {\n            println(\"Error: Rule \" + prodName.String + \" is defined multiple times.\")\n            exit(0)\n        }\n        prodsPos[prodName.Int] = lastPos++\n        if (prodTag != undefined) {\n            prodTag.Childs = simplifyToArr(prodExpression)\n            return abnf.newProduction(prodName.String, prodName.Int, [prodTag], prodName.Pos)\n        } else {\n            return abnf.newProduction(prodName.String, prodName.Int, simplifyToArr(prodExpression), prodName.Pos)\n        }\n    }\n    function buildLineCommand(cmd) {\n        cmd.Int = getNameIdx(cmd.String)\n        prodsPos[cmd.Int] = lastPos++\n        return cmd\n    }\n\n    // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.\n    function simplifyArr(rules) {\n        if (rules.length == 1) {\n            const op = rules[0].Operator\n            if (op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1)) return simplifyArr(rules[0].Childs)\n        }\n        return rules\n    }\n\n    // This also breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.\n    function simplifyToArr(rule) {\n        if (rule == undefined) return undefined\n        return simplifyArr([rule])\n    }\n\n    // Groups with only one child can be broken apart as long as down there is an unbreakable rule. Try to find one.\n    function trySimplifyDown(rule) {\n        if (rule.Childs == undefined) return rule\n        const op = rule.Operator\n        if ((rule.Childs.length == 1) && (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or)) return trySimplifyDown(rule.Childs[0])\n        if (op == abnf.oid.Sequence) return undefined\n        return rule\n    }\n\n    function simplify(rule) {\n        let ruleDown = trySimplifyDown(rule)\n        if (ruleDown != undefined) return ruleDown\n        if (rule.Childs.length == 1) { // Breaking up abnf.oid.Group did not work. Getting down only with Sequence and Or.\n            const op = rule.Operator\n            if (op == abnf.oid.Sequence || op == abnf.oid.Or) return simplify(rule.Childs[0])\n        }\n        return rule\n    }\n\n    c.compile(c.asg)\n    let rules = ltr.stack\n    resolveNameIdx(rules)\n\n    // To show the initial a-grammar:\n    println(\"=> Rules: \" + abnf.serializeRules(rules))\n\n    // To return the generated a-grammar to the next parser:\n    rules\n\n"
+    }, &r.Rule{Operator:r.Command, String:"startScript", CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\n\n    function buildProduction(prodName, prodTag, prodExpression) {\n        if (prodTag != undefined) {\n            prodTag.Childs = simplifyToArr(prodExpression)\n            return abnf.newProduction(prodName.String, [prodTag], prodName.Pos)\n        } else {\n            return abnf.newProduction(prodName.String, simplifyToArr(prodExpression), prodName.Pos)\n        }\n    }\n\n    // This breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.\n    function simplifyArr(rules) {\n        if (rules.length == 1) {\n            const op = rules[0].Operator\n            if (op == abnf.oid.Sequence || op == abnf.oid.Group || (op == abnf.oid.Or && rules[0].Childs.length <= 1)) return simplifyArr(rules[0].Childs)\n        }\n        return rules\n    }\n\n    // This also breaks up an abnf.oid.Group. Use only for childs of unbreakable rules.\n    function simplifyToArr(rule) {\n        if (rule == undefined) return undefined\n        return simplifyArr([rule])\n    }\n\n    // Groups with only one child can be broken apart as long as down there is an unbreakable rule. Try to find one.\n    function trySimplifyDown(rule) {\n        if (rule.Childs == undefined) return rule\n        const op = rule.Operator\n        if ((rule.Childs.length == 1) && (op == abnf.oid.Sequence || op == abnf.oid.Group || op == abnf.oid.Or)) return trySimplifyDown(rule.Childs[0])\n        if (op == abnf.oid.Sequence) return undefined\n        return rule\n    }\n\n    function simplify(rule) {\n        let ruleDown = trySimplifyDown(rule)\n        if (ruleDown != undefined) return ruleDown\n        if (rule.Childs.length == 1) { // Breaking up abnf.oid.Group did not work. Getting down only with Sequence and Or.\n            const op = rule.Operator\n            if (op == abnf.oid.Sequence || op == abnf.oid.Or) return simplify(rule.Childs[0])\n        }\n        return rule\n    }\n\n    c.compile(c.asg)\n    let rules = ltr.stack\n\n    // To show the initial a-grammar:\n    println(\"=> Rules: \" + abnf.serializeRules(rules))\n\n    // To return the generated a-grammar to the next parser:\n    rules\n\n"
             }
         }
     }
