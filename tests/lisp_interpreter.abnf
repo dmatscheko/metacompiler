@@ -1,0 +1,161 @@
+:title("Lisp interpreter") ;
+:description("Parses a small Lisp (a Scheme like integer subset) and executes it directly.
+
+Supported: (define (f a b) body...), (define x expr), (if c t e?), (let ((x e)...) body...),
+(begin e...), the n-ary operators + - * /, the comparisons = < > <= >=, integers (32 bit,
+/ truncates towards zero), recursion, and (putchar n) for output. 0 is false, everything
+else is true. Functions return the value of their last body form.
+
+The grammar only builds the s-expression tree (lists become JS arrays, symbols become
+{sym: name} objects, numbers stay numbers); all semantics live in the start script.
+The program value is the value of the last top level form, and it becomes the exit code
+of the metacompiler run, so Lisp test programs are self checking: they end in 0 on success.
+The same language with the same semantics is compiled by lisp-to-llvm-ir.abnf.") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     = { Form } ;
+
+Form        = List | Number | Symbol ;
+
+// The local stack holds the values of all inner forms in source order.
+List        <~~ push(takeAll()) ~~>
+            = "(" { Form } ")" ;
+
+// The minus must stick directly to the digits: '(- 5)' is a call, '(-5)' contains a number.
+Number      <~~ push(parseInt(up.in)) ~~>
+            = ( "-" :whitespace() "0"..."9" | "0"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+
+Symbol      <~~ push({sym: up.in}) ~~>
+            = SymbolStart :whitespace() { SymbolStart | "0"..."9" } :whitespace(Whitespace) ;
+SymbolStart = "a"..."z" | "A"..."Z" | @"+-*/<>=!?_" ;
+
+// Spaces and ; line comments.
+Whitespace  = { @+" \t\r\n" | ";" :whitespace() { NotNewline } :whitespace(Whitespace) } ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    // takeAll empties the local stack of the current tag and returns its items in push
+    // order as a plain JS array.
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    function fail(msg) {
+        println("Error: " + msg)
+        exit(1)
+    }
+
+    // All user defined functions by name: {params: [names...], body: [forms...]}.
+    var functions = {}
+    // The global variables ((define x e) at the top level).
+    var globalEnv = {vars: {}, parent: null}
+
+    function lookup(env, name) {
+        for (var e = env; e != null; e = e.parent) {
+            if (e.vars[name] != undefined) return e.vars[name]
+        }
+        fail("Variable not defined: " + name)
+    }
+
+    // Evaluates the forms in sequence and returns the value of the last one.
+    function evalBody(forms, env) {
+        var v = 0
+        for (var i = 0; i < forms.length; i++) v = evalForm(forms[i], env)
+        return v
+    }
+
+    function evalForm(form, env) {
+        if (typeof form == "number") return form
+        if (form.sym != undefined) return lookup(env, form.sym)
+
+        // form is a list.
+        if (form.length == 0) fail("Cannot evaluate the empty list ()")
+        var head = form[0]
+        if (head.sym == undefined) fail("The head of a list must be a symbol")
+        var s = head.sym
+
+        // Special forms.
+        if (s == "define") fail("(define ...) is only allowed at the top level")
+        if (s == "if") {
+            if (evalForm(form[1], env) != 0) return evalForm(form[2], env)
+            return form.length > 3 ? evalForm(form[3], env) : 0
+        }
+        if (s == "let") {
+            // All init expressions see the outer environment (like in Scheme).
+            var inner = {vars: {}, parent: env}
+            var bindings = form[1]
+            for (var i = 0; i < bindings.length; i++) {
+                inner.vars[bindings[i][0].sym] = evalForm(bindings[i][1], env)
+            }
+            return evalBody(form.slice(2), inner)
+        }
+        if (s == "begin") return evalBody(form.slice(1), env)
+
+        // Everything else evaluates its arguments first.
+        var args = []
+        for (var i = 1; i < form.length; i++) args.push(evalForm(form[i], env))
+
+        // Builtin operators (32 bit integer arithmetic, like the compiled version).
+        if (s == "+") { var v = 0; for (var i = 0; i < args.length; i++) v = (v + args[i]) | 0; return v }
+        if (s == "*") { var v = 1; for (var i = 0; i < args.length; i++) v = Math.imul(v, args[i]); return v }
+        if (s == "-") {
+            if (args.length == 1) return (0 - args[0]) | 0
+            var v = args[0]; for (var i = 1; i < args.length; i++) v = (v - args[i]) | 0; return v
+        }
+        if (s == "/") { var v = args[0]; for (var i = 1; i < args.length; i++) v = (v / args[i]) | 0; return v }
+        if (s == "=")  return (args[0] == args[1]) ? 1 : 0
+        if (s == "<")  return (args[0] < args[1]) ? 1 : 0
+        if (s == ">")  return (args[0] > args[1]) ? 1 : 0
+        if (s == "<=") return (args[0] <= args[1]) ? 1 : 0
+        if (s == ">=") return (args[0] >= args[1]) ? 1 : 0
+        if (s == "putchar") { printf("%c", args[0]); return args[0] }
+
+        // A user defined function. The body sees only its parameters and the globals
+        // (lexical scoping with top level functions).
+        var f = functions[s]
+        if (f == undefined) fail("Function not defined: " + s)
+        var env2 = {vars: {}, parent: globalEnv}
+        for (var i = 0; i < f.params.length; i++) {
+            env2.vars[f.params[i]] = (i < args.length) ? args[i] : 0
+        }
+        return evalBody(f.body, env2)
+    }
+
+    // Build the s-expression tree; the top level forms end up on the global stack.
+    var res = c.compile(c.asg)
+    var forms = res.stack
+
+    // Execute the top level forms in order. (define ...) registers, everything else runs.
+    var value = 0
+    for (var i = 0; i < forms.length; i++) {
+        var form = forms[i]
+        if (Array.isArray(form) && form.length > 0 && form[0].sym == "define") {
+            if (Array.isArray(form[1])) { // (define (f a b) body...)
+                var sig = form[1]
+                var params = []
+                for (var j = 1; j < sig.length; j++) params.push(sig[j].sym)
+                functions[sig[0].sym] = {params: params, body: form.slice(2)}
+            } else { // (define x expr)
+                globalEnv.vars[form[1].sym] = evalForm(form[2], globalEnv)
+            }
+        } else {
+            value = evalForm(form, globalEnv)
+        }
+    }
+
+    println("lisp interpreter: program value is " + value)
+    exit(value)
+
+~~) ;

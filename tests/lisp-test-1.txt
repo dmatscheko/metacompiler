@@ -1,0 +1,43 @@
+; Lisp self test.
+; The value of the last top level form is the exit code of the run,
+; so this program ends in 0 exactly when every check passed.
+
+(define (fact n)
+  (if (< n 2)
+      1
+      (* n (fact (- n 1)))))
+
+(define (fib n)
+  (if (< n 2)
+      n
+      (+ (fib (- n 1)) (fib (- n 2)))))
+
+(define (ackermann m n)                 ; heavy recursion (keep the arguments small!)
+  (if (= m 0)
+      (+ n 1)
+      (if (= n 0)
+          (ackermann (- m 1) 1)
+          (ackermann (- m 1) (ackermann m (- n 1))))))
+
+(define (sum-to n)                      ; symbols may contain a dash
+  (if (= n 0)
+      0
+      (+ n (sum-to (- n 1)))))
+
+(define seven 7)                        ; a global variable
+
+(define (check got want)                ; 0 when equal, 1 when not
+  (if (= got want) 0 1))
+
+(let ((failures (+ (check (fact 5) 120)
+                   (check (fib 10) 55)
+                   (check (ackermann 2 3) 9)
+                   (check (sum-to 10) 55)
+                   (check (* seven 2) 14)
+                   (check (/ 7 2) 3)                ; integer division truncates
+                   (check (- 3 10) -7)              ; negative numbers
+                   (check (if 0 1) 0)               ; a missing else arm yields 0
+                   (check (begin 1 2 3) 3))))       ; begin yields the last value
+  (if (= failures 0)
+      (begin (putchar 79) (putchar 75) (putchar 10) 0)   ; print "OK\n"
+      failures))
