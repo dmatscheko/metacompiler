@@ -1,19 +1,15 @@
-"Brainfuck"
+:title("Brainfuck (syntax only)") ;
+:description("A pure EBNF for Brainfuck, without annotations: It only checks the syntax
+(balanced brackets) and produces no output.
+The semantics live in brainfuck_interpreter.abnf and brainfuck-to-llvm-ir.abnf.") ;
 
-{
+:startRule(Brainfuck) ;
+// Everything that is not one of the opcode chars counts as a comment.
+:whitespace(Whitespace) ;
 
 Brainfuck = { Statement } ;
-Statement = Opcode | Lparen { Statement } Rparen ;
-Opcode = Next | Prev | Inc | Dec | Write | Read ;
+Statement = Opcode | "[" { Statement } "]" ;
+Opcode    = ">" | "<" | "+" | "-" | "." | "," | "?" ;
 
-Next    = '>' ;
-Prev    = '<' ;
-Inc     = '+' ;
-Dec     = '-' ;
-Write   = '.' ;
-Read    = ',' | '?' ;
-Lparen  = '[' ;
-Rparen  = ']' ;
-
-}
-Brainfuck
+// All chars except the opcode chars > < + - . , ? [ ].
+Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" } ;

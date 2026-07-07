@@ -1,27 +1,50 @@
 :title("Brainfuck interpreter") ;
+:description("Parses Brainfuck and executes it directly.
+
+Each opcode tag pushes its handler function onto the global stack, so after c.compile()
+the stack is the program: an array of functions in source order. The start script then
+walks that array with an instruction pointer. Loops work at runtime: '[' either skips
+to behind its matching ']' (cell is 0) or remembers its position on the same stack,
+and ']' jumps back while the cell is not 0.
+
+Cells are 8 bit and wrap around, like in the compiled version (brainfuck-to-llvm-ir.abnf).
+',' and '?' read one char of the input; at the end of the input they read 0.") ;
 
 
 // --- main rules
 
 :startRule(Brainfuck) ;
+// Everything that is not one of the opcode chars counts as a comment (real world
+// Brainfuck files contain plain text between the opcodes).
+:whitespace(Whitespace) ;
 
 Brainfuck = { Statement } ;
 Statement = Opcode | Lparen { Statement } Rparen ;
-Opcode = Next | Prev | Inc | Dec | Write | Read ;
+Opcode    = Next | Prev | Inc | Dec | Write | Read ;
 
-Next = '>'          <~~ pushg(next) ~~> ;
-Prev = '<'          <~~ pushg(prev) ~~> ;
-Inc = '+'           <~~ pushg(inc) ~~> ;
-Dec = '-'           <~~ pushg(dec) ~~> ;
-Write = '.'         <~~ pushg(write) ~~> ;
-Read = ',' | '?'    <~~ pushg(read) ~~> ;
-Lparen = '['        <~~ pushg(lparen) ~~> ;
-Rparen = ']'        <~~ pushg(rparen) ~~> ;
+Next   = ">"            <~~ pushg(next) ~~> ;
+Prev   = "<"            <~~ pushg(prev) ~~> ;
+Inc    = "+"            <~~ pushg(inc) ~~> ;
+Dec    = "-"            <~~ pushg(dec) ~~> ;
+Write  = "."            <~~ pushg(write) ~~> ;
+Read   = ( "," | "?" )  <~~ pushg(read) ~~> ; // The group is needed: a tag only annotates the term directly before it.
+Lparen = "["            <~~ pushg(lparen) ~~> ;
+Rparen = "]"            <~~ pushg(rparen) ~~> ;
+
+// All chars except the opcode chars > < + - . , ? [ ].
+Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" } ;
 
 // ---
 
 
 :startScript(~~
+
+    // The input that ',' and '?' read from (empty means every read returns 0).
+    var input = ""
+    var ipos = 0
+
+    var data = []
+    var dpos = 0
 
     function check() {
         if (data[dpos] == undefined) data[dpos] = 0
@@ -35,37 +58,46 @@ Rparen = ']'        <~~ pushg(rparen) ~~> ;
     }
     function inc() {
         check()
-        data[dpos]++
+        data[dpos] = (data[dpos] + 1) & 255 // The cells are 8 bit and wrap around.
     }
     function dec() {
         check()
-        data[dpos]--
+        data[dpos] = (data[dpos] - 1) & 255
     }
     function write() {
         check()
         printf("%c", data[dpos])
     }
     function read() {
-        data[dpos] = 42 // Here we could get a char from the command line.
+        data[dpos] = (ipos < input.length) ? input.charCodeAt(ipos++) & 255 : 0
     }
     function lparen() {
-        pushg(cpos)
+        check()
+        if (data[dpos] == 0) {
+            // Skip to behind the matching ']': scan the program for it.
+            var depth = 1
+            while (depth > 0) {
+                cpos++
+                if (ltr.stack[cpos] === lparen) depth++
+                else if (ltr.stack[cpos] === rparen) depth--
+            }
+        } else {
+            pushg(cpos) // Remember where the loop started.
+        }
     }
     function rparen() {
         check()
-        if (data[dpos] == 0) { popg() } else { cpos = popg() - 1 }
+        if (data[dpos] == 0) { popg() } else { cpos = popg() - 1 } // -1, because the driver loop adds 1 and must arrive at the '['.
     }
 
-    var data = []
-    var dpos = 0
-
-    // println("ASG: " + c.asg.Serialize())
+    // Fill the global stack with the program: one handler function per opcode, in source order.
     c.compile(c.asg)
 
+    // Run the program. Everything that lparen() pushes at runtime lies behind codeLength
+    // and is therefore never executed as an instruction.
+    var codeLength = ltr.stack.length
     var cpos = 0
-    while (ltr.stack[cpos] != undefined) {
-        // println(ltr.stack[cpos].name)
-        // sleep(20)
+    while (cpos < codeLength) {
         ltr.stack[cpos]()
         cpos++
     }

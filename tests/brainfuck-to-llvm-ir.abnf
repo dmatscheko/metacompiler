@@ -1,30 +1,44 @@
 :title("Brainfuck to LLVM IR compiler") ;
+:description("Compiles Brainfuck to an LLVM IR module and runs it with the built-in IR interpreter.
+
+Each opcode appends its instructions to the current basic block. A '[' opens two new
+blocks (loop head with the zero check, loop body) and ']' closes them, so the standard
+Brainfuck semantics hold: '[' skips its body when the current cell is 0.
+
+The generated module is also printed; it can be compiled with clang:
+    ./mec -a tests/brainfuck-to-llvm-ir.abnf -b tests/brainfuck-test-2.txt -q > test.ll && clang test.ll
+
+Cells are 8 bit. ',' and '?' read via getchar(); a negative result (EOF) reads as 0,
+which matches the interpreter variant (brainfuck_interpreter.abnf).") ;
 
 
 // --- main rules
 
 :startRule(Brainfuck) ;
+// Everything that is not one of the opcode chars counts as a comment (real world
+// Brainfuck files contain plain text between the opcodes).
+:whitespace(Whitespace) ;
 
 Brainfuck = { Statement } ;
 Statement = Opcode | Lparen { Statement } Rparen ;
-Opcode = Next | Prev | Inc | Dec | Write | Read ;
+Opcode    = Next | Prev | Inc | Dec | Write | Read ;
 
-Next = '>'          <~~ next() ~~> ;
-Prev = '<'          <~~ prev() ~~> ;
-Inc = '+'           <~~ inc() ~~> ;
-Dec = '-'           <~~ dec() ~~> ;
-Write = '.'         <~~ write() ~~> ;
-Read = ',' | '?'    <~~ read() ~~> ;
-Lparen = '['        <~~ lparen() ~~> ;
-Rparen = ']'        <~~ rparen() ~~> ;
+Next   = ">"            <~~ next() ~~> ;
+Prev   = "<"            <~~ prev() ~~> ;
+Inc    = "+"            <~~ inc() ~~> ;
+Dec    = "-"            <~~ dec() ~~> ;
+Write  = "."            <~~ write() ~~> ;
+Read   = ( "," | "?" )  <~~ read() ~~> ; // The group is needed: a tag only annotates the term directly before it.
+Lparen = "["            <~~ lparen() ~~> ;
+Rparen = "]"            <~~ rparen() ~~> ;
+
+// All chars except the opcode chars > < + - . , ? [ ].
+Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" } ;
 
 // ---
 
 
 :startScript(~~
-
-    // Compile output with:
-    // clang test.ll
 
     // Create types.
     var i8 = llvm.types.I8
@@ -33,101 +47,103 @@ Rparen = ']'        <~~ rparen() ~~> ;
 
     // Create constants.
     var zeroi8 = llvm.constant.NewInt(i8, 0)
+    var onei8 = llvm.constant.NewInt(i8, 1)
     var zero = llvm.constant.NewInt(i32, 0)
     var one = llvm.constant.NewInt(i32, 1)
 
     // Create a new LLVM IR module.
     var m = llvm.ir.NewModule()
 
-    // Define external functions.
-    var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i8))
-    var extGetchar = m.NewFunc("getchar", i8)
+    // Declare the external libc functions (their prototypes use int, like in C).
+    var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
+    var extGetchar = m.NewFunc("getchar", i32)
 
     // int main() { ... }
     var main = m.NewFunc("main", i32)
 
-    // Define blocks.
+    //    char data[4096] = {0};  int dpos = 0;
     var blockInit = main.NewBlock("init")
-    var blockCode = main.NewBlock("code")
-
-    //    "declare"()
-    //    byte[4096] dataPtr = [0, 0, ...]
     var dataPtr = blockInit.NewAlloca(i8x4096)
     blockInit.NewStore(llvm.constant.NewZeroInitializer(i8x4096), dataPtr)
-    //    int dposPtr = 4096
     var dposPtr = blockInit.NewAlloca(i32)
-    blockInit.NewStore(llvm.constant.NewInt(i32, 0), dposPtr)
-    //    jump("code")
+    blockInit.NewStore(zero, dposPtr)
+
+    // The block that the opcodes currently append their instructions to.
+    var blockCode = main.NewBlock("code")
     blockInit.NewBr(blockCode)
 
-    // Before the block "code" below adds its ret(0), let the compiler-pass add the instructions:
-    // A counter for the code blocks created by compile (just to name them nicely).
+    // A counter, only to give the loop blocks readable names.
     var blockCount = 0
-    // Compile the brainfuck instructions.
-    c.compile(c.asg)
 
-
-    //    "code"
-    //    exit(0)
-    blockCode.NewRet(zero)
-
+    // &data[dpos]
+    function cellPtr(b) {
+        return b.NewGetElementPtr(i8x4096, dataPtr, zero, b.NewLoad(i32, dposPtr))
+    }
 
     function next() {
         // dpos++
-        var dposAdd = blockCode.NewAdd(blockCode.NewLoad(i32, dposPtr), one)
-        blockCode.NewStore(dposAdd, dposPtr)
+        blockCode.NewStore(blockCode.NewAdd(blockCode.NewLoad(i32, dposPtr), one), dposPtr)
     }
     function prev() {
         // dpos--
-        var dposSub = blockCode.NewSub(blockCode.NewLoad(i32, dposPtr), one)
-        blockCode.NewStore(dposSub, dposPtr)
+        blockCode.NewStore(blockCode.NewSub(blockCode.NewLoad(i32, dposPtr), one), dposPtr)
     }
     function inc() {
         // data[dpos]++
-        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-        var elementAdd = blockCode.NewAdd(blockCode.NewLoad(i8, elementPtr), one)
-        blockCode.NewStore(elementAdd, elementPtr)
+        var elementPtr = cellPtr(blockCode)
+        blockCode.NewStore(blockCode.NewAdd(blockCode.NewLoad(i8, elementPtr), onei8), elementPtr)
     }
     function dec() {
         // data[dpos]--
-        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-        var elementSub = blockCode.NewSub(blockCode.NewLoad(i8, elementPtr), one)
-        blockCode.NewStore(elementSub, elementPtr)
+        var elementPtr = cellPtr(blockCode)
+        blockCode.NewStore(blockCode.NewSub(blockCode.NewLoad(i8, elementPtr), onei8), elementPtr)
     }
     function write() {
         // putchar(data[dpos])
-        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-        blockCode.NewCall(extPutchar, blockCode.NewLoad(i8, elementPtr))
+        blockCode.NewCall(extPutchar, blockCode.NewZExt(blockCode.NewLoad(i8, cellPtr(blockCode)), i32))
     }
     function read() {
-        // data[dpos] = getchar()
+        // c = getchar(); data[dpos] = (c < 0) ? 0 : c;   // EOF reads as 0.
         var char = blockCode.NewCall(extGetchar)
-        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-        blockCode.NewStore(char, elementPtr)
+        var isEof = blockCode.NewICmp(llvm.enum.IPredSLT, char, zero)
+        var value = blockCode.NewSelect(isEof, zero, char)
+        blockCode.NewStore(blockCode.NewTrunc(value, i8), cellPtr(blockCode))
     }
     function lparen() {
-        // pushg(IP)
-        var newBlockCode = main.NewBlock("code"+  ++blockCount)
-        blockCode.NewBr(newBlockCode)
-        blockCode = newBlockCode
-
-        pushg([blockCode, blockCount]);
+        // while (data[dpos] != 0) {
+        // The loop head (with the zero check) can only be filled in at the matching ']',
+        // because only then the exit block exists. Until then the pair is remembered.
+        blockCount++
+        var head = main.NewBlock("head" + blockCount)
+        var body = main.NewBlock("body" + blockCount)
+        blockCode.NewBr(head)
+        blockCode = body
+        pushg([head, body, blockCount])
     }
     function rparen() {
-        // if (data[dpos] == 0) { popg() } else { IP = popg()-1 }
-        var oldPos = popg()
-        var oldBlockCode = oldPos[0]
-        var oldBlockCount = oldPos[1]
-
-        var elementPtr = blockCode.NewGetElementPtr(i8x4096, dataPtr, zero, blockCode.NewLoad(i32, dposPtr))
-        var element = blockCode.NewLoad(i8, elementPtr)
-        var condition = blockCode.NewICmp(llvm.enum.IPredUGT, element, zeroi8)
-
-        var newBlockCode = main.NewBlock("code"+ oldBlockCount + "exit")
-        blockCode.NewCondBr(condition, oldBlockCode, newBlockCode)
-        blockCode = newBlockCode
+        // }
+        var loop = popg()
+        var head = loop[0]
+        var body = loop[1]
+        var exitBlock = main.NewBlock("exit" + loop[2])
+        blockCode.NewBr(head) // The end of the body jumps back to the check.
+        var condition = head.NewICmp(llvm.enum.IPredNE, head.NewLoad(i8, cellPtr(head)), zeroi8)
+        head.NewCondBr(condition, body, exitBlock)
+        blockCode = exitBlock
     }
 
+    // Compile the Brainfuck instructions into the module.
+    c.compile(c.asg)
+
+    //    return 0;
+    blockCode.NewRet(zero)
+
+    // Print the generated LLVM IR module (this is the compiler output).
     println(m)
+
+    // And run it with the built-in IR interpreter to show that it works.
+    var res = llvm.Run(m, "main")
+    println("--- Executed with the built-in IR interpreter, output:")
+    print(res.Out)
 
 ~~) ;
