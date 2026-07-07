@@ -60,7 +60,9 @@ Test        = Comp                  <~~ pushg(pop()) ~~>
             | Comp ;
 
 Comp        = Sum                                           <~~ pushg(pop()) ~~>
-                ( "<" | ">" | "<=" | ">=" | "==" | "!=" )   <~~ pushg(up.in) ~~>
+                // The two-char operators must be tried before their one-char prefixes ("<=" before "<"),
+                // because the parser always keeps the first match.
+                ( "<=" | ">=" | "==" | "!=" | "<" | ">" )   <~~ pushg(up.in) ~~>
                 Sum                                         <~~ var vb = pop(); var op = popg(); var va = popg(); push(compare(va, vb, op)) ~~>
             | Sum ;
 
