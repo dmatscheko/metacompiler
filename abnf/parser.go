@@ -30,40 +30,43 @@ import (
 // agrammar parser
 
 type parser struct {
-	Src      string
-	Sdx      int
-	agrammar *r.Rules
+	Src      string   // The target text that gets parsed.
+	Sdx      int      // The current parse position inside Src (byte index).
+	agrammar *r.Rules // The a-grammar that describes the target text.
 
 	opts         *Parseropts
-	blockList    map[int]bool
-	foundList    map[int]*r.Rules
-	foundSdxList map[int]int
+	blockList    map[int]bool     // Marks the (rule, position) pairs that are currently being applied (-lb). Used to stop left recursions.
+	foundList    map[int]*r.Rules // Caches the results of successfully applied (rule, position) pairs (-lf).
+	foundSdxList map[int]int      // The parse position right behind each cached foundList result.
 	traceCount   int
 
-	initialSpaces *r.Rule
+	initialSpaces *r.Rule // The rule that describes skippable whitespace (nil skips nothing). Set via :whitespace(), see applyCommand().
 
-	lastParsePosition int
+	lastParsePosition int // The furthest position that could be parsed. Only used for error messages.
 
-	ps *parserscript
+	ps *parserscript // The JS subsystem for dynamic :script() rules.
 
-	fileName string
+	fileName string // Where Src came from. Used for messages and to resolve relative paths.
 
-	rangeCache      [256]*r.Rule
-	referencesCache *references
+	rangeCache      [256]*r.Rule // Reusable single-char Token rules, see the comment in case r.CharOf of apply().
+	referencesCache *references  // Resolves production names and assigns the tag code UIDs.
 }
 
+// Parseropts are the command line options that influence the parser.
 type Parseropts struct {
 	UseBlockList, UseFoundList, TraceEnabled, PreventDefaultOutput bool
 }
 
+// getRulePosId maps the pair (rule, position in the target text) to one unique int,
+// used as key for the block and found lists.
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
-	// Cantor pairing function
+	// Cantor pairing function.
 	a := rule.Int
 	ab := pos + rule.Int
 	return ((ab * (ab + 1)) >> 1) + a
 }
 
-func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (bool, *r.Rules, int) { // => (isBlocked, rules, rulesSdx, rulesCh)
+func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (bool, *r.Rules, int) { // => (isBlocked, foundRule, foundSdx)
 	var isBlocked bool = false
 	var foundRule *r.Rules = nil
 	var foundSdx int = -1
@@ -81,7 +84,7 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (boo
 		}
 		if !isBlocked && pa.opts.UseBlockList {
 			isBlocked = pa.blockList[id] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
-			pa.blockList[id] = true      // Enter the current rule rule in the block list because it was not already blocked.
+			pa.blockList[id] = true      // Enter the current rule in the block list (a no-op if it was already blocked).
 		}
 	}
 
@@ -108,8 +111,11 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (boo
 	return isBlocked, foundRule, foundSdx
 }
 
-func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found *r.Rules, wasSdx int) {
-	if rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
+// The parameter wasBlocked must be true if the corresponding ruleEnter() returned isBlocked == true.
+// Such an early exit must not touch the block and found lists: The list entries belong to the still
+// running outer invocation of the same rule at the same position, not to this blocked one.
+func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found *r.Rules, wasSdx int, wasBlocked bool) {
+	if !wasBlocked && rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
 		id := pa.getRulePosId(rule, wasSdx)
 		if pa.opts.UseBlockList {
 			pa.blockList[id] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
@@ -156,13 +162,16 @@ func (pa *parser) resolveRulesToToken(rules *r.Rules) *r.Rules {
 	if rules == nil {
 		return nil
 	}
-	newProductions := &r.Rules{} // = nil
+	newProductions := &r.Rules{}
 
 	for _, rule := range *rules {
 		switch rule.Operator {
 		case r.Token:
 			*newProductions = append(*newProductions, rule)
 		case r.Identifier:
+			if rule.Int < 0 || rule.Int >= len(*pa.agrammar) {
+				panic("Unknown production name '" + rule.String + "' used as parameter.")
+			}
 			newProductions = r.AppendArrayOfPossibleSequences(newProductions, pa.resolveRulesToToken((*pa.agrammar)[rule.Int].Childs))
 		default:
 			if rule.Childs != nil && len(*rule.Childs) > 0 {
@@ -200,11 +209,18 @@ func flattenToken(rules *r.Rules) *r.Rule {
 	return &r.Rule{Operator: r.Token, String: string(buf)}
 }
 
+// Resolves command and tag parameters in place: Every parameter that references Token
+// productions (via a Name) is replaced by one Token that contains the combined text.
+// Token parameters are already resolved and Number parameters (e.g. the slot number of
+// :include()) have no text form, so both are kept as they are.
 func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 	if rules == nil {
 		return
 	}
 	for i := range *rules {
+		if (*rules)[i].Operator == r.Token || (*rules)[i].Operator == r.Number {
+			continue
+		}
 		resRule := flattenToken(pa.resolveRulesToToken(&r.Rules{(*rules)[i]}))
 		if resRule == nil {
 			panic("Parameter is empty. Rule: " + (*rules)[i].ToString())
@@ -213,19 +229,25 @@ func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 	}
 }
 
-// The global commands (Production level).
+// applyCommand executes the global commands (the LineCommands on Production level).
+// It runs once for every Command rule of the a-grammar before the parsing starts.
 // TODO: Maybe remove used commands.
 func (pa *parser) applyCommand(rule *r.Rule) {
 	switch rule.String {
 	case "whitespace":
-		// pa.resolveParameterToToken(rule.CodeChilds)
+		// The parameter is kept as a rule (usually an Identifier) on purpose:
+		// It is applied like any other rule whenever spaces can be skipped.
 		if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
 			pa.initialSpaces = (*rule.CodeChilds)[0]
 		} else {
 			pa.initialSpaces = nil
 		}
 	case "include":
-		// Resolve parameter constants.
+		// :include(fileName [, slot]) parses and compiles another ABNF file and adds its
+		// productions to the current a-grammar. Note that this happens when the combined
+		// a-grammar is USED, so the file name is resolved relative to the file that is
+		// currently being parsed.
+		// Resolve parameter constants (the file name can also be given via Token productions).
 		pa.resolveParameterToToken(rule.CodeChilds)
 		if rule.CodeChilds == nil || len(*rule.CodeChilds) == 0 || (*rule.CodeChilds)[0].Operator != r.Token {
 			panic("Command :include() needs at least a constant string as file name parameter.")
@@ -257,10 +279,12 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 			panic(err)
 		}
 		*pa.agrammar = append(*pa.agrammar, *aGrammar...)
-		// Correct all references
+		// Correct all references: The included productions moved to new positions and
+		// previously unresolved identifiers can now point to them.
 		pa.referencesCache.correctReferencesAndIDs(pa.agrammar)
 	case "number":
-		// :number(4, LE) would mean take 4 bytes from the input (gp.src), interpret them as little endian and create a Number from it. This means it should be usable in Times expressions and should allow the parsing of TLV-formats.
+		// :number(size, type) reads bytes from the target text, so it only makes sense
+		// inside an Expression (see apply()), not as a global line command.
 		panic(":number() is only allowed as inline command.")
 	case "title":
 		// TODO: Maybe use that information.
@@ -275,23 +299,31 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 	}
 }
 
-// Apply uses the rules top down and recursively.
-// This is the resolution process of the agrammar. Does the localProductions need to go into a Group or something? No. The grouping was done already in the agrammar.
-// At this point, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules.
-// Rules can be reused. So whatever you do, NEVER change a rule here.
-// TODO: If in a rule that does not change pa.Sdx, then the rule does not change pa.Sdx back. EXCEPT if the rule is in a loop that has to apply all of multiple rules (because each rule on its own only knows if it itself was successful and would not change back the position)!
+// apply matches one rule of the a-grammar against the target text at the current
+// position pa.Sdx, top down and recursively. It returns the productions that the rule
+// created for the ASG, or nil if the rule did not match. On a failed match, pa.Sdx is
+// restored to the position where the rule started.
+// The returned productions stay as flat as possible: The only grouping that survives is
+// done by Tags (the grouping of the grammar itself was already resolved here).
+// Rules can be shared and reused between grammars. So whatever you do, NEVER change a
+// rule in here (that is why e.g. the Times case clones its rule before resolving it).
+//
+// skipSpaceRule is the rule that describes what counts as skippable whitespace right now
+// (nil means nothing is skipped). skippingSpaces is true while we are already inside such
+// a whitespace rule, because then whitespace must not be skipped again (that would recurse
+// forever) and no productions are created.
 func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) *r.Rules { // => (localProductions)
 	wasSdx := pa.Sdx // Start position of the rule. Return, if the rule does not match.
 	localProductions := &r.Rules{}
 
 	isBlocked, foundRule, foundSdx := pa.ruleEnter(rule, skipSpaceRule, depth)
 	if isBlocked {
-		if foundRule != nil {
+		if foundRule != nil { // Reuse the cached result and continue behind it.
 			pa.Sdx = foundSdx
-			pa.ruleExit(rule, skipSpaceRule, depth, foundRule, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, foundRule, wasSdx, true)
 			return foundRule
 		}
-		pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+		pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, true)
 		return nil
 	}
 
@@ -300,18 +332,18 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		for i := range *rule.Childs {
 			newProductions := pa.apply((*rule.Childs)[i], skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
-			if len(*newProductions) > 0 { // Some Commands like :skip() have to be handled inside the sequence.
+			if len(*newProductions) > 0 { // Some Commands like :whitespace() have to be handled inside the sequence.
 				for _, prod := range *newProductions {
 					// The local commands (inside an Expression).
 					if prod.Operator == r.Command {
 						switch prod.String {
 						case "whitespace":
-							// Resolve parameter constants.
-							// pa.resolveParameterToToken(prod.CodeChilds)
+							// Change what counts as whitespace from here on inside this sequence.
+							// The parameter is kept as a rule, see applyCommand().
 							if prod.CodeChilds != nil && len(*prod.CodeChilds) > 0 {
 								skipSpaceRule = (*prod.CodeChilds)[0]
 							} else {
@@ -323,7 +355,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 							panic("Unknown inline command :" + prod.String + "()'")
 						}
 					}
-					// During parsing, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules. Text could be combined.. maybe in a []byte buffer like unescape.
+					// During parsing, the only grouping is done by Tags. The rest can stay in flat Sequences or arrays of rules.
 					localProductions = r.AppendPossibleSequence(localProductions, prod)
 				}
 			}
@@ -335,7 +367,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		size := len(rule.String)
 		if pa.Sdx+size > len(pa.Src) || rule.String != pa.Src[pa.Sdx:pa.Sdx+size] {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -350,13 +382,13 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 		if pa.Sdx+1 > len(pa.Src) {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
 		ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 		if !strings.ContainsRune(rule.String, ch) {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -364,7 +396,11 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		if skippingSpaces {
 			return &r.Rules{}
 		}
-		if ch >= 0 && ch <= 127 { // Cache the rune == 0...127 part of this rules and reuse them, because those are the most used chars and they are binary compatible with bytes. 128...255 are NOT compatible.
+		// Cache and reuse the Token rules for the runes 0...127, because those are by far
+		// the most used chars and their encoding is identical to the single byte (the byte
+		// range case below uses the same cache; bytes 128...255 are NOT identical to the
+		// runes 128...255 and are only ever created by the byte range case).
+		if ch >= 0 && ch <= 127 {
 			if pa.rangeCache[ch] == nil {
 				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
 			}
@@ -391,7 +427,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		size := pa.Sdx - startPos
 		if size == 0 {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -405,14 +441,14 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 		if pa.Sdx >= len(pa.Src) {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
 		if rule.Int == r.RangeTypeRune { // Rune range for unicode. JS-Mapping: abnf.rangeType.Rune
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 			if ch == utf8.RuneError {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -420,7 +456,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			to, _ := utf8.DecodeRuneInString((*rule.CodeChilds)[1].String)
 			// TODO: check if len of rune is len of string. Panic otherwise. Or better: Do that in verifier.
 			if !(ch >= from && ch <= to) {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -428,7 +464,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			if skippingSpaces {
 				return &r.Rules{}
 			}
-			if ch >= 0 && ch <= 127 { // Cache the rune == 0...127 part of this rules and reuse them, because those are the most used chars and they are binary compatible with bytes. 128...255 are NOT compatible.
+			if ch >= 0 && ch <= 127 { // Cache and reuse the Token rules for the runes 0...127, see case r.CharOf.
 				if pa.rangeCache[ch] == nil {
 					pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
 				}
@@ -442,7 +478,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			to := (*rule.CodeChilds)[1].String[0]
 			// TODO: check if len of string is 1. Panic otherwise. Or better: Do that in verifier.
 			if !(ch >= from && ch <= to) {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -450,7 +486,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			if skippingSpaces {
 				return &r.Rules{}
 			}
-			// Cache all bytes (0...255) of this rules and reuse them.
+			// Cache and reuse the Token rules for all bytes (0...255).
 			if pa.rangeCache[ch] == nil {
 				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]byte{ch})}
 			}
@@ -470,7 +506,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			// pa.Sdx = wasSdx // Should not be necessary, because each apply returns to wasSdx if the rule could not be fully applied.
 		}
 		if !found {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -482,18 +518,22 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			newRule = &r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: rule.Pos}
 		}
 		for { // Repeat as often as possible.
+			sdxBefore := pa.Sdx
 			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
 				break
 			}
 			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
+			if pa.Sdx == sdxBefore {
+				break // The child rules matched without consuming anything (e.g. { [ "x" ] }). Repeating them again could never consume anything either, it would only loop forever.
+			}
 		}
 	case r.Times:
-		// Copy first! Otherwise it will override all other positions too.
+		// Clone the rule first: The parameters in CodeChilds get resolved below (a :number()
+		// parameter even consumes bytes from the target text). Resolving them directly inside
+		// the shared grammar rule would falsify every later application of the same rule.
 		cloneRule := &r.Rule{Operator: r.Times, CodeChilds: &r.Rules{}, Childs: rule.Childs}
-		// The CodeChilds-array will be modified, so copy each entry:
 		*cloneRule.CodeChilds = append(*cloneRule.CodeChilds, *rule.CodeChilds...)
-		// It's not very clean but just pretend, the clone is the original:
 		rule = cloneRule
 		// Resolve parameters:
 		for i, child := range *rule.CodeChilds {
@@ -537,7 +577,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		for i := 0; i < from; i++ { // Repeat as often as possible.
 			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -545,38 +585,55 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		// Repeat from "from" to "to" -> here it CAN be found:
 		for i := from; i < to; i++ { // Repeat as often as possible.
+			sdxBefore := pa.Sdx
 			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
 				break
 			}
 			localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // Only append if all child rules matched.
+			if pa.Sdx == sdxBefore {
+				break // The child rules matched without consuming anything. See case r.Repeat.
+			}
 		}
 	case r.Optional:
 		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
 	case r.Identifier: // This identifies another rule (and its index), it is basically a link: E.g. to the expression-rule which is at position 3: { "Identifier", "expression", 3 }
+		if rule.Int < 0 || rule.Int >= len(*pa.agrammar) {
+			panic("Unknown production name '" + rule.String + "'. It is used inside the grammar but never defined.")
+		}
 		newProductions := pa.applyAsSequence((*pa.agrammar)[rule.Int].Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 	case r.Tag:
-		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos) // TODO: resolveRulesToToken for constants
+		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
+		// Resolve name parameters into their code text. This changes the grammar rule itself,
+		// but the resolution is idempotent, so all later applications just reuse the result.
 		pa.resolveParameterToToken(rule.CodeChilds)
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, Int: rule.Int, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx}) // Int contains a UID of the script for later caching.
+		// The matched childs get wrapped into a new Tag rule for the ASG. This is the only
+		// grouping that the ASG keeps. Int contains the UID of the script for later caching.
+		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, Int: rule.Int, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx})
 	case r.Command:
 		switch rule.String {
 		case "whitespace":
-			rule.Pos = pa.Sdx
-			localProductions = &r.Rules{rule} // Put the responsibility for the Command :skip() to the parent rule (the caller), because only the parent can change its own doSkipSpaces mode.
-		case "number": // Mainly to dynamically create Times rules.
+			// Hand the Command :whitespace() up to the parent rule (the caller), because only
+			// the parent can change its own skipSpaceRule. A copy is handed up instead of the
+			// shared grammar rule, so its match position can be recorded without changing the grammar.
+			localProductions = &r.Rules{{Operator: r.Command, String: rule.String, CodeChilds: rule.CodeChilds, Pos: pa.Sdx}}
+		case "number":
+			// :number(size, type) reads size bytes from the target text, interprets them as
+			// type (a r.NumberType* constant) and creates a Number production from the value.
+			// As a parameter of Times it defines the repeat count, standalone it e.g. allows
+			// to parse TLV formats.
 			byteCount := 0
 			numberType := r.NumberTypeLittleEndian // JS-Mapping: abnf.numberType
 			if rule.CodeChilds != nil && len(*rule.CodeChilds) > 0 {
@@ -588,7 +645,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				}
 			}
 			if pa.Sdx+byteCount > len(pa.Src) {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -651,12 +708,14 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			panic("NOT IMPLEMENTED")
 		case "include":
 			panic("NOT IMPLEMENTED")
-		case "script": // Int is reserved for UID for JS cache. // TODO: Maybe move upwards like :skip().
+		case "script": // Int is reserved for UID for JS cache. // TODO: Maybe move upwards like :whitespace().
+			// The script can be given inline as token or as the name of a production that contains the code.
+			pa.resolveParameterToToken(rule.CodeChilds)
 			resRule := pa.ps.HandleScriptRule(rule, localProductions, depth) // TODO: localProductions is empty here...
 			if resRule != nil {
 				scriptProductions := pa.apply(resRule, skipSpaceRule, skippingSpaces, depth+1)
 				if scriptProductions == nil {
-					pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx)
+					pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 					pa.Sdx = wasSdx
 					return nil
 				}
@@ -693,15 +752,21 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 	}
 
-	pa.ruleExit(rule, skipSpaceRule, depth, localProductions, wasSdx)
+	pa.ruleExit(rule, skipSpaceRule, depth, localProductions, wasSdx, false)
 	return localProductions
 }
 
 // References ---------------
 
+// references resolves the two kinds of links inside an a-grammar:
+//   - productionReferences maps each production name to its current position inside the
+//     grammar rules array. It is rebuilt on every correctReferencesAndIDs() call, because
+//     the positions can change (e.g. through :include()).
+//   - tagReferences maps each distinct tag code to its UID (used to cache the compiled JS).
+//     These have to stay stable over multiple calls, so they are never rebuilt.
 type references struct {
 	productionReferences map[string]int
-	tagReferences        map[string]int // The tag code references have to stay stable over multiple calls.
+	tagReferences        map[string]int
 	lastTag              int
 }
 
@@ -711,6 +776,8 @@ func NewReferences() *references {
 	re.lastTag = 0
 	return &re
 }
+
+// collectProductionReferences records the array position of every production by name.
 func (re *references) collectProductionReferences(rules *r.Rules) {
 	if rules == nil {
 		return
@@ -725,23 +792,30 @@ func (re *references) collectProductionReferences(rules *r.Rules) {
 		re.productionReferences[rule.String] = i
 	}
 }
+
+// correctReferencesAndIDs walks the whole a-grammar and fills in the two Int link values:
+// Every Identifier gets the current array position of the production it names (-1 if that
+// production does not exist), and every distinct Tag / :script() code gets its stable UID.
 func (re *references) correctReferencesAndIDs(rules *r.Rules) {
 	if rules == nil {
 		return
 	}
 	clear := false
-	if re.productionReferences == nil { // If this is nil, it is the outermost recursion of correctReferences(). This means, parameter rules holds all productions.
+	if re.productionReferences == nil { // If this is nil, it is the outermost recursion of correctReferencesAndIDs(). This means, parameter rules holds all productions.
 		re.productionReferences = map[string]int{}
 		re.collectProductionReferences(rules)
 		clear = true
 	}
 	for _, rule := range *rules {
 		if rule.Operator == r.Identifier {
-			// ref, ok := productionReferences[rule.String]
-			// if !ok {	// This test cannot be done, because it could be included in the future.
-			// 	panic("Production " + rule.String + "not found")
-			// }
-			rule.Int = re.productionReferences[rule.String]
+			// An unknown production name cannot be reported here, because it could still be
+			// added later (e.g. by an :include()). So it is only marked with the invalid
+			// position -1. Whoever really uses the Identifier has to check for that marker.
+			if pos, ok := re.productionReferences[rule.String]; ok {
+				rule.Int = pos
+			} else {
+				rule.Int = -1
+			}
 		} else if rule.Operator == r.Tag || (rule.Operator == r.Command && rule.String == "script") {
 			var allCode string
 			if len(*rule.CodeChilds) == 1 {
@@ -768,13 +842,16 @@ func (re *references) correctReferencesAndIDs(rules *r.Rules) {
 		}
 	}
 
-	if clear { // This must be recreated everytime, because there could be new entries and then some IDs are probably wrong.
+	if clear { // The production positions must be recollected on the next call, because new productions could have been added in the meantime.
 		re.productionReferences = nil
 	}
 }
 
 // ---------------
 
+// mergeTerminals combines neighbouring Token rules of the finished ASG into single Token
+// rules (recursively). The parser creates one Token per matched char range or string, which
+// would make the ASG unnecessarily large.
 func mergeTerminals(productions *r.Rules) {
 	if productions == nil {
 		return
@@ -792,17 +869,19 @@ func mergeTerminals(productions *r.Rules) {
 			}
 		} else {
 			lastWasTerminal = false
-			// if (*productions)[i].Childs == nil {
-			// 	panic((*productions)[i].Operator.String())
-			// }
-			// if (*productions)[i].Childs != nil && len(*(*productions)[i].Childs) > 0 {
-			if len(*(*productions)[i].Childs) > 0 {
+			// Not all rules have childs. E.g. a Number (from :number()) is a leaf like a Token.
+			if (*productions)[i].Childs != nil && len(*(*productions)[i].Childs) > 0 {
 				mergeTerminals((*productions)[i].Childs)
 			}
 		}
 	}
 }
 
+// ParseWithAgrammar parses the target text srcCode with the given a-grammar and returns the
+// resulting ASG (abstract semantic graph). fileName is where srcCode came from; it is used
+// for messages and to resolve relative paths. If the a-grammar defines no :startRule(),
+// (nil, nil) is returned: Nothing can be parsed then, which is fine for grammars that only
+// consist of a :startScript().
 func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Parseropts) (res *r.Rules, e error) { // => (productions, error)
 	defer func() {
 		if err := recover(); err != nil {
@@ -812,8 +891,8 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	}()
 
 	startRule := r.GetStartRule(agrammar)
-	if startRule == nil || startRule.Int >= len(*agrammar) || startRule.Int < 0 {
-		// No valid start rule defined. Imeediately return but this is no error. The startScript() rule of the compiler has to do everything now.
+	if startRule == nil {
+		// No start rule defined. Immediately return but this is no error. The :startScript() rule of the compiler has to do everything now.
 		return nil, nil
 	}
 
@@ -838,6 +917,12 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 		if rule.Operator == r.Command {
 			pa.applyCommand(rule)
 		}
+	}
+
+	// The references were corrected above (and again after every :include()), so an
+	// invalid position means the named start production really does not exist.
+	if startRule.Int < 0 || startRule.Int >= len(*pa.agrammar) {
+		panic("The production '" + startRule.String + "' of :startRule() was not found in the grammar.")
 	}
 
 	// For the parsing, the start rule is necessary. For the compilation not.

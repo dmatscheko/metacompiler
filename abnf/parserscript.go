@@ -13,9 +13,9 @@ import (
 type parserscript struct {
 	vm                   *goja.Runtime
 	common               *commonscript
-	compilerFuncMap      map[string]r.Object
+	compilerFuncMap      map[string]r.Object // The JS object 'c' (here extended with the parser state accessors).
 	preventDefaultOutput bool
-	stack                []r.Object // global stack.
+	stack                []r.Object // Global stack for the parser scripts (via push()/pop()). Survives between :script() calls.
 
 	// traceEnabled bool
 	// traceCount   int
@@ -23,8 +23,12 @@ type parserscript struct {
 	pa *parser
 }
 
+// HandleScriptRule executes the JS code of an inline :script() command. The code can inspect
+// and change the parser state (c.getSdx() etc.). If it returns a rule (built via the abnf.*
+// functions), the parser applies that rule at the current position; the result of every other
+// return value is nil, which means there is nothing to apply.
 func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules, depth int) *r.Rule {
-	ps.compilerFuncMap["localAsg"] = localProductions // The local part of the abstract syntax graph.
+	ps.compilerFuncMap["localAsg"] = localProductions // The local part of the abstract semantic graph.
 
 	// if ps.traceEnabled {
 	// co.traceTop(tag, slot, depth, upStream)
@@ -49,6 +53,8 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 	return nil
 }
 
+// initFuncMap installs the parser specific JS API on top of the common one:
+// accessors for the parse state and a stack that survives between the :script() calls.
 func (ps *parserscript) initFuncMap() {
 	ps.common = NewCommonScript(ps.vm, &ps.compilerFuncMap, ps.preventDefaultOutput)
 
@@ -56,6 +62,16 @@ func (ps *parserscript) initFuncMap() {
 	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.Src = src }
 	ps.compilerFuncMap["getSdx"] = func() int { return ps.pa.Sdx }
 	ps.compilerFuncMap["setSdx"] = func(sdx int) { ps.pa.Sdx = sdx }
+	// peek returns the byte at the current parse position plus offset, or -1 outside of the
+	// target text. Unlike getSrc() it does not copy the target text into the JS runtime, so
+	// scripts can use it to look ahead cheaply (e.g. to check a keyword boundary).
+	ps.compilerFuncMap["peek"] = func(offset int) int {
+		pos := ps.pa.Sdx + offset
+		if pos < 0 || pos >= len(ps.pa.Src) {
+			return -1
+		}
+		return int(ps.pa.Src[pos])
+	}
 
 	ps.vm.Set("pop", func() interface{} {
 		if len(ps.stack) > 0 {
@@ -71,6 +87,7 @@ func (ps *parserscript) initFuncMap() {
 	})
 }
 
+// NewParserScript creates the JS VM for the dynamic :script() rules of one parse run.
 func NewParserScript(pa *parser, preventDefaultOutput bool) *parserscript {
 	var ps parserscript
 	ps.pa = pa

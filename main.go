@@ -34,7 +34,7 @@ func main() {
 	param_slot_c := flag.Int("sc", 0, "The tag slot to use when compiling file c with the a-grammar from file -b (default is 0)")
 
 	param_useBlockList := flag.Bool("lb", false, "Block list. Prevent a second execution of the same rule at the same position (slow)")
-	param_useFoundList := flag.Bool("lf", false, "Found list. Caches all found blocks even if the sourrounding does not match. Immediately return the found block if the same rule would be applied again at the same place (very slow)")
+	param_useFoundList := flag.Bool("lf", false, "Found list. Caches all found blocks even if the surrounding does not match. Immediately return the found block if the same rule would be applied again at the same place (very slow)")
 
 	param_verbose_Ap := flag.Bool("va1", false, "Show verbose output for step one. The a-grammar parser, parsing the ABNF from file -a to an ASG")
 	param_verbose_Ac := flag.Bool("va2", false, "Show verbose output for step two. The ASG compiler, compiling the ASG generated in step one to an a-grammar")
@@ -61,13 +61,13 @@ func main() {
 
 	if *param_a == "" {
 		flag.Usage()
-		return
+		os.Exit(2)
 	}
 
 	dat, err := ioutil.ReadFile(*param_a)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error: ", err)
-		return
+		os.Exit(1)
 	}
 	srcA := string(dat) // This should be an ABNF.
 
@@ -76,7 +76,7 @@ func main() {
 		dat, err = ioutil.ReadFile(*param_b)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error: ", err)
-			return
+			os.Exit(1)
 		}
 		srcB = string(dat) // This can be anything that the ABNF understands.
 	}
@@ -86,7 +86,7 @@ func main() {
 		dat, err = ioutil.ReadFile(*param_c)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error: ", err)
-			return
+			os.Exit(1)
 		}
 		srcC = string(dat) // This can be anything that the a-grammar from srcB understands.
 	}
@@ -118,7 +118,12 @@ func main() {
 		*param_quiet_Most = true
 	}
 
-	parseropts := &abnf.Parseropts{*param_useBlockList, *param_useFoundList, *param_trace_Ap, *param_quiet_Full}
+	parseropts := &abnf.Parseropts{
+		UseBlockList:         *param_useBlockList,
+		UseFoundList:         *param_useFoundList,
+		TraceEnabled:         *param_trace_Ap,
+		PreventDefaultOutput: *param_quiet_Full,
+	}
 
 	// MAIN PROCESS ----------------------------------------------------------------------------------------------
 
@@ -132,13 +137,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
-		return
+		os.Exit(1)
 	}
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
 	}
 	if *param_verbose_Ap || *param_trace_Ap {
-		fmt.Fprintln(os.Stderr, "   => ASG: ", asg.Serialize(), "\n")
+		fmt.Fprintf(os.Stderr, "   => ASG:  %s\n\n", asg.Serialize())
 	}
 	// Use the annotations inside the ASG to compile it. This should generate a new a-grammar.
 	if !*param_quiet_Most {
@@ -148,18 +153,18 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
-		return
+		os.Exit(1)
 	}
 	if aGrammar == nil { // There should be a generated a-grammar
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, "Did not receive a valid a-grammar from compiler")
-		return
+		os.Exit(1)
 	}
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, " ==> Success, received an a-grammar from compiler")
 	}
 	if *param_verbose_Ac || *param_trace_Ac {
-		fmt.Fprintln(os.Stderr, "   => a-grammar: ", aGrammar.Serialize(), "\n")
+		fmt.Fprintf(os.Stderr, "   => a-grammar:  %s\n\n", aGrammar.Serialize())
 	}
 
 	// Part B:
@@ -173,13 +178,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
-		return
+		os.Exit(1)
 	}
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
 	}
 	if *param_verbose_Bp || *param_trace_Bp {
-		fmt.Fprintln(os.Stderr, "   => ASG: ", asg.Serialize(), "\n")
+		fmt.Fprintf(os.Stderr, "   => ASG:  %s\n\n", asg.Serialize())
 	}
 	// Use the annotations inside the ASG to compile it.
 	if !*param_quiet_Most {
@@ -189,21 +194,27 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
-		return
+		os.Exit(1)
 	}
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, " ==> Success")
 	}
 	if *param_verbose_Bc || *param_trace_Bc {
 		if result != nil {
-			fmt.Fprintln(os.Stderr, "   => Result: ", asg.Serialize(), "\n")
+			fmt.Fprintf(os.Stderr, "   => Result:  %s\n\n", result.Serialize())
 		}
 	}
 
 	// Part C:
 
-	if result == nil {
+	// Part C only runs if a file -c was given and part B generated an a-grammar to process it with.
+	if *param_c == "" {
 		return
+	}
+	if result == nil {
+		fmt.Fprintln(os.Stderr, "  ==> Fail")
+		fmt.Fprintln(os.Stderr, "File -c was given, but compiling file -b did not generate an a-grammar to process it with")
+		os.Exit(1)
 	}
 
 	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
@@ -215,13 +226,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
-		return
+		os.Exit(1)
 	}
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
 	}
 	if *param_verbose_Cp || *param_trace_Cp {
-		fmt.Fprintln(os.Stderr, "   => ASG: ", asg.Serialize(), "\n")
+		fmt.Fprintf(os.Stderr, "   => ASG:  %s\n\n", asg.Serialize())
 	}
 	// Use the annotations inside the ASG to compile it.
 	if !*param_quiet_Most {
@@ -231,20 +242,25 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
-		return
+		os.Exit(1)
 	}
 	if !*param_quiet_Most {
 		fmt.Fprintln(os.Stderr, " ==> Success")
 	}
 	if *param_verbose_Cc || *param_trace_Cc {
 		if result != nil {
-			fmt.Fprintln(os.Stderr, "   => Result: ", asg.Serialize(), "\n")
+			fmt.Fprintf(os.Stderr, "   => Result:  %s\n\n", result.Serialize())
 		}
 	}
 }
 
 func speedtest(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
-	parseropts := &abnf.Parseropts{useBlockList, useFoundList, false, true}
+	parseropts := &abnf.Parseropts{
+		UseBlockList:         useBlockList,
+		UseFoundList:         useFoundList,
+		TraceEnabled:         false,
+		PreventDefaultOutput: true,
+	}
 	speedtestParseWithGrammar(srcA, fileNameA, count, parseropts)
 	speedtestCompileASG(srcA, fileNameA, count, parseropts)
 	fmt.Fprintln(os.Stderr)

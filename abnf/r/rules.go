@@ -13,24 +13,24 @@ type OperatorID int
 const (
 	Error OperatorID = iota // This marks an invalid command. Every operation that encounters such command, should return to its caller with error.
 	Success
-	// Groups types:
-	Sequence // Basic sequence of objects. Can be broken apart.
+	// Group types:
+	Sequence // Basic sequence of rules. Can be broken apart.
 	Group    // A group that must not be broken apart.
 	// Action types:
-	Token
-	Number
-	Or
+	Token  // A terminal symbol (fixed text that must be in the target text).
+	Number // A plain number. Created e.g. by the inline command :number().
+	Or     // Alternative rules. The first matching child wins.
 	Optional
 	Repeat
-	Range
-	Times
-	Tag // Int is reserved for the UID for caching.
-	Command
-	CharOf
-	CharsOf
+	Range   // A char range ("a"..."z" or "\x00"..b"\xff"). Int holds the RangeType* constant.
+	Times   // A counted repetition (e.g. 3...5 ( X )). CodeChilds holds the count parameters.
+	Tag     // The annotation rule that carries JS code. Int is reserved for the UID for caching the compiled code.
+	Command // A parser command like :whitespace(). Int is reserved for the code UID of :script().
+	CharOf  // Exactly one char out of String must be in the target text.
+	CharsOf // One or more chars out of String (in any order) must be in the target text.
 	// Link types:
-	Production // Int is reserved for the position of the Production.
-	Identifier // Int is reserved for the position of the identified Production.
+	Production // Int is reserved for the position of the Production inside the grammar rules.
+	Identifier // Int is reserved for the position of the identified Production (-1 if unresolved).
 )
 
 func (id OperatorID) String() string {
@@ -39,11 +39,11 @@ func (id OperatorID) String() string {
 
 type Rule struct {
 	Operator   OperatorID
-	String     string // Only used when Operator == seq.Token || seq.Ident || seq.Production || seq.Command. If a String is in e.g. seq.Sequence, then this string can be handled like a comment and discarded.
-	Int        int    // Only used when Operator == seq.Ident || seq.Production
-	Pos        int    // The position where this Rule has matched.
-	Childs     *Rules // Used by most Operators
-	CodeChilds *Rules // Only used when Operator == seq.Tag || seq.Command
+	String     string // The text of Token, the name of Identifier | Production | Command, or the char set of CharOf | CharsOf. If a String is set anywhere else (e.g. in a Sequence), it can be handled like a comment and discarded.
+	Int        int    // The value of Number, the production position of Identifier | Production, the range type of Range, or the code UID of Tag | Command :script().
+	Pos        int    // The position in the source text where this Rule was defined (in a grammar) or where it has matched (in an ASG).
+	Childs     *Rules // The child rules. Used by most Operators.
+	CodeChilds *Rules // The parameters or the code. Only used when Operator == Tag | Command | Range | Times.
 }
 
 // Type of a Range String. JS-Mapping: abnf.rangeType
@@ -79,7 +79,7 @@ func (rules *Rules) Append(elems ...*Rule) {
 	*rules = append(*rules, elems...)
 }
 
-// Appends a Sequence but dissolves basic SEQUENCE groups
+// Appends one rule to target but dissolves basic Sequence groups into their childs.
 func AppendPossibleSequence(target *Rules, source *Rule) *Rules {
 	// This costs time and does not make the result that much smaller:
 	// if source.Childs != nil && len(*source.Childs) == 0 && (source.Operator == Sequence || source.Operator == Group) {
@@ -98,7 +98,7 @@ func AppendPossibleSequence(target *Rules, source *Rule) *Rules {
 	return target
 }
 
-// Appends a Sequence but dissolves basic SEQUENCE groups
+// Appends all rules of source to target but dissolves basic Sequence groups into their childs.
 func AppendArrayOfPossibleSequences(target *Rules, source *Rules) *Rules {
 	if source == nil {
 		return target
@@ -109,6 +109,8 @@ func AppendArrayOfPossibleSequences(target *Rules, source *Rules) *Rules {
 	return target
 }
 
+// Serialize converts one rule into its Go literal form (as used in agrammar.go).
+// The output can be deserialized by compiling it as Go code.
 func (rule *Rule) Serialize() string {
 	if rule == nil {
 		return "<nil>"
@@ -154,6 +156,7 @@ func (rule *Rule) Serialize() string {
 	return res
 }
 
+// Serialize converts the rules into their Go literal form (as used in agrammar.go).
 func (rules *Rules) Serialize() string {
 	if rules == nil {
 		return "<nil>"
@@ -170,6 +173,8 @@ func (rules *Rules) Serialize() string {
 	return res
 }
 
+// ToString converts one rule into a short, human readable form: Child rules are
+// abbreviated with [...]. Use Serialize() to see everything.
 func (rule *Rule) ToString() string {
 	if rule == nil {
 		return "<nil>"
@@ -224,6 +229,7 @@ func (rule *Rule) ToString() string {
 	return res
 }
 
+// ToString converts the rules into a short, human readable form.
 func (rules *Rules) ToString() string {
 	if rules == nil {
 		return "<nil>"
@@ -234,12 +240,14 @@ func (rules *Rules) ToString() string {
 		if i > 0 {
 			res += ", "
 		}
-		res += r.Serialize()
+		res += r.ToString()
 	}
 	res += "}"
 	return res
 }
 
+// GetStartRule returns the Identifier that points to the top level production for the
+// parser (defined via :startRule()), or nil if the a-grammar does not define one.
 func GetStartRule(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
@@ -252,6 +260,8 @@ func GetStartRule(aGrammar *Rules) *Rule {
 	return nil
 }
 
+// GetStartScript returns the JS code that controls the compile step (defined via
+// :startScript()), converted into a Tag-like rule, or nil if there is none.
 func GetStartScript(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
@@ -264,6 +274,7 @@ func GetStartScript(aGrammar *Rules) *Rule {
 	return nil
 }
 
+// GetTitle returns the title of the a-grammar (defined via :title()), or nil.
 func GetTitle(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil
@@ -276,6 +287,7 @@ func GetTitle(aGrammar *Rules) *Rule {
 	return nil
 }
 
+// GetDescription returns the description of the a-grammar (defined via :description()), or nil.
 func GetDescription(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
 		return nil

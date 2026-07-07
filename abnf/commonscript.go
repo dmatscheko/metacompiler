@@ -17,14 +17,24 @@ import (
 // ----------------------------------------------------------------------------
 // Scripting subsystem code for parser and compiler
 
-type commonscript struct {
-	vm               *goja.Runtime
-	codeCache        []*goja.Program
-	codeCacheInclude map[string]*goja.Program
-	referencesCache  *references
+// One cached, precompiled JS program together with the source it was compiled from.
+// The source is kept to detect UID collisions: Two different a-grammars that were numbered
+// independently can carry the same tag UIDs for different code.
+type cachedProgram struct {
+	src string
+	p   *goja.Program
 }
 
-// Stripped down and slightly modified version of stconv.Unquote()
+type commonscript struct {
+	vm              *goja.Runtime
+	codeCache       []cachedProgram          // Compiled programs by tag UID (for tags and :script() commands with a UID > 0).
+	codeCacheBySrc  map[string]*goja.Program // Compiled programs by name plus source text (for everything without a UID).
+	referencesCache *references              // Keeps the tag UIDs stable over multiple correctReferencesAndIDs() calls.
+}
+
+// Unescape resolves backslash escapes (\n, \t, \x41, \u00e4, ...) inside the content of
+// a Dquotetoken or Squotetoken string. It is a stripped down and slightly modified version
+// of strconv.Unquote(), but without the surrounding quotation marks.
 func Unescape(s string) (string, error) {
 	// Is it trivial? Avoid allocation.
 	if !strings.ContainsRune(s, '\\') {
@@ -51,6 +61,8 @@ func Unescape(s string) (string, error) {
 	return string(buf), nil
 }
 
+// UnescapeTilde resolves the only escape sequence of a tags raw Code string: It replaces
+// every \~ with a ~ (tilde) and leaves everything else untouched.
 func UnescapeTilde(s string) string {
 	// Is it trivial? Avoid allocation.
 	if !strings.ContainsRune(s, '\\') {
@@ -71,37 +83,47 @@ func UnescapeTilde(s string) string {
 	return string(buf)
 }
 
-// Run executes the given string in the global context.
+// Run executes the given source string in the global context.
+// Compiled programs are cached: Code with a UID (ID > 0, assigned by correctReferencesAndIDs())
+// is cached per UID. The comparison with the cached source is cheap (usually only a pointer
+// comparison) and protects against UID collisions between independently numbered a-grammars.
+// All other code (ID <= 0, e.g. the start script, includes, or tags that were built via JS and
+// never got a UID) is cached by its name plus source text. The name is part of the key because
+// it is compiled into the program (for stack traces and relative paths), so byte-identical
+// code from two different files must not share one program.
 func (cs *commonscript) Run(name, src string, ID int) (goja.Value, error) {
 	var p *goja.Program
-	if ID >= 0 {
+	if ID > 0 {
 		if ID >= len(cs.codeCache) {
-			tmp := make([]*goja.Program, ID*2)
+			tmp := make([]cachedProgram, ID*2)
 			cs.codeCache = append(cs.codeCache, tmp...)
-		} else {
-			p = cs.codeCache[ID]
+		} else if cs.codeCache[ID].src == src {
+			p = cs.codeCache[ID].p
 		}
 	} else {
-		p = cs.codeCacheInclude[name]
+		p = cs.codeCacheBySrc[name+"\x00"+src]
 	}
 
-	// Cache precompiled data
+	// Compile and cache on the first run.
 	if p == nil {
 		var err error
 		p, err = goja.Compile(name, src, true)
 		if err != nil {
 			return nil, err
 		}
-		if ID >= 0 {
-			cs.codeCache[ID] = p
+		if ID > 0 {
+			cs.codeCache[ID] = cachedProgram{src: src, p: p}
 		} else {
-			cs.codeCacheInclude[name] = p
+			cs.codeCacheBySrc[name+"\x00"+src] = p
 		}
 	}
 
 	return cs.vm.RunProgram(p)
 }
 
+// getCurrentModuleFileName returns the source name of the JS code that is currently being
+// executed (e.g. "tests/foo.abnf:startScript"). File operations like load(), store() and
+// include() use it to resolve their paths relative to that file.
 func (cs *commonscript) getCurrentModuleFileName() string {
 	var buf [2]goja.StackFrame
 	frames := cs.vm.CaptureCallStack(2, buf[:0])
@@ -111,13 +133,16 @@ func (cs *commonscript) getCurrentModuleFileName() string {
 	return frames[1].SrcName()
 }
 
-// This is used by parser and compiler.
+// NewCommonScript installs everything into the JS VM that parser and compiler scripts have
+// in common: console output, file access, string helpers, and the 'c', 'abnf' and 'llvm'
+// objects. Note that *compilerFuncMap is replaced with a fresh map; the caller can add its
+// own entries afterwards.
 func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, preventDefaultOutput bool) *commonscript {
 	var common commonscript
 
 	common.vm = vm
-	common.codeCache = make([]*goja.Program, 100)
-	common.codeCacheInclude = map[string]*goja.Program{}
+	common.codeCache = make([]cachedProgram, 100)
+	common.codeCacheBySrc = map[string]*goja.Program{}
 
 	if preventDefaultOutput { // Script output disabled.
 		vm.Set("print", func(a ...interface{}) (n int, err error) { return 0, nil })
@@ -180,7 +205,12 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	})
 
 	vm.Set("correctReferencesAndIDs", func(agrammar *r.Rules) {
-		common.referencesCache = NewReferences()
+		// The references cache lives as long as this VM: Tag UIDs have to stay stable and
+		// unique over multiple calls, otherwise the compiled-code cache would mix up the
+		// tags of different a-grammars.
+		if common.referencesCache == nil {
+			common.referencesCache = NewReferences()
+		}
 		common.referencesCache.correctReferencesAndIDs(agrammar)
 	})
 

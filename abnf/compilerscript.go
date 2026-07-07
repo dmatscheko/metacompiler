@@ -15,21 +15,22 @@ import (
 type compilerscript struct {
 	vm                   *goja.Runtime
 	common               *commonscript
-	compilerFuncMap      map[string]r.Object
+	compilerFuncMap      map[string]r.Object // The JS object 'c' (compiler API).
 	preventDefaultOutput bool
 
-	LtrStream map[string]r.Object // Global variables (the local variables are in upstream).
-	Stack     []r.Object          // global stack (the local stack is in upstream.stack).
+	LtrStream map[string]r.Object // The global variables ('ltr' in JS; the local variables are in upStream).
+	Stack     []r.Object          // The global stack (via pushg()/popg(); the local stack is in upStream["stack"]).
 
 	traceEnabled bool
 	traceCount   int
 
-	asgReference      *r.Rules // Only for reference. Will only be used by compiler if it is passed into the compile() function.
-	aGrammarReference *r.Rules // Only for reference. Will not be used by compiler.
+	asgReference      *r.Rules // Exposed to JS as c.asg. Only compiled when the script passes it into c.compile().
+	aGrammarReference *r.Rules // Exposed to JS as c.agrammar. Never used by the compiler itself.
 
 	co *compiler
 }
 
+// sprintStack formats the global stack for the trace output, one element per line.
 func (cs *compilerscript) sprintStack(space string) string {
 	res := ""
 	for _, elem := range cs.Stack {
@@ -72,13 +73,17 @@ func (cs *compilerscript) traceBottom(upStream map[string]r.Object) {
 	fmt.Print(space, ">>up: ", fmt.Sprintf("%v", upStream), "\n", space, "--\n\n\n")
 }
 
+// HandleTagCode executes the JS code of the given slot of a Tag (the ASG carries multiple
+// code slots when a Tag was written with multiple comma separated code strings). It returns
+// the JS result value of the code, or nil if the tag has no code for that slot. The code can
+// change upStream (visible to it as 'up').
 func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) goja.Value { // => (changes upStream)
-	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number
+	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number.
 		return nil
 	}
 
 	cs.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
-	cs.compilerFuncMap["localAsg"] = localASG // The local part of the abstract syntax graph.
+	cs.compilerFuncMap["localAsg"] = localASG // The local part of the abstract semantic graph.
 	// co.compilerFuncMap["Pos"] = tag.Pos
 	// co.compilerFuncMap["ID"] = tag.Int
 
@@ -121,6 +126,8 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 	return v
 }
 
+// initFuncMap installs the compiler specific JS API on top of the common one:
+// the local and global stack functions, 'ltr', and the c.compile()/c.asg/c.agrammar entries.
 func (cs *compilerscript) initFuncMap() {
 	cs.common = NewCommonScript(cs.vm, &cs.compilerFuncMap, cs.preventDefaultOutput)
 
@@ -140,14 +147,18 @@ func (cs *compilerscript) initFuncMap() {
 	cs.vm.Set("ltr", cs.LtrStream)
 
 	cs.compilerFuncMap["compile"] = func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
-		cs.traceEnabled = traceEnabled
+		// The JS parameter can only turn tracing on, not off: c.compile(c.asg) leaves out the
+		// parameter, which arrives here as false and must not override the -vb2/-vvb2 command
+		// line flags.
+		cs.traceEnabled = cs.traceEnabled || traceEnabled
 		return cs.co.compile(asg, slot, 0)
 	}
 
-	cs.compilerFuncMap["asg"] = cs.asgReference           // Just for reference.
+	cs.compilerFuncMap["asg"] = cs.asgReference           // Just for reference (usually passed to c.compile()).
 	cs.compilerFuncMap["agrammar"] = cs.aGrammarReference // Just for reference.
 }
 
+// NewCompilerScript creates the JS VM for one compile run.
 func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled, preventDefaultOutput bool) *compilerscript {
 	var cs compilerscript
 
@@ -161,8 +172,8 @@ func NewCompilerScript(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabl
 	cs.preventDefaultOutput = preventDefaultOutput
 
 	cs.LtrStream = map[string]r.Object{ // Basically like global variables.
-		"in":    "", // This is the parser input (the terminals).
-		"stack": &cs.Stack,
+		"in":    "",        // Collects the text of all Token that the compiler has seen so far (left to right).
+		"stack": &cs.Stack, // The global stack is also reachable as ltr.stack.
 	}
 
 	cs.vm = goja.New()

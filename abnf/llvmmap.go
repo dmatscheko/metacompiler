@@ -1011,7 +1011,7 @@ func callgraph(m *ir.Module) string {
 // Code taken from https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir#example-package-Evaluator
 
 func eval(m *ir.Module, start string) uint32 {
-	// Evalute and print the return value of the given function.
+	// Evaluate the return value of the function with the given name.
 	for _, f := range m.Funcs {
 		if f.Name() == start {
 			e := newEvaluator(f)
@@ -1035,7 +1035,7 @@ func newEvaluator(f *ir.Func, args ...value.Value) *evaluator {
 	return &evaluator{f: f, args: args}
 }
 
-// evalFunc evalutes f and returns the corresponding 32-bit integer.
+// evalFunc evaluates f and returns the corresponding 32-bit integer.
 func (e *evaluator) evalFunc() uint32 {
 	f := e.f
 	if !types.Equal(f.Sig.RetType, types.I32) {
@@ -1068,11 +1068,13 @@ func (e *evaluator) evalInst(inst ir.Instruction) uint32 {
 	case *ir.InstUDiv:
 		return e.evalValue(inst.X) / e.evalValue(inst.Y)
 	case *ir.InstSDiv:
-		return e.evalValue(inst.X) / e.evalValue(inst.Y)
+		// Signed division has to be done on the signed interpretation of the bits.
+		return uint32(int32(e.evalValue(inst.X)) / int32(e.evalValue(inst.Y)))
 	case *ir.InstURem:
 		return e.evalValue(inst.X) % e.evalValue(inst.Y)
 	case *ir.InstSRem:
-		return e.evalValue(inst.X) % e.evalValue(inst.Y)
+		// Signed remainder has to be done on the signed interpretation of the bits.
+		return uint32(int32(e.evalValue(inst.X)) % int32(e.evalValue(inst.Y)))
 	// Bitwise instructions.
 	case *ir.InstShl:
 		return e.evalValue(inst.X) << e.evalValue(inst.Y)
@@ -1105,7 +1107,7 @@ func (e *evaluator) evalInst(inst ir.Instruction) uint32 {
 	}
 }
 
-// evalValue evalutes v and returns the corresponding 32-bit integer.
+// evalValue evaluates v and returns the corresponding 32-bit integer.
 func (e *evaluator) evalValue(v value.Value) uint32 {
 	switch v := v.(type) {
 	case ir.Instruction:
@@ -1119,7 +1121,7 @@ func (e *evaluator) evalValue(v value.Value) uint32 {
 				return e.evalValue(e.args[i])
 			}
 		}
-		panic(fmt.Errorf("unable to locate paramater %q of function %q", v.Ident(), f.Ident()))
+		panic(fmt.Errorf("unable to locate parameter %q of function %q", v.Ident(), f.Ident()))
 	default:
 		panic(fmt.Errorf("support for value type %T not yet implemented", v))
 	}

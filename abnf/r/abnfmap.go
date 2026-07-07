@@ -1,9 +1,15 @@
 package r
 
 // ----------------------------------------------------------------------------
-// ABNF mapping for LLVM IR
+// Scripting subsystem mapping for the a-grammar rules
+//
+// This map is exposed to JS as the object 'abnf'. It contains the builder,
+// serializer and getter functions plus the constants that are needed to create
+// and inspect a-grammars from within tag scripts.
 
 var AbnfFuncMap = map[string]Object{
+	// Converts a plain JS array of rules into a Go *Rules value. The conversion itself
+	// is done by the JS runtime when it maps the JS argument onto the Go parameter.
 	"arrayToRules": func(rules *Rules) *Rules {
 		return rules
 	},
@@ -25,7 +31,8 @@ var AbnfFuncMap = map[string]Object{
 	"newTag": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule { // Int is reserved for the UID for caching.
 		return &Rule{Operator: Tag, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
 	},
-	// Command :number() -> Int == numberType.LittleEndian | Int == numberType.BigEndian | Int == numberType.BCD
+	// String is the command name (without ':'), CodeChilds holds the parameters.
+	// E.g. for :number(size, type), CodeChilds holds two Number rules (type is a numberType.* constant).
 	"newCommand": func(String string, CodeChilds *Rules, Pos int) *Rule {
 		if CodeChilds != nil && len(*CodeChilds) == 0 {
 			CodeChilds = nil
@@ -47,8 +54,8 @@ var AbnfFuncMap = map[string]Object{
 	"newAlternative": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
 	},
-	// Int == rangeType.Rune | Int == rangeType.Byte
-	"newRange": func(CodeChilds *Rules, Int int, Pos int) *Rule { // TODO: Why do the parameter have to be in that (wrong) order?
+	// CodeChilds must hold the two Token [from, to]. Int is the range type (rangeType.Rune | rangeType.Byte).
+	"newRange": func(CodeChilds *Rules, Int int, Pos int) *Rule {
 		return &Rule{Operator: Range, Int: Int, CodeChilds: CodeChilds, Pos: Pos}
 	},
 	"newTimes": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
@@ -81,7 +88,7 @@ var AbnfFuncMap = map[string]Object{
 	"oid": map[string]OperatorID{
 		"Error":   Error,
 		"Success": Success,
-		// Groups types:
+		// Group types:
 		"Sequence": Sequence,
 		"Group":    Group,
 		// Action types:
