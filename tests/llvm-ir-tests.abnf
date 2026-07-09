@@ -33,7 +33,8 @@ first mismatch, so this file is a self checking test.") ;
     //    int seed = 0;
     //    int rand(void) { seed = seed * 0x15A4E35 + 1; return abs(seed); }
 
-    var a = llvm.constant.NewInt(i32, 0x15A4E35) // multiplier of the PRNG.
+    // The multiplier of the PRNG, 0x15A4E35 (MetaJS has no hex literals).
+    var a = llvm.constant.NewInt(i32, 22695477)
     var c = one                                  // increment of the PRNG.
 
     var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
