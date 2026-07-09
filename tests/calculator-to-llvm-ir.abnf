@@ -1,5 +1,5 @@
 :title("Calculator to LLVM IR compiler") ;
-:description("Compiles a formula with + - * / and brackets into an LLVM IR module whose main()
+:description("Compiles a formula with + - * /, unary minus and brackets into an LLVM IR module whose main()
 returns the result, runs that module with the built-in IR interpreter, and checks the
 machine result against a direct JS evaluation of the same formula.
 
@@ -46,8 +46,13 @@ Factor      =
         ")"
     )
     |
+    Neg
+    |
     Number                      <~~push(makeNumber(parseInt(up.in)))~~>
     ;
+
+// Unary minus negates the factor behind it (and '- -x' works through the recursion).
+Neg         = "-" Factor        <~~push(makeNeg(pop()))~~> ;
 
 // Only integers: This calculator computes like C.
 Number      = "0" | "1"..."9" { "0"..."9" } ;
@@ -68,6 +73,13 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
         return {
             gen: function(b) { return llvm.constant.NewInt(i32, n) },
             val: n
+        }
+    }
+
+    function makeNeg(p) {
+        return {
+            gen: function(b) { return b.NewSub(llvm.constant.NewInt(i32, 0), p.gen(b)) },
+            val: -p.val
         }
     }
 

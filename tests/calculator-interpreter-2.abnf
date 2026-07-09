@@ -39,9 +39,14 @@ Factor      =
         ")"
     )
     |
+    Neg
+    |
     // The grammar allows a comma as decimal separator, parseFloat() does not.
     Number                      <~~push(parseFloat(up.in.replace(",", ".")))~~>
     ;
+
+// Unary minus negates the factor behind it (and '- -x' works through the recursion).
+Neg         = ( "-" Factor )    <~~push(-pop())~~> ;
 
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;

@@ -1,5 +1,5 @@
 :title("Calculator interpreter (global stack)") ;
-:description("Parses a formula with + - * / and brackets and evaluates it during the
+:description("Parses a formula with + - * /, unary minus and brackets and evaluates it during the
 compile walk: the tag behind every operator pops the operand values from the global stack
 (pushg/popg), computes, and pushes the result back, so after c.compile() the final value
 is the only entry left on that stack. Numbers may use a dot or a comma as decimal
@@ -47,9 +47,14 @@ Factor      =
         ")"
     )
     |
+    Neg
+    |
     // The grammar allows a comma as decimal separator, parseFloat() does not.
     Number                      <~~pushg(parseFloat(up.in.replace(",", ".")))~~>
     ;
+
+// Unary minus negates the factor behind it (and '- -x' works through the recursion).
+Neg         = "-" Factor        <~~pushg(-popg())~~> ;
 
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
