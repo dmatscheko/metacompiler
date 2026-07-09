@@ -2,7 +2,10 @@
 :description("Parses a Java subset and executes it directly, without generating code.
 
 The subset: classes with fields (instance and static, with initializers), methods
-(instance and static), constructors, records with auto generated constructor and
+(instance and static), constructors, single inheritance (class B extends A: inherited
+fields and methods, overriding with dynamic dispatch, the implicit no argument super
+constructor, and super.m() calls; a class must appear before its subclasses),
+records with auto generated constructor and
 accessors (a modern Java SE nod, like 'var' local declarations), object creation with
 new, arrays (new int[n], new int[]{...}, a.length, indexing), the enhanced for loop
 (for (var x : arr)), int / boolean / String / var / class types (types are parsed;
@@ -32,7 +35,8 @@ so self checking programs end with System.exit(failures).") ;
 Program     = { ClassDecl | RecordDecl } ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
-            = [ "public" KwEnd ] KwClass Id <~~ push(up.in) ~~> "{" { Member } "}" ;
+            = [ "public" KwEnd ] KwClass Id <~~ push(up.in); curClassName = up.in ~~>
+              [ KwExtends Id <~~ push({ext: up.in}) ~~> ] "{" { Member } "}" ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ buildRecord(takeAll()) ~~>
@@ -147,7 +151,7 @@ Neg         <~~ push(makeNeg(pop())) ~~>
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 
-PostfixExpr = IncDec | NewExpr | CallMember ;
+PostfixExpr = IncDec | NewExpr | SuperCall | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
@@ -159,6 +163,11 @@ NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
 NewArrSize  <~~ push(makeNewArray(pop())) ~~>
             = KwNew ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | Id ) "[" Expression "]" ;
+
+// super.m(args): the method search starts at the superclass of the class the call
+// appears in (curClassName is set while the class body is being built).
+SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
+            = KwSuper "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
@@ -200,6 +209,8 @@ KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
 KwNew       = "new" KwEnd ;
+KwExtends   = "extends" KwEnd ;
+KwSuper     = "super" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -316,6 +327,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return "" + v
     }
 
+    // The class whose body is currently being built (for super calls).
+    var curClassName = ""
+
     // ----- Method dispatch (mirrors the js_mcall external of the compiled world) -----
     function mcall(target, name, args) {
         if (typeof target == "string") {
@@ -330,7 +344,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
-            var m = target.__class[name]
+            // The lookup follows the __super chain (inheritance).
+            var m = undefined
+            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) m = c[name]
             if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
             return m.apply(undefined, concat2impl([target], args))
         }
@@ -472,6 +488,21 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var m = p.obj[p.key]
             p.obj[p.key] = (m + d) | 0
             return m
+        }
+    }
+
+    // super.m(args): the search starts at the superclass of the DEFINING class
+    // (captured at build time), not at the instance's own class.
+    function makeSuperCall(name, argThunks) {
+        var defName = curClassName
+        return function() {
+            var self = getVar("this")
+            var m = undefined
+            for (var c = getVar(defName).__super; c != undefined && m == undefined; c = c.__super) m = c[name]
+            if (typeof m != "function") fail("unknown super method '" + name + "'")
+            var argv = [self]
+            for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
+            return m.apply(undefined, argv)
         }
     }
 
@@ -656,7 +687,15 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var cls = {__isclass: true, __name: name}
         var fields = []
         var ctorInfo = null
+        var sup = null
         var i
+        for (i = 0; i < members.length; i++) {
+            if (members[i].ext != undefined) {
+                sup = globalScope[members[i].ext]
+                if (sup == undefined) fail("unknown superclass: " + members[i].ext + " (a class must appear before its subclasses)")
+                cls.__super = sup
+            }
+        }
         if (recordParams != undefined) {
             for (i = 0; i < recordParams.length; i++) {
                 fields.push({name: recordParams[i], init: null, dflt: 0})
@@ -673,8 +712,10 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
                 ctorInfo = mm
             }
         }
-        // The constructor: field defaults and initializers first, then the body.
+        // The constructor: the implicit super() first (the whole parent constructor,
+        // without arguments), then this class' field defaults and initializers.
         function initFields(self) {
+            if (sup != null) sup.__ctor(self)
             for (var k = 0; k < fields.length; k++) {
                 self[fields[k].name] = (fields[k].init != null && fields[k].init != undefined) ? fields[k].init() : fields[k].dflt
             }

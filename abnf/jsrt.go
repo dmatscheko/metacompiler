@@ -1080,9 +1080,10 @@ func (rt *jsrt) javaString(v interface{}) string {
 // language subsets (Java, Kotlin, Go) share: instances are objects with a
 // "__class" property pointing to their class descriptor object, whose
 // properties hold the method closures (called with the instance prepended to
-// the arguments). Objects without __class (class descriptors with static
-// methods, plain objects with function properties) call the property directly.
-// Strings get the Java style builtins.
+// the arguments); the lookup follows the descriptor's "__super" chain, which
+// gives Java its single inheritance. Objects without __class (class
+// descriptors with static methods, plain objects with function properties)
+// call the property directly. Strings get the Java style builtins.
 func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) interface{} {
 	switch o := target.(type) {
 	case string:
@@ -1108,10 +1109,16 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		rt.fail("unknown String method: %s", name)
 	case *jsObject:
 		if cls, ok := o.props["__class"]; ok {
-			if clsObj, ok := cls.(*jsObject); ok {
+			// The lookup follows the __super chain (single inheritance).
+			for cls != nil {
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
 				if m, ok := clsObj.props[name]; ok && isCallable(m) {
 					return rt.call(m, jsUndef, append([]interface{}{target}, args...))
 				}
+				cls = clsObj.props["__super"]
 			}
 			rt.fail("unknown method '%s' on an instance", name)
 		}
@@ -1497,6 +1504,27 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_mcall args must be an array")
 			}
 			return w(rt.memberCall(u(a[0]), rt.toString(u(a[1])), args.elems))
+		},
+		"js_supercall": func(a []uint64) uint64 { // (super class, this, method name, args array)
+			args, ok := u(a[3]).(*jsArray)
+			if !ok {
+				rt.fail("js_supercall args must be an array")
+			}
+			name := rt.toString(u(a[2]))
+			// Walk the __super chain starting AT the given class (the caller already
+			// resolved the superclass of the defining class).
+			for cls := u(a[0]); cls != nil; {
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if m, ok := clsObj.props[name]; ok && isCallable(m) {
+					return w(rt.call(m, jsUndef, append([]interface{}{u(a[1])}, args.elems...)))
+				}
+				cls = clsObj.props["__super"]
+			}
+			rt.fail("unknown super method '%s'", name)
+			return jsHUndefined
 		},
 		"js_arg": func(a []uint64) uint64 { // (args array, index) -> value
 			arr := u(a[0]).(*jsArray)

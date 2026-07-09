@@ -47,6 +47,36 @@ class Point {
     }
 }
 
+class Animal {
+    int legs = 4;
+
+    String name() {
+        return "animal";
+    }
+
+    String describe() {                 // this.name() dispatches dynamically
+        return this.name() + ":" + this.legs;
+    }
+
+    int base() {
+        return 10;
+    }
+}
+
+class Bird extends Animal {
+    Bird() {
+        this.legs = 2;                  // the implicit super() ran the field inits first
+    }
+
+    String name() {                     // overrides Animal.name
+        return "bird";
+    }
+
+    int base() {                        // super.m() starts above the defining class
+        return super.base() + 5;
+    }
+}
+
 record Pair(int first, int second) { }
 
 public class Main {
@@ -173,6 +203,16 @@ public class Main {
         Pair pr = new Pair(6, 7);
         Main.check("record accessor", pr.first(), 6);
         Main.check("record product", pr.first() * pr.second(), 42);
+
+        // inheritance
+        Animal an = new Animal();
+        Main.checkS("describe", an.describe(), "animal:4");
+        Bird bird = new Bird();
+        Main.checkS("override and dispatch", bird.describe(), "bird:2");
+        Main.check("super call", bird.base(), 15);
+        Main.check("inherited field", bird.legs, 2);
+        Animal upcast = bird;
+        Main.checkS("dispatch via supertype", upcast.name(), "bird");
 
         // statics and recursion
         Main.check("fib", Main.fib(10), 55);

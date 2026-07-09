@@ -37,7 +37,8 @@ Program     <~~ buildMain(takeAll()) ~~>
             = { ClassDecl | RecordDecl } ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ "public" KwEnd ] KwClass Id <~~ push(up.in) ~~> "{" { Member } "}" ;
+            = [ "public" KwEnd ] KwClass Id <~~ push(up.in); curClassName = up.in ~~>
+              [ KwExtends Id <~~ push({ext: up.in}) ~~> ] "{" { Member } "}" ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
@@ -152,7 +153,7 @@ Neg         <~~ push(makeNeg(pop())) ~~>
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 
-PostfixExpr = IncDec | NewExpr | CallMember ;
+PostfixExpr = IncDec | NewExpr | SuperCall | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
@@ -164,6 +165,11 @@ NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
 NewArrSize  <~~ push(makeNewArray(pop())) ~~>
             = KwNew ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | Id ) "[" Expression "]" ;
+
+// super.m(args): the method search starts at the superclass of the class the call
+// appears in (curClassName is set while the class body is being built).
+SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
+            = KwSuper "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
@@ -205,6 +211,8 @@ KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
 KwNew       = "new" KwEnd ;
+KwExtends   = "extends" KwEnd ;
+KwSuper     = "super" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -529,6 +537,24 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
 
     // new C(args): set __class, then run the constructor with [obj, args...].
+    // super.m(args): resolved through js_supercall, starting at the superclass of the
+    // class the call appears in (captured at build time).
+    function makeSuperCall(name, argThunks) {
+        var defName = curClassName
+        return function(b) {
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
+            var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            var argsV = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < argThunks.length; i++) {
+                var r = argThunks[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [argsV, r.v])
+            }
+            return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
+        }
+    }
+
     function makeNew(items) {
         var clsName = items[0]
         var args = items.slice(1)
@@ -770,7 +796,10 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // Emits one method/ctor as jsf_N(env, args). For instance functions args[0] is this.
     // fields != null marks a constructor: the field initializers run before the body.
-    function emitFunc(params, body, isInstance, fields, recordParams) {
+    // The class whose body is currently being built (for super calls).
+    var curClassName = ""
+
+    function emitFunc(params, body, isInstance, fields, recordParams, superName) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -789,6 +818,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         for (var i = 0; i < params.length; i++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                          callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+        }
+        if (superName != undefined && superName != null) {
+            // The implicit super(): run the whole parent constructor without arguments.
+            var supClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
+            var supCtorV = callExt(b, "js_get", [supClsV, emitStr(b, "__ctor")])
+            var sargsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [sargsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            callExt(b, "js_call", [supCtorV, hUndef, sargsV])
         }
         if (fields != null) {
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
@@ -836,7 +873,15 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             var fields = []
             var ctorInfo = null
+            var superName = null
             var i
+            for (i = 0; i < members.length; i++) {
+                if (members[i].ext != undefined) {
+                    superName = members[i].ext
+                    callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                          callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
+                }
+            }
             if (recordParams != undefined) {
                 for (i = 0; i < recordParams.length; i++) {
                     fields.push({name: recordParams[i], init: null, isInt: true, dfltH: 0})
@@ -865,9 +910,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             if (recordParams != undefined) {
                 ctorIdx = emitFunc([], null, true, fields, recordParams)
             } else if (ctorInfo != null) {
-                ctorIdx = emitFunc(ctorInfo.params, ctorInfo.body, true, fields, undefined)
+                ctorIdx = emitFunc(ctorInfo.params, ctorInfo.body, true, fields, undefined, superName)
             } else {
-                ctorIdx = emitFunc([], null, true, fields, undefined)
+                ctorIdx = emitFunc([], null, true, fields, undefined, superName)
             }
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
             for (i = 0; i < members.length; i++) {
