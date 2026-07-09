@@ -102,7 +102,9 @@ Not         <~~ push(makeNot(pop())) ~~>
             = "not" KwEnd NotExpr ;
 
 Comparison  <~~ push(foldBinary(takeAll())) ~~>
-            = Arith [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Arith ] ;
+            = Arith [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Arith
+                    | ( "not" KwEnd "in" KwEnd ) <~~ push("not in") ~~> Arith
+                    | ( "in" KwEnd ) <~~ push("in") ~~> Arith ] ;
 
 Arith       <~~ push(foldBinary(takeAll())) ~~>
             = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
@@ -126,7 +128,17 @@ MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | StringLit | NumberLit | True | False | None | ListLit | VarRef ;
+Primary     = "(" Expression ")" | FString | StringLit | NumberLit | True | False | None | ListLit | VarRef ;
+
+// f-string: literal chunks and {expression} parts; every expression renders like str().
+FString     <~~ push(makeFString(takeAll())) ~~>
+            = ( 'f"' | 'F"' ) :whitespace() { FExpr | FChunk } '"' :whitespace(Whitespace) ;
+FExpr       = "{" :whitespace(Whitespace) Expression "}" :whitespace() ;
+FChunk      <~~ push({chunk: unescapeJs(up.in)}) ~~>
+            = FChar { FChar } ;
+FChar       = StrEsc | FPlain ;
+// Everything printable except the quote, the braces and the backslash.
+FPlain      = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "|" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 
 ListLit     <~~ push(makeList(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
@@ -355,10 +367,30 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // items = [{chunk: text} | expression thunk, ...] -> the f-string value, built by
+    // concatenating the chunks and the str() rendering (js_pystr) of the expressions.
+    function makeFString(items) {
+        return function(b) {
+            var v = emitStr(b, "")
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i]
+                if (typeof it == "function") {
+                    var r = it(b)
+                    b = r.b
+                    v = callExt(b, "js_jadd", [v, callExt(b, "js_pystr", [r.v])])
+                } else {
+                    v = callExt(b, "js_jadd", [v, emitStr(b, it.chunk)])
+                }
+            }
+            return {b: b, v: v}
+        }
+    }
+
     var binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div",
                   "//": "js_fdiv", "%": "js_fmod",
                   "==": "js_seq", "!=": "js_sne",
                   "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge",
+                  "in": "js_pyin",
                   "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div"}
     function foldBinary(items) {
         if (items.length == 1) return items[0]
@@ -369,7 +401,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 1; i < items.length; i += 2) {
                 var rr = items[i + 1](b)
                 b = rr.b
-                v = callExt(b, binExt[items[i]], [v, rr.v])
+                if (items[i] == "not in") {
+                    v = callExt(b, "js_not", [callExt(b, "js_pyin", [v, rr.v])])
+                } else {
+                    v = callExt(b, binExt[items[i]], [v, rr.v])
+                }
             }
             return {b: b, v: v}
         }

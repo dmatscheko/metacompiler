@@ -12,7 +12,9 @@ The language: def functions (top level, with positional parameters), if/elif/els
 while, for x in <list or range(a[,b])>, break/continue/pass/return, assignment and
 += -= *= /= (assignment creates a variable in the current function if none exists in
 scope - there is no 'global' keyword; use a mutable list like fails = [0] for counters),
-lists with negative indexing, element assignment, .append()/.pop(), len(), print() with
+lists with negative indexing, element assignment, .append()/.pop(), len(), in / not in
+membership tests on lists and strings, f-strings (f'x={a + 1}' renders like str()),
+print() with
 Python style rendering (True/None/[1, 2]), True/False/None, and/or/not with Python
 truthiness (empty lists are falsy) and operand values, comparisons (no chaining),
 + - * % with float semantics, / as true division (7/2 == 3.5), // as floor division
@@ -20,7 +22,7 @@ truthiness (empty lists are falsy) and operand values, comparisons (no chaining)
 single or double quoted strings with escapes.
 
 Not in the subset: classes, dicts, tuples, nested def/lambdas/closures, the global
-keyword, comparison chaining, slices, for-else, f-strings, imports, exceptions, and
+keyword, comparison chaining, slices, for-else, imports, exceptions, and
 list equality by value (== compares lists by identity).
 
 There is no main(): the file simply runs top to bottom. Self checking programs end
@@ -95,7 +97,9 @@ Not         <~~ push(makeNot(pop())) ~~>
             = "not" KwEnd NotExpr ;
 
 Comparison  <~~ push(foldBinary(takeAll())) ~~>
-            = Arith [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Arith ] ;
+            = Arith [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Arith
+                    | ( "not" KwEnd "in" KwEnd ) <~~ push("not in") ~~> Arith
+                    | ( "in" KwEnd ) <~~ push("in") ~~> Arith ] ;
 
 Arith       <~~ push(foldBinary(takeAll())) ~~>
             = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
@@ -119,7 +123,17 @@ MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | StringLit | NumberLit | True | False | None | ListLit | VarRef ;
+Primary     = "(" Expression ")" | FString | StringLit | NumberLit | True | False | None | ListLit | VarRef ;
+
+// f-string: literal chunks and {expression} parts; every expression renders like str().
+FString     <~~ push(makeFString(takeAll())) ~~>
+            = ( 'f"' | 'F"' ) :whitespace() { FExpr | FChunk } '"' :whitespace(Whitespace) ;
+FExpr       = "{" :whitespace(Whitespace) Expression "}" :whitespace() ;
+FChunk      <~~ push({chunk: unescapeJs(up.in)}) ~~>
+            = FChar { FChar } ;
+FChar       = StrEsc | FPlain ;
+// Everything printable except the quote, the braces and the backslash.
+FPlain      = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "|" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 
 ListLit     <~~ push(makeList(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
@@ -375,6 +389,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == ">")  return l > r
         if (op == "<=") return l <= r
         if (op == ">=") return l >= r
+        if (op == "in") return pyIn(l, r)
+        if (op == "not in") return !pyIn(l, r)
+    }
+    // Python 'x in y' for lists and strings.
+    function pyIn(l, r) {
+        if (typeof r == "string") return r.indexOf(l) >= 0
+        for (var i = 0; i < r.length; i++) {
+            if (r[i] === l) return true
+        }
+        return false
+    }
+    // items = [{chunk: text} | expression thunk, ...] -> the f-string value.
+    function makeFString(items) {
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i]
+                if (typeof it == "function") out += pstr(it())
+                else out += it.chunk
+            }
+            return out
+        }
     }
     function foldBinary(items) {
         if (items.length == 1) return items[0]

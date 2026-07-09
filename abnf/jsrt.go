@@ -1679,6 +1679,24 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(arr)
 		},
+		"js_pyin": func(a []uint64) uint64 { // Python 'x in y' for lists and strings.
+			switch c := u(a[1]).(type) {
+			case *jsArray:
+				for _, e := range c.elems {
+					if rt.strictEq(e, u(a[0])) {
+						return boolH(true)
+					}
+				}
+				return boolH(false)
+			case string:
+				return boolH(strings.Contains(c, rt.toString(u(a[0]))))
+			}
+			rt.fail("'in' needs a list or a string on the right side")
+			return boolH(false)
+		},
+		"js_pystr": func(a []uint64) uint64 { // str(v) with Python style rendering.
+			return rt.wrapStr(rt.pyString(u(a[0])))
+		},
 		"js_pyprint": func(a []uint64) uint64 { // print(...) with Python style rendering.
 			args, ok := u(a[0]).(*jsArray)
 			if !ok {

@@ -3,6 +3,7 @@
 # metacompiler run exits with 0 exactly when everything works.
 
 fails = [0]
+lst0 = [3, 1, 4]
 
 def check(name, got, want):
     if got != want:
@@ -128,6 +129,19 @@ check("string negative", name[-1], "d")
 check_true("string compare", "apple" < "banana")
 
 # recursion and a mutable counter across functions
+# membership tests
+check("in list", 1 in lst0, True)
+check("not in list", 7 not in lst0, True)
+check("in string", "ell" in "hello", True)
+check("not in string", "z" not in "hello", True)
+
+# f-strings
+name = "world"
+check("f-string", f"hi {name}!", "hi world!")
+check("f-string expr", f"sum={1 + 2}", "sum=3")
+check("f-string list", f"l={lst0}", "l=[3, 1, 4]")
+check("f-string empty", f"", "")
+
 check("fib", fib(10), 55)
 check("fails so far", fails[0], 0)
 
