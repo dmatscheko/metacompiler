@@ -5,7 +5,9 @@ The subset: top level functions with block or expression bodies (fun add(a: Int,
 : Int = a + b), val/var declarations with type inference (annotations are parsed and
 ignored, val is not enforced), if/else as statement and as expression, when expressions
 with and without subject (arms are expressions, multiple comma separated match values,
-else required for a value), while, do-while, for over inclusive ranges (for (i in 1..n))
+else required for a value, range branches with in 1..9 and !in 1..9), the elvis
+operator a ?: b (b when a is null; short circuit), while, do-while, for over inclusive
+ranges (for (i in 1..n))
 and over lists, break/continue, classes with primary constructor properties
 (class Counter(val start: Int) { var value = start; fun next(): Int { ... } }) and
 implicit property access inside methods (value += step resolves against this), object
@@ -113,10 +115,20 @@ IfExpr      <~~ push(makeIfExpr(pop(), pop(), pop())) ~~>
 // when { c1 -> e1; else -> e } and when (x) { 1, 2 -> e1; else -> e }.
 WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
             = KwWhen [ "(" Expression <~~ push({subj: pop()}) ~~> ")" ] "{"
-              { WhenArm } [ KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ] "}" ;
+              { WhenElse | WhenArm } "}" ;
+// The else arm must be tried first: otherwise 'else' would parse as a variable arm
+// (and only fail at run time, when no other arm matches).
+WhenElse    = KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ;
 WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
-            = Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
-              "->" Expression [ ";" ] ;
+            = WhenCond { "," WhenCond } "->" Expression [ ";" ] ;
+// A branch condition: an inclusive range test (in / !in) or a value to compare with.
+WhenCond    = WhenIn | WhenNotIn | WhenVal ;
+WhenIn      <~~ var h = pop(); push({lo: pop(), hi: h, neg: false}) ~~>
+            = KwIn Expression ".." Expression ;
+WhenNotIn   <~~ var h = pop(); push({lo: pop(), hi: h, neg: true}) ~~>
+            = "!" KwIn Expression ".." Expression ;
+WhenVal     <~~ push({v: pop()}) ~~>
+            = Expression ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
@@ -128,7 +140,11 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+            = Elvis { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Elvis } ;
+
+// a ?: b yields a unless it is null (the elvis operator; the right side only runs then).
+Elvis       <~~ push(makeElvis(takeAll())) ~~>
+            = AddExpr { "?:" AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -403,9 +419,16 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // items = [{subj}?] [{vals, body}...] [{els}?]
     function makeWhenArm(items) {
         var body = items.pop()
-        var vals = []
-        for (var i = 0; i < items.length; i++) vals.push(items[i].v)
-        return {vals: vals, body: body}
+        return {conds: items, body: body}
+    }
+    // items = [thunk, thunk, ...]: a ?: b yields a unless it is null (short circuit).
+    function makeElvis(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length && (v === null || v === undefined); i++) v = items[i]()
+            return v
+        }
     }
     function makeWhen(items) {
         var subj = null
@@ -419,9 +442,20 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return function() {
             var s = subj != null ? subj() : undefined
             for (var a = 0; a < arms.length; a++) {
-                for (var v = 0; v < arms[a].vals.length; v++) {
-                    var val = arms[a].vals[v]()
-                    if (subj != null ? val === s : val) return arms[a].body()
+                for (var ci = 0; ci < arms[a].conds.length; ci++) {
+                    var cond = arms[a].conds[ci]
+                    var hit
+                    if (cond.v != undefined) {
+                        var val = cond.v()
+                        hit = subj != null ? val === s : val
+                    } else {
+                        // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
+                        var lo = cond.lo()
+                        var hi = cond.hi()
+                        hit = (s >= lo && s <= hi)
+                        if (cond.neg) hit = !hit
+                    }
+                    if (hit) return arms[a].body()
                 }
             }
             if (els != null) return els()

@@ -119,10 +119,20 @@ IfExpr      <~~ push(makeIfExpr(pop(), pop(), pop())) ~~>
 // when { c1 -> e1; else -> e } and when (x) { 1, 2 -> e1; else -> e }.
 WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
             = KwWhen [ "(" Expression <~~ push({subj: pop()}) ~~> ")" ] "{"
-              { WhenArm } [ KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ] "}" ;
+              { WhenElse | WhenArm } "}" ;
+// The else arm must be tried first: otherwise 'else' would parse as a variable arm
+// (and only fail at run time, when no other arm matches).
+WhenElse    = KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ;
 WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
-            = Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
-              "->" Expression [ ";" ] ;
+            = WhenCond { "," WhenCond } "->" Expression [ ";" ] ;
+// A branch condition: an inclusive range test (in / !in) or a value to compare with.
+WhenCond    = WhenIn | WhenNotIn | WhenVal ;
+WhenIn      <~~ var h = pop(); push({lo: pop(), hi: h, neg: false}) ~~>
+            = KwIn Expression ".." Expression ;
+WhenNotIn   <~~ var h = pop(); push({lo: pop(), hi: h, neg: true}) ~~>
+            = "!" KwIn Expression ".." Expression ;
+WhenVal     <~~ push({v: pop()}) ~~>
+            = Expression ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
@@ -134,7 +144,11 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+            = Elvis { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Elvis } ;
+
+// a ?: b yields a unless it is null (the elvis operator; the right side only runs then).
+Elvis       <~~ push(makeElvis(takeAll())) ~~>
+            = AddExpr { "?:" AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -426,11 +440,31 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
     function makeWhenArm(items) {
         var body = items.pop()
-        var vals = []
-        for (var i = 0; i < items.length; i++) vals.push(items[i].v)
-        return {vals: vals, body: body}
+        return {conds: items, body: body}
     }
     // A when compiles to a test chain; the result travels in a hidden scope variable.
+    // items = [thunk, thunk, ...]: a ?: b yields a unless it is null. Each step only
+    // runs the right side in its own block when the left value was null (phi merge).
+    function makeElvis(items) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i++) {
+                var rightB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                var isNull = callExt(b, "js_seq", [v, hNull])
+                b.NewCondBr(truthy(b, isNull), rightB, mergeB)
+                var r2 = items[i](rightB)
+                r2.b.NewBr(mergeB)
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(r2.v, r2.b)])
+                b = mergeB
+                v = phi
+            }
+            return {b: b, v: v}
+        }
+    }
     function makeWhen(items) {
         var subj = null
         var els = null
@@ -455,18 +489,32 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var endB = curF.NewBlock("")
             for (var a = 0; a < arms.length; a++) {
                 var matchB = curF.NewBlock("")
-                for (var v2 = 0; v2 < arms[a].vals.length; v2++) {
-                    var rv = arms[a].vals[v2](b)
-                    b = rv.b
-                    var condV
-                    if (subj != null) {
-                        var subjV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
-                        condV = callExt(b, "js_seq", [subjV, rv.v])
-                    } else {
-                        condV = rv.v
-                    }
+                for (var v2 = 0; v2 < arms[a].conds.length; v2++) {
+                    var cond = arms[a].conds[v2]
                     var nextB = curF.NewBlock("")
-                    b.NewCondBr(truthy(b, condV), matchB, nextB)
+                    if (cond.v != undefined) {
+                        var rv = cond.v(b)
+                        b = rv.b
+                        var condV
+                        if (subj != null) {
+                            var subjV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
+                            condV = callExt(b, "js_seq", [subjV, rv.v])
+                        } else {
+                            condV = rv.v
+                        }
+                        b.NewCondBr(truthy(b, condV), matchB, nextB)
+                    } else {
+                        // in lo..hi (or !in): both bounds are evaluated, like in Kotlin.
+                        var rl = cond.lo(b)
+                        b = rl.b
+                        var rh = cond.hi(b)
+                        b = rh.b
+                        var subjV2 = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
+                        var inRange = b.NewAnd(truthy(b, callExt(b, "js_ge", [subjV2, rl.v])),
+                                               truthy(b, callExt(b, "js_le", [subjV2, rh.v])))
+                        if (cond.neg) { b.NewCondBr(inRange, nextB, matchB) }
+                        else          { b.NewCondBr(inRange, matchB, nextB) }
+                    }
                     b = nextB
                 }
                 var rb = arms[a].body(matchB)

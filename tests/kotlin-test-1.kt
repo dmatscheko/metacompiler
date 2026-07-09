@@ -131,6 +131,22 @@ fun main() {
     check("data class", p.manhattan(), 7)
     check("property read", p.x - p.y, 7)
 
+    // when with range branches
+    val g1 = when (85) { in 90..100 -> "A"; in 80..89 -> "B"; else -> "?" }
+    checkS("when in range", g1, "B")
+    val g2 = when (77) { in 90..100 -> "A"; in 80..89 -> "B"; else -> "C" }
+    checkS("when range miss", g2, "C")
+    val g3 = when (5) { !in 0..3 -> "out"; else -> "in" }
+    checkS("when not in", g3, "out")
+    val g4 = when (2) { !in 0..3 -> "out"; else -> "in" }
+    checkS("when not in miss", g4, "in")
+
+    // elvis
+    var maybe: Int? = null
+    check("elvis null", maybe ?: 42, 42)
+    maybe = 7
+    check("elvis value", maybe ?: 42, 7)
+
     // functions and recursion
     check("fib", fib(10), 55)
     check("builtin max", max(3, 9), 9)
