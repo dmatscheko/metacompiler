@@ -26,6 +26,12 @@
 
 (define seven 7)                        ; a global variable
 
+(define (classify n)                    ; cond chooses the first matching clause
+  (cond ((< n 0) -1)
+        ((= n 0) 0)
+        ((= (mod n 2) 0) 2)
+        (else 1)))
+
 (define (check got want)                ; 0 when equal, 1 when not
   (if (= got want) 0 1))
 
@@ -37,7 +43,20 @@
                    (check (/ 7 2) 3)                ; integer division truncates
                    (check (- 3 10) -7)              ; negative numbers
                    (check (if 0 1) 0)               ; a missing else arm yields 0
-                   (check (begin 1 2 3) 3))))       ; begin yields the last value
+                   (check (begin 1 2 3) 3)          ; begin yields the last value
+                   (check (classify -5) -1)
+                   (check (classify 0) 0)
+                   (check (classify 8) 2)
+                   (check (classify 7) 1)
+                   (check (cond ((= 1 2) 10)) 0)      ; no clause matches: 0
+                   (check (and 2 3) 3)                ; and yields the last value
+                   (check (and 1 0 (boom)) 0)         ; ...and short circuits (boom is not defined)
+                   (check (or 0 5 (boom)) 5)          ; or yields the first non zero value
+                   (check (or 0 0) 0)
+                   (check (not 0) 1)
+                   (check (not 7) 0)
+                   (check (mod 7 3) 1)
+                   (check (mod -7 3) -1))))           ; truncating like C
   (if (= failures 0)
       (begin (putchar 79) (putchar 75) (putchar 10) 0)   ; print "OK\n"
       failures))

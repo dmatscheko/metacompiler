@@ -7,7 +7,7 @@ Every (define (f ...) ...) becomes an i32 function. All other top level forms be
 body of main(), which returns the value of the last one; (define x e) becomes a global
 that is initialized at its position in that flow (a use before that reads 0, where the
 interpreter would report an error - the only known difference). Because the language has
-no assignment, values stay in SSA form: an (if ...) merges its two arms with a phi.
+no assignment, values stay in SSA form: if, cond, and and or merge their arms with phis.
 
 The exit code of the metacompiler run is the value of the last top level form, so Lisp
 test programs are self checking: they end in 0 on success.") ;
@@ -143,6 +143,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return compileBody(form.slice(2), inner, b)
         }
         if (s == "begin") return compileBody(form.slice(1), env, b)
+        if (s == "cond") return compileCond(form, 1, env, b)
+        if (s == "and") return compileAndOr(form, env, b, false)
+        if (s == "or")  return compileAndOr(form, env, b, true)
 
         // Everything else evaluates its arguments first.
         var args = []
@@ -165,9 +168,53 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (preds[s] != undefined) {
             return {b: b, v: b.NewZExt(b.NewICmp(preds[s], args[0], args[1]), i32)}
         }
+        if (s == "not") return {b: b, v: b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, args[0], zero), i32)}
+        if (s == "mod") { var v = args[0]; for (var i = 1; i < args.length; i++) v = b.NewSRem(v, args[i]); return {b: b, v: v} }
 
         // A user defined function (or the putchar builtin).
         return {b: b, v: b.NewCall(getFunc(s, args.length), args)}
+    }
+
+    // (cond ...) from clause index i on: like nested ifs, every arm meets the rest in
+    // a phi, and a missing else yields 0. The else test itself is never compiled.
+    function compileCond(form, i, env, b) {
+        if (i >= form.length) return {b: b, v: zero}
+        var clause = form[i]
+        var t = clause[0]
+        if (typeof t != "number" && t.sym == "else") return compileBody(clause.slice(1), env, b)
+        var cond = compileExpr(t, env, b)
+        var thenB = curF.NewBlock("")
+        var elseB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        cond.b.NewCondBr(cond.b.NewICmp(llvm.enum.IPredNE, cond.v, zero), thenB, elseB)
+        var thenR = compileBody(clause.slice(1), env, thenB)
+        thenR.b.NewBr(mergeB)
+        var elseR = compileCond(form, i + 1, env, elseB)
+        elseR.b.NewBr(mergeB)
+        var phi = mergeB.NewPhi(llvm.ir.NewIncoming(thenR.v, thenR.b), llvm.ir.NewIncoming(elseR.v, elseR.b))
+        return {b: mergeB, v: phi}
+    }
+
+    // (and ...) / (or ...): short circuit left to right, the deciding operand is the
+    // value (like in Scheme); each step merges the skip path and the right side in a phi.
+    function compileAndOr(form, env, b, isOr) {
+        if (form.length == 1) return {b: b, v: isOr ? zero : one}
+        var r = compileExpr(form[1], env, b)
+        var bb = r.b
+        var v = r.v
+        for (var i = 2; i < form.length; i++) {
+            var rightB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            var c = bb.NewICmp(llvm.enum.IPredNE, v, zero)
+            if (isOr) { bb.NewCondBr(c, mergeB, rightB) }
+            else      { bb.NewCondBr(c, rightB, mergeB) }
+            var r2 = compileExpr(form[i], env, rightB)
+            r2.b.NewBr(mergeB)
+            var phi = mergeB.NewPhi(llvm.ir.NewIncoming(v, bb), llvm.ir.NewIncoming(r2.v, r2.b))
+            bb = mergeB
+            v = phi
+        }
+        return {b: bb, v: v}
     }
 
     // Compiles the forms in sequence; the value is the one of the last form.

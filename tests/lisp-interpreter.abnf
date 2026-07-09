@@ -2,7 +2,9 @@
 :description("Parses a small Lisp (a Scheme like integer subset) and executes it directly.
 
 Supported: (define (f a b) body...), (define x expr), (if c t e?), (let ((x e)...) body...),
-(begin e...), the n-ary operators + - * /, the comparisons = < > <= >=, integers (32 bit,
+(begin e...), (cond (test body...) ... (else body...)), the short circuit forms (and ...)
+and (or ...) that return the deciding value, (not x), the n-ary operators + - * / mod
+(mod truncates like C), the comparisons = < > <= >=, integers (32 bit,
 / truncates towards zero), recursion, and (putchar n) for output. 0 is false, everything
 else is true. Functions return the value of their last body form.
 
@@ -102,6 +104,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return evalBody(form.slice(2), inner)
         }
         if (s == "begin") return evalBody(form.slice(1), env)
+        if (s == "cond") {
+            // The first clause whose test is not 0 (or the else clause) provides the value.
+            for (var i = 1; i < form.length; i++) {
+                var clause = form[i]
+                var t = clause[0]
+                if (typeof t != "number" && t.sym == "else") return evalBody(clause.slice(1), env)
+                if (evalForm(t, env) != 0) return evalBody(clause.slice(1), env)
+            }
+            return 0
+        }
+        if (s == "and") {
+            // Short circuit: stops at the first 0; the value is the last one evaluated.
+            var v = 1
+            for (var i = 1; i < form.length; i++) {
+                v = evalForm(form[i], env)
+                if (v == 0) return 0
+            }
+            return v
+        }
+        if (s == "or") {
+            // Short circuit: the value is the first one that is not 0.
+            for (var i = 1; i < form.length; i++) {
+                var v = evalForm(form[i], env)
+                if (v != 0) return v
+            }
+            return 0
+        }
 
         // Everything else evaluates its arguments first.
         var args = []
@@ -120,6 +149,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (s == ">")  return (args[0] > args[1]) ? 1 : 0
         if (s == "<=") return (args[0] <= args[1]) ? 1 : 0
         if (s == ">=") return (args[0] >= args[1]) ? 1 : 0
+        if (s == "not") return (args[0] == 0) ? 1 : 0
+        if (s == "mod") { var v = args[0]; for (var i = 1; i < args.length; i++) v = (v % args[i]) | 0; return v }
         if (s == "putchar") { printf("%c", args[0]); return args[0] }
 
         // A user defined function. The body sees only its parameters and the globals
