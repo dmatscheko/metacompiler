@@ -3,7 +3,7 @@
 
 The language is exactly the one of tinyc-to-llvm-ir.abnf (the LLVM IR compiler); see there for a
 description. The semantics match too: int is 32 bit, / and % truncate towards zero,
-|| and && evaluate both sides, ++/-- are post operators, and the exit code of the
+|| and && short circuit like in C, ++/-- are post operators, and the exit code of the
 metacompiler run is the value that main() returns.
 
 Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
@@ -75,11 +75,12 @@ Assignment  <~~ push(makeAssign(pop(), pop())) ~~>
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = OrExpr ;
 
-OrExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = AndExpr { "||" <~~ push("||") ~~> AndExpr } ;
+// || and && short circuit, so they get their own folding functions.
+OrExpr      <~~ push(foldOr(takeAll())) ~~>
+            = AndExpr { "||" AndExpr } ;
 
-AndExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = CmpExpr { "&&" <~~ push("&&") ~~> CmpExpr } ;
+AndExpr     <~~ push(foldAnd(takeAll())) ~~>
+            = CmpExpr { "&&" CmpExpr } ;
 
 // The two-char operators must be tried before their one-char prefixes ("<=" before "<"),
 // because the parser always keeps the first match.
@@ -204,8 +205,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (op == "*") return Math.imul(l, r)   // 32 bit multiplication like in the compiled version.
         if (op == "/") return (l / r) | 0       // Truncates towards zero, like LLVM sdiv.
         if (op == "%") return (l % r) | 0
-        if (op == "||") return (l != 0 || r != 0) ? 1 : 0
-        if (op == "&&") return (l != 0 && r != 0) ? 1 : 0
         if (op == "==") return (l == r) ? 1 : 0
         if (op == "!=") return (l != r) ? 1 : 0
         if (op == "<")  return (l < r) ? 1 : 0
@@ -214,15 +213,34 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (op == ">=") return (l >= r) ? 1 : 0
     }
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
-    // Both operands are evaluated before the operator is applied (no short circuit),
-    // exactly like in the compiled version.
     function foldBinary(items) {
+        if (items.length == 1) return items[0]
         return function() {
             var v = items[0]()
             for (var i = 1; i < items.length; i += 2) {
                 v = binOp(items[i], v, items[i + 1]())
             }
             return v
+        }
+    }
+    // items = [thunk, thunk, ...] -> C short circuit: evaluation stops at the first
+    // decisive operand and the result is 0 or 1, exactly like in the compiled version.
+    function foldOr(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                if (items[i]() != 0) return 1
+            }
+            return 0
+        }
+    }
+    function foldAnd(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                if (items[i]() == 0) return 0
+            }
+            return 1
         }
     }
     // items = [name, argThunk...] -> call thunk.

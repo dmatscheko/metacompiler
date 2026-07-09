@@ -84,6 +84,19 @@ func main() {
     int old = i++;                              // post increment yields the old value
     if (old != 5 || i != 6)                    { failures++; }
 
+    // Short circuit: the right side must only run when it can still decide.
+    int sc = 0;
+    int r1 = 1 || sc++;                         // skipped
+    if (sc != 0 || r1 != 1)                    { failures++; }
+    int r2 = 0 && sc++;                         // skipped
+    if (sc != 0 || r2 != 0)                    { failures++; }
+    int r3 = 0 || sc++;                         // runs: sc -> 1, old value 0 is falsy
+    if (sc != 1 || r3 != 0)                    { failures++; }
+    int r4 = 1 && sc++;                         // runs: sc -> 2, old value 1 is truthy
+    if (sc != 2 || r4 != 1)                    { failures++; }
+    int r5 = 0 || 0 || sc++ || sc++;            // the chain stops at the first non-zero
+    if (sc != 3 || r5 != 1)                    { failures++; }
+
     // Output: TinyC can talk via putchar (79 75 10 = "OK\n").
     if (failures == 0) {
         putchar(79); putchar(75); putchar(10);

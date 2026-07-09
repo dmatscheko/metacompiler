@@ -4,7 +4,8 @@
 TinyC is a small C like language: functions with int parameters, int variables with block
 scoping, if/else, while, do-while, for, return, assignments, ++/--, the operators
 || && == != <= >= < > + - * / % and unary minus, calls (also recursive), and putchar(x)
-for output. Every function returns int. || and && evaluate both sides (no short circuit).
+for output. Every function returns int. || and && short circuit like in C: the right
+side only runs when the left side has not already decided, and the result is 0 or 1.
 
 The compilation works with closures: Every tag composes a small code generator function
 (a 'thunk') out of the thunks of its children. Expression thunks get the current basic
@@ -55,7 +56,7 @@ For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = Declaration1 | Assignment ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
-ForPost     <~~ push({k:"post", t:pop()}) ~~> = Assignment | Expression ;
+ForPost     <~~ push({k:"post", t:pop()}) ~~> = Assignment | ExprOnly ;
 
 // [] or [exprThunk].
 Return      <~~ push(makeReturn(takeAll())) ~~>
@@ -71,8 +72,10 @@ InitDecl    <~~ push(makeDecl(takeAll())) ~~>
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
 
-ExprStmt    <~~ push(makeExprStmt(pop())) ~~>
-            = ( Assignment | Expression ) ";" ;
+// An assignment is already a statement thunk; a bare expression gets wrapped into one.
+ExprStmt    = ( Assignment | ExprOnly ) ";" ;
+ExprOnly    <~~ push(makeExprStmt(pop())) ~~>
+            = Expression ;
 
 // Assignment is a statement (and a for clause), not a nested expression.
 Assignment  <~~ push(makeAssign(pop(), pop())) ~~>
@@ -81,11 +84,12 @@ Assignment  <~~ push(makeAssign(pop(), pop())) ~~>
 // Every expression production pushes exactly one thunk: function(block) -> value.
 Expression  = OrExpr ;
 
-OrExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = AndExpr { "||" <~~ push("||") ~~> AndExpr } ;
+// || and && short circuit, so they get their own thunk builder (branches and a phi).
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
 
-AndExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = CmpExpr { "&&" <~~ push("&&") ~~> CmpExpr } ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = CmpExpr { "&&" CmpExpr } ;
 
 // The two-char operators must be tried before their one-char prefixes ("<=" before "<"),
 // because the parser always keeps the first match.
@@ -207,17 +211,22 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // An i32 0/1 from an i1.
     function toInt(b, v) { return b.NewZExt(v, i32) }
 
-    // ----- Expression thunks: function(block) -> LLVM value -----
+    // ----- Expression thunks: function(block) -> {b: block to continue in, v: LLVM value} -----
+    // The block is part of the result because || and && branch: the code behind a short
+    // circuit expression has to continue in its merge block.
 
     function makeInt(n) {
         var c = llvm.constant.NewInt(i32, n)
-        return function(b) { return c }
+        return function(b) { return {b: b, v: c} }
     }
     function makeVarRef(name) {
-        return function(b) { return b.NewLoad(i32, getVar(name)) }
+        return function(b) { return {b: b, v: b.NewLoad(i32, getVar(name))} }
     }
     function makeNeg(t) {
-        return function(b) { return b.NewSub(zero, t(b)) }
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: r.b.NewSub(zero, r.v)}
+        }
     }
     function binOp(b, op, l, r) {
         if (op == "+") return b.NewAdd(l, r)
@@ -225,20 +234,48 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (op == "*") return b.NewMul(l, r)
         if (op == "/") return b.NewSDiv(l, r)
         if (op == "%") return b.NewSRem(l, r)
-        if (op == "||") return toInt(b, b.NewOr(truth(b, l), truth(b, r)))
-        if (op == "&&") return toInt(b, b.NewAnd(truth(b, l), truth(b, r)))
         var pred = { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredSLT,
                      ">": llvm.enum.IPredSGT, "<=": llvm.enum.IPredSLE, ">=": llvm.enum.IPredSGE }[op]
         return toInt(b, b.NewICmp(pred, l, r))
     }
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
     function foldBinary(items) {
+        if (items.length == 1) return items[0]
         return function(b) {
-            var v = items[0](b)
+            var r = items[0](b)
+            var b2 = r.b
+            var v = r.v
             for (var i = 1; i < items.length; i += 2) {
-                v = binOp(b, items[i], v, items[i + 1](b))
+                var r2 = items[i + 1](b2)
+                b2 = r2.b
+                v = binOp(b2, items[i], v, r2.v)
             }
-            return v
+            return {b: b2, v: v}
+        }
+    }
+    // items = [thunk, thunk, ...] -> one || (isOr) or && chain with C short circuit:
+    // every operand gets its own block, a phi in the merge block collects the 0/1
+    // results, and a decisive value skips the rest of the chain.
+    function makeOrAnd(items, isOr) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            var b2 = r.b
+            var v = toInt(b2, truth(b2, r.v)) // Normalized to 0/1, like C.
+            for (var i = 1; i < items.length; i++) {
+                var rightB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                if (isOr) { b2.NewCondBr(truth(b2, v), mergeB, rightB) }
+                else      { b2.NewCondBr(truth(b2, v), rightB, mergeB) }
+                var r2 = items[i](rightB)
+                var rightEnd = r2.b
+                var v2 = toInt(rightEnd, truth(rightEnd, r2.v))
+                rightEnd.NewBr(mergeB)
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b2), llvm.ir.NewIncoming(v2, rightEnd)])
+                b2 = mergeB
+                v = phi
+            }
+            return {b: b2, v: v}
         }
     }
     // items = [name, argThunk...] -> call thunk.
@@ -247,8 +284,12 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var args = items.slice(1)
         return function(b) {
             var argValues = []
-            for (var i = 0; i < args.length; i++) argValues.push(args[i](b))
-            return b.NewCall(getFunc(name, args.length), argValues)
+            for (var i = 0; i < args.length; i++) {
+                var r = args[i](b)
+                b = r.b
+                argValues.push(r.v)
+            }
+            return {b: b, v: b.NewCall(getFunc(name, args.length), argValues)}
         }
     }
     function makeIncDec(op, name) {
@@ -256,23 +297,31 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var ptr = getVar(name)
             var oldValue = b.NewLoad(i32, ptr)
             b.NewStore(op == "++" ? b.NewAdd(oldValue, one) : b.NewSub(oldValue, one), ptr)
-            return oldValue // Post increment: the expression value is the old one.
+            return {b: b, v: oldValue} // Post increment: the expression value is the old one.
         }
     }
 
     // ----- Statement thunks: function(block) -> block to continue in -----
 
     function makeExprStmt(t) {
-        return function(b) { t(b); return b }
+        return function(b) { return t(b).b }
     }
     function makeAssign(valueThunk, name) {
-        return function(b) { b.NewStore(valueThunk(b), getVar(name)); return b }
+        return function(b) {
+            var r = valueThunk(b)
+            r.b.NewStore(r.v, getVar(name))
+            return r.b
+        }
     }
     // items = [name] or [name, initThunk].
     function makeDecl(items) {
         var name = items[0]
         var init = items.length > 1 ? items[1] : makeInt(0)
-        return function(b) { b.NewStore(init(b), declVar(b, name)); return b }
+        return function(b) {
+            var r = init(b)
+            r.b.NewStore(r.v, declVar(r.b, name))
+            return r.b
+        }
     }
     function makeSeq(items) {
         return function(b) {
@@ -298,7 +347,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var thenB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             var elseB = elseT != null ? curF.NewBlock("") : mergeB
-            b.NewCondBr(truth(b, cond(b)), thenB, elseB)
+            var r = cond(b)
+            r.b.NewCondBr(truth(r.b, r.v), thenB, elseB)
             thenT(thenB).NewBr(mergeB)
             if (elseT != null) elseT(elseB).NewBr(mergeB)
             return mergeB
@@ -311,7 +361,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            headB.NewCondBr(truth(headB, condT(headB)), bodyB, exitB)
+            var r = condT(headB)
+            r.b.NewCondBr(truth(r.b, r.v), bodyB, exitB)
             bodyT(bodyB).NewBr(headB)
             return exitB
         }
@@ -322,7 +373,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var exitB = curF.NewBlock("")
             b.NewBr(bodyB)
             var endB = bodyT(bodyB)
-            endB.NewCondBr(truth(endB, condT(endB)), bodyB, exitB)
+            var r = condT(endB)
+            r.b.NewCondBr(truth(r.b, r.v), bodyB, exitB)
             return exitB
         }
     }
@@ -342,10 +394,16 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            var condV = cond != null ? truth(headB, cond(headB)) : truth(headB, one)
-            headB.NewCondBr(condV, bodyB, exitB)
+            var condEnd = headB
+            var condV = one
+            if (cond != null) {
+                var r = cond(headB)
+                condEnd = r.b
+                condV = r.v
+            }
+            condEnd.NewCondBr(truth(condEnd, condV), bodyB, exitB)
             var endB = bodyT(bodyB)
-            if (post != null) post(endB)
+            if (post != null) endB = post(endB)
             endB.NewBr(headB)
             scopes.pop()
             return exitB
@@ -355,7 +413,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : makeInt(0)
         return function(b) {
-            b.NewRet(t(b))
+            var r = t(b)
+            r.b.NewRet(r.v)
             // Code behind a return is unreachable but must still land in a valid block.
             deadCount++
             return curF.NewBlock("dead" + deadCount)
