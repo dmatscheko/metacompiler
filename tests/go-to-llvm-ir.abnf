@@ -59,7 +59,7 @@ TopVar      = VarDecl ;
 Type        = "[" "]" Type | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | For | Return | Break | Continue | VarDecl | SimpleStmt | Empty ;
+Statement   = Block | If | For | Switch | Return | Break | Continue | VarDecl | SimpleStmt | Empty ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -115,6 +115,19 @@ FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
 SimpleStmt2 = ShortDecl | IncDecStmt | Assign ;
 ForCond     <~~ push(makeForCond(pop(), pop())) ~~>
             = "for" KwEnd CondOn Expression CondOff Block ;
+
+// Go switch: no fallthrough (an implicit break ends every case), several values per
+// case, with a subject (compared ==) or without one (the first true condition wins).
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = "switch" KwEnd [ SwitchSubj ] "{" { CaseLabel | Statement } "}" ;
+SwitchSubj  <~~ push({subj: pop()}) ~~>
+            = CondOn Expression CondOff ;
+// The body is parsed flat: the labels must be tried before Statement (a bare 'case'
+// would parse as an identifier expression), and the builder groups the statements
+// under the label they follow.
+CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
+            = ( "case" KwEnd Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+              | "default" KwEnd ) ":" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = "return" KwEnd [ Expression { "," Expression } ] [ ";" ] ;
@@ -708,6 +721,69 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return exitB
         }
     }
+    // items = [{v: thunk}...]: one label; no values means 'default'.
+    function makeCaseLabel(items) {
+        var vals = []
+        for (var i = 0; i < items.length; i++) vals.push(items[i].v)
+        return {isDefault: items.length == 0, vals: vals}
+    }
+    // items = [{subj}?, label or statement thunk...]: Go switch. The flat item list is
+    // regrouped (every statement belongs to the last label). The dispatch compares (or,
+    // without a subject, tests) every case in source order; every body branches to the
+    // exit (no fallthrough), and break inside a case leaves the switch (loop stack).
+    function makeSwitch(items) {
+        var subj = null
+        var cases = []
+        var cur = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") {
+                if (cur != null) cur.body.push(it)
+            } else if (it.subj != undefined) {
+                subj = it.subj
+            } else {
+                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+                cases.push(cur)
+            }
+        }
+        return function(b) {
+            var subjV = null
+            if (subj != null) {
+                var rs = subj(b)
+                b = rs.b
+                subjV = rs.v
+            }
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDefault) { dfltB = bodyBs[i] }
+            }
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { continue }
+                for (var v = 0; v < cases[i].vals.length; v++) {
+                    var rv = cases[i].vals[v](b)
+                    b = rv.b
+                    var condV = subjV != null ? callExt(b, "js_seq", [subjV, rv.v]) : rv.v
+                    var nextB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, condV), bodyBs[i], nextB)
+                    b = nextB
+                }
+            }
+            b.NewBr(dfltB)
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var i = 0; i < cases.length; i++) {
+                var bb = bodyBs[i]
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                bb.NewBr(exitB)
+            }
+            loopStack.pop()
+            return exitB
+        }
+    }
     // items = [iName, vName?, listThunk, bodyThunk]
     function makeForRange(items) {
         var bodyT = items.pop()
@@ -725,14 +801,24 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, idxName), emitNum(b, 0)])
             if (vName != null && vName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
+            // The loop bound: the value itself for range over an int (Go 1.22), else
+            // the list length. Computed once before the loop, in separate blocks (a
+            // number must never see the .length access).
+            var numB = curF.NewBlock("")
+            var arrB = curF.NewBlock("")
+            var boundB = curF.NewBlock("")
+            var isNum = callExt(b, "js_seq", [callExt(b, "js_typeof", [r.v]), emitStr(b, "number")])
+            b.NewCondBr(truthy(b, isNum), numB, arrB)
+            var arrLenV = callExt(arrB, "js_get", [r.v, emitStr(arrB, "length")])
+            numB.NewBr(boundB)
+            arrB.NewBr(boundB)
+            var lenV = boundB.NewPhi([llvm.ir.NewIncoming(r.v, numB), llvm.ir.NewIncoming(arrLenV, arrB)])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
+            boundB.NewBr(headB)
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, idxName)])
-            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             if (vName != null && vName != "_") {
                 var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, idxName)])

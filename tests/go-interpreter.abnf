@@ -8,14 +8,16 @@ composite literals (Point{3, 4}), field access and assignment, := short declarat
 (also multiple: q, r := divmod(7, 2)), var declarations with zero values, parallel
 assignment (a, b = b, a) and the blank identifier _, slices ([]int{...}, append, len,
 indexing, element assignment), the three for forms (classic, condition only, and
-for i, v := range s), Go style if/else without parentheses (else if works), break,
+for i, v := range s - also over an int like range 5, Go 1.22), switch with subject
+(case 2, 3: compares ==) and without (the first true case wins; no fallthrough, an
+implicit break ends every case), Go style if/else without parentheses (else if works), break,
 continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
 and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / truncates.
 
 Deviations and limits: structs behave like references (as if every value were a *T),
 append mutates in place (write s = append(s, v) as usual), composite literals must not
-appear in if/for headers, there are no pointers, maps, closures, interfaces, goroutines,
-defer, switch, or method values, and s[i] on strings is not supported.
+appear in if/for/switch headers, there are no pointers, maps, closures, interfaces,
+goroutines, defer, fallthrough, or method values, and s[i] on strings is not supported.
 
 The entry point is func main(); self checking programs end with os.Exit(failures).") ;
 
@@ -52,7 +54,7 @@ TopVar      <~~ var t = pop(); t() ~~>
 Type        = "[" "]" Type | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | For | Return | Break | Continue | VarDecl | SimpleStmt | Empty ;
+Statement   = Block | If | For | Switch | Return | Break | Continue | VarDecl | SimpleStmt | Empty ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -108,6 +110,19 @@ FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
 SimpleStmt2 = ShortDecl | IncDecStmt | Assign ;
 ForCond     <~~ push(makeForCond(pop(), pop())) ~~>
             = "for" KwEnd CondOn Expression CondOff Block ;
+
+// Go switch: no fallthrough (an implicit break ends every case), several values per
+// case, with a subject (compared ==) or without one (the first true condition wins).
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = "switch" KwEnd [ SwitchSubj ] "{" { CaseLabel | Statement } "}" ;
+SwitchSubj  <~~ push({subj: pop()}) ~~>
+            = CondOn Expression CondOff ;
+// The body is parsed flat: the labels must be tried before Statement (a bare 'case'
+// would parse as an identifier expression), and the builder groups the statements
+// under the label they follow.
+CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
+            = ( "case" KwEnd Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+              | "default" KwEnd ) ":" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = "return" KwEnd [ Expression { "," Expression } ] [ ";" ] ;
@@ -619,13 +634,15 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var vName = items.length > 1 ? items[1] : null
         return function() {
             var arr = listT()
+            // range over an int (Go 1.22): the bound is the value itself.
+            var n = (typeof arr == "number") ? arr : arr.length
             var res = undefined
             scopes.push({})
             declVar(iName, 0)
             if (vName != null) declVar(vName, undefined)
-            for (var i = 0; i < arr.length; i++) {
+            for (var i = 0; i < n; i++) {
                 setVar(iName, i)
-                if (vName != null) setVar(vName, arr[i])
+                if (vName != null) setVar(vName, arr[i])   // only reached for lists
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
@@ -647,6 +664,51 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var vals = []
             for (var i = 0; i < items.length; i++) vals.push(items[i]())
             return {isRet: true, v: vals}
+        }
+    }
+    // items = [{v: thunk}...]: one label; no values means 'default'.
+    function makeCaseLabel(items) {
+        var vals = []
+        for (var i = 0; i < items.length; i++) vals.push(items[i].v)
+        return {isDefault: items.length == 0, vals: vals}
+    }
+    // items = [{subj}?, label or statement thunk...]: Go switch, no fallthrough.
+    // The flat item list is regrouped: every statement belongs to the last label.
+    function makeSwitch(items) {
+        var subj = null
+        var cases = []
+        var cur = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") {
+                if (cur != null) cur.body.push(it)
+            } else if (it.subj != undefined) {
+                subj = it.subj
+            } else {
+                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+                cases.push(cur)
+            }
+        }
+        return function() {
+            var s = subj != null ? subj() : undefined
+            var dflt = -1
+            var hit = -1
+            for (var i = 0; i < cases.length && hit < 0; i++) {
+                if (cases[i].isDefault) { dflt = i; continue }
+                for (var v = 0; v < cases[i].vals.length && hit < 0; v++) {
+                    var val = cases[i].vals[v]()
+                    if (subj != null ? val === s : val) hit = i
+                }
+            }
+            if (hit < 0) hit = dflt
+            if (hit < 0) return undefined
+            var body = cases[hit].body
+            for (var j = 0; j < body.length; j++) {
+                var r = body[j]()
+                if (r === BRK) return undefined
+                if (r != undefined) return r
+            }
+            return undefined
         }
     }
     function makeBreak() { return function() { return BRK } }

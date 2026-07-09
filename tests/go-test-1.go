@@ -180,6 +180,45 @@ func main() {
 	check("returned struct", d.x+d.y, 21)
 	check("chained", Point{1, 2}.scale(10).manhattan(), 30)
 
+	// switch
+	sw := 0
+	switch 2 {
+	case 1:
+		sw = 1
+	case 2, 3:
+		sw = 23
+	default:
+		sw = 9
+	}
+	check("switch value", sw, 23)
+
+	switch 7 {
+	case 1:
+		sw = 1
+	default:
+		sw = 77
+	}
+	check("switch default", sw, 77)
+
+	tagless := ""
+	score2 := 85
+	switch {
+	case score2 >= 90:
+		tagless = "A"
+	case score2 >= 80:
+		tagless = "B"
+	default:
+		tagless = "C"
+	}
+	checkS("tagless switch", tagless, "B")
+
+	// range over an int (Go 1.22)
+	rsum := 0
+	for i := range 5 {
+		rsum += i
+	}
+	check("range int", rsum, 10)
+
 	// recursion
 	check("fib", fib(10), 55)
 
