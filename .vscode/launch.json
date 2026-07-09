@@ -272,7 +272,7 @@
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop.abnf", "-b", "tests/infinite-loop_aaaaa.txt", "-lb", "-vvb1", "-vvb2"]
+            "program": "${workspaceFolder}","args": ["-a", "tests/infinite-loop.abnf", "-b", "tests/infinite-loop-test-1.txt", "-lb", "-vvb1", "-vvb2"]
         },
         {
             "name": "Speed Test",
