@@ -177,12 +177,14 @@ The test programs are valid programs of the real languages: c-test-1.c compiles 
 passes under clang, go-test-1.go under go run, python-test-1.py under python3,
 java-test-1.java under javac/java, and metajs-test-1.js under node (with println/printf
 shims) - all with exit code 0, matching both of our engines.
-The C subset has real pointers, arrays and globals and compiles to plain integer LLVM IR
-(llvm.Run). The object and dynamic languages (Java with classes/records, Kotlin with
-when/string templates/properties, Go with structs/methods/multiple returns, Python with
-real INDENT/DEDENT significant indentation, MetaJS and Typed MetaJS) compile to handle threaded
+The C subset has real pointers, arrays, globals and a switch with real fallthrough, and
+compiles to plain integer LLVM IR (llvm.Run). The object and dynamic languages (Java with
+classes/records/single inheritance, Kotlin with when/string templates/properties/elvis,
+Go with structs/methods/multiple returns/switch, Python with real INDENT/DEDENT
+significant indentation/f-strings, MetaJS and Typed MetaJS) compile to handle threaded
 IR on the MetaJS runtime (llvm.RunJS): objects, strings, lists and closures live behind
-i64 handles, methods dispatch through the shared class descriptor convention (js_mcall).
+i64 handles, methods dispatch through the shared class descriptor convention (js_mcall,
+with a __super chain for Java's inheritance).
 Typed MetaJS is exactly MetaJS plus one rule: a variable's type is pinned by its first
 non-undefined value (enforced by both engines; typed-metajs-fail-test.js demonstrates the abort).
 
