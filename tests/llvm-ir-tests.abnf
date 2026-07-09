@@ -1,8 +1,10 @@
 :title("LLVM IR tests") ;
 :description("Builds an LLVM IR module by hand and checks the built-in IR interpreter:
 straight arithmetic (llvm.Eval), globals with loads and stores, external functions,
-control flow with blocks and phi, and putchar/getchar via llvm.Run. Exits with 1 on the
-first mismatch, so this file is a self checking test.") ;
+control flow with blocks and phi, putchar/getchar via llvm.Run, and the whole integer
+instruction set (sub, div/rem, the bitwise group, shifts, select, trunc/zext/sext, all
+ten icmp predicates, and getelementptr). Exits with 1 on a mismatch, so this file is a
+self checking test.") ;
 
 
 :startScript(~~
@@ -129,6 +131,57 @@ first mismatch, so this file is a self checking test.") ;
     mb.NewRet(zero)
 
     // -----------------
+    // Every remaining integer instruction once, in tiny functions with constant
+    // operands, so the whole instruction set of the machine is checked.
+
+    var i8 = llvm.types.I8
+    var i32x4 = llvm.types.NewArray(4, i32)
+
+    function opFunc(name, build) {
+        var f = m.NewFunc(name, i32)
+        var b = f.NewBlock("")
+        b.NewRet(build(b))
+    }
+    function ci(v) { return llvm.constant.NewInt(i32, v) }
+
+    opFunc("opSub",  function(b) { return b.NewSub(ci(50), ci(8)) })                     // 42
+    opFunc("opSdiv", function(b) { return b.NewSDiv(ci(7), ci(2)) })                     // 3
+    opFunc("opUdiv", function(b) { return b.NewUDiv(ci(9), ci(2)) })                     // 4
+    opFunc("opSrem", function(b) { return b.NewSRem(ci(7), ci(3)) })                     // 1
+    opFunc("opUrem", function(b) { return b.NewURem(ci(9), ci(4)) })                     // 1
+    opFunc("opAnd",  function(b) { return b.NewAnd(ci(6), ci(3)) })                      // 2
+    opFunc("opOr",   function(b) { return b.NewOr(ci(6), ci(3)) })                       // 7
+    opFunc("opXor",  function(b) { return b.NewXor(ci(6), ci(3)) })                      // 5
+    opFunc("opShl",  function(b) { return b.NewShl(ci(3), ci(2)) })                      // 12
+    opFunc("opLshr", function(b) { return b.NewLShr(ci(12), ci(2)) })                    // 3
+    opFunc("opAshr", function(b) { return b.NewAShr(ci(12), ci(1)) })                    // 6
+    opFunc("opSelect", function(b) {
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ci(1), ci(2)), ci(11), ci(22))  // 11
+    })
+    // 300 -> i8 (44) -> zext back to i32.
+    opFunc("opTruncZext", function(b) { return b.NewZExt(b.NewTrunc(ci(300), i8), i32) })
+    // 255 -> i8 (-1) -> sext to i32 (-1); + 2 keeps the expected value positive.
+    opFunc("opTruncSext", function(b) { return b.NewAdd(b.NewSExt(b.NewTrunc(ci(255), i8), i32), ci(2)) })
+    // All ten icmp predicates on (5, 7), summed as 0/1 bits: 0+1+1+1+0+0+1+1+0+0 = 5.
+    opFunc("opPreds", function(b) {
+        var preds = [llvm.enum.IPredEQ, llvm.enum.IPredNE, llvm.enum.IPredSLT, llvm.enum.IPredSLE,
+                     llvm.enum.IPredSGT, llvm.enum.IPredSGE, llvm.enum.IPredULT, llvm.enum.IPredULE,
+                     llvm.enum.IPredUGT, llvm.enum.IPredUGE]
+        var v = ci(0)
+        for (var i = 0; i < preds.length; i++) {
+            v = b.NewAdd(v, b.NewZExt(b.NewICmp(preds[i], ci(5), ci(7)), i32))
+        }
+        return v
+    })
+    // A local array through getelementptr: store into [2], read it back.
+    opFunc("opGep", function(b) {
+        var aPtr = b.NewAlloca(i32x4)
+        b.NewStore(llvm.constant.NewZeroInitializer(i32x4), aPtr)
+        b.NewStore(ci(77), b.NewGetElementPtr(i32x4, aPtr, ci(0), ci(2)))
+        return b.NewLoad(i32, b.NewGetElementPtr(i32x4, aPtr, ci(0), ci(2)))
+    })
+
+    // -----------------
 
     // Print the LLVM IR assembly of the module.
     println(m)
@@ -144,6 +197,23 @@ first mismatch, so this file is a self checking test.") ;
     check("max(9, 3)", llvm.Eval(m, "callMax2"), 9)
     var res = llvm.Run(m, "main", "Hi")
     check("main() echo", res.Out, "Hi")
+
+    check("sub", llvm.Eval(m, "opSub"), 42)
+    check("sdiv", llvm.Eval(m, "opSdiv"), 3)
+    check("udiv", llvm.Eval(m, "opUdiv"), 4)
+    check("srem", llvm.Eval(m, "opSrem"), 1)
+    check("urem", llvm.Eval(m, "opUrem"), 1)
+    check("and", llvm.Eval(m, "opAnd"), 2)
+    check("or", llvm.Eval(m, "opOr"), 7)
+    check("xor", llvm.Eval(m, "opXor"), 5)
+    check("shl", llvm.Eval(m, "opShl"), 12)
+    check("lshr", llvm.Eval(m, "opLshr"), 3)
+    check("ashr", llvm.Eval(m, "opAshr"), 6)
+    check("select", llvm.Eval(m, "opSelect"), 11)
+    check("trunc + zext", llvm.Eval(m, "opTruncZext"), 44)
+    check("trunc + sext + 2", llvm.Eval(m, "opTruncSext"), 1)
+    check("icmp predicates", llvm.Eval(m, "opPreds"), 5)
+    check("getelementptr", llvm.Eval(m, "opGep"), 77)
 
     if (failures > 0) { exit(1) }
     println("All LLVM IR tests OK")
