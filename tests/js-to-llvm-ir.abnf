@@ -150,11 +150,13 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | Typeof | PostfixExpr ;
+UnaryExpr   = Neg | Not | BitNot | Typeof | PostfixExpr ;
 Neg         <~~ push(makeUnary(pop(), "js_neg")) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeUnary(pop(), "js_not")) ~~>
             = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
 Typeof      <~~ push(makeUnary(pop(), "js_typeof")) ~~>
             = KwTypeof UnaryExpr ;
 
@@ -377,6 +379,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return function(b) {
             var r = t(b)
             return {b: r.b, v: callExt(r.b, extName, [r.v])}
+        }
+    }
+    // ~v is v ^ -1 on the ToInt32 value, so it reuses the xor external.
+    function makeBitNot(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            return {b: b, v: callExt(b, "js_bxor", [r.v, callExt(b, "js_num_i", [handle(-1)])])}
         }
     }
 

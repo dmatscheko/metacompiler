@@ -9,7 +9,7 @@ numbers (doubles), strings, booleans, null, undefined, arrays, object literals, 
 access (.name and [expr]), method calls, assignment (= += -= *= /= %=) as an expression
 (the target may reach through calls: findScope(name)[name] = v), postfix ++/--, the
 ternary operator, || and && (short circuit, returning the operand),
-== != === !== < > <= >= + - * / % | ^ & << >> >>> and unary - ! typeof.
+== != === !== < > <= >= + - * / % | ^ & << >> >>> and unary - ! ~ typeof.
 
 Deliberately not in the subset: this, new, prototypes, try/catch, switch, regex, for-in,
 prefix ++/--, getters/setters, and hoisting (a binding must be executed before it is used;
@@ -145,11 +145,13 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | Typeof | PostfixExpr ;
+UnaryExpr   = Neg | Not | BitNot | Typeof | PostfixExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
 Typeof      <~~ push(makeTypeof(pop())) ~~>
             = KwTypeof UnaryExpr ;
 
@@ -361,6 +363,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     function makeVarRef(name) { return function() { return getVar(name) } }
     function makeNeg(t) { return function() { return -t() } }
     function makeNot(t) { return function() { return !t() } }
+    function makeBitNot(t) { return function() { return ~t() } }
     function makeTypeof(t) { return function() { return typeof t() } }
 
     function makeArray(items) {

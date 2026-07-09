@@ -113,10 +113,10 @@ function main() {
     s += "!";
     check("string plus assign", s, "hi!");
 
-    // ----- blocks and shadowing -----
-    var sh = 1;
+    // ----- blocks and shadowing (let, so real JS agrees: MetaJS vars are block scoped) -----
+    let sh = 1;
     {
-        var sh = 2;
+        let sh = 2;
         check("inner shadow", sh, 2);
     }
     check("outer after shadow", sh, 1);
@@ -274,6 +274,8 @@ function main() {
     check("bit precedence", 1 | 2 & 3, 3);
     check("bit vs eq", (4 & 4) == 4, true);
     check("bit or in logic", (0 | 0) || "empty", "empty");
+    check("bit not", ~0, -1);
+    check("bit not expr", ~(5 | 2), -8);
 
     // ----- assignment through call targets -----
     var boxData = {n: 1, arr: [0, 0]};
