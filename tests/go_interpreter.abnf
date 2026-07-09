@@ -1,0 +1,728 @@
+:title("Go (subset) interpreter") ;
+:description("Parses a Go subset and executes it directly, without generating code.
+
+The subset: package and import clauses (parsed, ignored), functions with typed
+parameters and multiple return values (func divmod(a int, b int) (int, int)), methods
+with value receivers (func (p Point) manhattan() int), struct types with positional
+composite literals (Point{3, 4}), field access and assignment, := short declarations
+(also multiple: q, r := divmod(7, 2)), var declarations with zero values, parallel
+assignment (a, b = b, a) and the blank identifier _, slices ([]int{...}, append, len,
+indexing, element assignment), the three for forms (classic, condition only, and
+for i, v := range s), Go style if/else without parentheses (else if works), break,
+continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
+and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / truncates.
+
+Deviations and limits: structs behave like references (as if every value were a *T),
+append mutates in place (write s = append(s, v) as usual), composite literals must not
+appear in if/for headers, there are no pointers, maps, closures, interfaces, goroutines,
+defer, switch, or method values, and s[i] on strings is not supported.
+
+The entry point is func main(); self checking programs end with os.Exit(failures).") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     = PackageClause { Import } { TypeDecl | FuncDecl | TopVar } ;
+
+PackageClause = "package" KwEnd Id ;
+Import      = "import" KwEnd ( ImportStr | "(" { ImportStr } ")" ) ;
+ImportStr   = '"' :whitespace() { "\x20"..."\x21" | "\x23"..."\x7e" } '"' :whitespace(Whitespace) ;
+
+// type Point struct { x int; y int }
+TypeDecl    <~~ buildStruct(takeAll()) ~~>
+            = "type" KwEnd Id <~~ push(up.in) ~~> "struct" KwEnd
+              "{" { Id <~~ push(up.in) ~~> Type [ ";" ] } "}" ;
+
+// func name(params) rets { } and func (r Type) name(params) rets { }
+FuncDecl    <~~ buildFunc(takeAll()) ~~>
+            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> ParamList [ RetTypes ] Block ;
+Receiver    <~~ push({recv: takeAll()}) ~~>
+            = "(" Id <~~ push(up.in) ~~> Id <~~ push(up.in) ~~> ")" ;
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Id <~~ push(up.in) ~~> Type { "," Id <~~ push(up.in) ~~> Type } ] ")" ;
+RetTypes    = Type | "(" Type { "," Type } ")" ;
+
+// A package level var, registered right away.
+TopVar      <~~ var t = pop(); t() ~~>
+            = VarDecl ;
+
+Type        = "[" "]" Type | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   = Block | If | For | Return | Break | Continue | VarDecl | SimpleStmt | Empty ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+// var x int = 5 / var s string -- the zero value depends on the type.
+VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
+            = "var" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
+VType       <~~ push({ty: up.in}) ~~>
+            = Type ;
+
+// Short declarations, assignments, ++/-- and expression statements. The cores do
+// not eat the separator themselves: for headers reuse them between the semicolons.
+SimpleStmt  = ( ShortDecl | IncDecStmt | Assign | ExprOnly ) [ ";" ] ;
+ExprOnly    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ;
+
+ShortDecl   <~~ push(makeShortDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ":=" ExprList ;
+
+IncDecStmt  <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// a = e / a, b = b, a / p.x = e / s[i] = e / a += e
+Assign      <~~ push(makeAssign(takeAll())) ~~>
+            = Target { "," Target } ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push({op: up.in}) ~~> ExprList ;
+
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+ExprList    = Expression { "," Expression } ;
+
+Empty       <~~ push(function() {}) ~~>
+            = ";" ;
+
+// Go style headers without parentheses. Composite literals are gated off inside.
+If          <~~ push(makeIf(takeAll())) ~~>
+            = "if" KwEnd CondOn Expression CondOff Block [ "else" KwEnd ( If | Block ) ] ;
+
+// ForCond is tried before ForClassic: a classic header would leave the
+// composite literal gate pushed when it fails at its first semicolon.
+For         = ForRange | ForCond | ForClassic ;
+// for i, v := range s / for _, v := range s / for i := range s
+ForRange    <~~ push(makeForRange(takeAll())) ~~>
+            = "for" KwEnd Id <~~ push(up.in) ~~> [ "," Id <~~ push(up.in) ~~> ] ":="
+              "range" KwEnd CondOn Expression CondOff Block ;
+ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
+            = "for" KwEnd CondOn [ FInit ] ";" [ FCond ] ";" [ FPost ] CondOff Block ;
+FInit       <~~ push({k:"init", t:pop()}) ~~> = SimpleStmt2 ;
+FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
+SimpleStmt2 = ShortDecl | IncDecStmt | Assign ;
+ForCond     <~~ push(makeForCond(pop(), pop())) ~~>
+            = "for" KwEnd CondOn Expression CondOff Block ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = "return" KwEnd [ Expression { "," Expression } ] [ ";" ] ;
+
+Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd [ ";" ] ;
+Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd [ ";" ] ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = OrExpr ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Neg | Not | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+
+// p.manhattan(), fmt.Println(...), p.x, s[i].
+PostfixExpr = CallMember ;
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | StringLit | IntLit | True | False | SliceLit | StructLit | Call | VarRef ;
+
+// []int{1, 2, 3}
+SliceLit    <~~ push(makeSliceLit(takeAll())) ~~>
+            = "[" "]" Type "{" [ Expression { "," Expression } ] "}" ;
+
+// Point{3, 4} -- positional, at least one element, and not inside if/for headers.
+StructLit   <~~ push(makeStructLit(takeAll())) ~~>
+            = StructGate Id <~~ push(up.in) ~~> "{" Expression { "," Expression } "}" ;
+
+// f(a, b): a function or a builtin.
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+StringLit   = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+StrEsc      = "\\" "\x20"..b"\x7e" ;
+DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+IntLit      <~~ push(makeConst(parseInt(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+
+True        <~~ push(makeConst(true)) ~~>  = "true" KwEnd ;
+False       <~~ push(makeConst(false)) ~~> = "false" KwEnd ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+// The composite literal gate: while an if/for header is being parsed (CondOn pushed
+// a marker on the parser stack), StructGate fails, so 'if ok {' never starts a literal.
+CondOn = :script(~~
+    push("$nostruct")
+    undefined
+~~) ;
+CondOff = :script(~~
+    pop()
+    undefined
+~~) ;
+StructGate = :script(~~
+    (function() {
+        var t = pop()
+        if (t != null) push(t)
+        return (t == "$nostruct") ? abnf.newToken("\x01no-composite-literal-in-header", 0) : undefined
+    })()
+~~) ;
+
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+    function popName() {
+        var items = takeAll()
+        var name = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
+            else { push(items[i]) }
+        }
+        return name
+    }
+
+    function fail(msg) {
+        println("go interpreter error: " + msg)
+        exit(1)
+    }
+
+    function hexAt(s, pos, len) {
+        var v = 0
+        for (var i = 0; i < len; i++) {
+            var c = s.charCodeAt(pos + i)
+            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
+            v = v * 16 + d
+        }
+        return v
+    }
+    function unescapeJs(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out += String.fromCharCode(c); i++; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
+            out += String.fromCharCode(e)
+            i += 2
+        }
+        return out
+    }
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+    function concat2impl(a, b) {
+        var out = []
+        var i
+        for (i = 0; i < a.length; i++) out.push(a[i])
+        for (i = 0; i < b.length; i++) out.push(b[i])
+        return out
+    }
+
+    // ----- Scopes -----
+    var globalScope = {}
+    var scopes = [globalScope]
+    function declVar(name, value) { if (name != "_") scopes[scopes.length - 1][name] = value }
+    function getVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
+        }
+        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
+        fail("unknown name: " + name)
+    }
+    function setVar(name, value) {
+        if (name == "_") { return }
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        fail("assignment to unknown name: " + name)
+    }
+
+    var hostGlobals = {}
+    hostGlobals["fmt"] = {
+        Println: function() {
+            var out = ""
+            for (var i = 0; i < arguments.length; i++) {
+                if (i > 0) out += " "
+                out += gstr(arguments[i])
+            }
+            println(out)
+        },
+        Print: function() {
+            var out = ""
+            for (var i = 0; i < arguments.length; i++) out += gstr(arguments[i])
+            print(out)
+        }
+    }
+    hostGlobals["os"] = { Exit: function(code) { exit(code | 0) } }
+    hostGlobals["len"] = function(x) { return x.length }
+    hostGlobals["append"] = function(arr, v) { arr.push(v); return arr }
+
+    function gstr(v) {
+        if (v === undefined || v === null) return "<nil>"
+        if (Array.isArray(v)) {
+            var out = "["
+            for (var i = 0; i < v.length; i++) {
+                if (i > 0) out += " "
+                out += gstr(v[i])
+            }
+            return out + "]"
+        }
+        if (typeof v == "object" && v.__class != undefined) {
+            var out2 = "{"
+            var fs = v.__class.__fields
+            for (var k = 0; k < fs.length; k++) {
+                if (k > 0) out2 += " "
+                out2 += gstr(v[fs[k]])
+            }
+            return out2 + "}"
+        }
+        return "" + v
+    }
+
+    function mcall(target, name, args) {
+        if (target === undefined || target === null) fail("method call ." + name + "() on nil")
+        if (typeof target == "object" && target.__class != undefined) {
+            var m = target.__class[name]
+            if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        var f = target[name]
+        if (typeof f != "function") fail("unknown method '" + name + "'")
+        return f.apply(undefined, args)
+    }
+
+    var BRK = {sig: "break"}
+    var CONT = {sig: "continue"}
+
+    // ----- Expression thunks -----
+
+    function makeConst(v) { return function() { return v } }
+    function makeVarRef(name) { return function() { return getVar(name) } }
+    function makeNeg(t) { return function() { return (0 - t()) | 0 } }
+    function makeNot(t) { return function() { return !t() } }
+
+    function gadd(l, r) {
+        if (typeof l == "string" || typeof r == "string") return l + r
+        return (l + r) | 0
+    }
+    function binOp(op, l, r) {
+        if (op == "+") return gadd(l, r)
+        if (op == "-") return (l - r) | 0
+        if (op == "*") return (l * r) | 0
+        if (op == "/") return (l / r) | 0
+        if (op == "%") return (l % r) | 0
+        if (op == "==") return l === r
+        if (op == "!=") return l !== r
+        if (op == "<")  return l < r
+        if (op == ">")  return l > r
+        if (op == "<=") return l <= r
+        if (op == ">=") return l >= r
+    }
+    function foldBinary(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
+            return v
+        }
+    }
+    function makeOrAnd(items, isOr) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (isOr) { if (v) return true }
+                else      { if (!v) return false }
+                v = items[i]()
+            }
+            return v ? true : false
+        }
+    }
+
+    function foldCallMember(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    cur = mcall(cur, s.name, argv)
+                } else if (s.kind == "field") {
+                    if (cur === undefined || cur === null) fail("field ." + s.name + " of nil")
+                    cur = cur[s.name]
+                } else {
+                    cur = cur[s.idx()]
+                }
+            }
+            return cur
+        }
+    }
+
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) argv.push(args[i]())
+            var f = getVar(name)
+            if (typeof f != "function") fail("call of a non function: " + name)
+            return f.apply(undefined, argv)
+        }
+    }
+
+    function makeSliceLit(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            return a
+        }
+    }
+    // items = [typeName, exprThunks...] -> {__class: type, fields set positionally}.
+    function makeStructLit(items) {
+        var tyName = items[0]
+        var args = items.slice(1)
+        return function() {
+            var cls = getVar(tyName)
+            if (cls == undefined || !cls.__isclass) fail("unknown struct type: " + tyName)
+            var obj = {__class: cls}
+            for (var i = 0; i < cls.__fields.length; i++) {
+                obj[cls.__fields[i]] = (i < args.length) ? args[i]() : zeroLike(0)
+            }
+            return obj
+        }
+    }
+    function zeroLike(v) { return 0 }
+
+    function makeTargetRef(items) {
+        return {name: items[0], path: items.slice(1)}
+    }
+    function resolveRef(ref) {
+        var o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            o = (s.key != undefined) ? o[s.key] : o[s.idx()]
+            if (o === undefined || o === null) fail("nil in assignment path of " + ref.name)
+        }
+        var last = ref.path[ref.path.length - 1]
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+    }
+    function applyOp(op, a, b) {
+        if (op == "+=") return gadd(a, b)
+        if (op == "-=") return (a - b) | 0
+        if (op == "*=") return (a * b) | 0
+        if (op == "/=") return (a / b) | 0
+        if (op == "%=") return (a % b) | 0
+    }
+    function assignRef(ref, v) {
+        if (ref.path.length == 0) { setVar(ref.name, v); return }
+        var p = resolveRef(ref)
+        p.obj[p.key] = v
+    }
+    function readRef(ref) {
+        if (ref.path.length == 0) return getVar(ref.name)
+        var p = resolveRef(ref)
+        return p.obj[p.key]
+    }
+    // items = [ref..., {op}, exprThunks...]: parallel assignment, or unpacking of a
+    // multi value call when there are more targets than expressions.
+    function makeAssign(items) {
+        var refs = []
+        var op = "="
+        var i = 0
+        for (; i < items.length; i++) {
+            if (items[i].op != undefined) { op = items[i].op; i++; break }
+            refs.push(items[i])
+        }
+        var exprs = items.slice(i)
+        return function() {
+            var vals = []
+            for (var k = 0; k < exprs.length; k++) vals.push(exprs[k]())
+            if (refs.length > 1 && exprs.length == 1) vals = vals[0] // Unpack multi returns.
+            if (op != "=") {
+                assignRef(refs[0], applyOp(op, readRef(refs[0]), vals[0]))
+                return
+            }
+            for (var r = 0; r < refs.length; r++) assignRef(refs[r], vals[r])
+        }
+    }
+    function makeShortDecl(items) {
+        var names = []
+        var i = 0
+        for (; i < items.length; i++) {
+            if (typeof items[i] != "string") break
+            names.push(items[i])
+        }
+        var exprs = items.slice(i)
+        return function() {
+            var vals = []
+            for (var k = 0; k < exprs.length; k++) vals.push(exprs[k]())
+            if (names.length > 1 && exprs.length == 1) vals = vals[0]
+            for (var n = 0; n < names.length; n++) declVar(names[n], vals[n])
+        }
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var d = (items[1] == "++") ? 1 : -1
+        return function() {
+            assignRef(ref, (readRef(ref) + d) | 0)
+        }
+    }
+
+    // ----- Statement thunks -----
+
+    function exprToStmt(t) { return function() { t() } }
+    function makeVarDecl(items) {
+        var name = items[0]
+        var i = 1
+        var ty = ""
+        if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
+        var init = i < items.length ? items[i] : null
+        return function() {
+            var v
+            if (init != null) { v = init() }
+            else if (ty == "int") { v = 0 }
+            else if (ty == "string") { v = "" }
+            else if (ty == "bool") { v = false }
+            else if (ty.charCodeAt(0) == 91) { v = [] } // A slice type: [ ...
+            else { v = null }
+            declVar(name, v)
+        }
+    }
+    function makeSeq(items) {
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i]()
+                if (r != undefined) return r
+            }
+        }
+    }
+    function makeBlockStmt(items) {
+        var seq = makeSeq(items)
+        return function() {
+            scopes.push({})
+            var r = seq()
+            scopes.pop()
+            return r
+        }
+    }
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function() {
+            if (cond()) return thenT()
+            if (elseT != null) return elseT()
+        }
+    }
+    function makeForCond(bodyT, condT) {
+        return function() {
+            while (condT()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            }
+        }
+    }
+    function makeForClassic(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function() {
+            scopes.push({})
+            var res = undefined
+            if (init != null) init()
+            while (cond == null || cond()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+                if (post != null) post()
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    // items = [name, name?, listThunk, bodyThunk]: for i, v := range s.
+    function makeForRange(items) {
+        var bodyT = items.pop()
+        var listT = items.pop()
+        var iName = items[0]
+        var vName = items.length > 1 ? items[1] : null
+        return function() {
+            var arr = listT()
+            var res = undefined
+            scopes.push({})
+            declVar(iName, 0)
+            if (vName != null) declVar(vName, undefined)
+            for (var i = 0; i < arr.length; i++) {
+                setVar(iName, i)
+                if (vName != null) setVar(vName, arr[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    // Multiple return values travel as an array.
+    function makeReturn(items) {
+        if (items.length == 0) return function() { return {isRet: true, v: undefined} }
+        if (items.length == 1) {
+            var t = items[0]
+            return function() { return {isRet: true, v: t()} }
+        }
+        return function() {
+            var vals = []
+            for (var i = 0; i < items.length; i++) vals.push(items[i]())
+            return {isRet: true, v: vals}
+        }
+    }
+    function makeBreak() { return function() { return BRK } }
+    function makeContinue() { return function() { return CONT } }
+
+    // ----- Functions, methods and structs -----
+
+    function invokeBody(params, body, self, recvName, args) {
+        var saved = scopes
+        scopes = [globalScope, {}]
+        if (self != undefined) declVar(recvName, self)
+        for (var i = 0; i < params.length; i++) {
+            declVar(params[i], i < args.length ? args[i] : undefined)
+        }
+        var r = body()
+        scopes = saved
+        return (r != undefined && r.isRet) ? r.v : undefined
+    }
+
+    var structs = {}
+    // items = [name, fieldName...]
+    function buildStruct(items) {
+        var cls = {__isclass: true, __name: items[0], __fields: items.slice(1)}
+        structs[items[0]] = cls
+        globalScope[items[0]] = cls
+    }
+    // items = [{recv:{...}}?, name, {params}, body]
+    function buildFunc(items) {
+        var i = 0
+        var recv = null
+        if (items[i] != undefined && items[i].recv != undefined) { recv = items[i].recv; i++ }
+        var name = items[i]
+        var params = items[i + 1].params
+        var body = items[i + 2]
+        if (recv != null) {
+            // A method: attached to its struct descriptor after the whole compile.
+            methodTodo.push({recvName: recv, name: name, params: params, body: body})
+        } else {
+            globalScope[name] = makeFunClosure(params, body)
+        }
+    }
+    var methodTodo = []
+    function makeFunClosure(params, body) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(params, body, undefined, "", args)
+        }
+    }
+    function makeMethodClosure(mm) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(mm.params, mm.body, self, mm.recvName, args)
+        }
+    }
+
+    c.compile(c.asg)
+
+    // Attach the collected methods to their struct descriptors. The receiver type is
+    // found by name: func (p Point) dist() -- recvName pushed [name, type].
+    for (var mi = 0; mi < methodTodo.length; mi++) {
+        var mm = methodTodo[mi]
+        var recvVar = mm.recvName[0]
+        var recvType = mm.recvName[1]
+        var cls = structs[recvType]
+        if (cls == undefined) fail("method receiver type not found: " + recvType)
+        cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params, body: mm.body})
+    }
+
+    if (typeof globalScope["main"] != "function") {
+        fail("Go programs need a func main().")
+    }
+    var ret = globalScope["main"]()
+    println("go interpreter: main() returned " + (ret === undefined ? 0 : ret))
+    exit(ret === undefined ? 0 : ret | 0)
+
+~~) ;
