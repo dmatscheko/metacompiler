@@ -5,7 +5,8 @@ MetaJS is the restricted JavaScript subset that the annotation scripts of the gr
 tests/ are written in. It has: var/let/const (all block scoped), function declarations and
 anonymous function expressions with real closures and an 'arguments' array, if/else, while,
 do-while, for(;;), break, continue, return, throw (terminates, there is no try/catch),
-numbers (doubles), strings, booleans, null, undefined, arrays, object literals, member
+numbers (doubles, hex 0x literals included), strings, booleans, null, undefined,
+arrays, object literals, member
 access (.name and [expr]), method calls, assignment (= += -= *= /= %=) as an expression
 (the target may reach through calls: findScope(name)[name] = v), postfix ++/--, the
 ternary operator, || and && (short circuit, returning the operand),
@@ -203,7 +204,14 @@ StrEsc      = "\\" "\x20"..b"\x7e" ;
 DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 
-NumberLit   <~~ push(makeNum(parseFloat(up.in))) ~~>
+NumberLit   = HexLit | DecLit ;
+
+// Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
+HexLit      <~~ push(makeNum(hexAt(up.in, 2, up.in.length - 2))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+
+DecLit      <~~ push(makeNum(parseFloat(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
 
 Id          = ( "a"..."z" | "A"..."Z" | "_" | "$" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" } :whitespace(Whitespace) ;

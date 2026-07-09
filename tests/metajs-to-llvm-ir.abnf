@@ -207,7 +207,14 @@ StrEsc      = "\\" "\x20"..b"\x7e" ;
 DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 
-NumberLit   <~~ push(makeNumT(parseFloat(up.in))) ~~>
+NumberLit   = HexLit | DecLit ;
+
+// Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
+HexLit      <~~ push(makeNumT(hexAt(up.in, 2, up.in.length - 2))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+
+DecLit      <~~ push(makeNumT(parseFloat(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
 
 Id          = ( "a"..."z" | "A"..."Z" | "_" | "$" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" } :whitespace(Whitespace) ;

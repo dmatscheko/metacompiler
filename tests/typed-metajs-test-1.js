@@ -28,6 +28,9 @@ function main() {
     n = 2.5;
     n = -7;
     check("number stays number", n, -7);
+    var h = 0xff;
+    h = 0x100;                      // a hex literal is a plain number: OK
+    check("hex stays number", h, 256);
 
     // Strings stay strings.
     var s = "a";

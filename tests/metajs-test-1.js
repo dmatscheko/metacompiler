@@ -56,6 +56,9 @@ function main() {
     check("add mul precedence", 1 + 2 * 3, 7);
     check("parens", (1 + 2) * 3, 9);
     check("left assoc", 10 - 3 - 2, 5);
+    check("hex literal", 0x1A, 26);
+    check("hex uppercase", 0XFF, 255);
+    check("hex arithmetic", 0x10 + 0x0f, 31);
     check("division", 7 / 2, 3.5);
     check("modulo", 7 % 3, 1);
     check("negative modulo", -7 % 3, -1);
