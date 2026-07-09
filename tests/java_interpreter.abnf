@@ -1,0 +1,759 @@
+:title("Java (subset) interpreter") ;
+:description("Parses a Java subset and executes it directly, without generating code.
+
+The subset: classes with fields (instance and static, with initializers), methods
+(instance and static), constructors, records with auto generated constructor and
+accessors (a modern Java SE nod, like 'var' local declarations), object creation with
+new, arrays (new int[n], new int[]{...}, a.length, indexing), the enhanced for loop
+(for (var x : arr)), int / boolean / String / var / class types (types are parsed;
+the semantics are dynamic), String concatenation with +, the String methods length(),
+charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one char
+String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
+if/else, while, do-while, both for forms, break/continue, return, assignment (also
++= -= *= /= %=), postfix ++/--, the ternary operator, || && with short circuit,
+== != < > <= >= (== compares objects by identity, use equals() for strings), + - * / %
+(int arithmetic is 32 bit, / truncates) and unary - !.
+
+Not in the subset: inheritance, interfaces, generics, packages/imports, exceptions,
+switch, casts, char/long/double, overloading, and implicit field access (fields are
+reached via this.x or ClassName.x - like the explicit style many code bases enforce).
+
+Fields live directly on the instance object, methods on the class descriptor; a
+constructor always exists (a default one is generated) and first applies the field
+initializers. main(String[] args) of class Main is the entry point; its return is void,
+so self checking programs end with System.exit(failures).") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     = { ClassDecl | RecordDecl } ;
+
+ClassDecl   <~~ buildClass(takeAll()) ~~>
+            = [ "public" KwEnd ] KwClass Id <~~ push(up.in) ~~> "{" { Member } "}" ;
+
+// record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
+RecordDecl  <~~ buildRecord(takeAll()) ~~>
+            = [ "public" KwEnd ] KwRecord Id <~~ push(up.in) ~~> RParams "{" { Member } "}" ;
+RParams     <~~ push({rparams: takeAll()}) ~~>
+            = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
+
+Member      = Ctor | Method | Field ;
+
+Ctor        <~~ push(makeCtor(takeAll())) ~~>
+            = [ "public" KwEnd ] Id <~~ push(up.in) ~~> ParamList Block ;
+
+Method      <~~ push(makeMethod(takeAll())) ~~>
+            = Mods Type Id <~~ push(up.in) ~~> ParamList Block ;
+
+Field       <~~ push(makeField(takeAll())) ~~>
+            = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
+
+Mods        <~~ push({mods: takeAll()}) ~~>
+            = { ( "public" | "static" ) <~~ push(up.in) ~~> KwEnd } ;
+FType       <~~ push({ty: up.in}) ~~>
+            = Type ;
+
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
+
+Type        = ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd | Id )
+              [ "[" "]" ] ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   = Block | If | While | Do | ForEach | For | Return | Break | Continue
+            | Decl | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+
+// The enhanced for is tried first: its ':' fails fast for the classic form.
+ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
+            = KwFor "(" Type Id <~~ push(up.in) ~~> ":" Expression ")" Statement ;
+
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      = DeclCore ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+
+Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+
+Decl        = DeclCore ";" ;
+DeclCore    <~~ push(makeSeq(takeAll())) ~~>
+            = Type Declarator { "," Declarator } ;
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
+
+Empty       <~~ push(function() {}) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ";" ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+
+// An assignable place: a variable (this and class names are variables too),
+// or a member/index path: this.x, p.x, Main.fails, arr[i].
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" Expression ":" Expression ] ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Neg | Not | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+
+PostfixExpr = IncDec | NewExpr | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// new Point(1, 2) | new int[]{1, 2, 3} | new int[n]
+NewExpr     = NewObject | NewArrLit | NewArrSize ;
+NewObject   <~~ push(makeNew(takeAll())) ~~>
+            = KwNew Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+NewArrLit   <~~ push(makeArray(takeAll())) ~~>
+            = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
+NewArrSize  <~~ push(makeNewArray(pop())) ~~>
+            = KwNew ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | Id ) "[" Expression "]" ;
+
+// A primary followed by method calls, field reads and indexing:
+// System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | StringLit | IntLit | True | False | Null | VarRef ;
+
+StringLit   = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+StrEsc      = "\\" "\x20"..b"\x7e" ;
+DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+IntLit      <~~ push(makeConst(parseInt(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+
+True        <~~ push(makeConst(true)) ~~>  = "true" KwEnd ;
+False       <~~ push(makeConst(false)) ~~> = "false" KwEnd ;
+Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
+
+// 'this' and class names resolve like variables.
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" | "$" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" } :whitespace(Whitespace) ;
+
+KwClass     = "class" KwEnd ;
+KwRecord    = "record" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwNew       = "new" KwEnd ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+    // MethodSfx pushes the name marker before the argument thunks; popName digs it out.
+    function popName() {
+        var items = takeAll()
+        var name = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
+            else { push(items[i]) }
+        }
+        return name
+    }
+
+    function fail(msg) {
+        println("java interpreter error: " + msg)
+        exit(1)
+    }
+
+    function hexAt(s, pos, len) {
+        var v = 0
+        for (var i = 0; i < len; i++) {
+            var c = s.charCodeAt(pos + i)
+            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
+            v = v * 16 + d
+        }
+        return v
+    }
+    function unescapeJs(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out += String.fromCharCode(c); i++; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
+            out += String.fromCharCode(e)
+            i += 2
+        }
+        return out
+    }
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
+    // ----- Scopes (locals of the running method) and globals (the classes) -----
+    var globalScope = {}
+    var scopes = [globalScope]
+    function declVar(name, value) { scopes[scopes.length - 1][name] = value }
+    function getVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
+        }
+        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
+        fail("unknown name: " + name)
+    }
+    function setVar(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        fail("assignment to unknown variable: " + name)
+    }
+
+    // The host names a program can see. System and Math are built here.
+    var hostGlobals = {}
+    hostGlobals["System"] = {
+        out: {
+            println: function(x) { println(jstr(x)) },
+            print: function(x) { print(jstr(x)) }
+        },
+        exit: function(code) { exit(code | 0) }
+    }
+    hostGlobals["Math"] = {
+        abs: function(v) { return v < 0 ? -v | 0 : v | 0 },
+        max: function(a, b) { return a > b ? a : b },
+        min: function(a, b) { return a < b ? a : b }
+    }
+
+    // Java's toString for the printable subset.
+    function jstr(v) {
+        if (v === undefined || v === null) return "null"
+        if (typeof v == "object") {
+            if (v.__isclass) return "class " + v.__name
+            if (v.__class != undefined) return v.__class.__name + "@obj"
+            return "" + v
+        }
+        return "" + v
+    }
+
+    // ----- Method dispatch (mirrors the js_mcall external of the compiled world) -----
+    function mcall(target, name, args) {
+        if (typeof target == "string") {
+            if (name == "length") return target.length
+            if (name == "charCodeAt") return target.charCodeAt(args[0])
+            if (name == "charAt") return target.charAt(args[0])
+            if (name == "equals") return target === args[0]
+            if (name == "substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
+            if (name == "indexOf") return target.indexOf(args[0])
+            if (name == "isEmpty") return target.length == 0
+            fail("unknown String method: " + name)
+        }
+        if (target === undefined || target === null) fail("method call ." + name + "() on null")
+        if (target.__class != undefined) {
+            var m = target.__class[name]
+            if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        var f = target[name]
+        if (typeof f != "function") fail("unknown method '" + name + "'")
+        return f.apply(undefined, args)
+    }
+
+    // ----- Signals -----
+    var BRK = {sig: "break"}
+    var CONT = {sig: "continue"}
+
+    // ----- Expression thunks: function() -> value -----
+
+    function makeConst(v) { return function() { return v } }
+    function makeVarRef(name) { return function() { return getVar(name) } }
+    function makeNeg(t) { return function() { return (0 - t()) | 0 } }
+    function makeNot(t) { return function() { return !t() } }
+
+    function jadd(l, r) {
+        if (typeof l == "string" || typeof r == "string") return jstr2(l) + jstr2(r)
+        return (l + r) | 0
+    }
+    function jstr2(v) {
+        if (typeof v == "string") return v
+        return jstr(v)
+    }
+    function binOp(op, l, r) {
+        if (op == "+") return jadd(l, r)
+        if (op == "-") return (l - r) | 0
+        if (op == "*") return (l * r) | 0
+        if (op == "/") return (l / r) | 0
+        if (op == "%") return (l % r) | 0
+        if (op == "==") return l === r
+        if (op == "!=") return l !== r
+        if (op == "<")  return l < r
+        if (op == ">")  return l > r
+        if (op == "<=") return l <= r
+        if (op == ">=") return l >= r
+    }
+    function foldBinary(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
+            return v
+        }
+    }
+    function makeOrAnd(items, isOr) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (isOr) { if (v) return true }
+                else      { if (!v) return false }
+                v = items[i]()
+            }
+            return v ? true : false
+        }
+    }
+    function makeCond(items) {
+        if (items.length == 1) return items[0]
+        return function() { return items[0]() ? items[1]() : items[2]() }
+    }
+
+    // items = [primaryThunk, {kind:"mcall"|"field"|"index", ...}...].
+    function foldCallMember(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    cur = mcall(cur, s.name, argv)
+                } else if (s.kind == "field") {
+                    if (cur === undefined || cur === null) fail("field ." + s.name + " of null")
+                    if (s.name == "length" && Array.isArray(cur)) { cur = cur.length }
+                    else { cur = cur[s.name] }
+                } else {
+                    cur = cur[s.idx()]
+                }
+            }
+            return cur
+        }
+    }
+
+    // Target items = [name, {key}|{idx}...].
+    function makeTargetRef(items) {
+        return {name: items[0], path: items.slice(1)}
+    }
+    function resolveRef(ref) {
+        var o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            o = (s.key != undefined) ? o[s.key] : o[s.idx()]
+            if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
+        }
+        var last = ref.path[ref.path.length - 1]
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+    }
+    function applyOp(op, a, b) {
+        if (op == "+=") return jadd(a, b)
+        if (op == "-=") return (a - b) | 0
+        if (op == "*=") return (a * b) | 0
+        if (op == "/=") return (a / b) | 0
+        if (op == "%=") return (a % b) | 0
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                setVar(ref.name, v)
+            } else {
+                var p = resolveRef(ref)
+                if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                p.obj[p.key] = v
+            }
+            return v
+        }
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var d = (items[1] == "++") ? 1 : -1
+        return function() {
+            if (ref.path.length == 0) {
+                var n = getVar(ref.name)
+                setVar(ref.name, (n + d) | 0)
+                return n
+            }
+            var p = resolveRef(ref)
+            var m = p.obj[p.key]
+            p.obj[p.key] = (m + d) | 0
+            return m
+        }
+    }
+
+    // new C(args): the constructor closure always exists and does the field inits.
+    function makeNew(items) {
+        var clsName = items[0]
+        var args = items.slice(1)
+        return function() {
+            var cls = getVar(clsName)
+            if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
+            var obj = {__class: cls}
+            var argv = [obj]
+            for (var i = 0; i < args.length; i++) argv.push(args[i]())
+            cls.__ctor.apply(undefined, argv)
+            return obj
+        }
+    }
+    function makeArray(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            return a
+        }
+    }
+    function makeNewArray(sizeT) {
+        return function() {
+            var n = sizeT()
+            var a = []
+            for (var i = 0; i < n; i++) a.push(0)
+            return a
+        }
+    }
+
+    // ----- Statement thunks -----
+
+    function exprToStmt(t) { return function() { t() } }
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeConst(0)
+        return function() { declVar(name, init()) }
+    }
+    function makeSeq(items) {
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i]()
+                if (r != undefined) return r
+            }
+        }
+    }
+    function makeBlockStmt(items) {
+        var seq = makeSeq(items)
+        return function() {
+            scopes.push({})
+            var r = seq()
+            scopes.pop()
+            return r
+        }
+    }
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function() {
+            if (cond()) return thenT()
+            if (elseT != null) return elseT()
+        }
+    }
+    function makeWhile(bodyT, condT) {
+        return function() {
+            while (condT()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            }
+        }
+    }
+    function makeDo(condT, bodyT) {
+        return function() {
+            do {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            } while (condT())
+        }
+    }
+    // for (var x : arr) body -- pops reversed: body, expr, name.
+    function makeForEach(bodyT, arrT, name) {
+        return function() {
+            var arr = arrT()
+            scopes.push({})
+            declVar(name, undefined)
+            var res = undefined
+            for (var i = 0; i < arr.length; i++) {
+                setVar(name, arr[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function() {
+            scopes.push({})
+            var res = undefined
+            if (init != null) init()
+            while (cond == null || cond()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+                if (post != null) post()
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { return {isRet: true, v: t()} }
+    }
+    function makeBreak() { return function() { return BRK } }
+    function makeContinue() { return function() { return CONT } }
+
+    // ----- Class building -----
+
+    function makeMethod(items) {
+        var mods = items[0].mods
+        var name = items[1]
+        var params = items[2].params
+        var body = items[3]
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        return {kind: "method", name: name, statik: isStatic, params: params, body: body}
+    }
+    function makeCtor(items) {
+        return {kind: "ctor", name: items[0], params: items[1].params, body: items[2]}
+    }
+    function makeField(items) {
+        var mods = items[0].mods
+        var ty = items[1].ty
+        var name = items[2]
+        var init = items.length > 3 ? items[3] : null
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        var dflt = 0
+        if (ty == "boolean") dflt = false
+        if (ty != "int" && ty != "boolean") dflt = null
+        if (ty.indexOf("[") >= 0) dflt = null
+        return {kind: "field", name: name, statik: isStatic, init: init, dflt: dflt}
+    }
+
+    // Runs a method body with a fresh scope: params bound, this bound for instance methods.
+    function invokeBody(params, body, self, args) {
+        var saved = scopes
+        scopes = [globalScope, {}]
+        if (self != undefined) declVar("this", self)
+        for (var i = 0; i < params.length; i++) {
+            declVar(params[i], i < args.length ? args[i] : undefined)
+        }
+        var r = body()
+        scopes = saved
+        return (r != undefined && r.isRet) ? r.v : undefined
+    }
+
+    function buildClassFrom(name, members, recordParams) {
+        var cls = {__isclass: true, __name: name}
+        var fields = []
+        var ctorInfo = null
+        var i
+        if (recordParams != undefined) {
+            for (i = 0; i < recordParams.length; i++) {
+                fields.push({name: recordParams[i], init: null, dflt: 0})
+            }
+        }
+        for (i = 0; i < members.length; i++) {
+            var mm = members[i]
+            if (mm.kind == "field") {
+                if (mm.statik) { cls[mm.name] = (mm.init != null) ? mm.init() : mm.dflt }
+                else { fields.push(mm) }
+            }
+            if (mm.kind == "ctor") {
+                if (mm.name != name) fail("constructor name " + mm.name + " does not match class " + name)
+                ctorInfo = mm
+            }
+        }
+        // The constructor: field defaults and initializers first, then the body.
+        function initFields(self) {
+            for (var k = 0; k < fields.length; k++) {
+                self[fields[k].name] = (fields[k].init != null && fields[k].init != undefined) ? fields[k].init() : fields[k].dflt
+            }
+        }
+        if (recordParams != undefined) {
+            cls.__ctor = function() {
+                var self = arguments[0]
+                initFields(self)
+                for (var k = 0; k < recordParams.length; k++) self[recordParams[k]] = arguments[k + 1]
+            }
+            // Record accessors: p.a() returns the field a.
+            for (i = 0; i < recordParams.length; i++) {
+                cls[recordParams[i]] = makeRecordAccessor(recordParams[i])
+            }
+        } else if (ctorInfo != null) {
+            cls.__ctor = makeCtorClosure(ctorInfo, initFields)
+        } else {
+            cls.__ctor = function() { initFields(arguments[0]) }
+        }
+        for (i = 0; i < members.length; i++) {
+            var m2 = members[i]
+            if (m2.kind == "method") {
+                cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
+            }
+        }
+        globalScope[name] = cls
+    }
+    function makeRecordAccessor(fname) {
+        return function() { return arguments[0][fname] }
+    }
+    function makeCtorClosure(info, initFields) {
+        return function() {
+            var self = arguments[0]
+            initFields(self)
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            invokeBody(info.params, info.body, self, args)
+        }
+    }
+    function makeInstanceClosure(m) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(m.params, m.body, self, args)
+        }
+    }
+    function makeStaticClosure(m) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(m.params, m.body, undefined, args)
+        }
+    }
+
+    function buildClass(items) {
+        buildClassFrom(items[0], items.slice(1), undefined)
+    }
+    function buildRecord(items) {
+        buildClassFrom(items[0], items.slice(2), items[1].rparams)
+    }
+
+    // Appends b to a copy of a (kept as a plain function to stay inside MetaJS).
+    function concat2impl(a, b) {
+        var out = []
+        var i
+        for (i = 0; i < a.length; i++) out.push(a[i])
+        for (i = 0; i < b.length; i++) out.push(b[i])
+        return out
+    }
+
+    c.compile(c.asg)
+
+    var mainCls = globalScope["Main"]
+    if (mainCls == undefined || typeof mainCls["main"] != "function") {
+        fail("Java programs need a class Main with a static main method.")
+    }
+    var ret = mainCls["main"]([])
+    println("java interpreter: main() returned " + (ret === undefined ? 0 : ret))
+    exit(ret === undefined ? 0 : ret | 0)
+
+~~) ;
