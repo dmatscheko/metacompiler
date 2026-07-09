@@ -1,0 +1,563 @@
+:title("Python (subset) interpreter") ;
+:description("Parses a Python subset - with significant indentation - and executes it
+directly, without generating code.
+
+The blocks are recognized with real INDENT/DEDENT handling: :script() rules keep an
+indentation stack on the persistent parser stack, a suite is ':' NEWLINE INDENT
+statements DEDENT, and every statement checks that it starts at the level of its block.
+Comments (#) and blank lines are skipped by the newline rule. Indentation must use
+spaces (no tabs).
+
+The language: def functions (top level, with positional parameters), if/elif/else,
+while, for x in <list or range(a[,b])>, break/continue/pass/return, assignment and
++= -= *= /= (assignment creates a variable in the current function if none exists in
+scope - there is no 'global' keyword; use a mutable list like fails = [0] for counters),
+lists with negative indexing, element assignment, .append()/.pop(), len(), print() with
+Python style rendering (True/None/[1, 2]), True/False/None, and/or/not with Python
+truthiness (empty lists are falsy) and operand values, comparisons (no chaining),
++ - * % with float semantics, / as true division (7/2 == 3.5), // as floor division
+(-7//2 == -4), % as floor modulo (-7%2 == 1), unary -, int and float literals, and
+single or double quoted strings with escapes.
+
+Not in the subset: classes, dicts, tuples, nested def/lambdas/closures, the global
+keyword, comparison chaining, slices, for-else, f-strings, imports, exceptions, and
+list equality by value (== compares lists by identity).
+
+There is no main(): the file simply runs top to bottom. Self checking programs end
+with exit(fails[0]).") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// The leading NL swallows any comment/blank lines at the top of the file.
+Program     <~~ runProgram(takeAll()) ~~>
+            = [ NL ] { TopStmt } ;
+TopStmt     = SameLevel Statement ;
+
+// Compound statements own their suites; small statements end with a newline.
+Statement   = If | While | For | Def | SmallLine ;
+
+SmallLine   = ( Return | Break | Continue | Pass | AugAssign | Assign | ExprSmall ) NL ;
+
+// A suite: ':' NEWLINE INDENT statements DEDENT. Every further statement of the
+// suite starts at the same level; the first one defined the level via Indent.
+Suite       <~~ push(makeSeq(takeAll())) ~~>
+            = ":" NL Indent Statement { SameLevel Statement } Dedent ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = "if" KwEnd Expression Suite { Elif } [ Else ] ;
+Elif        <~~ push(makeElif(pop(), pop())) ~~>
+            = SameLevel "elif" KwEnd Expression Suite ;
+Else        <~~ push(makeElse(pop())) ~~>
+            = SameLevel "else" KwEnd Suite ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = "while" KwEnd Expression Suite ;
+
+For         <~~ push(makeFor(pop(), pop(), pop())) ~~>
+            = "for" KwEnd Id <~~ push(up.in) ~~> "in" KwEnd Expression Suite ;
+
+Def         <~~ push(makeDef(pop(), pop(), pop())) ~~>
+            = "def" KwEnd Id <~~ push(up.in) ~~> ParamList Suite ;
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = "return" KwEnd [ Expression ] ;
+Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd ;
+Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd ;
+Pass        <~~ push(function() {}) ~~>  = "pass" KwEnd ;
+
+AugAssign   <~~ push(makeAugAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" ) <~~ push({op: up.in}) ~~> Expression ;
+Assign      <~~ push(makeAssign(pop(), pop())) ~~>
+            = Target "=" Expression ;
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { TIndex } ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+ExprSmall   <~~ push(exprToStmt(pop())) ~~>
+            = Expression ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = OrExpr ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "or" KwEnd AndExpr } ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = NotExpr { "and" KwEnd NotExpr } ;
+NotExpr     = Not | Comparison ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "not" KwEnd NotExpr ;
+
+Comparison  <~~ push(foldBinary(takeAll())) ~~>
+            = Arith [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Arith ] ;
+
+Arith       <~~ push(foldBinary(takeAll())) ~~>
+            = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
+
+// The floor division // must be tried before /.
+Term        <~~ push(foldBinary(takeAll())) ~~>
+            = Factor { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> Factor } ;
+
+Factor      = Neg | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" Factor ;
+
+// f(a), s[i], lst.append(x).
+PostfixExpr = CallMember ;
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { CallSfx | MethodSfx | IndexSfx } ;
+CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" [ Expression { "," Expression } ] ")" ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | StringLit | NumberLit | True | False | None | ListLit | VarRef ;
+
+ListLit     <~~ push(makeList(takeAll())) ~~>
+            = "[" [ Expression { "," Expression } ] "]" ;
+
+StringLit   = DqString | SqString ;
+DqString    = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+SqString    = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+StrEsc      = "\\" "\x20"..b"\x7e" ;
+DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+NumberLit   <~~ push(makeConst(parseFloat(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
+
+True        <~~ push(makeConst(true)) ~~>      = "True" KwEnd ;
+False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
+None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+// A logical line break: one or more newlines (blank and comment lines collapse,
+// because the whitespace skip eats spaces and # comments), or the end of the file.
+NL          = RealNL | AtEOF ;
+RealNL      = "\n" { "\n" } ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+AtEOF = :script(~~
+    (function() {
+        return (c.peek(0) === -1) ? undefined : abnf.newToken("\x01not-at-eof", 0)
+    })()
+~~) ;
+
+// The indentation machinery. The persistent parser stack holds the indentation
+// levels; the scripts scan the spaces of the current line with c.peek().
+// Indent: the line is deeper than the current level - push the new level.
+Indent = :script(~~
+    (function() {
+        var n = 0
+        while (c.peek(n) === 32) n++
+        if (c.peek(n) === -1) n = -1
+        var top = pop()
+        if (top == null) top = 0
+        push(top)
+        if (n > top) { push(n); return undefined }
+        return abnf.newToken("\x01expected-an-indented-block", 0)
+    })()
+~~) ;
+// Dedent: the line (or the end of file) is shallower - pop one level.
+Dedent = :script(~~
+    (function() {
+        var n = 0
+        while (c.peek(n) === 32) n++
+        if (c.peek(n) === -1) n = -1
+        var top = pop()
+        if (top == null) top = 0
+        if (n < top) { return undefined }
+        push(top)
+        return abnf.newToken("\x01expected-a-dedent", 0)
+    })()
+~~) ;
+// SameLevel: the line starts exactly at the current level.
+SameLevel = :script(~~
+    (function() {
+        var n = 0
+        while (c.peek(n) === 32) n++
+        if (c.peek(n) === -1) n = -1
+        var top = pop()
+        if (top == null) top = 0
+        push(top)
+        return (n == top) ? undefined : abnf.newToken("\x01wrong-indentation-level", 0)
+    })()
+~~) ;
+
+// Whitespace never includes newlines: they are structure, not noise.
+Whitespace  = { @+" \t" | Comment } ;
+Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+    function popName() {
+        var items = takeAll()
+        var name = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
+            else { push(items[i]) }
+        }
+        return name
+    }
+
+    function fail(msg) {
+        println("python interpreter error: " + msg)
+        exit(1)
+    }
+
+    function hexAt(s, pos, len) {
+        var v = 0
+        for (var i = 0; i < len; i++) {
+            var c = s.charCodeAt(pos + i)
+            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
+            v = v * 16 + d
+        }
+        return v
+    }
+    function unescapeJs(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out += String.fromCharCode(c); i++; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
+            out += String.fromCharCode(e)
+            i += 2
+        }
+        return out
+    }
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
+    // ----- Scopes: one global scope plus one scope per function call -----
+    var globalScope = {}
+    var scopes = [globalScope]
+    function getVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
+        }
+        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
+        fail("name '" + name + "' is not defined")
+    }
+    // Assignment: update in the chain, else create in the current function scope.
+    function setVar(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        scopes[scopes.length - 1][name] = value
+    }
+
+    var hostGlobals = {}
+    hostGlobals["print"] = function() {
+        var out = ""
+        for (var i = 0; i < arguments.length; i++) {
+            if (i > 0) out += " "
+            out += pstr(arguments[i])
+        }
+        println(out)
+    }
+    hostGlobals["len"] = function(x) { return x.length }
+    hostGlobals["range"] = function(a, b) {
+        var from = 0
+        var to = a
+        if (b !== undefined) { from = a; to = b }
+        var out = []
+        for (var i = from; i < to; i++) out.push(i)
+        return out
+    }
+    hostGlobals["exit"] = function(code) { exit(code | 0) }
+    hostGlobals["abs"] = function(v) { return v < 0 ? -v : v }
+
+    // Python style rendering: True/False/None, lists in brackets.
+    function pstr(v) {
+        if (v === undefined || v === null) return "None"
+        if (v === true) return "True"
+        if (v === false) return "False"
+        if (Array.isArray(v)) {
+            var out = "["
+            for (var i = 0; i < v.length; i++) {
+                if (i > 0) out += ", "
+                if (typeof v[i] == "string") { out += "'" + v[i] + "'" }
+                else { out += pstr(v[i]) }
+            }
+            return out + "]"
+        }
+        return "" + v
+    }
+    // Python truthiness: empty lists are falsy.
+    function pytruthy(v) {
+        if (Array.isArray(v)) return v.length > 0
+        if (v === undefined || v === null) return false
+        return !!v
+    }
+
+    function pyget(o, i) {
+        if (typeof o == "string") {
+            if (i < 0) i += o.length
+            if (i < 0 || i >= o.length) fail("string index out of range")
+            return o.charAt(i)
+        }
+        if (i < 0) i += o.length
+        if (i < 0 || i >= o.length) fail("list index out of range")
+        return o[i]
+    }
+    function mcall(target, name, args) {
+        if (Array.isArray(target)) {
+            if (name == "append") { target.push(args[0]); return undefined }
+            if (name == "pop") {
+                if (target.length == 0) fail("pop from empty list")
+                return target.pop()
+            }
+            fail("unknown list method: " + name)
+        }
+        fail("method call ." + name + "() on " + pstr(target))
+    }
+
+    var BRK = {sig: "break"}
+    var CONT = {sig: "continue"}
+
+    // ----- Expression thunks -----
+
+    function makeConst(v) { return function() { return v } }
+    function makeVarRef(name) { return function() { return getVar(name) } }
+    function makeNeg(t) { return function() { return -t() } }
+    function makeNot(t) { return function() { return !pytruthy(t()) } }
+
+    function fdiv(a, b) { return Math.floor(a / b) }
+    function fmod(a, b) {
+        var r = a % b
+        if (r != 0 && ((r < 0) != (b < 0))) r += b
+        return r
+    }
+    function binOp(op, l, r) {
+        if (op == "+") return l + r
+        if (op == "-") return l - r
+        if (op == "*") return l * r
+        if (op == "/") return l / r
+        if (op == "//") return fdiv(l, r)
+        if (op == "%") return fmod(l, r)
+        if (op == "==") return l === r
+        if (op == "!=") return l !== r
+        if (op == "<")  return l < r
+        if (op == ">")  return l > r
+        if (op == "<=") return l <= r
+        if (op == ">=") return l >= r
+    }
+    function foldBinary(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
+            return v
+        }
+    }
+    // and/or return the deciding operand, with Python truthiness.
+    function makeOrAnd(items, isOr) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (isOr) { if (pytruthy(v)) return v }
+                else      { if (!pytruthy(v)) return v }
+                v = items[i]()
+            }
+            return v
+        }
+    }
+
+    function foldCallMember(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "call") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    if (typeof cur != "function") fail("call of a non function")
+                    cur = cur.apply(undefined, argv)
+                } else if (s.kind == "mcall") {
+                    var argv2 = []
+                    for (var j2 = 0; j2 < s.args.length; j2++) argv2.push(s.args[j2]())
+                    cur = mcall(cur, s.name, argv2)
+                } else {
+                    cur = pyget(cur, s.idx())
+                }
+            }
+            return cur
+        }
+    }
+
+    function makeList(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            return a
+        }
+    }
+
+    function makeTargetRef(items) {
+        return {name: items[0], path: items.slice(1)}
+    }
+    function assignRef(ref, v) {
+        if (ref.path.length == 0) { setVar(ref.name, v); return }
+        var o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) o = pyget(o, ref.path[i].idx())
+        var idx = ref.path[ref.path.length - 1].idx()
+        if (idx < 0) idx += o.length
+        if (idx < 0 || idx >= o.length) fail("list assignment index out of range")
+        o[idx] = v
+    }
+    function readRef(ref) {
+        if (ref.path.length == 0) return getVar(ref.name)
+        var o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length; i++) o = pyget(o, ref.path[i].idx())
+        return o
+    }
+    function makeAssign(valT, ref) {
+        return function() { assignRef(ref, valT()) }
+    }
+    function makeAugAssign(items) {
+        var ref = items[0]
+        var op = items[1].op
+        var valT = items[2]
+        return function() {
+            var a = readRef(ref)
+            var b = valT()
+            var v
+            if (op == "+=") { v = a + b }
+            else if (op == "-=") { v = a - b }
+            else if (op == "*=") { v = a * b }
+            else { v = a / b }
+            assignRef(ref, v)
+        }
+    }
+
+    // ----- Statement thunks -----
+
+    function exprToStmt(t) { return function() { t() } }
+    function makeSeq(items) {
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i]()
+                if (r != undefined) return r
+            }
+        }
+    }
+    // items = [cond, suite, {elif}..., {else}?]
+    function makeElif(suite, cond) { return {elifCond: cond, suite: suite} }
+    function makeElse(suite) { return {elseSuite: suite} }
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elifs = []
+        var elseT = null
+        for (var i = 2; i < items.length; i++) {
+            if (items[i].elifCond != undefined) elifs.push(items[i])
+            if (items[i].elseSuite != undefined) elseT = items[i].elseSuite
+        }
+        return function() {
+            if (pytruthy(cond())) return thenT()
+            for (var k = 0; k < elifs.length; k++) {
+                if (pytruthy(elifs[k].elifCond())) return elifs[k].suite()
+            }
+            if (elseT != null) return elseT()
+        }
+    }
+    function makeWhile(bodyT, condT) {
+        return function() {
+            while (pytruthy(condT())) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            }
+        }
+    }
+    function makeFor(bodyT, listT, name) {
+        return function() {
+            var arr = listT()
+            for (var i = 0; i < arr.length; i++) {
+                setVar(name, arr[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            }
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { return {isRet: true, v: t()} }
+    }
+    function makeBreak() { return function() { return BRK } }
+    function makeContinue() { return function() { return CONT } }
+
+    // def: bind the closure; calls get a fresh function scope.
+    function makeDef(bodyT, plist, name) {
+        var params = plist.params
+        return function() {
+            setVar(name, function() {
+                var args = []
+                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+                var saved = scopes
+                scopes = [globalScope, {}]
+                for (var p = 0; p < params.length; p++) {
+                    scopes[1][params[p]] = p < args.length ? args[p] : undefined
+                }
+                var r = bodyT()
+                scopes = saved
+                return (r != undefined && r.isRet) ? r.v : undefined
+            })
+        }
+    }
+
+    // The whole file runs top to bottom.
+    function runProgram(items) {
+        var progT = makeSeq(items)
+        progT()
+    }
+
+    c.compile(c.asg)
+
+    println("python interpreter: program ran to completion")
+    exit(0)
+
+~~) ;
