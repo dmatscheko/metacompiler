@@ -1,11 +1,12 @@
 :title("Brainfuck interpreter") ;
 :description("Parses Brainfuck and executes it directly.
 
-Each opcode tag pushes its handler function onto the global stack, so after c.compile()
-the stack is the program: an array of functions in source order. The start script then
-walks that array with an instruction pointer. Loops work at runtime: '[' either skips
-to behind its matching ']' (cell is 0) or remembers its position on the same stack,
-and ']' jumps back while the cell is not 0.
+Each opcode tag pushes its character onto the global stack, so after c.compile() the
+stack is the program in source order. The start script precomputes the matching bracket
+of every '[' and ']' in one pass and then walks the program with an instruction pointer
+and a char to handler dispatch table, so both loop opcodes jump in O(1). (The stack
+holds characters, not handler functions: a function that is read back from the stack is
+a fresh wrapper under goja and cannot be compared by identity.)
 
 Cells are 8 bit and wrap around, like in the compiled version (brainfuck-to-llvm-ir.abnf).
 ',' and '?' read one char of the input; at the end of the input they read 0.") ;
@@ -20,16 +21,12 @@ Cells are 8 bit and wrap around, like in the compiled version (brainfuck-to-llvm
 
 Brainfuck = { Statement } ;
 Statement = Opcode | Lparen { Statement } Rparen ;
-Opcode    = Next | Prev | Inc | Dec | Write | Read ;
 
-Next   = ">"            <~~ pushg(next) ~~> ;
-Prev   = "<"            <~~ pushg(prev) ~~> ;
-Inc    = "+"            <~~ pushg(inc) ~~> ;
-Dec    = "-"            <~~ pushg(dec) ~~> ;
-Write  = "."            <~~ pushg(write) ~~> ;
-Read   = ( "," | "?" )  <~~ pushg(read) ~~> ; // The group is needed: a tag only annotates the term directly before it.
-Lparen = "["            <~~ pushg(lparen) ~~> ;
-Rparen = "]"            <~~ pushg(rparen) ~~> ;
+// Every opcode pushes its own character. The group is needed: a tag only annotates the
+// term directly before it.
+Opcode = ( ">" | "<" | "+" | "-" | "." | "," | "?" ) <~~ pushg(up.in) ~~> ;
+Lparen = "[" <~~ pushg(up.in) ~~> ;
+Rparen = "]" <~~ pushg(up.in) ~~> ;
 
 // All chars except the opcode chars > < + - . , ? [ ].
 Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" } ;
@@ -73,32 +70,37 @@ Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c
     }
     function lparen() {
         check()
-        if (data[dpos] == 0) {
-            // Skip to behind the matching ']': scan the program for it.
-            var depth = 1
-            while (depth > 0) {
-                cpos++
-                if (ltr.stack[cpos] === lparen) depth++
-                else if (ltr.stack[cpos] === rparen) depth--
-            }
-        } else {
-            pushg(cpos) // Remember where the loop started.
-        }
+        if (data[dpos] == 0) cpos = jump[cpos] // To the matching ']'; the driver then steps behind it.
     }
     function rparen() {
         check()
-        if (data[dpos] == 0) { popg() } else { cpos = popg() - 1 } // -1, because the driver loop adds 1 and must arrive at the '['.
+        if (data[dpos] != 0) cpos = jump[cpos] // Back behind the matching '[' (the cell is known non-zero, so its check may be skipped).
     }
 
-    // Fill the global stack with the program: one handler function per opcode, in source order.
+    // Fill the global stack with the program: one opcode character per instruction.
     c.compile(c.asg)
-
-    // Run the program. Everything that lparen() pushes at runtime lies behind codeLength
-    // and is therefore never executed as an instruction.
     var codeLength = ltr.stack.length
+
+    // Precompute the matching bracket of every '[' and ']' in one pass.
+    var jump = []
+    var open = []
+    for (var i = 0; i < codeLength; i++) {
+        if (ltr.stack[i] == "[") { open.push(i) }
+        if (ltr.stack[i] == "]") { var j = open.pop(); jump[j] = i; jump[i] = j }
+    }
+
+    // The dispatch table: opcode character -> handler function.
+    var ops = {}
+    ops[">"] = next; ops["<"] = prev
+    ops["+"] = inc;  ops["-"] = dec
+    ops["."] = write
+    ops[","] = read; ops["?"] = read
+    ops["["] = lparen; ops["]"] = rparen
+
+    // Run the program.
     var cpos = 0
     while (cpos < codeLength) {
-        ltr.stack[cpos]()
+        ops[ltr.stack[cpos]]()
         cpos++
     }
 

@@ -1,7 +1,9 @@
 :title("Brainfuck to LLVM IR compiler") ;
 :description("Compiles Brainfuck to an LLVM IR module and runs it with the built-in IR interpreter.
 
-Each opcode appends its instructions to the current basic block. A '[' opens two new
+Each opcode appends its instructions to the current basic block. Runs of + - > < are
+folded into single add instructions (the classic Brainfuck optimization), and a run
+with zero net effect (like '+-' or '><') emits nothing at all. A '[' opens two new
 blocks (loop head with the zero check, loop body) and ']' closes them, so the standard
 Brainfuck semantics hold: '[' skips its body when the current cell is 0.
 
@@ -80,29 +82,51 @@ Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c
         return b.NewGetElementPtr(i8x4096, dataPtr, zero, b.NewLoad(i32, dposPtr))
     }
 
+    // Runs of pointer moves and cell adds are collected here and only emitted (as one
+    // instruction) when something else needs the state: a move flushes the pending add
+    // of the old cell, an add flushes the pending move first, and the other opcodes
+    // flush both. A run that cancels itself out disappears completely.
+    var pendMove = 0
+    var pendAdd = 0
+
+    function flushMove() {
+        if (pendMove == 0) { return }
+        // dpos += pendMove
+        blockCode.NewStore(blockCode.NewAdd(blockCode.NewLoad(i32, dposPtr), llvm.constant.NewInt(i32, pendMove)), dposPtr)
+        pendMove = 0
+    }
+    function flushAdd() {
+        if (pendAdd == 0) { return }
+        // data[dpos] += pendAdd   (the & 255 turns a negative count into its 8 bit wrap)
+        var elementPtr = cellPtr(blockCode)
+        blockCode.NewStore(blockCode.NewAdd(blockCode.NewLoad(i8, elementPtr), llvm.constant.NewInt(i8, pendAdd & 255)), elementPtr)
+        pendAdd = 0
+    }
+    function flush() { flushMove(); flushAdd() }
+
     function next() {
-        // dpos++
-        blockCode.NewStore(blockCode.NewAdd(blockCode.NewLoad(i32, dposPtr), one), dposPtr)
+        flushAdd()
+        pendMove++
     }
     function prev() {
-        // dpos--
-        blockCode.NewStore(blockCode.NewSub(blockCode.NewLoad(i32, dposPtr), one), dposPtr)
+        flushAdd()
+        pendMove--
     }
     function inc() {
-        // data[dpos]++
-        var elementPtr = cellPtr(blockCode)
-        blockCode.NewStore(blockCode.NewAdd(blockCode.NewLoad(i8, elementPtr), onei8), elementPtr)
+        flushMove()
+        pendAdd++
     }
     function dec() {
-        // data[dpos]--
-        var elementPtr = cellPtr(blockCode)
-        blockCode.NewStore(blockCode.NewSub(blockCode.NewLoad(i8, elementPtr), onei8), elementPtr)
+        flushMove()
+        pendAdd--
     }
     function write() {
+        flush()
         // putchar(data[dpos])
         blockCode.NewCall(extPutchar, blockCode.NewZExt(blockCode.NewLoad(i8, cellPtr(blockCode)), i32))
     }
     function read() {
+        flush()
         // c = getchar(); data[dpos] = (c < 0) ? 0 : c;   // EOF reads as 0.
         var char = blockCode.NewCall(extGetchar)
         var isEof = blockCode.NewICmp(llvm.enum.IPredSLT, char, zero)
@@ -110,6 +134,7 @@ Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c
         blockCode.NewStore(blockCode.NewTrunc(value, i8), cellPtr(blockCode))
     }
     function lparen() {
+        flush()
         // while (data[dpos] != 0) {
         // The loop head (with the zero check) can only be filled in at the matching ']',
         // because only then the exit block exists. Until then the pair is remembered.
@@ -121,6 +146,7 @@ Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c
         pushg([head, body, blockCount])
     }
     function rparen() {
+        flush()
         // }
         var loop = popg()
         var head = loop[0]
@@ -134,6 +160,7 @@ Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c
 
     // Compile the Brainfuck instructions into the module.
     c.compile(c.asg)
+    flush()
 
     //    return 0;
     blockCode.NewRet(zero)
