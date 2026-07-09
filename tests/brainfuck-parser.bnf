@@ -1,7 +1,7 @@
 :title("Brainfuck (syntax only)") ;
 :description("A pure EBNF for Brainfuck, without annotations: It only checks the syntax
 (balanced brackets) and produces no output.
-The semantics live in brainfuck_interpreter.abnf and brainfuck-to-llvm-ir.abnf.") ;
+The semantics live in brainfuck-interpreter.abnf and brainfuck-to-llvm-ir.abnf.") ;
 
 :startRule(Brainfuck) ;
 // Everything that is not one of the opcode chars counts as a comment.

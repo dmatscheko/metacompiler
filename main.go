@@ -57,7 +57,7 @@ func main() {
 
 	param_speedTest := flag.Bool("s", false, "Run speed test with 100 cycles")
 
-	param_freeze := flag.String("freeze", "", "Create the frozen MetaJS bootstrap snapshot from the given js-to-llvm-ir grammar (writes abnf/jsagrammar.go and abnf/jsbootstrap.ll, then rebuild)")
+	param_freeze := flag.String("freeze", "", "Create the frozen MetaJS bootstrap snapshot from the given metajs-to-llvm-ir grammar (writes abnf/jsagrammar.go and abnf/jsbootstrap.ll, then rebuild)")
 	param_frozen := flag.Bool("frozen", false, "Run all annotation scripts goja free: parse them with the frozen a-grammar, compile them with the frozen bootstrap on the IR machine, and execute the emitted IR")
 
 	flag.Parse()

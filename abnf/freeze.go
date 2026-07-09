@@ -13,7 +13,7 @@ import (
 // ----------------------------------------------------------------------------
 // The freezer (-freeze)
 //
-// Freeze runs the given js-to-llvm-ir.abnf once under goja and snapshots
+// Freeze runs the given metajs-to-llvm-ir.abnf once under goja and snapshots
 // everything that the frozen mode needs:
 //
 //   abnf/jsagrammar.go  - the serialized a-grammar (the pure Go parser input)

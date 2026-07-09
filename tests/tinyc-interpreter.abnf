@@ -1,7 +1,7 @@
 :title("TinyC interpreter") ;
 :description("Parses TinyC and executes it directly, without generating code.
 
-The language is exactly the one of tinyc.abnf (the LLVM IR compiler); see there for a
+The language is exactly the one of tinyc-to-llvm-ir.abnf (the LLVM IR compiler); see there for a
 description. The semantics match too: int is 32 bit, / and % truncate towards zero,
 || and && evaluate both sides, ++/-- are post operators, and the exit code of the
 metacompiler run is the value that main() returns.

@@ -15,7 +15,7 @@ be emitted into the loop head block, which does not exist yet while the conditio
 
 The exit code of the metacompiler run is the value that main() returns, so TinyC test
 programs are self checking: they return 0 on success.
-The same language with the same semantics is interpreted directly by tinyc_interpreter.abnf.") ;
+The same language with the same semantics is interpreted directly by tinyc-interpreter.abnf.") ;
 
 
 // --- main rules

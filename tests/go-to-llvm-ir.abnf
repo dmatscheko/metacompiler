@@ -24,7 +24,7 @@ positionally (the field lists are known at compile time), method calls dispatch 
 js_mcall, multiple return values travel as arrays and are unpacked by multi assignments.
 The whole program becomes jsmain(env, args), which runs the top level and calls main().
 The entry point is func main(); self checking programs end with os.Exit(failures).
-The same language with the same semantics is interpreted directly by go_interpreter.abnf.") ;
+The same language with the same semantics is interpreted directly by go-interpreter.abnf.") ;
 
 
 // --- main rules

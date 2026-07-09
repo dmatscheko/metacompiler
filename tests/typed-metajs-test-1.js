@@ -1,4 +1,4 @@
-/* Typed JS self test.
+/* Typed MetaJS self test.
  * The language is MetaJS with pinned variable types: the first non-undefined
  * value a variable holds decides its type class forever. main() returns the
  * number of failed checks, so the run exits with 0 exactly when all is well. **/
@@ -90,6 +90,6 @@ function main() {
     arr.push(0);
     check("arrays", arr.length + arr[0], 7);
 
-    if (failures == 0) { println("Typed JS self test passed"); }
+    if (failures == 0) { println("Typed MetaJS self test passed"); }
     return failures;
 }

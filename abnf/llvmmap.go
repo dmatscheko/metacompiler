@@ -976,7 +976,7 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// Run executes the named function with the given stdin content for getchar() and
 	// returns {Ret, Out}. The input parameter can be left out.
 	"Run": run,
-	// RunJS executes a MetaJS module (IR emitted by js-to-llvm-ir.abnf, where every
+	// RunJS executes a MetaJS module (IR emitted by metajs-to-llvm-ir.abnf, where every
 	// value is an i64 handle and the js_* externals implement the semantics). The
 	// named function is the module entry (usually "jsmain"); its i64 handle result
 	// is converted to an int32 and returned as Ret.

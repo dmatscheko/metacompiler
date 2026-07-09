@@ -31,7 +31,7 @@ truthiness (empty lists are falsy) through js_pytruthy, and print through js_pyp
 The whole file becomes jsmain(env, args) and simply runs top to bottom. Self checking
 programs end with exit(fails[0]).
 The same language with the same semantics is interpreted directly by
-python_interpreter.abnf.") ;
+python-interpreter.abnf.") ;
 
 
 // --- main rules

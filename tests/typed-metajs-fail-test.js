@@ -1,4 +1,4 @@
-// Typed JS violation demo: THIS PROGRAM SHOULD FAIL in both the interpreter
+// Typed MetaJS violation demo: THIS PROGRAM SHOULD FAIL in both the interpreter
 // and the compiler. The variable x is pinned as a number by its first value,
 // so assigning a string to it must abort the run with a nonzero exit code.
 

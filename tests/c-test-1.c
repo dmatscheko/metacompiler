@@ -1,117 +1,169 @@
-/* Test file for the C99 grammar (tests/c.abnf).
- * It deliberately contains the constructs that are hard to parse. **/
+/* C subset self test.
+ * Exercises the whole language: pointers, arrays, globals, all operators,
+ * control flow and recursion. main() returns the number of failed checks,
+ * so the metacompiler run exits with 0 exactly when everything works. **/
 
-#include <stdio.h>
-#include <stdlib.h>
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define LONG_MACRO(x) do { \
-        (void)(x);         \
-    } while (0)
+int putchar(int c);                     /* Prototypes are parsed and ignored. */
 
-typedef unsigned long size_type;
-typedef struct Node Node;
+int nfail = 0;
+int global_counter;
+int primes[10];
 
-struct Node {
-    int value;
-    unsigned flags : 4;
-    unsigned : 4;
-    struct Node *next;
-    union {
-        double d;
-        char bytes[8];
-    } payload;
-};
-
-enum Color { RED, GREEN = 2, BLUE, };
-
-static const char *messages[] = {
-    "hello \"world\"\n",
-    "tab\there, hex \x41, octal \101, unicode ä",
-    "adjacent " "strings " "concatenate",
-};
-
-static double doubled = 1.0;   /* identifier starts with keyword "double" */
-static int interned = 2;       /* identifier starts with keyword "int" */
-int format = 3;                /* identifier starts with keyword "for" */
-
-typedef int (*BinaryOp)(int, int);
-
-static int add(int a, int b) { return a + b; }
-
-int apply(BinaryOp op, int a, int b)
-{
-    return op(a, b);
+int check(int got, int want) {
+    if (got != want) {
+        nfail++;
+        putchar('F');
+        putchar('0' + nfail);
+        putchar('\n');
+    }
+    return got == want;
 }
 
-size_type count_nodes(const Node *head)
-{
-    size_type n = 0;
-    for (const Node *p = head; p != NULL; p = p->next) {
-        n++;
-    }
-    return n;
+int add(int a, int b) { return a + b; }
+
+int fib(int n) {                       // recursion
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
 }
 
-int main(int argc, char **argv)
-{
-    Node *list = NULL;          /* typedef-name led pointer declaration */
-    BinaryOp fn = &add;         /* address of function */
-    size_type total = 0;
-    int matrix[2][3] = { { 1, 2, 3 }, { 4, 5, 6 } };
-    struct Node n1 = { .value = 41, .flags = 3, .payload = { .d = 0.5 } };
-    int sparse[8] = { [0] = 1, [7] = 2 };
-    long big = 0x7fffffffL;
-    unsigned u = 42u;
-    float f = 1.5e-3f;
-    double hexfloat = 0x1.8p3;
-    char c = '\n';
-    char wide_ish = 'x';
-
-    (void)argv;
-    free(malloc(16));           /* call with call argument, must stay a statement */
-
-    if (argc > 1 && interned != 0) {
-        total += (size_type)argc;      /* cast to typedef name */
-    } else if (!format) {
-        total = MAX(u, 7);
+int sum_array(int *a, int n) {         // pointer parameter + pointer arithmetic
+    int s = 0;
+    int i;
+    for (i = 0; i < n; i++) {
+        s += *(a + i);
     }
+    return s;
+}
 
-    while (total < 10) {
-        total <<= 1;
-        total |= 1;
-    }
-
-    do {
-        total--;
-    } while (total > 12);
-
-    switch (argc) {
-    case 1:
-        total += sizeof(int) * 2;
-        break;
-    case 2:
-        total += sizeof total;
-        break;
-    default:
-        total = doubled > 0.5 ? total : 0;
-        break;
-    }
-
-    for (u = 0; u < 3; u++) {
-        matrix[1][u] += apply(fn, (int)u, sparse[u]);
-    }
-
-    n1.next = list;
-    list = &n1;
-
-    if (count_nodes(list) != 1) {
-        goto fail;
-    }
-
-    printf("%s %ld %f %f %c%c\n", messages[0], big, f, hexfloat, c, wide_ish);
-    printf("colors: %d %d %d\n", RED, GREEN, BLUE);
+int swap(int *x, int *y) {             // classic pointer swap
+    int t = *x;
+    *x = *y;
+    *y = t;
     return 0;
+}
 
-fail:
-    return 1;
+int bump(void) {                       // works on a global
+    global_counter += 1;
+    return global_counter;
+}
+
+int count_primes(int limit) {          // nested loops, break/continue, arrays
+    int found = 0;
+    int n;
+    for (n = 2; n <= limit; n++) {
+        int is_prime = 1;
+        int d;
+        for (d = 2; d * d <= n; d++) {
+            if (n % d == 0) { is_prime = 0; break; }
+        }
+        if (!is_prime) { continue; }
+        if (found < 10) { primes[found] = n; }
+        found++;
+    }
+    return found;
+}
+
+int main() {
+    // arithmetic and precedence
+    check(1 + 2 * 3, 7);
+    check((1 + 2) * 3, 9);
+    check(7 / 2, 3);                    // int division truncates
+    check(-7 / 2, -3);                  // towards zero
+    check(7 % 3, 1);
+    check(-(-5), 5);
+    check(10 - 3 - 2, 5);
+
+    // bitwise and shifts
+    check(5 | 2, 7);
+    check(5 & 3, 1);
+    check(5 ^ 1, 4);
+    check(1 << 4, 16);
+    check(-8 >> 1, -4);                 // arithmetic shift
+    check(~0, -1);
+    check(1 | 2 & 3, 3);                // & binds tighter than |
+
+    // comparisons, ! and ternary
+    check(3 < 4, 1);
+    check(4 <= 4, 1);
+    check(!0, 1);
+    check(!7, 0);
+    check(3 > 2 ? 10 : 20, 10);
+    check(0 ? 10 : 20, 20);
+
+    // short circuit evaluation
+    global_counter = 0;
+    int r1 = 0 && bump();
+    check(global_counter, 0);           // right side skipped
+    int r2 = 1 || bump();
+    check(global_counter, 0);           // right side skipped
+    int r3 = 1 && bump();
+    check(global_counter, 1);           // right side ran
+    check(r1 + r2 + r3, 2);
+
+    // assignment as expression, compound assigns, inc/dec
+    int x = 1;
+    int y = (x = 5) + 1;
+    check(y, 6);
+    x += 4;  check(x, 9);
+    x -= 2;  check(x, 7);
+    x *= 3;  check(x, 21);
+    x /= 2;  check(x, 10);
+    x %= 3;  check(x, 1);
+    check(x++, 1);
+    check(x, 2);
+    check(++x, 3);
+    check(x--, 3);
+    check(--x, 1);
+
+    // chars
+    check('A', 65);
+    check('\n', 10);
+    check('0' + 5, 53);
+
+    // control flow
+    int w = 0;
+    while (w < 5) { w++; }
+    check(w, 5);
+    int dc = 0;
+    do { dc++; } while (0);
+    check(dc, 1);
+
+    // functions and recursion
+    check(add(2, 3), 5);
+    check(fib(10), 55);
+
+    // arrays
+    int arr[5];
+    int i;
+    for (i = 0; i < 5; i++) { arr[i] = i * i; }
+    check(arr[3], 9);
+    arr[2] += 10;
+    check(arr[2], 14);
+    check(sum_array(arr, 5), 0 + 1 + 14 + 9 + 16);
+
+    // pointers
+    int a = 1, b = 2;
+    int *p = &a;
+    check(*p, 1);
+    *p = 42;
+    check(a, 42);
+    swap(&a, &b);
+    check(a, 2);
+    check(b, 42);
+    p = &arr[1];
+    check(*(p + 1), 14);                // pointer arithmetic steps ints
+    check(p[2], 9);
+    *(p + 3) = 7;
+    check(arr[4], 7);
+
+    // globals and a bigger computation
+    check(count_primes(30), 10);
+    check(primes[0], 2);
+    check(primes[9], 29);
+    check(count_primes(100), 25);
+
+    if (nfail == 0) {
+        putchar('O'); putchar('K'); putchar('\n');
+    }
+    return nfail;
 }

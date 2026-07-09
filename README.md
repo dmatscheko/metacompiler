@@ -138,7 +138,7 @@ When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
 
 ```
 go build .
-./mec -a tests/brainfuck_interpreter.abnf -b tests/brainfuck-test-2.txt
+./mec -a tests/brainfuck-interpreter.abnf -b tests/brainfuck-test-2.txt
 ```
 or
 ```
@@ -146,53 +146,55 @@ go run . -a tests/abnf-of-abnf.abnf -b tests/abnf-of-abnf.abnf
 ```
 or, to parse a C file with the full C99 grammar:
 ```
-go run . -a tests/c.abnf -b tests/c-test-1.c -q
+go run . -a tests/c99-parser.abnf -b tests/c99-test-1.c -q
 ```
 
 #### The examples in tests/
 
-Every language in `tests/` has at least one interpreter and one compiler. The compilers
+Every language in `tests/` has at least one interpreter and one compiler (only the full
+C99 grammar is parse only). The compilers
 generate LLVM IR and immediately execute it with the built-in IR interpreter (`llvm.Run`),
 and the test programs are self checking: the exit code of the run is 0 on success.
 
-| Language   | Interpreter                              | Compiler (to LLVM IR)        | Test inputs                                 |
-| ---------- | ---------------------------------------- | ---------------------------- | ------------------------------------------- |
-| Calculator | calculator-1.abnf, calculator-2.abnf     | calculator-to-llvm-ir.abnf   | calculator_formula.txt                      |
-| Brainfuck  | brainfuck_interpreter.abnf               | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt  |
-| TinyC      | tinyc_interpreter.abnf                   | tinyc.abnf                   | tinyc-test-1.txt, tinyc-test-2.txt          |
-| Lisp       | lisp_interpreter.abnf                    | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                             |
-| JS (MetaJS)| js_interpreter.abnf                      | js-to-llvm-ir.abnf           | js-test-1.txt                               |
-| Typed JS   | tjs_interpreter.abnf                     | tjs-to-llvm-ir.abnf          | tjs-test-1.txt (tjs-fail-test.txt must fail)|
-| C (subset) | c_interpreter.abnf                       | c-to-llvm-ir.abnf            | c-sub-test-1.c                              |
-| Java       | java_interpreter.abnf                    | java-to-llvm-ir.abnf         | java-test-1.java                            |
-| Kotlin     | kotlin_interpreter.abnf                  | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                            |
-| Go         | go_interpreter.abnf                      | go-to-llvm-ir.abnf           | go-test-1.go                                |
-| Python     | python_interpreter.abnf                  | python-to-llvm-ir.abnf       | python-test-1.py                            |
-| C (C99)    | (grammar only)                           | (grammar only)               | c.abnf parses c-test-1.c                    |
+| Language     | Interpreter                                                  | Compiler (to LLVM IR)        | Test inputs                                       |
+| ------------ | ------------------------------------------------------------ | ---------------------------- | ------------------------------------------------- |
+| Calculator   | calculator-interpreter-1.abnf, calculator-interpreter-2.abnf | calculator-to-llvm-ir.abnf   | calculator-test-1.txt                             |
+| Brainfuck    | brainfuck-interpreter.abnf                                   | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt        |
+| TinyC        | tinyc-interpreter.abnf                                       | tinyc-to-llvm-ir.abnf        | tinyc-test-1.txt, tinyc-test-2.txt                |
+| Lisp         | lisp-interpreter.abnf                                        | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                                   |
+| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js                                  |
+| Typed MetaJS | typed-metajs-interpreter.abnf                                | typed-metajs-to-llvm-ir.abnf | typed-metajs-test-1.js, typed-metajs-fail-test.js |
+| C (subset)   | c-interpreter.abnf                                           | c-to-llvm-ir.abnf            | c-test-1.c                                        |
+| Java         | java-interpreter.abnf                                        | java-to-llvm-ir.abnf         | java-test-1.java                                  |
+| Kotlin       | kotlin-interpreter.abnf                                      | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                                  |
+| Go           | go-interpreter.abnf                                          | go-to-llvm-ir.abnf           | go-test-1.go                                      |
+| Python       | python-interpreter.abnf                                      | python-to-llvm-ir.abnf       | python-test-1.py                                  |
+| C99          | c99-parser.abnf (parses only)                                | -                            | c99-test-1.c                                      |
 
 Every language is a well chosen executable subset; the exact feature list and the
 deliberate deviations are documented in the :description() of each interpreter grammar.
-The test programs are valid programs of the real languages: c-sub-test-1.c compiles and
+The test programs are valid programs of the real languages: c-test-1.c compiles and
 passes under clang, go-test-1.go under go run, python-test-1.py under python3,
-java-test-1.java under javac/java, and js-test-1.txt under node (with println/printf
+java-test-1.java under javac/java, and metajs-test-1.js under node (with println/printf
 shims) - all with exit code 0, matching both of our engines.
 The C subset has real pointers, arrays and globals and compiles to plain integer LLVM IR
 (llvm.Run). The object and dynamic languages (Java with classes/records, Kotlin with
 when/string templates/properties, Go with structs/methods/multiple returns, Python with
-real INDENT/DEDENT significant indentation, JS and typed JS) compile to handle threaded
+real INDENT/DEDENT significant indentation, MetaJS and Typed MetaJS) compile to handle threaded
 IR on the MetaJS runtime (llvm.RunJS): objects, strings, lists and closures live behind
 i64 handles, methods dispatch through the shared class descriptor convention (js_mcall).
-Typed JS is exactly MetaJS plus one rule: a variable's type is pinned by its first
-non-undefined value (enforced by both engines; tjs-fail-test.txt demonstrates the abort).
+Typed MetaJS is exactly MetaJS plus one rule: a variable's type is pinned by its first
+non-undefined value (enforced by both engines; typed-metajs-fail-test.js demonstrates the abort).
 
 Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
-ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck.bnf as syntax only variant), the feature
+ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck-parser.bnf and tinyc-parser.bnf as syntax
+only variants), the feature
 demos (tlv-test, parser-script-test, include-test, parse-and-compile-from-js, llvm-ir-tests),
 and two grammars that deliberately fail to demonstrate the parser limits
 (smaller-match-first-test, infinite-loop).
 
 MetaJS is special: it is the restricted JavaScript subset that the annotation scripts of all
-grammars in tests/ are written in (see the description in js_interpreter.abnf for the exact
+grammars in tests/ are written in (see the description in metajs-interpreter.abnf for the exact
 language). That closes the loop for the frozen bootstrap below: every grammar above - all
 interpreters and compilers of all languages - also runs completely goja free with -frozen.
 
@@ -201,12 +203,12 @@ interpreters and compilers of all languages - also runs completely goja free wit
 Normally the annotation scripts run on goja (a JS engine in Go). The frozen mode replaces it:
 
 ```
-./mec -freeze tests/js-to-llvm-ir.abnf     # snapshot: abnf/jsagrammar.go + abnf/jsbootstrap.ll
-go build .                                 # embed the snapshot
-./mec -a tests/tinyc.abnf -b tests/tinyc-test-1.txt -q -frozen
+./mec -freeze tests/metajs-to-llvm-ir.abnf    # snapshot: abnf/jsagrammar.go + abnf/jsbootstrap.ll
+go build .                                    # embed the snapshot
+./mec -a tests/tinyc-to-llvm-ir.abnf -b tests/tinyc-test-1.txt -q -frozen
 ```
 
-`-freeze` runs js-to-llvm-ir.abnf once under goja and lets it compile its *own* tag scripts
+`-freeze` runs metajs-to-llvm-ir.abnf once under goja and lets it compile its *own* tag scripts
 (plus its emitter library) to one LLVM IR module, keyed by tag source text. With `-frozen`,
 the Go core then executes every annotation script goja free:
 
@@ -221,7 +223,7 @@ the Go core then executes every annotation script goja free:
 
 All grammars in tests/ pass their self checking runs with identical output in both modes;
 frozen mode is roughly an order of magnitude slower (threaded IR on an interpreter instead
-of a JS VM). goja is only needed to (re)create the snapshot after changing js-to-llvm-ir.abnf.
+of a JS VM). goja is only needed to (re)create the snapshot after changing metajs-to-llvm-ir.abnf.
 
 ### High level overview
 
@@ -575,7 +577,7 @@ Reads / replaces the whole target text.
 * __c.getSdx() int__ / __c.setSdx(sdx int)__  
 Reads / moves the current parse position.
 * __c.peek(offset int) int__  
-Returns the byte at the current parse position plus `offset`, or `-1` outside of the target text. Unlike `c.getSrc()` this does not copy the target text, so it is the cheap way to look ahead (see the keyword boundary check `KwEnd` in `tests/c.abnf` for a negative lookahead built with it).
+Returns the byte at the current parse position plus `offset`, or `-1` outside of the target text. Unlike `c.getSrc()` this does not copy the target text, so it is the cheap way to look ahead (see the keyword boundary check `KwEnd` in `tests/c99-parser.abnf` for a negative lookahead built with it).
 * __push(v object)__ / __pop() object__  
 A stack that survives between the `:script()` calls of one parse run.
 
@@ -721,7 +723,7 @@ The functions and constants are exposed to JS as:
   * __llvm.Run(m ir.Module, f string, input string) {Ret uint32, Out string}__  
   Like `llvm.Eval()`, but `input` is what `getchar()` reads (can be left out), `Out` is everything the program wrote via `putchar()`/`puts()`, and `Ret` is the return value. The interpreter supports the integer subset of LLVM IR that the compiler grammars generate: alloca/load/store, getelementptr into arrays, integer arithmetic and comparisons, zext/sext/trunc, select, phi, branches, calls, and the externals putchar, getchar, puts and abs.
   * __llvm.RunJS(m ir.Module, f string) {Ret uint32, Out string}__  
-  Executes a MetaJS module (IR emitted by `tests/js-to-llvm-ir.abnf`, where every value is an i64 handle and the `js_*` externals implement the JS semantics on the Go side). `f` is the module entry, normally `jsmain`; its handle result is converted to an int32 and returned as `Ret`.
+  Executes a MetaJS module (IR emitted by `tests/metajs-to-llvm-ir.abnf`, where every value is an i64 handle and the `js_*` externals implement the JS semantics on the Go side). `f` is the module entry, normally `jsmain`; its handle result is converted to an int32 and returned as `Ret`.
 
 ## Further Examples
 

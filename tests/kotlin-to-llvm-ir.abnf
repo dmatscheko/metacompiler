@@ -25,7 +25,7 @@ prepended), classes become descriptor objects, implicit property access goes thr
 js_kget/js_kset externals (locals first, then the properties of this), method calls
 dispatch through js_mcall. The whole program becomes jsmain(env, args).
 The entry point is fun main(); self checking programs end with exitProcess(failures).
-The same language with the same semantics is interpreted directly by kotlin_interpreter.abnf.") ;
+The same language with the same semantics is interpreted directly by kotlin-interpreter.abnf.") ;
 
 
 // --- main rules

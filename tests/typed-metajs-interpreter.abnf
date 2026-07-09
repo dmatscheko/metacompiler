@@ -1,7 +1,7 @@
-:title("Typed JS interpreter") ;
-:description("Parses typed JS and executes it directly, without generating code.
+:title("Typed MetaJS interpreter") ;
+:description("Parses Typed MetaJS and executes it directly, without generating code.
 
-Typed JS is exactly MetaJS (see js_interpreter.abnf) with one extra rule: every variable
+Typed MetaJS is exactly MetaJS (see metajs-interpreter.abnf) with one extra rule: every variable
 must be declared before use (MetaJS already enforces that), and a variable's type is
 pinned by the first non-undefined value it holds - later assignments must keep that type
 class (number, string, boolean, function or object; null counts as object, and arrays and
@@ -28,8 +28,8 @@ Expression thunks return the value, statement thunks return undefined or a signa
 (return/break/continue) that the enclosing statements route.
 
 The program must define main(); the exit code of the metacompiler run is what main()
-returns, so typed JS test programs are self checking: they return 0 on success.
-The same language is compiled to LLVM IR by tjs-to-llvm-ir.abnf.") ;
+returns, so Typed MetaJS test programs are self checking: they return 0 on success.
+The same language is compiled to LLVM IR by typed-metajs-to-llvm-ir.abnf.") ;
 
 
 // --- main rules
@@ -334,7 +334,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
                 var tc = typeClass(value)
                 if (tc != "") {
                     if (entry.t != "" && entry.t != tc) {
-                        fail("typed JS: variable '" + name + "' has type " + entry.t + " and cannot hold a " + tc)
+                        fail("Typed MetaJS: variable '" + name + "' has type " + entry.t + " and cannot hold a " + tc)
                     }
                     entry.t = tc
                 }
@@ -678,7 +678,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // this metacompiler run is what main() returned, so test programs are self checking.
     progT()
     if (!hasOwn(globalScope, "main") || typeof globalScope["main"].v != "function") {
-        fail("Typed JS programs need a main() function.")
+        fail("Typed MetaJS programs need a main() function.")
     }
     var ret = globalScope["main"].v()
     println("tjs interpreter: main() returned " + ret)

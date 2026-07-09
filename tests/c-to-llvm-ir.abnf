@@ -2,7 +2,7 @@
 :description("Compiles a C subset to an LLVM IR module and runs its main() with the built-in
 IR interpreter.
 
-The language is exactly the one of c_interpreter.abnf; see there for a description.
+The language is exactly the one of c-interpreter.abnf; see there for a description.
 Pointers compile to real addresses (alloca values), arrays to alloca [N x i32] plus
 getelementptr, globals to module globals. || and && short circuit through basic blocks,
 the ternary operator merges with a phi. int is 32 bit, / and % truncate towards zero,
@@ -14,7 +14,7 @@ statement thunks get the current block and return the block to continue in.
 
 The exit code of the metacompiler run is the value that main() returns, so C test
 programs are self checking: they return 0 on success.
-The same language with the same semantics is interpreted directly by c_interpreter.abnf.") ;
+The same language with the same semantics is interpreted directly by c-interpreter.abnf.") ;
 
 
 // --- main rules

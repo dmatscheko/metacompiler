@@ -14,7 +14,7 @@ import (
 // ----------------------------------------------------------------------------
 // MetaJS handle runtime (jsrt)
 //
-// The IR that js-to-llvm-ir.abnf emits works exclusively with i64 handles:
+// The IR that metajs-to-llvm-ir.abnf emits works exclusively with i64 handles:
 // every dynamic value of the compiled MetaJS program is an index into the
 // value table of this runtime, and every operation with real JS semantics is
 // a call to one of the js_* external functions below. The IR itself only
@@ -1694,7 +1694,7 @@ func (rt *jsrt) printArgs(args []interface{}) []interface{} {
 }
 
 // standardJSBindings are the host globals of a standalone MetaJS program (the
-// same set that js_interpreter.abnf exposes).
+// same set that metajs-interpreter.abnf exposes).
 func standardJSBindings() map[string]interface{} {
 	mathObj := newJSObject()
 	mathObj.set("imul", jsHostFunc("imul", func(rt *jsrt, this uint64, args []interface{}) interface{} {

@@ -2,7 +2,7 @@
 :description("Compiles a small Lisp (a Scheme like integer subset) to an LLVM IR module and runs
 it with the built-in IR interpreter.
 
-The language is exactly the one of lisp_interpreter.abnf; see there for a description.
+The language is exactly the one of lisp-interpreter.abnf; see there for a description.
 Every (define (f ...) ...) becomes an i32 function. All other top level forms become the
 body of main(), which returns the value of the last one; (define x e) becomes a global
 that is initialized at its position in that flow (a use before that reads 0, where the

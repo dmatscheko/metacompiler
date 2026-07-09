@@ -1,4 +1,4 @@
-:title("JS (MetaJS) interpreter") ;
+:title("MetaJS interpreter") ;
 :description("Parses MetaJS and executes it directly, without generating code.
 
 MetaJS is the restricted JavaScript subset that the annotation scripts of the grammars in
@@ -23,7 +23,7 @@ Expression thunks return the value, statement thunks return undefined or a signa
 
 The program must define main(); the exit code of the metacompiler run is what main()
 returns, so MetaJS test programs are self checking: they return 0 on success.
-The same language is compiled to LLVM IR by js-to-llvm-ir.abnf.") ;
+The same language is compiled to LLVM IR by metajs-to-llvm-ir.abnf.") ;
 
 
 // --- main rules

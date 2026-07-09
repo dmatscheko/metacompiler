@@ -25,7 +25,7 @@ class descriptor object; calls dispatch through the js_mcall external. A constru
 always exists (a default one is generated) and first applies the field initializers.
 The whole program becomes jsmain(env, args): it builds the class descriptors, then calls
 Main.main. Self checking programs end with System.exit(failures).
-The same language with the same semantics is interpreted directly by java_interpreter.abnf.") ;
+The same language with the same semantics is interpreted directly by java-interpreter.abnf.") ;
 
 
 // --- main rules
@@ -269,7 +269,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return out
     }
 
-    // ----- The emitter (the same scaffold as js-to-llvm-ir.abnf) -----
+    // ----- The emitter (the same scaffold as metajs-to-llvm-ir.abnf) -----
 
     var i64 = llvm.types.I64
     var m = llvm.ir.NewModule()

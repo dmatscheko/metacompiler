@@ -3,8 +3,9 @@
 returns the result, runs that module with the built-in IR interpreter, and checks the
 machine result against a direct JS evaluation of the same formula.
 
-In contrast to the interpreting calculators (calculator-1.abnf, calculator-2.abnf) this
-variant works on integers, like C: '/' is a signed integer division that truncates.
+In contrast to the interpreting calculators (calculator-interpreter-1.abnf and
+calculator-interpreter-2.abnf) this variant works on integers, like C: '/' is a signed
+integer division that truncates.
 Every tag therefore pushes a pair {gen, val}: 'gen' emits the LLVM instructions for the
 subformula into a basic block, 'val' is the reference value computed directly in JS.
 
