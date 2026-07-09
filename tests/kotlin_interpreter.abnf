@@ -1,0 +1,737 @@
+:title("Kotlin (subset) interpreter") ;
+:description("Parses a Kotlin subset and executes it directly, without generating code.
+
+The subset: top level functions with block or expression bodies (fun add(a: Int, b: Int)
+: Int = a + b), val/var declarations with type inference (annotations are parsed and
+ignored, val is not enforced), if/else as statement and as expression, when expressions
+with and without subject (arms are expressions, multiple comma separated match values,
+else required for a value), while, do-while, for over inclusive ranges (for (i in 1..n))
+and over lists, break/continue, classes with primary constructor properties
+(class Counter(val start: Int) { var value = start; fun next(): Int { ... } }) and
+implicit property access inside methods (value += step resolves against this), object
+creation without new (Counter(5)), string templates ('x=$x sum=${a+b}'), listOf() with
+.size, indexing, .add()/.get()/.contains(), the builtins println/print/abs/max/min and
+exitProcess. Int arithmetic is 32 bit and / truncates; + concatenates when one side is
+a String; == compares structurally for strings and by identity for objects.
+
+Not in the subset: inheritance, interfaces, generics, nullable types (? is parsed and
+ignored), lambdas, extension functions, named/default arguments, data class methods
+(the data modifier is parsed), init blocks, secondary constructors, and bare method
+calls (methods are called via this.m() or obj.m()).
+
+The entry point is fun main(); self checking programs end with exitProcess(failures).") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     = { FunDecl <~~ registerFun(pop()) ~~> | ClassDecl | TopProp } ;
+
+// A top level val/var: its declaration thunk runs right away (into the global scope).
+TopProp     <~~ var t = pop(); t() ~~>
+            = Decl ;
+
+FunDecl     <~~ push(makeFun(takeAll())) ~~>
+            = KwFun Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
+FunBody     = Block | "=" ExprBody ;
+ExprBody    <~~ push(makeExprBody(pop())) ~~>
+            = Expression ;
+
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Param { "," Param } ] ")" ;
+Param       = Id <~~ push(up.in) ~~> ":" Type ;
+
+// class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
+ClassDecl   <~~ buildClass(takeAll()) ~~>
+            = [ "data" KwEnd ] KwClass Id <~~ push(up.in) ~~> [ CtorParams ] [ "{" { Member } "}" ] ;
+CtorParams  <~~ push({cparams: takeAll()}) ~~>
+            = "(" [ CtorParam { "," CtorParam } ] ")" ;
+CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
+            = [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
+
+Member      = PropDecl | FunDecl <~~ push({method: pop()}) ~~> ;
+PropDecl    <~~ push(makeProp(takeAll())) ~~>
+            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+
+Type        = Id [ "?" ] [ "<" Type ">" ] ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   = Block | Decl | If | While | Do | For | Return | Break | Continue | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+Decl        <~~ push(makeDecl(takeAll())) ~~>
+            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
+
+// for (i in 1..n) and for (x in list); the range is tried first.
+For         = ForRange | ForList ;
+ForRange    <~~ push(makeForRange(pop(), pop(), pop(), pop())) ~~>
+            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ".." Expression ")" Statement ;
+ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
+            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] [ ";" ] ;
+
+Break       <~~ push(makeBreak()) ~~>    = KwBreak [ ";" ] ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue [ ";" ] ;
+
+Empty       <~~ push(function() {}) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression [ ";" ] ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = Assignment | CondLevel ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+CondLevel   = IfExpr | WhenExpr | OrExpr ;
+
+// if as an expression needs both arms.
+IfExpr      <~~ push(makeIfExpr(pop(), pop(), pop())) ~~>
+            = KwIf "(" Expression ")" Expression KwElse Expression ;
+
+// when { c1 -> e1; else -> e } and when (x) { 1, 2 -> e1; else -> e }.
+WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
+            = KwWhen [ "(" Expression <~~ push({subj: pop()}) ~~> ")" ] "{"
+              { WhenArm } [ KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ] "}" ;
+WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
+            = Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+              "->" Expression [ ";" ] ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Neg | Not | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// Counter(5) is a constructor call, this.m() and list.add() are method calls,
+// p.x is a property read, list[i] an indexed read.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | Template | IntLit | True | False | Null | Call | VarRef ;
+
+// f(a, b): a top level function, a builtin, or a class constructor.
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+// String templates: "x=$x sum=${a + b}".
+Template    <~~ push(makeTemplate(takeAll())) ~~>
+            = '"' :whitespace() { TplExpr | TplVar | TplChunk } '"' :whitespace(Whitespace) ;
+TplExpr     <~~ push({e: pop()}) ~~>
+            = "${" :whitespace(Whitespace) Expression "}" ;
+TplVar      = "$" TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
+TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+            = TplChar { TplChar } ;
+TplChar     = TplEsc | TplPlain ;
+TplEsc      = "\\" "\x20"..b"\x7e" ;
+TplPlain    = "\x20"..."\x21" | "\x23"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+IntLit      <~~ push(makeConst(parseInt(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+
+True        <~~ push(makeConst(true)) ~~>  = "true" KwEnd ;
+False       <~~ push(makeConst(false)) ~~> = "false" KwEnd ;
+Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+KwFun       = "fun" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwWhen      = "when" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+    function popName() {
+        var items = takeAll()
+        var name = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
+            else { push(items[i]) }
+        }
+        return name
+    }
+
+    function fail(msg) {
+        println("kotlin interpreter error: " + msg)
+        exit(1)
+    }
+
+    function hexAt(s, pos, len) {
+        var v = 0
+        for (var i = 0; i < len; i++) {
+            var c = s.charCodeAt(pos + i)
+            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
+            v = v * 16 + d
+        }
+        return v
+    }
+    function unescapeJs(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out += String.fromCharCode(c); i++; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
+            out += String.fromCharCode(e)
+            i += 2
+        }
+        return out
+    }
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+    function concat2impl(a, b) {
+        var out = []
+        var i
+        for (i = 0; i < a.length; i++) out.push(a[i])
+        for (i = 0; i < b.length; i++) out.push(b[i])
+        return out
+    }
+
+    // ----- Scopes with implicit property fallback (Kotlin style) -----
+    var globalScope = {}
+    var scopes = [globalScope]
+    function declVar(name, value) { scopes[scopes.length - 1][name] = value }
+    function findThis() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "this")) return scopes[i]["this"]
+        }
+        return undefined
+    }
+    function getVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
+        }
+        var self = findThis()
+        if (self != undefined && hasOwn(self, name)) return self[name]
+        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
+        fail("unknown name: " + name)
+    }
+    function setVar(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        var self = findThis()
+        if (self != undefined && hasOwn(self, name)) { self[name] = value; return }
+        fail("assignment to unknown name: " + name)
+    }
+
+    var hostGlobals = {}
+    hostGlobals["println"] = function(x) { println(kstr(x)) }
+    hostGlobals["print"] = function(x) { print(kstr(x)) }
+    hostGlobals["exitProcess"] = function(code) { exit(code | 0) }
+    hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
+    hostGlobals["max"] = function(a, b) { return a > b ? a : b }
+    hostGlobals["min"] = function(a, b) { return a < b ? a : b }
+    hostGlobals["listOf"] = function() {
+        var out = []
+        for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
+        return out
+    }
+    hostGlobals["mutableListOf"] = hostGlobals["listOf"]
+
+    function kstr(v) {
+        if (v === undefined) return "kotlin.Unit"
+        if (v === null) return "null"
+        return "" + v
+    }
+
+    function mcall(target, name, args) {
+        if (typeof target == "string") {
+            if (name == "length") return target.length
+            fail("unknown String method: " + name)
+        }
+        if (target === undefined || target === null) fail("method call ." + name + "() on null")
+        if (Array.isArray(target)) {
+            if (name == "add") { target.push(args[0]); return true }
+            if (name == "size") return target.length
+            if (name == "get") return target[args[0]]
+            if (name == "contains") return target.indexOf(args[0]) >= 0
+            fail("unknown list method: " + name)
+        }
+        if (target.__class != undefined) {
+            var m = target.__class[name]
+            if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        fail("unknown method '" + name + "'")
+    }
+
+    var BRK = {sig: "break"}
+    var CONT = {sig: "continue"}
+
+    // ----- Expression thunks -----
+
+    function makeConst(v) { return function() { return v } }
+    function makeVarRef(name) { return function() { return getVar(name) } }
+    function makeNeg(t) { return function() { return (0 - t()) | 0 } }
+    function makeNot(t) { return function() { return !t() } }
+
+    function kadd(l, r) {
+        if (typeof l == "string" || typeof r == "string") return kstr2(l) + kstr2(r)
+        return (l + r) | 0
+    }
+    function kstr2(v) {
+        if (typeof v == "string") return v
+        return kstr(v)
+    }
+    function binOp(op, l, r) {
+        if (op == "+") return kadd(l, r)
+        if (op == "-") return (l - r) | 0
+        if (op == "*") return (l * r) | 0
+        if (op == "/") return (l / r) | 0
+        if (op == "%") return (l % r) | 0
+        if (op == "==") return l === r
+        if (op == "!=") return l !== r
+        if (op == "<")  return l < r
+        if (op == ">")  return l > r
+        if (op == "<=") return l <= r
+        if (op == ">=") return l >= r
+    }
+    function foldBinary(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
+            return v
+        }
+    }
+    function makeOrAnd(items, isOr) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (isOr) { if (v) return true }
+                else      { if (!v) return false }
+                v = items[i]()
+            }
+            return v ? true : false
+        }
+    }
+    function makeIfExpr(elseT, thenT, condT) {
+        return function() { return condT() ? thenT() : elseT() }
+    }
+    // items = [{subj}?] [{vals, body}...] [{els}?]
+    function makeWhenArm(items) {
+        var body = items.pop()
+        var vals = []
+        for (var i = 0; i < items.length; i++) vals.push(items[i].v)
+        return {vals: vals, body: body}
+    }
+    function makeWhen(items) {
+        var subj = null
+        var els = null
+        var arms = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].subj != undefined) subj = items[i].subj
+            else if (items[i].els != undefined) els = items[i].els
+            else arms.push(items[i])
+        }
+        return function() {
+            var s = subj != null ? subj() : undefined
+            for (var a = 0; a < arms.length; a++) {
+                for (var v = 0; v < arms[a].vals.length; v++) {
+                    var val = arms[a].vals[v]()
+                    if (subj != null ? val === s : val) return arms[a].body()
+                }
+            }
+            if (els != null) return els()
+            return undefined
+        }
+    }
+
+    function foldCallMember(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    cur = mcall(cur, s.name, argv)
+                } else if (s.kind == "field") {
+                    if (cur === undefined || cur === null) fail("property ." + s.name + " of null")
+                    if (s.name == "size" && Array.isArray(cur)) { cur = cur.length }
+                    else if (s.name == "length" && typeof cur == "string") { cur = cur.length }
+                    else { cur = cur[s.name] }
+                } else {
+                    cur = cur[s.idx()]
+                }
+            }
+            return cur
+        }
+    }
+
+    // f(args): a global function, a builtin, or a class constructor.
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) argv.push(args[i]())
+            var f = getVar(name)
+            if (f != undefined && f.__isclass) {
+                var obj = {__class: f}
+                f.__ctor.apply(undefined, concat2impl([obj], argv))
+                return obj
+            }
+            if (typeof f != "function") fail("call of a non function: " + name)
+            return f.apply(undefined, argv)
+        }
+    }
+
+    function makeTargetRef(items) {
+        return {name: items[0], path: items.slice(1)}
+    }
+    function resolveRef(ref) {
+        var o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            o = (s.key != undefined) ? o[s.key] : o[s.idx()]
+            if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
+        }
+        var last = ref.path[ref.path.length - 1]
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+    }
+    function applyOp(op, a, b) {
+        if (op == "+=") return kadd(a, b)
+        if (op == "-=") return (a - b) | 0
+        if (op == "*=") return (a * b) | 0
+        if (op == "/=") return (a / b) | 0
+        if (op == "%=") return (a % b) | 0
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                setVar(ref.name, v)
+            } else {
+                var p = resolveRef(ref)
+                if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                p.obj[p.key] = v
+            }
+            return v
+        }
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var d = (items[1] == "++") ? 1 : -1
+        return function() {
+            if (ref.path.length == 0) {
+                var n = getVar(ref.name)
+                setVar(ref.name, (n + d) | 0)
+                return n
+            }
+            var p = resolveRef(ref)
+            var mv = p.obj[p.key]
+            p.obj[p.key] = (mv + d) | 0
+            return mv
+        }
+    }
+
+    // items = [{s: "chunk"} | {e: thunk}...] -> concatenation thunk.
+    function makeTemplate(items) {
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].s != undefined) out += items[i].s
+                else out += kstr2(items[i].e())
+            }
+            return out
+        }
+    }
+
+    // ----- Statement thunks -----
+
+    function exprToStmt(t) { return function() { t() } }
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items[1]
+        return function() { declVar(name, init()) }
+    }
+    function makeSeq(items) {
+        return function() {
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i]()
+                if (r != undefined) return r
+            }
+        }
+    }
+    function makeBlockStmt(items) {
+        var seq = makeSeq(items)
+        return function() {
+            scopes.push({})
+            var r = seq()
+            scopes.pop()
+            return r
+        }
+    }
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function() {
+            if (cond()) return thenT()
+            if (elseT != null) return elseT()
+        }
+    }
+    function makeWhile(bodyT, condT) {
+        return function() {
+            while (condT()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            }
+        }
+    }
+    function makeDo(condT, bodyT) {
+        return function() {
+            do {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            } while (condT())
+        }
+    }
+    // Pops reversed: body, to, from, name.
+    function makeForRange(bodyT, toT, fromT, name) {
+        return function() {
+            var to = 0
+            var res = undefined
+            scopes.push({})
+            declVar(name, 0)
+            var from = fromT()
+            to = toT()
+            for (var i = from; i <= to; i++) {
+                setVar(name, i)
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeForList(bodyT, listT, name) {
+        return function() {
+            var arr = listT()
+            var res = undefined
+            scopes.push({})
+            declVar(name, undefined)
+            for (var i = 0; i < arr.length; i++) {
+                setVar(name, arr[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { return {isRet: true, v: t()} }
+    }
+    function makeBreak() { return function() { return BRK } }
+    function makeContinue() { return function() { return CONT } }
+    function makeExprBody(t) {
+        return function() { return {isRet: true, v: t()} }
+    }
+
+    // ----- Functions and classes -----
+
+    function invokeBody(params, body, self, args) {
+        var saved = scopes
+        scopes = [globalScope, {}]
+        if (self != undefined) declVar("this", self)
+        for (var i = 0; i < params.length; i++) {
+            declVar(params[i], i < args.length ? args[i] : undefined)
+        }
+        var r = body()
+        scopes = saved
+        return (r != undefined && r.isRet) ? r.v : undefined
+    }
+
+    function makeFun(items) {
+        return {name: items[0], params: items[1].params, body: items[2]}
+    }
+    function registerFun(f) {
+        globalScope[f.name] = makeFunClosure(f)
+    }
+    function makeFunClosure(f) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(f.params, f.body, undefined, args)
+        }
+    }
+    function makeMethodClosure(f) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(f.params, f.body, self, args)
+        }
+    }
+    function makeCtorParam(items) {
+        if (items.length > 1) return {name: items[1], prop: true}
+        return {name: items[0], prop: false}
+    }
+    function makeProp(items) {
+        return {prop: items[0], init: items[1]}
+    }
+
+    // items = [name, {cparams}?, members...]
+    function buildClass(items) {
+        var name = items[0]
+        var i = 1
+        var cparams = []
+        if (items.length > 1 && items[1] != undefined && items[1].cparams != undefined) {
+            cparams = items[1].cparams
+            i = 2
+        }
+        var props = []
+        var methods = []
+        for (; i < items.length; i++) {
+            if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
+            if (items[i].method != undefined) methods.push(items[i].method)
+        }
+        var cls = {__isclass: true, __name: name}
+        // The constructor: bind the primary constructor parameters, store the
+        // property parameters on the instance, then run the property initializers
+        // (they see the constructor parameters).
+        cls.__ctor = function() {
+            var self = arguments[0]
+            var saved = scopes
+            scopes = [globalScope, {}]
+            declVar("this", self)
+            for (var k = 0; k < cparams.length; k++) {
+                var v = (k + 1 < arguments.length) ? arguments[k + 1] : undefined
+                declVar(cparams[k].name, v)
+                if (cparams[k].prop) self[cparams[k].name] = v
+            }
+            for (var p = 0; p < props.length; p++) {
+                self[props[p].prop] = props[p].init()
+            }
+            scopes = saved
+        }
+        for (var m2 = 0; m2 < methods.length; m2++) {
+            cls[methods[m2].name] = makeMethodClosure(methods[m2])
+        }
+        globalScope[name] = cls
+    }
+
+    c.compile(c.asg)
+
+    if (typeof globalScope["main"] != "function") {
+        fail("Kotlin programs need a top level main() function.")
+    }
+    var ret = globalScope["main"]()
+    println("kotlin interpreter: main() returned " + (ret === undefined ? 0 : ret))
+    exit(ret === undefined ? 0 : ret | 0)
+
+~~) ;
