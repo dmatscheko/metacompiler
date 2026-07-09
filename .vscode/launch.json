@@ -191,6 +191,12 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-parser.bnf", "-b", "tests/brainfuck-test-1.txt", "-q"]
         },
         {
+            "name": "TinyC parser (syntax only)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc-parser.bnf", "-b", "tests/tinyc-test-1.txt", "-q"]
+        },
+        {
             "name": "C99 parser",
             "type": "go",
             "request": "launch",

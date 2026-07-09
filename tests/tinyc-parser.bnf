@@ -1,4 +1,12 @@
-:title("Tiny C-ish language") ;
+:title("TinyC (syntax only)") ;
+:description("A pure EBNF for TinyC, without annotations: It only checks the syntax and
+produces no output. The semantics live in tinyc-interpreter.abnf and tinyc-to-llvm-ir.abnf;
+see there for a description of the language.
+
+One simplification against the annotated grammars: keywords are plain tokens without the
+KwEnd boundary check (that needs a :script() annotation). An identifier that merely starts
+with a keyword ('iffy', 'format') is therefore first tried as that keyword, but the wrong
+branch fails locally and the identifier branch still accepts it.") ;
 
 
 :startRule(Program) ;
@@ -6,40 +14,52 @@
 
 Program     = { Function } ;
 
-Function    = "func" Id ParenParams Statement ;
+Function    = "func" Id Parameter Statement ;
 
-ParenParams = "(" [ Declaration { "," Declaration } ] ")" ;
+Parameter   = "(" [ ParamDecl { "," ParamDecl } ] ")" ;
+ParamDecl   = "int" Id ;
 
-Statement   = IfElse | If | For | While | Do | Return | Block | SingleStmt | ZeroStmt ;
+Statement   = Block | If | While | Do | For | Return | Declaration | Empty | ExprStmt ;
 
-IfElse      = "if" ParenExpr Statement "else" Statement ;
-If          = "if" ParenExpr Statement ;
-For         = "for" ParenExpr Statement ;
-While       = "while" ParenExpr Statement ;
-Do          = "do" Statement "while" ParenExpr ";" ;
-Return      = "return" [ ResultExpr ] ";" ;
 Block       = "{" { Statement } "}" ;
-SingleStmt  = Expression ";" ;
-ZeroStmt    = ";" ;
+If          = "if" "(" Expression ")" Statement [ "else" Statement ] ;
+While       = "while" "(" Expression ")" Statement ;
+Do          = "do" Statement "while" "(" Expression ")" ";" ;
+For         = "for" "(" [ ForInit ] ";" [ Expression ] ";" [ ForPost ] ")" Statement ;
+ForInit     = Declaration1 | Assignment ;
+ForPost     = Assignment | Expression ;
+Return      = "return" [ Expression ] ";" ;
 
-ParenExpr   =  "(" Expression { ";" Expression } ")" ;
+Declaration = Declaration1 ";" ;
+Declaration1 = "int" InitDecl { "," InitDecl } ;
+InitDecl    = Id [ "=" Expression ] ;
 
-Expression  = VoidExpr | ResultExpr ;
-VoidExpr    = Declaration | Assignment ;
-ResultExpr  = Test ;
+Empty       = ";" ;
+ExprStmt    = ( Assignment | Expression ) ";" ;
 
-Declaration = "int" ( Assignment | Id ) ;
+// Assignment is a statement (and a for clause), not a nested expression.
+Assignment  = Id "=" Expression ;
 
-Assignment  = Id "=" ResultExpr ;
+Expression  = OrExpr ;
+OrExpr      = AndExpr { "||" AndExpr } ;
+AndExpr     = CmpExpr { "&&" CmpExpr } ;
+// Two-char operators before their one-char prefixes: the parser keeps the first match.
+CmpExpr     = Sum [ ( "<=" | ">=" | "==" | "!=" | "<" | ">" ) Sum ] ;
+Sum         = Term { ( "+" | "-" ) Term } ;
+Term        = Unary { ( "*" | "/" | "%" ) Unary } ;
+Unary       = "-" Unary | Primary ;
+Primary     = "(" Expression ")" | Call | IncDec | VarRef | Int ;
+Call        = Id "(" [ Expression { "," Expression } ] ")" ;
+IncDec      = Id ( "++" | "--" ) ;
+VarRef      = Id ;
 
-Test        = Comp ( "||" | "&&" ) Comp | Comp ;
-Comp        = Sum ( "<" | ">" | "==" | "!=" ) Sum | Sum ;
-Sum         = Term "+" Term | Term "-" Term | Id "++" | Id "--" | Term ;
-Term        = ParenExpr | Call | Id | Int ;
+Int         = ( "0" | "1"..."9" :whitespace() { "0"..."9" } ) :whitespace(Whitespace) ;
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
 
-Call        = Id "(" [ ResultExpr { "," ResultExpr } ] ")" ;
-
-Id          = ( "a"..."z" | "A"..."Z" ) :whitespace() { "a"..."z" | "A"..."Z" | "_" } :whitespace(Whitespace) ;
-Int         = "0" | "1"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
-
-Whitespace  = @+" \t\r\n" ;
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
