@@ -7,8 +7,9 @@ dereferencing (*p, also as assignment target), pointer arithmetic (p + i steps w
 ints), pre and post ++/--, assignment as an expression with = += -= *= /= %=, the
 ternary operator, || and && with real C short circuit evaluation, the bitwise operators
 | ^ & << >> and unary - ! ~, char literals ('A', '\n'), comparisons, function calls and
-recursion, and putchar()/getchar(). int is 32 bit, / and % truncate towards zero.
-Not in the subset: structs, typedef, switch, sizeof, strings, casts, and multi level
+recursion, switch with real C fallthrough (stacked case labels, default, break), and
+putchar()/getchar(). int is 32 bit, / and % truncate towards zero.
+Not in the subset: structs, typedef, sizeof, strings, casts, and multi level
 pointers (int**).
 
 The interpreter uses one flat, word addressed memory array: every variable lives at an
@@ -55,7 +56,7 @@ ArraySize   <~~ push({size: pop()}) ~~>
             = "[" Number "]" ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | While | Do | For | Return | Break | Continue | Decl | Empty | ExprStmt ;
+Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue | Decl | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -82,6 +83,16 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 
 Break       <~~ push(makeBreak()) ~~>   = KwBreak ";" ;
 Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+
+// C switch with fallthrough: execution starts at the first matching case (or default)
+// and runs until a break or the end of the switch. Labels may stack (case 1: case 2:).
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
+SwitchCase  = Case | Default ;
+Case        <~~ push(makeCase(takeAll())) ~~>
+            = KwCase CondExpr ":" { Statement } ;
+Default     <~~ push(makeDefault(takeAll())) ~~>
+            = KwDefault ":" { Statement } ;
 
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeSeq(takeAll())) ~~>
@@ -197,6 +208,9 @@ KwFor       = "for" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -509,6 +523,34 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             }
             scopes.pop()
             return res
+        }
+    }
+    // items = [valueThunk, stmtThunk...] resp. [stmtThunk...] -> one case descriptor.
+    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
+    function makeDefault(items) { return {isDefault: true, body: items} }
+    // items = [scrutineeThunk, caseDescriptor...]: C switch with fallthrough.
+    function makeSwitch(items) {
+        var scrut = items[0]
+        var cases = items.slice(1)
+        return function() {
+            var v = scrut()
+            var start = -1
+            var dflt = -1
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { dflt = i; continue }
+                if (start < 0 && cases[i].v() == v) { start = i }
+            }
+            if (start < 0) { start = dflt }
+            if (start < 0) { return undefined }
+            for (var i = start; i < cases.length; i++) {
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) {
+                    var r = body[j]()
+                    if (r === BRK) { return undefined }        // break leaves the switch
+                    if (r != undefined) { return r }           // return/continue propagate
+                }
+            }
+            return undefined
         }
     }
     function makeReturn(items) {

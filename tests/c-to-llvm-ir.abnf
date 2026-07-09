@@ -48,7 +48,7 @@ ArraySize   <~~ push({size: pop()}) ~~>
             = "[" Number "]" ;
 
 // Every statement production pushes exactly one thunk: function(block) -> nextBlock.
-Statement   = Block | If | While | Do | For | Return | Break | Continue | Decl | Empty | ExprStmt ;
+Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue | Decl | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -75,6 +75,16 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 
 Break       <~~ push(makeBreak()) ~~>   = KwBreak ";" ;
 Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+
+// C switch with fallthrough: execution starts at the first matching case (or default)
+// and runs until a break or the end of the switch. Labels may stack (case 1: case 2:).
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
+SwitchCase  = Case | Default ;
+Case        <~~ push(makeCase(takeAll())) ~~>
+            = KwCase CondExpr ":" { Statement } ;
+Default     <~~ push(makeDefault(takeAll())) ~~>
+            = KwDefault ":" { Statement } ;
 
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeSeq(takeAll())) ~~>
@@ -186,6 +196,9 @@ KwFor       = "for" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -599,6 +612,48 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             if (post != null) pb = post(postB)
             pb.NewBr(headB)
             scopes.pop()
+            return exitB
+        }
+    }
+    // items = [valueThunk, stmtThunk...] resp. [stmtThunk...] -> one case descriptor.
+    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
+    function makeDefault(items) { return {isDefault: true, body: items} }
+    // items = [scrutineeThunk, caseDescriptor...]: C switch with fallthrough. The
+    // dispatch compares the value against every case in source order; the bodies form
+    // one block chain (fallthrough), and break jumps behind the switch (loop stack).
+    function makeSwitch(items) {
+        var scrut = items[0]
+        var cases = items.slice(1)
+        return function(b) {
+            var r = scrut(b)
+            b = r.b
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDefault) { dfltB = bodyBs[i] }
+            }
+            // The dispatch chain, in source order.
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { continue }
+                var rc = cases[i].v(b)
+                b = rc.b
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, r.v, rc.v), bodyBs[i], nextB)
+                b = nextB
+            }
+            b.NewBr(dfltB)
+            // The bodies fall through into each other; only break leaves early.
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var i = 0; i < cases.length; i++) {
+                var bb = bodyBs[i]
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                bb.NewBr(i + 1 < cases.length ? bodyBs[i + 1] : exitB)
+            }
+            loopStack.pop()
             return exitB
         }
     }

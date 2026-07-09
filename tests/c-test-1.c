@@ -47,6 +47,27 @@ int bump(void) {                       // works on a global
     return global_counter;
 }
 
+int classify(int x) {                  /* switch with fallthrough and default */
+    int r = 0;
+    switch (x) {
+    case 0:
+        r = 100;
+        break;
+    case 1:                            /* stacked labels */
+    case 2:
+        r = 12;
+        break;
+    case 3:
+        r = 3;                         /* falls through into case 4 */
+    case 4:
+        r += 40;
+        break;
+    default:
+        r = -1;
+    }
+    return r;
+}
+
 int count_primes(int limit) {          // nested loops, break/continue, arrays
     int found = 0;
     int n;
@@ -155,6 +176,14 @@ int main() {
     check(p[2], 9);
     *(p + 3) = 7;
     check(arr[4], 7);
+
+    // switch
+    check(classify(0), 100);
+    check(classify(1), 12);
+    check(classify(2), 12);
+    check(classify(3), 43);
+    check(classify(4), 40);
+    check(classify(9), -1);
 
     // globals and a bigger computation
     check(count_primes(30), 10);
