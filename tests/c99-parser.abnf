@@ -1,4 +1,4 @@
-:title("C99") ;
+:title("C99 parser") ;
 :description("A full annotated EBNF for the C programming language (ISO/IEC 9899:1999, Annex A).
 
 The phrase and lexical grammar follow the standard, transformed for this parser:

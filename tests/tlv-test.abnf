@@ -1,4 +1,8 @@
 :title("TLV Test") ;
+:description("Demonstrates binary parsing with the :number() command used as a repeat
+count: the first byte is printed as it is, every TLVEntry then reads one length byte and
+consumes that many payload bytes (a minimal type-length-value format), and the rest is
+printed in one piece. Run with tlv-test.txt and -vv to watch the parser work.") ;
 
 
 :startRule(TLV) ;

@@ -1,4 +1,7 @@
 :title("EBNF of EBNF") ;
+:description("The plain EBNF rule syntax, described in itself: this grammar parses its own
+source (see the launch config), covering tokens, alternatives, sequences, groups, options,
+repetitions, ranges, times and commands - everything of the ABNF format except tags.") ;
 :startRule(EBNF) ;
 
 

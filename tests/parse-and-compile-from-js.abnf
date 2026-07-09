@@ -1,4 +1,8 @@
 :title("Parse and compile from JS") ;
+:description("A commented walkthrough that builds a complete compiler at run time, purely
+from the script side: it parses an ABNF given as a JS string with c.ABNFagrammar, compiles
+the resulting ASG into a new a-grammar, and uses that new grammar to parse and compile a
+target text. Run without -b; every step prints what it produces.") ;
 
 
 :startScript(~~

@@ -1,4 +1,9 @@
 :title("Include test") ;
+:description("Demonstrates the file operations: the :include() command merges the rules of
+include-test-lib.abnf into this grammar before parsing, and the start script uses
+include() to run a JS file, load() to read a file, store() to write one
+(include-test-create.out) and moduleName(). All paths are relative to this grammar
+file.") ;
 
 // This includes the rule that can resolve include-test.txt:
 :include("include-test-lib.abnf") ;

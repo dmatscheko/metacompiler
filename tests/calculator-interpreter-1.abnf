@@ -1,4 +1,11 @@
-:title("Tiny calculator") ;
+:title("Calculator interpreter (global stack)") ;
+:description("Parses a formula with + - * / and brackets and evaluates it during the
+compile walk: the tag behind every operator pops the operand values from the global stack
+(pushg/popg), computes, and pushes the result back, so after c.compile() the final value
+is the only entry left on that stack. Numbers may use a dot or a comma as decimal
+separator. This is the smallest example of the tag data flow; the same calculator built
+on the local stacks is calculator-interpreter-2.abnf, and a compiling variant is
+calculator-to-llvm-ir.abnf.") ;
 
 
 :startRule(Expression) ;

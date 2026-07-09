@@ -1,4 +1,8 @@
 :title("Infinite Loop") ; // Note: This ABNF SHOULD throw an error!
+:description("This grammar SHOULD fail: TestA is left recursive, so the parser would call
+it again and again at the same position. Run it with -lb (see the launch config), which
+blocks the second execution of a rule at the same position - the parse then fails with an
+error instead of looping forever.") ;
 
 
 :startRule(TestA) ;

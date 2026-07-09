@@ -1,4 +1,7 @@
 :title("EBNF of ABNF") ;
+:description("A pure EBNF (no annotations) for the annotated ABNF format: running it over
+abnf-of-abnf.abnf is a syntax check of the grammar of grammars. Compare with
+abnf-of-abnf.abnf itself, which adds the tags that actually build the a-grammar.") ;
 :startRule(ABNF) ;
 
 

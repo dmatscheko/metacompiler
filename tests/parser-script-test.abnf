@@ -1,4 +1,9 @@
 :title("Parser script Test") ;
+:description("Demonstrates the inline :script() command, which runs JS while the parser is
+working: it reads the parse position (c.getSdx), moves it (c.setSdx), and returns a
+dynamically built rule that the parser then applies in place of a static one. Run with
+tlv-test.txt as input (anything longer than 50 bytes works); the tags print what the
+surrounding rules captured.") ;
 
 // TODO: Create ABNF-constants so things like abnf.numberType.LittleEndian can be used in ABNF (not only inside the JS context).
 

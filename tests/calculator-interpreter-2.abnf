@@ -1,8 +1,8 @@
-:title("Other Tiny calculator") ;
-:description("Like calculator-1.abnf, but built on the local stacks (push/pop) instead of the
-global one (pushg/popg): The tag of a group sees the merged pushes of everything inside
-the group, so the whole chain 'Term op Term op Term ...' can be collected and folded
-left to right in one place.") ;
+:title("Calculator interpreter (local stacks)") ;
+:description("Like calculator-interpreter-1.abnf, but built on the local stacks
+(push/pop) instead of the global one (pushg/popg): The tag of a group sees the merged
+pushes of everything inside the group, so the whole chain 'Term op Term op Term ...'
+can be collected and folded left to right in one place.") ;
 
 
 :startRule(Expression) ;
