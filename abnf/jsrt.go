@@ -82,6 +82,10 @@ type jsClosure struct {
 type jsScope struct {
 	vars   map[string]interface{}
 	parent *jsScope
+
+	// types is only used by the typed JS dialect (js_tdecl/js_tset): it pins
+	// the type class of a variable at its first non-undefined value.
+	types map[string]string
 }
 
 // hostFunc is a builtin implemented directly on handles (no reflection).
@@ -636,6 +640,52 @@ func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
 	rt.fail("assignment to undeclared variable: %s", name)
 }
 
+// typeClass returns the fixed type class of a value for the typed JS dialect.
+// undefined returns "" (it never pins a type); null counts as object.
+func (rt *jsrt) typeClass(v interface{}) string {
+	if _, u := v.(jsUndefT); u {
+		return ""
+	}
+	if _, n := v.(jsNullT); n {
+		return "object"
+	}
+	return rt.typeOf(v)
+}
+
+// typedDecl declares a variable and pins its type if the value already has one.
+func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
+	sc.vars[name] = v
+	if sc.types == nil {
+		sc.types = map[string]string{}
+	}
+	if tc := rt.typeClass(v); tc != "" {
+		sc.types[name] = tc
+	} else {
+		delete(sc.types, name) // A redeclaration starts untyped again.
+	}
+}
+
+// typedSet assigns like scopeSet but refuses to change a pinned type.
+// Assigning undefined is allowed and keeps the pinned type.
+func (rt *jsrt) typedSet(sc *jsScope, name string, v interface{}) {
+	for s := sc; s != nil; s = s.parent {
+		if _, ok := s.vars[name]; ok {
+			if tc := rt.typeClass(v); tc != "" {
+				if old, pinned := s.types[name]; pinned && old != tc {
+					rt.fail("typed JS: variable '%s' has type %s and cannot hold a %s", name, old, tc)
+				}
+				if s.types == nil {
+					s.types = map[string]string{}
+				}
+				s.types[name] = tc
+			}
+			s.vars[name] = v
+			return
+		}
+	}
+	rt.fail("assignment to undeclared variable: %s", name)
+}
+
 // ----------------------------------------------------------------------------
 // Property access (including the Go bridge)
 
@@ -988,6 +1038,125 @@ func (rt *jsrt) convertToType(v interface{}, t reflect.Type) reflect.Value {
 	return reflect.Value{}
 }
 
+// pyString renders a value like Python's str(): True/False/None capitalized,
+// lists in bracket notation.
+func (rt *jsrt) pyString(v interface{}) string {
+	switch t := v.(type) {
+	case jsUndefT, jsNullT:
+		return "None"
+	case bool:
+		if t {
+			return "True"
+		}
+		return "False"
+	case *jsArray:
+		out := "["
+		for i, e := range t.elems {
+			if i > 0 {
+				out += ", "
+			}
+			if s, isStr := e.(string); isStr {
+				out += "'" + s + "'"
+			} else {
+				out += rt.pyString(e)
+			}
+		}
+		return out + "]"
+	default:
+		return rt.toString(v)
+	}
+}
+
+// javaString renders a value for Java style string concatenation:
+// null/undefined print as "null", everything else like toString.
+func (rt *jsrt) javaString(v interface{}) string {
+	if isUndefOrNull(v) {
+		return "null"
+	}
+	return rt.toString(v)
+}
+
+// memberCall implements the method call convention that the class based
+// language subsets (Java, Kotlin, Go) share: instances are objects with a
+// "__class" property pointing to their class descriptor object, whose
+// properties hold the method closures (called with the instance prepended to
+// the arguments). Objects without __class (class descriptors with static
+// methods, plain objects with function properties) call the property directly.
+// Strings get the Java style builtins.
+func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) interface{} {
+	switch o := target.(type) {
+	case string:
+		switch name {
+		case "length":
+			return float64(len(o))
+		case "charAt":
+			i := int(rt.toNumber(argAt(args, 0)))
+			if i < 0 || i >= len(o) {
+				rt.fail("charAt(%d) out of range for %q", i, o)
+			}
+			return string(o[i])
+		case "equals":
+			return rt.strictEq(o, argAt(args, 0))
+		case "substring":
+			begin, end := sliceRange(len(o), args, rt)
+			return o[begin:end]
+		case "indexOf":
+			return float64(strings.Index(o, rt.toString(argAt(args, 0))))
+		case "isEmpty":
+			return len(o) == 0
+		}
+		rt.fail("unknown String method: %s", name)
+	case *jsObject:
+		if cls, ok := o.props["__class"]; ok {
+			if clsObj, ok := cls.(*jsObject); ok {
+				if m, ok := clsObj.props[name]; ok && isCallable(m) {
+					return rt.call(m, jsUndef, append([]interface{}{target}, args...))
+				}
+			}
+			rt.fail("unknown method '%s' on an instance", name)
+		}
+		if m, ok := o.props[name]; ok && isCallable(m) {
+			return rt.call(m, jsUndef, args)
+		}
+		rt.fail("unknown method '%s'", name)
+	case *jsArray:
+		// Kotlin and Python style list methods.
+		switch name {
+		case "add":
+			o.elems = append(o.elems, argAt(args, 0))
+			return true
+		case "append": // Python: returns None.
+			o.elems = append(o.elems, argAt(args, 0))
+			return jsUndef
+		case "pop": // Python: removes and returns the last element.
+			if len(o.elems) == 0 {
+				rt.fail("pop from empty list")
+			}
+			v := o.elems[len(o.elems)-1]
+			o.elems = o.elems[:len(o.elems)-1]
+			return v
+		case "size":
+			return float64(len(o.elems))
+		case "get":
+			i := int(rt.toNumber(argAt(args, 0)))
+			if i < 0 || i >= len(o.elems) {
+				rt.fail("list index %d out of range", i)
+			}
+			return o.elems[i]
+		case "contains":
+			for _, e := range o.elems {
+				if rt.strictEq(e, argAt(args, 0)) {
+					return true
+				}
+			}
+			return false
+		}
+		rt.fail("unknown list method '%s'", name)
+	}
+	rt.fail("method call '%s' on a %s", name, rt.typeOf(target))
+	return nil
+}
+
 // builtinMethod implements the string and array methods of the subset, plus
 // apply/call on function values.
 func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
@@ -1203,6 +1372,64 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 
+		// Scope access with 'this' fallback (Kotlin style implicit property access):
+		// a name that is no local resolves against the properties of 'this'.
+		"js_kget": func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			for s := sc; s != nil; s = s.parent {
+				if v, ok := s.vars[name]; ok {
+					return w(v)
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if t, ok := s.vars["this"]; ok {
+					if obj, isObj := t.(*jsObject); isObj {
+						if v, ok := obj.props[name]; ok {
+							return w(v)
+						}
+					}
+					break
+				}
+			}
+			rt.fail("unknown name: %s", name)
+			return 0
+		},
+		"js_kset": func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			v := u(a[2])
+			for s := sc; s != nil; s = s.parent {
+				if _, ok := s.vars[name]; ok {
+					s.vars[name] = v
+					return 0
+				}
+			}
+			for s := sc; s != nil; s = s.parent {
+				if t, ok := s.vars["this"]; ok {
+					if obj, isObj := t.(*jsObject); isObj {
+						if _, ok := obj.props[name]; ok {
+							obj.set(name, v)
+							return 0
+						}
+					}
+					break
+				}
+			}
+			rt.fail("assignment to unknown name: %s", name)
+			return 0
+		},
+
+		// The typed JS dialect: declarations and assignments with type pinning.
+		"js_tdecl": func(a []uint64) uint64 {
+			rt.typedDecl(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
+			return 0
+		},
+		"js_tset": func(a []uint64) uint64 {
+			rt.typedSet(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
+			return 0
+		},
+
 		// Constants.
 		"js_str_mem": func(a []uint64) uint64 { // (ptr, len) -> string handle
 			ptr, n := a[0], a[1]
@@ -1225,6 +1452,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Objects, arrays.
 		"js_obj_new": func(a []uint64) uint64 { return w(newJSObject()) },
 		"js_arr_new": func(a []uint64) uint64 { return w(&jsArray{}) },
+		"js_arr_new_n": func(a []uint64) uint64 { // (length, fill value) -> array handle
+			n := int(a[0])
+			arr := &jsArray{elems: make([]interface{}, n)}
+			fill := u(a[1])
+			for i := 0; i < n; i++ {
+				arr.elems[i] = fill
+			}
+			return w(arr)
+		},
 		"js_arr_push": func(a []uint64) uint64 {
 			arr := u(a[0]).(*jsArray)
 			arr.elems = append(arr.elems, u(a[1]))
@@ -1255,6 +1491,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(rt.call(u(a[0]), u(a[1]), args.elems))
 		},
+		"js_mcall": func(a []uint64) uint64 { // (target, method name, args array)
+			args, ok := u(a[2]).(*jsArray)
+			if !ok {
+				rt.fail("js_mcall args must be an array")
+			}
+			return w(rt.memberCall(u(a[0]), rt.toString(u(a[1])), args.elems))
+		},
 		"js_arg": func(a []uint64) uint64 { // (args array, index) -> value
 			arr := u(a[0]).(*jsArray)
 			if int(a[1]) < len(arr.elems) {
@@ -1271,6 +1514,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_add": func(a []uint64) uint64 { return w(rt.jsAdd(u(a[0]), u(a[1]))) },
+		"js_jadd": func(a []uint64) uint64 { // Java +: string concatenation or 32 bit int addition.
+			l, r := u(a[0]), u(a[1])
+			_, ls := l.(string)
+			_, rs := r.(string)
+			if ls || rs {
+				return rt.wrapStr(rt.javaString(l) + rt.javaString(r))
+			}
+			return rt.wrapNum(float64(int32(int64(rt.toNumber(l)) + int64(rt.toNumber(r)))))
+		},
 		"js_sub": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) - rt.toNumber(u(a[1]))) },
 		"js_mul": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) * rt.toNumber(u(a[1]))) },
 		"js_div": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) / rt.toNumber(u(a[1]))) },
@@ -1308,6 +1560,110 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_tonum":  func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
 		"js_throw": func(a []uint64) uint64 {
 			rt.fail("thrown: %s", rt.toString(u(a[0])))
+			return 0
+		},
+
+		// The Python dialect externals.
+		"js_fdiv": func(a []uint64) uint64 { // Floor division (Python //).
+			return rt.wrapNum(math.Floor(rt.toNumber(u(a[0])) / rt.toNumber(u(a[1]))))
+		},
+		"js_fmod": func(a []uint64) uint64 { // Floor modulo (Python %): -7 % 2 == 1.
+			x, y := rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))
+			r := math.Mod(x, y)
+			if r != 0 && (r < 0) != (y < 0) {
+				r += y
+			}
+			return rt.wrapNum(r)
+		},
+		"js_pytruthy": func(a []uint64) uint64 { // Python truthiness: empty lists are falsy.
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				if len(arr.elems) > 0 {
+					return 1
+				}
+				return 0
+			}
+			if rt.truthy(u(a[0])) {
+				return 1
+			}
+			return 0
+		},
+		"js_pyget": func(a []uint64) uint64 { // Sequence indexing with negative wrap around.
+			idx := int(rt.toNumber(u(a[1])))
+			switch o := u(a[0]).(type) {
+			case *jsArray:
+				if idx < 0 {
+					idx += len(o.elems)
+				}
+				if idx < 0 || idx >= len(o.elems) {
+					rt.fail("list index out of range: %d", int(rt.toNumber(u(a[1]))))
+				}
+				return w(o.elems[idx])
+			case string:
+				if idx < 0 {
+					idx += len(o)
+				}
+				if idx < 0 || idx >= len(o) {
+					rt.fail("string index out of range: %d", int(rt.toNumber(u(a[1]))))
+				}
+				return rt.wrapStr(string(o[idx]))
+			}
+			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		"js_pyset": func(a []uint64) uint64 { // List element assignment with negative wrap around.
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("item assignment on a %s", rt.typeOf(u(a[0])))
+			}
+			idx := int(rt.toNumber(u(a[1])))
+			if idx < 0 {
+				idx += len(arr.elems)
+			}
+			if idx < 0 || idx >= len(arr.elems) {
+				rt.fail("list assignment index out of range")
+			}
+			arr.elems[idx] = u(a[2])
+			return 0
+		},
+		"js_pyset_var": func(a []uint64) uint64 { // Assign in the chain, else declare locally.
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			for s := sc; s != nil; s = s.parent {
+				if _, ok := s.vars[name]; ok {
+					s.vars[name] = u(a[2])
+					return 0
+				}
+			}
+			sc.vars[name] = u(a[2])
+			return 0
+		},
+		"js_pyrange": func(a []uint64) uint64 { // range(a) or range(a, b) as a materialized list.
+			from := int(rt.toNumber(u(a[0])))
+			to := from
+			if _, undef := u(a[1]).(jsUndefT); undef {
+				from = 0
+			} else {
+				to = int(rt.toNumber(u(a[1])))
+			}
+			arr := &jsArray{}
+			for i := from; i < to; i++ {
+				arr.elems = append(arr.elems, float64(i))
+			}
+			return w(arr)
+		},
+		"js_pyprint": func(a []uint64) uint64 { // print(...) with Python style rendering.
+			args, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("js_pyprint needs an argument array")
+			}
+			out := ""
+			for i, e := range args.elems {
+				if i > 0 {
+					out += " "
+				}
+				out += rt.pyString(e)
+			}
+			fmt.Println(out)
 			return 0
 		},
 
