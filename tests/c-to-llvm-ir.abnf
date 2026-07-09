@@ -1,0 +1,683 @@
+:title("C (subset) to LLVM IR compiler") ;
+:description("Compiles a C subset to an LLVM IR module and runs its main() with the built-in
+IR interpreter.
+
+The language is exactly the one of c_interpreter.abnf; see there for a description.
+Pointers compile to real addresses (alloca values), arrays to alloca [N x i32] plus
+getelementptr, globals to module globals. || and && short circuit through basic blocks,
+the ternary operator merges with a phi. int is 32 bit, / and % truncate towards zero,
+>> is arithmetic.
+
+Every tag composes a small code generator thunk. Expression thunks get the current basic
+block and return {b: endBlock, v: LLVM value}; lvalue thunks return {b, v: address};
+statement thunks get the current block and return the block to continue in.
+
+The exit code of the metacompiler run is the value that main() returns, so C test
+programs are self checking: they return 0 on success.
+The same language with the same semantics is interpreted directly by c_interpreter.abnf.") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     = { FuncDef | Proto | GlobalDecl } ;
+
+// A function prototype (int putchar(int c);) is accepted and ignored: the callees
+// are resolved by name anyway. It keeps the test programs valid for a real C compiler.
+Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
+            = TypeInt [ "*" ] Id <~~ push(up.in) ~~> ParamList ";" ;
+
+// The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr}.
+FuncDef     <~~ buildFunction() ~~>
+            = TypeInt Id <~~ push(up.in) ~~> ParamList Block ;
+
+ParamList   <~~ push(takeAll()) ~~>
+            = "(" [ ( "void" KwEnd | Param { "," Param } ) ] ")" ;
+Param       <~~ push(makeParam(takeAll())) ~~>
+            = TypeInt [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
+
+// Globals are registered at build time.
+GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
+            = TypeInt GDeclarator { "," GDeclarator } ";" ;
+GDeclarator <~~ push(makeGDecl(takeAll())) ~~>
+            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
+              [ ArraySize | "=" Number <~~ push({init: pop()}) ~~> ] ;
+ArraySize   <~~ push({size: pop()}) ~~>
+            = "[" Number "]" ;
+
+// Every statement production pushes exactly one thunk: function(block) -> nextBlock.
+Statement   = Block | If | While | Do | For | Return | Break | Continue | Decl | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      = DeclCore ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+
+Break       <~~ push(makeBreak()) ~~>   = KwBreak ";" ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+
+Decl        = DeclCore ";" ;
+DeclCore    <~~ push(makeSeq(takeAll())) ~~>
+            = TypeInt InitDecl { "," InitDecl } ;
+InitDecl    <~~ push(makeDecl(takeAll())) ~~>
+            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
+              [ ArraySize | "=" AssignExpr ] ;
+
+Empty       <~~ push(function(b) { return b }) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ";" ;
+
+// Every expression production pushes exactly one thunk: function(block) -> {b, v}.
+Expression  = AssignExpr ;
+
+AssignExpr  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Lvalue ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+
+// An lvalue thunk evaluates to an address value.
+Lvalue      = Deref | VarPlace ;
+Deref       <~~ push(makeDerefPlace(pop())) ~~>
+            = "*" UnaryExpr ;
+VarPlace    <~~ push(makeVarPlace(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "[" Expression "]" ] ;
+
+CondExpr    <~~ push(makeCondExpr(takeAll())) ~~>
+            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = BitOrExpr { "&&" BitOrExpr } ;
+
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { "|" <~~ push("|") ~~> BitXorExpr } ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push("^") ~~> BitAndExpr } ;
+// The & operator must not match the start of &&: && with an addressable right side
+// (0 && bump()) would otherwise parse as 0 & (&bump) and poison the parse.
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { "&" <~~ push("&") ~~> NotAmp EqExpr } ;
+NotAmp = :script(~~
+    (function() {
+        return (c.peek(0) === 38) ? abnf.newToken("\x01single-amp-only", 0) : undefined
+    })()
+~~) ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
+
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | PostfixExpr ;
+PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Lvalue ;
+AddrOf      <~~ push(pop() /* The lvalue thunk already yields the address. */) ~~>
+            = "&" Lvalue ;
+DerefLoad   <~~ push(makeLoadOf(makeDerefPlace(pop()))) ~~>
+            = "*" UnaryExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
+
+PostfixExpr = PostIncDec | Call | Primary ;
+PostIncDec  <~~ push(makePostIncDec(pop(), pop())) ~~>
+            = Lvalue ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+
+Primary     = "(" Expression ")" | NumberLit | CharLit | IndexedRef | VarRef ;
+IndexedRef  <~~ push(makeLoadOf(makeVarPlace(takeAll()))) ~~>
+            = Id <~~ push(up.in) ~~> "[" Expression "]" ;
+NumberLit   <~~ push(makeInt(pop())) ~~>
+            = Number ;
+CharLit     = "'" :whitespace() CChar <~~ push(makeInt(charCode(unescapeC(up.in)))) ~~> "'" :whitespace(Whitespace) ;
+CChar       = "\\" "\x20"..b"\x7e" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" ;
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+Number      <~~ push(parseInt(up.in)) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+TypeInt     = "int" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    function takeAll() {
+        var items = []
+        var v
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    function fail(msg) {
+        println("c compiler error: " + msg)
+        exit(1)
+    }
+
+    function charCode(s) { return s.charCodeAt(0) }
+    function unescapeC(s) {
+        if (s.charCodeAt(0) != 92) return s
+        var e = s.charCodeAt(1)
+        if (e == 110) return "\n"
+        if (e == 116) return "\t"
+        if (e == 114) return "\r"
+        if (e == 48) return String.fromCharCode(0)
+        return String.fromCharCode(e)
+    }
+
+    var i32 = llvm.types.I32
+    var i32p = llvm.types.I32Ptr
+    var zero = llvm.constant.NewInt(i32, 0)
+    var one = llvm.constant.NewInt(i32, 1)
+
+    var m = llvm.ir.NewModule()
+
+    var funcs = {}
+    function getFunc(name, paramSpecs) {
+        var f = funcs[name]
+        if (f != undefined) return f
+        if (name == "putchar" || name == "getchar") {
+            var ps = []
+            if (name == "putchar") ps.push(llvm.ir.NewParam("", i32))
+            f = m.NewFunc(name, i32, ps)
+        } else {
+            var params = []
+            for (var i = 0; i < paramSpecs.length; i++) {
+                params.push(llvm.ir.NewParam("", paramSpecs[i].ptr ? i32p : i32))
+            }
+            f = m.NewFunc(name, i32, params)
+        }
+        funcs[name] = f
+        return f
+    }
+    // Parameter counts of not yet defined callees: collect the arity from the call site.
+    function getFuncByArity(name, arity) {
+        var f = funcs[name]
+        if (f != undefined) return f
+        var specs = []
+        for (var i = 0; i < arity; i++) specs.push({ptr: false})
+        return getFunc(name, specs)
+    }
+
+    var curF = null
+    var deadCount = 0
+    var loopStack = []
+    function deadBlock() {
+        deadCount++
+        return curF.NewBlock("dead" + deadCount)
+    }
+
+    // Scopes map names to {val: alloca or global, arr: bool, ty: [N x i32] type for arrays}.
+    var globalScope = {}
+    var scopes = [globalScope]
+    function declVar(name, entry) {
+        scopes[scopes.length - 1][name] = entry
+    }
+    function findVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (scopes[i][name] != undefined) return scopes[i][name]
+        }
+        fail("variable not defined: " + name)
+    }
+
+    function truth(b, v) { return b.NewICmp(llvm.enum.IPredNE, v, zero) }
+    function toInt(b, v) { return b.NewZExt(v, i32) }
+
+    // ----- Expression thunks: function(block) -> {b, v} -----
+
+    function makeInt(n) {
+        var c = llvm.constant.NewInt(i32, n)
+        return function(b) { return {b: b, v: c} }
+    }
+    // Bare name: int variable loads, array decays to the address of its first element.
+    function makeVarRef(name) {
+        return function(b) {
+            var e = findVar(name)
+            if (e.arr) return {b: b, v: b.NewGetElementPtr(e.ty, e.val, [zero, zero])}
+            return {b: b, v: b.NewLoad(e.load != undefined ? e.load : i32, e.val)}
+        }
+    }
+    // Id [index] as a place: x -> its cell; a[i] -> element address (array or pointer base).
+    function makeVarPlace(items) {
+        var name = items[0]
+        var idxT = items.length > 1 ? items[1] : null
+        return function(b) {
+            var e = findVar(name)
+            if (idxT == null) {
+                if (e.arr) fail("an array is not assignable: " + name)
+                return {b: b, v: e.val}
+            }
+            var r = idxT(b)
+            b = r.b
+            if (e.arr) return {b: b, v: b.NewGetElementPtr(e.ty, e.val, [zero, r.v])}
+            var base = b.NewLoad(i32p, e.val)
+            return {b: b, v: b.NewGetElementPtr(i32, base, [r.v])}
+        }
+    }
+    function makeDerefPlace(t) { return t } // The pointer expression value IS the address.
+    function makeLoadOf(placeT) {
+        return function(b) {
+            var r = placeT(b)
+            return {b: r.b, v: r.b.NewLoad(i32, r.v)}
+        }
+    }
+    function makeNeg(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: r.b.NewSub(zero, r.v)}
+        }
+    }
+    function makeNot(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: toInt(r.b, r.b.NewICmp(llvm.enum.IPredEQ, r.v, zero))}
+        }
+    }
+    function makeBitNot(t) {
+        var minusOne = llvm.constant.NewInt(i32, -1)
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: r.b.NewXor(r.v, minusOne)}
+        }
+    }
+
+    function binOp(b, op, l, r) {
+        // C pointer arithmetic: ptr +/- int steps whole elements (getelementptr).
+        if (op == "+" || op == "-") {
+            var lp = llvm.types.IsPointer(l.Type())
+            var rp = llvm.types.IsPointer(r.Type())
+            if (lp || rp) {
+                var base = lp ? l : r
+                var off = lp ? r : l
+                if (op == "-") off = b.NewSub(zero, off)
+                return b.NewGetElementPtr(i32, base, [off])
+            }
+        }
+        if (op == "+") return b.NewAdd(l, r)
+        if (op == "-") return b.NewSub(l, r)
+        if (op == "*") return b.NewMul(l, r)
+        if (op == "/") return b.NewSDiv(l, r)
+        if (op == "%") return b.NewSRem(l, r)
+        if (op == "|") return b.NewOr(l, r)
+        if (op == "^") return b.NewXor(l, r)
+        if (op == "&") return b.NewAnd(l, r)
+        if (op == "<<") return b.NewShl(l, r)
+        if (op == ">>") return b.NewAShr(l, r)
+        var pred = { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredSLT,
+                     ">": llvm.enum.IPredSGT, "<=": llvm.enum.IPredSLE, ">=": llvm.enum.IPredSGE }[op]
+        return toInt(b, b.NewICmp(pred, l, r))
+    }
+    function foldBinary(items) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = items[i + 1](b)
+                b = rr.b
+                v = binOp(b, items[i], v, rr.v)
+            }
+            return {b: b, v: v}
+        }
+    }
+    // Real C short circuit through basic blocks; the result is an i32 0/1 phi.
+    function makeOrAnd(items, isOr) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = toInt(b, truth(b, r.v))
+            for (var i = 1; i < items.length; i++) {
+                var rightB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                var c = truth(b, v)
+                if (isOr) { b.NewCondBr(c, mergeB, rightB) }
+                else      { b.NewCondBr(c, rightB, mergeB) }
+                var r2 = items[i](rightB)
+                var v2 = toInt(r2.b, truth(r2.b, r2.v))
+                r2.b.NewBr(mergeB)
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(v2, r2.b)])
+                b = mergeB
+                v = phi
+            }
+            return {b: b, v: v}
+        }
+    }
+    function makeCondExpr(items) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            var thenB = curF.NewBlock("")
+            var elseB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            r.b.NewCondBr(truth(r.b, r.v), thenB, elseB)
+            var rt = items[1](thenB)
+            rt.b.NewBr(mergeB)
+            var re = items[2](elseB)
+            re.b.NewBr(mergeB)
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
+            return {b: mergeB, v: phi}
+        }
+    }
+    function applyOp(b, op, a, v) {
+        if (op == "+=") return b.NewAdd(a, v)
+        if (op == "-=") return b.NewSub(a, v)
+        if (op == "*=") return b.NewMul(a, v)
+        if (op == "/=") return b.NewSDiv(a, v)
+        if (op == "%=") return b.NewSRem(a, v)
+    }
+    // items = [placeThunk, opString, valueThunk].
+    function makeAssign(items) {
+        var placeT = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function(b) {
+            var p = placeT(b)
+            b = p.b
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            if (op != "=") v = applyOp(b, op, b.NewLoad(i32, p.v), v)
+            b.NewStore(v, p.v)
+            return {b: b, v: v}
+        }
+    }
+    function makePreIncDec(placeT, op) {
+        return function(b) {
+            var p = placeT(b)
+            b = p.b
+            var old = b.NewLoad(i32, p.v)
+            var nv = (op == "++") ? b.NewAdd(old, one) : b.NewSub(old, one)
+            b.NewStore(nv, p.v)
+            return {b: b, v: nv}
+        }
+    }
+    function makePostIncDec(op, placeT) {
+        return function(b) {
+            var p = placeT(b)
+            b = p.b
+            var old = b.NewLoad(i32, p.v)
+            var nv = (op == "++") ? b.NewAdd(old, one) : b.NewSub(old, one)
+            b.NewStore(nv, p.v)
+            return {b: b, v: old}
+        }
+    }
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function(b) {
+            var argValues = []
+            for (var i = 0; i < args.length; i++) {
+                var r = args[i](b)
+                b = r.b
+                argValues.push(r.v)
+            }
+            return {b: b, v: b.NewCall(getFuncByArity(name, args.length), argValues)}
+        }
+    }
+
+    // ----- Statement thunks: function(block) -> block to continue in -----
+
+    function exprToStmt(t) {
+        return function(b) { return t(b).b }
+    }
+    // items = ["*"?] name [{size}|initThunk].
+    function makeDecl(items) {
+        var i = 0
+        var isPtr = false
+        if (items[i] == "*") { isPtr = true; i++ }
+        var name = items[i]
+        var opt = items[i + 1]
+        return function(b) {
+            if (opt != undefined && typeof opt != "function") { // {size: n}: an array.
+                var ty = llvm.types.NewArray(opt.size, i32)
+                declVar(name, {val: b.NewAlloca(ty), arr: true, ty: ty})
+                return b
+            }
+            var ptr = b.NewAlloca(isPtr ? i32p : i32)
+            if (opt != undefined) {
+                var r = opt(b)
+                b = r.b
+                b.NewStore(r.v, ptr)
+            }
+            declVar(name, {val: ptr, arr: false, load: isPtr ? i32p : i32})
+            return b
+        }
+    }
+    function makeSeq(items) {
+        return function(b) {
+            for (var i = 0; i < items.length; i++) b = items[i](b)
+            return b
+        }
+    }
+    function makeBlockStmt(items) {
+        var seq = makeSeq(items)
+        return function(b) {
+            scopes.push({})
+            b = seq(b)
+            scopes.pop()
+            return b
+        }
+    }
+    function makeIf(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elseT = items.length > 2 ? items[2] : null
+        return function(b) {
+            var r = cond(b)
+            var thenB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            var elseB = elseT != null ? curF.NewBlock("") : mergeB
+            r.b.NewCondBr(truth(r.b, r.v), thenB, elseB)
+            thenT(thenB).NewBr(mergeB)
+            if (elseT != null) elseT(elseB).NewBr(mergeB)
+            return mergeB
+        }
+    }
+    function makeWhile(bodyT, condT) {
+        return function(b) {
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var r = condT(headB)
+            r.b.NewCondBr(truth(r.b, r.v), bodyB, exitB)
+            loopStack.push({cont: headB, brk: exitB})
+            bodyT(bodyB).NewBr(headB)
+            loopStack.pop()
+            return exitB
+        }
+    }
+    function makeDo(condT, bodyT) {
+        return function(b) {
+            var bodyB = curF.NewBlock("")
+            var condB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(bodyB)
+            loopStack.push({cont: condB, brk: exitB})
+            bodyT(bodyB).NewBr(condB)
+            loopStack.pop()
+            var r = condT(condB)
+            r.b.NewCondBr(truth(r.b, r.v), bodyB, exitB)
+            return exitB
+        }
+    }
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function(b) {
+            scopes.push({})
+            if (init != null) b = init(b)
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            if (cond != null) {
+                var r = cond(headB)
+                r.b.NewCondBr(truth(r.b, r.v), bodyB, exitB)
+            } else {
+                headB.NewBr(bodyB)
+            }
+            loopStack.push({cont: postB, brk: exitB})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var pb = postB
+            if (post != null) pb = post(postB)
+            pb.NewBr(headB)
+            scopes.pop()
+            return exitB
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeInt(0)
+        return function(b) {
+            var r = t(b)
+            r.b.NewRet(r.v)
+            return deadBlock()
+        }
+    }
+    function makeBreak() {
+        return function(b) {
+            b.NewBr(loopStack[loopStack.length - 1].brk)
+            return deadBlock()
+        }
+    }
+    function makeContinue() {
+        return function(b) {
+            b.NewBr(loopStack[loopStack.length - 1].cont)
+            return deadBlock()
+        }
+    }
+
+    // ----- Top level -----
+
+    function makeParam(items) {
+        if (items[0] == "*") return {name: items[1], ptr: true}
+        return {name: items[0], ptr: false}
+    }
+    function makeGDecl(items) {
+        var i = 0
+        var isPtr = false
+        if (items[i] == "*") { isPtr = true; i++ }
+        var name = items[i]
+        var opt = items[i + 1]
+        if (opt != undefined && opt.size != undefined) {
+            var ty = llvm.types.NewArray(opt.size, i32)
+            var g = m.NewGlobalDef(name, llvm.constant.NewZeroInitializer(ty))
+            declVar(name, {val: g, arr: true, ty: ty})
+        } else {
+            var init = (opt != undefined) ? opt.init : 0
+            var g2 = m.NewGlobalDef(name, llvm.constant.NewInt(i32, init))
+            declVar(name, {val: g2, arr: false, load: isPtr ? i32p : i32})
+        }
+    }
+    function defineGlobals(items) {}
+
+    function buildFunction() {
+        var bodyT = pop()
+        var params = pop()
+        var name = pop()
+        var f = getFunc(name, params)
+        curF = f
+        var b = f.NewBlock("entry")
+        scopes.push({})
+        for (var i = 0; i < params.length; i++) {
+            var pty = params[i].ptr ? i32p : i32
+            var ptr = b.NewAlloca(pty)
+            b.NewStore(f.Params[i], ptr)
+            declVar(params[i].name, {val: ptr, arr: false, load: pty})
+        }
+        b = bodyT(b)
+        b.NewRet(zero)
+        scopes.pop()
+    }
+
+    c.compile(c.asg)
+
+    if (funcs["main"] == undefined || funcs["main"].Blocks.length == 0) {
+        println("Error: C programs need a main() function.")
+        exit(1)
+    }
+
+    println(m)
+
+    var res = llvm.Run(m, "main")
+    print(res.Out)
+    println("c compiler: main() returned " + res.Ret)
+    exit(res.Ret)
+
+~~) ;
