@@ -162,7 +162,28 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | TinyC      | tinyc_interpreter.abnf                   | tinyc.abnf                   | tinyc-test-1.txt, tinyc-test-2.txt          |
 | Lisp       | lisp_interpreter.abnf                    | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                             |
 | JS (MetaJS)| js_interpreter.abnf                      | js-to-llvm-ir.abnf           | js-test-1.txt                               |
+| Typed JS   | tjs_interpreter.abnf                     | tjs-to-llvm-ir.abnf          | tjs-test-1.txt (tjs-fail-test.txt must fail)|
+| C (subset) | c_interpreter.abnf                       | c-to-llvm-ir.abnf            | c-sub-test-1.c                              |
+| Java       | java_interpreter.abnf                    | java-to-llvm-ir.abnf         | java-test-1.java                            |
+| Kotlin     | kotlin_interpreter.abnf                  | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                            |
+| Go         | go_interpreter.abnf                      | go-to-llvm-ir.abnf           | go-test-1.go                                |
+| Python     | python_interpreter.abnf                  | python-to-llvm-ir.abnf       | python-test-1.py                            |
 | C (C99)    | (grammar only)                           | (grammar only)               | c.abnf parses c-test-1.c                    |
+
+Every language is a well chosen executable subset; the exact feature list and the
+deliberate deviations are documented in the :description() of each interpreter grammar.
+The test programs are valid programs of the real languages: c-sub-test-1.c compiles and
+passes under clang, go-test-1.go under go run, python-test-1.py under python3,
+java-test-1.java under javac/java, and js-test-1.txt under node (with println/printf
+shims) - all with exit code 0, matching both of our engines.
+The C subset has real pointers, arrays and globals and compiles to plain integer LLVM IR
+(llvm.Run). The object and dynamic languages (Java with classes/records, Kotlin with
+when/string templates/properties, Go with structs/methods/multiple returns, Python with
+real INDENT/DEDENT significant indentation, JS and typed JS) compile to handle threaded
+IR on the MetaJS runtime (llvm.RunJS): objects, strings, lists and closures live behind
+i64 handles, methods dispatch through the shared class descriptor convention (js_mcall).
+Typed JS is exactly MetaJS plus one rule: a variable's type is pinned by its first
+non-undefined value (enforced by both engines; tjs-fail-test.txt demonstrates the abort).
 
 Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
 ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck.bnf as syntax only variant), the feature
@@ -172,7 +193,8 @@ and two grammars that deliberately fail to demonstrate the parser limits
 
 MetaJS is special: it is the restricted JavaScript subset that the annotation scripts of all
 grammars in tests/ are written in (see the description in js_interpreter.abnf for the exact
-language). That closes the loop for the frozen bootstrap below.
+language). That closes the loop for the frozen bootstrap below: every grammar above - all
+interpreters and compilers of all languages - also runs completely goja free with -frozen.
 
 #### The frozen bootstrap (running without goja)
 

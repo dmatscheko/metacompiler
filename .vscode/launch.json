@@ -89,6 +89,84 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/js-to-llvm-ir.abnf", "-b", "tests/js-test-1.txt", "-q"]
         },
         {
+            "name": "C (subset) interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/c_interpreter.abnf", "-b", "tests/c-sub-test-1.c", "-q"]
+        },
+        {
+            "name": "C (subset) to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/c-to-llvm-ir.abnf", "-b", "tests/c-sub-test-1.c", "-q"]
+        },
+        {
+            "name": "Typed JS interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tjs_interpreter.abnf", "-b", "tests/tjs-test-1.txt", "-q"]
+        },
+        {
+            "name": "Typed JS to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tjs-to-llvm-ir.abnf", "-b", "tests/tjs-test-1.txt", "-q"]
+        },
+        {
+            "name": "Typed JS violation (SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/tjs_interpreter.abnf", "-b", "tests/tjs-fail-test.txt", "-q"]
+        },
+        {
+            "name": "Java interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/java_interpreter.abnf", "-b", "tests/java-test-1.java", "-q"]
+        },
+        {
+            "name": "Java to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/java-to-llvm-ir.abnf", "-b", "tests/java-test-1.java", "-q"]
+        },
+        {
+            "name": "Kotlin interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/kotlin_interpreter.abnf", "-b", "tests/kotlin-test-1.kt", "-q"]
+        },
+        {
+            "name": "Kotlin to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/kotlin-to-llvm-ir.abnf", "-b", "tests/kotlin-test-1.kt", "-q"]
+        },
+        {
+            "name": "Go interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/go_interpreter.abnf", "-b", "tests/go-test-1.go", "-q"]
+        },
+        {
+            "name": "Go to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/go-to-llvm-ir.abnf", "-b", "tests/go-test-1.go", "-q"]
+        },
+        {
+            "name": "Python interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/python_interpreter.abnf", "-b", "tests/python-test-1.py", "-q"]
+        },
+        {
+            "name": "Python to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/python-to-llvm-ir.abnf", "-b", "tests/python-test-1.py", "-q"]
+        },
+        {
             "name": "TinyC compiler (FROZEN, goja free)",
             "type": "go",
             "request": "launch",
