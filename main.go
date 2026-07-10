@@ -29,6 +29,7 @@ import (
 //
 //	-v / -vN     verbose for all stages / for stage N (parse ASG + compiled result)
 //	-vv / -vvN   parser+compiler trace for all stages / for stage N
+//	-slotN V     compile stage N with tag slot V (default 0)
 //	-q / -qq     quiet (only program output+errors / only errors)
 //	-frozen      run the annotation scripts goja-free (see abnf/frozen.go)
 //	-verify      lint the first file's grammar and exit
@@ -48,6 +49,7 @@ type options struct {
 	traceAll     bool
 	verboseStage map[int]bool // 1-indexed by stage.
 	traceStage   map[int]bool
+	slotStage    map[int]int // Tag slot to compile a stage with (default 0).
 
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
@@ -60,7 +62,7 @@ type options struct {
 // (anything starting with '-'), so the two may be freely interspersed - unlike
 // the standard flag package, which stops at the first positional argument.
 func parseArgs(args []string) (*options, error) {
-	o := &options{verboseStage: map[int]bool{}, traceStage: map[int]bool{}}
+	o := &options{verboseStage: map[int]bool{}, traceStage: map[int]bool{}, slotStage: map[int]int{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if len(a) == 0 || a[0] != '-' || a == "-" {
@@ -117,7 +119,17 @@ func parseArgs(args []string) (*options, error) {
 		case "-render":
 			o.renderKind, err = takeVal()
 		default:
-			if n, ok := stageFlag(name, "-vv"); ok {
+			if n, ok := stageFlag(name, "-slot"); ok {
+				v, verr := takeVal()
+				if verr != nil {
+					return nil, verr
+				}
+				slot, serr := strconv.Atoi(v)
+				if serr != nil {
+					return nil, fmt.Errorf("flag %s needs an integer slot, got %q", name, v)
+				}
+				o.slotStage[n] = slot
+			} else if n, ok := stageFlag(name, "-vv"); ok {
 				o.traceStage[n] = true
 			} else if n, ok := stageFlag(name, "-v"); ok {
 				o.verboseStage[n] = true
@@ -190,6 +202,12 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	for stage := range o.slotStage {
+		if stage > len(o.files) {
+			fmt.Fprintf(os.Stderr, "Error: -slot%d, but there are only %d stage(s)\n", stage, len(o.files))
+			os.Exit(2)
+		}
+	}
 
 	srcs := make([]string, len(o.files))
 	for i, f := range o.files {
@@ -233,7 +251,7 @@ func main() {
 			// Positions in traces/diagrams refer to the last file (the program).
 			abnf.SetTraceSource(o.files[i], srcs[i])
 		}
-		grammar = runStage(grammar, o.files[i], srcs[i], stage, verbose, trace, o.quietMost, o.quietFull, parseropts)
+		grammar = runStage(grammar, o.files[i], srcs[i], stage, o.slotStage[stage], verbose, trace, o.quietMost, o.quietFull, parseropts)
 	}
 
 	// If the last file produced a startScript-only grammar, run it on empty input.
@@ -241,7 +259,7 @@ func main() {
 		last := len(o.files)
 		verbose := o.verboseAll || o.verboseStage[last]
 		trace := o.traceAll || o.traceStage[last]
-		runStage(grammar, "", "", last, verbose, trace, o.quietMost, o.quietFull, parseropts)
+		runStage(grammar, "", "", last, o.slotStage[last], verbose, trace, o.quietMost, o.quietFull, parseropts)
 	}
 }
 
@@ -249,7 +267,7 @@ func main() {
 // ASG; the compiled result is the a-grammar for the next stage. It exits the
 // process on any error (the exit code of a compiled program is set by the
 // program itself, via the exit() it calls).
-func runStage(grammar *r.Rules, file, src string, stage int, verbose, trace, quietMost, quietFull bool, parseropts *abnf.Parseropts) *r.Rules {
+func runStage(grammar *r.Rules, file, src string, stage, slot int, verbose, trace, quietMost, quietFull bool, parseropts *abnf.Parseropts) *r.Rules {
 	target := file
 	if target == "" {
 		target = "(run)"
@@ -274,7 +292,7 @@ func runStage(grammar *r.Rules, file, src string, stage int, verbose, trace, qui
 	if !quietMost {
 		fmt.Fprintf(os.Stderr, "Stage %d: compile\n", stage)
 	}
-	result, err := abnf.CompileASG(asg, grammar, file, 0, trace, quietFull)
+	result, err := abnf.CompileASG(asg, grammar, file, slot, trace, quietFull)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
@@ -355,6 +373,7 @@ anywhere among the files.
 
   -v, -vN       verbose for all stages / stage N (ASG + compiled result)
   -vv, -vvN     parser+compiler trace for all stages / stage N
+  -slotN V      compile stage N with tag slot V (default 0)
   -q, -qq       quiet (program output + errors / errors only)
   -frozen       run the annotation scripts without goja
   -verify       lint the first file's grammar and exit

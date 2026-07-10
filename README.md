@@ -410,7 +410,7 @@ This is how that input is processed (with `grammar[0]` = `initial-a-grammar`):
 
 Each stage feeds its compiled `grammar[i]` (which must be an a-grammar, except at the last stage, where it may be a final result such as an emitted module or a program's exit code) into the parser for the next file. After the last file, if its compiled grammar is *startScript-only* (has a `:startScript()` but no `:startRule()`, so it takes no input), that startScript is run on empty input - which lets the last file be a grammar that builds and runs a module entirely in JS. So `./mec llvm-ir-tests.abnf` runs on its own, and `./mec abnf-of-abnf.abnf llvm-ir-tests.abnf` builds that grammar with a meta-layer first and then runs it.
 
-Per-stage diagnostics: `-v` shows the ASG and compiled result of every stage, `-v<n>` of stage `n` alone (1-indexed); `-vv` / `-vv<n>` add the parser+compiler trace.
+Per-stage diagnostics: `-v` shows the ASG and compiled result of every stage, `-v<n>` of stage `n` alone (1-indexed); `-vv` / `-vv<n>` add the parser+compiler trace. `-slot<n> <v>` compiles stage `n` with tag slot `<v>` (default 0), for grammars whose tags carry more than one code slot.
 
 An example of this process, done fully inside the `:startScript()` code of an ABNF:
 
