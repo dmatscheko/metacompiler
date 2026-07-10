@@ -294,6 +294,9 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 	}
 	bindings["unescape"] = r.Unescape
 	bindings["unescapeTilde"] = UnescapeTilde
+	// correctReferencesAndIDs is a global (not part of abnf.*): it links a freshly
+	// built a-grammar so it can be compiled directly - resolving each Identifier to its
+	// Production and giving each Tag a UID. See references.correctReferencesAndIDs.
 	bindings["correctReferencesAndIDs"] = func(agrammar *r.Rules) {
 		if eng.references == nil {
 			eng.references = NewReferences()

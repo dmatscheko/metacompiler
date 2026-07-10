@@ -12,24 +12,24 @@ type Object = interface{}
 type OperatorID int
 
 const (
-	Error OperatorID = iota // This marks an invalid command. Every operation that encounters such command, should return to its caller with error.
-	Success
+	Error   OperatorID = iota // This marks an invalid command. Every operation that encounters such command, should return to its caller with error.
+	Success                   // The success counterpart of Error. Like Error it is only a status marker, never a real rule (apply() rejects it).
 	// Group types:
 	Sequence // Basic sequence of rules. Can be broken apart.
 	Group    // A group that must not be broken apart.
 	// Action types:
-	Token  // A terminal symbol (fixed text that must be in the target text).
-	Number // A plain number. Created e.g. by the inline command :number().
-	Or     // Alternative rules. The first matching child wins.
-	Optional
-	Repeat
-	Range   // A char range ("a"..."z" or "\x00"..b"\xff"). Int holds the RangeType* constant.
-	Times   // A counted repetition (e.g. 3...5 ( X )). CodeChilds holds the count parameters.
-	Tag     // The annotation rule that carries JS code. Int is reserved for the UID for caching the compiled code.
-	Command // A parser command like :whitespace(). Int is reserved for the code UID of :script().
-	CharOf  // Exactly one char out of String must be in the target text. Int holds CharType* flags.
-	CharsOf // One or more chars out of String (in any order) must be in the target text. Int holds CharType* flags.
-	Not     // Negative lookahead: matches (consuming nothing) exactly when its single child does NOT match.
+	Token    // A terminal symbol (fixed text that must be in the target text).
+	Number   // A plain number. Created e.g. by the inline command :number().
+	Or       // Alternative rules. The first matching child wins.
+	Optional // An optional part (the [ ... ] form). Matches its childs zero or one time.
+	Repeat   // A repetition (the { ... } form). Matches its childs zero or more times.
+	Range    // A char range ("a"..."z" or "\x00"..b"\xff"). Int holds the RangeType* constant.
+	Times    // A counted repetition (e.g. 3...5 ( X )). CodeChilds holds the count parameters.
+	Tag      // The annotation rule that carries JS code. Int is reserved for the UID for caching the compiled code.
+	Command  // A parser command like :whitespace(). Int is reserved for the code UID of :script().
+	CharOf   // Exactly one char out of String must be in the target text. Int holds CharType* flags.
+	CharsOf  // One or more chars out of String (in any order) must be in the target text. Int holds CharType* flags.
+	Not      // Negative lookahead: matches (consuming nothing) exactly when its single child does NOT match.
 	// Link types:
 	Production // Int is reserved for the position of the Production inside the grammar rules.
 	Identifier // Int is reserved for the position of the identified Production (-1 if unresolved).
@@ -50,8 +50,8 @@ type Rule struct {
 
 // Type of a Range String. JS-Mapping: abnf.rangeType
 const (
-	RangeTypeRune int = iota
-	RangeTypeByte
+	RangeTypeRune int = iota // The two range bounds are single runes (the "a"..."z" form).
+	RangeTypeByte            // The two range bounds are single bytes (the "\x00"..b"\xff" form).
 )
 
 // Flags for the Int field of CharOf and CharsOf. JS-Mapping: abnf.charType
@@ -65,10 +65,10 @@ const (
 
 // Encoding of a :number() in the target text. JS-Mapping: abnf.numberType
 const (
-	NumberTypeLittleEndian int = iota
-	NumberTypeBigEndian
-	NumberTypeBCD
-	NumberTypeASCII
+	NumberTypeLittleEndian int = iota // Unsigned little-endian integer (the default).
+	NumberTypeBigEndian               // Unsigned big-endian integer.
+	NumberTypeBCD                     // Binary-coded decimal (an optional trailing 'f' nibble is dropped).
+	NumberTypeASCII                   // ASCII decimal digits.
 )
 
 // -----------------------------------------

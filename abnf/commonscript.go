@@ -179,6 +179,9 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		}
 	})
 
+	// correctReferencesAndIDs is a global (not part of abnf.*): it links a freshly
+	// built a-grammar so it can be compiled directly - resolving each Identifier to its
+	// Production and giving each Tag a UID. See references.correctReferencesAndIDs.
 	vm.Set("correctReferencesAndIDs", func(agrammar *r.Rules) {
 		// The references cache lives as long as this VM: Tag UIDs have to stay stable and
 		// unique over multiple calls, otherwise the compiled-code cache would mix up the

@@ -27,9 +27,12 @@ var AbnfFuncMap = map[string]Object{
 	"arrayToRules": func(rules *Rules) *Rules {
 		return rules
 	},
+	// newRule is the generic constructor: it builds any rule from its raw fields.
+	// The typed new* helpers below are shorthands for the common Operator cases.
 	"newRule": func(Operator OperatorID, String string, Int int, Pos int, Childs *Rules, CodeChilds *Rules) *Rule {
 		return &Rule{Operator: Operator, String: String, Int: Int, Pos: Pos, Childs: Childs, CodeChilds: CodeChilds}
 	},
+	// newToken builds a terminal symbol: fixed text that must appear in the target text.
 	"newToken": func(String string, Pos int) *Rule {
 		return &Rule{Operator: Token, String: String, Pos: Pos}
 	},
@@ -44,6 +47,7 @@ var AbnfFuncMap = map[string]Object{
 		}
 		return &Rule{Operator: Token, String: s, Pos: Pos}
 	},
+	// newNumber builds a plain number literal (as produced by :number()).
 	"newNumber": func(Int int, Pos int) *Rule {
 		return &Rule{Operator: Number, Int: Int, Pos: Pos}
 	},
@@ -64,18 +68,23 @@ var AbnfFuncMap = map[string]Object{
 		}
 		return &Rule{Operator: Command, String: String, CodeChilds: CodeChilds, Pos: Pos}
 	},
+	// newRepetition builds a "zero or more" repetition (the { ... } form).
 	"newRepetition": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Repeat, Childs: Childs, Pos: Pos}
 	},
+	// newOption builds an optional part (the [ ... ] form).
 	"newOption": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Optional, Childs: Childs, Pos: Pos}
 	},
+	// newGroup builds a group (the ( ... ) form) that must not be broken apart.
 	"newGroup": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Group, Childs: Childs, Pos: Pos}
 	},
+	// newSequence builds a sequence of rules matched one after another.
 	"newSequence": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Sequence, Childs: Childs, Pos: Pos}
 	},
+	// newAlternative builds an alternative (the | form); the first matching child wins.
 	"newAlternative": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Or, Childs: Childs, Pos: Pos}
 	},
@@ -83,9 +92,12 @@ var AbnfFuncMap = map[string]Object{
 	"newRange": func(CodeChilds *Rules, Int int, Pos int) *Rule {
 		return &Rule{Operator: Range, Int: Int, CodeChilds: CodeChilds, Pos: Pos}
 	},
+	// newTimes builds a counted repetition (e.g. 3...5 ( X )). CodeChilds holds the
+	// count bounds, Childs the repeated group.
 	"newTimes": func(CodeChilds *Rules, Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Times, CodeChilds: CodeChilds, Childs: Childs, Pos: Pos}
 	},
+	// newCharOf builds a match for exactly one char of a set.
 	// Int holds charType flags (charType.Rune | charType.Byte | charType.Negated).
 	// The set should be passed as the Token *Rule itself (not as its String): the rule
 	// pointer passes through the JS engine untouched, while a raw Go string with non
@@ -93,6 +105,7 @@ var AbnfFuncMap = map[string]Object{
 	"newCharOf": func(Token Object, Int int, Pos int) *Rule {
 		return &Rule{Operator: CharOf, String: tokenString(Token), Int: Int, Pos: Pos}
 	},
+	// newCharsOf is like newCharOf but matches a maximal run of chars of the set.
 	"newCharsOf": func(Token Object, Int int, Pos int) *Rule {
 		return &Rule{Operator: CharsOf, String: tokenString(Token), Int: Int, Pos: Pos}
 	},
@@ -100,24 +113,34 @@ var AbnfFuncMap = map[string]Object{
 	"newNot": func(Childs *Rules, Pos int) *Rule {
 		return &Rule{Operator: Not, Childs: Childs, Pos: Pos}
 	},
+	// serializeRule renders one rule as its Go-literal form (the form hard coded in
+	// abnf/agrammar.go; re-readable by compiling it as Go). See Rule.Serialize.
 	"serializeRule": func(rule *Rule) string {
 		return rule.Serialize()
 	},
+	// serializeRules renders a whole a-grammar as its Go-literal form.
 	"serializeRules": func(rules *Rules) string {
 		return rules.Serialize()
 	},
+	// toStringRule renders one rule as a short, human readable dump (child rules
+	// abbreviated as [...]). See Rule.ToString.
 	"toStringRule": func(rule *Rule) string {
 		return rule.ToString()
 	},
+	// toStringRules renders a whole a-grammar as a short, human readable dump.
 	"toStringRules": func(rules *Rules) string {
 		return rules.ToString()
 	},
 
-	"getStartRule":   GetStartRule,
-	"getStartScript": GetStartScript,
-	"getTitle":       GetTitle,
-	"getDescription": GetDescription,
+	// Grammar getters. Each pulls one part out of an a-grammar; see the GetStartRule,
+	// GetStartScript, GetTitle and GetDescription definitions in rules.go for the details.
+	"getStartRule":   GetStartRule,   // The :startRule() Identifier (the top production for the parser).
+	"getStartScript": GetStartScript, // The :startScript() code that drives the compile step.
+	"getTitle":       GetTitle,       // The :title() Token, or nil.
+	"getDescription": GetDescription, // The :description() Token, or nil.
 
+	// oid exposes the OperatorID values (a rule's Operator field). Each value is
+	// documented at its constant definition in rules.go.
 	"oid": map[string]OperatorID{
 		"Error":   Error,
 		"Success": Success,
@@ -142,20 +165,23 @@ var AbnfFuncMap = map[string]Object{
 		"Identifier": Identifier,
 	},
 
-	// Type of a Range String.
+	// rangeType exposes the RangeType* constants: the Int field of a Range rule
+	// (whether its two bounds are runes or bytes). See rules.go.
 	"rangeType": map[string]int{
 		"Rune": RangeTypeRune,
 		"Byte": RangeTypeByte,
 	},
 
-	// Flags for the Int field of CharOf/CharsOf (combine with |).
+	// charType exposes the CharType* flags for the Int field of CharOf/CharsOf
+	// (combine with |). See rules.go.
 	"charType": map[string]int{
 		"Rune":    CharTypeRune,
 		"Byte":    CharTypeByte,
 		"Negated": CharTypeNegated,
 	},
 
-	// Encoding of a :number() in the target text.
+	// numberType exposes the NumberType* constants: the type parameter of
+	// :number(size, type), i.e. how the bytes in the target text are decoded. See rules.go.
 	"numberType": map[string]int{
 		"LittleEndian": NumberTypeLittleEndian,
 		"BigEndian":    NumberTypeBigEndian,
