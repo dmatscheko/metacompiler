@@ -514,7 +514,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			from, _ := utf8.DecodeRuneInString((*rule.CodeChilds)[0].String)
 			to, _ := utf8.DecodeRuneInString((*rule.CodeChilds)[1].String)
-			// TODO: check if len of rune is len of string. Panic otherwise. Or better: Do that in verifier.
+			// A multi-rune bound would silently use only its first rune here; -verify (abnf/verifier.go) reports such malformed ranges.
 			if !(ch >= from && ch <= to) {
 				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
@@ -536,7 +536,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			ch := pa.Src[pa.Sdx]
 			from := (*rule.CodeChilds)[0].String[0]
 			to := (*rule.CodeChilds)[1].String[0]
-			// TODO: check if len of string is 1. Panic otherwise. Or better: Do that in verifier.
+			// A multi-byte bound would silently use only its first byte here; -verify (abnf/verifier.go) reports such malformed ranges.
 			if !(ch >= from && ch <= to) {
 				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx

@@ -19,19 +19,21 @@ package abnf
 import (
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"14.gy/mec/abnf/r"
 )
 
 // VerifyIssue is one problem found by Verify.
 type VerifyIssue struct {
-	Kind string // "undefined" (error) or "unreachable" (warning).
-	Name string // The offending identifier / production name.
-	Line int    // 1-based line in the grammar source (0 if unknown).
+	Kind   string // "undefined" / "badrange" (errors) or "unreachable" (warning).
+	Name   string // The offending identifier / production name, or bad range bound.
+	Line   int    // 1-based line in the grammar source (0 if unknown).
+	Detail string // Extra context (the range unit "rune"/"byte" for badrange).
 }
 
 // IsError reports whether the issue breaks the grammar (vs. a mere warning).
-func (vi VerifyIssue) IsError() bool { return vi.Kind == "undefined" }
+func (vi VerifyIssue) IsError() bool { return vi.Kind == "undefined" || vi.Kind == "badrange" }
 
 // Message renders the issue as a human sentence (without the location).
 func (vi VerifyIssue) Message() string {
@@ -40,8 +42,29 @@ func (vi VerifyIssue) Message() string {
 		return "undefined name '" + vi.Name + "' is used but no production defines it (typo, or a missing :include())"
 	case "unreachable":
 		return "production '" + vi.Name + "' is defined but never reached from the start rule (dead)"
+	case "badrange":
+		return "malformed range: the bound " + quote(vi.Name) + " must be exactly one " + vi.Detail
 	}
 	return vi.Kind + " " + vi.Name
+}
+
+// quote renders a range bound for a message, escaping the unprintable bytes a
+// range endpoint may hold (e.g. a lone 0x00 or 0xff).
+func quote(s string) string {
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, c := range []byte(s) {
+		if c >= 0x20 && c < 0x7f {
+			b.WriteByte(c)
+		} else {
+			b.WriteString("\\x")
+			const hex = "0123456789abcdef"
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0xf])
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
 }
 
 // HasInclude reports whether a grammar has any :include() command - i.e. whether
@@ -110,29 +133,46 @@ func Verify(aGrammar *r.Rules, source string, ownNames map[string]bool) []Verify
 	}
 	var issues []VerifyIssue
 
-	// Check 1 - undefined: every Identifier whose name has no production. One
-	// issue per distinct name (a name typoed ten times is one problem). The
-	// line points at the first use.
+	// Checks 1 & 2 walk every rule once:
+	//   - undefined: an Identifier whose name has no production. One issue per
+	//     distinct name (a name typoed ten times is one problem); the line
+	//     points at the first use.
+	//   - badrange: a rune/byte range ("a"..."z" / "\x00"..b"\xff") whose bound
+	//     is not exactly one rune/byte - the parser would silently use only its
+	//     first character, so "ab"..."z" reads as "a"..."z".
 	seenUndef := map[string]bool{}
-	var scanUndefined func(rules *r.Rules)
-	scanUndefined = func(rules *r.Rules) {
+	var scan func(rules *r.Rules)
+	scan = func(rules *r.Rules) {
 		if rules == nil {
 			return
 		}
 		for _, rule := range *rules {
-			if rule.Operator == r.Identifier {
+			switch rule.Operator {
+			case r.Identifier:
 				if _, ok := defined[rule.String]; !ok && !seenUndef[rule.String] {
 					seenUndef[rule.String] = true
 					name := rule.String
 					line := lineFor(rule.Pos, func() int { return firstUseLine(source, name) })
 					issues = append(issues, VerifyIssue{Kind: "undefined", Name: name, Line: line})
 				}
+			case r.Range:
+				unit := "rune"
+				if rule.Int == r.RangeTypeByte {
+					unit = "byte"
+				}
+				if rule.CodeChilds != nil {
+					for _, bound := range *rule.CodeChilds {
+						if !validRangeBound(bound.String, rule.Int) {
+							issues = append(issues, VerifyIssue{Kind: "badrange", Name: bound.String, Line: posLine(source, rule.Pos), Detail: unit})
+						}
+					}
+				}
 			}
-			scanUndefined(rule.Childs)
-			scanUndefined(rule.CodeChilds)
+			scan(rule.Childs)
+			scan(rule.CodeChilds)
 		}
 	}
-	scanUndefined(aGrammar)
+	scan(aGrammar)
 
 	// Check 2 - unreachable: reachability from the start rule plus every name a
 	// top-level command references (e.g. :whitespace(Whitespace) roots the whole
@@ -212,6 +252,16 @@ func posLine(source string, pos int) int {
 		}
 	}
 	return line
+}
+
+// validRangeBound reports whether s is a well-formed bound of a range of the
+// given RangeType: exactly one byte for a byte range, exactly one rune for a
+// rune range (an empty or multi-character bound is malformed).
+func validRangeBound(s string, rangeType int) bool {
+	if rangeType == r.RangeTypeByte {
+		return len(s) == 1
+	}
+	return utf8.RuneCountInString(s) == 1
 }
 
 // isIdentByte reports whether b can be part of a grammar name.

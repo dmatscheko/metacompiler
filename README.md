@@ -353,9 +353,11 @@ stepper are the planned next layers.
 ./mec -a languages/java-interpreter.abnf -verify
 ```
 
-It reports two things, each with the source line: **undefined** names - an
+It reports three things, each with the source line: **undefined** names - an
 identifier used with no production defining it (a typo, or a missing
-`:include()`); this is an error and exits non-zero - and **unreachable**
+`:include()`); **malformed** ranges - a rune or byte range whose bound is not
+exactly one rune/byte, so `"ab"..."z"` would silently read as `"a"..."z"`; both
+are errors and exit non-zero - and **unreachable**
 productions - defined but never reached from the start rule through identifiers
 (a warning). Reachability seeds from the start rule and from command parameters
 like `:whitespace(Whitespace)`, so a whole whitespace/comment sub-grammar counts
@@ -901,9 +903,6 @@ The functions and constants are exposed to JS as:
 :title("ABNF of ABNF to a-grammar") ;
 :description("This ABNF contains the grammatic and semantic information for annotated EBNF.
 It allows to automatically create a compiler for everything described in ABNF (yes, that format).") ;
-
-
-// TODO: implement !"asdf", !@"asdf", and !@+"asdf", and maybe @b"asdf", and @b+"asdf", and !@b"asdf", and !@b+"asdf".
 
 
 // --- main rules

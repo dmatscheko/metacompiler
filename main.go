@@ -16,7 +16,6 @@ import (
 // TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).
 // TODO: Define an :EOF() symbol for the EBNF syntax.
 // An unknown Name still resolves to the -1 marker at parse time instead of a clear error up front; the -verify flag (abnf/verifier.go) reports such names (also those used as command parameters or in tags) before a run.
-// TODO: add -c -d , ... to the cmd line
 
 // rule == production | expression | term.
 // link == identifier == name             //  <=  Identifies another rule (== position of the other rule inside the grammar rules array).
