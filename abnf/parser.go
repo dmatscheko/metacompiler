@@ -263,7 +263,13 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		if paramFileName == "" {
 			panic("The file parameter for Command :include() must not be empty.")
 		}
-		fullFileName := filepath.Dir(pa.fileName) + string(os.PathSeparator) + paramFileName
+		// Int == 1: the path was anchored to the grammar file's directory by
+		// CompileASG (resolveIncludePaths). The legacy fallback for dynamic
+		// file names resolves relative to the file currently being parsed.
+		fullFileName := paramFileName
+		if rule.Int != 1 {
+			fullFileName = filepath.Dir(pa.fileName) + string(os.PathSeparator) + paramFileName
+		}
 		dat, err := ioutil.ReadFile(fullFileName)
 		if err != nil {
 			panic(err)
@@ -290,6 +296,9 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		// TODO: Maybe use that information.
 	case "description":
 		// TODO: Maybe use that information.
+	case "origin":
+		// The grammar file this a-grammar was compiled from (stamped by
+		// CompileASG; the start script runs under this module name).
 	case "startRule":
 		// This is used by ParseWithAgrammar().
 	case "startScript":

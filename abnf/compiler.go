@@ -163,8 +163,15 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 		upStream := map[string]r.Object{ // Basically the local variables.
 			"in": "", // This is the parser input (the terminals).
 		}
+		// The start script belongs to the GRAMMAR: run it under the grammar's
+		// module name (include/load/store resolve relative to that), falling
+		// back to the compile target for grammars without an :origin() stamp.
+		module := r.GetOrigin(aGrammar)
+		if module == "" {
+			module = co.fileName
+		}
 		// The actual co.compile() of the ASG is called from inside the start script (via the JS function c.compile()).
-		v, ran := co.eng.RunTagCode(startScript, co.fileName+":startScript", upStream, asg, slot, 0)
+		v, ran := co.eng.RunTagCode(startScript, module+":startScript", upStream, asg, slot, 0)
 		if ran { // False if the start script has no code for the requested slot.
 			res = v
 		}
@@ -200,5 +207,38 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, trac
 			}
 		}
 	}
+	if res != nil {
+		resolveIncludePaths(res, fileName)
+		// Stamp the source file onto the grammar (unless a recompile already
+		// carries one): the start script and its include()/load()/store()
+		// then resolve relative to the GRAMMAR, not the parsed input.
+		if r.GetOrigin(res) == "" {
+			*res = append(*res, &r.Rule{Operator: r.Command, String: "origin",
+				CodeChilds: &r.Rules{&r.Rule{Operator: r.Token, String: filepath.Clean(fileName)}}})
+		}
+	}
 	return res, nil
+}
+
+// resolveIncludePaths anchors the constant file name of every top level
+// :include() command to the grammar file's directory. The include itself only
+// runs when the a-grammar is USED (see the parser), where just the INPUT file
+// name is known - without this pass the path would resolve relative to
+// whatever file happens to be parsed. Rule.Int == 1 marks an anchored path;
+// a dynamic (non constant) file name keeps the legacy input relative lookup.
+func resolveIncludePaths(agrammar *r.Rules, fileName string) {
+	for _, rule := range *agrammar {
+		if rule.Operator != r.Command || rule.String != "include" || rule.Int != 0 {
+			continue
+		}
+		if rule.CodeChilds == nil || len(*rule.CodeChilds) == 0 {
+			continue
+		}
+		param := (*rule.CodeChilds)[0]
+		if param.Operator != r.Token || filepath.IsAbs(param.String) {
+			continue
+		}
+		param.String = filepath.Join(filepath.Dir(fileName), param.String)
+		rule.Int = 1
+	}
 }

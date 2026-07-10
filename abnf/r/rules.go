@@ -284,6 +284,21 @@ func GetStartScript(aGrammar *Rules) *Rule {
 	return nil
 }
 
+// GetOrigin returns the file the a-grammar was compiled from (stamped as an
+// :origin() command by CompileASG), or "" for grammars without one (e.g. the
+// embedded serialized grammars or grammars built directly by scripts).
+func GetOrigin(aGrammar *Rules) string {
+	if aGrammar == nil {
+		return ""
+	}
+	for _, rule := range *aGrammar {
+		if rule.Operator == Command && rule.String == "origin" {
+			return (*rule.CodeChilds)[0].String
+		}
+	}
+	return ""
+}
+
 // GetTitle returns the title of the a-grammar (defined via :title()), or nil.
 func GetTitle(aGrammar *Rules) *Rule {
 	if aGrammar == nil {
