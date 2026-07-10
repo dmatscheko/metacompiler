@@ -9,21 +9,29 @@ Comments (#) and blank lines are skipped by the newline rule. Indentation must u
 spaces (no tabs).
 
 The language: def functions (top level, with positional parameters), if/elif/else,
-while, for x in <list or range(a[,b])>, break/continue/pass/return, assignment and
+while, for x in <list, dict (its keys), string (its chars) or range(a[,b])>,
+break/continue/pass/return, assignment and
 += -= *= /= (assignment creates a variable in the current function if none exists in
 scope - there is no 'global' keyword; use a mutable list like fails = [0] for counters),
-lists with negative indexing, element assignment, .append()/.pop(), len(), in / not in
-membership tests on lists and strings, f-strings (f'x={a + 1}' renders like str()),
-print() with
-Python style rendering (True/None/[1, 2]), True/False/None, and/or/not with Python
-truthiness (empty lists are falsy) and operand values, comparisons (no chaining),
+lists with negative indexing, element assignment, .append()/.pop(), dicts with
+insertion order ({'a': 1}, d[k] get/set, in tests keys, len(), .keys()/.values()/
+.get(k[, default]), the counts[w] = counts.get(w, 0) + 1 idiom), the list() builtin (a fresh list from any iterable), slicing of lists
+and strings (s[1:3], s[:2], s[-3:]; no step), list comprehensions
+([x * x for x in xs if x % 2 == 0]; the variable does not leak), len(), in / not in
+membership tests on lists, strings and dicts, f-strings (f'x={a + 1}' renders like
+str()), print() with
+Python style rendering (True/None/[1, 2]/{'a': 1}), True/False/None, and/or/not with
+Python
+truthiness (empty lists and dicts are falsy) and operand values, comparisons (no
+chaining),
 + - * % with float semantics, / as true division (7/2 == 3.5), // as floor division
 (-7//2 == -4), % as floor modulo (-7%2 == 1), unary -, int and float literals, and
 single or double quoted strings with escapes.
 
-Not in the subset: classes, dicts, tuples, nested def/lambdas/closures, the global
-keyword, comparison chaining, slices, for-else, imports, exceptions, and
-list equality by value (== compares lists by identity).
+Not in the subset: classes, tuples, nested def/lambdas/closures, the global
+keyword, comparison chaining, slice assignment and slice steps, dict comprehensions,
+for-else, imports, exceptions, and
+list/dict equality by value (== compares them by identity).
 
 There is no main(): the file simply runs top to bottom. Self checking programs end
 with exit(fails[0]).") ;
@@ -112,18 +120,38 @@ Factor      = Neg | PostfixExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
 
-// f(a), s[i], lst.append(x).
+// f(a), s[i], s[a:b], lst.append(x).
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | MethodSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Expression { "," Expression } ] ")" ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+// A slice s[lo:hi] with both ends optional; tried before plain indexing (the
+// missing ':' makes it fail fast there).
+SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
+            = "[" [ SliceLo ] ":" [ SliceHi ] "]" ;
+SliceLo     <~~ push({slo: pop()}) ~~> = Expression ;
+SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FString | StringLit | NumberLit | True | False | None | ListLit | VarRef ;
+Primary     = "(" Expression ")" | FString | StringLit | NumberLit | True | False | None
+            | ListComp | ListLit | DictLit | VarRef ;
+
+// [expr for x in iterable if cond] builds a list; the variable is comprehension local.
+ListComp    <~~ push(makeListComp(takeAll())) ~~>
+            = "[" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~> "in" KwEnd Expression
+              [ CompIf ] "]" ;
+CompIf      <~~ push({cif: pop()}) ~~>
+            = "if" KwEnd Expression ;
+
+// {k: v, ...}: keys and values are expressions; entries keep their insertion order.
+DictLit     <~~ push(makeDict(takeAll())) ~~>
+            = "{" [ DictEntry { "," DictEntry } ] "}" ;
+DictEntry   <~~ var dv = pop(); push({dk: pop(), dv: dv}) ~~>
+            = Expression ":" Expression ;
 
 // f-string: literal chunks and {expression} parts; every expression renders like str().
 FString     <~~ push(makeFString(takeAll())) ~~>
@@ -303,7 +331,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         println(out)
     }
-    hostGlobals["len"] = function(x) { return x.length }
+    hostGlobals["len"] = function(x) {
+        if (isDict(x)) return x.keys.length
+        return x.length
+    }
+    // list(x): a fresh list from any iterable (lists copy, dicts give their keys).
+    hostGlobals["list"] = function(x) { return iterToList(x).slice(0) }
     hostGlobals["range"] = function(a, b) {
         var from = 0
         var to = a
@@ -315,7 +348,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v : v }
 
-    // Python style rendering: True/False/None, lists in brackets.
+    // ----- Dicts: {__dict, keys, vals} with two parallel arrays. The arrays keep
+    // the insertion order (like Python) and allow any === comparable key. -----
+    function isDict(v) {
+        return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
+    }
+    function newDict() { return {__dict: true, keys: [], vals: []} }
+    function dictFind(d, k) {
+        for (var i = 0; i < d.keys.length; i++) {
+            if (d.keys[i] === k) return i
+        }
+        return -1
+    }
+    function dictSet(d, k, v) {
+        var i = dictFind(d, k)
+        if (i >= 0) { d.vals[i] = v }
+        else { d.keys.push(k); d.vals.push(v) }
+    }
+
+    // Python style rendering: True/False/None, lists in brackets, dicts in braces.
+    function prepr(v) {
+        if (typeof v == "string") return "'" + v + "'"
+        return pstr(v)
+    }
     function pstr(v) {
         if (v === undefined || v === null) return "None"
         if (v === true) return "True"
@@ -324,21 +379,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var out = "["
             for (var i = 0; i < v.length; i++) {
                 if (i > 0) out += ", "
-                if (typeof v[i] == "string") { out += "'" + v[i] + "'" }
-                else { out += pstr(v[i]) }
+                out += prepr(v[i])
             }
             return out + "]"
         }
+        if (isDict(v)) {
+            var out2 = "{"
+            for (var k = 0; k < v.keys.length; k++) {
+                if (k > 0) out2 += ", "
+                out2 += prepr(v.keys[k]) + ": " + prepr(v.vals[k])
+            }
+            return out2 + "}"
+        }
         return "" + v
     }
-    // Python truthiness: empty lists are falsy.
+    // Python truthiness: empty lists and dicts are falsy.
     function pytruthy(v) {
         if (Array.isArray(v)) return v.length > 0
+        if (isDict(v)) return v.keys.length > 0
         if (v === undefined || v === null) return false
         return !!v
     }
 
     function pyget(o, i) {
+        if (isDict(o)) {
+            var di = dictFind(o, i)
+            if (di < 0) fail("KeyError: " + pstr(i))
+            return o.vals[di]
+        }
         if (typeof o == "string") {
             if (i < 0) i += o.length
             if (i < 0 || i >= o.length) fail("string index out of range")
@@ -348,6 +416,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (i < 0 || i >= o.length) fail("list index out of range")
         return o[i]
     }
+    // Slicing with Python bounds: open ends, negative wrap around, clamping.
+    function pySlice(o, lo, hi) {
+        var n = o.length
+        if (lo === undefined) { lo = 0 } else { if (lo < 0) lo += n; if (lo < 0) lo = 0; if (lo > n) lo = n }
+        if (hi === undefined) { hi = n } else { if (hi < 0) hi += n; if (hi < 0) hi = 0; if (hi > n) hi = n }
+        if (hi < lo) hi = lo
+        if (typeof o == "string") return o.slice(lo, hi)
+        var out = []
+        for (var i = lo; i < hi; i++) out.push(o[i])
+        return out
+    }
+    // The list a for loop or comprehension runs over: dicts iterate their keys
+    // (a snapshot), strings their characters.
+    function iterToList(v) {
+        if (Array.isArray(v)) return v
+        if (isDict(v)) return v.keys.slice(0)
+        if (typeof v == "string") {
+            var out = []
+            for (var i = 0; i < v.length; i++) out.push(v.charAt(i))
+            return out
+        }
+        fail("iteration over " + pstr(v))
+    }
     function mcall(target, name, args) {
         if (Array.isArray(target)) {
             if (name == "append") { target.push(args[0]); return undefined }
@@ -356,6 +447,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return target.pop()
             }
             fail("unknown list method: " + name)
+        }
+        if (isDict(target)) {
+            if (name == "keys") return target.keys.slice(0)
+            if (name == "values") return target.vals.slice(0)
+            if (name == "get") {
+                var i = dictFind(target, args[0])
+                if (i >= 0) return target.vals[i]
+                return args.length > 1 ? args[1] : undefined
+            }
+            fail("unknown dict method: " + name)
         }
         fail("method call ." + name + "() on " + pstr(target))
     }
@@ -392,9 +493,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == "in") return pyIn(l, r)
         if (op == "not in") return !pyIn(l, r)
     }
-    // Python 'x in y' for lists and strings.
+    // Python 'x in y' for lists, strings and dict keys.
     function pyIn(l, r) {
         if (typeof r == "string") return r.indexOf(l) >= 0
+        if (isDict(r)) return dictFind(r, l) >= 0
         for (var i = 0; i < r.length; i++) {
             if (r[i] === l) return true
         }
@@ -451,6 +553,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var argv2 = []
                     for (var j2 = 0; j2 < s.args.length; j2++) argv2.push(s.args[j2]())
                     cur = mcall(cur, s.name, argv2)
+                } else if (s.kind == "slice") {
+                    cur = pySlice(cur, s.lo != null ? s.lo() : undefined, s.hi != null ? s.hi() : undefined)
                 } else {
                     cur = pyget(cur, s.idx())
                 }
@@ -466,6 +570,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return a
         }
     }
+    // items = [{dk, dv}...] -> a dict built in source order.
+    function makeDict(items) {
+        return function() {
+            var d = newDict()
+            for (var i = 0; i < items.length; i++) dictSet(d, items[i].dk(), items[i].dv())
+            return d
+        }
+    }
+    // items = [{slo}?, {shi}?] -> a slice suffix descriptor.
+    function makeSliceSfx(items) {
+        var lo = null
+        var hi = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].slo != undefined) lo = items[i].slo
+            if (items[i].shi != undefined) hi = items[i].shi
+        }
+        return {kind: "slice", lo: lo, hi: hi}
+    }
+    // items = [exprT, {cvar}, iterT, {cif}?]. The variable lives in an own scope
+    // (Python 3 comprehension scoping: it does not leak).
+    function makeListComp(items) {
+        var exprT = items[0]
+        var name = items[1].cvar
+        var iterT = items[2]
+        var condT = items.length > 3 ? items[3].cif : null
+        return function() {
+            var arr = iterToList(iterT())
+            var out = []
+            scopes.push({})
+            for (var i = 0; i < arr.length; i++) {
+                scopes[scopes.length - 1][name] = arr[i]
+                if (condT == null || pytruthy(condT())) out.push(exprT())
+            }
+            scopes.pop()
+            return out
+        }
+    }
 
     function makeTargetRef(items) {
         return {name: items[0], path: items.slice(1)}
@@ -475,6 +616,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) o = pyget(o, ref.path[i].idx())
         var idx = ref.path[ref.path.length - 1].idx()
+        if (isDict(o)) { dictSet(o, idx, v); return }
         if (idx < 0) idx += o.length
         if (idx < 0 || idx >= o.length) fail("list assignment index out of range")
         o[idx] = v
@@ -548,7 +690,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function makeFor(bodyT, listT, name) {
         return function() {
-            var arr = listT()
+            var arr = iterToList(listT())
             for (var i = 0; i < arr.length; i++) {
                 setVar(name, arr[i])
                 var r = bodyT()

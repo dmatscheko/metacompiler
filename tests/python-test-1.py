@@ -142,6 +142,68 @@ check("f-string expr", f"sum={1 + 2}", "sum=3")
 check("f-string list", f"l={lst0}", "l=[3, 1, 4]")
 check("f-string empty", f"", "")
 
+# dicts (insertion ordered, like Python)
+ages = {"alice": 30, "bob": 25}
+check("dict get", ages["alice"], 30)
+ages["carol"] = 35
+check("dict set new", ages["carol"], 35)
+ages["bob"] += 1
+check("dict aug assign", ages["bob"], 26)
+check("dict len", len(ages), 3)
+check("in dict", "alice" in ages, True)
+check("not in dict", "dave" not in ages, True)
+check("dict get method", ages.get("alice"), 30)
+check("dict get default", ages.get("dave", -1), -1)
+ks = list(ages.keys())
+check("dict keys", len(ks), 3)
+check("keys order", ks[0], "alice")
+check("values order", list(ages.values())[2], 35)
+check("list copies", len(list(lst0)), 3)
+total_age = 0
+for who in ages:
+    total_age += ages[who]
+check("dict iterate", total_age, 91)
+check("dict f-string", f"{ages}", "{'alice': 30, 'bob': 26, 'carol': 35}")
+empty_d = {}
+check_true("empty dict falsy", not empty_d)
+counts = {}
+for w in ["a", "b", "a", "c", "a"]:
+    counts[w] = counts.get(w, 0) + 1
+check("counter idiom", counts["a"], 3)
+check("counter idiom b", counts["b"], 1)
+
+# slices
+lst2 = [0, 1, 2, 3, 4, 5]
+check("slice render", f"{lst2[1:4]}", "[1, 2, 3]")
+check("slice len", len(lst2[1:3]), 2)
+check("slice open hi", len(lst2[2:]), 4)
+check("slice open lo", lst2[:2][1], 1)
+check("slice negative", lst2[-3:][0], 3)
+check("slice clamped", len(lst2[2:100]), 4)
+check("string slice", "hello"[1:3], "el")
+check("string slice open", "hello"[:2], "he")
+check("string slice negative", "hello"[-3:], "llo")
+
+# list comprehensions
+squares = [x * x for x in range(5)]
+check("comp", squares[4], 16)
+check("comp len", len(squares), 5)
+evens = [x for x in range(10) if x % 2 == 0]
+check("comp if", len(evens), 5)
+check("comp if last", evens[-1], 8)
+words = ["hey", "a", "bcd"]
+check("comp call", f"{[len(w2) for w2 in words]}", "[3, 1, 3]")
+x = 99
+check("comp scope", len([x for x in range(3)]), 3)
+check("comp does not leak", x, 99)
+
+# for over a string
+cs = ""
+for ch in "abc":
+    cs += ch + "."
+check("for over string", cs, "a.b.c.")
+check("comp over string", f"{[c2 for c2 in 'xy']}", "['x', 'y']")
+
 check("fib", fib(10), 55)
 check("fails so far", fails[0], 0)
 

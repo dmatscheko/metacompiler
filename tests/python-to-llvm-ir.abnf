@@ -10,24 +10,38 @@ Comments (#) and blank lines are skipped by the newline rule. Indentation must u
 spaces (no tabs).
 
 The language: def functions (top level, with positional parameters), if/elif/else,
-while, for x in <list or range(a[,b])>, break/continue/pass/return, assignment and
+while, for x in <list, dict (its keys), string (its chars) or range(a[,b])>,
+break/continue/pass/return, assignment and
 += -= *= /= (assignment creates a variable in the current function if none exists in
 scope - there is no 'global' keyword; use a mutable list like fails = [0] for counters),
-lists with negative indexing, element assignment, .append()/.pop(), len(), print() with
-Python style rendering (True/None/[1, 2]), True/False/None, and/or/not with Python
-truthiness (empty lists are falsy) and operand values, comparisons (no chaining),
+lists with negative indexing, element assignment, .append()/.pop(), dicts with
+insertion order ({'a': 1}, d[k] get/set, in tests keys, len(), .keys()/.values()/
+.get(k[, default]), the counts[w] = counts.get(w, 0) + 1 idiom), the list() builtin (a fresh list from any iterable), slicing of lists
+and strings (s[1:3], s[:2], s[-3:]; no step), list comprehensions
+([x * x for x in xs if x % 2 == 0]; the variable does not leak), len(), in / not in
+membership tests on lists, strings and dicts, f-strings (f'x={a + 1}' renders like
+str()), print() with
+Python style rendering (True/None/[1, 2]/{'a': 1}), True/False/None, and/or/not with
+Python
+truthiness (empty lists and dicts are falsy) and operand values, comparisons (no
+chaining),
 + - * % with float semantics, / as true division (7/2 == 3.5), // as floor division
 (-7//2 == -4), % as floor modulo (-7%2 == 1), unary -, int and float literals, and
 single or double quoted strings with escapes.
 
-Not in the subset: classes, dicts, tuples, nested def/lambdas/closures, the global
-keyword, comparison chaining, slices, for-else, f-strings, imports, exceptions, and
-list equality by value (== compares lists by identity).
+Not in the subset: classes, tuples, nested def/lambdas/closures, the global
+keyword, comparison chaining, slice assignment and slice steps, dict comprehensions,
+for-else, imports, exceptions, and
+list/dict equality by value (== compares them by identity).
 
 Functions become IR functions jsf_N(env, args); Python scoping (assignment creates a
 function local unless the name exists) goes through the js_pyset_var external, negative
-indexing through js_pyget/js_pyset, floor division and modulo through js_fdiv/js_fmod,
-truthiness (empty lists are falsy) through js_pytruthy, and print through js_pyprint.
+indexing and dict entries through js_pyget/js_pyset, dicts through js_dict_new (two
+parallel key/value arrays keep the insertion order), slices through js_pyslice,
+iteration through js_pyiter, len through js_pylen, floor division and modulo through
+js_fdiv/js_fmod,
+truthiness (empty lists and dicts are falsy) through js_pytruthy, and print/f-strings
+through js_pyprint/js_pystr.
 The whole file becomes jsmain(env, args) and simply runs top to bottom. Self checking
 programs end with exit(fails[0]).
 The same language with the same semantics is interpreted directly by
@@ -120,15 +134,35 @@ Neg         <~~ push(makeNeg(pop())) ~~>
 // f(a), s[i], lst.append(x).
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | MethodSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Expression { "," Expression } ] ")" ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+// A slice s[lo:hi] with both ends optional; tried before plain indexing (the
+// missing ':' makes it fail fast there).
+SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
+            = "[" [ SliceLo ] ":" [ SliceHi ] "]" ;
+SliceLo     <~~ push({slo: pop()}) ~~> = Expression ;
+SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FString | StringLit | NumberLit | True | False | None | ListLit | VarRef ;
+Primary     = "(" Expression ")" | FString | StringLit | NumberLit | True | False | None
+            | ListComp | ListLit | DictLit | VarRef ;
+
+// [expr for x in iterable if cond] builds a list; the variable is comprehension local.
+ListComp    <~~ push(makeListComp(takeAll())) ~~>
+            = "[" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~> "in" KwEnd Expression
+              [ CompIf ] "]" ;
+CompIf      <~~ push({cif: pop()}) ~~>
+            = "if" KwEnd Expression ;
+
+// {k: v, ...}: keys and values are expressions; entries keep their insertion order.
+DictLit     <~~ push(makeDict(takeAll())) ~~>
+            = "{" [ DictEntry { "," DictEntry } ] "}" ;
+DictEntry   <~~ var dv = pop(); push({dk: pop(), dv: dv}) ~~>
+            = Expression ":" Expression ;
 
 // f-string: literal chunks and {expression} parts; every expression renders like str().
 FString     <~~ push(makeFString(takeAll())) ~~>
@@ -460,6 +494,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var ea2 = emitArgs(b, s.args)
                     b = ea2.b
                     cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea2.v])
+                } else if (s.kind == "slice") {
+                    var loV = hUndef
+                    var hiV = hUndef
+                    if (s.lo != null) { var rl = s.lo(b); b = rl.b; loV = rl.v }
+                    if (s.hi != null) { var rh = s.hi(b); b = rh.b; hiV = rh.v }
+                    cur = callExt(b, "js_pyslice", [cur, loV, hiV])
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
@@ -479,6 +519,84 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 callExt(b, "js_arr_push", [arr, r.v])
             }
             return {b: b, v: arr}
+        }
+    }
+    // items = [{dk, dv}...] -> a dict built in source order (js_pyset appends new keys).
+    function makeDict(items) {
+        return function(b) {
+            var d = callExt(b, "js_dict_new", [])
+            for (var i = 0; i < items.length; i++) {
+                var rk = items[i].dk(b)
+                b = rk.b
+                var rv = items[i].dv(b)
+                b = rv.b
+                callExt(b, "js_pyset", [d, rk.v, rv.v])
+            }
+            return {b: b, v: d}
+        }
+    }
+    // items = [{slo}?, {shi}?] -> a slice suffix descriptor.
+    function makeSliceSfx(items) {
+        var lo = null
+        var hi = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].slo != undefined) lo = items[i].slo
+            if (items[i].shi != undefined) hi = items[i].shi
+        }
+        return {kind: "slice", lo: lo, hi: hi}
+    }
+    // items = [exprT, {cvar}, iterT, {cif}?]. Compiles to an append loop over the
+    // normalized iterable (js_pyiter); the variable lives in an own scope (Python 3
+    // comprehension scoping: it does not leak).
+    function makeListComp(items) {
+        var exprT = items[0]
+        var name = items[1].cvar
+        var iterT = items[2]
+        var condT = items.length > 3 ? items[3].cif : null
+        return function(b) {
+            hidCount++
+            var iName = "$ci" + hidCount
+            var aName = "$ca" + hidCount
+            var oName = "$co" + hidCount
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var r = iterT(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [r.v])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_arr_new", [])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
+            headB.NewCondBr(pytruthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            var bb = bodyB
+            var iV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iName)])
+            var aV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, aName)])
+            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, name), callExt(bb, "js_get", [aV2, iV2])])
+            if (condT != null) {
+                var rc = condT(bb)
+                bb = rc.b
+                var keepB = curF.NewBlock("")
+                bb.NewCondBr(pytruthy(bb, rc.v), keepB, postB)
+                bb = keepB
+            }
+            var re = exprT(bb)
+            bb = re.b
+            var oV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, oName)])
+            callExt(bb, "js_arr_push", [oV, re.v])
+            bb.NewBr(postB)
+            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
+            postB.NewBr(headB)
+            var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])
+            curScopeV = saved
+            return {b: exitB, v: outV}
         }
     }
 
@@ -600,7 +718,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var aName = "$a" + hidCount
             var r = listT(b)
             b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
+            // js_pyiter normalizes the iterable: dicts iterate their keys, strings their chars.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [r.v])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
@@ -692,14 +811,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pb.NewCall(getExtern("js_pyprint", 1), [pf.Params[1]])
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
-        // len(x)
+        // len(x): strings, lists and dicts via js_pylen.
         funcCount++
         var lenIdx = funcCount
         var lf = m.NewFunc("jsf_" + lenIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var lb = lf.NewBlock("entry")
         var lArg = lb.NewCall(getExtern("js_arg", 2), [lf.Params[1], handle(0)])
-        lb.NewRet(lb.NewCall(getExtern("js_get", 2), [lArg, emitStr(lb, "length")]))
+        lb.NewRet(lb.NewCall(getExtern("js_pylen", 1), [lArg]))
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "len"), callExt(b, "js_closure", [handle(lenIdx), curScopeV])])
+        // list(x): a fresh list from any iterable, via js_pylist.
+        funcCount++
+        var listIdx = funcCount
+        var tf = m.NewFunc("jsf_" + listIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var tb = tf.NewBlock("entry")
+        var tArg = tb.NewCall(getExtern("js_arg", 2), [tf.Params[1], handle(0)])
+        tb.NewRet(tb.NewCall(getExtern("js_pylist", 1), [tArg]))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "list"), callExt(b, "js_closure", [handle(listIdx), curScopeV])])
         // range(a[, b])
         funcCount++
         var rgIdx = funcCount

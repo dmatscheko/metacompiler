@@ -1038,8 +1038,72 @@ func (rt *jsrt) convertToType(v interface{}, t reflect.Type) reflect.Value {
 	return reflect.Value{}
 }
 
+// dictParts returns the keys and vals arrays of a Python dict handle: a jsObject
+// tagged with __dict whose two parallel arrays keep the entries in insertion
+// order (the object's Go property map cannot).
+func dictParts(v interface{}) (*jsArray, *jsArray, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, nil, false
+	}
+	if tag, ok := o.props["__dict"]; !ok || tag != true {
+		return nil, nil, false
+	}
+	keys, _ := o.props["keys"].(*jsArray)
+	vals, _ := o.props["vals"].(*jsArray)
+	if keys == nil || vals == nil {
+		return nil, nil, false
+	}
+	return keys, vals, true
+}
+
+// dictFind returns the position of key k in the keys array, or -1.
+func (rt *jsrt) dictFind(keys *jsArray, k interface{}) int {
+	for i, e := range keys.elems {
+		if rt.strictEq(e, k) {
+			return i
+		}
+	}
+	return -1
+}
+
+// pySliceRange resolves Python slice bounds against a length: undefined ends
+// mean the whole side, negatives wrap, everything clamps into [0, n].
+func (rt *jsrt) pySliceRange(lo, hi interface{}, n int) (int, int) {
+	clamp := func(v interface{}, dflt int) int {
+		if _, undef := v.(jsUndefT); undef {
+			return dflt
+		}
+		i := int(rt.toNumber(v))
+		if i < 0 {
+			i += n
+		}
+		if i < 0 {
+			i = 0
+		}
+		if i > n {
+			i = n
+		}
+		return i
+	}
+	from := clamp(lo, 0)
+	to := clamp(hi, n)
+	if to < from {
+		to = from
+	}
+	return from, to
+}
+
+// pyRepr renders a container element like Python's repr: strings get quotes.
+func (rt *jsrt) pyRepr(v interface{}) string {
+	if s, isStr := v.(string); isStr {
+		return "'" + s + "'"
+	}
+	return rt.pyString(v)
+}
+
 // pyString renders a value like Python's str(): True/False/None capitalized,
-// lists in bracket notation.
+// lists in bracket and dicts in brace notation.
 func (rt *jsrt) pyString(v interface{}) string {
 	switch t := v.(type) {
 	case jsUndefT, jsNullT:
@@ -1055,13 +1119,21 @@ func (rt *jsrt) pyString(v interface{}) string {
 			if i > 0 {
 				out += ", "
 			}
-			if s, isStr := e.(string); isStr {
-				out += "'" + s + "'"
-			} else {
-				out += rt.pyString(e)
-			}
+			out += rt.pyRepr(e)
 		}
 		return out + "]"
+	case *jsObject:
+		if keys, vals, ok := dictParts(t); ok {
+			out := "{"
+			for i := range keys.elems {
+				if i > 0 {
+					out += ", "
+				}
+				out += rt.pyRepr(keys.elems[i]) + ": " + rt.pyRepr(vals.elems[i])
+			}
+			return out + "}"
+		}
+		return rt.toString(v)
 	default:
 		return rt.toString(v)
 	}
@@ -1108,6 +1180,24 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		}
 		rt.fail("unknown String method: %s", name)
 	case *jsObject:
+		if keys, vals, isDict := dictParts(o); isDict {
+			// The Python dict methods.
+			switch name {
+			case "keys":
+				return &jsArray{elems: append([]interface{}{}, keys.elems...)}
+			case "values":
+				return &jsArray{elems: append([]interface{}{}, vals.elems...)}
+			case "get":
+				if i := rt.dictFind(keys, argAt(args, 0)); i >= 0 {
+					return vals.elems[i]
+				}
+				if len(args) > 1 {
+					return args[1]
+				}
+				return jsUndef
+			}
+			rt.fail("unknown dict method '%s'", name)
+		}
 		if cls, ok := o.props["__class"]; ok {
 			// The lookup follows the __super chain (single inheritance).
 			for cls != nil {
@@ -1647,9 +1737,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapNum(r)
 		},
-		"js_pytruthy": func(a []uint64) uint64 { // Python truthiness: empty lists are falsy.
+		"js_pytruthy": func(a []uint64) uint64 { // Python truthiness: empty lists/dicts are falsy.
 			if arr, ok := u(a[0]).(*jsArray); ok {
 				if len(arr.elems) > 0 {
+					return 1
+				}
+				return 0
+			}
+			if keys, _, ok := dictParts(u(a[0])); ok {
+				if len(keys.elems) > 0 {
 					return 1
 				}
 				return 0
@@ -1659,7 +1755,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return 0
 		},
-		"js_pyget": func(a []uint64) uint64 { // Sequence indexing with negative wrap around.
+		"js_pyget": func(a []uint64) uint64 { // Sequence indexing (negative wraps) and dict lookup.
+			if keys, vals, ok := dictParts(u(a[0])); ok {
+				i := rt.dictFind(keys, u(a[1]))
+				if i < 0 {
+					rt.fail("KeyError: %s", rt.pyString(u(a[1])))
+				}
+				return w(vals.elems[i])
+			}
 			idx := int(rt.toNumber(u(a[1])))
 			switch o := u(a[0]).(type) {
 			case *jsArray:
@@ -1682,7 +1785,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
-		"js_pyset": func(a []uint64) uint64 { // List element assignment with negative wrap around.
+		"js_pyset": func(a []uint64) uint64 { // List element (negative wraps) or dict entry assignment.
+			if keys, vals, ok := dictParts(u(a[0])); ok {
+				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+					vals.elems[i] = u(a[2])
+				} else {
+					keys.elems = append(keys.elems, u(a[1]))
+					vals.elems = append(vals.elems, u(a[2]))
+				}
+				return 0
+			}
 			arr, ok := u(a[0]).(*jsArray)
 			if !ok {
 				rt.fail("item assignment on a %s", rt.typeOf(u(a[0])))
@@ -1695,6 +1807,70 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("list assignment index out of range")
 			}
 			arr.elems[idx] = u(a[2])
+			return 0
+		},
+		"js_dict_new": func(a []uint64) uint64 { // An empty Python dict handle.
+			return w(&jsObject{props: map[string]interface{}{
+				"__dict": true, "keys": &jsArray{}, "vals": &jsArray{},
+			}})
+		},
+		"js_pylen": func(a []uint64) uint64 { // len() for strings, lists and dicts.
+			switch o := u(a[0]).(type) {
+			case string:
+				return rt.wrapNum(float64(len(o)))
+			case *jsArray:
+				return rt.wrapNum(float64(len(o.elems)))
+			}
+			if keys, _, ok := dictParts(u(a[0])); ok {
+				return rt.wrapNum(float64(len(keys.elems)))
+			}
+			rt.fail("len() of a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		"js_pylist": func(a []uint64) uint64 { // list(x): always a fresh list.
+			switch o := u(a[0]).(type) {
+			case *jsArray:
+				return w(&jsArray{elems: append([]interface{}{}, o.elems...)})
+			case string:
+				out := &jsArray{}
+				for i := 0; i < len(o); i++ {
+					out.elems = append(out.elems, string(o[i]))
+				}
+				return w(out)
+			}
+			if keys, _, ok := dictParts(u(a[0])); ok {
+				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
+			}
+			rt.fail("list() of a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		"js_pyiter": func(a []uint64) uint64 { // The list a for loop runs over: dicts iterate
+			switch o := u(a[0]).(type) { // their keys, strings their characters.
+			case *jsArray:
+				return a[0]
+			case string:
+				out := &jsArray{}
+				for i := 0; i < len(o); i++ {
+					out.elems = append(out.elems, string(o[i]))
+				}
+				return w(out)
+			}
+			if keys, _, ok := dictParts(u(a[0])); ok {
+				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
+			}
+			rt.fail("iteration over a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		"js_pyslice": func(a []uint64) uint64 { // s[lo:hi] on lists and strings; open ends are undefined.
+			switch o := u(a[0]).(type) {
+			case *jsArray:
+				from, to := rt.pySliceRange(u(a[1]), u(a[2]), len(o.elems))
+				return w(&jsArray{elems: append([]interface{}{}, o.elems[from:to]...)})
+			case string:
+				from, to := rt.pySliceRange(u(a[1]), u(a[2]), len(o))
+				return rt.wrapStr(o[from:to])
+			}
+			rt.fail("slicing a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
 		"js_pyset_var": func(a []uint64) uint64 { // Assign in the chain, else declare locally.
@@ -1723,7 +1899,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(arr)
 		},
-		"js_pyin": func(a []uint64) uint64 { // Python 'x in y' for lists and strings.
+		"js_pyin": func(a []uint64) uint64 { // Python 'x in y' for lists, strings and dict keys.
 			switch c := u(a[1]).(type) {
 			case *jsArray:
 				for _, e := range c.elems {
@@ -1735,7 +1911,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case string:
 				return boolH(strings.Contains(c, rt.toString(u(a[0]))))
 			}
-			rt.fail("'in' needs a list or a string on the right side")
+			if keys, _, ok := dictParts(u(a[1])); ok {
+				return boolH(rt.dictFind(keys, u(a[0])) >= 0)
+			}
+			rt.fail("'in' needs a list, a string or a dict on the right side")
 			return boolH(false)
 		},
 		"js_pystr": func(a []uint64) uint64 { // str(v) with Python style rendering.
