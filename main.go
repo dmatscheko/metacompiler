@@ -37,7 +37,9 @@ import (
 //	-cfg F       write the CFG of every executed module to F (DOT; .mmd = Mermaid)
 //	-trace F     stream runtime events to F (JSON lines); also the -render input
 //	-callgraph F write the static call graph (.jsonl appends for -render static)
-//	-render K    render a -trace/-callgraph file to DOT: calls | vars | static
+//	-render K    standalone (no pipeline): read the JSON-lines file named by -trace F
+//	             and write graph K to stdout as Graphviz DOT. K is calls or vars
+//	             (from a -trace run) or static (from a -callgraph run)
 //	-freeze F    (re)create the frozen bootstrap snapshot from grammar F, then exit
 //	-lb / -lf    parser block-list / found-list (debugging aids)
 //	-s           speed test (100 cycles on the first file)
@@ -378,11 +380,13 @@ anywhere among the files.
   -frozen       run the annotation scripts without goja
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit
-  -cfg F        write the control flow graph of every executed module to F
-  -trace F      stream runtime events to F as JSON lines
-  -callgraph F  write the static call graph (.jsonl appends for -render static)
-  -render K     render a -trace/-callgraph file to DOT: calls | vars | static
-  -freeze F     (re)create the frozen bootstrap snapshot from grammar F, then exit
+  -cfg F        write the control flow graph of every executed module to file F
+  -trace F      stream runtime events to file F as JSON lines
+  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
+  -render K     standalone: read the JSON-lines file named by -trace F and write graph
+                K to stdout as Graphviz DOT, then exit. K = calls | vars (from a -trace
+                run) or static (from a -callgraph run)
+  -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
   -lb, -lf      parser block-list / found-list debugging aids
   -s            speed test (100 cycles on the first file)
 `)
