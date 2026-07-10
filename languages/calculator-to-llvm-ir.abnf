@@ -62,9 +62,11 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
     // takeAll empties the local stack of the current tag and returns its items in push order.
     function takeAll() {
         var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
+        while (true) {
+            var v = pop() // Redeclared per iteration: consecutive pops may yield different types.
+            if (v == null) { return items }
+            items.unshift(v)
+        }
     }
 
     var i32 = llvm.types.I32

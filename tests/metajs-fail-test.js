@@ -1,0 +1,10 @@
+// MetaJS type pinning violation demo: THIS PROGRAM SHOULD FAIL in the interpreter
+// and the compiler of both the metajs and typed-metajs grammars. The variable x is
+// pinned as a number by its first value, so assigning a string to it must abort the
+// run with a nonzero exit code.
+
+function main() {
+    var x = 5;
+    x = "oops";
+    return 0;
+}

@@ -10,7 +10,9 @@ JS semantics is a call to one of its js_* externals (js_add, js_get, js_call, ..
 Only the control flow is real IR: if/while/for/&&/||/?: compile to basic blocks,
 branches and phis, driven by js_truthy. The handles 0..3 are the constants undefined,
 null, false and true. Variables live in scope chain objects on the host side
-(js_scope_new/decl/get/set), which is also what gives closures their captured
+(js_scope_new, js_scope_get, and the declaring/assigning js_tdecl/js_tset, which
+also enforce the MetaJS type pinning), and the scope chain is what gives closures
+their captured
 environment: a function expression becomes an own IR function jsf_N(env, args) plus a
 js_closure(N, currentScope) at the site of its creation. String and number literals
 enter through module globals (js_str_mem) and js_num_i/js_num_str.
@@ -28,7 +30,11 @@ The same language with the same semantics is interpreted directly by metajs-inte
 
 This grammar has a second purpose: its own tag scripts (and every annotation script of
 the other grammars) are written in MetaJS, so this compiler can compile the scripts that
-define it - that is what makes the frozen, goja free bootstrap possible.") ;
+define it - that is what makes the frozen, goja free bootstrap possible. As a
+consequence, every tag script runs under the MetaJS discipline rules when frozen:
+declaration before use and the pinned type class. Under goja only the declaration rule
+holds (the scripts are compiled as strict-mode JS; goja cannot pin types), so the
+-frozen leg of the test matrix is the conformance check for tag scripts.") ;
 
 
 // --- main rules
@@ -423,7 +429,7 @@ KwDefault   = "default" KwEnd ;
                     var old = callExt(b, "js_scope_get", [curScopeV, nameV])
                     v = callExt(b, binExt[op], [old, v])
                 }
-                callExt(b, "js_scope_set", [curScopeV, nameV, v])
+                callExt(b, "js_tset", [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -445,7 +451,7 @@ KwDefault   = "default" KwEnd ;
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
-                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, extName, [oldV, oneV])])
+                callExt(b, "js_tset", [curScopeV, nameV, callExt(b, extName, [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
@@ -464,7 +470,7 @@ KwDefault   = "default" KwEnd ;
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
                 var newV = callExt(b, extName, [oldV, oneV])
-                callExt(b, "js_scope_set", [curScopeV, nameV, newV])
+                callExt(b, "js_tset", [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
@@ -492,10 +498,10 @@ KwDefault   = "default" KwEnd ;
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         for (var i = 0; i < paramNames.length; i++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, paramNames[i]),
-                                         callExt(b, "js_arg", [f.Params[1], handle(i)])])
+            callExt(b, "js_tdecl", [curScopeV, emitStr(b, paramNames[i]),
+                                    callExt(b, "js_arg", [f.Params[1], handle(i)])])
         }
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
+        callExt(b, "js_tdecl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
 
@@ -537,7 +543,7 @@ KwDefault   = "default" KwEnd ;
                 b = r.b
                 v = r.v
             }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+            callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), v])
             return b
         }
     }
@@ -671,7 +677,7 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var idx = emitFunction(paramNames, bodyT)
             var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cl])
+            callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), cl])
             return b
         }
     }

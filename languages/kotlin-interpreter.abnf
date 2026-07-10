@@ -394,32 +394,31 @@ KwStep      = "step" KwEnd ;
         }
     }
 
+    // The folded value is a parameter, so each suffix step pins its type fresh.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        return function() {
-            var cur = primary()
-            for (var i = 0; i < suffixes.length; i++) {
-                var s = suffixes[i]
-                // A ?. suffix on a null receiver yields null; the argument
-                // expressions of a skipped call do not run (like in Kotlin).
-                if (s.safe && (cur === undefined || cur === null)) { cur = null; continue }
-                if (s.kind == "mcall") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                    cur = mcall(cur, s.name, argv)
-                } else if (s.kind == "field") {
-                    if (cur === undefined || cur === null) fail("property ." + s.name + " of null")
-                    if (s.name == "size" && Array.isArray(cur)) { cur = cur.length }
-                    else if (s.name == "length" && typeof cur == "string") { cur = cur.length }
-                    else { cur = cur[s.name] }
-                } else {
-                    cur = cur[s.idx()]
-                }
-            }
-            return cur
+        return function() { return foldKtSuffix(primary(), suffixes, 0) }
+    }
+    function foldKtSuffix(cur, suffixes, i) {
+        if (i >= suffixes.length) return cur
+        var s = suffixes[i]
+        // A ?. suffix on a null receiver yields null; the argument
+        // expressions of a skipped call do not run (like in Kotlin).
+        if (s.safe && (cur === undefined || cur === null)) return foldKtSuffix(null, suffixes, i + 1)
+        if (s.kind == "mcall") {
+            var argv = []
+            for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+            return foldKtSuffix(mcall(cur, s.name, argv), suffixes, i + 1)
         }
+        if (s.kind == "field") {
+            if (cur === undefined || cur === null) fail("property ." + s.name + " of null")
+            if (s.name == "size" && Array.isArray(cur)) return foldKtSuffix(cur.length, suffixes, i + 1)
+            if (s.name == "length" && typeof cur == "string") return foldKtSuffix(cur.length, suffixes, i + 1)
+            return foldKtSuffix(cur[s.name], suffixes, i + 1)
+        }
+        return foldKtSuffix(cur[s.idx()], suffixes, i + 1)
     }
 
     // Lambda items = [{lparams}?, bodyThunk]. The lambda captures the scope chain of

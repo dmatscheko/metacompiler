@@ -89,6 +89,24 @@
             "program": "${workspaceFolder}","args": ["-a", "languages/metajs-to-llvm-ir.abnf", "-b", "tests/metajs-test-1.js", "-q"]
         },
         {
+            "name": "MetaJS type violation (SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-interpreter.abnf", "-b", "tests/metajs-fail-test.js", "-q"]
+        },
+        {
+            "name": "MetaJS type violation, compiled (SHOULD FAIL, no -q: the engines' error dumps differ)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-to-llvm-ir.abnf", "-b", "tests/metajs-fail-test.js"]
+        },
+        {
+            "name": "MetaJS undeclared assignment (SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-interpreter.abnf", "-b", "tests/metajs-fail-test-undeclared.js", "-q"]
+        },
+        {
             "name": "C (subset) interpreter",
             "type": "go",
             "request": "launch",
@@ -116,7 +134,7 @@
             "name": "Typed MetaJS violation (SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-interpreter.abnf", "-b", "tests/typed-metajs-fail-test.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-interpreter.abnf", "-b", "tests/metajs-fail-test.js", "-q"]
         },
         {
             "name": "Java interpreter",

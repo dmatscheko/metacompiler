@@ -433,45 +433,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return out
         }
     }
-    // and/or return the deciding operand, with Python truthiness.
+    // and/or return the deciding operand, with Python truthiness. The running
+    // operand is a parameter, so mixed operand types pin fresh per step.
     makeOrAnd = function(items, isOr) {
         if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i++) {
-                if (isOr) { if (pytruthy(v)) return v }
-                else      { if (!pytruthy(v)) return v }
-                v = items[i]()
-            }
-            return v
-        }
+        return function() { return pyOrAndFrom(items[0](), items, 1, isOr) }
+    }
+    function pyOrAndFrom(v, items, i, isOr) {
+        if (isOr) { if (pytruthy(v)) return v }
+        else      { if (!pytruthy(v)) return v }
+        if (i >= items.length) return v
+        return pyOrAndFrom(items[i](), items, i + 1, isOr)
     }
 
+    // The folded value is a parameter, so each suffix step pins its type fresh.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        return function() {
-            var cur = primary()
-            for (var i = 0; i < suffixes.length; i++) {
-                var s = suffixes[i]
-                if (s.kind == "call") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                    if (typeof cur != "function") fail("call of a non function")
-                    cur = cur.apply(undefined, argv)
-                } else if (s.kind == "mcall") {
-                    var argv2 = []
-                    for (var j2 = 0; j2 < s.args.length; j2++) argv2.push(s.args[j2]())
-                    cur = mcall(cur, s.name, argv2)
-                } else if (s.kind == "slice") {
-                    cur = pySlice(cur, s.lo != null ? s.lo() : undefined, s.hi != null ? s.hi() : undefined)
-                } else {
-                    cur = pyget(cur, s.idx())
-                }
-            }
-            return cur
+        return function() { return foldPySuffix(primary(), suffixes, 0) }
+    }
+    function foldPySuffix(cur, suffixes, i) {
+        if (i >= suffixes.length) return cur
+        var s = suffixes[i]
+        if (s.kind == "call") {
+            var argv = []
+            for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+            if (typeof cur != "function") fail("call of a non function")
+            return foldPySuffix(cur.apply(undefined, argv), suffixes, i + 1)
         }
+        if (s.kind == "mcall") {
+            var argv2 = []
+            for (var j2 = 0; j2 < s.args.length; j2++) argv2.push(s.args[j2]())
+            return foldPySuffix(mcall(cur, s.name, argv2), suffixes, i + 1)
+        }
+        if (s.kind == "slice") {
+            return foldPySuffix(pySlice(cur, s.lo != null ? s.lo() : undefined, s.hi != null ? s.hi() : undefined), suffixes, i + 1)
+        }
+        return foldPySuffix(pyget(cur, s.idx()), suffixes, i + 1)
     }
 
     function makeList(items) {
@@ -519,10 +518,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // Walks path steps i..n of a reference; the container is a parameter, so each
+    // step pins its type fresh (the last readRef step lands on the element itself).
+    function pyRefWalk(o, ref, i, n) {
+        if (i >= n) return o
+        return pyRefWalk(pyget(o, ref.path[i].idx()), ref, i + 1, n)
+    }
     function assignRef(ref, v) {
         if (ref.path.length == 0) { setVar(ref.name, v); return }
-        var o = getVar(ref.name)
-        for (var i = 0; i < ref.path.length - 1; i++) o = pyget(o, ref.path[i].idx())
+        var o = pyRefWalk(getVar(ref.name), ref, 0, ref.path.length - 1)
         var idx = ref.path[ref.path.length - 1].idx()
         if (isDict(o)) { dictSet(o, idx, v); return }
         if (idx < 0) idx += o.length
@@ -531,9 +535,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function readRef(ref) {
         if (ref.path.length == 0) return getVar(ref.name)
-        var o = getVar(ref.name)
-        for (var i = 0; i < ref.path.length; i++) o = pyget(o, ref.path[i].idx())
-        return o
+        return pyRefWalk(getVar(ref.name), ref, 0, ref.path.length)
     }
     function makeAssign(valT, ref) {
         return function() { assignRef(ref, valT()) }

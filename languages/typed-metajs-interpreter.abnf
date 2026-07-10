@@ -1,12 +1,14 @@
 :title("Typed MetaJS interpreter") ;
 :description("Parses Typed MetaJS and executes it directly, without generating code.
 
-Typed MetaJS is exactly MetaJS (see metajs-interpreter.abnf) with one extra rule: every variable
-must be declared before use (MetaJS already enforces that), and a variable's type is
-pinned by the first non-undefined value it holds - later assignments must keep that type
-class (number, string, boolean, function or object; null counts as object, and arrays and
-objects share the object class like typeof does). Assigning undefined is always allowed
-and keeps the pinned type. A violation aborts the run.
+Typed MetaJS is the dialect in which the type pinning rule was first prototyped: every
+variable must be declared before use, and a variable's type is pinned by the first
+non-undefined, non-null value it holds - later assignments must keep that type class
+(number, string, boolean, function or object; arrays and objects share the object class
+like typeof does). undefined and null pin nothing and are always assignable. A violation
+aborts the run. Since the rule moved into MetaJS itself, this is exactly the same
+language as metajs-interpreter.abnf; the pair is kept as the demo of deriving a
+stricter dialect from a base grammar.
 
 The base language is MetaJS. It has: var/let/const (all block scoped), function declarations and
 anonymous function expressions with real closures and an 'arguments' array, if/else, while,
@@ -277,10 +279,9 @@ KwDefault   = "default" KwEnd ;
         "exit": exit
     }
 
-    // The type class that pins a variable: undefined pins nothing, null is an object.
+    // The type class that pins a variable: undefined and null pin nothing.
     function typeClass(v) {
-        if (v === undefined) return ""
-        if (v === null) return "object"
+        if (v === undefined || v === null) return ""
         return typeof v
     }
     // Scope entries are {v, t} type boxes: reads unbox, declarations pin the type.
@@ -391,28 +392,25 @@ KwDefault   = "default" KwEnd ;
         if (op == ">>>") return l >>> r
     }
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
-    // || and && evaluate lazily and return the deciding operand, like in JS.
+    // || and && evaluate lazily and return the deciding operand, like in JS. The
+    // running operand is a parameter, so mixed operand types pin fresh per step.
     function makeOr(items) {
         if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i++) {
-                if (v) return v
-                v = items[i]()
-            }
-            return v
-        }
+        return function() { return orFrom(items[0](), items, 1) }
+    }
+    function orFrom(v, items, i) {
+        if (v) return v
+        if (i >= items.length) return v
+        return orFrom(items[i](), items, i + 1)
     }
     function makeAnd(items) {
         if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i++) {
-                if (!v) return v
-                v = items[i]()
-            }
-            return v
-        }
+        return function() { return andFrom(items[0](), items, 1) }
+    }
+    function andFrom(v, items, i) {
+        if (!v) return v
+        if (i >= items.length) return v
+        return andFrom(items[i](), items, i + 1)
     }
     // items = [thunk] or [condThunk, thenThunk, elseThunk].
     function makeCond(items) {
@@ -421,54 +419,47 @@ KwDefault   = "default" KwEnd ;
     }
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
-    // its object, so that a directly following call uses it as 'this'.
+    // its object, so that a directly following call uses it as 'this'. The folded value
+    // and the remembered receiver are parameters, so every step pins their types fresh.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        return function() {
-            var cur = primary()
-            var curThis = undefined
-            for (var i = 0; i < suffixes.length; i++) {
-                var s = suffixes[i]
-                if (s.kind == "member") {
-                    curThis = cur
-                    cur = getMember(cur, s.key())
-                } else {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                    if (typeof cur != "function") fail("call of a non function value: " + cur)
-                    cur = cur.apply(curThis, argv)
-                    curThis = undefined
-                }
-            }
-            return cur
+        return function() { return foldJsSuffix(primary(), undefined, suffixes, 0) }
+    }
+    function foldJsSuffix(cur, curThis, suffixes, i) {
+        if (i >= suffixes.length) return cur
+        var s = suffixes[i]
+        if (s.kind == "member") {
+            return foldJsSuffix(getMember(cur, s.key()), cur, suffixes, i + 1)
         }
+        var argv = []
+        for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+        if (typeof cur != "function") fail("call of a non function value: " + cur)
+        return foldJsSuffix(cur.apply(curThis, argv), undefined, suffixes, i + 1)
     }
 
     // Target items = [nameString, suffix marker...] -> reference descriptor.
     // Walks a target path (members and calls) up to the last element and returns
     // the assignable place {obj, key}. The last element must be a member.
     resolveRef = function(ref) {
-        var cur = getVar(ref.name)
-        var curThis = undefined
-        for (var i = 0; i < ref.path.length - 1; i++) {
-            var s = ref.path[i]
-            if (s.kind == "member") {
-                curThis = cur
-                cur = getMember(cur, s.key())
-            } else {
-                var argv = []
-                for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                if (typeof cur != "function") fail("call of a non function value: " + cur)
-                cur = cur.apply(curThis, argv)
-                curThis = undefined
-            }
+        return jsRefWalk(getVar(ref.name), undefined, ref, 0)
+    }
+    function jsRefWalk(cur, curThis, ref, i) {
+        if (i >= ref.path.length - 1) {
+            var last = ref.path[ref.path.length - 1]
+            if (last.kind != "member") fail("assignment target must end in a member")
+            if (cur == undefined) fail("member assignment on " + cur)
+            return {obj: cur, key: last.key()}
         }
-        var last = ref.path[ref.path.length - 1]
-        if (last.kind != "member") fail("assignment target must end in a member")
-        if (cur == undefined) fail("member assignment on " + cur)
-        return {obj: cur, key: last.key()}
+        var s = ref.path[i]
+        if (s.kind == "member") {
+            return jsRefWalk(getMember(cur, s.key()), cur, ref, i + 1)
+        }
+        var argv = []
+        for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+        if (typeof cur != "function") fail("call of a non function value: " + cur)
+        return jsRefWalk(cur.apply(curThis, argv), undefined, ref, i + 1)
     }
     applyOp = function(op, a, b) {
         if (op == "+=") return a + b
@@ -485,14 +476,16 @@ KwDefault   = "default" KwEnd ;
         return function() {
             var v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") v = applyOp(op, getVar(ref.name), v)
-                setVar(ref.name, v)
-            } else {
-                var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, p.obj[p.key], v)
-                p.obj[p.key] = v
+                if (op == "=") { setVar(ref.name, v); return v }
+                var w = applyOp(op, getVar(ref.name), v)
+                setVar(ref.name, w)
+                return w
             }
-            return v
+            var p = resolveRef(ref)
+            if (op == "=") { p.obj[p.key] = v; return v }
+            var w2 = applyOp(op, p.obj[p.key], v)
+            p.obj[p.key] = w2
+            return w2
         }
     }
     // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.

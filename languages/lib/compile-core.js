@@ -20,9 +20,11 @@ var core = {
 
 function takeAll() {
     var items = []
-    var v
-    while ((v = pop()) != null) items.unshift(v)
-    return items
+    while (true) {
+        var v = pop() // Redeclared per iteration: consecutive pops may yield different types.
+        if (v == null) { return items }
+        items.unshift(v)
+    }
 }
 function popName() {
     var items = takeAll()

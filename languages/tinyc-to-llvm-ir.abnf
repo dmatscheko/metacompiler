@@ -159,9 +159,11 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // the runtime wraps the Go slice behind up.stack.
     function takeAll() {
         var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
+        while (true) {
+            var v = pop() // Redeclared per iteration: consecutive pops may yield different types.
+            if (v == null) { return items }
+            items.unshift(v)
+        }
     }
 
     var i32 = llvm.types.I32

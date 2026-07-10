@@ -83,8 +83,9 @@ type jsScope struct {
 	vars   map[string]interface{}
 	parent *jsScope
 
-	// types is only used by the typed JS dialect (js_tdecl/js_tset): it pins
-	// the type class of a variable at its first non-undefined value.
+	// types backs the MetaJS type pinning (js_tdecl/js_tset): it pins the type
+	// class of a variable at its first non-undefined, non-null value. Languages
+	// that declare through js_scope_decl/js_scope_set stay unpinned.
 	types map[string]string
 }
 
@@ -640,19 +641,22 @@ func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
 	rt.fail("assignment to undeclared variable: %s", name)
 }
 
-// typeClass returns the fixed type class of a value for the typed JS dialect.
-// undefined returns "" (it never pins a type); null counts as object.
+// typeClass returns the fixed type class of a value for MetaJS type pinning.
+// undefined and null return "" (they never pin a type and are always
+// assignable): null is the deliberate absence of a value, not an object.
 func (rt *jsrt) typeClass(v interface{}) string {
 	if _, u := v.(jsUndefT); u {
 		return ""
 	}
 	if _, n := v.(jsNullT); n {
-		return "object"
+		return ""
 	}
 	return rt.typeOf(v)
 }
 
 // typedDecl declares a variable and pins its type if the value already has one.
+// This is the declaration of MetaJS itself: the compiled MetaJS programs and
+// (through the frozen bootstrap) every tag script declare through it.
 func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
 	sc.vars[name] = v
 	if sc.types == nil {
@@ -666,13 +670,13 @@ func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
 }
 
 // typedSet assigns like scopeSet but refuses to change a pinned type.
-// Assigning undefined is allowed and keeps the pinned type.
+// Assigning undefined or null is allowed and keeps the pinned type.
 func (rt *jsrt) typedSet(sc *jsScope, name string, v interface{}) {
 	for s := sc; s != nil; s = s.parent {
 		if _, ok := s.vars[name]; ok {
 			if tc := rt.typeClass(v); tc != "" {
 				if old, pinned := s.types[name]; pinned && old != tc {
-					rt.fail("typed JS: variable '%s' has type %s and cannot hold a %s", name, old, tc)
+					rt.fail("MetaJS: variable '%s' has type %s and cannot hold a %s", name, old, tc)
 				}
 				if s.types == nil {
 					s.types = map[string]string{}
@@ -1568,7 +1572,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 
-		// The typed JS dialect: declarations and assignments with type pinning.
+		// MetaJS declarations and assignments: scope ops with type pinning.
+		// (Historically introduced for the typed JS dialect, hence the names.)
 		"js_tdecl": func(a []uint64) uint64 {
 			rt.typedDecl(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
 			return 0

@@ -1,10 +1,10 @@
 :title("Typed MetaJS to LLVM IR compiler") ;
 :description("Compiles Typed MetaJS to an LLVM IR module and runs it with the built-in IR interpreter.
 
-The language is exactly the one of typed-metajs-interpreter.abnf: MetaJS plus the rule that a
-variable's type is pinned by its first non-undefined value. The compiled code declares
-and assigns variables through the js_tdecl/js_tset externals, which enforce the type
-pinning on the host side, so a violation aborts the run exactly like in the interpreter.
+The language is exactly the one of typed-metajs-interpreter.abnf - which, since the type
+pinning rule moved into MetaJS itself, is MetaJS (see metajs-interpreter.abnf). The
+compiled code declares and assigns variables through the same js_tdecl/js_tset externals
+as metajs-to-llvm-ir.abnf, which enforce the pinning on the host side.
 
 The emitted IR is handle threaded code: every dynamic value is an i64 handle into the
 value table of the Go side MetaJS runtime (abnf/jsrt.go), and every operation with real

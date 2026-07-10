@@ -163,8 +163,8 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | Brainfuck    | brainfuck-interpreter.abnf                                   | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt        |
 | TinyC        | tinyc-interpreter.abnf                                       | tinyc-to-llvm-ir.abnf        | tinyc-test-1.txt, tinyc-test-2.txt                |
 | Lisp         | lisp-interpreter.abnf                                        | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                                   |
-| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js                                  |
-| Typed MetaJS | typed-metajs-interpreter.abnf                                | typed-metajs-to-llvm-ir.abnf | typed-metajs-test-1.js, typed-metajs-fail-test.js |
+| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js, metajs-fail-test.js, metajs-fail-test-undeclared.js |
+| Typed MetaJS | typed-metajs-interpreter.abnf                                | typed-metajs-to-llvm-ir.abnf | typed-metajs-test-1.js, metajs-fail-test.js       |
 | C (subset)   | c-interpreter.abnf                                           | c-to-llvm-ir.abnf            | c-test-1.c                                        |
 | Java         | java-interpreter.abnf                                        | java-to-llvm-ir.abnf         | java-test-1.java                                  |
 | Kotlin       | kotlin-interpreter.abnf                                      | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                                  |
@@ -195,8 +195,12 @@ i64 handles, methods dispatch through the shared class descriptor convention (js
 with a __super chain for Java's inheritance). Go maps and Python dicts share one handle
 shape (two parallel key/value arrays, so the insertion order is deterministic in both
 engines).
-Typed MetaJS is exactly MetaJS plus one rule: a variable's type is pinned by its first
-non-undefined value (enforced by both engines; typed-metajs-fail-test.js demonstrates the abort).
+MetaJS pins types: every variable must be declared (var/let/const) before use, and a
+variable's type class is pinned by the first non-undefined, non-null value it holds -
+enforced by both engines and demonstrated by metajs-fail-test.js and
+metajs-fail-test-undeclared.js (both SHOULD FAIL). Typed MetaJS is the dialect in which
+that rule was prototyped; it is now the same language and stays as the demo of deriving
+a stricter dialect from a base grammar.
 
 The big-language grammars (Java, Kotlin, Go, Python, C and both MetaJS variants -
 interpreters and compilers) draw their common machinery from `languages/lib/`: the
@@ -208,7 +212,8 @@ builders). Where languages genuinely differ the behavior is a knob on the librar
 identifier `_`, `nil` wording, map-aware indexing and defer frame hooks, Kotlin the
 implicit-this name fallback, Python its truthiness and assignment-declares-local rule,
 C its nonzero-int conditions - and anything genuinely language-specific (Java's
-inheritance dispatch, Go's multi-assign, Python's elif chains, Typed MetaJS' type boxes,
+inheritance dispatch, Go's multi-assign, Python's elif chains, the MetaJS variants'
+type boxes,
 C's arena addressing) stays in the grammar file as a plain-assignment override of the
 library name (never a `function` declaration: the two engines install those in opposite
 order relative to the include). The freezer inlines the emitter library's `include()`
@@ -241,6 +246,13 @@ MetaJS is special: it is the restricted JavaScript subset that the annotation sc
 grammars are written in (see the description in languages/metajs-interpreter.abnf for the exact
 language). That closes the loop for the frozen bootstrap below: every grammar above - all
 interpreters and compilers of all languages - also runs completely goja free with -frozen.
+It also means the discipline rules apply to the tag scripts themselves: under -frozen they
+declare and assign through the pinning externals (js_tdecl/js_tset), while goja enforces
+only the declaration rule (the scripts are compiled as strict-mode JS; a JS engine cannot
+pin types) - so the -frozen leg of a test sweep is the conformance check for tag scripts.
+A variable that legitimately hops between types (an interpreter folding obj.name.length
+walks object, string, number) is written as the parameter of a recursive helper instead
+of a loop-carried assignment: parameters pin fresh on every call.
 
 #### The frozen bootstrap (running without goja)
 
