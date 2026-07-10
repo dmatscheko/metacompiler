@@ -3,20 +3,24 @@
 IR interpreter and the MetaJS handle runtime (llvm.RunJS).
 
 The subset: classes with fields (instance and static, with initializers), methods
-(instance and static), constructors, records with auto generated constructor and
+(instance and static), constructors, single inheritance (class B extends A: inherited
+fields and methods, overriding with dynamic dispatch, the implicit no argument super
+constructor, and super.m() calls; a class must appear before its subclasses),
+records with auto generated constructor and
 accessors (a modern Java SE nod, like 'var' local declarations), object creation with
 new, arrays (new int[n], new int[]{...}, a.length, indexing), the enhanced for loop
 (for (var x : arr)), int / boolean / String / var / class types (types are parsed;
 the semantics are dynamic), String concatenation with +, the String methods length(),
 charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one char
 String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
-if/else, while, do-while, both for forms, break/continue, return, assignment (also
+if/else, while, do-while, both for forms, the classic colon switch on int or String
+(fallthrough, stacked labels, default), break/continue, return, assignment (also
 += -= *= /= %=), postfix ++/--, the ternary operator, || && with short circuit,
 == != < > <= >= (== compares objects by identity, use equals() for strings), + - * / %
 (int arithmetic is 32 bit, / truncates) and unary - !.
 
-Not in the subset: inheritance, interfaces, generics, packages/imports, exceptions,
-switch, casts, char/long/double, overloading, and implicit field access (fields are
+Not in the subset: interfaces, generics, packages/imports, exceptions, casts,
+the arrow switch, char/long/double, overloading, and implicit field access (fields are
 reached via this.x or ClassName.x - like the explicit style many code bases enforce).
 
 Fields live directly on the instance object (js_get/js_set), methods become own IR
@@ -69,7 +73,7 @@ Type        = ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | "void" KwEnd | 
               [ "[" "]" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | While | Do | ForEach | For | Return | Break | Continue
+Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
             | Decl | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
@@ -83,6 +87,16 @@ While       <~~ push(makeWhile(pop(), pop())) ~~>
 
 Do          <~~ push(makeDo(pop(), pop())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" ";" ;
+
+// The classic colon switch (on int or String): execution starts at the first matching
+// label and runs until a break or the end of the switch. Labels may stack.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
+SwitchCase  = Case | Default ;
+Case        <~~ push(makeCase(takeAll())) ~~>
+            = KwCase CondExpr ":" { Statement } ;
+Default     <~~ push(makeDefault(takeAll())) ~~>
+            = KwDefault ":" { Statement } ;
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
@@ -213,6 +227,9 @@ KwContinue  = "continue" KwEnd ;
 KwNew       = "new" KwEnd ;
 KwExtends   = "extends" KwEnd ;
 KwSuper     = "super" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -664,6 +681,45 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             loopStack.pop()
             var r = condT(condB)
             r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            return exitB
+        }
+    }
+    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
+    function makeDefault(items) { return {isDefault: true, body: items} }
+    // The dispatch chain compares with js_seq (=== semantics: ints by value, Strings by
+    // content), so switching on Strings works. The bodies fall through into each other;
+    // break jumps to the exit, continue still targets the enclosing loop.
+    function makeSwitch(items) {
+        var scrut = items[0]
+        var cases = items.slice(1)
+        return function(b) {
+            var r = scrut(b)
+            b = r.b
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDefault) { dfltB = bodyBs[i] }
+            }
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { continue }
+                var rc = cases[i].v(b)
+                b = rc.b
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [r.v, rc.v])), bodyBs[i], nextB)
+                b = nextB
+            }
+            b.NewBr(dfltB)
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var i = 0; i < cases.length; i++) {
+                var bb = bodyBs[i]
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                bb.NewBr(i + 1 < cases.length ? bodyBs[i + 1] : exitB)
+            }
+            loopStack.pop()
             return exitB
         }
     }

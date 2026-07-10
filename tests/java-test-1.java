@@ -109,6 +109,37 @@ public class Main {
         return Main.fib(n - 1) + Main.fib(n - 2);
     }
 
+    static int classify(int x) {        // switch with fallthrough and default
+        int r = 0;
+        switch (x) {
+        case 0:
+            r = 100;
+            break;
+        case 1:                         // stacked labels
+        case 2:
+            r = 12;
+            break;
+        case 3:
+            r = 3;                      // falls through into case 4
+        case 4:
+            r += 40;
+            break;
+        default:
+            r = -1;
+        }
+        return r;
+    }
+
+    static String dayKind(String d) {   // switch on String, return from a case
+        switch (d) {
+        case "sat":
+        case "sun":
+            return "weekend";
+        default:
+            return "workday";
+        }
+    }
+
     public static void main(String[] args) {
         // arithmetic (int is 32 bit, / truncates)
         Main.check("precedence", 1 + 2 * 3, 7);
@@ -213,6 +244,26 @@ public class Main {
         Main.check("inherited field", bird.legs, 2);
         Animal upcast = bird;
         Main.checkS("dispatch via supertype", upcast.name(), "bird");
+
+        // switch
+        Main.check("switch first", Main.classify(0), 100);
+        Main.check("switch stacked", Main.classify(2), 12);
+        Main.check("switch fallthrough", Main.classify(3), 43);
+        Main.check("switch late entry", Main.classify(4), 40);
+        Main.check("switch default", Main.classify(9), -1);
+        Main.checkS("string switch", Main.dayKind("sun"), "weekend");
+        Main.checkS("string switch default", Main.dayKind("tue"), "workday");
+
+        int sc = 0;
+        for (int n = 0; n < 6; n++) {   // continue skips the tail, break only the switch
+            switch (n % 3) {
+            case 0: continue;
+            case 1: sc += 10; break;
+            default: sc += 1;
+            }
+            sc += 100;
+        }
+        Main.check("switch in loop", sc, 422);
 
         // statics and recursion
         Main.check("fib", Main.fib(10), 55);
