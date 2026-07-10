@@ -197,15 +197,23 @@ engines).
 Typed MetaJS is exactly MetaJS plus one rule: a variable's type is pinned by its first
 non-undefined value (enforced by both engines; typed-metajs-fail-test.js demonstrates the abort).
 
-The Java and Go grammars draw their common machinery from `tests/lib/`: the startScript
-begins with `include("lib/interp-core.js")` (scopes, the break/continue protocol, the
-expression and statement thunk builders) or `include("lib/compile-core.js")` (the LLVM
-module, handle constants, on-demand externs, the loopStack and the emitter builders).
-Where languages genuinely differ the behavior is a knob on the library's `core` object -
-Java sets its string-concatenating `+` and array `.length`, Go sets the blank identifier
-`_`, `nil` wording, map-aware indexing and defer frame hooks - and anything genuinely
-language-specific (Java's inheritance dispatch, Go's multi-assign and defer) stays in the
-grammar file, which can also override any library function by plain assignment.
+The big-language grammars (Java, Kotlin, Go, Python, C and both MetaJS variants -
+interpreters and compilers) draw their common machinery from `tests/lib/`: the
+startScript begins with `include("lib/interp-core.js")` (scopes, the break/continue
+protocol, the expression and statement thunk builders) or `include("lib/compile-core.js")`
+(the LLVM module, handle constants, on-demand externs, the loopStack and the emitter
+builders). Where languages genuinely differ the behavior is a knob on the library's
+`core` object - Java sets its string-concatenating `+` and array `.length`, Go the blank
+identifier `_`, `nil` wording, map-aware indexing and defer frame hooks, Kotlin the
+implicit-this name fallback, Python its truthiness and assignment-declares-local rule,
+C its nonzero-int conditions - and anything genuinely language-specific (Java's
+inheritance dispatch, Go's multi-assign, Python's elif chains, Typed MetaJS' type boxes,
+C's arena addressing) stays in the grammar file as a plain-assignment override of the
+library name (never a `function` declaration: the two engines install those in opposite
+order relative to the include). The freezer inlines the emitter library's `include()`
+lines into the bootstrap snapshot, so `-freeze` keeps working and the snapshot stays
+self contained. TinyC, Lisp, Calculator and Brainfuck share almost nothing with the
+libs and remain deliberately self-contained.
 
 Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
 ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck-parser.bnf and tinyc-parser.bnf as syntax
