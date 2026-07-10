@@ -274,17 +274,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 :startScript(~~
 
-    function takeAll() {
-        var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
-    }
-
-    function fail(msg) {
-        println("c interpreter error: " + msg)
-        exit(1)
-    }
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); language-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
 
     function charCode(s) { return s.charCodeAt(0) }
     function unescapeC(s) {
@@ -317,9 +309,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // ----- Scopes map names to {addr, arr, ct} (arr marks array names: they yield
     // their address; for arrays ct is the ELEMENT type) -----
-    var globalScope = {}
-    var scopes = [globalScope]
-    function declVar(name, addr, arr, ct) {
+    declVar = function(name, addr, arr, ct) {
         scopes[scopes.length - 1][name] = {addr: addr, arr: arr, ct: ct}
     }
     function findVar(name) {
@@ -409,7 +399,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // ----- Expression thunks: function() -> 32 bit int. Lvalue thunks -> address. -----
 
     function makeInt(n) { return function() { return n | 0 } }
-    function makeVarRef(name) {
+    makeVarRef = function(name) {
         return function() {
             var v = findVar(name)
             return v.arr ? v.addr : load(v.addr) // An array name decays to its address.
@@ -456,11 +446,10 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
     function makeDerefPlace(t) { return function() { return t() } }
     function makeLoad(placeT) { return function() { return load(placeT()) } }
-    function makeNeg(t) { return function() { return (0 - t()) | 0 } }
-    function makeNot(t) { return function() { return t() == 0 ? 1 : 0 } }
+    makeNot = function(t) { return function() { return t() == 0 ? 1 : 0 } }
     function makeBitNot(t) { return function() { return ~t() } }
 
-    function binOp(op, l, r) {
+    binOp = function(op, l, r) {
         if (op == "+") return (l + r) | 0
         if (op == "-") return (l - r) | 0
         if (op == "*") return Math.imul(l, r)
@@ -478,18 +467,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (op == "<<") return l << r
         if (op == ">>") return l >> r
     }
-    function foldBinary(items) {
-        if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i += 2) {
-                v = binOp(items[i], v, items[i + 1]())
-            }
-            return v
-        }
-    }
     // Real C short circuit: the right side only runs if it can still change the result.
-    function makeOrAnd(items, op) {
+    makeOrAnd = function(items, op) {
         if (items.length == 1) return items[0]
         return function() {
             var v = items[0]() != 0
@@ -504,7 +483,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (items.length == 1) return items[0]
         return function() { return items[0]() != 0 ? items[1]() : items[2]() }
     }
-    function applyOp(op, a, b) {
+    applyOp = function(op, a, b) {
         if (op == "+=") return (a + b) | 0
         if (op == "-=") return (a - b) | 0
         if (op == "*=") return Math.imul(a, b)
@@ -552,7 +531,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // ----- Statement thunks -----
 
-    function exprToStmt(t) { return function() { t() } }
     // items = ["*"?] name [{size}|initThunk] -> declaration thunk.
     function makeDecl(items) {
         var i = 0
@@ -609,45 +587,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         for (var i = 1; i < items.length; i++) {
             if (items[i].init != undefined) fail("global struct pointers take no initializer: " + items[i].name)
             declStructVar(sname, items[i])
-        }
-    }
-    function makeSeq(items) {
-        return function() {
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i]()
-                if (r != undefined) return r
-            }
-        }
-    }
-    function makeBlockStmt(items) {
-        var seq = makeSeq(items)
-        return function() {
-            scopes.push({})
-            var r = seq()
-            scopes.pop()
-            return r
-        }
-    }
-    function makeIf(items) {
-        var cond = items[0]
-        var thenT = items[1]
-        var elseT = items.length > 2 ? items[2] : null
-        return function() {
-            if (cond() != 0) return thenT()
-            if (elseT != null) return elseT()
-        }
-    }
-    var BRK = {sig: "break"}
-    var CONT = {sig: "continue"}
-    function makeWhile(bodyT, condT) {
-        return function() {
-            while (condT() != 0) {
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) return r
-                }
-            }
         }
     }
     function makeDo(condT, bodyT) {
@@ -717,9 +656,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var t = items.length > 0 ? items[0] : makeInt(0)
         return function() { return {isRet: true, v: t()} }
     }
-    function makeBreak() { return function() { return BRK } }
-    function makeContinue() { return function() { return CONT } }
-
     // ----- Top level -----
 
     // Param items = [{sname}?, "*"?, name]: int, int*, or a struct pointer.
@@ -757,6 +693,10 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var name = pop()
         funcs[name] = {params: params, body: bodyT}
     }
+
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "c"
+    core.test = function(v) { return v != 0 } // C conditions: any nonzero int.
 
     c.compile(c.asg)
 
