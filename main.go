@@ -27,22 +27,22 @@ import (
 //
 // Flags may appear anywhere among the files:
 //
-//	-v / -vN     verbose for all stages / for stage N (parse ASG + compiled result)
-//	-vv / -vvN   parser+compiler trace for all stages / for stage N
-//	-slotN V     compile stage N with tag slot V (default 0)
-//	-q / -qq     quiet (only program output+errors / only errors)
-//	-frozen      run the annotation scripts goja-free (see abnf/frozen.go)
-//	-verify      lint the first file's grammar and exit
-//	-pretty      print the first file's serialized a-grammar and exit
-//	-cfg F       write the CFG of every executed module to F (DOT; .mmd = Mermaid)
-//	-trace F     stream runtime events to F (JSON lines); also the -render input
-//	-callgraph F write the static call graph (.jsonl appends for -render static)
-//	-render K    standalone (no pipeline): read the JSON-lines file named by -trace F
-//	             and write graph K to stdout as Graphviz DOT. K is calls or vars
-//	             (from a -trace run) or static (from a -callgraph run)
-//	-freeze F    (re)create the frozen bootstrap snapshot from grammar F, then exit
-//	-lb / -lf    parser block-list / found-list (debugging aids)
-//	-s           speed test (100 cycles on the first file)
+//  -v, -vN       verbose for all stages / for stage N (parse ASG + compiled result)
+//  -vv, -vvN     parser+compiler trace for all stages / for stage N
+//  -slotN V      compile stage N with tag slot V (default 0)
+//  -q, -qq       quiet (only program output+errors / only errors)
+//  -frozen       run the annotation scripts goja-free (see abnf/frozen.go)
+//  -verify       lint the first file's grammar and exit
+//  -pretty       print the first file's serialized a-grammar and exit
+//  -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
+//  -trace F      stream runtime events to file F as JSON lines; also the -render input
+//  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
+//  -render K     standalone (no pipeline): read the JSON-lines file named by -trace F
+//                and write graph K to stdout as Graphviz DOT, then exit. K is calls or vars
+//                (from a -trace run) or static (from a -callgraph run)
+//  -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
+//  -lb, -lf      parser block-list / found-list (debugging aids)
+//  -s            speed test (100 cycles on the first file)
 
 // options is the parsed command line.
 type options struct {
@@ -380,7 +380,7 @@ anywhere among the files.
   -frozen       run the annotation scripts without goja
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit
-  -cfg F        write the control flow graph of every executed module to file F
+  -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
   -trace F      stream runtime events to file F as JSON lines
   -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
   -render K     standalone: read the JSON-lines file named by -trace F and write graph
