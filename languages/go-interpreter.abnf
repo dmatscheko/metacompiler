@@ -47,7 +47,8 @@ Program     = PackageClause { Import } { TypeDecl | FuncDecl | TopVar } ;
 
 PackageClause = "package" KwEnd Id ;
 Import      = "import" KwEnd ( ImportStr | "(" { ImportStr } ")" ) ;
-ImportStr   = '"' :whitespace() { "\x20"..."\x21" | "\x23"..."\x7e" } '"' :whitespace(Whitespace) ;
+ImportStr   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
+            = '"' :whitespace() { "\x20"..."\x21" | "\x23"..."\x7e" } '"' :whitespace(Whitespace) ;
 
 // type Point struct { x int; y int }
 TypeDecl    <~~ buildStruct(takeAll()) ~~>
@@ -719,6 +720,9 @@ StructGate = :script(~~
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "go"
     core.blank = "_"
+    // Go stdlib packages the runtime provides (resolveImport lives in lib/interp-core.js;
+    // exact-match paths, so sub-packages like "encoding/json" are listed in full).
+    core.stdlibImports = ["fmt", "os", "strings", "strconv", "math", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     core.nullWord = "nil"
     core.getIndex = function(o, i) { return isMap(o) ? mapGet(o, i) : o[i] }
     core.framePush = function() { deferFrames.push([]) }

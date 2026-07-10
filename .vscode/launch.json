@@ -215,6 +215,18 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-1.go", "-q"]
         },
         {
+            "name": "Go unresolved import SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-import.go", "-q"]
+        },
+        {
+            "name": "Go unresolved import warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-fail-test-import.go", "-q", "-warn-imports"]
+        },
+        {
             "name": "Python interpreter",
             "type": "go",
             "request": "launch",
