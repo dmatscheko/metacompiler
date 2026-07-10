@@ -1816,10 +1816,89 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			arr.elems[idx] = u(a[2])
 			return 0
 		},
-		"js_dict_new": func(a []uint64) uint64 { // An empty Python dict handle.
+		"js_dict_new": func(a []uint64) uint64 { // An empty Python dict / Go map handle.
 			return w(&jsObject{props: map[string]interface{}{
 				"__dict": true, "keys": &jsArray{}, "vals": &jsArray{},
 			}})
+		},
+		"js_map_get": func(a []uint64) uint64 { // Go indexing: maps read their zero value for
+			if keys, vals, ok := dictParts(u(a[0])); ok { // missing keys, slices their element.
+				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+					return w(vals.elems[i])
+				}
+				if z, has := u(a[0]).(*jsObject).props["zero"]; has {
+					return w(z)
+				}
+				return w(jsUndef)
+			}
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				i := int(rt.toNumber(u(a[1])))
+				if i < 0 || i >= len(arr.elems) {
+					rt.fail("index %d out of range", i)
+				}
+				return w(arr.elems[i])
+			}
+			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		"js_map_del": func(a []uint64) uint64 { // delete(m, k); missing keys are a no-op.
+			keys, vals, ok := dictParts(u(a[0]))
+			if !ok {
+				rt.fail("delete() needs a map")
+			}
+			if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+			}
+			return 0
+		},
+		"js_range_len": func(a []uint64) uint64 { // The Go range bound: an int is its own bound,
+			switch o := u(a[0]).(type) { // otherwise the element/entry count.
+			case float64:
+				return rt.wrapNum(o)
+			case string:
+				return rt.wrapNum(float64(len(o)))
+			case *jsArray:
+				return rt.wrapNum(float64(len(o.elems)))
+			}
+			if keys, _, ok := dictParts(u(a[0])); ok {
+				return rt.wrapNum(float64(len(keys.elems)))
+			}
+			rt.fail("range over a %s", rt.typeOf(u(a[0])))
+			return 0
+		},
+		"js_range_key": func(a []uint64) uint64 { // The i-th range key: maps yield their key,
+			if keys, _, ok := dictParts(u(a[0])); ok { // everything else the index itself.
+				return w(keys.elems[int(rt.toNumber(u(a[1])))])
+			}
+			return a[1]
+		},
+		"js_range_val": func(a []uint64) uint64 { // The i-th range value (maps by entry, lists by index).
+			if _, vals, ok := dictParts(u(a[0])); ok {
+				return w(vals.elems[int(rt.toNumber(u(a[1])))])
+			}
+			if arr, ok := u(a[0]).(*jsArray); ok {
+				i := int(rt.toNumber(u(a[1])))
+				if i >= 0 && i < len(arr.elems) {
+					return w(arr.elems[i])
+				}
+			}
+			return w(jsUndef)
+		},
+		"js_rundefers": func(a []uint64) uint64 { // Runs collected [f, args] pairs LIFO (Go defer).
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("js_rundefers needs the defer list")
+			}
+			for i := len(arr.elems) - 1; i >= 0; i-- {
+				pair, ok := arr.elems[i].(*jsArray)
+				if !ok || len(pair.elems) != 2 {
+					rt.fail("broken defer entry")
+				}
+				args, _ := pair.elems[1].(*jsArray)
+				rt.call(pair.elems[0], jsUndef, args.elems)
+			}
+			return 0
 		},
 		"js_pylen": func(a []uint64) uint64 { // len() for strings, lists and dicts.
 			switch o := u(a[0]).(type) {

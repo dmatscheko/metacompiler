@@ -8,20 +8,39 @@ with value receivers (func (p Point) manhattan() int), struct types with positio
 composite literals (Point{3, 4}), field access and assignment, := short declarations
 (also multiple: q, r := divmod(7, 2)), var declarations with zero values, parallel
 assignment (a, b = b, a) and the blank identifier _, slices ([]int{...}, append, len,
-indexing, element assignment), the three for forms (classic, condition only, and
-for i, v := range s), Go style if/else without parentheses (else if works), break,
+indexing, element assignment), maps (map[K]V{...} literals and make(map[K]V); reads
+of missing keys yield the zero value of the value type - int/string/bool -, m[k] = v,
+len, delete(m, k), the comma ok idiom v, ok := m[k], and range over the entries),
+function literals as values (func(x int) int { ... }) with real closures over their
+scope, defer for plain and pkg.fn calls (arguments evaluate at defer time, the calls
+run LIFO at function exit), the three for forms (classic, condition only, and
+for i, v := range s - also over an int like range 5, Go 1.22, and over maps), switch
+with subject
+(case 2, 3: compares ==) and without (the first true case wins; no fallthrough, an
+implicit break ends every case), Go style if/else without parentheses (else if works), break,
 continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
 and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / truncates.
 
 Deviations and limits: structs behave like references (as if every value were a *T),
 append mutates in place (write s = append(s, v) as usual), composite literals must not
-appear in if/for headers, there are no pointers, maps, closures, interfaces, goroutines,
-defer, switch, or method values, and s[i] on strings is not supported.
+appear in if/for/switch headers, map iteration and printing follow the insertion order
+(real Go randomizes resp. sorts), 'var m map[K]V' is not a usable map (create maps with
+a literal or make), defer cannot take struct methods, there are no pointers,
+interfaces,
+goroutines, fallthrough, or method values, and s[i] on strings is not supported.
 
-Functions and methods become IR functions jsf_N(env, args) (methods get the receiver
-prepended), struct types become descriptor objects and composite literals set the fields
+
+Functions, methods and function literals become IR functions jsf_N(env, args) (methods
+get the receiver
+prepended, literals close over their scope via js_closure), struct types become
+descriptor objects and composite literals set the fields
 positionally (the field lists are known at compile time), method calls dispatch through
 js_mcall, multiple return values travel as arrays and are unpacked by multi assignments.
+Maps are js_dict_new handles (two parallel key/value arrays keep the insertion order)
+with their zero value stored on the map; indexing goes through the polymorphic
+js_map_get/js_pyset externals, range loops through js_range_len/key/val (one emission
+covers ints, slices and maps), and defer collects [f, args] pairs on a per function
+$defers list that js_rundefers runs LIFO before every return.
 The whole program becomes jsmain(env, args), which runs the top level and calls main().
 The entry point is func main(); self checking programs end with os.Exit(failures).
 The same language with the same semantics is interpreted directly by go-interpreter.abnf.") ;
@@ -56,10 +75,20 @@ RetTypes    = Type | "(" Type { "," Type } ")" ;
 // A package level var: its declaration thunk becomes a top level statement.
 TopVar      = VarDecl ;
 
-Type        = "[" "]" Type | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+Type        = "[" "]" Type | MapTypeT | FuncTypeT
+            | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+MapTypeT    = "map" KwEnd "[" Type "]" Type ;
+FuncTypeT   = "func" KwEnd "(" [ Type { "," Type } ] ")" [ Type | "(" Type { "," Type } ")" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | For | Switch | Return | Break | Continue | VarDecl | SimpleStmt | Empty ;
+Statement   = Block | If | For | Switch | Return | Break | Continue | Defer | VarDecl
+            | SimpleStmt | Empty ;
+
+// defer f(args) / defer pkg.fn(args): the function value and the arguments are
+// evaluated now, the call runs when the surrounding function returns (LIFO).
+Defer       <~~ push(makeDefer(takeAll())) ~~>
+            = "defer" KwEnd Id <~~ push(up.in) ~~> [ "." Id <~~ push({mname: up.in}) ~~> ]
+              "(" [ Expression { "," Expression } ] ")" [ ";" ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -72,7 +101,12 @@ VType       <~~ push({ty: up.in}) ~~>
 
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
-SimpleStmt  = ( ShortDecl | IncDecStmt | Assign | ExprOnly ) [ ";" ] ;
+// MapOk (v, ok := m[k]) must come first: as a ShortDecl it would miss the flag.
+SimpleStmt  = ( MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ) [ ";" ] ;
+
+// The comma ok idiom: the value (or the zero value) plus the key presence flag.
+MapOk       <~~ push(makeMapOk(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "," Id <~~ push(up.in) ~~> ":=" Primary "[" Expression "]" ;
 ExprOnly    <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
 
@@ -172,11 +206,28 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | StringLit | IntLit | True | False | SliceLit | StructLit | Call | VarRef ;
+Primary     = "(" Expression ")" | StringLit | IntLit | True | False | FuncLit | SliceLit
+            | MapLit | MakeMap | StructLit | Call | VarRef ;
+
+// func(x int) int { ... }: a function literal; a real closure over its scope.
+FuncLit     <~~ push(makeFuncLit(pop(), pop())) ~~>
+            = "func" KwEnd ParamList [ RetTypes ] Block ;
 
 // []int{1, 2, 3}
 SliceLit    <~~ push(makeSliceLit(takeAll())) ~~>
             = "[" "]" Type "{" [ Expression { "," Expression } ] "}" ;
+
+// map[string]int{"a": 1} and make(map[string]int). The value type decides the
+// zero value that a read of a missing key yields.
+MapLit      <~~ push(makeMapLit(takeAll())) ~~>
+            = MapTypeZ "{" [ MapEntry { "," MapEntry } ] "}" ;
+MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
+            = Expression ":" Expression ;
+MakeMap     <~~ push(makeMakeMap(pop())) ~~>
+            = "make" KwEnd "(" MapTypeZ ")" ;
+MapTypeZ    = "map" KwEnd "[" Type "]" ZType ;
+ZType       <~~ push({mzero: up.in}) ~~>
+            = Type ;
 
 // Point{3, 4} -- positional, at least one element, and not inside if/for headers.
 StructLit   <~~ push(makeStructLit(takeAll())) ~~>
@@ -448,7 +499,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
-                    cur = callExt(b, "js_get", [cur, ir2.v])
+                    // Polymorphic: slice element or map read (zero value when missing).
+                    cur = callExt(b, "js_map_get", [cur, ir2.v])
                 }
             }
             return {b: b, v: cur}
@@ -477,6 +529,93 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return {b: b, v: arr}
         }
     }
+    // items = [{mzero}, {mk, mv}...] -> a map built in source order. The zero value
+    // of the value type is stored on the map itself (js_map_get reads it).
+    function makeMapLit(items) {
+        var zero = items[0].mzero
+        var entries = items.slice(1)
+        return function(b) {
+            var mV = callExt(b, "js_dict_new", [])
+            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+            for (var i = 0; i < entries.length; i++) {
+                var rk = entries[i].mk(b)
+                b = rk.b
+                var rv = entries[i].mv(b)
+                b = rv.b
+                callExt(b, "js_pyset", [mV, rk.v, rv.v])
+            }
+            return {b: b, v: mV}
+        }
+    }
+    function makeMakeMap(mz) {
+        var zero = mz.mzero
+        return function(b) {
+            var mV = callExt(b, "js_dict_new", [])
+            callExt(b, "js_set", [mV, emitStr(b, "zero"), emitZero(b, zero)])
+            return {b: b, v: mV}
+        }
+    }
+    // The zero value of a map's value type ('int', 'string', 'bool'; the captured
+    // type text may carry trailing whitespace, so match the prefix).
+    function emitZero(b, t) {
+        if (t.indexOf("int") == 0) return emitNum(b, 0)
+        if (t.indexOf("string") == 0) return emitStr(b, "")
+        if (t.indexOf("bool") == 0) return hFalse
+        return hNull
+    }
+    // items = [valueName, okName, baseThunk, keyThunk]: v, ok := m[k].
+    function makeMapOk(items) {
+        var vName = items[0]
+        var okName = items[1]
+        var baseT = items[2]
+        var keyT = items[3]
+        return function(b) {
+            var rm = baseT(b)
+            b = rm.b
+            var rk = keyT(b)
+            b = rk.b
+            if (vName != "_") {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName),
+                                             callExt(b, "js_map_get", [rm.v, rk.v])])
+            }
+            if (okName != "_") {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, okName),
+                                             callExt(b, "js_pyin", [rk.v, rm.v])])
+            }
+            return b
+        }
+    }
+    // items = [{params}, bodyT] (an ignored RetTypes leaves no stack entry). The
+    // literal becomes an own IR function closed over the current scope (js_closure).
+    function makeFuncLit(bodyT, plist) {
+        var params = plist.params
+        return function(b) {
+            var idx = emitFunc(params, bodyT, null)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+    // items = [fname, {mname}?, argThunks...]: the function value and the arguments
+    // are evaluated at defer time and pushed as a [f, args] pair onto the innermost
+    // function's $defers list; js_rundefers runs them LIFO at every return.
+    function makeDefer(items) {
+        var fname = items[0]
+        var i = 1
+        var mname = null
+        if (i < items.length && items[i] != undefined && items[i].mname != undefined) { mname = items[i].mname; i++ }
+        var argTs = items.slice(i)
+        return function(b) {
+            var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, fname)])
+            if (mname != null) fV = callExt(b, "js_get", [fV, emitStr(b, mname)])
+            var ea = emitArgs(b, argTs)
+            b = ea.b
+            var pairV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [pairV, fV])
+            callExt(b, "js_arr_push", [pairV, ea.v])
+            callExt(b, "js_arr_push", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")]), pairV])
+            return b
+        }
+    }
+
     // Point{a, b}: the field names are known at compile time.
     function makeStructLit(items) {
         var tyName = items[0]
@@ -507,7 +646,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = callExt(b, "js_get", [o, r.v])
+                o = callExt(b, "js_map_get", [o, r.v])
             }
         }
         return {b: b, v: o}
@@ -525,7 +664,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             } else {
                 var r = s.idx(b)
                 b = r.b
-                o = callExt(b, "js_get", [o, r.v])
+                o = callExt(b, "js_map_get", [o, r.v])
             }
         }
         var last = ref.path[ref.path.length - 1]
@@ -535,7 +674,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         }
         var kr = last.idx(b)
         b = kr.b
-        callExt(b, "js_set", [o, kr.v, v])
+        callExt(b, "js_pyset", [o, kr.v, v]) // Polymorphic: slice element or map entry.
         return b
     }
 
@@ -784,7 +923,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return exitB
         }
     }
-    // items = [iName, vName?, listThunk, bodyThunk]
+    // items = [iName, vName?, listThunk, bodyThunk]. A hidden counter drives the
+    // loop; js_range_len/key/val make one emission cover ints (the bound is the
+    // value), slices (index and element) and maps (key and entry, insertion order).
     function makeForRange(items) {
         var bodyT = items.pop()
         var listT = items.pop()
@@ -792,50 +933,46 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var vName = items.length > 1 ? items[1] : null
         return function(b) {
             hidCount++
-            var idxName = (iName != "_") ? iName : "$i" + hidCount
+            var cName = "$c" + hidCount
             var aName = "$a" + hidCount
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var r = listT(b)
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, idxName), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), emitNum(b, 0)])
+            if (iName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), hUndef])
             if (vName != null && vName != "_") callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), hUndef])
-            // The loop bound: the value itself for range over an int (Go 1.22), else
-            // the list length. Computed once before the loop, in separate blocks (a
-            // number must never see the .length access).
-            var numB = curF.NewBlock("")
-            var arrB = curF.NewBlock("")
-            var boundB = curF.NewBlock("")
-            var isNum = callExt(b, "js_seq", [callExt(b, "js_typeof", [r.v]), emitStr(b, "number")])
-            b.NewCondBr(truthy(b, isNum), numB, arrB)
-            var arrLenV = callExt(arrB, "js_get", [r.v, emitStr(arrB, "length")])
-            numB.NewBr(boundB)
-            arrB.NewBr(boundB)
-            var lenV = boundB.NewPhi([llvm.ir.NewIncoming(r.v, numB), llvm.ir.NewIncoming(arrLenV, arrB)])
+            var lenV = callExt(b, "js_range_len", [r.v])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            boundB.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, idxName)])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            b.NewBr(headB)
+            var cV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [cV, lenV])), bodyB, exitB)
+            var cV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, cName)])
+            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+            if (iName != "_") {
+                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                                callExt(bodyB, "js_range_key", [aV2, cV2])])
+            }
             if (vName != null && vName != "_") {
-                var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, idxName)])
-                var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, vName), callExt(bodyB, "js_get", [aV2, iV2])])
+                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, vName),
+                                                callExt(bodyB, "js_range_val", [aV2, cV2])])
             }
             loopStack.push({cont: postB, brk: exitB})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
-            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, idxName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, idxName), callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
+            var cV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, cName), callExt(postB, "js_jadd", [cV3, emitNum(postB, 1)])])
             postB.NewBr(headB)
             curScopeV = saved
             return exitB
         }
     }
-    // Multiple return values travel as an array.
+    // Multiple return values travel as an array. The return value is computed
+    // first, then the collected defers run (Go order), then the function returns.
     function makeReturn(items) {
         return function(b) {
             var v = hUndef
@@ -852,6 +989,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
                 }
                 v = arr
             }
+            callExt(b, "js_rundefers", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")])])
             b.NewRet(v)
             return deadBlock()
         }
@@ -891,7 +1029,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                          callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
         }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$defers"), callExt(b, "js_arr_new", [])])
         var endB = body(b)
+        callExt(endB, "js_rundefers", [callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "$defers")])])
         endB.NewRet(hUndef)
         curF = savedF
         curScopeV = savedScope
@@ -954,8 +1094,17 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var lf = m.NewFunc("jsf_" + lenIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var lb = lf.NewBlock("entry")
         var lArg = lb.NewCall(getExtern("js_arg", 2), [lf.Params[1], handle(0)])
-        lb.NewRet(lb.NewCall(getExtern("js_get", 2), [lArg, emitStr(lb, "length")]))
+        lb.NewRet(lb.NewCall(getExtern("js_pylen", 1), [lArg]))
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "len"), callExt(b, "js_closure", [handle(lenIdx), curScopeV])])
+        // delete(m, k)
+        funcCount++
+        var delIdx = funcCount
+        var df = m.NewFunc("jsf_" + delIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var db = df.NewBlock("entry")
+        db.NewCall(getExtern("js_map_del", 2), [db.NewCall(getExtern("js_arg", 2), [df.Params[1], handle(0)]),
+                                                db.NewCall(getExtern("js_arg", 2), [df.Params[1], handle(1)])])
+        db.NewRet(hUndef)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "delete"), callExt(b, "js_closure", [handle(delIdx), curScopeV])])
         funcCount++
         var apIdx = funcCount
         var af = m.NewFunc("jsf_" + apIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])

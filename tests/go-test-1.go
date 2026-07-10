@@ -79,6 +79,31 @@ func sum(s []int) int {
 	return total
 }
 
+func apply(f func(int) int, v int) int { // a function typed parameter
+	return f(v)
+}
+
+var dlog = ""
+var nlog = 0
+
+func record(s string) { dlog = dlog + s }
+func recordN(n int)   { nlog = n }
+
+func deferDemo() int { // defers run LIFO, after the return value is computed
+	dlog = ""
+	defer record("c")
+	defer record("b")
+	dlog = dlog + "a"
+	return len(dlog)
+}
+
+func deferArgVal() int { // defer arguments are evaluated at defer time
+	x := 1
+	defer recordN(x)
+	x = 50
+	return x
+}
+
 func main() {
 	// arithmetic
 	check("precedence", 1+2*3, 7)
@@ -218,6 +243,73 @@ func main() {
 		rsum += i
 	}
 	check("range int", rsum, 10)
+
+	// maps
+	ages := map[string]int{"alice": 30, "bob": 25}
+	check("map get", ages["alice"], 30)
+	ages["carol"] = 35
+	check("map set new", ages["carol"], 35)
+	ages["bob"]++
+	check("map incdec", ages["bob"], 26)
+	ages["carol"] += 5
+	check("map compound", ages["carol"], 40)
+	check("map len", len(ages), 3)
+	check("map zero value", ages["nobody"], 0)
+	v1, ok1 := ages["alice"]
+	check("comma ok value", v1, 30)
+	if !ok1 {
+		check("comma ok flag", 0, 1)
+	}
+	_, ok2 := ages["nobody"]
+	if ok2 {
+		check("comma ok miss", 1, 0)
+	}
+	delete(ages, "bob")
+	check("map delete", len(ages), 2)
+	check("deleted reads zero", ages["bob"], 0)
+	msum := 0
+	knames := ""
+	for k, v := range ages {
+		msum += v
+		knames += k
+	}
+	check("range map values", msum, 70)
+	check("range map keys", len(knames), 10)
+	counts := make(map[string]int)
+	for _, w2 := range []string{"a", "b", "a"} {
+		counts[w2]++
+	}
+	check("map counter idiom", counts["a"], 2)
+	mi := map[int]string{1: "one", 2: "two"}
+	checkS("int keyed map", mi[2], "two")
+
+	// function literals and closures
+	twice := func(x int) int { return x * 2 }
+	check("func literal", twice(21), 42)
+	check("func literal as arg", apply(twice, 7), 14)
+	acc := 0
+	add2 := func(d int) { acc += d }
+	add2(5)
+	add2(7)
+	check("closure writes", acc, 12)
+	mk := func(start int) func() int {
+		c := start
+		return func() int {
+			c++
+			return c
+		}
+	}
+	c1 := mk(10)
+	c2 := mk(100)
+	c1()
+	check("closure counter", c1(), 12)
+	check("closures independent", c2(), 101)
+
+	// defer
+	check("defer after return value", deferDemo(), 1)
+	checkS("defer lifo order", dlog, "abc")
+	check("defer sees final x", deferArgVal(), 50)
+	check("defer args early", nlog, 1)
 
 	// recursion
 	check("fib", fib(10), 55)

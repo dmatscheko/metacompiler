@@ -7,8 +7,14 @@ with value receivers (func (p Point) manhattan() int), struct types with positio
 composite literals (Point{3, 4}), field access and assignment, := short declarations
 (also multiple: q, r := divmod(7, 2)), var declarations with zero values, parallel
 assignment (a, b = b, a) and the blank identifier _, slices ([]int{...}, append, len,
-indexing, element assignment), the three for forms (classic, condition only, and
-for i, v := range s - also over an int like range 5, Go 1.22), switch with subject
+indexing, element assignment), maps (map[K]V{...} literals and make(map[K]V); reads
+of missing keys yield the zero value of the value type - int/string/bool -, m[k] = v,
+len, delete(m, k), the comma ok idiom v, ok := m[k], and range over the entries),
+function literals as values (func(x int) int { ... }) with real closures over their
+scope, defer for plain and pkg.fn calls (arguments evaluate at defer time, the calls
+run LIFO at function exit), the three for forms (classic, condition only, and
+for i, v := range s - also over an int like range 5, Go 1.22, and over maps), switch
+with subject
 (case 2, 3: compares ==) and without (the first true case wins; no fallthrough, an
 implicit break ends every case), Go style if/else without parentheses (else if works), break,
 continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
@@ -16,8 +22,11 @@ and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / tr
 
 Deviations and limits: structs behave like references (as if every value were a *T),
 append mutates in place (write s = append(s, v) as usual), composite literals must not
-appear in if/for/switch headers, there are no pointers, maps, closures, interfaces,
-goroutines, defer, fallthrough, or method values, and s[i] on strings is not supported.
+appear in if/for/switch headers, map iteration and printing follow the insertion order
+(real Go randomizes resp. sorts), 'var m map[K]V' is not a usable map (create maps with
+a literal or make), defer cannot take struct methods, there are no pointers,
+interfaces,
+goroutines, fallthrough, or method values, and s[i] on strings is not supported.
 
 The entry point is func main(); self checking programs end with os.Exit(failures).") ;
 
@@ -51,10 +60,20 @@ RetTypes    = Type | "(" Type { "," Type } ")" ;
 TopVar      <~~ var t = pop(); t() ~~>
             = VarDecl ;
 
-Type        = "[" "]" Type | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+Type        = "[" "]" Type | MapTypeT | FuncTypeT
+            | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+MapTypeT    = "map" KwEnd "[" Type "]" Type ;
+FuncTypeT   = "func" KwEnd "(" [ Type { "," Type } ] ")" [ Type | "(" Type { "," Type } ")" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | For | Switch | Return | Break | Continue | VarDecl | SimpleStmt | Empty ;
+Statement   = Block | If | For | Switch | Return | Break | Continue | Defer | VarDecl
+            | SimpleStmt | Empty ;
+
+// defer f(args) / defer pkg.fn(args): the function value and the arguments are
+// evaluated now, the call runs when the surrounding function returns (LIFO).
+Defer       <~~ push(makeDefer(takeAll())) ~~>
+            = "defer" KwEnd Id <~~ push(up.in) ~~> [ "." Id <~~ push({mname: up.in}) ~~> ]
+              "(" [ Expression { "," Expression } ] ")" [ ";" ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -67,7 +86,12 @@ VType       <~~ push({ty: up.in}) ~~>
 
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
-SimpleStmt  = ( ShortDecl | IncDecStmt | Assign | ExprOnly ) [ ";" ] ;
+// MapOk (v, ok := m[k]) must come first: as a ShortDecl it would miss the flag.
+SimpleStmt  = ( MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ) [ ";" ] ;
+
+// The comma ok idiom: the value (or the zero value) plus the key presence flag.
+MapOk       <~~ push(makeMapOk(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "," Id <~~ push(up.in) ~~> ":=" Primary "[" Expression "]" ;
 ExprOnly    <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
 
@@ -167,11 +191,28 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | StringLit | IntLit | True | False | SliceLit | StructLit | Call | VarRef ;
+Primary     = "(" Expression ")" | StringLit | IntLit | True | False | FuncLit | SliceLit
+            | MapLit | MakeMap | StructLit | Call | VarRef ;
+
+// func(x int) int { ... }: a function literal; a real closure over its scope.
+FuncLit     <~~ push(makeFuncLit(pop(), pop())) ~~>
+            = "func" KwEnd ParamList [ RetTypes ] Block ;
 
 // []int{1, 2, 3}
 SliceLit    <~~ push(makeSliceLit(takeAll())) ~~>
             = "[" "]" Type "{" [ Expression { "," Expression } ] "}" ;
+
+// map[string]int{"a": 1} and make(map[string]int). The value type decides the
+// zero value that a read of a missing key yields.
+MapLit      <~~ push(makeMapLit(takeAll())) ~~>
+            = MapTypeZ "{" [ MapEntry { "," MapEntry } ] "}" ;
+MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
+            = Expression ":" Expression ;
+MakeMap     <~~ push(makeMakeMap(pop())) ~~>
+            = "make" KwEnd "(" MapTypeZ ")" ;
+MapTypeZ    = "map" KwEnd "[" Type "]" ZType ;
+ZType       <~~ push({mzero: up.in}) ~~>
+            = Type ;
 
 // Point{3, 4} -- positional, at least one element, and not inside if/for headers.
 StructLit   <~~ push(makeStructLit(takeAll())) ~~>
@@ -310,6 +351,36 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         fail("assignment to unknown name: " + name)
     }
 
+    // ----- Maps: {__dict, keys, vals, zero} with two parallel arrays. The arrays keep
+    // the insertion order; missing keys read as the zero value of the value type. -----
+    function isMap(v) {
+        return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
+    }
+    function newMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero} }
+    function mapFind(m, k) {
+        for (var i = 0; i < m.keys.length; i++) {
+            if (m.keys[i] === k) return i
+        }
+        return -1
+    }
+    function mapGet(m, k) {
+        var i = mapFind(m, k)
+        return i >= 0 ? m.vals[i] : m.zero
+    }
+    function mapSet(m, k, v) {
+        var i = mapFind(m, k)
+        if (i >= 0) { m.vals[i] = v }
+        else { m.keys.push(k); m.vals.push(v) }
+    }
+    // The zero value of a map's value type ('int', 'string', 'bool'; the captured
+    // type text may carry trailing whitespace, so match the prefix).
+    function zeroOfType(t) {
+        if (t.indexOf("int") == 0) return 0
+        if (t.indexOf("string") == 0) return ""
+        if (t.indexOf("bool") == 0) return false
+        return null
+    }
+
     var hostGlobals = {}
     hostGlobals["fmt"] = {
         Println: function() {
@@ -327,8 +398,23 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         }
     }
     hostGlobals["os"] = { Exit: function(code) { exit(code | 0) } }
-    hostGlobals["len"] = function(x) { return x.length }
+    hostGlobals["len"] = function(x) {
+        if (isMap(x)) return x.keys.length
+        return x.length
+    }
     hostGlobals["append"] = function(arr, v) { arr.push(v); return arr }
+    hostGlobals["delete"] = function(m, k) {
+        if (!isMap(m)) fail("delete() needs a map")
+        var i = mapFind(m, k)
+        if (i < 0) { return }
+        var nk = []
+        var nv = []
+        for (var j = 0; j < m.keys.length; j++) {
+            if (j != i) { nk.push(m.keys[j]); nv.push(m.vals[j]) }
+        }
+        m.keys = nk
+        m.vals = nv
+    }
 
     function gstr(v) {
         if (v === undefined || v === null) return "<nil>"
@@ -339,6 +425,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
                 out += gstr(v[i])
             }
             return out + "]"
+        }
+        if (isMap(v)) {
+            var outm = "map["
+            for (var j = 0; j < v.keys.length; j++) {
+                if (j > 0) outm += " "
+                outm += gstr(v.keys[j]) + ":" + gstr(v.vals[j])
+            }
+            return outm + "]" // Insertion order (real Go sorts the keys here).
         }
         if (typeof v == "object" && v.__class != undefined) {
             var out2 = "{"
@@ -428,7 +522,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
                     if (cur === undefined || cur === null) fail("field ." + s.name + " of nil")
                     cur = cur[s.name]
                 } else {
-                    cur = cur[s.idx()]
+                    cur = isMap(cur) ? mapGet(cur, s.idx()) : cur[s.idx()]
                 }
             }
             return cur
@@ -454,6 +548,57 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return a
         }
     }
+    // items = [{mzero}, {mk, mv}...] -> a map built in source order.
+    function makeMapLit(items) {
+        var zero = zeroOfType(items[0].mzero)
+        var entries = items.slice(1)
+        return function() {
+            var m = newMap(zero)
+            for (var i = 0; i < entries.length; i++) mapSet(m, entries[i].mk(), entries[i].mv())
+            return m
+        }
+    }
+    function makeMakeMap(mz) {
+        var zero = zeroOfType(mz.mzero)
+        return function() { return newMap(zero) }
+    }
+    // items = [valueName, okName, baseThunk, keyThunk]: v, ok := m[k].
+    function makeMapOk(items) {
+        var vName = items[0]
+        var okName = items[1]
+        var baseT = items[2]
+        var keyT = items[3]
+        return function() {
+            var m = baseT()
+            if (!isMap(m)) fail("the comma ok form needs a map")
+            var k = keyT()
+            var i = mapFind(m, k)
+            declVar(vName, i >= 0 ? m.vals[i] : m.zero)
+            declVar(okName, i >= 0)
+        }
+    }
+    // items = [{params}, bodyT] (an ignored RetTypes leaves no stack entry).
+    // The literal captures the scope chain of its evaluation (a real closure).
+    function makeFuncLit(bodyT, plist) {
+        var params = plist.params
+        return function() {
+            var env = scopes.slice(0)
+            return function() {
+                var args = []
+                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+                var saved = scopes
+                scopes = env.slice(0)
+                var sc = {}
+                for (var p = 0; p < params.length; p++) sc[params[p]] = p < args.length ? args[p] : undefined
+                scopes.push(sc)
+                deferFrames.push([])
+                var r = bodyT()
+                runDefers(deferFrames.pop())
+                scopes = saved
+                return (r != undefined && r.isRet) ? r.v : undefined
+            }
+        }
+    }
     // items = [typeName, exprThunks...] -> {__class: type, fields set positionally}.
     function makeStructLit(items) {
         var tyName = items[0]
@@ -477,7 +622,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            o = (s.key != undefined) ? o[s.key] : o[s.idx()]
+            if (s.key != undefined) { o = o[s.key] }
+            else { o = isMap(o) ? mapGet(o, s.idx()) : o[s.idx()] }
             if (o === undefined || o === null) fail("nil in assignment path of " + ref.name)
         }
         var last = ref.path[ref.path.length - 1]
@@ -493,12 +639,13 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     function assignRef(ref, v) {
         if (ref.path.length == 0) { setVar(ref.name, v); return }
         var p = resolveRef(ref)
+        if (isMap(p.obj)) { mapSet(p.obj, p.key, v); return }
         p.obj[p.key] = v
     }
     function readRef(ref) {
         if (ref.path.length == 0) return getVar(ref.name)
         var p = resolveRef(ref)
-        return p.obj[p.key]
+        return isMap(p.obj) ? mapGet(p.obj, p.key) : p.obj[p.key]
     }
     // items = [ref..., {op}, exprThunks...]: parallel assignment, or unpacking of a
     // multi value call when there are more targets than expressions.
@@ -626,7 +773,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return res
         }
     }
-    // items = [name, name?, listThunk, bodyThunk]: for i, v := range s.
+    // items = [name, name?, listThunk, bodyThunk]: for i, v := range s. Ranging over
+    // a map yields its keys (and values) in insertion order (real Go randomizes).
     function makeForRange(items) {
         var bodyT = items.pop()
         var listT = items.pop()
@@ -634,15 +782,18 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var vName = items.length > 1 ? items[1] : null
         return function() {
             var arr = listT()
+            var keys = null
+            var vals = null
+            if (isMap(arr)) { keys = arr.keys.slice(0); vals = arr.vals.slice(0) }
             // range over an int (Go 1.22): the bound is the value itself.
-            var n = (typeof arr == "number") ? arr : arr.length
+            var n = (typeof arr == "number") ? arr : (keys != null ? keys.length : arr.length)
             var res = undefined
             scopes.push({})
             declVar(iName, 0)
             if (vName != null) declVar(vName, undefined)
             for (var i = 0; i < n; i++) {
-                setVar(iName, i)
-                if (vName != null) setVar(vName, arr[i])   // only reached for lists
+                setVar(iName, keys != null ? keys[i] : i)
+                if (vName != null) setVar(vName, keys != null ? vals[i] : arr[i])
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
@@ -714,6 +865,35 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     function makeBreak() { return function() { return BRK } }
     function makeContinue() { return function() { return CONT } }
 
+    // ----- Defer -----
+    // One frame per running function; a defer statement appends {f, args} to the
+    // innermost frame, the function exit runs its frame in reverse (LIFO).
+    var deferFrames = []
+    function runDefers(frame) {
+        for (var i = frame.length - 1; i >= 0; i--) {
+            frame[i].f.apply(undefined, frame[i].args)
+        }
+    }
+    // items = [fname, {mname}?, argThunks...]: the function value and the arguments
+    // are evaluated at defer time. pkg.fn(...) reaches a function valued property
+    // (fmt.Println); struct methods are not supported here.
+    function makeDefer(items) {
+        var fname = items[0]
+        var i = 1
+        var mname = null
+        if (i < items.length && items[i] != undefined && items[i].mname != undefined) { mname = items[i].mname; i++ }
+        var argTs = items.slice(i)
+        return function() {
+            var f = getVar(fname)
+            if (mname != null) f = f == undefined ? undefined : f[mname]
+            if (typeof f != "function") fail("defer needs a function: " + fname + (mname != null ? "." + mname : ""))
+            var argv = []
+            for (var a = 0; a < argTs.length; a++) argv.push(argTs[a]())
+            if (deferFrames.length == 0) fail("defer outside a function")
+            deferFrames[deferFrames.length - 1].push({f: f, args: argv})
+        }
+    }
+
     // ----- Functions, methods and structs -----
 
     function invokeBody(params, body, self, recvName, args) {
@@ -723,7 +903,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         for (var i = 0; i < params.length; i++) {
             declVar(params[i], i < args.length ? args[i] : undefined)
         }
+        deferFrames.push([])
         var r = body()
+        runDefers(deferFrames.pop())
         scopes = saved
         return (r != undefined && r.isRet) ? r.v : undefined
     }
