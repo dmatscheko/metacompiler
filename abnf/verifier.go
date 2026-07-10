@@ -98,14 +98,21 @@ func Verify(aGrammar *r.Rules, source string, ownNames map[string]bool) []Verify
 		}
 	}
 
-	// Compiled a-grammars carry no reliable source positions (c.Pos is not wired
-	// into abnf-of-abnf), so locate each name by scanning the grammar text: a
-	// used-name error points at the first use, a dead-production warning at its
-	// definition.
+	// Rule positions are byte offsets into the grammar source (since abnf-of-abnf
+	// stamps up.pos onto the identifiers and productions it builds). A rule that
+	// came from an :include()d fragment carries no meaningful offset here, so the
+	// line falls back to a by-name scan of the source.
+	lineFor := func(pos int, fallback func() int) int {
+		if l := posLine(source, pos); l != 0 {
+			return l
+		}
+		return fallback()
+	}
 	var issues []VerifyIssue
 
 	// Check 1 - undefined: every Identifier whose name has no production. One
-	// issue per distinct name (a name typoed ten times is one problem).
+	// issue per distinct name (a name typoed ten times is one problem). The
+	// line points at the first use.
 	seenUndef := map[string]bool{}
 	var scanUndefined func(rules *r.Rules)
 	scanUndefined = func(rules *r.Rules) {
@@ -116,7 +123,9 @@ func Verify(aGrammar *r.Rules, source string, ownNames map[string]bool) []Verify
 			if rule.Operator == r.Identifier {
 				if _, ok := defined[rule.String]; !ok && !seenUndef[rule.String] {
 					seenUndef[rule.String] = true
-					issues = append(issues, VerifyIssue{Kind: "undefined", Name: rule.String, Line: firstUseLine(source, rule.String)})
+					name := rule.String
+					line := lineFor(rule.Pos, func() int { return firstUseLine(source, name) })
+					issues = append(issues, VerifyIssue{Kind: "undefined", Name: name, Line: line})
 				}
 			}
 			scanUndefined(rule.Childs)
@@ -154,14 +163,16 @@ func Verify(aGrammar *r.Rules, source string, ownNames map[string]bool) []Verify
 		for _, root := range roots {
 			visit(root)
 		}
-		for name := range defined {
+		for name, rule := range defined {
 			if reached[name] {
 				continue
 			}
 			if ownNames != nil && !ownNames[name] {
 				continue // Defined by an :include() fragment, not the grammar's own code.
 			}
-			issues = append(issues, VerifyIssue{Kind: "unreachable", Name: name, Line: definitionLine(source, name)})
+			nm := name
+			line := lineFor(rule.Pos, func() int { return definitionLine(source, nm) })
+			issues = append(issues, VerifyIssue{Kind: "unreachable", Name: name, Line: line})
 		}
 	}
 
@@ -186,6 +197,21 @@ func collectIdentNames(rules *r.Rules, f func(string)) {
 		collectIdentNames(rule.Childs, f)
 		collectIdentNames(rule.CodeChilds, f)
 	}
+}
+
+// posLine maps a byte offset in source to a 1-based line, or 0 when the offset
+// is unusable (<=0, or past the end - e.g. a rule that came from another file).
+func posLine(source string, pos int) int {
+	if pos <= 0 || pos > len(source) {
+		return 0
+	}
+	line := 1
+	for i := 0; i < pos; i++ {
+		if source[i] == '\n' {
+			line++
+		}
+	}
+	return line
 }
 
 // isIdentByte reports whether b can be part of a grammar name.

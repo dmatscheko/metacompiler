@@ -84,8 +84,8 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 
 	cs.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	cs.compilerFuncMap["localAsg"] = localASG // The local part of the abstract semantic graph.
-	// co.compilerFuncMap["Pos"] = tag.Pos
-	// co.compilerFuncMap["ID"] = tag.Int
+	// The node's source position is exposed as up.pos (set in compiler.go), which
+	// is what abnf-of-abnf stamps onto the rules it builds; there is no c.Pos.
 
 	cs.vm.Set("pop", func() interface{} {
 		stack, ok := upStream["stack"].([]interface{})
