@@ -256,73 +256,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 :startScript(~~
 
-    function takeAll() {
-        var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
-    }
-    function popName() {
-        var items = takeAll()
-        var name = ""
-        for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
-            else { push(items[i]) }
-        }
-        return name
-    }
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); language-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
 
-    function fail(msg) {
-        println("python interpreter error: " + msg)
-        exit(1)
-    }
-
-    function hexAt(s, pos, len) {
-        var v = 0
-        for (var i = 0; i < len; i++) {
-            var c = s.charCodeAt(pos + i)
-            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
-            v = v * 16 + d
-        }
-        return v
-    }
-    function unescapeJs(s) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var c = s.charCodeAt(i)
-            if (c != 92) { out += String.fromCharCode(c); i++; continue }
-            var e = s.charCodeAt(i + 1)
-            if (e == 110) { out += "\n"; i += 2; continue }
-            if (e == 116) { out += "\t"; i += 2; continue }
-            if (e == 114) { out += "\r"; i += 2; continue }
-            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
-            out += String.fromCharCode(e)
-            i += 2
-        }
-        return out
-    }
-    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
-
-    // ----- Scopes: one global scope plus one scope per function call -----
-    var globalScope = {}
-    var scopes = [globalScope]
-    function getVar(name) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) return scopes[i][name]
-        }
-        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
-        fail("name '" + name + "' is not defined")
-    }
-    // Assignment: update in the chain, else create in the current function scope.
-    function setVar(name, value) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
-        }
-        scopes[scopes.length - 1][name] = value
-    }
-
-    var hostGlobals = {}
+    // The host names a program can see.
     hostGlobals["print"] = function() {
         var out = ""
         for (var i = 0; i < arguments.length; i++) {
@@ -461,15 +399,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("method call ." + name + "() on " + pstr(target))
     }
 
-    var BRK = {sig: "break"}
-    var CONT = {sig: "continue"}
 
     // ----- Expression thunks -----
 
-    function makeConst(v) { return function() { return v } }
-    function makeVarRef(name) { return function() { return getVar(name) } }
-    function makeNeg(t) { return function() { return -t() } }
-    function makeNot(t) { return function() { return !pytruthy(t()) } }
+    makeNeg = function(t) { return function() { return -t() } }
+    makeNot = function(t) { return function() { return !pytruthy(t()) } }
 
     function fdiv(a, b) { return Math.floor(a / b) }
     function fmod(a, b) {
@@ -477,7 +411,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (r != 0 && ((r < 0) != (b < 0))) r += b
         return r
     }
-    function binOp(op, l, r) {
+    binOp = function(op, l, r) {
         if (op == "+") return l + r
         if (op == "-") return l - r
         if (op == "*") return l * r
@@ -514,16 +448,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return out
         }
     }
-    function foldBinary(items) {
-        if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
-            return v
-        }
-    }
     // and/or return the deciding operand, with Python truthiness.
-    function makeOrAnd(items, isOr) {
+    makeOrAnd = function(items, isOr) {
         if (items.length == 1) return items[0]
         return function() {
             var v = items[0]()
@@ -536,7 +462,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    function foldCallMember(items) {
+    foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -608,9 +534,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    function makeTargetRef(items) {
-        return {name: items[0], path: items.slice(1)}
-    }
     function assignRef(ref, v) {
         if (ref.path.length == 0) { setVar(ref.name, v); return }
         var o = getVar(ref.name)
@@ -648,19 +571,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Statement thunks -----
 
-    function exprToStmt(t) { return function() { t() } }
-    function makeSeq(items) {
-        return function() {
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i]()
-                if (r != undefined) return r
-            }
-        }
-    }
     // items = [cond, suite, {elif}..., {else}?]
     function makeElif(suite, cond) { return {elifCond: cond, suite: suite} }
     function makeElse(suite) { return {elseSuite: suite} }
-    function makeIf(items) {
+    makeIf = function(items) {
         var cond = items[0]
         var thenT = items[1]
         var elifs = []
@@ -675,17 +589,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (pytruthy(elifs[k].elifCond())) return elifs[k].suite()
             }
             if (elseT != null) return elseT()
-        }
-    }
-    function makeWhile(bodyT, condT) {
-        return function() {
-            while (pytruthy(condT())) {
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) return r
-                }
-            }
         }
     }
     function makeFor(bodyT, listT, name) {
@@ -705,9 +608,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var t = items.length > 0 ? items[0] : makeConst(undefined)
         return function() { return {isRet: true, v: t()} }
     }
-    function makeBreak() { return function() { return BRK } }
-    function makeContinue() { return function() { return CONT } }
-
     // def: bind the closure; calls get a fresh function scope.
     function makeDef(bodyT, plist, name) {
         var params = plist.params
@@ -732,6 +632,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var progT = makeSeq(items)
         progT()
     }
+
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "python"
+    core.test = pytruthy
+    // Assignment creates the name in the innermost scope (Python declares by assigning).
+    core.setMiss = function(name, value) { scopes[scopes.length - 1][name] = value; return true }
 
     c.compile(c.asg)
 

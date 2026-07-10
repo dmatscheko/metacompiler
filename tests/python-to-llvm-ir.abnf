@@ -267,132 +267,22 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 :startScript(~~
 
-    function takeAll() {
-        var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
-    }
-    function popName() {
-        var items = takeAll()
-        var name = ""
-        for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
-            else { push(items[i]) }
-        }
-        return name
-    }
-    function hexAt(s, pos, len) {
-        var v = 0
-        for (var i = 0; i < len; i++) {
-            var c = s.charCodeAt(pos + i)
-            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
-            v = v * 16 + d
-        }
-        return v
-    }
-    function unescapeJs(s) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var c = s.charCodeAt(i)
-            if (c != 92) { out += String.fromCharCode(c); i++; continue }
-            var e = s.charCodeAt(i + 1)
-            if (e == 110) { out += "\n"; i += 2; continue }
-            if (e == 116) { out += "\t"; i += 2; continue }
-            if (e == 114) { out += "\r"; i += 2; continue }
-            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
-            out += String.fromCharCode(e)
-            i += 2
-        }
-        return out
-    }
+    // Shared emitter machinery (module, handle constants, externs, loopStack
+    // protocol, expression/statement builders); see the `core` knobs below.
+    include("lib/compile-core.js")
 
-    // ----- The emitter -----
-
-    var i64 = llvm.types.I64
-    var m = llvm.ir.NewModule()
-    function handle(n) { return llvm.constant.NewInt(i64, n) }
-    var hUndef = handle(0)
-    var hFalse = handle(2)
-    var hTrue = handle(3)
-
-    var externs = {}
-    function getExtern(name, paramCount) {
-        var f = externs[name]
-        if (f != undefined) return f
-        var params = []
-        if (name == "js_str_mem") {
-            params.push(llvm.ir.NewParam("", llvm.types.I8Ptr))
-            params.push(llvm.ir.NewParam("", i64))
-        } else {
-            for (var i = 0; i < paramCount; i++) params.push(llvm.ir.NewParam("", i64))
-        }
-        f = m.NewFunc(name, i64, params)
-        externs[name] = f
-        return f
-    }
-    function callExt(b, name, args) {
-        return b.NewCall(getExtern(name, args.length), args)
-    }
-    var strGlobals = {}
-    var strCount = 0
-    function emitStr(b, s) {
-        var g = strGlobals[s]
-        if (g == undefined) {
-            strCount++
-            g = {}
-            g.glob = m.NewGlobalDef("str." + strCount, llvm.constant.NewCharArrayFromString(s))
-            g.len = handle(s.length)
-            g.ptr = llvm.constant.NewGetElementPtr(g.glob.ContentType, g.glob, [handle(0), handle(0)])
-            strGlobals[s] = g
-        }
-        return callExt(b, "js_str_mem", [g.ptr, g.len])
-    }
-    function emitNum(b, n) {
-        if (n % 1 == 0) return callExt(b, "js_num_i", [handle(n)])
-        return callExt(b, "js_num_str", [emitStr(b, "" + n)])
-    }
-
-    var curF = null
-    var curScopeV = null
-    var loopStack = []
-    var funcCount = 0
-    var deadCount = 0
     var hidCount = 0
-    function deadBlock() {
-        deadCount++
-        return curF.NewBlock("dead" + deadCount)
-    }
     // Python truthiness for branches.
-    function pytruthy(b, v) {
-        return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_pytruthy", [v]), handle(0))
-    }
-
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    function makeConst(v) {
-        return function(b) {
-            if (v === true) return {b: b, v: hTrue}
-            if (v === false) return {b: b, v: hFalse}
-            if (v === undefined) return {b: b, v: hUndef}
-            if (typeof v == "string") return {b: b, v: emitStr(b, v)}
-            return {b: b, v: emitNum(b, v)}
-        }
-    }
-    function makeVarRef(name) {
-        return function(b) {
-            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
-        }
-    }
-    function makeNeg(t) {
+    makeNeg = function(t) {
         return function(b) {
             var r = t(b)
             return {b: r.b, v: callExt(r.b, "js_neg", [r.v])}
         }
     }
     // not: True exactly when the Python truthiness is 0.
-    function makeNot(t) {
+    makeNot = function(t) {
         return function(b) {
             var r = t(b)
             b = r.b
@@ -420,13 +310,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    var binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div",
+    binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div",
                   "//": "js_fdiv", "%": "js_fmod",
                   "==": "js_seq", "!=": "js_sne",
                   "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge",
                   "in": "js_pyin",
                   "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div"}
-    function foldBinary(items) {
+    foldBinary = function(items) {
         if (items.length == 1) return items[0]
         return function(b) {
             var r = items[0](b)
@@ -445,38 +335,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // and/or keep the deciding operand, with Python truthiness.
-    function makeOrAnd(items, isOr) {
-        if (items.length == 1) return items[0]
-        return function(b) {
-            var r = items[0](b)
-            b = r.b
-            var v = r.v
-            for (var i = 1; i < items.length; i++) {
-                var rightB = curF.NewBlock("")
-                var mergeB = curF.NewBlock("")
-                var c = pytruthy(b, v)
-                if (isOr) { b.NewCondBr(c, mergeB, rightB) }
-                else      { b.NewCondBr(c, rightB, mergeB) }
-                var r2 = items[i](rightB)
-                r2.b.NewBr(mergeB)
-                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(r2.v, r2.b)])
-                b = mergeB
-                v = phi
-            }
-            return {b: b, v: v}
-        }
-    }
-
-    function emitArgs(b, args) {
-        var argsV = callExt(b, "js_arr_new", [])
-        for (var j = 0; j < args.length; j++) {
-            var ar = args[j](b)
-            b = ar.b
-            callExt(b, "js_arr_push", [argsV, ar.v])
-        }
-        return {b: b, v: argsV}
-    }
-    function foldCallMember(items) {
+    foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -574,7 +433,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(pytruthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var bb = bodyB
             var iV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iName)])
             var aV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, aName)])
@@ -583,7 +442,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var rc = condT(bb)
                 bb = rc.b
                 var keepB = curF.NewBlock("")
-                bb.NewCondBr(pytruthy(bb, rc.v), keepB, postB)
+                bb.NewCondBr(truthy(bb, rc.v), keepB, postB)
                 bb = keepB
             }
             var re = exprT(bb)
@@ -600,9 +459,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    function makeTargetRef(items) {
-        return {name: items[0], path: items.slice(1)}
-    }
     function emitRefRead(b, ref) {
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length; i++) {
@@ -651,19 +507,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Statement thunks: function(block) -> block -----
 
-    function exprToStmt(t) {
-        return function(b) { return t(b).b }
-    }
-    function makeSeq(items) {
-        return function(b) {
-            for (var i = 0; i < items.length; i++) b = items[i](b)
-            return b
-        }
-    }
     function makeElif(suite, cond) { return {elifCond: cond, suite: suite} }
     function makeElse(suite) { return {elseSuite: suite} }
     // The if/elif/else chain becomes a chain of tests, all meeting in one merge block.
-    function makeIf(items) {
+    makeIf = function(items) {
         var cond = items[0]
         var thenT = items[1]
         var elifs = []
@@ -678,7 +525,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r.b
             var thenB = curF.NewBlock("")
             var nextB = curF.NewBlock("")
-            b.NewCondBr(pytruthy(b, r.v), thenB, nextB)
+            b.NewCondBr(truthy(b, r.v), thenB, nextB)
             thenT(thenB).NewBr(mergeB)
             b = nextB
             for (var k = 0; k < elifs.length; k++) {
@@ -686,27 +533,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = r2.b
                 var armB = curF.NewBlock("")
                 var next2 = curF.NewBlock("")
-                b.NewCondBr(pytruthy(b, r2.v), armB, next2)
+                b.NewCondBr(truthy(b, r2.v), armB, next2)
                 elifs[k].suite(armB).NewBr(mergeB)
                 b = next2
             }
             if (elseT != null) { elseT(b).NewBr(mergeB) }
             else { b.NewBr(mergeB) }
             return mergeB
-        }
-    }
-    function makeWhile(bodyT, condT) {
-        return function(b) {
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var r = condT(headB)
-            r.b.NewCondBr(pytruthy(r.b, r.v), bodyB, exitB)
-            loopStack.push({cont: headB, brk: exitB})
-            bodyT(bodyB).NewBr(headB)
-            loopStack.pop()
-            return exitB
         }
     }
     // for x in <list>: a hidden index drives the loop; x is a normal Python variable
@@ -729,7 +562,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(pytruthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
@@ -755,19 +588,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return deadBlock()
         }
     }
-    function makeBreak() {
-        return function(b) {
-            b.NewBr(loopStack[loopStack.length - 1].brk)
-            return deadBlock()
-        }
-    }
-    function makeContinue() {
-        return function(b) {
-            b.NewBr(loopStack[loopStack.length - 1].cont)
-            return deadBlock()
-        }
-    }
-
     // def: an own IR function; the body shares one function scope (no block scopes).
     function makeDef(bodyT, plist, name) {
         var params = plist.params
@@ -842,6 +662,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = makeSeq(items)(b)
         b.NewRet(hUndef)
     }
+
+    // ----- Core library config (see lib/compile-core.js) -----
+    core.truthyExt = "js_pytruthy" // Python truthiness: empty containers are false.
 
     c.compile(c.asg)
 

@@ -14,7 +14,8 @@
 // ----- Configuration knobs -----
 var core = {
     indexExt: "js_get",       // The external for [i] reads (Go: "js_map_get", map-aware).
-    scopeGetExt: "js_scope_get" // The external for reading a name (Kotlin: "js_kget", this-aware).
+    scopeGetExt: "js_scope_get", // The external for reading a name (Kotlin: "js_kget", this-aware).
+    truthyExt: "js_truthy"    // The external deciding branch conditions (Python: "js_pytruthy").
 }
 
 function takeAll() {
@@ -101,7 +102,8 @@ function emitStr(b, s) {
     return callExt(b, "js_str_mem", [g.ptr, g.len])
 }
 function emitNum(b, n) {
-    return callExt(b, "js_num_i", [handle(n)])
+    if (n % 1 == 0) return callExt(b, "js_num_i", [handle(n)])
+    return callExt(b, "js_num_str", [emitStr(b, "" + n)])
 }
 
 var curF = null
@@ -115,7 +117,7 @@ function deadBlock() {
     return curF.NewBlock("dead" + deadCount)
 }
 function truthy(b, v) {
-    return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0))
+    return b.NewICmp(llvm.enum.IPredNE, callExt(b, core.truthyExt, [v]), handle(0))
 }
 // Int results are truncated to 32 bit through the bitwise or external.
 function intWrap(b, v) {
@@ -129,6 +131,7 @@ function makeConst(v) {
         if (v === true) return {b: b, v: hTrue}
         if (v === false) return {b: b, v: hFalse}
         if (v === null) return {b: b, v: hNull}
+        if (v === undefined) return {b: b, v: hUndef}
         if (typeof v == "string") return {b: b, v: emitStr(b, v)}
         return {b: b, v: emitNum(b, v)}
     }

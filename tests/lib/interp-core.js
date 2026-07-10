@@ -22,6 +22,7 @@ var core = {
         if (typeof l == "string" || typeof r == "string") return l + r
         return (l + r) | 0
     },
+    test: function(v) { return v },                  // Condition truthiness in if/while (Python: pytruthy).
     getField: function(o, name) { return o[name] },  // .name reads (Java: array .length).
     getIndex: function(o, i) { return o[i] },        // [i] reads (Go: map-aware).
     framePush: null,    // Called on function entry (Go: open a defer frame).
@@ -172,14 +173,14 @@ function makeIf(items) {
     var thenT = items[1]
     var elseT = items.length > 2 ? items[2] : null
     return function() {
-        if (cond()) return thenT()
+        if (core.test(cond())) return thenT()
         if (elseT != null) return elseT()
     }
 }
 
 function makeWhile(bodyT, condT) {
     return function() {
-        while (condT()) {
+        while (core.test(condT())) {
             var r = bodyT()
             if (r != undefined) {
                 if (r === BRK) break
