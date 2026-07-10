@@ -177,14 +177,23 @@ The test programs are valid programs of the real languages: c-test-1.c compiles 
 passes under clang, go-test-1.go under go run, python-test-1.py under python3,
 java-test-1.java under javac/java, and metajs-test-1.js under node (with println/printf
 shims) - all with exit code 0, matching both of our engines.
-The C subset has real pointers, arrays, globals and a switch with real fallthrough, and
-compiles to plain integer LLVM IR (llvm.Run). The object and dynamic languages (Java with
-classes/records/single inheritance, Kotlin with when/string templates/properties/elvis,
-Go with structs/methods/multiple returns/switch, Python with real INDENT/DEDENT
-significant indentation/f-strings, MetaJS and Typed MetaJS) compile to handle threaded
+The C subset has real pointers, arrays, globals, structs (nested values, self
+referencing pointers for linked lists, . and -> along whole paths) and a switch with
+real fallthrough, and
+compiles to plain integer LLVM IR (llvm.Run) - member access is a getelementptr into a
+real LLVM struct type. The object and dynamic languages (Java with
+classes/records/single inheritance/switch on int and String, Kotlin with when/string
+templates/properties/elvis/safe calls/lambdas with map/filter/sumOf and
+until/downTo/step ranges,
+Go with structs/methods/multiple returns/switch/maps/function literals with
+closures/defer, Python with real INDENT/DEDENT
+significant indentation/f-strings/dicts/slices/list comprehensions, MetaJS and Typed
+MetaJS with the JS switch and prefix ++/--) compile to handle threaded
 IR on the MetaJS runtime (llvm.RunJS): objects, strings, lists and closures live behind
 i64 handles, methods dispatch through the shared class descriptor convention (js_mcall,
-with a __super chain for Java's inheritance).
+with a __super chain for Java's inheritance). Go maps and Python dicts share one handle
+shape (two parallel key/value arrays, so the insertion order is deterministic in both
+engines).
 Typed MetaJS is exactly MetaJS plus one rule: a variable's type is pinned by its first
 non-undefined value (enforced by both engines; typed-metajs-fail-test.js demonstrates the abort).
 
@@ -748,7 +757,7 @@ The functions and constants are exposed to JS as:
   * __llvm.Eval(m ir.Module, f string) uint32__  
   The function `llvm.Eval(m ir.Module, f string)` executes the function `f` inside the IR module `m` with the built-in IR interpreter and returns the resulting uint32.
   * __llvm.Run(m ir.Module, f string, input string) {Ret uint32, Out string}__  
-  Like `llvm.Eval()`, but `input` is what `getchar()` reads (can be left out), `Out` is everything the program wrote via `putchar()`/`puts()`, and `Ret` is the return value. The interpreter supports the integer subset of LLVM IR that the compiler grammars generate: alloca/load/store, getelementptr into arrays, integer arithmetic and comparisons, zext/sext/trunc, select, phi, branches, calls, and the externals putchar, getchar, puts and abs.
+  Like `llvm.Eval()`, but `input` is what `getchar()` reads (can be left out), `Out` is everything the program wrote via `putchar()`/`puts()`, and `Ret` is the return value. The interpreter supports the integer subset of LLVM IR that the compiler grammars generate: alloca/load/store, getelementptr into arrays and structs (packed layout: the fields lie back to back, ints take 4 bytes and pointers 8), integer arithmetic and comparisons, zext/sext/trunc, ptrtoint/inttoptr/bitcast, select, phi, branches, calls, and the externals putchar, getchar, puts and abs.
   * __llvm.RunJS(m ir.Module, f string) {Ret uint32, Out string}__  
   Executes a MetaJS module (IR emitted by `tests/metajs-to-llvm-ir.abnf`, where every value is an i64 handle and the `js_*` externals implement the JS semantics on the Go side). `f` is the module entry, normally `jsmain`; its handle result is converted to an int32 and returned as `Ret`.
 
