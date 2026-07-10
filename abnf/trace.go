@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/llir/llvm/ir"
+	"github.com/llir/llvm/ir/constant"
 )
 
 // CFGOutPath and TraceOutPath are set from the -cfg and -trace CLI flags.
@@ -36,15 +37,58 @@ var (
 	TraceOutPath string
 )
 
+// TraceMarkersWanted reports whether the compilers should emit js_srcpos
+// statement markers (the c.tracing value the tag scripts read): positions
+// serve both the event stream and the CFG line annotations.
+func TraceMarkersWanted() bool {
+	return TraceOutPath != "" || CFGOutPath != ""
+}
+
+// SetTraceSource registers the program source, so events and CFG labels can
+// carry line numbers instead of raw byte offsets.
+func SetTraceSource(name, text string) {
+	traceSrcName = name
+	traceLineStarts = []int{0}
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			traceLineStarts = append(traceLineStarts, i+1)
+		}
+	}
+}
+
+var (
+	traceSrcName    string
+	traceLineStarts []int // Byte offset of every line start; nil = no source known.
+)
+
+// lineOfPos converts a byte offset to a 1-based line number (0 = unknown).
+func lineOfPos(pos int) int {
+	if traceLineStarts == nil || pos < 0 {
+		return 0
+	}
+	lo, hi := 0, len(traceLineStarts)-1
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if traceLineStarts[mid] <= pos {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo + 1
+}
+
 // ----------------------------------------------------------------------------
 // The runtime event stream (-trace)
 
-// TraceEvent is one line of the JSONL stream. Ev is one of: decl, read, write
-// (scope variables), mread, mwrite (object members), call, ret.
+// TraceEvent is one line of the JSONL stream. Ev is one of: stmt (a statement
+// begins), decl, read, write (scope variables), mread, mwrite (object
+// members), call, ret.
 type TraceEvent struct {
 	Seq   int64  `json:"seq"`
 	Ev    string `json:"ev"`
 	Depth int    `json:"depth"`
+	Line  int    `json:"line,omitempty"` // 1-based source line of the executing statement.
 	Name  string `json:"name,omitempty"` // Variable or callee name.
 	Key   string `json:"key,omitempty"`  // Member key of mread/mwrite.
 	Obj   string `json:"obj,omitempty"`  // Container of mread/mwrite: "type#handle".
@@ -125,7 +169,7 @@ func (rt *jsrt) noteClosureName(name string, v interface{}) {
 // trVar traces a scope variable event: decl, read or write.
 func (rt *jsrt) trVar(ev, name string, v interface{}) {
 	rt.noteClosureName(name, v)
-	traceEmit(&TraceEvent{Ev: ev, Depth: rt.traceDepth, Name: name, Val: rt.traceVal(v)})
+	traceEmit(&TraceEvent{Ev: ev, Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Name: name, Val: rt.traceVal(v)})
 }
 
 // trMember traces an object member event: mread or mwrite.
@@ -133,7 +177,7 @@ func (rt *jsrt) trMember(ev string, objH uint64, key interface{}, v interface{})
 	keyS := rt.toString(key)
 	rt.noteClosureName(keyS, v)
 	obj := fmt.Sprintf("%s#%d", rt.typeOf(rt.unwrap(objH)), objH)
-	traceEmit(&TraceEvent{Ev: ev, Depth: rt.traceDepth, Key: keyS, Obj: obj, Val: rt.traceVal(v)})
+	traceEmit(&TraceEvent{Ev: ev, Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Key: keyS, Obj: obj, Val: rt.traceVal(v)})
 }
 
 // calleeName resolves what a call event should be called.
@@ -235,6 +279,40 @@ func blockCalls(b *ir.Block) []string {
 	return out
 }
 
+// blockLines derives the source line range of a block from its js_srcpos
+// markers (present when the module was compiled with -trace or -cfg active).
+func blockLines(b *ir.Block) string {
+	lo, hi := 0, 0
+	for _, inst := range b.Insts {
+		call, ok := inst.(*ir.InstCall)
+		if !ok || strings.TrimPrefix(call.Callee.Ident(), "@") != "js_srcpos" || len(call.Args) == 0 {
+			continue
+		}
+		ci, ok := call.Args[0].(*constant.Int)
+		if !ok {
+			continue
+		}
+		line := lineOfPos(int(ci.X.Int64()))
+		if line == 0 {
+			continue
+		}
+		if lo == 0 || line < lo {
+			lo = line
+		}
+		if line > hi {
+			hi = line
+		}
+	}
+	switch {
+	case lo == 0:
+		return ""
+	case lo == hi:
+		return fmt.Sprintf("L%d", lo)
+	default:
+		return fmt.Sprintf("L%d-%d", lo, hi)
+	}
+}
+
 func writeCFGDot(m *ir.Module, buf *strings.Builder) {
 	buf.WriteString("digraph CFG {\n\trankdir=TB;\n\tnode [shape=box, fontname=\"Courier\", fontsize=10];\n")
 	for fi, f := range m.Funcs {
@@ -248,6 +326,9 @@ func writeCFGDot(m *ir.Module, buf *strings.Builder) {
 		fmt.Fprintf(buf, "\tsubgraph cluster_%d {\n\t\tlabel=%q;\n", fi, f.Name())
 		for bi, b := range f.Blocks {
 			label := fmt.Sprintf("%s\n%d inst", blockTitle(b, bi), len(b.Insts))
+			if lines := blockLines(b); lines != "" {
+				label = fmt.Sprintf("%s %s\n%d inst", blockTitle(b, bi), lines, len(b.Insts))
+			}
 			if calls := blockCalls(b); len(calls) > 0 {
 				label += "\ncalls: " + strings.Join(calls, ", ")
 			}
@@ -283,7 +364,11 @@ func writeCFGMermaid(m *ir.Module, buf *strings.Builder) {
 		}
 		fmt.Fprintf(buf, "  subgraph sg%d[%q]\n", fi, f.Name())
 		for bi, b := range f.Blocks {
-			fmt.Fprintf(buf, "    %s[%q]\n", ids[b], fmt.Sprintf("%s (%d)", blockTitle(b, bi), len(b.Insts)))
+			title := blockTitle(b, bi)
+			if lines := blockLines(b); lines != "" {
+				title += " " + lines
+			}
+			fmt.Fprintf(buf, "    %s[%q]\n", ids[b], fmt.Sprintf("%s (%d)", title, len(b.Insts)))
 		}
 		buf.WriteString("  end\n")
 		for _, b := range f.Blocks {

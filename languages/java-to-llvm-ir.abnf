@@ -80,7 +80,8 @@ Type        = ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | "void" KwEnd | 
               [ "[" "]" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
             | Decl | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>

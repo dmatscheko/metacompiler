@@ -211,6 +211,9 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 			return compileASGInternal(asg, aGrammar, common.getCurrentModuleFileName(), slot, traceEnabled, false)
 		},
 		"ABNFagrammar": AbnfAgrammar,
+		// True when -trace/-cfg collect source positions: the compilers then
+		// emit js_srcpos statement markers (see lib/compile-core.js stmtPos).
+		"tracing": TraceMarkersWanted(),
 	}
 	vm.Set("c", compilerFuncMap)
 	vm.Set("abnf", r.AbnfFuncMap)

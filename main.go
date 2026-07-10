@@ -119,6 +119,14 @@ func main() {
 		srcC = string(dat) // This can be anything that the a-grammar from srcB understands.
 	}
 
+	// The program whose positions traces and diagrams refer to is the last
+	// input of the pipeline: -c when present, else -b.
+	if *param_c != "" {
+		abnf.SetTraceSource(*param_c, srcC)
+	} else if *param_b != "" {
+		abnf.SetTraceSource(*param_b, srcB)
+	}
+
 	if *param_speedTest {
 		speedtest(srcA, *param_a, 100, *param_useBlockList, *param_useFoundList)
 		return

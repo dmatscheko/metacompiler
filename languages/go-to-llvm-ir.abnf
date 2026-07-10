@@ -88,7 +88,8 @@ MapTypeT    = "map" KwEnd "[" Type "]" Type ;
 FuncTypeT   = "func" KwEnd "(" [ Type { "," Type } ] ")" [ Type | "(" Type { "," Type } ")" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | For | Switch | Return | Break | Continue | Defer | VarDecl
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = Block | If | For | Switch | Return | Break | Continue | Defer | VarDecl
             | SimpleStmt | Empty ;
 
 // defer f(args) / defer pkg.fn(args): the function value and the arguments are

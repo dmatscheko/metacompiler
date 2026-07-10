@@ -116,6 +116,20 @@ var loopStack = []
 var funcCount = 0
 var deadCount = 0
 
+// stmtPos wraps a statement thunk with a js_srcpos marker carrying the source
+// position of its node (up.pos), so traces, diagrams and steppers know which
+// statement executes. Only when the host collects positions (c.tracing, i.e.
+// -trace or -cfg): otherwise the emitted IR stays exactly as without markers.
+// The grammars apply it with a production level tag on their Statement rule.
+function stmtPos(t) {
+    if (!c.tracing || up.pos == undefined) return t
+    var pos = up.pos
+    return function(b) {
+        callExt(b, "js_srcpos", [handle(pos)])
+        return t(b)
+    }
+}
+
 function deadBlock() {
     deadCount++
     return curF.NewBlock("dead" + deadCount)

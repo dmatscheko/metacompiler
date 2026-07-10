@@ -302,13 +302,21 @@ identical event streams (abnf/trace.go):
 (Mermaid when the file name ends in .mmd) - the compilers literally build the
 control flow, so the diagram is the program's real branch structure, for the
 integer-IR languages (TinyC, C subset) too. `-trace` streams runtime events as
-JSON lines: decl/read/write for scope variables, mread/mwrite for object members
+JSON lines: stmt when a statement begins, decl/read/write for scope variables,
+mread/mwrite for object members
 (with stable value handles), call/ret with resolved names (a method closure gets
 its name when the class descriptor is built). Only the program runtime is traced;
 the tag scripts of the grammars stay silent, which is why the goja and -frozen
 streams of one program are identical. `-render` turns a stream into DOT on stdout.
-The flags default to off and change nothing when unused; interpreter-grammar runs
-and source position mapping are the planned next layers.
+
+Events carry source lines: every tag sees the position of its node as up.pos, and
+the compiler grammars wrap their Statement production with stmtPos()
+(lib/compile-core.js), which plants a js_srcpos marker per statement - but only
+while -trace or -cfg is active (the tag scripts read the switch as c.tracing), so
+the emitted IR is untouched otherwise. The runtime remembers the marker as the
+current position and stamps it on every event; -cfg labels the blocks with their
+line ranges (entry L15-16). The flags default to off and change nothing when
+unused; interpreter-grammar runs and a stepper are the planned next layers.
 
 ### High level overview
 

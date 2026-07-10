@@ -56,7 +56,8 @@ Program     <~~ buildMain(takeAll()) ~~>
             = { Statement } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
             | Throw | FuncDecl | Empty | ExprStmt ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default

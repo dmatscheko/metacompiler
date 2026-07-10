@@ -141,6 +141,7 @@ type jsrt struct {
 	traced     bool
 	traceDepth int
 	traceNames map[*jsClosure]string // Under which name a closure was stored.
+	curPos     int                   // Source offset of the executing statement (js_srcpos), -1 = unknown.
 }
 
 // noteGet records a member lookup cheaply; failure messages format them lazily.
@@ -168,6 +169,7 @@ func newJSRT(bindings map[string]interface{}) *jsrt {
 		numIntern: map[float64]uint64{},
 		objIntern: map[interface{}]uint64{},
 		retSlot:   jsUndef,
+		curPos:    -1,
 	}
 	rootVars := map[string]interface{}{}
 	for k, v := range bindings {
@@ -926,11 +928,13 @@ func (rt *jsrt) call(callee interface{}, this interface{}, args []interface{}) i
 	if !rt.traced {
 		return rt.callInner(callee, this, args)
 	}
-	traceEmit(&TraceEvent{Ev: "call", Depth: rt.traceDepth, Name: rt.calleeName(callee)})
+	traceEmit(&TraceEvent{Ev: "call", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Name: rt.calleeName(callee)})
 	rt.traceDepth++
+	savedPos := rt.curPos
 	ret := rt.callInner(callee, this, args)
+	rt.curPos = savedPos // The caller's statement continues after the call.
 	rt.traceDepth--
-	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Val: rt.traceVal(ret)})
+	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Val: rt.traceVal(ret)})
 	return ret
 }
 
@@ -1662,6 +1666,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 
+		// The source position marker: compiled in per statement when the host
+		// collects positions (c.tracing), so traces and steppers know which
+		// statement executes. Costs one int store at run time.
+		"js_srcpos": func(a []uint64) uint64 {
+			rt.curPos = int(int64(a[0]))
+			if rt.traced {
+				traceEmit(&TraceEvent{Ev: "stmt", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos)})
+			}
+			return 0
+		},
+
 		// Constants.
 		"js_str_mem": func(a []uint64) uint64 { // (ptr, len) -> string handle
 			ptr, n := a[0], a[1]
@@ -2360,7 +2375,7 @@ func (rt *jsrt) callEntry(ma *machine, name string, env uint64) uint64 {
 	rt.traceDepth++
 	h := ma.callByName(name, []uint64{env, rt.wrap(&jsArray{})})
 	rt.traceDepth--
-	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Val: rt.traceVal(rt.unwrap(h))})
+	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Val: rt.traceVal(rt.unwrap(h))})
 	return h
 }
 

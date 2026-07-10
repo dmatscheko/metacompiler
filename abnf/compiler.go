@@ -133,8 +133,12 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 	case r.Tag:
 		// First collect all the data.
 		upStream := co.compile(rule.Childs, slot, depth+1) // Evaluate the child productions of the TAG to collect their values.
+		// The tag sees the source position of its node as up.pos (the builders
+		// capture it for traces and diagrams); it does not propagate upwards.
+		upStream["pos"] = rule.Pos
 		// Then run the script on it.
 		co.eng.RunTagCode(rule, fmt.Sprintf("%s:tag:pos:%d", co.fileName, rule.Pos), upStream, localASG, slot, depth)
+		delete(upStream, "pos")
 		return upStream
 	default:
 		// Not all rules have childs. E.g. a Number (from :number()) is a leaf like a Token, but without text.

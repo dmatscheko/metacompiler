@@ -64,7 +64,8 @@ Program     <~~ buildMain(takeAll()) ~~>
 TopStmt     = SameLevel Statement ;
 
 // Compound statements own their suites; small statements end with a newline.
-Statement   = If | While | For | Def | SmallLine ;
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = If | While | For | Def | SmallLine ;
 
 SmallLine   = ( Return | Break | Continue | Pass | AugAssign | Assign | ExprSmall ) NL ;
 

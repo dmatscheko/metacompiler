@@ -81,7 +81,8 @@ PropDecl    <~~ push(makeProp(takeAll())) ~~>
 Type        = Id [ "?" ] [ "<" Type ">" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | Decl | If | While | Do | For | Return | Break | Continue | Empty | ExprStmt ;
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = Block | Decl | If | While | Do | For | Return | Break | Continue | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;

@@ -144,6 +144,10 @@ func newWalkRuntime() (*jsrt, *walkEngine) {
 	bindings["llvm"] = llvmFuncMap
 	bindings["abnf"] = r.AbnfFuncMap
 	bindings["up"] = nil // Replaced per tag below.
+	// The bootstrap compiles TAG SCRIPTS here: they never get js_srcpos
+	// markers (stmtPos in lib/compile-core.js reads c.tracing), their
+	// positions would point into tag text, not into the traced program.
+	bindings["c"] = map[string]r.Object{"tracing": false}
 	bindings["pop"] = jsHostFunc("pop", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		stack, ok := we.curUp["stack"].([]interface{})
 		if !ok || len(stack) == 0 {
@@ -273,6 +277,9 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
 			return compileASGInternal(asg, aGrammar, eng.fileName, slot, traceEnabled, eng.preventDefaultOutput)
 		},
+		// True when -trace/-cfg collect source positions: the compilers then
+		// emit js_srcpos statement markers (see lib/compile-core.js stmtPos).
+		"tracing": TraceMarkersWanted(),
 	}
 
 	bindings := frozenBaseBindings(preventDefaultOutput)
