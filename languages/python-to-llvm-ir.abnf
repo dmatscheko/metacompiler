@@ -61,7 +61,26 @@ python-interpreter.abnf.") ;
 // The leading NL swallows any comment/blank lines at the top of the file.
 Program     <~~ buildMain(takeAll()) ~~>
             = [ NL ] { TopStmt } ;
-TopStmt     = SameLevel Statement ;
+// Imports are module level (column 0) and yield no statement, so they are tried
+// at the TopStmt level (before Statement, outside the stmtPos wrapper) and push
+// nothing net - keeping the value stack balanced for buildMain(takeAll()).
+TopStmt     = SameLevel ( Import | FromImport | Statement ) ;
+
+// Module level imports. resolveImport (lib/compile-core.js) checks each module
+// path against core.stdlibImports; an unresolvable one aborts (or, under
+// -warn-imports, warns and continues). An import produces no statement thunk:
+// DottedName pushes the bare path and the resolving tag pops it (net zero).
+Import      = KwImport ImportMod { "," ImportMod } NL ;
+ImportMod   <~~ resolveImport(pop(), up.pos) ~~>
+            = DottedName [ KwAs Id ] ;
+FromImport  <~~ resolveImport(pop(), up.pos) ~~>
+            = KwFrom DottedName KwImport ( "*" | ImportName { "," ImportName } ) NL ;
+ImportName  = Id [ KwAs Id ] ;
+DottedName  <~~ push(stripWs(up.in)) ~~>
+            = Id { "." Id } ;
+KwImport    = "import" KwEnd ;
+KwFrom      = "from" KwEnd ;
+KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
 Statement   <~~ push(stmtPos(pop())) ~~>
@@ -256,6 +275,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Shared emitter machinery (module, handle constants, externs, loopStack
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
+
+    // resolveImport / notImpl (lib/compile-core.js) call fail; each compiler
+    // defines it. Bare early returns are braced (MetaJS has no ASI).
+    function fail(msg) { println("python compiler error: " + msg); exit(1) }
 
     var hidCount = 0
     // Python truthiness for branches.
@@ -651,6 +674,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Core library config (see lib/compile-core.js) -----
     core.truthyExt = "js_pytruthy" // Python truthiness: empty containers are false.
+    // Python stdlib modules the runtime provides (prefix match, so os.path
+    // resolves against "os").
+    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc"]
 
     c.compile(c.asg)
 

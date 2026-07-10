@@ -40,7 +40,20 @@ programs are self checking: they return 0 on success.") ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { StructDef | StructGDecl | FuncDef | Proto | GlobalDecl } ;
+Program     = { Include | StructDef | StructGDecl | FuncDef | Proto | GlobalDecl } ;
+
+// #include <stdio.h> or #include "local.h": the header is routed through the
+// shared resolveImport (lib/interp-core.js). System <...> headers listed in
+// core.stdlibImports resolve; a quoted "local.h" or an unknown header aborts,
+// or warns under -warn-imports. The production-level tag's up.in is the whole
+// <...>/"..." token including its delimiters, so slice them off to get the bare
+// header name. Nothing is pushed, so an include yields no top-level statement.
+Include     = "#" "include" ( SysHeader | LocHeader ) ;
+SysHeader   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
+            = "<" :whitespace() { HdrChar } ">" :whitespace(Whitespace) ;
+LocHeader   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
+            = '"' :whitespace() { HdrChar } '"' :whitespace(Whitespace) ;
+HdrChar     = "\x20"..."\x21" | "\x23"..."\x3b" | "\x3d" | "\x3f"..."\x7e" ;
 
 // struct Point { int x; int y; }; -- the fields: int, int* and, of already defined
 // structs, nested struct values and struct pointers (also of the struct itself:
@@ -682,6 +695,9 @@ KwDefault   = "default" KwEnd ;
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "c"
     core.test = function(v) { return v != 0 } // C conditions: any nonzero int.
+    // System headers the runtime already provides; #include of anything else is an
+    // external library we cannot resolve (see resolveImport in lib/interp-core.js).
+    core.stdlibImports = ["stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h", "stdbool.h", "stdint.h", "stddef.h", "limits.h", "assert.h", "stdarg.h"]
 
     c.compile(c.asg)
 

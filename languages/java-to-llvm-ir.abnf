@@ -45,7 +45,17 @@ The same language with the same semantics is interpreted directly by java-interp
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = { ClassDecl | RecordDecl } ;
+            = [ Package ] { Import } { ClassDecl | RecordDecl } ;
+
+// An optional package header (parsed and ignored) then repeated imports. Each
+// import path is resolved against the runtime builtins (core.stdlibImports); one
+// that does not resolve aborts the compile, unless -warn-imports downgrades it to
+// a warning (see resolveImport in compile-core.js). 'import static a.b.C.d'
+// resolves the dotted path too. QualName also accepts a trailing '.*' wildcard.
+// Neither Package nor Import pushes a statement, so buildMain never sees them.
+Package     <~~ pop() ~~> = KwPackage QualName ";" ;
+Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] QualName ";" ;
+QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = [ "public" KwEnd ] KwClass Id <~~ push(up.in); curClassName = up.in ~~>
@@ -213,6 +223,8 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 
 KwClass     = "class" KwEnd ;
 KwRecord    = "record" KwEnd ;
+KwPackage   = "package" KwEnd ;
+KwImport    = "import" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
@@ -238,6 +250,14 @@ KwDefault   = "default" KwEnd ;
     include("lib/compile-core.js")
 
     var feCount = 0 // Names hidden foreach counters.
+
+    // ----- Imports & errors -----
+    function fail(msg) { println("java compiler error: " + msg); exit(1) }
+
+    // Import roots the runtime already provides (System, Math, String methods, ...);
+    // importing them is a no-op. Anything else is an external library we cannot
+    // resolve. resolveImport / stripWs live in lib/compile-core.js.
+    core.stdlibImports = ["java", "java.util", "java.io", "java.lang", "java.math", "java.time", "java.util.function", "javax"]
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 

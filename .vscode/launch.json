@@ -125,6 +125,18 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-1.c", "-q"]
         },
         {
+            "name": "C unresolved include SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-import.c", "-q"]
+        },
+        {
+            "name": "C unresolved include warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-fail-test-import.c", "-q", "-warn-imports"]
+        },
+        {
             "name": "MetaJS interpreter (pinning self test)",
             "type": "go",
             "request": "launch",
@@ -147,6 +159,18 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-1.java", "-q"]
+        },
+        {
+            "name": "Java unresolved import SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-import.java", "-q"]
+        },
+        {
+            "name": "Java unresolved import warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-fail-test-import.java", "-q", "-warn-imports"]
         },
         {
             "name": "Kotlin interpreter",
@@ -237,6 +261,18 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-1.py", "-q"]
+        },
+        {
+            "name": "Python unresolved import SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-import.py", "-q"]
+        },
+        {
+            "name": "Python unresolved import warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-import.py", "-q", "-warn-imports"]
         },
         {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",

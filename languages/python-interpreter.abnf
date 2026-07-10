@@ -50,7 +50,25 @@ with exit(fails[0]).") ;
 // The leading NL swallows any comment/blank lines at the top of the file.
 Program     <~~ runProgram(takeAll()) ~~>
             = [ NL ] { TopStmt } ;
-TopStmt     = SameLevel Statement ;
+// Imports are module level (column 0) and yield no statement, so they are tried
+// at the TopStmt level (before Statement) and push nothing net.
+TopStmt     = SameLevel ( Import | FromImport | Statement ) ;
+
+// Module level imports. resolveImport (lib/interp-core.js) checks each module
+// path against core.stdlibImports; an unresolvable one aborts (or, under
+// -warn-imports, warns and continues). An import produces no statement thunk:
+// DottedName pushes the bare path and the resolving tag pops it (net zero).
+Import      = KwImport ImportMod { "," ImportMod } NL ;
+ImportMod   <~~ resolveImport(pop(), up.pos) ~~>
+            = DottedName [ KwAs Id ] ;
+FromImport  <~~ resolveImport(pop(), up.pos) ~~>
+            = KwFrom DottedName KwImport ( "*" | ImportName { "," ImportName } ) NL ;
+ImportName  = Id [ KwAs Id ] ;
+DottedName  <~~ push(stripWs(up.in)) ~~>
+            = Id { "." Id } ;
+KwImport    = "import" KwEnd ;
+KwFrom      = "from" KwEnd ;
+KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
 Statement   = If | While | For | Def | SmallLine ;
@@ -627,6 +645,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     core.test = pytruthy
     // Assignment creates the name in the innermost scope (Python declares by assigning).
     core.setMiss = function(name, value) { scopes[scopes.length - 1][name] = value; return true }
+    // Python stdlib modules the runtime provides (resolveImport lives in
+    // lib/interp-core.js; prefix match, so os.path resolves against "os").
+    core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc"]
 
     c.compile(c.asg)
 

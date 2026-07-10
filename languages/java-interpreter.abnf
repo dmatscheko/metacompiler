@@ -40,7 +40,17 @@ so self checking programs end with System.exit(failures).") ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { ClassDecl | RecordDecl } ;
+Program     = [ Package ] { Import } { ClassDecl | RecordDecl } ;
+
+// An optional package header (parsed and ignored) then repeated imports. Each
+// import path is resolved against the runtime builtins (core.stdlibImports); one
+// that does not resolve aborts, unless -warn-imports downgrades it to a warning
+// (see resolveImport in interp-core.js). 'import static a.b.C.d' resolves the
+// dotted path too. QualName also accepts a trailing '.*' wildcard. Neither Package
+// nor Import leaves a value on the stack.
+Package     <~~ pop() ~~> = KwPackage QualName ";" ;
+Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] QualName ";" ;
+QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
             = [ "public" KwEnd ] KwClass Id <~~ push(up.in); curClassName = up.in ~~>
@@ -207,6 +217,8 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 
 KwClass     = "class" KwEnd ;
 KwRecord    = "record" KwEnd ;
+KwPackage   = "package" KwEnd ;
+KwImport    = "import" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
@@ -605,6 +617,12 @@ KwDefault   = "default" KwEnd ;
         if (name == "length" && Array.isArray(o)) { return o.length }
         return o[name]
     }
+
+    // Import roots the runtime already provides (their symbols are builtins:
+    // System, Math, String methods, ...), so importing them is a no-op. Anything
+    // else is an external library we cannot resolve. resolveImport / stripWs live
+    // in lib/interp-core.js.
+    core.stdlibImports = ["java", "java.util", "java.io", "java.lang", "java.math", "java.time", "java.util.function", "javax"]
 
     c.compile(c.asg)
 
