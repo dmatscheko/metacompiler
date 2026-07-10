@@ -221,6 +221,12 @@
             "program": "${workspaceFolder}","args": ["-a", "languages/ebnf-of-abnf.bnf", "-b", "languages/abnf-of-abnf.abnf"]
         },
         {
+            "name": "EBNF of ABNF (Java grammar)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "languages/ebnf-of-abnf.bnf", "-b", "languages/java-interpreter.abnf"]
+        },
+        {
             "name": "ABNF of ABNF to object",
             "type": "go",
             "request": "launch",
