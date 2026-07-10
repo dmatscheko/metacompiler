@@ -282,9 +282,10 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"tracing": TraceMarkersWanted(),
 		// Import policy + source positions for clean grammar errors (mirrors the
 		// goja c map in commonscript.go).
-		"warnImports": WarnUnresolvedImports,
-		"file":        traceSrcName,
-		"lineOf":      func(pos int) int { return lineOfPos(pos) },
+		"warnImports":     WarnUnresolvedImports,
+		"warnUnsupported": WarnUnsupported,
+		"file":            traceSrcName,
+		"lineOf":          func(pos int) int { return lineOfPos(pos) },
 	}
 
 	bindings := frozenBaseBindings(preventDefaultOutput)

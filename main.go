@@ -35,6 +35,8 @@ import (
 //  -verify       lint the first file's grammar and exit
 //  -pretty       print the first file's serialized a-grammar and exit
 //  -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
+//  -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
+//                lets call graphs / CFGs / traces be built from partially understood languages
 //  -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
 //  -trace F      stream runtime events to file F as JSON lines; also the -render input
 //  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
@@ -57,6 +59,7 @@ type options struct {
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
 	warnImports                           bool // -warn-imports: warn+skip unresolved imports instead of aborting.
+	warnUnsupported                       bool // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
 	speedTest, useBlockList, useFoundList bool
 	speedCount                            int // Timed cycle count for -speed (>0 when set).
 
@@ -105,6 +108,8 @@ func parseArgs(args []string) (*options, error) {
 			o.pretty = true
 		case "-warn-imports":
 			o.warnImports = true
+		case "-warn-unsupported":
+			o.warnUnsupported = true
 		case "-speed":
 			var v string
 			if v, err = takeVal(); err == nil {
@@ -196,6 +201,7 @@ func main() {
 
 	abnf.UseFrozenScripts = o.frozen
 	abnf.WarnUnresolvedImports = o.warnImports
+	abnf.WarnUnsupported = o.warnUnsupported
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath
@@ -394,6 +400,8 @@ anywhere among the files.
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit
   -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
+  -warn-unsupported  warn+placeholder parsed-but-unimplemented syntax instead of aborting;
+                lets call graphs / CFGs / traces be built from partially understood languages
   -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
   -trace F      stream runtime events to file F as JSON lines
   -callgraph F  write the static call graph to file F (.jsonl appends for -render static)

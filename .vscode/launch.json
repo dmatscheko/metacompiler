@@ -185,6 +185,24 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-import.kt", "-q", "-warn-imports"]
         },
         {
+            "name": "Kotlin widened syntax +warn (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-widen.kt", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Kotlin widened syntax +warn (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen.kt", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Kotlin unsupported syntax SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen.kt", "-q"]
+        },
+        {
             "name": "Go interpreter",
             "type": "go",
             "request": "launch",

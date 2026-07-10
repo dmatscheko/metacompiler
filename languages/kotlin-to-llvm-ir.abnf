@@ -51,7 +51,19 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ Package ] { Import } { FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp } ;
+            = [ Package ] { Import } { [ Modifiers ] ( FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp ) } ;
+
+// Modifiers and annotations before a declaration are parsed and ignored (they do
+// not change what we lower). Annotation arguments are not yet accepted. Modifiers
+// that would change the shape of the body (enum/annotation/companion) are NOT
+// consumed here - those declaration forms are not accepted yet.
+Modifiers   = { Modifier | Annotation } ;
+Modifier    = ( "public" | "private" | "protected" | "internal" | "open" | "final"
+              | "abstract" | "sealed" | "data" | "override" | "lateinit" | "const"
+              | "inner" | "vararg" | "noinline" | "crossinline" | "tailrec"
+              | "operator" | "infix" | "inline" | "external" | "suspend"
+              | "expect" | "actual" | "reified" ) KwEnd ;
+Annotation  = "@" Id { "." Id } ;
 
 // package / import headers. The package name is parsed and ignored. Each import
 // is resolved against the runtime builtins (core.stdlibImports); one that does
@@ -83,7 +95,7 @@ CtorParams  <~~ push({cparams: takeAll()}) ~~>
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
 
-Member      = PropDecl | FunDecl <~~ push({method: pop()}) ~~> ;
+Member      = [ Modifiers ] ( PropDecl | FunDecl <~~ push({method: pop()}) ~~> ) ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
 
@@ -91,7 +103,16 @@ Type        = Id [ "?" ] [ "<" Type ">" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | Decl | If | While | Do | For | Return | Break | Continue | Empty | ExprStmt ;
+            = Block | Decl | If | While | Do | For | TryStmt | Throw | Return | Break | Continue | Empty | ExprStmt ;
+
+// try/catch/finally and throw parse fully; without an exception model they are
+// not implemented (see makeTry/makeThrow). Under -warn-unsupported the try block
+// is still compiled and the thrown expression still evaluated, so their calls
+// remain visible to graphs.
+TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwTry Block { KwCatch "(" Id [ ":" Type ] ")" Block } [ KwFinally Block ] ;
+Throw       <~~ push(makeThrow(pop(), up.pos)) ~~>
+            = KwThrow Expression [ ";" ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -178,7 +199,15 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = Elvis { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Elvis } ;
+            = TypeOp { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeOp } ;
+
+// Type operators: x as T / x as? T lower to x (an unchecked identity cast in the
+// untyped handle world); x is T / x !is T cannot be decided, so they are not
+// implemented (makeIsCheck). The suffix is optional, so plain expressions are
+// unaffected. Type is parsed and (apart from steering as/is) ignored.
+TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = Elvis [ IsSfx | AsSfx ] ;
+IsSfx       <~~ push({isType: true, pos: up.pos}) ~~> = ( KwIs | KwNotIs ) Type ;
+AsSfx       <~~ push({asType: true}) ~~> = ( KwAsSafe | KwAs ) Type ;
 
 // a ?: b yields a unless it is null (the elvis operator; the right side only runs then).
 Elvis       <~~ push(makeElvis(takeAll())) ~~>
@@ -252,6 +281,13 @@ KwFun       = "fun" KwEnd ;
 KwImport    = "import" KwEnd ;
 KwPackage   = "package" KwEnd ;
 KwAs        = "as" KwEnd ;
+KwAsSafe    = "as?" ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwIs        = "is" KwEnd ;
+KwNotIs     = "!is" KwEnd ;
 KwClass     = "class" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
@@ -314,6 +350,35 @@ KwStep      = "step" KwEnd ;
         var where = c.file + ":" + c.lineOf(pos)
         if (c.warnImports) { println("kotlin: warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
         fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
+    }
+
+    // ----- Not-implemented syntax -----
+    // A construct that parsed but cannot be lowered. Default: abort with a clean
+    // file:line message. Under -warn-unsupported (c.warnUnsupported): warn and let
+    // the caller drop in a placeholder, so the rest of the program still compiles
+    // (enough to build call graphs / CFGs / traces from a partly understood file).
+    function notImpl(construct, pos) {
+        var where = c.file + ":" + c.lineOf(pos)
+        if (c.warnUnsupported) { println("kotlin: warning: " + where + ": " + construct + " not implemented (ignored)"); return }
+        fail(construct + " not implemented (" + where + "); use -warn-unsupported to ignore")
+    }
+    // Placeholders: a no-op statement (pass the block through) and an undefined expression.
+    function notImplStmt(construct, pos) { notImpl(construct, pos); return function(b) { return b } }
+    function notImplExpr(construct, pos) { notImpl(construct, pos); return function(b) { return {b: b, v: hUndef} } }
+    // try/catch/finally: keep the try block (its calls stay visible); drop catch/finally.
+    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+    // throw e: evaluate e (so its calls count) then fall through - no real unwinding.
+    function makeThrow(e, pos) { notImpl("throw", pos); return exprToStmt(e) }
+    // x is T / x !is T: undecidable without runtime types; evaluate x, yield undefined.
+    function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function(b) { var r = operand(b); return {b: r.b, v: hUndef} } }
+    // TypeOp collects the operand thunk and (if present) an is/as marker at
+    // production level (a sibling inline tag cannot pop the operand). as = identity.
+    function applyTypeOp(items) {
+        if (items.length == 1) { return items[0] }
+        var operand = items[0]
+        var m = items[1]
+        if (m.asType) { return operand }
+        return makeIsCheck(operand, m.pos)
     }
 
     // ----- Expression thunks: function(block) -> {b, v} -----

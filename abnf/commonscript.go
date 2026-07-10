@@ -220,9 +220,10 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		// Import policy + source positions for clean grammar errors. warnImports
 		// is the -warn-imports flag; file is the program being compiled; lineOf
 		// turns an up.pos byte offset into a 1-based line (0 if unknown).
-		"warnImports": WarnUnresolvedImports,
-		"file":        traceSrcName,
-		"lineOf":      func(pos int) int { return lineOfPos(pos) },
+		"warnImports":     WarnUnresolvedImports,
+		"warnUnsupported": WarnUnsupported,
+		"file":            traceSrcName,
+		"lineOf":          func(pos int) int { return lineOfPos(pos) },
 	}
 	vm.Set("c", compilerFuncMap)
 	vm.Set("abnf", r.AbnfFuncMap)

@@ -14,6 +14,15 @@ import (
 // c.warnImports and turn it into the policy via lib resolveImports().
 var WarnUnresolvedImports = false
 
+// WarnUnsupported is set from the -warn-unsupported CLI flag. When false (the
+// default) a parsed-but-not-implemented construct aborts the compile with a
+// clean file:line message; when true it is reported as a warning and replaced by
+// a benign placeholder (a no-op statement / undefined expression) so the rest of
+// the program still compiles - enough to build call graphs, CFGs and traces from
+// a language that is only partially understood. Grammars read it as
+// c.warnUnsupported via the lib notImplemented() family.
+var WarnUnsupported = false
+
 // ----------------------------------------------------------------------------
 // ASG compiler
 

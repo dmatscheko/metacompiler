@@ -41,7 +41,18 @@ The entry point is fun main(); self checking programs end with exitProcess(failu
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = [ Package ] { Import } { FunDecl <~~ registerFun(pop()) ~~> | ClassDecl | TopProp } ;
+Program     = [ Package ] { Import } { [ Modifiers ] ( FunDecl <~~ registerFun(pop()) ~~> | ClassDecl | TopProp ) } ;
+
+// Modifiers/annotations before a declaration are parsed and ignored (no-arg
+// annotations only). Body-shaping modifiers (enum/annotation/companion) are not
+// consumed - those declaration forms are not accepted yet.
+Modifiers   = { Modifier | Annotation } ;
+Modifier    = ( "public" | "private" | "protected" | "internal" | "open" | "final"
+              | "abstract" | "sealed" | "data" | "override" | "lateinit" | "const"
+              | "inner" | "vararg" | "noinline" | "crossinline" | "tailrec"
+              | "operator" | "infix" | "inline" | "external" | "suspend"
+              | "expect" | "actual" | "reified" ) KwEnd ;
+Annotation  = "@" Id { "." Id } ;
 
 // package / import headers (same policy as kotlin-to-llvm-ir.abnf): the package
 // name is ignored; each import is resolved against the runtime builtins, and an
@@ -72,14 +83,22 @@ CtorParams  <~~ push({cparams: takeAll()}) ~~>
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
 
-Member      = PropDecl | FunDecl <~~ push({method: pop()}) ~~> ;
+Member      = [ Modifiers ] ( PropDecl | FunDecl <~~ push({method: pop()}) ~~> ) ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
 
 Type        = Id [ "?" ] [ "<" Type ">" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | Decl | If | While | Do | For | Return | Break | Continue | Empty | ExprStmt ;
+Statement   = Block | Decl | If | While | Do | For | TryStmt | Throw | Return | Break | Continue | Empty | ExprStmt ;
+
+// try/catch/finally and throw parse fully but are not implemented (no exception
+// model). Under -warn-unsupported the try block runs and the thrown expression is
+// still evaluated (see makeTry/makeThrow), so their calls stay visible.
+TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwTry Block { KwCatch "(" Id [ ":" Type ] ")" Block } [ KwFinally Block ] ;
+Throw       <~~ push(makeThrow(pop(), up.pos)) ~~>
+            = KwThrow Expression [ ";" ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -166,7 +185,13 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = Elvis { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Elvis } ;
+            = TypeOp { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeOp } ;
+
+// x as T / x as? T = identity (untyped values); x is T / x !is T undecidable, so
+// not implemented. The suffix is optional, so plain expressions are unaffected.
+TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = Elvis [ IsSfx | AsSfx ] ;
+IsSfx       <~~ push({isType: true, pos: up.pos}) ~~> = ( KwIs | KwNotIs ) Type ;
+AsSfx       <~~ push({asType: true}) ~~> = ( KwAsSafe | KwAs ) Type ;
 
 // a ?: b yields a unless it is null (the elvis operator; the right side only runs then).
 Elvis       <~~ push(makeElvis(takeAll())) ~~>
@@ -240,6 +265,13 @@ KwFun       = "fun" KwEnd ;
 KwImport    = "import" KwEnd ;
 KwPackage   = "package" KwEnd ;
 KwAs        = "as" KwEnd ;
+KwAsSafe    = "as?" ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwIs        = "is" KwEnd ;
+KwNotIs     = "!is" KwEnd ;
 KwClass     = "class" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
@@ -292,6 +324,26 @@ KwStep      = "step" KwEnd ;
         var where = c.file + ":" + c.lineOf(pos)
         if (c.warnImports) { println("kotlin: warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
         fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
+    }
+
+    // ----- Not-implemented syntax (mirrors kotlin-to-llvm-ir.abnf; interpreter
+    // thunks are function()->value / function()->signal) -----
+    function notImpl(construct, pos) {
+        var where = c.file + ":" + c.lineOf(pos)
+        if (c.warnUnsupported) { println("kotlin: warning: " + where + ": " + construct + " not implemented (ignored)"); return }
+        fail(construct + " not implemented (" + where + "); use -warn-unsupported to ignore")
+    }
+    function notImplStmt(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
+    function notImplExpr(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
+    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+    function makeThrow(e, pos) { notImpl("throw", pos); return exprToStmt(e) }
+    function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function() { operand(); return undefined } }
+    function applyTypeOp(items) {
+        if (items.length == 1) { return items[0] }
+        var operand = items[0]
+        var m = items[1]
+        if (m.asType) { return operand }
+        return makeIsCheck(operand, m.pos)
     }
 
     // ----- Scopes with implicit property fallback (Kotlin style) -----
