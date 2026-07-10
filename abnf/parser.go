@@ -386,27 +386,53 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			pa.Sdx = wasSdx
 			return nil
 		}
-		ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
-		if !strings.ContainsRune(rule.String, ch) {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
-			pa.Sdx = wasSdx
-			return nil
-		}
-		pa.Sdx += size
-		if skippingSpaces {
-			return &r.Rules{}
-		}
-		// Cache and reuse the Token rules for the runes 0...127, because those are by far
-		// the most used chars and their encoding is identical to the single byte (the byte
-		// range case below uses the same cache; bytes 128...255 are NOT identical to the
-		// runes 128...255 and are only ever created by the byte range case).
-		if ch >= 0 && ch <= 127 {
+		// Int holds the charType flags: Negated inverts the set, Byte matches one byte
+		// instead of one rune. A set membership equal to Negated is the mismatch.
+		negated := rule.Int&r.CharTypeNegated != 0
+		if rule.Int&r.CharTypeByte != 0 {
+			ch := pa.Src[pa.Sdx]
+			if (strings.IndexByte(rule.String, ch) >= 0) == negated {
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.Sdx = wasSdx
+				return nil
+			}
+			pa.Sdx++
+			if skippingSpaces {
+				return &r.Rules{}
+			}
+			// Cache and reuse the Token rules for all bytes, see case r.Range.
 			if pa.rangeCache[ch] == nil {
-				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
+				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]byte{ch})}
 			}
 			*localProductions = append(*localProductions, pa.rangeCache[ch])
 		} else {
-			*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
+			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
+			if ch == utf8.RuneError && size == 1 { // An invalid encoding never matches (like in case r.Range).
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.Sdx = wasSdx
+				return nil
+			}
+			if strings.ContainsRune(rule.String, ch) == negated {
+				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.Sdx = wasSdx
+				return nil
+			}
+			pa.Sdx += size
+			if skippingSpaces {
+				return &r.Rules{}
+			}
+			// Cache and reuse the Token rules for the runes 0...127, because those are by far
+			// the most used chars and their encoding is identical to the single byte (the byte
+			// range case below uses the same cache; bytes 128...255 are NOT identical to the
+			// runes 128...255 and are only ever created by the byte cases).
+			if ch >= 0 && ch <= 127 {
+				if pa.rangeCache[ch] == nil {
+					pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
+				}
+				*localProductions = append(*localProductions, pa.rangeCache[ch])
+			} else {
+				*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
+			}
 		}
 	case r.CharsOf:
 		// Only skip spaces when actually reading from the target text (Tokens)
@@ -415,15 +441,25 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		length := len(pa.Src)
 		startPos := pa.Sdx
-		for {
-			if pa.Sdx >= length {
-				break
+		// Int holds the charType flags, see case r.CharOf.
+		negated := rule.Int&r.CharTypeNegated != 0
+		byteMode := rule.Int&r.CharTypeByte != 0
+		for pa.Sdx < length {
+			if byteMode {
+				if (strings.IndexByte(rule.String, pa.Src[pa.Sdx]) >= 0) == negated {
+					break
+				}
+				pa.Sdx++
+			} else {
+				ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
+				if ch == utf8.RuneError && size == 1 { // An invalid encoding never matches.
+					break
+				}
+				if strings.ContainsRune(rule.String, ch) == negated {
+					break
+				}
+				pa.Sdx += size
 			}
-			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
-			if !strings.ContainsRune(rule.String, ch) {
-				break
-			}
-			pa.Sdx += size
 		}
 		size := pa.Sdx - startPos
 		if size == 0 {
@@ -435,6 +471,21 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			return &r.Rules{}
 		}
 		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: pa.Src[startPos:pa.Sdx]})
+	case r.Not:
+		// Negative lookahead: the single child is probed and the position is restored,
+		// so nothing is ever consumed. The Not matches exactly when the child does NOT
+		// match here. A successful Not has zero width and leaves nothing in the ASG.
+		// (Side effects of :script() rules inside the probed child are not rolled back,
+		// like everywhere else.)
+		probe := pa.apply((*rule.Childs)[0], skipSpaceRule, skippingSpaces, depth+1)
+		pa.Sdx = wasSdx
+		if probe != nil { // The child matched: the lookahead fails.
+			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			return nil
+		}
+		if skippingSpaces {
+			return &r.Rules{}
+		}
 	case r.Range:
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.

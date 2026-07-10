@@ -26,15 +26,16 @@ const (
 	Times   // A counted repetition (e.g. 3...5 ( X )). CodeChilds holds the count parameters.
 	Tag     // The annotation rule that carries JS code. Int is reserved for the UID for caching the compiled code.
 	Command // A parser command like :whitespace(). Int is reserved for the code UID of :script().
-	CharOf  // Exactly one char out of String must be in the target text.
-	CharsOf // One or more chars out of String (in any order) must be in the target text.
+	CharOf  // Exactly one char out of String must be in the target text. Int holds CharType* flags.
+	CharsOf // One or more chars out of String (in any order) must be in the target text. Int holds CharType* flags.
+	Not     // Negative lookahead: matches (consuming nothing) exactly when its single child does NOT match.
 	// Link types:
 	Production // Int is reserved for the position of the Production inside the grammar rules.
 	Identifier // Int is reserved for the position of the identified Production (-1 if unresolved).
 )
 
 func (id OperatorID) String() string {
-	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Number", "Or", "Optional", "Repeat", "Range", "Times", "Tag", "Command", "CharOf", "CharsOf", "Production", "Identifier"}[id]
+	return [...]string{"Error", "Success", "Sequence", "Group", "Token", "Number", "Or", "Optional", "Repeat", "Range", "Times", "Tag", "Command", "CharOf", "CharsOf", "Not", "Production", "Identifier"}[id]
 }
 
 type Rule struct {
@@ -50,6 +51,15 @@ type Rule struct {
 const (
 	RangeTypeRune int = iota
 	RangeTypeByte
+)
+
+// Flags for the Int field of CharOf and CharsOf. JS-Mapping: abnf.charType
+// The zero value (CharTypeRune) is the plain rune based set match, so all
+// serialized grammars from before these flags keep their meaning.
+const (
+	CharTypeRune    int = 0      // Match whole runes of the set (the default).
+	CharTypeByte    int = 1 << 0 // Match single bytes of the set instead of runes.
+	CharTypeNegated int = 1 << 1 // Match exactly the chars that are NOT in the set.
 )
 
 // Encoding of a :number() in the target text. JS-Mapping: abnf.numberType
@@ -123,7 +133,7 @@ func (rule *Rule) Serialize() string {
 	if op == Token || op == Identifier || op == Production || op == Command || op == CharOf || op == CharsOf {
 		res += fmt.Sprintf(", String:%q", rule.String)
 	}
-	if op == Number || op == Range {
+	if op == Number || op == Range || ((op == CharOf || op == CharsOf) && rule.Int != 0) {
 		res += fmt.Sprintf(", Int:%d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
@@ -136,7 +146,7 @@ func (rule *Rule) Serialize() string {
 		}
 		res += "}"
 	}
-	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == Not) {
 		res += ", Childs:&r.Rules{"
 		for i := range *rule.Childs {
 			if i > 0 {
@@ -146,7 +156,7 @@ func (rule *Rule) Serialize() string {
 		}
 		res += "}"
 	}
-	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == CharOf || op == CharsOf) {
+	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == CharOf || op == CharsOf || op == Not) {
 		panic("wrong rule type: " + op.String())
 	}
 
@@ -187,16 +197,16 @@ func (rule *Rule) ToString() string {
 	if op == Token || op == Identifier || op == Production || op == Command || op == CharOf || op == CharsOf {
 		res += fmt.Sprintf(", String:%q", rule.String)
 	}
-	if op == Identifier || op == Number || op == Range {
+	if op == Identifier || op == Number || op == Range || ((op == CharOf || op == CharsOf) && rule.Int != 0) {
 		res += fmt.Sprintf(", Int:%d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
 		res += ", CodeChilds:[...]"
 	}
-	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat) {
+	if rule.Childs != nil && (op == Tag || op == Identifier || op == Production || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == Not) {
 		res += ", Childs:[...]"
 	}
-	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == CharOf || op == CharsOf) {
+	if !(op == Token || op == Number || op == Identifier || op == Production || op == Tag || op == Command || op == Range || op == Times || op == Group || op == Sequence || op == Or || op == Optional || op == Repeat || op == CharOf || op == CharsOf || op == Not) {
 		res += fmt.Sprintf(", String:%q", rule.String)
 		res += fmt.Sprintf(", Int:%d", rule.Int)
 		if rule.CodeChilds != nil {

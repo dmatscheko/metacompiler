@@ -5,7 +5,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -30,35 +29,6 @@ type commonscript struct {
 	codeCache       []cachedProgram          // Compiled programs by tag UID (for tags and :script() commands with a UID > 0).
 	codeCacheBySrc  map[string]*goja.Program // Compiled programs by name plus source text (for everything without a UID).
 	referencesCache *references              // Keeps the tag UIDs stable over multiple correctReferencesAndIDs() calls.
-}
-
-// Unescape resolves backslash escapes (\n, \t, \x41, \u00e4, ...) inside the content of
-// a Dquotetoken or Squotetoken string. It is a stripped down and slightly modified version
-// of strconv.Unquote(), but without the surrounding quotation marks.
-func Unescape(s string) (string, error) {
-	// Is it trivial? Avoid allocation.
-	if !strings.ContainsRune(s, '\\') {
-		if utf8.ValidString(s) {
-			return s, nil
-		}
-	}
-
-	var runeTmp [utf8.UTFMax]byte
-	buf := make([]byte, 0, 3*len(s)/2) // Try to avoid more allocations.
-	for len(s) > 0 {
-		c, multibyte, ss, err := strconv.UnquoteChar(s, 0)
-		if err != nil {
-			return "", err
-		}
-		s = ss
-		if c < utf8.RuneSelf || !multibyte {
-			buf = append(buf, byte(c))
-		} else {
-			n := utf8.EncodeRune(runeTmp[:], c)
-			buf = append(buf, runeTmp[:n]...)
-		}
-	}
-	return string(buf), nil
 }
 
 // UnescapeTilde resolves the only escape sequence of a tags raw Code string: It replaces
@@ -164,7 +134,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		return &tmp
 	})
 
-	vm.Set("unescape", Unescape)
+	vm.Set("unescape", r.Unescape)
 	vm.Set("unescapeTilde", UnescapeTilde)
 
 	vm.Set("include", func(fileName string) bool {

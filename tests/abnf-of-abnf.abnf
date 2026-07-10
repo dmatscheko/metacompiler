@@ -1,9 +1,17 @@
 :title("ABNF of ABNF to a-grammar") ;
-:description("This ABNF contains the grammatic and semantic information for annotated EBNF.
-It allows to automatically create a compiler for everything described in ABNF (yes, that format).") ;
+:description("The annotated EBNF format, described in itself: parsing this file with the
+built-in a-grammar and compiling the result yields exactly that a-grammar again (its
+serialized twin is hard coded in abnf/agrammar.go and bootstraps every run).
 
+This file is the reference for the whole syntax: productions, alternatives |, sequences,
+groups ( ), options [ ], repetitions { }, counted repetitions like 3...5 ( X ), rune and
+byte ranges (... and ..b), char sets (@'ab' is one char of the set, @+'ab' a run of them,
+@b and @b+ the byte versions, and !@ !@+ !@b !@b+ match the chars NOT in the set),
+!'token' as negative lookahead (matches without consuming when the token does not),
+tokens with escapes (\\n \\t \\x41 \\u00e4 and the token's own quote), commands like
+:whitespace(), and tags carrying JS code.
 
-// TODO: implement !"asdf", !@"asdf", and !@+"asdf", and maybe @b"asdf", and @b+"asdf", and !@b"asdf", and !@b+"asdf".
+After changing this file, regenerate abnf/agrammar.go as described in the README.") ;
 
 
 // --- main rules
@@ -25,8 +33,11 @@ Alternative <~~ push(simplify(abnf.newAlternative(popg(), c.Pos))) ~~>
 Sequence    <~~ push(simplify(abnf.newSequence(popg(), c.Pos))) ~~>
             = Term <~~ pushg([pop()]) ~~> { Term <~~ pushg(append(popg(), pop())) ~~> } ;
 
+// The alternatives are ordered so that the longer prefixes are tried first
+// ("!@b+" before "!@b" before "!@+" before "!@" before "!", and "@b+" before "@b"
+// before "@+" before "@"), because the parser keeps the first match.
 Term        <~~ push(popg()) ~~>
-            = ( Name | ByteRange | Range | CharsOf | CharOf | Group | Option | Repetition | Times | Command ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
+            = ( Name | ByteRange | Range | NotCharsOfByte | NotCharOfByte | NotCharsOf | NotCharOf | NotToken | CharsOfByte | CharOfByte | CharsOf | CharOf | Group | Option | Repetition | Times | Command ) <~~ pushg(simplify(pop())) ~~> [ Tag <~~ var tag=pop(); tag.Childs=simplifyToArr(popg()); pushg(tag) ~~> ] ;
 
 Group       = "(" Expression <~~ push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) ~~> ")" ;
 Option      = "[" Expression <~~ push(abnf.newOption(simplifyToArr(pop()), c.Pos)) ~~> "]" ;
@@ -34,8 +45,21 @@ Repetition  = "{" Expression <~~ push(abnf.newRepetition(simplifyToArr(pop()), c
 Range       <~~ push(popg()) ~~>
             = Token <~~ pushg(pop()) ~~> [ "..." Token <~~ pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) ~~> ] ;
 ByteRange   = Token <~~ pushg(pop()) ~~> "..b" Token <~~ push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) ~~> ;
-CharsOf     = "@+" Token <~~ push(abnf.newCharsOf(pop().String, c.Pos)) ~~> ;
-CharOf      = "@" Token <~~ push(abnf.newCharOf(pop().String, c.Pos)) ~~> ;
+
+// The char set family: one char of the set (@) or a maximal run of them (@+), matching
+// runes (default) or single bytes (b), of the set itself or of its complement (!).
+CharsOf        = "@+" Token <~~ push(abnf.newCharsOf(pop(), abnf.charType.Rune, c.Pos)) ~~> ;
+CharOf         = "@" Token <~~ push(abnf.newCharOf(pop(), abnf.charType.Rune, c.Pos)) ~~> ;
+CharsOfByte    = "@b+" Token <~~ push(abnf.newCharsOf(pop(), abnf.charType.Byte, c.Pos)) ~~> ;
+CharOfByte     = "@b" Token <~~ push(abnf.newCharOf(pop(), abnf.charType.Byte, c.Pos)) ~~> ;
+NotCharsOf     = "!@+" Token <~~ push(abnf.newCharsOf(pop(), abnf.charType.Negated, c.Pos)) ~~> ;
+NotCharOf      = "!@" Token <~~ push(abnf.newCharOf(pop(), abnf.charType.Negated, c.Pos)) ~~> ;
+NotCharsOfByte = "!@b+" Token <~~ push(abnf.newCharsOf(pop(), abnf.charType.Byte | abnf.charType.Negated, c.Pos)) ~~> ;
+NotCharOfByte  = "!@b" Token <~~ push(abnf.newCharOf(pop(), abnf.charType.Byte | abnf.charType.Negated, c.Pos)) ~~> ;
+
+// Negative lookahead: !'x' matches (consuming nothing) when the token does not match here.
+NotToken    = "!" Token <~~ push(abnf.newNot([pop()], c.Pos)) ~~> ;
+
 Times       = CmdNumber <~~ pushg([pop()]) ~~> [ "..." ( CmdNumber | "" <~~ push(abnf.newToken("...")) ~~> ) <~~ pushg(append(popg(), pop())) ~~> ] Group <~~ push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) ~~> ;
 
 CmdNumber   = Number | Command ;
@@ -53,16 +77,23 @@ CmdName     <~~ push(up.in) ~~>
             = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken | Code ;
-Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> '"' :whitespace(Whitespace) ;
-Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } <~~ push(abnf.newToken(unescape(up.in), c.Pos)) ~~> "'" :whitespace(Whitespace) ;
+// The escape pair (backslash plus any printable char) is consumed as a whole and tried
+// first, so neither an escaped quote ends the token early nor pairs the second
+// backslash of a \\ with the closing quote.
+Dquotetoken = '"' :whitespace() { TokenEsc | AsciiNoQs | "'" } <~~ push(abnf.newTokenEscaped(up.in, c.Pos)) ~~> '"' :whitespace(Whitespace) ;
+Squotetoken = "'" :whitespace() { TokenEsc | AsciiNoQs | '"' } <~~ push(abnf.newTokenEscaped(up.in, c.Pos)) ~~> "'" :whitespace(Whitespace) ;
+// The backslash is written as \x5c here: this file must stay parseable by the built-in
+// a-grammar of OLDER builds during regeneration, and some of those mis-parsed a "\\"
+// token directly in front of another quote.
+TokenEsc    = "\x5c" "\x20"..b"\x7e" ;
 Code        = '~~' :whitespace() { [ "~" ] AllButTilde } <~~ push(abnf.newToken(unescapeTilde(up.in), c.Pos)) ~~> '~~' :whitespace(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
 AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | @"\t\n\r !" ; // Readable ASCII without double and single quotes.
-NoLinebreak = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ; // All chars except the line feed.
-NoStar      = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ; // All chars except the star (*).
-NoStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ; // All chars except star (*) and slash (/).
+NoLinebreak = !@"\n" ;  // Any char except the line feed (the file uses its own !@ syntax).
+NoStar      = !@"*" ;   // Any char except the star.
+NoStarSlash = !@"*/" ;  // Any char except star and slash.
 AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\U0010ffff" ; // All chars. Only tilde is escaped.
 
 Number      <~~ push(abnf.newNumber(up.in, c.Pos)) ~~>

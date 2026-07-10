@@ -281,7 +281,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		tmp := append(t, v...)
 		return &tmp
 	}
-	bindings["unescape"] = Unescape
+	bindings["unescape"] = r.Unescape
 	bindings["unescapeTilde"] = UnescapeTilde
 	bindings["correctReferencesAndIDs"] = func(agrammar *r.Rules) {
 		if eng.references == nil {
