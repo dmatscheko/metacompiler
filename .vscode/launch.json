@@ -119,22 +119,16 @@
             "program": "${workspaceFolder}","args": ["-a", "languages/c-to-llvm-ir.abnf", "-b", "tests/c-test-1.c", "-q"]
         },
         {
-            "name": "Typed MetaJS interpreter",
+            "name": "MetaJS interpreter (pinning self test)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-interpreter.abnf", "-b", "tests/typed-metajs-test-1.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-interpreter.abnf", "-b", "tests/metajs-test-2.js", "-q"]
         },
         {
-            "name": "Typed MetaJS to LLVM IR",
+            "name": "MetaJS to LLVM IR (pinning self test)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-to-llvm-ir.abnf", "-b", "tests/typed-metajs-test-1.js", "-q"]
-        },
-        {
-            "name": "Typed MetaJS violation (SHOULD FAIL)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-interpreter.abnf", "-b", "tests/metajs-fail-test.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-to-llvm-ir.abnf", "-b", "tests/metajs-test-2.js", "-q"]
         },
         {
             "name": "Java interpreter",

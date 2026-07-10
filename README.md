@@ -163,8 +163,7 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | Brainfuck    | brainfuck-interpreter.abnf                                   | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt        |
 | TinyC        | tinyc-interpreter.abnf                                       | tinyc-to-llvm-ir.abnf        | tinyc-test-1.txt, tinyc-test-2.txt                |
 | Lisp         | lisp-interpreter.abnf                                        | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                                   |
-| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js, metajs-fail-test.js, metajs-fail-test-undeclared.js |
-| Typed MetaJS | typed-metajs-interpreter.abnf                                | typed-metajs-to-llvm-ir.abnf | typed-metajs-test-1.js, metajs-fail-test.js       |
+| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js, metajs-test-2.js, metajs-fail-test.js, metajs-fail-test-undeclared.js |
 | C (subset)   | c-interpreter.abnf                                           | c-to-llvm-ir.abnf            | c-test-1.c                                        |
 | Java         | java-interpreter.abnf                                        | java-to-llvm-ir.abnf         | java-test-1.java                                  |
 | Kotlin       | kotlin-interpreter.abnf                                      | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                                  |
@@ -188,8 +187,8 @@ templates/properties/elvis/safe calls/lambdas with map/filter/sumOf and
 until/downTo/step ranges,
 Go with structs/methods/multiple returns/switch/maps/function literals with
 closures/defer, Python with real INDENT/DEDENT
-significant indentation/f-strings/dicts/slices/list comprehensions, MetaJS and Typed
-MetaJS with the JS switch and prefix ++/--) compile to handle threaded
+significant indentation/f-strings/dicts/slices/list comprehensions, MetaJS with the
+JS switch and prefix ++/--) compile to handle threaded
 IR on the MetaJS runtime (llvm.RunJS): objects, strings, lists and closures live behind
 i64 handles, methods dispatch through the shared class descriptor convention (js_mcall,
 with a __super chain for Java's inheritance). Go maps and Python dicts share one handle
@@ -197,12 +196,12 @@ shape (two parallel key/value arrays, so the insertion order is deterministic in
 engines).
 MetaJS pins types: every variable must be declared (var/let/const) before use, and a
 variable's type class is pinned by the first non-undefined, non-null value it holds -
-enforced by both engines and demonstrated by metajs-fail-test.js and
-metajs-fail-test-undeclared.js (both SHOULD FAIL). Typed MetaJS is the dialect in which
-that rule was prototyped; it is now the same language and stays as the demo of deriving
-a stricter dialect from a base grammar.
+enforced by both engines, positively tested by metajs-test-2.js and demonstrated by
+metajs-fail-test.js and metajs-fail-test-undeclared.js (both SHOULD FAIL). The rule was
+prototyped in a separate 'Typed MetaJS' dialect pair that has since been folded into the
+base language (the js_tdecl/js_tset extern names remember it).
 
-The big-language grammars (Java, Kotlin, Go, Python, C and both MetaJS variants -
+The big-language grammars (Java, Kotlin, Go, Python, C and MetaJS -
 interpreters and compilers) draw their common machinery from `languages/lib/`: the
 startScript begins with `include("lib/interp-core.js")` (scopes, the break/continue
 protocol, the expression and statement thunk builders) or `include("lib/compile-core.js")`
@@ -212,8 +211,7 @@ builders). Where languages genuinely differ the behavior is a knob on the librar
 identifier `_`, `nil` wording, map-aware indexing and defer frame hooks, Kotlin the
 implicit-this name fallback, Python its truthiness and assignment-declares-local rule,
 C its nonzero-int conditions - and anything genuinely language-specific (Java's
-inheritance dispatch, Go's multi-assign, Python's elif chains, the MetaJS variants'
-type boxes,
+inheritance dispatch, Go's multi-assign, Python's elif chains, MetaJS' type boxes,
 C's arena addressing) stays in the grammar file as a plain-assignment override of the
 library name (never a `function` declaration: the two engines install those in opposite
 order relative to the include). The freezer inlines the emitter library's `include()`

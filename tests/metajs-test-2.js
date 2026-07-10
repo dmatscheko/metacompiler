@@ -1,6 +1,6 @@
-/* Typed MetaJS self test.
- * The language is MetaJS with pinned variable types: the first non-undefined
- * value a variable holds decides its type class forever. main() returns the
+/* MetaJS type pinning self test.
+ * The first non-undefined, non-null value a variable holds decides its type
+ * class; undefined and null stay assignable to everything. main() returns the
  * number of failed checks, so the run exits with 0 exactly when all is well. **/
 
 var failures = 0;
@@ -56,7 +56,7 @@ function main() {
     t = 7;
     check("undefined does not unpin", t, 7);
 
-    // Arrays, objects and null share the object class (like typeof).
+    // Arrays and objects share the object class (like typeof); null assigns freely.
     var o = {a: 1};
     o = [1, 2, 3];
     o = null;
@@ -113,6 +113,6 @@ function main() {
     check("post after pre", pn++, 7);
     check("effects", pn, 8);
 
-    if (failures == 0) { println("Typed MetaJS self test passed"); }
+    if (failures == 0) { println("MetaJS pinning self test passed"); }
     return failures;
 }
