@@ -45,9 +45,8 @@ This system should allow to define and use compiler for arbitrary computer langu
       - [Compiler API](#compiler-api)
       - [Parser and Compiler ABNF a-grammar API](#parser-and-compiler-abnf-a-grammar-api)
         - [Builder functions](#builder-functions)
-        - [ToString functions](#tostring-functions)
+        - [Serializer functions](#serializer-functions)
         - [Grammar functions](#grammar-functions)
-        - [Text functions](#text-functions)
         - [OperatorID Constants](#operatorid-constants)
         - [RangeType Constants](#rangetype-constants)
         - [CharType Constants](#chartype-constants)
@@ -827,24 +826,38 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 
 ##### Builder functions
 
-* __abnf.arrayToRules(rules []object) []Rule__
-* __abnf.newRule(Operator OperatorID, String string, Int int, Pos int, Childs []Rule, CodeChilds []Rule) Rule__
-* __abnf.newToken(String string, Pos int) Rule__
+* __abnf.arrayToRules(rules []object) []Rule__  
+  Wraps a plain JS array of rules into an a-grammar (`Rules`) value.
+* __abnf.newRule(Operator OperatorID, String string, Int int, Pos int, Childs []Rule, CodeChilds []Rule) Rule__  
+  The generic constructor: builds any rule from its raw fields (the `new*` helpers below are shorthands for it).
+* __abnf.newToken(String string, Pos int) Rule__  
+  A terminal symbol: fixed text that must appear in the target text.
 * __abnf.newTokenEscaped(String string, Pos int) Rule__  
   Like `newToken`, but resolves the backslash escapes of `String` on the Go side, so a byte set token like `'\xff'` keeps its raw bytes instead of being mangled into U+FFFD by the JS engine.
-* __abnf.newNumber(Int int, Pos int) Rule__
-* __abnf.newIdentifier(String string, Pos int) Rule__
-* __abnf.newProduction(String string, Childs []Rule, Pos int) Rule__
-* __abnf.newTag(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
-* __abnf.newCommand(String string, CodeChilds []Rule, Pos int) Rule__
-* __abnf.newRepetition(Childs []Rule, Pos int) Rule__
-* __abnf.newOption(Childs []Rule, Pos int) Rule__
-* __abnf.newGroup(Childs []Rule, Pos int) Rule__
-* __abnf.newSequence(Childs []Rule, Pos int) Rule__
-* __abnf.newAlternative(Childs []Rule, Pos int) Rule__
+* __abnf.newNumber(Int int, Pos int) Rule__  
+  A plain number literal (as produced by `:number()`).
+* __abnf.newIdentifier(String string, Pos int) Rule__  
+  A reference to a production by name.
+* __abnf.newProduction(String string, Childs []Rule, Pos int) Rule__  
+  A named production - the definition an `Identifier` points to.
+* __abnf.newTag(CodeChilds []Rule, Childs []Rule, Pos int) Rule__  
+  An annotation over `Childs`; `CodeChilds` holds the JS code that runs once they matched.
+* __abnf.newCommand(String string, CodeChilds []Rule, Pos int) Rule__  
+  A `:name(...)` command; `String` is the name, `CodeChilds` the parameters.
+* __abnf.newRepetition(Childs []Rule, Pos int) Rule__  
+  Zero or more repetitions (the `{ ... }` form).
+* __abnf.newOption(Childs []Rule, Pos int) Rule__  
+  An optional part (the `[ ... ]` form).
+* __abnf.newGroup(Childs []Rule, Pos int) Rule__  
+  A group (the `( ... )` form) that must not be broken apart.
+* __abnf.newSequence(Childs []Rule, Pos int) Rule__  
+  A sequence of rules matched one after another.
+* __abnf.newAlternative(Childs []Rule, Pos int) Rule__  
+  Alternatives (the `|` form); the first matching child wins.
 * __abnf.newRange(CodeChilds []Rule, RangeType int, Pos int) Rule__  
   `CodeChilds` holds the two Token `[from, to]`, `RangeType` is one of the [RangeType Constants](#rangetype-constants).
-* __abnf.newTimes(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
+* __abnf.newTimes(CodeChilds []Rule, Childs []Rule, Pos int) Rule__  
+  A counted repetition (e.g. `3...5 ( X )`); `CodeChilds` holds the count bounds.
 * __abnf.newCharOf(Token Rule, CharType int, Pos int) Rule__  
   One char of a set. `Token` is the set's Token *rule* (pass the rule, not its string, so raw bytes survive the JS engine), `CharType` is a combination of the [CharType Constants](#chartype-constants).
 * __abnf.newCharsOf(Token Rule, CharType int, Pos int) Rule__  
@@ -854,12 +867,16 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __correctReferencesAndIDs(agrammar []Rule)__ (a global function, not part of `abnf.*`)  
 This fills the array position of `Productions` into their `Identifier` (-1 if the production does not exist). It also identifies each different `Tag` with another UID. The array positions of the productions and the UIDs of the Tags are stored in the rules Int field. This method must be used on newly created a-grammars, if they are directly used for compilation. The parser applies this method automatically.
 
-##### ToString functions
+##### Serializer functions
 
-* __abnf.serializeRule(rule Rule) string__
-* __abnf.serializeRules(rules []Rule) string__
-* __abnf.toStringRule(rule Rule) string__
-* __abnf.toStringRules(rules []Rule) string__
+* __abnf.serializeRule(rule Rule) string__  
+  Serializes one rule to its Go-literal form (the form hard coded in `abnf/agrammar.go`, re-readable by compiling it as Go).
+* __abnf.serializeRules(rules []Rule) string__  
+  Serializes a whole a-grammar to its Go-literal form.
+* __abnf.toStringRule(rule Rule) string__  
+  A short, human readable dump of one rule (child rules abbreviated as `[...]`).
+* __abnf.toStringRules(rules []Rule) string__  
+  A short, human readable dump of a whole a-grammar.
 
 ##### Grammar functions
 
@@ -867,41 +884,40 @@ This fills the array position of `Productions` into their `Identifier` (-1 if th
 Returns the start rule of the a-grammar. The start rule points to the top level production for the parser.
 * __abnf.getStartScript(rules []Rule) Rule__  
 Returns the :startScript() of the a-grammar. This contains the JS code that controls the compile step.
-* __abnf.getTitle(rules []Rule) []Rule__  
-Returns the title of the a-grammar.
-* __abnf.getDescription(rules []Rule) []Rule__  
-Returns the description of the a-grammar.
-
-##### Text functions
-
-* __abnf.serializeRule(r Rule)__
-* __abnf.serializeRules(rs []Rule)__
+* __abnf.getTitle(rules []Rule) Rule__  
+Returns the a-grammar's `:title()` Token (the title text), or nothing if it has none.
+* __abnf.getDescription(rules []Rule) Rule__  
+Returns the a-grammar's `:description()` Token, or nothing if it has none.
 
 ##### OperatorID Constants
 
-* __abnf.oid.Error__
-* __abnf.oid.Success__
-* __abnf.oid.Sequence__
-* __abnf.oid.Group__
-* __abnf.oid.Token__
-* __abnf.oid.Number__
-* __abnf.oid.Or__
-* __abnf.oid.Optional__
-* __abnf.oid.Repeat__
-* __abnf.oid.Range__
-* __abnf.oid.Times__
-* __abnf.oid.Tag__
-* __abnf.oid.Command__
-* __abnf.oid.CharOf__
-* __abnf.oid.CharsOf__
-* __abnf.oid.Not__
-* __abnf.oid.Production__
-* __abnf.oid.Identifier__
+The `Operator` field of a `Rule`; compare against these to inspect a rule (e.g. `rule.Operator == abnf.oid.Sequence`).
+
+* __abnf.oid.Error__ — internal marker for an invalid rule (never appears in a valid a-grammar).
+* __abnf.oid.Success__ — internal status marker (never appears in a valid a-grammar).
+* __abnf.oid.Sequence__ — a sequence of rules matched in order (may be broken apart).
+* __abnf.oid.Group__ — a group `( ... )` that must not be broken apart.
+* __abnf.oid.Token__ — a terminal symbol (fixed text in the target).
+* __abnf.oid.Number__ — a plain number (e.g. from `:number()`).
+* __abnf.oid.Or__ — alternatives `|`; the first matching child wins.
+* __abnf.oid.Optional__ — an optional part `[ ... ]`.
+* __abnf.oid.Repeat__ — zero or more repetitions `{ ... }`.
+* __abnf.oid.Range__ — a char range; `Int` holds the [RangeType](#rangetype-constants).
+* __abnf.oid.Times__ — a counted repetition (e.g. `3...5 ( X )`).
+* __abnf.oid.Tag__ — an annotation carrying JS code.
+* __abnf.oid.Command__ — a `:name(...)` command.
+* __abnf.oid.CharOf__ — exactly one char of a set; `Int` holds [CharType](#chartype-constants) flags.
+* __abnf.oid.CharsOf__ — a run of chars of a set; `Int` holds [CharType](#chartype-constants) flags.
+* __abnf.oid.Not__ — negative lookahead (matches with zero width when the child does not).
+* __abnf.oid.Production__ — a named production (the definition an `Identifier` points to).
+* __abnf.oid.Identifier__ — a reference to a production by name.
 
 ##### RangeType Constants
 
-* __abnf.rangeType.Rune__
-* __abnf.rangeType.Byte__
+The `Int` field of a `Range` rule (see `newRange`).
+
+* __abnf.rangeType.Rune__ — the bounds are single runes (the `"a"..."z"` form).
+* __abnf.rangeType.Byte__ — the bounds are single bytes (the `"\x00"..b"\xff"` form).
 
 ##### CharType Constants
 
@@ -913,10 +929,12 @@ Flags for the `CharType` argument of `newCharOf` / `newCharsOf` (combine with `|
 
 ##### NumberType Constants
 
-* __abnf.numberType.LittleEndian__
-* __abnf.numberType.BigEndian__
-* __abnf.numberType.BCD__
-* __abnf.numberType.ASCII__
+The `type` parameter of `:number(size, type)` - how the `size` bytes read from the target text are decoded:
+
+* __abnf.numberType.LittleEndian__ — an unsigned little-endian integer (the default).
+* __abnf.numberType.BigEndian__ — an unsigned big-endian integer.
+* __abnf.numberType.BCD__ — binary-coded decimal (an optional trailing `f` nibble is dropped).
+* __abnf.numberType.ASCII__ — ASCII decimal digits.
 
 #### LLVM IR API
 
