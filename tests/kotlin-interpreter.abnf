@@ -6,9 +6,14 @@ The subset: top level functions with block or expression bodies (fun add(a: Int,
 ignored, val is not enforced), if/else as statement and as expression, when expressions
 with and without subject (arms are expressions, multiple comma separated match values,
 else required for a value, range branches with in 1..9 and !in 1..9), the elvis
-operator a ?: b (b when a is null; short circuit), while, do-while, for over inclusive
-ranges (for (i in 1..n))
-and over lists, break/continue, classes with primary constructor properties
+operator a ?: b (b when a is null; short circuit), the safe calls x?.length and
+obj?.m() (null when the receiver is null; skipped calls do not evaluate their
+arguments), while, do-while, for over ranges (for (i in 1..n), 0 until n, n downTo 1,
+each with an optional positive step)
+and over lists, break/continue, lambdas as values ({ it * 2 }, { x: Int -> x * 2 },
+multi parameter, real closures over the defining scope; the body is one expression)
+with trailing lambda call syntax (list.map { it * 2 }), the list higher order methods
+map/filter/sumOf/forEach/count/any, classes with primary constructor properties
 (class Counter(val start: Int) { var value = start; fun next(): Int { ... } }) and
 implicit property access inside methods (value += step resolves against this), object
 creation without new (Counter(5)), string templates ('x=$x sum=${a+b}'), listOf() with
@@ -17,7 +22,8 @@ exitProcess. Int arithmetic is 32 bit and / truncates; + concatenates when one s
 a String; == compares structurally for strings and by identity for objects.
 
 Not in the subset: inheritance, interfaces, generics, nullable types (? is parsed and
-ignored), lambdas, extension functions, named/default arguments, data class methods
+ignored), extension functions, named/default arguments, multi statement lambda bodies,
+data class methods
 (the data modifier is parsed), init blocks, secondary constructors, and bare method
 calls (methods are called via this.m() or obj.m()).
 
@@ -77,10 +83,17 @@ While       <~~ push(makeWhile(pop(), pop())) ~~>
 Do          <~~ push(makeDo(pop(), pop())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
 
-// for (i in 1..n) and for (x in list); the range is tried first.
+// for (i in 1..n) and for (x in list); the range is tried first. Ranges come as
+// 1..n (inclusive), 0 until n (exclusive) and n downTo 1, all with an optional
+// positive step (soft keywords: until/downTo/step stay usable as names).
 For         = ForRange | ForList ;
-ForRange    <~~ push(makeForRange(pop(), pop(), pop(), pop())) ~~>
-            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ".." Expression ")" Statement ;
+ForRange    <~~ push(makeForRange(takeAll())) ~~>
+            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression RangeOp Expression [ StepSfx ] ")" Statement ;
+RangeOp     = ".." <~~ push({rop: ".."}) ~~>
+            | KwUntil <~~ push({rop: "until"}) ~~>
+            | KwDownTo <~~ push({rop: "downTo"}) ~~> ;
+StepSfx     <~~ push({step: pop()}) ~~>
+            = KwStep Expression ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 
@@ -163,16 +176,30 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // Counter(5) is a constructor call, this.m() and list.add() are method calls,
-// p.x is a property read, list[i] an indexed read.
+// p.x is a property read, list[i] an indexed read. The ?. variants yield null
+// (instead of failing) when their receiver is null. A method call may take a
+// trailing lambda - list.map { it * 2 } - which becomes the last argument.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
+SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}) ~~>
+            = "?." Id <~~ push({mname: up.in}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+SafeFieldSfx = "?." Id <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
+MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
 
-Primary     = "(" Expression ")" | Template | IntLit | True | False | Null | Call | VarRef ;
+Primary     = "(" Expression ")" | Template | IntLit | True | False | Null | Lambda | Call | VarRef ;
+
+// A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
+// one expression; without parameters the single argument is bound to 'it'.
+Lambda      <~~ push(makeLambda(takeAll())) ~~>
+            = "{" [ LambdaParams ] Expression "}" ;
+LambdaParams <~~ push({lparams: takeAll()}) ~~>
+            = LParam { "," LParam } "->" ;
+LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor.
 Call        <~~ push(makeCall(takeAll())) ~~>
@@ -215,6 +242,9 @@ KwWhen      = "when" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
+KwUntil     = "until" KwEnd ;
+KwDownTo    = "downTo" KwEnd ;
+KwStep      = "step" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -352,6 +382,37 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             if (name == "size") return target.length
             if (name == "get") return target[args[0]]
             if (name == "contains") return target.indexOf(args[0]) >= 0
+            var i
+            var out
+            if (name == "map") {
+                out = []
+                for (i = 0; i < target.length; i++) out.push(args[0](target[i]))
+                return out
+            }
+            if (name == "filter") {
+                out = []
+                for (i = 0; i < target.length; i++) { if (args[0](target[i])) out.push(target[i]) }
+                return out
+            }
+            if (name == "sumOf") {
+                var sum = 0
+                for (i = 0; i < target.length; i++) sum = (sum + args[0](target[i])) | 0
+                return sum
+            }
+            if (name == "forEach") {
+                for (i = 0; i < target.length; i++) args[0](target[i])
+                return undefined
+            }
+            if (name == "count") {
+                if (args.length == 0) return target.length
+                var n = 0
+                for (i = 0; i < target.length; i++) { if (args[0](target[i])) n++ }
+                return n
+            }
+            if (name == "any") {
+                for (i = 0; i < target.length; i++) { if (args[0](target[i])) return true }
+                return false
+            }
             fail("unknown list method: " + name)
         }
         if (target.__class != undefined) {
@@ -359,6 +420,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
             return m.apply(undefined, concat2impl([target], args))
         }
+        if (typeof target[name] == "function") return target[name].apply(undefined, args)
         fail("unknown method '" + name + "'")
     }
 
@@ -471,6 +533,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
+                // A ?. suffix on a null receiver yields null; the argument
+                // expressions of a skipped call do not run (like in Kotlin).
+                if (s.safe && (cur === undefined || cur === null)) { cur = null; continue }
                 if (s.kind == "mcall") {
                     var argv = []
                     for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
@@ -485,6 +550,34 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
                 }
             }
             return cur
+        }
+    }
+
+    // Lambda items = [{lparams}?, bodyThunk]. The lambda captures the scope chain of
+    // its evaluation (a real closure: later writes through the captured scopes are
+    // shared). Without a parameter list the single argument is bound to 'it'.
+    function makeLambda(items) {
+        var params = null
+        var body = items[items.length - 1]
+        if (items.length > 1) params = items[0].lparams
+        return function() {
+            var captured = scopes.slice(0)
+            return function() {
+                var args = arguments
+                var saved = scopes
+                scopes = captured.slice(0)
+                scopes.push({})
+                if (params == null) {
+                    declVar("it", args.length > 0 ? args[0] : undefined)
+                } else {
+                    for (var i = 0; i < params.length; i++) {
+                        declVar(params[i], i < args.length ? args[i] : undefined)
+                    }
+                }
+                var r = body()
+                scopes = saved
+                return r
+            }
         }
     }
 
@@ -627,16 +720,27 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             } while (condT())
         }
     }
-    // Pops reversed: body, to, from, name.
-    function makeForRange(bodyT, toT, fromT, name) {
+    // items = [name, fromT, {rop}, toT, {step}?, bodyT]. The bounds and the step are
+    // evaluated once; until excludes the upper bound, downTo counts backwards, and
+    // the step must be positive (its sign comes from the direction, like in Kotlin).
+    function makeForRange(items) {
+        var name = items[0]
+        var fromT = items[1]
+        var rop = items[2].rop
+        var toT = items[3]
+        var stepT = items.length > 5 ? items[4].step : null
+        var bodyT = items[items.length - 1]
         return function() {
-            var to = 0
             var res = undefined
             scopes.push({})
             declVar(name, 0)
             var from = fromT()
-            to = toT()
-            for (var i = from; i <= to; i++) {
+            var last = toT()
+            if (rop == "until") last = (last - 1) | 0
+            var st = stepT != null ? stepT() : 1
+            if (st <= 0) fail("for range step must be positive")
+            var down = (rop == "downTo")
+            for (var i = from; down ? i >= last : i <= last; i += (down ? -st : st)) {
                 setVar(name, i)
                 var r = bodyT()
                 if (r != undefined) {

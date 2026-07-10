@@ -147,6 +147,58 @@ fun main() {
     maybe = 7
     check("elvis value", maybe ?: 42, 7)
 
+    // safe calls
+    var str: String? = null
+    check("safe call null", str?.length ?: -1, -1)
+    str = "abc"
+    check("safe call value", str?.length ?: -1, 3)
+    val c3: Counter? = Counter(1, 2)
+    check("safe method", c3?.next() ?: 0, 3)
+
+    // ranges with until, downTo and step
+    var u = 0
+    for (i in 0 until 5) { u += i }
+    check("until", u, 10)
+    var dn = 0
+    for (i in 5 downTo 1) { dn = dn * 10 + i }
+    check("downTo", dn, 54321)
+    var st = 0
+    for (i in 0..10 step 3) { st += i }
+    check("step", st, 18)
+    var us = 0
+    for (i in 10 until 20 step 4) { us += i }
+    check("until step", us, 42)
+    var ds = 0
+    for (i in 9 downTo 1 step 3) { ds = ds * 10 + i }
+    check("downTo step", ds, 963)
+
+    // lambdas: values, closures and the list higher order methods
+    val twice = { x: Int -> x * 2 }
+    check("lambda variable", twice(21), 42)
+    val addF = { a2: Int, b2: Int -> a2 + b2 }
+    check("two param lambda", addF(20, 22), 42)
+
+    var acc = 10
+    val plusAcc = { d: Int -> acc + d }
+    check("closure read", plusAcc(5), 15)
+    acc = 100
+    check("closure sees update", plusAcc(5), 105)
+
+    val nums = listOf(3, 1, 4, 1, 5)
+    val doubled = nums.map { it * 2 }
+    check("map", doubled[0] + doubled[4], 16)
+    check("map chain", nums.map { it + 1 }.sumOf { it }, 19)
+    val odds = nums.filter { it % 2 == 1 }
+    check("filter", odds.size, 4)
+    check("sumOf", nums.sumOf { it * 10 }, 140)
+    nums.forEach { acc += it }
+    check("forEach closure write", acc, 114)
+    check("count", nums.count(), 5)
+    check("count pred", nums.count { it == 1 }, 2)
+    checkB("any hit", nums.any { it > 4 }, true)
+    checkB("any miss", nums.any { it > 9 }, false)
+    check("lambda in parens", nums.filter({ it > 2 }).size, 3)
+
     // functions and recursion
     check("fib", fib(10), 55)
     check("builtin max", max(3, 9), 9)

@@ -1157,6 +1157,50 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 				}
 			}
 			return false
+		// The Kotlin higher order methods; the argument is a lambda (closure handle).
+		case "map":
+			out := &jsArray{}
+			for _, e := range o.elems {
+				out.elems = append(out.elems, rt.call(argAt(args, 0), jsUndef, []interface{}{e}))
+			}
+			return out
+		case "filter":
+			out := &jsArray{}
+			for _, e := range o.elems {
+				if rt.truthy(rt.call(argAt(args, 0), jsUndef, []interface{}{e})) {
+					out.elems = append(out.elems, e)
+				}
+			}
+			return out
+		case "sumOf":
+			var sum int32
+			for _, e := range o.elems {
+				sum += int32(int64(rt.toNumber(rt.call(argAt(args, 0), jsUndef, []interface{}{e}))))
+			}
+			return float64(sum)
+		case "forEach":
+			for _, e := range o.elems {
+				rt.call(argAt(args, 0), jsUndef, []interface{}{e})
+			}
+			return jsUndef
+		case "count":
+			if len(args) == 0 {
+				return float64(len(o.elems))
+			}
+			n := 0
+			for _, e := range o.elems {
+				if rt.truthy(rt.call(argAt(args, 0), jsUndef, []interface{}{e})) {
+					n++
+				}
+			}
+			return float64(n)
+		case "any":
+			for _, e := range o.elems {
+				if rt.truthy(rt.call(argAt(args, 0), jsUndef, []interface{}{e})) {
+					return true
+				}
+			}
+			return false
 		}
 		rt.fail("unknown list method '%s'", name)
 	}

@@ -6,8 +6,15 @@ The subset: top level functions with block or expression bodies (fun add(a: Int,
 : Int = a + b), val/var declarations with type inference (annotations are parsed and
 ignored, val is not enforced), if/else as statement and as expression, when expressions
 with and without subject (arms are expressions, multiple comma separated match values,
-else required for a value), while, do-while, for over inclusive ranges (for (i in 1..n))
-and over lists, break/continue, classes with primary constructor properties
+else required for a value, range branches with in 1..9 and !in 1..9), the elvis
+operator a ?: b (b when a is null; short circuit), the safe calls x?.length and
+obj?.m() (null when the receiver is null; skipped calls do not evaluate their
+arguments), while, do-while, for over ranges (for (i in 1..n), 0 until n, n downTo 1,
+each with an optional positive step)
+and over lists, break/continue, lambdas as values ({ it * 2 }, { x: Int -> x * 2 },
+multi parameter, real closures over the defining scope; the body is one expression)
+with trailing lambda call syntax (list.map { it * 2 }), the list higher order methods
+map/filter/sumOf/forEach/count/any, classes with primary constructor properties
 (class Counter(val start: Int) { var value = start; fun next(): Int { ... } }) and
 implicit property access inside methods (value += step resolves against this), object
 creation without new (Counter(5)), string templates ('x=$x sum=${a+b}'), listOf() with
@@ -16,14 +23,18 @@ exitProcess. Int arithmetic is 32 bit and / truncates; + concatenates when one s
 a String; == compares structurally for strings and by identity for objects.
 
 Not in the subset: inheritance, interfaces, generics, nullable types (? is parsed and
-ignored), lambdas, extension functions, named/default arguments, data class methods
+ignored), extension functions, named/default arguments, multi statement lambda bodies,
+data class methods
 (the data modifier is parsed), init blocks, secondary constructors, and bare method
 calls (methods are called via this.m() or obj.m()).
 
-Functions and methods become IR functions jsf_N(env, args) (methods get the instance
-prepended), classes become descriptor objects, implicit property access goes through the
+Functions, methods and lambdas become IR functions jsf_N(env, args) (methods get the
+instance prepended, lambdas close over their scope via js_closure), classes become
+descriptor objects, implicit property access goes through the
 js_kget/js_kset externals (locals first, then the properties of this), method calls
-dispatch through js_mcall. The whole program becomes jsmain(env, args).
+dispatch through js_mcall (which also implements the list higher order methods), and
+?. compiles to a null test branching around the access (a phi merges the null).
+The whole program becomes jsmain(env, args).
 The entry point is fun main(); self checking programs end with exitProcess(failures).
 The same language with the same semantics is interpreted directly by kotlin-interpreter.abnf.") ;
 
@@ -81,10 +92,17 @@ While       <~~ push(makeWhile(pop(), pop())) ~~>
 Do          <~~ push(makeDo(pop(), pop())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
 
-// for (i in 1..n) and for (x in list); the range is tried first.
+// for (i in 1..n) and for (x in list); the range is tried first. Ranges come as
+// 1..n (inclusive), 0 until n (exclusive) and n downTo 1, all with an optional
+// positive step (soft keywords: until/downTo/step stay usable as names).
 For         = ForRange | ForList ;
-ForRange    <~~ push(makeForRange(pop(), pop(), pop(), pop())) ~~>
-            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ".." Expression ")" Statement ;
+ForRange    <~~ push(makeForRange(takeAll())) ~~>
+            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression RangeOp Expression [ StepSfx ] ")" Statement ;
+RangeOp     = ".." <~~ push({rop: ".."}) ~~>
+            | KwUntil <~~ push({rop: "until"}) ~~>
+            | KwDownTo <~~ push({rop: "downTo"}) ~~> ;
+StepSfx     <~~ push({step: pop()}) ~~>
+            = KwStep Expression ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 
@@ -167,16 +185,30 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // Counter(5) is a constructor call, this.m() and list.add() are method calls,
-// p.x is a property read, list[i] an indexed read.
+// p.x is a property read, list[i] an indexed read. The ?. variants yield null
+// (instead of failing) when their receiver is null. A method call may take a
+// trailing lambda - list.map { it * 2 } - which becomes the last argument.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
+SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}) ~~>
+            = "?." Id <~~ push({mname: up.in}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+SafeFieldSfx = "?." Id <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
+MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
 
-Primary     = "(" Expression ")" | Template | IntLit | True | False | Null | Call | VarRef ;
+Primary     = "(" Expression ")" | Template | IntLit | True | False | Null | Lambda | Call | VarRef ;
+
+// A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
+// one expression; without parameters the single argument is bound to 'it'.
+Lambda      <~~ push(makeLambda(takeAll())) ~~>
+            = "{" [ LambdaParams ] Expression "}" ;
+LambdaParams <~~ push({lparams: takeAll()}) ~~>
+            = LParam { "," LParam } "->" ;
+LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor.
 Call        <~~ push(makeCall(takeAll())) ~~>
@@ -219,6 +251,9 @@ KwWhen      = "when" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
+KwUntil     = "until" KwEnd ;
+KwDownTo    = "downTo" KwEnd ;
+KwStep      = "step" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -546,26 +581,61 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
+        function emitSuffix(b, cur, s) {
+            if (s.kind == "mcall") {
+                var ea = emitArgs(b, s.args)
+                return {b: ea.b, v: callExt(ea.b, "js_mcall", [cur, emitStr(ea.b, s.name), ea.v])}
+            }
+            if (s.kind == "field") {
+                var fname = s.name == "size" ? "length" : s.name
+                return {b: b, v: callExt(b, "js_get", [cur, emitStr(b, fname)])}
+            }
+            var ir2 = s.idx(b)
+            return {b: ir2.b, v: callExt(ir2.b, "js_get", [cur, ir2.v])}
+        }
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
-                if (s.kind == "mcall") {
-                    var ea = emitArgs(b, s.args)
-                    b = ea.b
-                    cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
-                } else if (s.kind == "field") {
-                    var fname = s.name == "size" ? "length" : s.name
-                    cur = callExt(b, "js_get", [cur, emitStr(b, fname)])
+                if (s.safe) {
+                    // ?. : the suffix (and the arguments of a skipped call) only runs
+                    // in its own block when the receiver is not null; a phi merges.
+                    var doB = curF.NewBlock("")
+                    var mergeB = curF.NewBlock("")
+                    var isNull = callExt(b, "js_eq", [cur, hNull])
+                    b.NewCondBr(truthy(b, isNull), mergeB, doB)
+                    var rs = emitSuffix(doB, cur, s)
+                    rs.b.NewBr(mergeB)
+                    var phi = mergeB.NewPhi([llvm.ir.NewIncoming(hNull, b), llvm.ir.NewIncoming(rs.v, rs.b)])
+                    b = mergeB
+                    cur = phi
                 } else {
-                    var ir2 = s.idx(b)
-                    b = ir2.b
-                    cur = callExt(b, "js_get", [cur, ir2.v])
+                    var r2 = emitSuffix(b, cur, s)
+                    b = r2.b
+                    cur = r2.v
                 }
             }
             return {b: b, v: cur}
+        }
+    }
+
+    // Lambda items = [{lparams}?, bodyThunk]. A lambda becomes an own IR function
+    // closed over the current scope (js_closure); the body expression is its return
+    // value. Without a parameter list the single argument is bound to 'it'.
+    function makeLambda(items) {
+        var params = ["it"]
+        var body = items[items.length - 1]
+        if (items.length > 1) params = items[0].lparams
+        var bodyStmt = function(b) {
+            var r = body(b)
+            r.b.NewRet(r.v)
+            return deadBlock()
+        }
+        return function(b) {
+            var idx = emitFunc(params, bodyStmt, false)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
 
@@ -754,11 +824,20 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return exitB
         }
     }
-    // for (i in from..to): the loop variable drives the loop; 'to' is evaluated once.
-    function makeForRange(bodyT, toT, fromT, name) {
+    // items = [name, fromT, {rop}, toT, {step}?, bodyT]. The bounds and the step are
+    // evaluated once (until subtracts one from the bound up front); downTo flips the
+    // condition to >= and steps backwards. The loop variable drives the loop.
+    function makeForRange(items) {
+        var name = items[0]
+        var fromT = items[1]
+        var rop = items[2].rop
+        var toT = items[3]
+        var stepT = items.length > 5 ? items[4].step : null
+        var bodyT = items[items.length - 1]
         return function(b) {
             hidCount++
             var tName = "$to" + hidCount
+            var sName = "$st" + hidCount
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             var rf = fromT(b)
@@ -766,7 +845,16 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), rf.v])
             var rt = toT(b)
             b = rt.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), rt.v])
+            var boundV = rt.v
+            if (rop == "until") boundV = callExt(b, "js_sub", [boundV, emitNum(b, 1)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), boundV])
+            var stepV = emitNum(b, 1)
+            if (stepT != null) {
+                var rs = stepT(b)
+                b = rs.b
+                stepV = rs.v
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), stepV])
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -774,12 +862,15 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             b.NewBr(headB)
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, name)])
             var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_le", [iV, tV])), bodyB, exitB)
+            var condExt = (rop == "downTo") ? "js_ge" : "js_le"
+            headB.NewCondBr(truthy(headB, callExt(headB, condExt, [iV, tV])), bodyB, exitB)
             loopStack.push({cont: postB, brk: exitB})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, name)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, name), callExt(postB, "js_jadd", [iV2, emitNum(postB, 1)])])
+            var sV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, sName)])
+            var stepExt = (rop == "downTo") ? "js_sub" : "js_jadd"
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, name), callExt(postB, stepExt, [iV2, sV2])])
             postB.NewBr(headB)
             curScopeV = saved
             return exitB
