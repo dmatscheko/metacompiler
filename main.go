@@ -60,6 +60,10 @@ func main() {
 	param_freeze := flag.String("freeze", "", "Create the frozen MetaJS bootstrap snapshot from the given metajs-to-llvm-ir grammar (writes abnf/jsagrammar.go and abnf/jsbootstrap.ll, then rebuild)")
 	param_frozen := flag.Bool("frozen", false, "Run all annotation scripts goja free: parse them with the frozen a-grammar, compile them with the frozen bootstrap on the IR machine, and execute the emitted IR")
 
+	param_cfg := flag.String("cfg", "", "Write the control flow graph of every executed IR module to this file (Graphviz DOT; Mermaid when the name ends in .mmd)")
+	param_traceOut := flag.String("trace", "", "Stream the runtime events of compiled programs (llvm.RunJS) to this file as JSON lines; also the input file of -render")
+	param_render := flag.String("render", "", "Render the -trace file to Graphviz DOT on stdout: 'calls' (dynamic call graph) or 'vars' (function/variable access graph)")
+
 	flag.Parse()
 
 	if *param_freeze != "" {
@@ -70,7 +74,18 @@ func main() {
 		return
 	}
 
+	if *param_render != "" {
+		if err := abnf.RenderTrace(*param_render, *param_traceOut); err != nil {
+			fmt.Fprintln(os.Stderr, "Render failed: ", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	abnf.UseFrozenScripts = *param_frozen
+	abnf.CFGOutPath = *param_cfg
+	abnf.TraceOutPath = *param_traceOut
+	defer abnf.CloseTrace()
 
 	if *param_a == "" {
 		flag.Usage()

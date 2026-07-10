@@ -284,6 +284,32 @@ All grammars pass their self checking runs with identical output in both modes;
 frozen mode is roughly an order of magnitude slower (threaded IR on an interpreter instead
 of a JS VM). goja is only needed to (re)create the snapshot after changing metajs-to-llvm-ir.abnf.
 
+#### Tracing and diagrams (one system through all languages)
+
+Because every dynamic language compiles to handle-IR whose semantics run through the
+js_* externals of one shared runtime, a single hook there traces Java, Kotlin, Go,
+Python, Lisp and MetaJS programs alike - under goja and under -frozen, with byte
+identical event streams (abnf/trace.go):
+
+```
+./mec -a languages/java-to-llvm-ir.abnf -b tests/java-test-1.java -q \
+      -cfg java.dot -trace java.jsonl   # run + control flow graph + event stream
+./mec -render calls -trace java.jsonl > calls.dot   # dynamic call graph (counts)
+./mec -render vars  -trace java.jsonl > vars.dot    # which function touches which variable
+```
+
+`-cfg` writes the basic block graph of every executed IR module as Graphviz DOT
+(Mermaid when the file name ends in .mmd) - the compilers literally build the
+control flow, so the diagram is the program's real branch structure, for the
+integer-IR languages (TinyC, C subset) too. `-trace` streams runtime events as
+JSON lines: decl/read/write for scope variables, mread/mwrite for object members
+(with stable value handles), call/ret with resolved names (a method closure gets
+its name when the class descriptor is built). Only the program runtime is traced;
+the tag scripts of the grammars stay silent, which is why the goja and -frozen
+streams of one program are identical. `-render` turns a stream into DOT on stdout.
+The flags default to off and change nothing when unused; interpreter-grammar runs
+and source position mapping are the planned next layers.
+
 ### High level overview
 
 There are two basic components: A __parser__ and a __compiler__.

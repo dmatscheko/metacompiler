@@ -135,6 +135,12 @@ type jsrt struct {
 	retSlot interface{}
 
 	lastGets [][2]uint64 // The most recent member lookups (obj, key handles), for error messages.
+
+	// The -trace hook (see trace.go). Only the program runtime of runJSModule
+	// is traced; the frozen engine's tag-script runtime stays silent.
+	traced     bool
+	traceDepth int
+	traceNames map[*jsClosure]string // Under which name a closure was stored.
 }
 
 // noteGet records a member lookup cheaply; failure messages format them lazily.
@@ -639,6 +645,9 @@ func (rt *jsrt) scopeOf(h uint64) *jsScope {
 func (rt *jsrt) scopeGet(sc *jsScope, name string) interface{} {
 	for s := sc; s != nil; s = s.parent {
 		if v, ok := s.vars[name]; ok {
+			if rt.traced {
+				rt.trVar("read", name, v)
+			}
 			return v
 		}
 	}
@@ -650,6 +659,9 @@ func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
 	for s := sc; s != nil; s = s.parent {
 		if _, ok := s.vars[name]; ok {
 			s.vars[name] = v
+			if rt.traced {
+				rt.trVar("write", name, v)
+			}
 			return
 		}
 	}
@@ -681,6 +693,9 @@ func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
 	if isAnytype(v) {
 		sc.vars[name] = jsUndef
 		sc.types[name] = "*"
+		if rt.traced {
+			rt.trVar("decl", name, jsUndef)
+		}
 		return
 	}
 	sc.vars[name] = v
@@ -688,6 +703,9 @@ func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
 		sc.types[name] = tc
 	} else {
 		delete(sc.types, name) // A redeclaration starts untyped again.
+	}
+	if rt.traced {
+		rt.trVar("decl", name, v)
 	}
 }
 
@@ -714,6 +732,9 @@ func (rt *jsrt) typedSet(sc *jsScope, name string, v interface{}) {
 				}
 			}
 			s.vars[name] = v
+			if rt.traced {
+				rt.trVar("write", name, v)
+			}
 			return
 		}
 	}
@@ -902,6 +923,18 @@ func (rt *jsrt) setGoMember(obj interface{}, name string, val interface{}) {
 // Calls
 
 func (rt *jsrt) call(callee interface{}, this interface{}, args []interface{}) interface{} {
+	if !rt.traced {
+		return rt.callInner(callee, this, args)
+	}
+	traceEmit(&TraceEvent{Ev: "call", Depth: rt.traceDepth, Name: rt.calleeName(callee)})
+	rt.traceDepth++
+	ret := rt.callInner(callee, this, args)
+	rt.traceDepth--
+	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Val: rt.traceVal(ret)})
+	return ret
+}
+
+func (rt *jsrt) callInner(callee interface{}, this interface{}, args []interface{}) interface{} {
 	switch c := callee.(type) {
 	case *jsClosure:
 		arr := &jsArray{elems: args}
@@ -1543,7 +1576,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(&jsScope{vars: map[string]interface{}{}, parent: rt.scopeOf(a[0])})
 		},
 		"js_scope_decl": func(a []uint64) uint64 {
-			rt.scopeOf(a[0]).vars[rt.toString(u(a[1]))] = u(a[2])
+			name := rt.toString(u(a[1]))
+			rt.scopeOf(a[0]).vars[name] = u(a[2])
+			if rt.traced {
+				rt.trVar("decl", name, u(a[2]))
+			}
 			return 0
 		},
 		"js_scope_get": func(a []uint64) uint64 {
@@ -1561,6 +1598,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			name := rt.toString(u(a[1]))
 			for s := sc; s != nil; s = s.parent {
 				if v, ok := s.vars[name]; ok {
+					if rt.traced {
+						rt.trVar("read", name, v)
+					}
 					return w(v)
 				}
 			}
@@ -1568,6 +1608,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if t, ok := s.vars["this"]; ok {
 					if obj, isObj := t.(*jsObject); isObj {
 						if v, ok := obj.props[name]; ok {
+							if rt.traced {
+								rt.trVar("read", name, v)
+							}
 							return w(v)
 						}
 					}
@@ -1584,6 +1627,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for s := sc; s != nil; s = s.parent {
 				if _, ok := s.vars[name]; ok {
 					s.vars[name] = v
+					if rt.traced {
+						rt.trVar("write", name, v)
+					}
 					return 0
 				}
 			}
@@ -1592,6 +1638,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					if obj, isObj := t.(*jsObject); isObj {
 						if _, ok := obj.props[name]; ok {
 							obj.set(name, v)
+							if rt.traced {
+								rt.trVar("write", name, v)
+							}
 							return 0
 						}
 					}
@@ -1651,10 +1700,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_get": func(a []uint64) uint64 {
 			rt.noteGet(a[0], a[1])
-			return w(rt.getMember(u(a[0]), u(a[1])))
+			v := rt.getMember(u(a[0]), u(a[1]))
+			if rt.traced {
+				rt.trMember("mread", a[0], u(a[1]), v)
+			}
+			return w(v)
 		},
 		"js_set": func(a []uint64) uint64 {
 			rt.setMember(u(a[0]), u(a[1]), u(a[2]))
+			if rt.traced {
+				rt.trMember("mwrite", a[0], u(a[1]), u(a[2]))
+			}
 			return 0
 		},
 
@@ -2000,10 +2056,16 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for s := sc; s != nil; s = s.parent {
 				if _, ok := s.vars[name]; ok {
 					s.vars[name] = u(a[2])
+					if rt.traced {
+						rt.trVar("write", name, u(a[2]))
+					}
 					return 0
 				}
 			}
 			sc.vars[name] = u(a[2])
+			if rt.traced {
+				rt.trVar("decl", name, u(a[2]))
+			}
 			return 0
 		},
 		"js_pyrange": func(a []uint64) uint64 { // range(a) or range(a, b) as a materialized list.
@@ -2291,7 +2353,15 @@ done:
 
 // callEntry runs a (env, args) MetaJS entry function and returns the value handle.
 func (rt *jsrt) callEntry(ma *machine, name string, env uint64) uint64 {
-	return ma.callByName(name, []uint64{env, rt.wrap(&jsArray{})})
+	if !rt.traced {
+		return ma.callByName(name, []uint64{env, rt.wrap(&jsArray{})})
+	}
+	traceEmit(&TraceEvent{Ev: "call", Depth: rt.traceDepth, Name: name})
+	rt.traceDepth++
+	h := ma.callByName(name, []uint64{env, rt.wrap(&jsArray{})})
+	rt.traceDepth--
+	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Val: rt.traceVal(rt.unwrap(h))})
+	return h
 }
 
 // toInt32 converts a JS value to an int32 like the JS ToInt32 operation.
@@ -2305,8 +2375,11 @@ func (rt *jsrt) toInt32(v interface{}) int32 {
 
 // runJSModule is llvm.RunJS(): it executes the entry function of a MetaJS
 // module with the standard host bindings and returns its int32 result.
+// This is the program runtime, so the -cfg and -trace hooks live here.
 func runJSModule(m *ir.Module, entry string) *RunResult {
+	maybeDumpCFG(m)
 	rt := newJSRT(standardJSBindings())
+	rt.enableTrace()
 	ma := rt.attach(m)
 	h := rt.callEntry(ma, entry, 0)
 	return &RunResult{Ret: uint32(rt.toInt32(rt.unwrap(h))), Out: ""}
