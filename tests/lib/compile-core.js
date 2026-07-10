@@ -52,6 +52,8 @@ function unescapeJs(s) {
         if (e == 110) { out += "\n"; i += 2; continue }
         if (e == 116) { out += "\t"; i += 2; continue }
         if (e == 114) { out += "\r"; i += 2; continue }
+        if (e == 48)  { out += String.fromCharCode(0); i += 2; continue }
+        if (e == 120) { out += String.fromCharCode(hexAt(s, i + 2, 2)); i += 4; continue }
         if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
         out += String.fromCharCode(e)
         i += 2
@@ -102,7 +104,9 @@ function emitStr(b, s) {
     return callExt(b, "js_str_mem", [g.ptr, g.len])
 }
 function emitNum(b, n) {
-    if (n % 1 == 0) return callExt(b, "js_num_i", [handle(n)])
+    if (n % 1 == 0 && n < 9007199254740992 && n > -9007199254740992) {
+        return callExt(b, "js_num_i", [handle(n)])
+    }
     return callExt(b, "js_num_str", [emitStr(b, "" + n)])
 }
 

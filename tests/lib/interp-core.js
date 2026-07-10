@@ -95,6 +95,8 @@ function unescapeJs(s) {
         if (e == 110) { out += "\n"; i += 2; continue }
         if (e == 116) { out += "\t"; i += 2; continue }
         if (e == 114) { out += "\r"; i += 2; continue }
+        if (e == 48)  { out += String.fromCharCode(0); i += 2; continue }
+        if (e == 120) { out += String.fromCharCode(hexAt(s, i + 2, 2)); i += 4; continue }
         if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
         out += String.fromCharCode(e)
         i += 2

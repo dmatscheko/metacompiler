@@ -272,116 +272,27 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 :startScript(~~
 
+    // Shared emitter machinery (module, handle constants, externs, loopStack
+    // protocol, expression/statement builders); see the `core` knobs below.
+    include("lib/compile-core.js")
+
     // takeAll empties the local stack of the current tag and returns its items in push
     // order as a plain JS array.
-    function takeAll() {
-        var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
-    }
-
     // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
-    function hexAt(s, pos, len) {
-        var v = 0
-        for (var i = 0; i < len; i++) {
-            var c = s.charCodeAt(pos + i)
-            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
-            v = v * 16 + d
-        }
-        return v
-    }
-    function unescapeJs(s) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var c = s.charCodeAt(i)
-            if (c != 92) { out += String.fromCharCode(c); i++; continue }
-            var e = s.charCodeAt(i + 1)
-            if (e == 110) { out += "\n"; i += 2; continue }
-            if (e == 116) { out += "\t"; i += 2; continue }
-            if (e == 114) { out += "\r"; i += 2; continue }
-            if (e == 48)  { out += String.fromCharCode(0); i += 2; continue }
-            if (e == 120) { out += String.fromCharCode(hexAt(s, i + 2, 2)); i += 4; continue }
-            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
-            out += String.fromCharCode(e)
-            i += 2
-        }
-        return out
-    }
-
     // ----- The emitter state -----
 
-    var i64 = llvm.types.I64
     var i8 = llvm.types.I8
 
-    var m = llvm.ir.NewModule()
 
     // The handle constants: 0 undefined, 1 null, 2 false, 3 true.
-    function handle(n) { return llvm.constant.NewInt(i64, n) }
-    var hUndef = handle(0)
 
     // All js_* externals get declared on first use. Every parameter and result is i64,
     // except the string pool pointer of js_str_mem.
-    var externs = {}
-    function getExtern(name, paramCount) {
-        var f = externs[name]
-        if (f != undefined) return f
-        var params = []
-        if (name == "js_str_mem") {
-            params.push(llvm.ir.NewParam("", llvm.types.I8Ptr))
-            params.push(llvm.ir.NewParam("", i64))
-        } else {
-            for (var i = 0; i < paramCount; i++) params.push(llvm.ir.NewParam("", i64))
-        }
-        f = m.NewFunc(name, i64, params)
-        externs[name] = f
-        return f
-    }
-    function callExt(b, name, args) {
-        return b.NewCall(getExtern(name, args.length), args)
-    }
-
     // One module global per distinct string literal / name.
-    var strGlobals = {}
-    var strCount = 0
-    function emitStr(b, s) {
-        var g = strGlobals[s]
-        if (g == undefined) {
-            strCount++
-            g = {}
-            g.glob = m.NewGlobalDef("str." + strCount, llvm.constant.NewCharArrayFromString(s))
-            g.len = handle(s.length)
-            g.ptr = llvm.constant.NewGetElementPtr(g.glob.ContentType, g.glob, [handle(0), handle(0)])
-            strGlobals[s] = g
-        }
-        return callExt(b, "js_str_mem", [g.ptr, g.len])
-    }
-    function emitNum(b, n) {
-        if (n % 1 == 0 && n < 9007199254740992 && n > -9007199254740992) {
-            return callExt(b, "js_num_i", [handle(n)])
-        }
-        return callExt(b, "js_num_str", [emitStr(b, "" + n)])
-    }
-
     // The function being built, the current scope chain handle (an SSA value), and the
     // enclosing loops (for break/continue).
-    var curF = null
-    var curScopeV = null
-    var loopStack = []
-    var funcCount = 0
-    var deadCount = 0
-
-    function deadBlock() {
-        deadCount++
-        return curF.NewBlock("dead" + deadCount)
-    }
 
     // An i1 for conditional branches: js_truthy(v) != 0.
-    function truthy(b, v) {
-        return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0))
-    }
-
     // ----- Expression thunks: function(block) -> {b: endBlock, v: i64 handle} -----
 
     function makeNumT(n) {
@@ -393,11 +304,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     function makeHandleConst(n) {
         var c = handle(n)
         return function(b) { return {b: b, v: c} }
-    }
-    function makeVarRef(name) {
-        return function(b) {
-            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
-        }
     }
     function makeUnary(t, extName) {
         return function(b) {
@@ -414,53 +320,17 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         }
     }
 
-    var binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
+    binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
                   "==": "js_eq", "!=": "js_ne", "===": "js_seq", "!==": "js_sne",
                   "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge",
                   "|": "js_bor", "^": "js_bxor", "&": "js_band",
                   "<<": "js_shl", ">>": "js_shr", ">>>": "js_ushr",
                   "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div", "%=": "js_mod"}
+    wraps = {} // MetaJS numbers are not wrapped to 32 bit.
 
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
-    function foldBinary(items) {
-        if (items.length == 1) return items[0]
-        return function(b) {
-            var r = items[0](b)
-            b = r.b
-            var v = r.v
-            for (var i = 1; i < items.length; i += 2) {
-                var right = items[i + 1](b)
-                b = right.b
-                v = callExt(b, binExt[items[i]], [v, right.v])
-            }
-            return {b: b, v: v}
-        }
-    }
-
     // || and && evaluate lazily and keep the deciding operand, exactly like in JS.
     // Each step branches: on a decided value the right side is skipped, a phi merges.
-    function makeOrAnd(items, isOr) {
-        if (items.length == 1) return items[0]
-        return function(b) {
-            var r = items[0](b)
-            b = r.b
-            var v = r.v
-            for (var i = 1; i < items.length; i++) {
-                var rightB = curF.NewBlock("")
-                var mergeB = curF.NewBlock("")
-                var c = truthy(b, v)
-                if (isOr) { b.NewCondBr(c, mergeB, rightB) }
-                else      { b.NewCondBr(c, rightB, mergeB) }
-                var r2 = items[i](rightB)
-                r2.b.NewBr(mergeB)
-                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(r2.v, r2.b)])
-                b = mergeB
-                v = phi
-            }
-            return {b: b, v: v}
-        }
-    }
-
     // items = [thunk] or [condThunk, thenThunk, elseThunk].
     function makeCond(items) {
         if (items.length == 1) return items[0]
@@ -510,7 +380,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
     // its object handle, so that a directly following call uses it as 'this'.
-    function foldCallMember(items) {
+    foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -542,9 +412,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
 
     // Target items = [nameString, suffix marker...] -> reference descriptor.
-    function makeTargetRef(items) {
-        return {name: items[0], path: items.slice(1)}
-    }
     // Walks a target path (members and calls) up to the last element, which must
     // be a member. Returns {b, obj, key} with the object and the last key evaluated.
     function emitRefPath(b, ref) {
@@ -678,7 +545,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // An expression in statement position: evaluate the value and record it as the
     // program completion value (what a goja Run() would return; js_getret reads it).
-    function exprToStmt(t) {
+    exprToStmt = function(t) {
         return function(b) {
             var r = t(b)
             callExt(r.b, "js_setret", [r.v])
@@ -704,53 +571,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return b
         }
     }
-    function makeSeq(items) {
-        return function(b) {
-            for (var i = 0; i < items.length; i++) b = items[i](b)
-            return b
-        }
-    }
-    function makeBlockStmt(items) {
-        var seq = makeSeq(items)
-        return function(b) {
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV]) // A block is a new variable scope.
-            b = seq(b)
-            curScopeV = saved
-            return b
-        }
-    }
     // items = [cond, then] or [cond, then, else].
-    function makeIf(items) {
-        var cond = items[0]
-        var thenT = items[1]
-        var elseT = items.length > 2 ? items[2] : null
-        return function(b) {
-            var r = cond(b)
-            var thenB = curF.NewBlock("")
-            var mergeB = curF.NewBlock("")
-            var elseB = elseT != null ? curF.NewBlock("") : mergeB
-            r.b.NewCondBr(truthy(r.b, r.v), thenB, elseB)
-            thenT(thenB).NewBr(mergeB)
-            if (elseT != null) elseT(elseB).NewBr(mergeB)
-            return mergeB
-        }
-    }
     // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
-    function makeWhile(bodyT, condT) {
-        return function(b) {
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var r = condT(headB)
-            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
-            loopStack.push({cont: headB, brk: exitB})
-            bodyT(bodyB).NewBr(headB)
-            loopStack.pop()
-            return exitB
-        }
-    }
     function makeDo(condT, bodyT) {
         return function(b) {
             var bodyB = curF.NewBlock("")
@@ -811,18 +633,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             }
             b.NewRet(v)
             // Code behind a return is unreachable but must still land in a valid block.
-            return deadBlock()
-        }
-    }
-    function makeBreak() {
-        return function(b) {
-            b.NewBr(loopStack[loopStack.length - 1].brk)
-            return deadBlock()
-        }
-    }
-    function makeContinue() {
-        return function(b) {
-            b.NewBr(loopStack[loopStack.length - 1].cont)
             return deadBlock()
         }
     }

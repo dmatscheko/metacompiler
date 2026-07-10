@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"14.gy/mec/abnf/r"
@@ -73,6 +75,14 @@ func Freeze(grammarPath string, outDir string) error {
 		return fmt.Errorf("%s: start script has no %q marker", grammarPath, frozenDriverMarker)
 	}
 	lib := full[:markerPos]
+	// The emitter library may pull shared code from tests/lib via include().
+	// The bootstrap must be self contained (at -frozen startup nothing can
+	// compile an included file yet - the compiler IS what is being started),
+	// so the freezer inlines the files here, at freeze time.
+	lib, err = inlineIncludes(lib, filepath.Dir(grammarPath))
+	if err != nil {
+		return err
+	}
 
 	// Collect every distinct script source of the grammar: the tag scripts
 	// (all slots) and the inline :script() commands.
@@ -160,6 +170,29 @@ func Freeze(grammarPath string, outDir string) error {
 	fmt.Fprintf(os.Stderr, "Frozen %d tag scripts of %s\n  => %s/jsagrammar.go\n  => %s/jsbootstrap.ll\nRebuild the binary to embed the snapshot.\n",
 		len(sources), grammarPath, outDir, outDir)
 	return nil
+}
+
+// inlineIncludes textually replaces whole line include("file") calls with the
+// file's content, paths relative to dir (the grammar file's directory, the
+// same base that the runtime include() uses).
+func inlineIncludes(src string, dir string) (string, error) {
+	re := regexp.MustCompile(`(?m)^[ \t]*include\("([^"]*)"\)[ \t]*$`)
+	for depth := 0; ; depth++ {
+		m := re.FindStringSubmatchIndex(src)
+		if m == nil {
+			return src, nil
+		}
+		if depth > 16 {
+			return "", fmt.Errorf("include() nesting deeper than 16 levels (cycle?)")
+		}
+		name := src[m[2]:m[3]]
+		dat, err := ioutil.ReadFile(dir + string(os.PathSeparator) + filepath.Clean(name))
+		if err != nil {
+			return "", fmt.Errorf("cannot inline include(%q): %s", name, err)
+		}
+		src = src[:m[0]] + "// ----- inlined include(\"" + name + "\") -----\n" +
+			string(dat) + src[m[1]:]
+	}
 }
 
 // escapeMetaJSString quotes s as a MetaJS double quoted string literal.

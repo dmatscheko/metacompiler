@@ -273,61 +273,21 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 :startScript(~~
 
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); language-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
+
     // takeAll empties the local stack of the current tag and returns its items in push
     // order as a plain JS array. It only uses pop(), so it works independently of how
     // the runtime wraps the Go slice behind up.stack.
-    function takeAll() {
-        var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
-    }
-
-    function fail(msg) {
-        println("js interpreter error: " + msg)
-        exit(1)
-    }
-
     // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
     // The host unescape() is for the grammar token syntax and rejects \' and \", so the
     // JS string literals bring their own unescaper.
-    function hexAt(s, pos, len) {
-        var v = 0
-        for (var i = 0; i < len; i++) {
-            var c = s.charCodeAt(pos + i)
-            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
-            v = v * 16 + d
-        }
-        return v
-    }
-    function unescapeJs(s) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var c = s.charCodeAt(i)
-            if (c != 92) { out += String.fromCharCode(c); i++; continue }
-            var e = s.charCodeAt(i + 1)
-            if (e == 110) { out += "\n"; i += 2; continue }
-            if (e == 116) { out += "\t"; i += 2; continue }
-            if (e == 114) { out += "\r"; i += 2; continue }
-            if (e == 48)  { out += String.fromCharCode(0); i += 2; continue }
-            if (e == 120) { out += String.fromCharCode(hexAt(s, i + 2, 2)); i += 4; continue }
-            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
-            out += String.fromCharCode(e) // \\ \" \' and everything else: the char itself.
-            i += 2
-        }
-        return out
-    }
-
-    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
-
     // ----- Scopes -----
     // 'scopes' is the active scope chain (innermost last). Every closure captures a copy
     // of the chain array; the scope objects inside stay shared, so later declarations in
     // an already captured scope are visible to the closure (that is what allows mutual
     // recursion between top level functions).
-    var globalScope = {}
-    var scopes = [globalScope]
 
     // The host names that a MetaJS program can use. Everything resolves to the goja
     // natives, so e.g. Math.imul or the string/array methods behave exactly like in JS.
@@ -337,27 +297,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         "exit": exit
     }
 
-    function getVar(name) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) return scopes[i][name]
-        }
-        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
-        fail("variable not defined: " + name)
-    }
-    function setVar(name, value) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
-        }
-        fail("assignment to undeclared variable: " + name)
-    }
-    function declVar(name, value) {
-        scopes[scopes.length - 1][name] = value
-    }
-
     // ----- Statement signals -----
     // Statement thunks return undefined (fall through), BRK, CONT, or {isRet:true, v:...}.
-    var BRK = {sig: "break"}
-    var CONT = {sig: "continue"}
 
     // ----- Functions -----
     // A MetaJS function value is a real (goja) JS function, so typeof, passing it around,
@@ -387,11 +328,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // ----- Expression thunks: function() -> value -----
 
     function makeNum(n) { return function() { return n } }
-    function makeConst(v) { return function() { return v } }
     function makeStr(s) { return function() { return s } }
-    function makeVarRef(name) { return function() { return getVar(name) } }
-    function makeNeg(t) { return function() { return -t() } }
-    function makeNot(t) { return function() { return !t() } }
+    makeNeg = function(t) { return function() { return -t() } }
     function makeBitNot(t) { return function() { return ~t() } }
     function makeTypeof(t) { return function() { return typeof t() } }
 
@@ -419,7 +357,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return function() { return makeClosure(params, bodyT, scopes) }
     }
 
-    function binOp(op, l, r) {
+    binOp = function(op, l, r) {
         if (op == "+") return l + r
         if (op == "-") return l - r
         if (op == "*") return l * r
@@ -441,16 +379,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (op == ">>>") return l >>> r
     }
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
-    function foldBinary(items) {
-        if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i += 2) {
-                v = binOp(items[i], v, items[i + 1]())
-            }
-            return v
-        }
-    }
     // || and && evaluate lazily and return the deciding operand, like in JS.
     function makeOr(items) {
         if (items.length == 1) return items[0]
@@ -482,7 +410,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
     // its object, so that a directly following call uses it as 'this'.
-    function foldCallMember(items) {
+    foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -507,12 +435,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
 
     // Target items = [nameString, suffix marker...] -> reference descriptor.
-    function makeTargetRef(items) {
-        return {name: items[0], path: items.slice(1)}
-    }
     // Walks a target path (members and calls) up to the last element and returns
     // the assignable place {obj, key}. The last element must be a member.
-    function resolveRef(ref) {
+    resolveRef = function(ref) {
         var cur = getVar(ref.name)
         var curThis = undefined
         for (var i = 0; i < ref.path.length - 1; i++) {
@@ -533,7 +458,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (cur == undefined) fail("member assignment on " + cur)
         return {obj: cur, key: last.key()}
     }
-    function applyOp(op, a, b) {
+    applyOp = function(op, a, b) {
         if (op == "+=") return a + b
         if (op == "-=") return a - b
         if (op == "*=") return a * b
@@ -593,54 +518,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // ----- Statement thunks: function() -> undefined | BRK | CONT | {isRet, v} -----
 
     // An expression in statement position: evaluate and discard the value.
-    function exprToStmt(t) {
-        return function() { t() }
-    }
     // items = [name] or [name, initThunk].
     function makeDecl(items) {
         var name = items[0]
         var init = items.length > 1 ? items[1] : makeConst(undefined)
         return function() { declVar(name, init()) }
     }
-    function makeSeq(items) {
-        return function() {
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i]()
-                if (r != undefined) return r // A signal: pass it on.
-            }
-        }
-    }
-    function makeBlockStmt(items) {
-        var seq = makeSeq(items)
-        return function() {
-            scopes.push({}) // A block is a new variable scope.
-            var r = seq()
-            scopes.pop()
-            return r
-        }
-    }
     // items = [cond, then] or [cond, then, else].
-    function makeIf(items) {
-        var cond = items[0]
-        var thenT = items[1]
-        var elseT = items.length > 2 ? items[2] : null
-        return function() {
-            if (cond()) return thenT()
-            if (elseT != null) return elseT()
-        }
-    }
     // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
-    function makeWhile(bodyT, condT) {
-        return function() {
-            while (condT()) {
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) return r // A return signal.
-                }
-            }
-        }
-    }
     function makeDo(condT, bodyT) {
         return function() {
             do {
@@ -682,8 +567,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var t = items.length > 0 ? items[0] : makeConst(undefined)
         return function() { return {isRet: true, v: t()} }
     }
-    function makeBreak() { return function() { return BRK } }
-    function makeContinue() { return function() { return CONT } }
     function makeThrow(t) { return function() { fail("thrown: " + t()) } }
 
     // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement
@@ -731,6 +614,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
 
     // Build the program thunk out of the parsed source.
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "js"
+
     c.compile(c.asg)
     var progT = popg()
 
