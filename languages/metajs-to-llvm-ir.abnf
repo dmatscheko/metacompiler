@@ -1,10 +1,8 @@
-:title("Typed MetaJS to LLVM IR compiler") ;
-:description("Compiles Typed MetaJS to an LLVM IR module and runs it with the built-in IR interpreter.
+:title("MetaJS to LLVM IR compiler") ;
+:description("Compiles MetaJS to an LLVM IR module and runs it with the built-in IR interpreter.
 
-The language is exactly the one of typed-metajs-interpreter.abnf: MetaJS plus the rule that a
-variable's type is pinned by its first non-undefined value. The compiled code declares
-and assigns variables through the js_tdecl/js_tset externals, which enforce the type
-pinning on the host side, so a violation aborts the run exactly like in the interpreter.
+The language is exactly the one of metajs-interpreter.abnf; see there for a description
+(including the bitwise operators and assignment targets that reach through calls).
 
 The emitted IR is handle threaded code: every dynamic value is an i64 handle into the
 value table of the Go side MetaJS runtime (abnf/jsrt.go), and every operation with real
@@ -24,14 +22,18 @@ following code has to continue in (short circuit operators and loops branch, so 
 can move the insertion point). The top level becomes the function jsmain(env, args),
 which runs the program statements and then calls main().
 
-The exit code of the metacompiler run is the value that main() returns, so Typed MetaJS test
+The exit code of the metacompiler run is the value that main() returns, so MetaJS test
 programs are self checking: they return 0 on success.
-The same language with the same semantics is interpreted directly by typed-metajs-interpreter.abnf.") ;
+The same language with the same semantics is interpreted directly by metajs-interpreter.abnf.
+
+This grammar has a second purpose: its own tag scripts (and every annotation script of
+the other grammars) are written in MetaJS, so this compiler can compile the scripts that
+define it - that is what makes the frozen, goja free bootstrap possible.") ;
 
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident-dollar.abnf") ;
 :include("lib/dq-strings.abnf") ;
@@ -45,7 +47,7 @@ The same language with the same semantics is interpreted directly by typed-metaj
 Program     <~~ buildMain(takeAll()) ~~>
             = { Statement } ;
 
-// Every statement production pushes exactly one thunk: function(block) -> nextBlock.
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
             | Throw | FuncDecl | Empty | ExprStmt ;
 
@@ -421,7 +423,7 @@ KwDefault   = "default" KwEnd ;
                     var old = callExt(b, "js_scope_get", [curScopeV, nameV])
                     v = callExt(b, binExt[op], [old, v])
                 }
-                callExt(b, "js_tset", [curScopeV, nameV, v])
+                callExt(b, "js_scope_set", [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -443,7 +445,7 @@ KwDefault   = "default" KwEnd ;
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
-                callExt(b, "js_tset", [curScopeV, nameV, callExt(b, extName, [oldV, oneV])])
+                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, extName, [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
@@ -462,7 +464,7 @@ KwDefault   = "default" KwEnd ;
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
                 var newV = callExt(b, extName, [oldV, oneV])
-                callExt(b, "js_tset", [curScopeV, nameV, newV])
+                callExt(b, "js_scope_set", [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
@@ -490,10 +492,10 @@ KwDefault   = "default" KwEnd ;
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         for (var i = 0; i < paramNames.length; i++) {
-            callExt(b, "js_tdecl", [curScopeV, emitStr(b, paramNames[i]),
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, paramNames[i]),
                                          callExt(b, "js_arg", [f.Params[1], handle(i)])])
         }
-        callExt(b, "js_tdecl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
 
@@ -535,7 +537,7 @@ KwDefault   = "default" KwEnd ;
                 b = r.b
                 v = r.v
             }
-            callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
         }
     }
@@ -669,7 +671,7 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var idx = emitFunction(paramNames, bodyT)
             var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
-            callExt(b, "js_tdecl", [curScopeV, emitStr(b, name), cl])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cl])
             return b
         }
     }
@@ -714,7 +716,7 @@ KwDefault   = "default" KwEnd ;
     // The exit code of this metacompiler run is what main() returned, so test
     // programs are self checking.
     var res = llvm.RunJS(m, "jsmain")
-    println("tjs compiler: main() returned " + res.Ret)
+    println("js compiler: main() returned " + res.Ret)
     exit(res.Ret)
 
 ~~) ;

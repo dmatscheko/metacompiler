@@ -138,20 +138,21 @@ When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
 
 ```
 go build .
-./mec -a tests/brainfuck-interpreter.abnf -b tests/brainfuck-test-2.txt
+./mec -a languages/brainfuck-interpreter.abnf -b tests/brainfuck-test-2.txt
 ```
 or
 ```
-go run . -a tests/abnf-of-abnf.abnf -b tests/abnf-of-abnf.abnf
+go run . -a languages/abnf-of-abnf.abnf -b languages/abnf-of-abnf.abnf
 ```
 or, to parse a C file with the full C99 grammar:
 ```
-go run . -a tests/c99-parser.abnf -b tests/c99-test-1.c -q
+go run . -a languages/c99-parser.abnf -b tests/c99-test-1.c -q
 ```
 
-#### The examples in tests/
+#### The example languages in languages/
 
-Every language in `tests/` has at least one interpreter and one compiler (only the full
+Every language in `languages/` has at least one interpreter and one compiler (the test
+programs live in `tests/`, next to the feature-test grammars) (only the full
 C99 grammar is parse only). The compilers
 generate LLVM IR and immediately execute it with the built-in IR interpreter (`llvm.Run`),
 and the test programs are self checking: the exit code of the run is 0 on success.
@@ -198,7 +199,7 @@ Typed MetaJS is exactly MetaJS plus one rule: a variable's type is pinned by its
 non-undefined value (enforced by both engines; typed-metajs-fail-test.js demonstrates the abort).
 
 The big-language grammars (Java, Kotlin, Go, Python, C and both MetaJS variants -
-interpreters and compilers) draw their common machinery from `tests/lib/`: the
+interpreters and compilers) draw their common machinery from `languages/lib/`: the
 startScript begins with `include("lib/interp-core.js")` (scopes, the break/continue
 protocol, the expression and statement thunk builders) or `include("lib/compile-core.js")`
 (the LLVM module, handle constants, on-demand externs, the loopStack and the emitter
@@ -215,7 +216,7 @@ lines into the bootstrap snapshot, so `-freeze` keeps working and the snapshot s
 self contained.
 
 The same grammars also share their token PRODUCTIONS via grammar level `:include()`
-fragments in `tests/lib`: cstyle-comments.abnf (whitespace with // and /* */),
+fragments in `languages/lib`: cstyle-comments.abnf (whitespace with // and /* */),
 ident.abnf / ident-dollar.abnf (identifiers and the KwEnd keyword boundary, with and
 without '$'), dq-strings.abnf (quoted strings with escapes), numbers.abnf (IntLit and
 DecLit) and bools.abnf - each a handful of productions whose tags call the shared
@@ -237,7 +238,7 @@ and two grammars that deliberately fail to demonstrate the parser limits
 (smaller-match-first-test, infinite-loop).
 
 MetaJS is special: it is the restricted JavaScript subset that the annotation scripts of all
-grammars in tests/ are written in (see the description in metajs-interpreter.abnf for the exact
+grammars are written in (see the description in languages/metajs-interpreter.abnf for the exact
 language). That closes the loop for the frozen bootstrap below: every grammar above - all
 interpreters and compilers of all languages - also runs completely goja free with -frozen.
 
@@ -246,9 +247,9 @@ interpreters and compilers of all languages - also runs completely goja free wit
 Normally the annotation scripts run on goja (a JS engine in Go). The frozen mode replaces it:
 
 ```
-./mec -freeze tests/metajs-to-llvm-ir.abnf    # snapshot: abnf/jsagrammar.go + abnf/jsbootstrap.ll
+./mec -freeze languages/metajs-to-llvm-ir.abnf    # snapshot: abnf/jsagrammar.go + abnf/jsbootstrap.ll
 go build .                                    # embed the snapshot
-./mec -a tests/tinyc-to-llvm-ir.abnf -b tests/tinyc-test-1.txt -q -frozen
+./mec -a languages/tinyc-to-llvm-ir.abnf -b tests/tinyc-test-1.txt -q -frozen
 ```
 
 `-freeze` runs metajs-to-llvm-ir.abnf once under goja and lets it compile its *own* tag scripts
@@ -264,7 +265,7 @@ the Go core then executes every annotation script goja free:
    llvm.* builder objects with their methods) - including JS closures that scripts push onto
    the stacks, which survive as IR function handles.
 
-All grammars in tests/ pass their self checking runs with identical output in both modes;
+All grammars pass their self checking runs with identical output in both modes;
 frozen mode is roughly an order of magnitude slower (threaded IR on an interpreter instead
 of a JS VM). goja is only needed to (re)create the snapshot after changing metajs-to-llvm-ir.abnf.
 
@@ -644,7 +645,7 @@ Reads / replaces the whole target text.
 * __c.getSdx() int__ / __c.setSdx(sdx int)__  
 Reads / moves the current parse position.
 * __c.peek(offset int) int__  
-Returns the byte at the current parse position plus `offset`, or `-1` outside of the target text. Unlike `c.getSrc()` this does not copy the target text, so it is the cheap way to look ahead (see the keyword boundary check `KwEnd` in `tests/c99-parser.abnf` for a negative lookahead built with it).
+Returns the byte at the current parse position plus `offset`, or `-1` outside of the target text. Unlike `c.getSrc()` this does not copy the target text, so it is the cheap way to look ahead (see the keyword boundary check `KwEnd` in `languages/c99-parser.abnf` for a negative lookahead built with it).
 * __push(v object)__ / __pop() object__  
 A stack that survives between the `:script()` calls of one parse run.
 
@@ -790,7 +791,7 @@ The functions and constants are exposed to JS as:
   * __llvm.Run(m ir.Module, f string, input string) {Ret uint32, Out string}__  
   Like `llvm.Eval()`, but `input` is what `getchar()` reads (can be left out), `Out` is everything the program wrote via `putchar()`/`puts()`, and `Ret` is the return value. The interpreter supports the integer subset of LLVM IR that the compiler grammars generate: alloca/load/store, getelementptr into arrays and structs (packed layout: the fields lie back to back, ints take 4 bytes and pointers 8), integer arithmetic and comparisons, zext/sext/trunc, ptrtoint/inttoptr/bitcast, select, phi, branches, calls, and the externals putchar, getchar, puts and abs.
   * __llvm.RunJS(m ir.Module, f string) {Ret uint32, Out string}__  
-  Executes a MetaJS module (IR emitted by `tests/metajs-to-llvm-ir.abnf`, where every value is an i64 handle and the `js_*` externals implement the JS semantics on the Go side). `f` is the module entry, normally `jsmain`; its handle result is converted to an int32 and returned as `Ret`.
+  Executes a MetaJS module (IR emitted by `languages/metajs-to-llvm-ir.abnf`, where every value is an i64 handle and the `js_*` externals implement the JS semantics on the Go side). `f` is the module entry, normally `jsmain`; its handle result is converted to an int32 and returned as `Ret`.
 
 ## Further Examples
 

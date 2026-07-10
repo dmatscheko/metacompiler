@@ -33,7 +33,7 @@ programs are self checking: they return 0 on success.") ;
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident.abnf") ;
 

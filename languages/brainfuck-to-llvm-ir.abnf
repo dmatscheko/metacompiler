@@ -8,7 +8,7 @@ blocks (loop head with the zero check, loop body) and ']' closes them, so the st
 Brainfuck semantics hold: '[' skips its body when the current cell is 0.
 
 The generated module is also printed; it can be compiled with clang:
-    ./mec -a tests/brainfuck-to-llvm-ir.abnf -b tests/brainfuck-test-2.txt -q > test.ll && clang test.ll
+    ./mec -a languages/brainfuck-to-llvm-ir.abnf -b tests/brainfuck-test-2.txt -q > test.ll && clang test.ll
 
 Cells are 8 bit. ',' and '?' read via getchar(); a negative result (EOF) reads as 0,
 which matches the interpreter variant (brainfuck-interpreter.abnf).") ;

@@ -33,7 +33,7 @@ The entry point is func main(); self checking programs end with os.Exit(failures
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident.abnf") ;
 :include("lib/dq-strings.abnf") ;

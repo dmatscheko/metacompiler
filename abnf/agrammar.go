@@ -7,7 +7,7 @@ import "14.gy/mec/abnf/r"
 //
 // AbnfAgrammar is the hard coded a-grammar that understands ABNF itself. It is the starting
 // point of every run: It parses and compiles the user supplied ABNF into a new a-grammar.
-// It is the serialized twin of tests/abnf-of-abnf.abnf. To regenerate it after a syntax
+// It is the serialized twin of languages/abnf-of-abnf.abnf. To regenerate it after a syntax
 // change, run the metacompiler with that file (see the README) and paste the serialized
 // rules that its start script prints (with the println of the embedded start script
 // commented out again, so that the bootstrap stays quiet).

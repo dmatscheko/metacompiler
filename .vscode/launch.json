@@ -8,199 +8,199 @@
             "name": "Calculator interpreter 1",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-interpreter-1.abnf", "-b", "tests/calculator-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/calculator-interpreter-1.abnf", "-b", "tests/calculator-test-1.txt", "-q"]
         },
         {
             "name": "Calculator interpreter 1 (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-interpreter-1.abnf", "-b", "tests/calculator-test-1.txt", "-vvb2"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/calculator-interpreter-1.abnf", "-b", "tests/calculator-test-1.txt", "-vvb2"]
         },
         {
             "name": "Calculator interpreter 2",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-interpreter-2.abnf", "-b", "tests/calculator-test-1.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/calculator-interpreter-2.abnf", "-b", "tests/calculator-test-1.txt"]
         },
         {
             "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tiny-self-parse.bnf", "-b", "tests/tiny-self-parse.bnf"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/tiny-self-parse.bnf", "-b", "languages/tiny-self-parse.bnf"]
         },
         {
             "name": "Brainfuck interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-interpreter.abnf", "-b", "tests/brainfuck-test-2.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/brainfuck-interpreter.abnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
             "name": "Brainfuck to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-to-llvm-ir.abnf", "-b", "tests/brainfuck-test-2.txt"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/brainfuck-to-llvm-ir.abnf", "-b", "tests/brainfuck-test-2.txt"]
         },
         {
             "name": "TinyC to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc-to-llvm-ir.abnf", "-b", "tests/tinyc-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/tinyc-to-llvm-ir.abnf", "-b", "tests/tinyc-test-1.txt", "-q"]
         },
         {
             "name": "TinyC to LLVM IR (primes)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc-to-llvm-ir.abnf", "-b", "tests/tinyc-test-2.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/tinyc-to-llvm-ir.abnf", "-b", "tests/tinyc-test-2.txt", "-q"]
         },
         {
             "name": "TinyC interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc-interpreter.abnf", "-b", "tests/tinyc-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/tinyc-interpreter.abnf", "-b", "tests/tinyc-test-1.txt", "-q"]
         },
         {
             "name": "Lisp interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/lisp-interpreter.abnf", "-b", "tests/lisp-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/lisp-interpreter.abnf", "-b", "tests/lisp-test-1.txt", "-q"]
         },
         {
             "name": "Lisp to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/lisp-to-llvm-ir.abnf", "-b", "tests/lisp-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/lisp-to-llvm-ir.abnf", "-b", "tests/lisp-test-1.txt", "-q"]
         },
         {
             "name": "Calculator to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/calculator-to-llvm-ir.abnf", "-b", "tests/calculator-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/calculator-to-llvm-ir.abnf", "-b", "tests/calculator-test-1.txt", "-q"]
         },
         {
             "name": "MetaJS interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/metajs-interpreter.abnf", "-b", "tests/metajs-test-1.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-interpreter.abnf", "-b", "tests/metajs-test-1.js", "-q"]
         },
         {
             "name": "MetaJS to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/metajs-to-llvm-ir.abnf", "-b", "tests/metajs-test-1.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-to-llvm-ir.abnf", "-b", "tests/metajs-test-1.js", "-q"]
         },
         {
             "name": "C (subset) interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/c-interpreter.abnf", "-b", "tests/c-test-1.c", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/c-interpreter.abnf", "-b", "tests/c-test-1.c", "-q"]
         },
         {
             "name": "C (subset) to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/c-to-llvm-ir.abnf", "-b", "tests/c-test-1.c", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/c-to-llvm-ir.abnf", "-b", "tests/c-test-1.c", "-q"]
         },
         {
             "name": "Typed MetaJS interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/typed-metajs-interpreter.abnf", "-b", "tests/typed-metajs-test-1.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-interpreter.abnf", "-b", "tests/typed-metajs-test-1.js", "-q"]
         },
         {
             "name": "Typed MetaJS to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/typed-metajs-to-llvm-ir.abnf", "-b", "tests/typed-metajs-test-1.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-to-llvm-ir.abnf", "-b", "tests/typed-metajs-test-1.js", "-q"]
         },
         {
             "name": "Typed MetaJS violation (SHOULD FAIL)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/typed-metajs-interpreter.abnf", "-b", "tests/typed-metajs-fail-test.js", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/typed-metajs-interpreter.abnf", "-b", "tests/typed-metajs-fail-test.js", "-q"]
         },
         {
             "name": "Java interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/java-interpreter.abnf", "-b", "tests/java-test-1.java", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/java-interpreter.abnf", "-b", "tests/java-test-1.java", "-q"]
         },
         {
             "name": "Java to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/java-to-llvm-ir.abnf", "-b", "tests/java-test-1.java", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/java-to-llvm-ir.abnf", "-b", "tests/java-test-1.java", "-q"]
         },
         {
             "name": "Kotlin interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/kotlin-interpreter.abnf", "-b", "tests/kotlin-test-1.kt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/kotlin-interpreter.abnf", "-b", "tests/kotlin-test-1.kt", "-q"]
         },
         {
             "name": "Kotlin to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/kotlin-to-llvm-ir.abnf", "-b", "tests/kotlin-test-1.kt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/kotlin-to-llvm-ir.abnf", "-b", "tests/kotlin-test-1.kt", "-q"]
         },
         {
             "name": "Go interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/go-interpreter.abnf", "-b", "tests/go-test-1.go", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/go-interpreter.abnf", "-b", "tests/go-test-1.go", "-q"]
         },
         {
             "name": "Go to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/go-to-llvm-ir.abnf", "-b", "tests/go-test-1.go", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/go-to-llvm-ir.abnf", "-b", "tests/go-test-1.go", "-q"]
         },
         {
             "name": "Python interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/python-interpreter.abnf", "-b", "tests/python-test-1.py", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/python-interpreter.abnf", "-b", "tests/python-test-1.py", "-q"]
         },
         {
             "name": "Python to LLVM IR",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/python-to-llvm-ir.abnf", "-b", "tests/python-test-1.py", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/python-to-llvm-ir.abnf", "-b", "tests/python-test-1.py", "-q"]
         },
         {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc-to-llvm-ir.abnf", "-b", "tests/tinyc-test-1.txt", "-q", "-frozen"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/tinyc-to-llvm-ir.abnf", "-b", "tests/tinyc-test-1.txt", "-q", "-frozen"]
         },
         {
             "name": "MetaJS to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/metajs-to-llvm-ir.abnf", "-b", "tests/metajs-test-1.js", "-q", "-frozen"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-to-llvm-ir.abnf", "-b", "tests/metajs-test-1.js", "-q", "-frozen"]
         },
         {
             "name": "Freeze the MetaJS bootstrap",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-freeze", "tests/metajs-to-llvm-ir.abnf"]
+            "program": "${workspaceFolder}","args": ["-freeze", "languages/metajs-to-llvm-ir.abnf"]
         },
         {
             "name": "Brainfuck parser (syntax only)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/brainfuck-parser.bnf", "-b", "tests/brainfuck-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/brainfuck-parser.bnf", "-b", "tests/brainfuck-test-1.txt", "-q"]
         },
         {
             "name": "TinyC parser (syntax only)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/tinyc-parser.bnf", "-b", "tests/tinyc-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/tinyc-parser.bnf", "-b", "tests/tinyc-test-1.txt", "-q"]
         },
         {
             "name": "C99 parser",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/c99-parser.abnf", "-b", "tests/c99-test-1.c", "-q"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/c99-parser.abnf", "-b", "tests/c99-test-1.c", "-q"]
         },
         {
             "name": "---------",
@@ -212,19 +212,19 @@
             "name": "EBNF of EBNF",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/ebnf-of-ebnf.bnf", "-b", "tests/ebnf-of-ebnf.bnf"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/ebnf-of-ebnf.bnf", "-b", "languages/ebnf-of-ebnf.bnf"]
         },
         {
             "name": "EBNF of ABNF",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/ebnf-of-abnf.bnf", "-b", "tests/abnf-of-abnf.abnf"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/ebnf-of-abnf.bnf", "-b", "languages/abnf-of-abnf.abnf"]
         },
         {
             "name": "ABNF of ABNF to object",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/abnf-of-abnf.abnf", "-b", "languages/abnf-of-abnf.abnf"]
         },
         {
             "name": "---------",
@@ -284,7 +284,7 @@
             "name": "Speed Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["-a", "tests/abnf-of-abnf.abnf", "-b", "tests/abnf-of-abnf.abnf", "-s"]
+            "program": "${workspaceFolder}","args": ["-a", "languages/abnf-of-abnf.abnf", "-b", "languages/abnf-of-abnf.abnf", "-s"]
         },
 
     ]

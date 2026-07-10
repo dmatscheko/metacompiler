@@ -50,7 +50,7 @@ python-interpreter.abnf.") ;
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/ident.abnf") ;
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;

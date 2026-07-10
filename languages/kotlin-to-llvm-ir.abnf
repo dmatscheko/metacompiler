@@ -41,7 +41,7 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident.abnf") ;
 :include("lib/numbers.abnf") ;

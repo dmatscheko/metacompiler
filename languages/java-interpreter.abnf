@@ -30,7 +30,7 @@ so self checking programs end with System.exit(failures).") ;
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident-dollar.abnf") ;
 :include("lib/dq-strings.abnf") ;

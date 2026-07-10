@@ -1,15 +1,19 @@
-:title("MetaJS interpreter") ;
-:description("Parses MetaJS and executes it directly, without generating code.
+:title("Typed MetaJS interpreter") ;
+:description("Parses Typed MetaJS and executes it directly, without generating code.
 
-MetaJS is the restricted JavaScript subset that the annotation scripts of the grammars in
-tests/ are written in. It has: var/let/const (all block scoped), function declarations and
+Typed MetaJS is exactly MetaJS (see metajs-interpreter.abnf) with one extra rule: every variable
+must be declared before use (MetaJS already enforces that), and a variable's type is
+pinned by the first non-undefined value it holds - later assignments must keep that type
+class (number, string, boolean, function or object; null counts as object, and arrays and
+objects share the object class like typeof does). Assigning undefined is always allowed
+and keeps the pinned type. A violation aborts the run.
+
+The base language is MetaJS. It has: var/let/const (all block scoped), function declarations and
 anonymous function expressions with real closures and an 'arguments' array, if/else, while,
 do-while, for(;;), switch (=== comparison, fallthrough, stacked labels, default),
 break, continue, return, throw (terminates, there is no try/catch),
-numbers (doubles, hex 0x literals included), strings with the methods length/charAt/
-charCodeAt/indexOf/replace/slice/substring/split/toUpperCase/toLowerCase/trim,
-booleans, null, undefined,
-arrays (push/pop/shift/unshift/slice/indexOf/join/concat), object literals, member
+numbers (doubles, hex 0x literals included), strings, booleans, null, undefined,
+arrays, object literals, member
 access (.name and [expr]), method calls, assignment (= += -= *= /= %=) as an expression
 (the target may reach through calls: findScope(name)[name] = v), prefix and postfix
 ++/--, the
@@ -27,13 +31,13 @@ Expression thunks return the value, statement thunks return undefined or a signa
 (return/break/continue) that the enclosing statements route.
 
 The program must define main(); the exit code of the metacompiler run is what main()
-returns, so MetaJS test programs are self checking: they return 0 on success.
-The same language is compiled to LLVM IR by metajs-to-llvm-ir.abnf.") ;
+returns, so Typed MetaJS test programs are self checking: they return 0 on success.
+The same language is compiled to LLVM IR by typed-metajs-to-llvm-ir.abnf.") ;
 
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident-dollar.abnf") ;
 :include("lib/dq-strings.abnf") ;
@@ -273,6 +277,40 @@ KwDefault   = "default" KwEnd ;
         "exit": exit
     }
 
+    // The type class that pins a variable: undefined pins nothing, null is an object.
+    function typeClass(v) {
+        if (v === undefined) return ""
+        if (v === null) return "object"
+        return typeof v
+    }
+    // Scope entries are {v, t} type boxes: reads unbox, declarations pin the type.
+    getVar = function(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) return scopes[i][name].v
+        }
+        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
+        fail("variable not defined: " + name)
+    }
+    declVar = function(name, value) {
+        scopes[scopes.length - 1][name] = {v: value, t: typeClass(value)}
+    }
+    setVar = function(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) {
+                var entry = scopes[i][name]
+                var tc = typeClass(value)
+                if (tc != "") {
+                    if (entry.t != "" && entry.t != tc) {
+                        fail("Typed MetaJS: variable '" + name + "' has type " + entry.t + " and cannot hold a " + tc)
+                    }
+                    entry.t = tc
+                }
+                entry.v = value
+                return
+            }
+        }
+        fail("assignment to undeclared variable: " + name)
+    }
     // ----- Statement signals -----
     // Statement thunks return undefined (fall through), BRK, CONT, or {isRet:true, v:...}.
 
@@ -287,8 +325,8 @@ KwDefault   = "default" KwEnd ;
             var saved = scopes
             scopes = env.slice()
             var sc = {}
-            for (var j = 0; j < params.length; j++) sc[params[j]] = args[j]
-            sc["arguments"] = args
+            for (var j = 0; j < params.length; j++) sc[params[j]] = {v: args[j], t: typeClass(args[j])}
+            sc["arguments"] = {v: args, t: "object"}
             scopes.push(sc)
             var r = bodyT()
             scopes = saved
@@ -597,11 +635,11 @@ KwDefault   = "default" KwEnd ;
     // Run the top level (it binds the functions), then call main(). The exit code of
     // this metacompiler run is what main() returned, so test programs are self checking.
     progT()
-    if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
-        fail("MetaJS programs need a main() function.")
+    if (!hasOwn(globalScope, "main") || typeof globalScope["main"].v != "function") {
+        fail("Typed MetaJS programs need a main() function.")
     }
-    var ret = globalScope["main"]()
-    println("js interpreter: main() returned " + ret)
+    var ret = globalScope["main"].v()
+    println("tjs interpreter: main() returned " + ret)
     exit(ret | 0)
 
 ~~) ;

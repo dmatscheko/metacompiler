@@ -48,7 +48,7 @@ The same language with the same semantics is interpreted directly by go-interpre
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident.abnf") ;
 :include("lib/dq-strings.abnf") ;

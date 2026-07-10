@@ -32,7 +32,7 @@ The entry point is fun main(); self checking programs end with exitProcess(failu
 
 // --- main rules
 
-// Shared token productions (tests/lib).
+// Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
 :include("lib/ident.abnf") ;
 :include("lib/numbers.abnf") ;
