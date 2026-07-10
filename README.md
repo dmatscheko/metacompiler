@@ -368,6 +368,11 @@ grammars with no `:startRule()` skip the reachability check. It is the modern
 successor of an old standalone verifier, rewritten to walk the current
 a-grammar by name (it resolves nothing and mutates nothing).
 
+A companion flag, `-pretty`, compiles the `-a` grammar and prints its serialized
+a-grammar as a pretty Go literal (one brace per line, the runtime `:origin()`
+stamp dropped so it matches `abnf/agrammar.go`'s form), then exits - handy for
+inspecting a compiled grammar or regenerating the example dump above.
+
 ### High level overview
 
 There are two basic components: A __parser__ and a __compiler__.
@@ -1074,7 +1079,7 @@ LineComment = "//" :whitespace() { NoLinebreak } :whitespace(Whitespace) ;
 
 ### Its output, when it gets applied on itself:
 
-This output is exactly the data structure that controls the parser when it is used as an ABNF parser. It is what makes the parser to an ABNF parser:
+This output is exactly the data structure that controls the parser when it is used as an ABNF parser. It is what makes the parser to an ABNF parser. It is the pretty-printed serialized a-grammar (the same structure as `abnf/agrammar.go`); regenerate this dump with `./mec -a languages/abnf-of-abnf.abnf -pretty`:
 
 <details>
   <summary>Click to expand!</summary>
@@ -1083,7 +1088,7 @@ This output is exactly the data structure that controls the parser when it is us
 &r.Rules{&r.Rule{Operator:r.Command, String:"title", CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"ABNF of ABNF to a-grammar"
             }
         }
-    }, &r.Rule{Operator:r.Command, String:"description", CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"This ABNF contains the grammatic and semantic information for annotated EBNF.\nIt allows to automatically create a compiler for everything described in ABNF (yes, that format)."
+    }, &r.Rule{Operator:r.Command, String:"description", CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"The annotated EBNF format, described in itself: parsing this file with the\nbuilt-in a-grammar and compiling the result yields exactly that a-grammar again (its\nserialized twin is hard coded in abnf/agrammar.go and bootstraps every run).\n\nThis file is the reference for the whole syntax: productions, alternatives |, sequences,\ngroups ( ), options [ ], repetitions { }, counted repetitions like 3...5 ( X ), rune and\nbyte ranges (... and ..b), char sets (@'ab' is one char of the set, @+'ab' a run of them,\n@b and @b+ the byte versions, and !@ !@+ !@b !@b+ match the chars NOT in the set),\n!'token' as negative lookahead (matches without consuming when the token does not),\ntokens with escapes (\\n \\t \\x41 \\u00e4 and the token's own quote), commands like\n:whitespace(), and tags carrying JS code.\n\nAfter changing this file, regenerate abnf/agrammar.go as described in the README."
             }
         }
     }, &r.Rule{Operator:r.Command, String:"startRule", CodeChilds:&r.Rules{&r.Rule{Operator:r.Identifier, String:"ABNF"
@@ -1130,7 +1135,7 @@ This output is exactly the data structure that controls the parser when it is us
     }, &r.Rule{Operator:r.Production, String:"Expression", Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Alternative"
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"Alternative", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(simplify(abnf.newAlternative(popg(), c.Pos))) "
+    }, &r.Rule{Operator:r.Production, String:"Alternative", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(simplify(abnf.newAlternative(popg(), up.pos))) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([pop()]) "
                             }
@@ -1149,7 +1154,7 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"Sequence", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(simplify(abnf.newSequence(popg(), c.Pos))) "
+    }, &r.Rule{Operator:r.Production, String:"Sequence", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(simplify(abnf.newSequence(popg(), up.pos))) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([pop()]) "
                             }
@@ -1174,6 +1179,13 @@ This output is exactly the data structure that controls the parser when it is us
                         }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Name"
                                     }, &r.Rule{Operator:r.Identifier, String:"ByteRange"
                                     }, &r.Rule{Operator:r.Identifier, String:"Range"
+                                    }, &r.Rule{Operator:r.Identifier, String:"NotCharsOfByte"
+                                    }, &r.Rule{Operator:r.Identifier, String:"NotCharOfByte"
+                                    }, &r.Rule{Operator:r.Identifier, String:"NotCharsOf"
+                                    }, &r.Rule{Operator:r.Identifier, String:"NotCharOf"
+                                    }, &r.Rule{Operator:r.Identifier, String:"NotToken"
+                                    }, &r.Rule{Operator:r.Identifier, String:"CharsOfByte"
+                                    }, &r.Rule{Operator:r.Identifier, String:"CharOfByte"
                                     }, &r.Rule{Operator:r.Identifier, String:"CharsOf"
                                     }, &r.Rule{Operator:r.Identifier, String:"CharOf"
                                     }, &r.Rule{Operator:r.Identifier, String:"Group"
@@ -1197,7 +1209,7 @@ This output is exactly the data structure that controls the parser when it is us
             }
         }
     }, &r.Rule{Operator:r.Production, String:"Group", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"("
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newGroup(simplifyToArr(pop()), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newGroup(simplifyToArr(pop()), up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Expression"
                     }
@@ -1206,7 +1218,7 @@ This output is exactly the data structure that controls the parser when it is us
             }
         }
     }, &r.Rule{Operator:r.Production, String:"Option", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"["
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newOption(simplifyToArr(pop()), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newOption(simplifyToArr(pop()), up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Expression"
                     }
@@ -1215,7 +1227,7 @@ This output is exactly the data structure that controls the parser when it is us
             }
         }
     }, &r.Rule{Operator:r.Production, String:"Repetition", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"{"
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newRepetition(simplifyToArr(pop()), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newRepetition(simplifyToArr(pop()), up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Expression"
                     }
@@ -1231,7 +1243,7 @@ This output is exactly the data structure that controls the parser when it is us
                             }
                         }
                     }, &r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"..."
-                            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, c.Pos)) "
+                            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg(abnf.newRange([popg(), pop()], abnf.rangeType.Rune, up.pos)) "
                                     }
                                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
                                     }
@@ -1248,7 +1260,7 @@ This output is exactly the data structure that controls the parser when it is us
                     }
                 }
             }, &r.Rule{Operator:r.Token, String:"..b"
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newRange([popg(), pop()], abnf.rangeType.Byte, up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
                     }
@@ -1256,7 +1268,7 @@ This output is exactly the data structure that controls the parser when it is us
             }
         }
     }, &r.Rule{Operator:r.Production, String:"CharsOf", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"@+"
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharsOf(pop().String, c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharsOf(pop(), abnf.charType.Rune, up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
                     }
@@ -1264,7 +1276,63 @@ This output is exactly the data structure that controls the parser when it is us
             }
         }
     }, &r.Rule{Operator:r.Production, String:"CharOf", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"@"
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharOf(pop().String, c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharOf(pop(), abnf.charType.Rune, up.pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"CharsOfByte", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"@b+"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharsOf(pop(), abnf.charType.Byte, up.pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"CharOfByte", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"@b"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharOf(pop(), abnf.charType.Byte, up.pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"NotCharsOf", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"!@+"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharsOf(pop(), abnf.charType.Negated, up.pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"NotCharOf", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"!@"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharOf(pop(), abnf.charType.Negated, up.pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"NotCharsOfByte", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"!@b+"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharsOf(pop(), abnf.charType.Byte | abnf.charType.Negated, up.pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"NotCharOfByte", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"!@b"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCharOf(pop(), abnf.charType.Byte | abnf.charType.Negated, up.pos)) "
+                    }
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
+                    }
+                }
+            }
+        }
+    }, &r.Rule{Operator:r.Production, String:"NotToken", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"!"
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newNot([pop()], up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Token"
                     }
@@ -1291,7 +1359,7 @@ This output is exactly the data structure that controls the parser when it is us
                         }
                     }
                 }
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTimes(popg(), simplifyToArr(pop()), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTimes(popg(), simplifyToArr(pop()), up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Group"
                     }
@@ -1312,7 +1380,7 @@ This output is exactly the data structure that controls the parser when it is us
             }, &r.Rule{Operator:r.Token, String:";"
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"Command", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCommand(pop(), popg(), c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"Command", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newCommand(pop(), popg(), up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:":"
                     }, &r.Rule{Operator:r.Identifier, String:"CmdName"
@@ -1349,7 +1417,7 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"Tag", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTag(popg(), undefined, c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"Tag", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTag(popg(), undefined, up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"<"
                     }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" pushg([pop()]) "
@@ -1376,7 +1444,7 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"Name", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newIdentifier(up.in, c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"Name", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newIdentifier(up.in, up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"Alphabet"
                     }, &r.Rule{Operator:r.Command, String:"whitespace"
@@ -1421,11 +1489,11 @@ This output is exactly the data structure that controls the parser when it is us
         }
     }, &r.Rule{Operator:r.Production, String:"Dquotetoken", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"\""
             }, &r.Rule{Operator:r.Command, String:"whitespace"
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(unescape(up.in), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTokenEscaped(up.in, up.pos)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"AsciiNoQs"
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"TokenEsc"
+                                    }, &r.Rule{Operator:r.Identifier, String:"AsciiNoQs"
                                     }, &r.Rule{Operator:r.Token, String:"'"
-                                    }, &r.Rule{Operator:r.Token, String:"\\\""
                                     }
                                 }
                             }
@@ -1440,11 +1508,11 @@ This output is exactly the data structure that controls the parser when it is us
         }
     }, &r.Rule{Operator:r.Production, String:"Squotetoken", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"'"
             }, &r.Rule{Operator:r.Command, String:"whitespace"
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(unescape(up.in), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newTokenEscaped(up.in, up.pos)) "
                     }
-                }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"AsciiNoQs"
+                }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Identifier, String:"TokenEsc"
+                                    }, &r.Rule{Operator:r.Identifier, String:"AsciiNoQs"
                                     }, &r.Rule{Operator:r.Token, String:"\""
-                                    }, &r.Rule{Operator:r.Token, String:"\\'"
                                     }
                                 }
                             }
@@ -1457,9 +1525,16 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
+    }, &r.Rule{Operator:r.Production, String:"TokenEsc", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"\\"
+            }, &r.Rule{Operator:r.Range, Int:1, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" "
+                    }, &r.Rule{Operator:r.Token, String:"~"
+                    }
+                }
+            }
+        }
     }, &r.Rule{Operator:r.Production, String:"Code", Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"~~"
             }, &r.Rule{Operator:r.Command, String:"whitespace"
-            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(unescapeTilde(up.in), c.Pos)) "
+            }, &r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newToken(unescapeTilde(up.in), up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Repeat, Childs:&r.Rules{&r.Rule{Operator:r.Optional, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"~"
                                     }
@@ -1506,44 +1581,13 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"NoLinebreak", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
-                            }, &r.Rule{Operator:r.Token, String:"\t"
-                            }
-                        }
-                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\v"
-                            }, &r.Rule{Operator:r.Token, String:"\U0010ffff"
-                            }
-                        }
-                    }
-                }
+    }, &r.Rule{Operator:r.Production, String:"NoLinebreak", Childs:&r.Rules{&r.Rule{Operator:r.CharOf, String:"\n", Int:2
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"NoStar", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
-                            }, &r.Rule{Operator:r.Token, String:")"
-                            }
-                        }
-                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"+"
-                            }, &r.Rule{Operator:r.Token, String:"\U0010ffff"
-                            }
-                        }
-                    }
-                }
+    }, &r.Rule{Operator:r.Production, String:"NoStar", Childs:&r.Rules{&r.Rule{Operator:r.CharOf, String:"*", Int:2
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"NoStarSlash", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
-                            }, &r.Rule{Operator:r.Token, String:")"
-                            }
-                        }
-                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"+"
-                            }, &r.Rule{Operator:r.Token, String:"."
-                            }
-                        }
-                    }, &r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"0"
-                            }, &r.Rule{Operator:r.Token, String:"\U0010ffff"
-                            }
-                        }
-                    }
-                }
+    }, &r.Rule{Operator:r.Production, String:"NoStarSlash", Childs:&r.Rules{&r.Rule{Operator:r.CharOf, String:"*/", Int:2
             }
         }
     }, &r.Rule{Operator:r.Production, String:"AllButTilde", Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"\x00"
@@ -1559,7 +1603,7 @@ This output is exactly the data structure that controls the parser when it is us
                 }
             }
         }
-    }, &r.Rule{Operator:r.Production, String:"Number", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newNumber(up.in, c.Pos)) "
+    }, &r.Rule{Operator:r.Production, String:"Number", Childs:&r.Rules{&r.Rule{Operator:r.Tag, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:" push(abnf.newNumber(up.in, up.pos)) "
                     }
                 }, Childs:&r.Rules{&r.Rule{Operator:r.Or, Childs:&r.Rules{&r.Rule{Operator:r.Token, String:"0"
                             }, &r.Rule{Operator:r.Sequence, Childs:&r.Rules{&r.Rule{Operator:r.Range, Int:0, CodeChilds:&r.Rules{&r.Rule{Operator:r.Token, String:"1"

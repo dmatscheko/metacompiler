@@ -60,6 +60,7 @@ func main() {
 	param_frozen := flag.Bool("frozen", false, "Run all annotation scripts goja free: parse them with the frozen a-grammar, compile them with the frozen bootstrap on the IR machine, and execute the emitted IR")
 
 	param_verify := flag.Bool("verify", false, "Lint the -a grammar: report used-but-undefined names (error) and defined-but-unreachable productions (warning), then exit without running the program")
+	param_pretty := flag.Bool("pretty", false, "Print the compiled -a grammar as a pretty-printed Go literal (the serialized a-grammar, one brace per line, as in the README example) to stdout, then exit")
 
 	param_cfg := flag.String("cfg", "", "Write the control flow graph of every executed IR module to this file (Graphviz DOT; Mermaid when the name ends in .mmd)")
 	param_traceOut := flag.String("trace", "", "Stream the runtime events of compiled programs (llvm.RunJS) to this file as JSON lines; also the input file of -render")
@@ -204,6 +205,12 @@ func main() {
 	}
 	if *param_verbose_Ac || *param_trace_Ac {
 		fmt.Fprintf(os.Stderr, "   => a-grammar:  %s\n\n", aGrammar.Serialize())
+	}
+
+	// -pretty: print the compiled a-grammar as a pretty serialized Go literal and exit.
+	if *param_pretty {
+		fmt.Println(abnf.SerializeGrammarPretty(aGrammar))
+		return
 	}
 
 	// -verify: lint the a-grammar and exit (do not run the program). The grammar

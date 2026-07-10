@@ -224,6 +224,25 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, trac
 	return res, nil
 }
 
+// SerializeGrammarPretty renders an a-grammar as a pretty-printed Go literal in
+// the canonical bootstrap form used by abnf/agrammar.go: the runtime :origin()
+// provenance stamp that CompileASG adds is dropped, so the output is the
+// grammar's structure alone (directly comparable to AbnfAgrammar). Backs the
+// -pretty CLI flag.
+func SerializeGrammarPretty(aGrammar *r.Rules) string {
+	if aGrammar == nil {
+		return "<nil>"
+	}
+	canonical := r.Rules{}
+	for _, rule := range *aGrammar {
+		if rule.Operator == r.Command && rule.String == "origin" {
+			continue
+		}
+		canonical = append(canonical, rule)
+	}
+	return canonical.SerializePretty()
+}
+
 // resolveIncludePaths anchors the constant file name of every top level
 // :include() command to the grammar file's directory. The include itself only
 // runs when the a-grammar is USED (see the parser), where just the INPUT file

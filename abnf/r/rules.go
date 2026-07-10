@@ -2,6 +2,7 @@ package r
 
 import (
 	"fmt"
+	"strings"
 )
 
 // ----------------------------------------------------------------------------
@@ -181,6 +182,54 @@ func (rules *Rules) Serialize() string {
 	}
 	res += "}"
 	return res
+}
+
+// SerializePretty is Serialize() laid out for reading: every structural brace
+// closes on its own line, indented by its nesting depth. Braces inside string
+// literals (e.g. the JS of a tag) are left untouched. This is the layout of the
+// example dump in the README.
+func (rules *Rules) SerializePretty() string {
+	return prettyBraces(rules.Serialize())
+}
+
+// prettyBraces rewrites a compact Go-literal string so that each closing brace
+// sits on its own line at (depth-1)*4 spaces, tracking string literals so a '}'
+// inside a quoted string is copied verbatim.
+func prettyBraces(s string) string {
+	var b strings.Builder
+	depth := 0
+	inString := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			b.WriteByte(c)
+			if c == '\\' && i+1 < len(s) { // Escape: copy the next byte verbatim.
+				i++
+				b.WriteByte(s[i])
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+			b.WriteByte(c)
+		case '{':
+			depth++
+			b.WriteByte(c)
+		case '}':
+			depth--
+			b.WriteByte('\n')
+			for k := 0; k < depth*4; k++ {
+				b.WriteByte(' ')
+			}
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // ToString converts one rule into a short, human readable form: Child rules are
