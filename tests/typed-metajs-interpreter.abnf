@@ -37,6 +37,13 @@ The same language is compiled to LLVM IR by typed-metajs-to-llvm-ir.abnf.") ;
 
 // --- main rules
 
+// Shared token productions (tests/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident-dollar.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
@@ -190,7 +197,7 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { CallSuffix | DotSuffix | IndexSuffix } ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
-DotSuffix   = "." Id <~~ push({kind:"member", key: makeStr(up.in)}) ~~> ;
+DotSuffix   = "." Id <~~ push({kind:"member", key: makeConst(up.in)}) ~~> ;
 IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -210,8 +217,6 @@ PropKey     = Id <~~ push(up.in) ~~> | StringLit ;
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ AssignExpr { "," AssignExpr } ] "]" ;
 
-True        <~~ push(makeConst(true)) ~~>      = "true" KwEnd ;
-False       <~~ push(makeConst(false)) ~~>     = "false" KwEnd ;
 Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
 Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
 
@@ -219,24 +224,12 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
 StringLit   = DqString | SqString ;
-// The escape pair is tried before the plain chars, so \" and \\ do not end the string early.
-DqString    = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeStr(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
-SqString    = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeStr(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
-StrEsc      = "\\" "\x20"..b"\x7e" ;
-DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
-SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
-
 NumberLit   = HexLit | DecLit ;
 
 // Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
-HexLit      <~~ push(makeNum(hexAt(up.in, 2, up.in.length - 2))) ~~>
+HexLit      <~~ push(makeConst(hexAt(up.in, 2, up.in.length - 2))) ~~>
             = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
-
-DecLit      <~~ push(makeNum(parseFloat(up.in))) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
-
-Id          = ( "a"..."z" | "A"..."Z" | "_" | "$" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" } :whitespace(Whitespace) ;
 
 // The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
 KwVar       = ( "var" | "let" | "const" ) KwEnd ;
@@ -254,23 +247,6 @@ KwTypeof    = "typeof" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
 KwDefault   = "default" KwEnd ;
-
-KwEnd = :script(~~
-    (function() {
-        var cc = c.peek(0)
-        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))
-            ? abnf.newToken("\x01keyword-boundary", 0)
-            : undefined
-    })()
-~~) ;
-
-Whitespace  = { @+" \t\r\n" | Comment } ;
-Comment     = LineComment | BlockComment ;
-LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
-BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
-NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
-NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
-NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 // ---
 
@@ -365,8 +341,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // ----- Expression thunks: function() -> value -----
 
-    function makeNum(n) { return function() { return n } }
-    function makeStr(s) { return function() { return s } }
     makeNeg = function(t) { return function() { return -t() } }
     function makeBitNot(t) { return function() { return ~t() } }
     function makeTypeof(t) { return function() { return typeof t() } }

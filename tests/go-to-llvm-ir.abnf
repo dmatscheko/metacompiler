@@ -48,6 +48,13 @@ The same language with the same semantics is interpreted directly by go-interpre
 
 // --- main rules
 
+// Shared token productions (tests/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
@@ -206,7 +213,7 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | StringLit | IntLit | True | False | FuncLit | SliceLit
+Primary     = "(" Expression ")" | DqString | IntLit | True | False | FuncLit | SliceLit
             | MapLit | MakeMap | StructLit | Call | VarRef ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
@@ -237,29 +244,8 @@ StructLit   <~~ push(makeStructLit(takeAll())) ~~>
 Call        <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
 
-StringLit   = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
-StrEsc      = "\\" "\x20"..b"\x7e" ;
-DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
-
-IntLit      <~~ push(makeConst(parseInt(up.in))) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
-
-True        <~~ push(makeConst(true)) ~~>  = "true" KwEnd ;
-False       <~~ push(makeConst(false)) ~~> = "false" KwEnd ;
-
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
-
-Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
-
-KwEnd = :script(~~
-    (function() {
-        var cc = c.peek(0)
-        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
-            ? abnf.newToken("\x01keyword-boundary", 0)
-            : undefined
-    })()
-~~) ;
 
 // The composite literal gate: while an if/for header is being parsed (CondOn pushed
 // a marker on the parser stack), StructGate fails, so 'if ok {' never starts a literal.
@@ -278,14 +264,6 @@ StructGate = :script(~~
         return (t == "$nostruct") ? abnf.newToken("\x01no-composite-literal-in-header", 0) : undefined
     })()
 ~~) ;
-
-Whitespace  = { @+" \t\r\n" | Comment } ;
-Comment     = LineComment | BlockComment ;
-LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
-BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
-NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
-NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
-NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 // ---
 

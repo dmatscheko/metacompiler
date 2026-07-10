@@ -1,0 +1,7 @@
+// Number literals as makeConst thunks: IntLit (integers only) and DecLit
+// (optional decimal fraction, e.g. Python and MetaJS). Expects Whitespace.
+
+IntLit      <~~ push(makeConst(parseInt(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+DecLit   <~~ push(makeConst(parseFloat(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;

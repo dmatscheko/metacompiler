@@ -1,0 +1,5 @@
+// The lowercase boolean literals as makeConst thunks. Expects KwEnd (from
+// lib/ident.abnf, lib/ident-dollar.abnf or the including grammar).
+
+True        <~~ push(makeConst(true)) ~~>  = "true" KwEnd ;
+False       <~~ push(makeConst(false)) ~~> = "false" KwEnd ;

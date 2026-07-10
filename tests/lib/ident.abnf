@@ -1,0 +1,13 @@
+// Identifiers and the keyword boundary: a keyword production ends with KwEnd,
+// which fails (via the impossible-token trick) when the next byte would extend
+// the word, so 'iffy' or 'variable' stay identifiers. Expects Whitespace.
+
+Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;

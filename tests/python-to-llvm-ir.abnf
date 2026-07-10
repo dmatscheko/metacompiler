@@ -50,6 +50,11 @@ python-interpreter.abnf.") ;
 
 // --- main rules
 
+// Shared token productions (tests/lib).
+:include("lib/ident.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
@@ -148,7 +153,7 @@ SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FString | StringLit | NumberLit | True | False | None
+Primary     = "(" Expression ")" | FString | StringLit | DecLit | True | False | None
             | ListComp | ListLit | DictLit | VarRef ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
@@ -178,15 +183,6 @@ ListLit     <~~ push(makeList(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
 
 StringLit   = DqString | SqString ;
-DqString    = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
-SqString    = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
-StrEsc      = "\\" "\x20"..b"\x7e" ;
-DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
-SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
-
-NumberLit   <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
-
 True        <~~ push(makeConst(true)) ~~>      = "True" KwEnd ;
 False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
 None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
@@ -194,21 +190,10 @@ None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
-Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
-
 // A logical line break: one or more newlines (blank and comment lines collapse,
 // because the whitespace skip eats spaces and # comments), or the end of the file.
 NL          = RealNL | AtEOF ;
 RealNL      = "\n" { "\n" } ;
-
-KwEnd = :script(~~
-    (function() {
-        var cc = c.peek(0)
-        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
-            ? abnf.newToken("\x01keyword-boundary", 0)
-            : undefined
-    })()
-~~) ;
 
 AtEOF = :script(~~
     (function() {

@@ -33,6 +33,10 @@ programs are self checking: they return 0 on success.") ;
 
 // --- main rules
 
+// Shared token productions (tests/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident.abnf") ;
+
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
@@ -236,8 +240,6 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 Number      <~~ push(parseInt(up.in)) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
-Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
-
 TypeInt     = "int" KwEnd ;
 KwStruct    = "struct" KwEnd ;
 KwIf        = "if" KwEnd ;
@@ -251,23 +253,6 @@ KwContinue  = "continue" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
 KwDefault   = "default" KwEnd ;
-
-KwEnd = :script(~~
-    (function() {
-        var cc = c.peek(0)
-        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
-            ? abnf.newToken("\x01keyword-boundary", 0)
-            : undefined
-    })()
-~~) ;
-
-Whitespace  = { @+" \t\r\n" | Comment } ;
-Comment     = LineComment | BlockComment ;
-LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
-BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
-NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
-NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
-NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 // ---
 

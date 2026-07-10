@@ -1,0 +1,10 @@
+// Double and single quoted string literals with backslash escapes; the value
+// arrives as a makeConst thunk after unescapeJs (both from the tag-script
+// libs). The escape pair is tried before the plain chars, so \" and \\ do
+// not end the string early. Expects Whitespace.
+
+DqString    = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+SqString    = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+StrEsc      = "\\" "\x20"..b"\x7e" ;
+DqPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;

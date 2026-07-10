@@ -212,8 +212,21 @@ C's arena addressing) stays in the grammar file as a plain-assignment override o
 library name (never a `function` declaration: the two engines install those in opposite
 order relative to the include). The freezer inlines the emitter library's `include()`
 lines into the bootstrap snapshot, so `-freeze` keeps working and the snapshot stays
-self contained. TinyC, Lisp, Calculator and Brainfuck share almost nothing with the
-libs and remain deliberately self-contained.
+self contained.
+
+The same grammars also share their token PRODUCTIONS via grammar level `:include()`
+fragments in `tests/lib`: cstyle-comments.abnf (whitespace with // and /* */),
+ident.abnf / ident-dollar.abnf (identifiers and the KwEnd keyword boundary, with and
+without '$'), dq-strings.abnf (quoted strings with escapes), numbers.abnf (IntLit and
+DecLit) and bools.abnf - each a handful of productions whose tags call the shared
+makeConst/unescapeJs builders, so one fragment serves interpreters and compilers of
+every language alike. Fragments reference the names Whitespace and KwEnd as
+'expected names' that the including grammar (or a sibling fragment) provides; a name
+defined twice is a hard error, so porting mistakes fail loudly. Note that :include()
+resolves its path when the grammar is USED, relative to the parsed input file - which
+works here because the test inputs live next to the grammars - and the freezer
+inlines grammar includes the same way as script includes. TinyC, Lisp, Calculator and
+Brainfuck share almost nothing with the libs and remain deliberately self-contained.
 
 Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
 ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck-parser.bnf and tinyc-parser.bnf as syntax

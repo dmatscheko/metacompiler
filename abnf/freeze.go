@@ -47,6 +47,15 @@ func Freeze(grammarPath string, outDir string) error {
 		return err
 	}
 	src := string(dat)
+	// Grammar level :include() resolves relative to the INPUT file when the
+	// a-grammar is used, but the bootstrap program is parsed under a pseudo
+	// name without a directory - so the freezer inlines the fragments here,
+	// which also makes the serialized grammar self contained.
+	src, err = inlineDirectives(src, filepath.Dir(grammarPath),
+		regexp.MustCompile(`(?m)^[ \t]*:include\("([^"]*)"\)[ \t]*;[ \t]*$`), ":include")
+	if err != nil {
+		return err
+	}
 
 	opts := &Parseropts{PreventDefaultOutput: true}
 	asg, err := ParseWithAgrammar(AbnfAgrammar, src, grammarPath, opts)
@@ -176,21 +185,28 @@ func Freeze(grammarPath string, outDir string) error {
 // file's content, paths relative to dir (the grammar file's directory, the
 // same base that the runtime include() uses).
 func inlineIncludes(src string, dir string) (string, error) {
-	re := regexp.MustCompile(`(?m)^[ \t]*include\("([^"]*)"\)[ \t]*$`)
+	return inlineDirectives(src, dir,
+		regexp.MustCompile(`(?m)^[ \t]*include\("([^"]*)"\)[ \t]*$`), "include")
+}
+
+// inlineDirectives replaces every whole line matched by re (group 1 = the file
+// name, resolved relative to dir) with that file's content, repeatedly, so
+// nested includes expand too.
+func inlineDirectives(src string, dir string, re *regexp.Regexp, what string) (string, error) {
 	for depth := 0; ; depth++ {
 		m := re.FindStringSubmatchIndex(src)
 		if m == nil {
 			return src, nil
 		}
 		if depth > 16 {
-			return "", fmt.Errorf("include() nesting deeper than 16 levels (cycle?)")
+			return "", fmt.Errorf("%s() nesting deeper than 16 levels (cycle?)", what)
 		}
 		name := src[m[2]:m[3]]
 		dat, err := ioutil.ReadFile(dir + string(os.PathSeparator) + filepath.Clean(name))
 		if err != nil {
-			return "", fmt.Errorf("cannot inline include(%q): %s", name, err)
+			return "", fmt.Errorf("cannot inline %s(%q): %s", what, name, err)
 		}
-		src = src[:m[0]] + "// ----- inlined include(\"" + name + "\") -----\n" +
+		src = src[:m[0]] + "// ----- inlined " + what + "(\"" + name + "\") -----\n" +
 			string(dat) + src[m[1]:]
 	}
 }
