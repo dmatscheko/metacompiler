@@ -17,7 +17,9 @@ Expression  = Alternative ;
 Alternative = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
-Term        = Name | Group | Option | Repetition | ByteRange | Range | CharsOf | CharOf | Times | Command ;
+Term        = Name | Group | Option | Repetition | ByteRange | Range
+            | NotCharsOfByte | NotCharOfByte | NotCharsOf | NotCharOf | NotToken
+            | CharsOfByte | CharOfByte | CharsOf | CharOf | Times | Command ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
@@ -25,6 +27,13 @@ ByteRange   = Token "..b" Token ;
 Range       = Token [ "..." Token ] ;
 CharsOf     = "@+" Token ;
 CharOf      = "@" Token ;
+CharsOfByte = "@b+" Token ;
+CharOfByte  = "@b" Token ;
+NotCharsOf  = "!@+" Token ;
+NotCharOf   = "!@" Token ;
+NotCharsOfByte = "!@b+" Token ;
+NotCharOfByte  = "!@b" Token ;
+NotToken    = "!" Token ;
 Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
 
 CmdNumber   = Number | Command ;
@@ -36,8 +45,11 @@ Name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whit
 CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
 Token       = Dquotetoken | Squotetoken ;
-Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(Whitespace) ;
-Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } "'" :whitespace(Whitespace) ;
+// The escape pair (backslash plus any printable char) is consumed as a whole and tried
+// first, so neither an escaped quote nor a \\ can end the token early.
+Dquotetoken = '"' :whitespace() { TokenEsc | AsciiNoQs | "'" } '"' :whitespace(Whitespace) ;
+Squotetoken = "'" :whitespace() { TokenEsc | AsciiNoQs | '"' } "'" :whitespace(Whitespace) ;
+TokenEsc    = "\\" "\x20"..b"\x7e" ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;

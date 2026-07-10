@@ -1,0 +1,54 @@
+:title("Negation and byte set test") ;
+:description("Checks the char set family and the negative lookahead against a fixed input:
+@+ (a run of set chars), !@+ (a run of anything else), @b and !@b (the byte versions,
+demonstrated by taking a two byte UTF8 char apart), and !'token' (the lookahead that
+makes 'if' match without swallowing the start of 'ifx'). The escaped quote \"inside\"
+this description is part of the test too. The start script compares every captured
+piece; the run exits 0 exactly when all of them are right.") ;
+
+
+:startRule(S) ;
+:whitespace() ;
+
+S       = Word "-" Digits ";" B1 B2 ":" Sel " " Sel "." Last " " Quote ;
+
+// A run of everything that is not a minus (rune complement).
+Word    = !@+"-" <~~ push(up.in) ~~> ;
+
+// A run of set chars.
+Digits  = @+"0123456789" <~~ push(up.in) ~~> ;
+
+// The two bytes of the UTF8 char 'e acute' (0xc3 0xa9), matched one byte at a time.
+B1      = @b"\xc3" <~~ push("b1") ~~> ;
+B2      = @b"\xa9" <~~ push("b2") ~~> ;
+
+// The lookahead makes the keyword branch fail on 'ifx', so the identifier branch wins.
+Sel     = KwIf | Ident ;
+KwIf    = ( "if" !"x" ) <~~ push("kw") ~~> ;
+Ident   = @+"abcdefghijklmnopqrstuvwxyz" <~~ push("id:" + up.in) ~~> ;
+
+// One byte that is not a dot (byte complement).
+Last    = !@b"." <~~ push("last:" + up.in) ~~> ;
+
+// The fixed escape order: a double quoted token may contain \" now.
+Quote   = "say \"hi\"" <~~ push("quote") ~~> ;
+
+
+:startScript(~~
+    var res = c.compile(c.asg)
+    var got = res.stack
+    var want = ["abc", "123", "b1", "b2", "kw", "id:ifx", "last:z", "quote"]
+    var fails = 0
+    if (got.length != want.length) {
+        println("FAIL count: got " + got.length + " want " + want.length)
+        fails++
+    }
+    for (var i = 0; i < want.length && i < got.length; i++) {
+        if (got[i] !== want[i]) {
+            println("FAIL " + i + ": got " + got[i] + " want " + want[i])
+            fails++
+        }
+    }
+    if (fails == 0) { println("negation test passed") }
+    exit(fails)
+~~) ;

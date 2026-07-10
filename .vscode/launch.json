@@ -245,6 +245,12 @@
             "program": "${workspaceFolder}","args": ["-a", "tests/llvm-ir-tests.abnf"]
         },
         {
+            "name": "Negation Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "tests/negation-test.abnf", "-b", "tests/negation-test.txt", "-q"]
+        },
+        {
             "name": "TLV Test",
             "type": "go",
             "request": "launch",

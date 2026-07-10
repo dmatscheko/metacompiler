@@ -191,7 +191,8 @@ non-undefined value (enforced by both engines; typed-metajs-fail-test.js demonst
 Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
 ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck-parser.bnf and tinyc-parser.bnf as syntax
 only variants), the feature
-demos (tlv-test, parser-script-test, include-test, parse-and-compile-from-js, llvm-ir-tests),
+demos (tlv-test, parser-script-test, include-test, parse-and-compile-from-js, llvm-ir-tests,
+negation-test for the ! and @b forms),
 and two grammars that deliberately fail to demonstrate the parser limits
 (smaller-match-first-test, infinite-loop).
 
@@ -341,7 +342,9 @@ Production  = name "=" [ Expression ] ";" ;
 Expression  = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
-Term        = name | Group | Option | Repetition | ByteRange | Range | CharsOf | CharOf | Times | Command ;
+Term        = name | Group | Option | Repetition | ByteRange | Range
+            | NotCharsOfByte | NotCharOfByte | NotCharsOf | NotCharOf | NotToken
+            | CharsOfByte | CharOfByte | CharsOf | CharOf | Times | Command ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
@@ -349,6 +352,13 @@ ByteRange   = token "..b" token ;
 Range       = token [ "..." token ] ;
 CharsOf     = "@+" token ;
 CharOf      = "@" token ;
+CharsOfByte = "@b+" token ;
+CharOfByte  = "@b" token ;
+NotCharsOf  = "!@+" token ;
+NotCharOf   = "!@" token ;
+NotCharsOfByte = "!@b+" token ;
+NotCharOfByte  = "!@b" token ;
+NotToken    = "!" token ;
 Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
 
 CmdNumber   = number | Command ;
@@ -367,6 +377,9 @@ Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | nu
 * `Range` with only one parameter is the same as a `token`. `Range` when used as two `token` with the `...` between, defines that the a char between (and including) the two `token` should be in the target text. That char can be any UTF8 symbol and therefore can use more than one byte.
 * `CharOf` is not strictly necessary but shortens some EBNF quite a lot. It stands for any one of the UTF8-chars of the `token`. Exactly one of the chars has to be in the target text.
 * `CharsOf` is the same as `CharOf`, but the chars contained in the `token` can occour in any order from zero to infinite times. At least one char has to be in the target text.
+* `CharOfByte` (`@b`) and `CharsOfByte` (`@b+`) are the byte versions of `CharOf` and `CharsOf`: they compare single bytes instead of UTF8 chars (useful for binary formats, like the `..b` byte range).
+* All four set forms can be prefixed with `!` (`!@`, `!@+`, `!@b`, `!@b+`): they then match exactly the chars (or bytes) that are NOT in the `token`. `!@"\n"` is one char of anything but a line feed, `!@+"<>"` is a whole run without angle brackets.
+* `NotToken` (`!token`) is a negative lookahead: it matches _without consuming anything_ when the token does NOT match at the current position. `"if" !"fy"` accepts `if` but not the start of `iffy`.
 * `Times` is a number, or a number and `...`, or a number and `...` and another number. Each of the three options followed by a `Group`.
   * __number ( Expression )__: The Expression must occur exactly _number_ times.
   * __number ... ( Expression )__: The Expression must occur _number_ to infinite times.
@@ -388,7 +401,9 @@ Expression  = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
 Term        = TaggedTerm | Command ;
-TaggedTerm  = ( name | Group | Option | Repetition | ByteRange | Range | CharsOf | CharOf | Times ) [ Tag ] ;
+TaggedTerm  = ( name | Group | Option | Repetition | ByteRange | Range
+              | NotCharsOfByte | NotCharOfByte | NotCharsOf | NotCharOf | NotToken
+              | CharsOfByte | CharOfByte | CharsOf | CharOf | Times ) [ Tag ] ;
 
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
@@ -397,6 +412,13 @@ ByteRange   = token "..b" token ;
 Range       = token [ "..." token ] ;
 CharsOf     = "@+" token ;
 CharOf      = "@" token ;
+CharsOfByte = "@b+" token ;
+CharOfByte  = "@b" token ;
+NotCharsOf  = "!@+" token ;
+NotCharOf   = "!@" token ;
+NotCharsOfByte = "!@b+" token ;
+NotCharOfByte  = "!@b" token ;
+NotToken    = "!" token ;
 Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
 
 CmdNumber   = number | Command ;
@@ -419,8 +441,11 @@ This is the definition of `name` and `token`, of `number`, and of `whitespace`:
 name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(whitespace) ;
 
 token       = Dquotetoken | Squotetoken | Code ;
-Dquotetoken = '"' :whitespace() { AsciiNoQs | "'" | '\\"' } '"' :whitespace(whitespace) ;
-Squotetoken = "'" :whitespace() { AsciiNoQs | '"' | "\\'" } "'" :whitespace(whitespace) ;
+// The escape pair (backslash plus any printable char) is consumed as a whole and tried
+// first, so neither an escaped quote nor a \\ can end the token early.
+Dquotetoken = '"' :whitespace() { TokenEsc | AsciiNoQs | "'" } '"' :whitespace(whitespace) ;
+Squotetoken = "'" :whitespace() { TokenEsc | AsciiNoQs | '"' } "'" :whitespace(whitespace) ;
+TokenEsc    = "\\" "\x20"..b"\x7e" ;
 Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(whitespace) ;
 
 number      = "0" | "1"..."9" { "0"..."9" } ;
