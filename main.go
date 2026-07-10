@@ -15,7 +15,7 @@ import (
 
 // TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).
 // TODO: Define an :EOF() symbol for the EBNF syntax.
-// TODO: aaaa (unknown Name does not create error. E.g. as alternative or as parameter to parser commands or tags) (implement verifier like the one from earlier).
+// An unknown Name still resolves to the -1 marker at parse time instead of a clear error up front; the -verify flag (abnf/verifier.go) reports such names (also those used as command parameters or in tags) before a run.
 // TODO: add -c -d , ... to the cmd line
 
 // rule == production | expression | term.
@@ -59,6 +59,8 @@ func main() {
 
 	param_freeze := flag.String("freeze", "", "Create the frozen MetaJS bootstrap snapshot from the given metajs-to-llvm-ir grammar (writes abnf/jsagrammar.go and abnf/jsbootstrap.ll, then rebuild)")
 	param_frozen := flag.Bool("frozen", false, "Run all annotation scripts goja free: parse them with the frozen a-grammar, compile them with the frozen bootstrap on the IR machine, and execute the emitted IR")
+
+	param_verify := flag.Bool("verify", false, "Lint the -a grammar: report used-but-undefined names (error) and defined-but-unreachable productions (warning), then exit without running the program")
 
 	param_cfg := flag.String("cfg", "", "Write the control flow graph of every executed IR module to this file (Graphviz DOT; Mermaid when the name ends in .mmd)")
 	param_traceOut := flag.String("trace", "", "Stream the runtime events of compiled programs (llvm.RunJS) to this file as JSON lines; also the input file of -render")
@@ -203,6 +205,44 @@ func main() {
 	}
 	if *param_verbose_Ac || *param_trace_Ac {
 		fmt.Fprintf(os.Stderr, "   => a-grammar:  %s\n\n", aGrammar.Serialize())
+	}
+
+	// -verify: lint the a-grammar and exit (do not run the program). The grammar
+	// must be assembled first - a parse merges any :include() fragments into it in
+	// place (its setup phase runs before matching, and ParseWithAgrammar recovers
+	// from a failed match), so an empty target is enough when no -b was given.
+	if *param_verify {
+		ownNames := abnf.ProductionNames(aGrammar) // Before assembly: the grammar's own productions.
+		// Assemble the grammar (merge :include() fragments) only if it has any.
+		// A parse triggers the merge, but it also runs the grammar - which would
+		// diverge or overflow on a pathological (e.g. left-recursive) grammar, so
+		// it is skipped when there is nothing to include.
+		if abnf.HasInclude(aGrammar) {
+			abnf.ParseWithAgrammar(aGrammar, srcB, *param_b, parseropts)
+		}
+		issues := abnf.Verify(aGrammar, srcA, ownNames)
+		errors := 0
+		for _, iss := range issues {
+			where := ""
+			if iss.Line > 0 {
+				where = fmt.Sprintf("%s:%d: ", *param_a, iss.Line)
+			}
+			tag := "warning"
+			if iss.IsError() {
+				tag = "error"
+				errors++
+			}
+			fmt.Fprintf(os.Stderr, "%s%s: %s\n", where, tag, iss.Message())
+		}
+		if len(issues) == 0 {
+			fmt.Fprintf(os.Stderr, "%s: verified, no issues.\n", *param_a)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s: %d issue(s), %d error(s).\n", *param_a, len(issues), errors)
+		}
+		if errors > 0 {
+			os.Exit(1)
+		}
+		return
 	}
 
 	// Part B:

@@ -344,6 +344,28 @@ merge into one node (class attribution is a planned refinement). The flags
 default to off and change nothing when unused; interpreter-grammar runs and a
 stepper are the planned next layers.
 
+#### Grammar linting (-verify)
+
+`-verify` checks a grammar for name consistency without running it and exits
+(it does not process a target file):
+
+```
+./mec -a languages/java-interpreter.abnf -verify
+```
+
+It reports two things, each with the source line: **undefined** names - an
+identifier used with no production defining it (a typo, or a missing
+`:include()`); this is an error and exits non-zero - and **unreachable**
+productions - defined but never reached from the start rule through identifiers
+(a warning). Reachability seeds from the start rule and from command parameters
+like `:whitespace(Whitespace)`, so a whole whitespace/comment sub-grammar counts
+as reached. Grammars that pull in shared `:include()` fragments are assembled
+first (the fragments define more than any one language uses, so only the
+grammar's own productions are reported as unreachable); startScript-driven
+grammars with no `:startRule()` skip the reachability check. It is the modern
+successor of an old standalone verifier, rewritten to walk the current
+a-grammar by name (it resolves nothing and mutates nothing).
+
 ### High level overview
 
 There are two basic components: A __parser__ and a __compiler__.
