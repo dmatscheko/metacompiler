@@ -300,41 +300,9 @@ KwStep      = "step" KwEnd ;
     // Prefixes the runtime already provides as builtins; importing them is a no-op.
     core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences"]
 
-    function stripWs(s) {
-        var out = ""
-        for (var i = 0; i < s.length; i++) {
-            var cc = s.charCodeAt(i)
-            if (cc != 32 && cc != 9 && cc != 10 && cc != 13) { out = out + s.charAt(i) }
-        }
-        return out
-    }
-    function importResolvable(path) {
-        var p = path
-        if (p.length >= 2 && p.slice(p.length - 2) == ".*") { p = p.slice(0, p.length - 2) }
-        for (var i = 0; i < core.stdlibImports.length; i++) {
-            var pref = core.stdlibImports[i]
-            if (p == pref) { return true }
-            if (p.slice(0, pref.length + 1) == pref + ".") { return true }
-        }
-        return false
-    }
-    function resolveImport(path, pos) {
-        path = stripWs(path)
-        if (importResolvable(path)) { return }
-        var where = c.file + ":" + c.lineOf(pos)
-        if (c.warnImports) { println("kotlin: warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
-        fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
-    }
-
-    // ----- Not-implemented syntax (mirrors kotlin-to-llvm-ir.abnf; interpreter
-    // thunks are function()->value / function()->signal) -----
-    function notImpl(construct, pos) {
-        var where = c.file + ":" + c.lineOf(pos)
-        if (c.warnUnsupported) { println("kotlin: warning: " + where + ": " + construct + " not implemented (ignored)"); return }
-        fail(construct + " not implemented (" + where + "); use -warn-unsupported to ignore")
-    }
-    function notImplStmt(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
-    function notImplExpr(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
+    // stripWs, importResolvable, resolveImport and the notImpl / notImplStmt /
+    // notImplExpr family now live in lib/interp-core.js (shared). This grammar sets
+    // core.stdlibImports (above) and keeps the Kotlin-specific builders below.
     function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
     function makeThrow(e, pos) { notImpl("throw", pos); return exprToStmt(e) }
     function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function() { operand(); return undefined } }

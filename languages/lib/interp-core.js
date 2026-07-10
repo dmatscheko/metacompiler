@@ -47,6 +47,54 @@ function fail(msg) {
     exit(1)
 }
 
+// ----- Imports & not-implemented syntax (shared policy; see language-widening) -----
+// A grammar wires these to its Package/Import/Type-op/... productions and sets the
+// resolvable prefixes in core.stdlibImports. Source positions come from c.file /
+// c.lineOf(up.pos); the -warn-imports / -warn-unsupported flags arrive as
+// c.warnImports / c.warnUnsupported.
+
+// stripWs removes all whitespace from a dotted import path.
+function stripWs(s) {
+    var out = ""
+    for (var i = 0; i < s.length; i++) {
+        var cc = s.charCodeAt(i)
+        if (cc != 32 && cc != 9 && cc != 10 && cc != 13) { out = out + s.charAt(i) }
+    }
+    return out
+}
+// True when path (or its package prefix, ignoring a trailing .*) is a builtin the
+// runtime already provides (core.stdlibImports is the per-language resolvable set).
+function importResolvable(path) {
+    var p = path
+    if (p.length >= 2 && p.slice(p.length - 2) == ".*") { p = p.slice(0, p.length - 2) }
+    for (var i = 0; i < core.stdlibImports.length; i++) {
+        var pref = core.stdlibImports[i]
+        if (p == pref) { return true }
+        if (p.slice(0, pref.length + 1) == pref + ".") { return true }
+    }
+    return false
+}
+// Resolvable imports are ignored (already provided); an unresolvable one aborts,
+// or warns and continues under -warn-imports.
+function resolveImport(path, pos) {
+    path = stripWs(path)
+    if (importResolvable(path)) { return }
+    var where = c.file + ":" + c.lineOf(pos)
+    if (c.warnImports) { println("warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
+    fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
+}
+// A construct that parsed but cannot be lowered. Default: abort with a clean
+// file:line message; under -warn-unsupported warn and let the caller place a
+// placeholder so the rest still runs (enough for call graphs / CFGs / traces).
+function notImpl(construct, pos) {
+    var where = c.file + ":" + c.lineOf(pos)
+    if (c.warnUnsupported) { println("warning: " + where + ": " + construct + " not implemented (ignored)"); return }
+    fail(construct + " not implemented (" + where + "); use -warn-unsupported to ignore")
+}
+// Placeholders - interpreter thunks are function() -> value / signal.
+function notImplStmt(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
+function notImplExpr(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
+
 function declVar(name, value) { if (name != core.blank) scopes[scopes.length - 1][name] = value }
 
 function setVar(name, value) {

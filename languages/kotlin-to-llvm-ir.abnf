@@ -323,48 +323,11 @@ KwStep      = "step" KwEnd ;
     // no-op. Anything else is an external library we cannot resolve.
     core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences"]
 
-    function stripWs(s) {
-        var out = ""
-        for (var i = 0; i < s.length; i++) {
-            var cc = s.charCodeAt(i)
-            if (cc != 32 && cc != 9 && cc != 10 && cc != 13) { out = out + s.charAt(i) }
-        }
-        return out
-    }
-    // True when path (or its package prefix, ignoring a trailing .*) is a builtin.
-    function importResolvable(path) {
-        var p = path
-        if (p.length >= 2 && p.slice(p.length - 2) == ".*") { p = p.slice(0, p.length - 2) }
-        for (var i = 0; i < core.stdlibImports.length; i++) {
-            var pref = core.stdlibImports[i]
-            if (p == pref) return true
-            if (p.slice(0, pref.length + 1) == pref + ".") return true
-        }
-        return false
-    }
-    // Policy: resolvable imports are ignored (already provided); an unresolvable
-    // one aborts, or warns and continues under -warn-imports (c.warnImports).
-    function resolveImport(path, pos) {
-        path = stripWs(path)
-        if (importResolvable(path)) { return }
-        var where = c.file + ":" + c.lineOf(pos)
-        if (c.warnImports) { println("kotlin: warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
-        fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
-    }
+    // stripWs, importResolvable, resolveImport and the notImpl / notImplStmt /
+    // notImplExpr family now live in lib/compile-core.js (shared by all compiler
+    // grammars). This grammar sets core.stdlibImports (above) and keeps the
+    // Kotlin-specific builders below (they call notImpl from the lib).
 
-    // ----- Not-implemented syntax -----
-    // A construct that parsed but cannot be lowered. Default: abort with a clean
-    // file:line message. Under -warn-unsupported (c.warnUnsupported): warn and let
-    // the caller drop in a placeholder, so the rest of the program still compiles
-    // (enough to build call graphs / CFGs / traces from a partly understood file).
-    function notImpl(construct, pos) {
-        var where = c.file + ":" + c.lineOf(pos)
-        if (c.warnUnsupported) { println("kotlin: warning: " + where + ": " + construct + " not implemented (ignored)"); return }
-        fail(construct + " not implemented (" + where + "); use -warn-unsupported to ignore")
-    }
-    // Placeholders: a no-op statement (pass the block through) and an undefined expression.
-    function notImplStmt(construct, pos) { notImpl(construct, pos); return function(b) { return b } }
-    function notImplExpr(construct, pos) { notImpl(construct, pos); return function(b) { return {b: b, v: hUndef} } }
     // try/catch/finally: keep the try block (its calls stay visible); drop catch/finally.
     function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
     // throw e: evaluate e (so its calls count) then fall through - no real unwinding.
