@@ -25,7 +25,7 @@ This system should allow to define and use compiler for arbitrary computer langu
       - [EBNF of EBNF](#ebnf-of-ebnf)
       - [EBNF of non-context-free EBNF](#ebnf-of-non-context-free-ebnf)
       - [EBNF of ABNF](#ebnf-of-abnf)
-      - [Common syntax](#common-syntax)
+      - [Almost Common syntax](#almost-common-syntax)
     - [Parser commands](#parser-commands)
       - [Line plus inline commands](#line-plus-inline-commands)
       - [Line commands](#line-commands)
@@ -50,6 +50,7 @@ This system should allow to define and use compiler for arbitrary computer langu
         - [Text functions](#text-functions)
         - [OperatorID Constants](#operatorid-constants)
         - [RangeType Constants](#rangetype-constants)
+        - [CharType Constants](#chartype-constants)
         - [NumberType Constants](#numbertype-constants)
       - [LLVM IR API](#llvm-ir-api)
   - [Further Examples](#further-examples)
@@ -73,7 +74,7 @@ This is a fully working calculator for addition and multiplication. It can parse
   <summary>Click to expand!</summary>
 
 ```javascript
-:title("Tiny calculator") ;
+:title("Calculator interpreter (global stack)") ;
 
 
 :startRule(Expression) ;
@@ -115,9 +116,14 @@ Factor      =
         ")"
     )
     |
+    Neg
+    |
     // The grammar allows a comma as decimal separator, parseFloat() does not.
     Number                      <~~pushg(parseFloat(up.in.replace(",", ".")))~~>
     ;
+
+// Unary minus negates the factor behind it (and '- -x' works through the recursion).
+Neg         = "-" Factor        <~~pushg(-popg())~~> ;
 
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
@@ -488,38 +494,40 @@ This system uses an EBNF syntax that is a bit more capable:
 ```javascript
 :title("EBNF of EBNF") ;
 :startRule(EBNF) ;
-:whitespace(whitespace) ;
+:whitespace(Whitespace) ;
 
 EBNF        = { Production | LineCommand } ;
-Production  = name "=" [ Expression ] ";" ;
+Production  = Name "=" [ Expression ] ";" ;
 
-Expression  = Sequence { "|" Sequence } ;
+Expression  = Alternative ;
+Alternative = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
-Term        = name | Group | Option | Repetition | ByteRange | Range
+Term        = Name | Group | Option | Repetition | ByteRange | Range
             | NotCharsOfByte | NotCharOfByte | NotCharsOf | NotCharOf | NotToken
             | CharsOfByte | CharOfByte | CharsOf | CharOf | Times | Command ;
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-ByteRange   = token "..b" token ;
-Range       = token [ "..." token ] ;
-CharsOf     = "@+" token ;
-CharOf      = "@" token ;
-CharsOfByte = "@b+" token ;
-CharOfByte  = "@b" token ;
-NotCharsOf  = "!@+" token ;
-NotCharOf   = "!@" token ;
-NotCharsOfByte = "!@b+" token ;
-NotCharOfByte  = "!@b" token ;
-NotToken    = "!" token ;
+ByteRange   = Token "..b" Token ;
+Range       = Token [ "..." Token ] ;
+CharsOf     = "@+" Token ;
+CharOf      = "@" Token ;
+CharsOfByte = "@b+" Token ;
+CharOfByte  = "@b" Token ;
+NotCharsOf  = "!@+" Token ;
+NotCharOf   = "!@" Token ;
+NotCharsOfByte = "!@b+" Token ;
+NotCharOfByte  = "!@b" Token ;
+NotToken    = "!" Token ;
 Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
 
-CmdNumber   = number | Command ;
+CmdNumber   = Number | Command ;
 
 LineCommand = Command ";" ;
-Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
+Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
 ```
+The `Name`, `Token`, `Number`, and `Whitespace` definitions are in [Almost Common syntax](#almost-common-syntax)
 
 * `:title()` is a `Command`. Those commands normally inform the parser about context, but not necessarily influence what has to be parsed in the target text (but they can). This means, the EBNF-variant that is used by this system is _not_ context free. There are commands that can be inline in an `Expression` and there are commands that have to be in their own line, terminated with semicolon (`LineCommands`). Some commands, like the `:whitespace()` command can occour either as inline command or as `LineCommand`. In the case of whitespace, this allows to change what is seen as whitespace and therefore allows to parse strings correctly.
   * The `:title()` command only describes the EBNF via a short title. There is a `:description()` command available that describes the EBNF in more detail.
@@ -546,75 +554,82 @@ Annotated EBNF basically only adds tags to the syntax of the above EBNF:
 ```javascript
 :title("EBNF of ABNF") ;
 :startRule(ABNF) ;
-:whitespace(whitespace) ;
+:whitespace(Whitespace) ;
 
 ABNF        = { Production | LineCommand } ;
-Production  = name [ Tag ] "=" [ Expression ] ";" ;
+Production  = Name [ Tag ] "=" [ Expression ] ";" ;
 
-Expression  = Sequence { "|" Sequence } ;
+Expression  = Alternative ;
+Alternative = Sequence { "|" Sequence } ;
 Sequence    = Term { Term } ;
 
-Term        = TaggedTerm | Command ;
-TaggedTerm  = ( name | Group | Option | Repetition | ByteRange | Range
+Term        = ( Name | Group | Option | Repetition | ByteRange | Range
               | NotCharsOfByte | NotCharOfByte | NotCharsOf | NotCharOf | NotToken
-              | CharsOfByte | CharOfByte | CharsOf | CharOf | Times ) [ Tag ] ;
+              | CharsOfByte | CharOfByte | CharsOf | CharOf | Times | Command ) [ Tag ] ;
 
 Group       = "(" Expression ")" ;
 Option      = "[" Expression "]" ;
 Repetition  = "{" Expression "}" ;
-ByteRange   = token "..b" token ;
-Range       = token [ "..." token ] ;
-CharsOf     = "@+" token ;
-CharOf      = "@" token ;
-CharsOfByte = "@b+" token ;
-CharOfByte  = "@b" token ;
-NotCharsOf  = "!@+" token ;
-NotCharOf   = "!@" token ;
-NotCharsOfByte = "!@b+" token ;
-NotCharOfByte  = "!@b" token ;
-NotToken    = "!" token ;
+ByteRange   = Token "..b" Token ;
+Range       = Token [ "..." Token ] ;
+CharsOf     = "@+" Token ;
+CharOf      = "@" Token ;
+CharsOfByte = "@b+" Token ;
+CharOfByte  = "@b" Token ;
+NotCharsOf  = "!@+" Token ;
+NotCharOf   = "!@" Token ;
+NotCharsOfByte = "!@b+" Token ;
+NotCharOfByte  = "!@b" Token ;
+NotToken    = "!" Token ;
 Times       = CmdNumber [ "..." ( CmdNumber | "" ) ] Group ;
 
-CmdNumber   = number | Command ;
+CmdNumber   = Number | Command ;
 
 LineCommand = Command ";" ;
-Command     = ":" name "(" [ ( name | token | number ) { "," ( name | token | number ) } ] ")" ;
+Command     = ":" CmdName "(" [ ( Name | Token | Number ) { "," ( Name | Token | Number ) } ] ")" ;
 
-Tag         = "<" ( name | token ) { "," ( name | token ) } ">" ;
+Tag         = "<" ( Name | Token ) { "," ( Name | Token ) } ">" ;
 ```
 
 * The `Tag` is always responsible for the `Term` right before it.
 
 Note: If you want to see an ABNF of an ABNF, this is here: [ABNF of ABNF to a-grammar](#abnf-of-abnf-to-a-grammar).
 
-#### Common syntax
+#### Almost Common syntax
 
-This is the definition of `name` and `token`, of `number`, and of `whitespace`:
+This is the definition of `Name` and `Token`, of `Number`, and of `Whitespace`:
 
 ```javascript
-name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(whitespace) ;
+Name        = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
+CmdName     = Alphabet :whitespace() { Alphabet | Digit | "_" } :whitespace(Whitespace) ;
 
-token       = Dquotetoken | Squotetoken | Code ;
+Token       = Dquotetoken | Squotetoken | Code ;
 // The escape pair (backslash plus any printable char) is consumed as a whole and tried
 // first, so neither an escaped quote nor a \\ can end the token early.
-Dquotetoken = '"' :whitespace() { TokenEsc | AsciiNoQs | "'" } '"' :whitespace(whitespace) ;
-Squotetoken = "'" :whitespace() { TokenEsc | AsciiNoQs | '"' } "'" :whitespace(whitespace) ;
+Dquotetoken = '"' :whitespace() { TokenEsc | AsciiNoQs | "'" } '"' :whitespace(Whitespace) ;
+Squotetoken = "'" :whitespace() { TokenEsc | AsciiNoQs | '"' } "'" :whitespace(Whitespace) ;
 TokenEsc    = "\\" "\x20"..b"\x7e" ;
-Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(whitespace) ;
-
-number      = "0" | "1"..."9" { "0"..."9" } ;
-
-whitespace  = { @+"\t\n\r " | Comment } ;
-
-Comment     = LineComment | "/*" :whitespace() { { "*" } AsciiNoStSl { "/" } } "*/" :whitespace(whitespace) ;
-LineComment = "//" :whitespace() { AsciiNoLb } ( "\n" | "\r" ) :whitespace(whitespace) ;
+Code        = '~~' :whitespace() { [ "~" ] AllButTilde } '~~' :whitespace(Whitespace) ;
 
 Alphabet    = "a"..."z" | "A"..."Z" ;
 Digit       = "0"..."9" ;
 AsciiNoQs   = "\x28"..."\x7e" | "\x23"..."\x26" | @"\t\n\r !" ; // Readable ASCII without double and single quotes.
-AsciiNoLb   = "\x20"..."\x7e" | "\t" ; // Readable ASCII without line breaks (CR and LF).
-AsciiNoStSl = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\x7e" ; // All ASCII without star (*) and slash (/).
-AllButTilde = "\x00"..."\x7d" | "\\~" | "\x7f"..."\uffff" ; // All ASCII and unicode chars. Only tilde is escaped.
+NoLinebreak = !@"\n" ;  // Any char except the line feed (using the negated set syntax).
+NoStar      = !@"*" ;   // Any char except the star.
+NoStarSlash = !@"*/" ;  // Any char except star and slash.
+AllButTilde = "\x00"..."}" | "\\~" | "\x7f"..."\U0010ffff" ; // All chars. Only tilde is escaped.
+
+Number      = "0" | "1"..."9" { "0"..."9" } ;
+
+Whitespace  = { @+"\t\n\r " | Comment } ;
+
+Comment     = LineComment | BlockComment ;
+// The body consumes stars only when they are not part of the closing */, so comments
+// like /* foo **/ close correctly.
+BlockComment = "/*" :whitespace() { NoStar | "*" { "*" } NoStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+// The line feed is consumed as ordinary whitespace, so a line comment can also end at
+// the end of the file.
+LineComment = "//" :whitespace() { NoLinebreak } :whitespace(Whitespace) ;
 ```
 
 As can be seen in the above EBNF, a `token` consists of one backslash escaped string, quoted in single or double quotes.
@@ -815,6 +830,8 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __abnf.arrayToRules(rules []object) []Rule__
 * __abnf.newRule(Operator OperatorID, String string, Int int, Pos int, Childs []Rule, CodeChilds []Rule) Rule__
 * __abnf.newToken(String string, Pos int) Rule__
+* __abnf.newTokenEscaped(String string, Pos int) Rule__  
+  Like `newToken`, but resolves the backslash escapes of `String` on the Go side, so a byte set token like `'\xff'` keeps its raw bytes instead of being mangled into U+FFFD by the JS engine.
 * __abnf.newNumber(Int int, Pos int) Rule__
 * __abnf.newIdentifier(String string, Pos int) Rule__
 * __abnf.newProduction(String string, Childs []Rule, Pos int) Rule__
@@ -828,8 +845,12 @@ The a-grammar can be built from within JS. For this, some simple builder funcion
 * __abnf.newRange(CodeChilds []Rule, RangeType int, Pos int) Rule__  
   `CodeChilds` holds the two Token `[from, to]`, `RangeType` is one of the [RangeType Constants](#rangetype-constants).
 * __abnf.newTimes(CodeChilds []Rule, Childs []Rule, Pos int) Rule__
-* __abnf.newCharOf(String string, Pos int) Rule__
-* __abnf.newCharsOf(String string, Pos int) Rule__
+* __abnf.newCharOf(Token Rule, CharType int, Pos int) Rule__  
+  One char of a set. `Token` is the set's Token *rule* (pass the rule, not its string, so raw bytes survive the JS engine), `CharType` is a combination of the [CharType Constants](#chartype-constants).
+* __abnf.newCharsOf(Token Rule, CharType int, Pos int) Rule__  
+  Like `newCharOf`, but matches a maximal run of set chars.
+* __abnf.newNot(Childs []Rule, Pos int) Rule__  
+  Negative lookahead: `Childs` holds exactly one rule; the Not matches with zero width when that rule does **not** match at the current position.
 * __correctReferencesAndIDs(agrammar []Rule)__ (a global function, not part of `abnf.*`)  
 This fills the array position of `Productions` into their `Identifier` (-1 if the production does not exist). It also identifies each different `Tag` with another UID. The array positions of the productions and the UIDs of the Tags are stored in the rules Int field. This method must be used on newly created a-grammars, if they are directly used for compilation. The parser applies this method automatically.
 
@@ -863,19 +884,32 @@ Returns the description of the a-grammar.
 * __abnf.oid.Sequence__
 * __abnf.oid.Group__
 * __abnf.oid.Token__
+* __abnf.oid.Number__
 * __abnf.oid.Or__
 * __abnf.oid.Optional__
 * __abnf.oid.Repeat__
 * __abnf.oid.Range__
-* __abnf.oid.SkipSpace__
+* __abnf.oid.Times__
 * __abnf.oid.Tag__
+* __abnf.oid.Command__
+* __abnf.oid.CharOf__
+* __abnf.oid.CharsOf__
+* __abnf.oid.Not__
 * __abnf.oid.Production__
-* __abnf.oid.Ident__
+* __abnf.oid.Identifier__
 
 ##### RangeType Constants
 
 * __abnf.rangeType.Rune__
 * __abnf.rangeType.Byte__
+
+##### CharType Constants
+
+Flags for the `CharType` argument of `newCharOf` / `newCharsOf` (combine with `|`):
+
+* __abnf.charType.Rune__ — match one UTF8 char of the set (the default, the `@` / `@+` forms).
+* __abnf.charType.Byte__ — match a single byte instead (the `@b` / `@b+` forms).
+* __abnf.charType.Negated__ — match the chars _not_ in the set (the `!@` forms).
 
 ##### NumberType Constants
 

@@ -320,7 +320,7 @@
             "name": "Speed Test",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/abnf-of-abnf.abnf", "languages/abnf-of-abnf.abnf", "-s"]
+            "program": "${workspaceFolder}","args": ["languages/abnf-of-abnf.abnf", "-speed", "200"]
         },
 
     ]

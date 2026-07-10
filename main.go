@@ -42,7 +42,7 @@ import (
 //                (from a -trace run) or static (from a -callgraph run)
 //  -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
 //  -lb, -lf      parser block-list / found-list (debugging aids)
-//  -s            speed test (100 cycles on the first file)
+//  -speed N      speed test: warm up once, then time N parse+compile cycles of the first file
 
 // options is the parsed command line.
 type options struct {
@@ -56,6 +56,7 @@ type options struct {
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
 	speedTest, useBlockList, useFoundList bool
+	speedCount                            int // Timed cycle count for -speed (>0 when set).
 
 	freezePath, cfgPath, tracePath, callgraphPath, renderKind string
 }
@@ -100,8 +101,15 @@ func parseArgs(args []string) (*options, error) {
 			o.verify = true
 		case "-pretty":
 			o.pretty = true
-		case "-s":
-			o.speedTest = true
+		case "-speed":
+			var v string
+			if v, err = takeVal(); err == nil {
+				n, serr := strconv.Atoi(v)
+				if serr != nil || n < 1 {
+					return nil, fmt.Errorf("flag -speed needs a positive integer cycle count, got %q", v)
+				}
+				o.speedTest, o.speedCount = true, n
+			}
 		case "-lb":
 			o.useBlockList = true
 		case "-lf":
@@ -228,7 +236,7 @@ func main() {
 	}
 
 	if o.speedTest {
-		speedtest(srcs[0], o.files[0], 100, o.useBlockList, o.useFoundList)
+		speedtest(srcs[0], o.files[0], o.speedCount, o.useBlockList, o.useFoundList)
 		return
 	}
 
@@ -388,49 +396,58 @@ anywhere among the files.
                 run) or static (from a -callgraph run)
   -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
   -lb, -lf      parser block-list / found-list debugging aids
-  -s            speed test (100 cycles on the first file)
+  -speed N      speed test: warm up once, then time N parse+compile cycles of the first file
 `)
 }
 
-func speedtest(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {
+// speedtest benchmarks the metacompiler on the first file. It parses and
+// compiles the file once as an untimed warm-up (so engine init, lazy caches and
+// the one-off goja tag-script compile stay out of the numbers), then times only
+// the repeated cycles: N parses, then N compiles of the pre-parsed ASG. The
+// result therefore reflects steady-state throughput, not the program start-up or
+// the file I/O.
+func speedtest(src, fileName string, count int, useBlockList, useFoundList bool) {
 	parseropts := &abnf.Parseropts{
 		UseBlockList:         useBlockList,
 		UseFoundList:         useFoundList,
 		TraceEnabled:         false,
 		PreventDefaultOutput: true,
 	}
-	speedtestParseWithGrammar(srcA, fileNameA, count, parseropts)
-	speedtestCompileASG(srcA, fileNameA, count, parseropts)
+
+	// Warm up once, untimed.
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, src, fileName, parseropts)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Speed test: parse failed:", err)
+		return
+	}
+	if _, err = abnf.CompileASG(asg, abnf.AbnfAgrammar, fileName, 0, false, true); err != nil {
+		fmt.Fprintln(os.Stderr, "Speed test: compile failed:", err)
+		return
+	}
+
+	// Time N parse cycles.
+	start := time.Now()
+	for i := 0; i < count; i++ {
+		if asg, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, src, fileName, parseropts); err != nil {
+			fmt.Fprintln(os.Stderr, "Speed test: parse failed:", err)
+			return
+		}
+	}
+	reportSpeed("Parse", time.Since(start), count)
+
+	// Time N compile cycles on the ASG from the last parse.
+	start = time.Now()
+	for i := 0; i < count; i++ {
+		if _, err = abnf.CompileASG(asg, abnf.AbnfAgrammar, fileName, 0, false, true); err != nil {
+			fmt.Fprintln(os.Stderr, "Speed test: compile failed:", err)
+			return
+		}
+	}
+	reportSpeed("Compile", time.Since(start), count)
 	fmt.Fprintln(os.Stderr)
 }
-func timeTrack(start time.Time, name string) {
-	elapsed := time.Since(start)
-	fmt.Fprintf(os.Stderr, "%s took %s\n", name, elapsed)
-}
 
-func speedtestParseWithGrammar(srcA, fileNameA string, count int, parseropts *abnf.Parseropts) {
-	var err error
-	defer timeTrack(time.Now(), "ParseWithGrammar")
-	for i := 0; i < count; i++ {
-		_, err = abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, parseropts)
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
-		return
-	}
-}
-func speedtestCompileASG(srcA, fileNameA string, count int, parseropts *abnf.Parseropts) {
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, fileNameA, parseropts)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error ParseWithGrammar")
-		return
-	}
-	defer timeTrack(time.Now(), "CompileASG")
-	for i := 0; i < count; i++ {
-		_, err = abnf.CompileASG(asg, abnf.AbnfAgrammar, fileNameA, 0, false, true)
-	}
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error CompileASG")
-		return
-	}
+// reportSpeed prints the total and per-cycle time of a timed loop.
+func reportSpeed(name string, elapsed time.Duration, count int) {
+	fmt.Fprintf(os.Stderr, "%-8s %d cycle(s) in %s (%s/cycle)\n", name, count, elapsed, elapsed/time.Duration(count))
 }
