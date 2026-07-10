@@ -34,8 +34,8 @@ Read   = ( "," | "?" )  <~~ read() ~~> ; // The group is needed: a tag only anno
 Lparen = "["            <~~ lparen() ~~> ;
 Rparen = "]"            <~~ rparen() ~~> ;
 
-// All chars except the opcode chars > < + - . , ? [ ].
-Whitespace = { "\x00"..."\x2a" | "\x2f"..."\x3b" | "=" | "\x40"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" } ;
+// Everything that is not one of the opcode chars, as one run per iteration.
+Whitespace = { !@+"><+-.,?[]" } ;
 
 // ---
 
