@@ -280,6 +280,11 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		// True when -trace/-cfg collect source positions: the compilers then
 		// emit js_srcpos statement markers (see lib/compile-core.js stmtPos).
 		"tracing": TraceMarkersWanted(),
+		// Import policy + source positions for clean grammar errors (mirrors the
+		// goja c map in commonscript.go).
+		"warnImports": WarnUnresolvedImports,
+		"file":        traceSrcName,
+		"lineOf":      func(pos int) int { return lineOfPos(pos) },
 	}
 
 	bindings := frozenBaseBindings(preventDefaultOutput)

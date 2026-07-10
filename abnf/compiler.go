@@ -8,6 +8,12 @@ import (
 	"14.gy/mec/abnf/r"
 )
 
+// WarnUnresolvedImports is set from the -warn-imports CLI flag. When false (the
+// default) a program import a grammar cannot resolve aborts the compile; when
+// true such an import is reported as a warning and skipped. Grammars read it as
+// c.warnImports and turn it into the policy via lib resolveImports().
+var WarnUnresolvedImports = false
+
 // ----------------------------------------------------------------------------
 // ASG compiler
 

@@ -51,7 +51,16 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = { FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp } ;
+            = [ Package ] { Import } { FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp } ;
+
+// package / import headers. The package name is parsed and ignored. Each import
+// is resolved against the runtime builtins (core.stdlibImports); one that does
+// not resolve aborts the compile, unless -warn-imports downgrades it to a
+// warning (see resolveImport in the startScript). QualName also accepts a
+// trailing .* wildcard. Neither pushes a statement, so buildMain never sees them.
+Package     <~~ pop() ~~> = KwPackage QualName [ ";" ] ;
+Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport QualName [ KwAs Id ] [ ";" ] ;
+QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 // A top level val/var: its declaration thunk becomes a top level statement.
 TopProp     = Decl ;
@@ -240,6 +249,9 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
 KwFun       = "fun" KwEnd ;
+KwImport    = "import" KwEnd ;
+KwPackage   = "package" KwEnd ;
+KwAs        = "as" KwEnd ;
 KwClass     = "class" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
@@ -266,6 +278,43 @@ KwStep      = "step" KwEnd ;
 
     var hidCount = 0     // Names hidden loop counters.
     var classNames = {}  // Known class names (constructor calls).
+
+    // ----- Imports & errors -----
+    function fail(msg) { println("kotlin compiler error: " + msg); exit(1) }
+
+    // Import prefixes the runtime already satisfies: their symbols are provided
+    // as builtins (abs/max/min, listOf, exitProcess, ...), so importing them is a
+    // no-op. Anything else is an external library we cannot resolve.
+    core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences"]
+
+    function stripWs(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc != 32 && cc != 9 && cc != 10 && cc != 13) { out = out + s.charAt(i) }
+        }
+        return out
+    }
+    // True when path (or its package prefix, ignoring a trailing .*) is a builtin.
+    function importResolvable(path) {
+        var p = path
+        if (p.length >= 2 && p.slice(p.length - 2) == ".*") { p = p.slice(0, p.length - 2) }
+        for (var i = 0; i < core.stdlibImports.length; i++) {
+            var pref = core.stdlibImports[i]
+            if (p == pref) return true
+            if (p.slice(0, pref.length + 1) == pref + ".") return true
+        }
+        return false
+    }
+    // Policy: resolvable imports are ignored (already provided); an unresolvable
+    // one aborts, or warns and continues under -warn-imports (c.warnImports).
+    function resolveImport(path, pos) {
+        path = stripWs(path)
+        if (importResolvable(path)) { return }
+        var where = c.file + ":" + c.lineOf(pos)
+        if (c.warnImports) { println("kotlin: warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
+        fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
+    }
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 

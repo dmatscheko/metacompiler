@@ -161,6 +161,30 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-1.kt", "-q"]
         },
         {
+            "name": "Kotlin imports (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-imports.kt", "-q"]
+        },
+        {
+            "name": "Kotlin imports (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-imports.kt", "-q"]
+        },
+        {
+            "name": "Kotlin unresolved import SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-import.kt", "-q"]
+        },
+        {
+            "name": "Kotlin unresolved import warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-fail-test-import.kt", "-q", "-warn-imports"]
+        },
+        {
             "name": "Go interpreter",
             "type": "go",
             "request": "launch",
