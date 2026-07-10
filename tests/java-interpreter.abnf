@@ -248,75 +248,11 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 :startScript(~~
 
-    function takeAll() {
-        var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
-    }
-    // MethodSfx pushes the name marker before the argument thunks; popName digs it out.
-    function popName() {
-        var items = takeAll()
-        var name = ""
-        for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
-            else { push(items[i]) }
-        }
-        return name
-    }
-
-    function fail(msg) {
-        println("java interpreter error: " + msg)
-        exit(1)
-    }
-
-    function hexAt(s, pos, len) {
-        var v = 0
-        for (var i = 0; i < len; i++) {
-            var c = s.charCodeAt(pos + i)
-            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
-            v = v * 16 + d
-        }
-        return v
-    }
-    function unescapeJs(s) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var c = s.charCodeAt(i)
-            if (c != 92) { out += String.fromCharCode(c); i++; continue }
-            var e = s.charCodeAt(i + 1)
-            if (e == 110) { out += "\n"; i += 2; continue }
-            if (e == 116) { out += "\t"; i += 2; continue }
-            if (e == 114) { out += "\r"; i += 2; continue }
-            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
-            out += String.fromCharCode(e)
-            i += 2
-        }
-        return out
-    }
-    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
-
-    // ----- Scopes (locals of the running method) and globals (the classes) -----
-    var globalScope = {}
-    var scopes = [globalScope]
-    function declVar(name, value) { scopes[scopes.length - 1][name] = value }
-    function getVar(name) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) return scopes[i][name]
-        }
-        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
-        fail("unknown name: " + name)
-    }
-    function setVar(name, value) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
-        }
-        fail("assignment to unknown variable: " + name)
-    }
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); language-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
 
     // The host names a program can see. System and Math are built here.
-    var hostGlobals = {}
     hostGlobals["System"] = {
         out: {
             println: function(x) { println(jstr(x)) },
@@ -369,16 +305,8 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return f.apply(undefined, args)
     }
 
-    // ----- Signals -----
-    var BRK = {sig: "break"}
-    var CONT = {sig: "continue"}
 
     // ----- Expression thunks: function() -> value -----
-
-    function makeConst(v) { return function() { return v } }
-    function makeVarRef(name) { return function() { return getVar(name) } }
-    function makeNeg(t) { return function() { return (0 - t()) | 0 } }
-    function makeNot(t) { return function() { return !t() } }
 
     function jadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return jstr2(l) + jstr2(r)
@@ -388,90 +316,13 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         if (typeof v == "string") return v
         return jstr(v)
     }
-    function binOp(op, l, r) {
-        if (op == "+") return jadd(l, r)
-        if (op == "-") return (l - r) | 0
-        if (op == "*") return (l * r) | 0
-        if (op == "/") return (l / r) | 0
-        if (op == "%") return (l % r) | 0
-        if (op == "==") return l === r
-        if (op == "!=") return l !== r
-        if (op == "<")  return l < r
-        if (op == ">")  return l > r
-        if (op == "<=") return l <= r
-        if (op == ">=") return l >= r
-    }
-    function foldBinary(items) {
-        if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
-            return v
-        }
-    }
-    function makeOrAnd(items, isOr) {
-        if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i++) {
-                if (isOr) { if (v) return true }
-                else      { if (!v) return false }
-                v = items[i]()
-            }
-            return v ? true : false
-        }
-    }
     function makeCond(items) {
         if (items.length == 1) return items[0]
         return function() { return items[0]() ? items[1]() : items[2]() }
     }
 
     // items = [primaryThunk, {kind:"mcall"|"field"|"index", ...}...].
-    function foldCallMember(items) {
-        if (items.length == 1) return items[0]
-        var primary = items[0]
-        var suffixes = items.slice(1)
-        return function() {
-            var cur = primary()
-            for (var i = 0; i < suffixes.length; i++) {
-                var s = suffixes[i]
-                if (s.kind == "mcall") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                    cur = mcall(cur, s.name, argv)
-                } else if (s.kind == "field") {
-                    if (cur === undefined || cur === null) fail("field ." + s.name + " of null")
-                    if (s.name == "length" && Array.isArray(cur)) { cur = cur.length }
-                    else { cur = cur[s.name] }
-                } else {
-                    cur = cur[s.idx()]
-                }
-            }
-            return cur
-        }
-    }
-
     // Target items = [name, {key}|{idx}...].
-    function makeTargetRef(items) {
-        return {name: items[0], path: items.slice(1)}
-    }
-    function resolveRef(ref) {
-        var o = getVar(ref.name)
-        for (var i = 0; i < ref.path.length - 1; i++) {
-            var s = ref.path[i]
-            o = (s.key != undefined) ? o[s.key] : o[s.idx()]
-            if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
-        }
-        var last = ref.path[ref.path.length - 1]
-        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
-    }
-    function applyOp(op, a, b) {
-        if (op == "+=") return jadd(a, b)
-        if (op == "-=") return (a - b) | 0
-        if (op == "*=") return (a * b) | 0
-        if (op == "/=") return (a / b) | 0
-        if (op == "%=") return (a % b) | 0
-    }
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
@@ -552,48 +403,10 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // ----- Statement thunks -----
 
-    function exprToStmt(t) { return function() { t() } }
     function makeDecl(items) {
         var name = items[0]
         var init = items.length > 1 ? items[1] : makeConst(0)
         return function() { declVar(name, init()) }
-    }
-    function makeSeq(items) {
-        return function() {
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i]()
-                if (r != undefined) return r
-            }
-        }
-    }
-    function makeBlockStmt(items) {
-        var seq = makeSeq(items)
-        return function() {
-            scopes.push({})
-            var r = seq()
-            scopes.pop()
-            return r
-        }
-    }
-    function makeIf(items) {
-        var cond = items[0]
-        var thenT = items[1]
-        var elseT = items.length > 2 ? items[2] : null
-        return function() {
-            if (cond()) return thenT()
-            if (elseT != null) return elseT()
-        }
-    }
-    function makeWhile(bodyT, condT) {
-        return function() {
-            while (condT()) {
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) return r
-                }
-            }
-        }
     }
     function makeDo(condT, bodyT) {
         return function() {
@@ -681,9 +494,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         var t = items.length > 0 ? items[0] : makeConst(undefined)
         return function() { return {isRet: true, v: t()} }
     }
-    function makeBreak() { return function() { return BRK } }
-    function makeContinue() { return function() { return CONT } }
-
     // ----- Class building -----
 
     function makeMethod(items) {
@@ -713,18 +523,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
 
     // Runs a method body with a fresh scope: params bound, this bound for instance methods.
-    function invokeBody(params, body, self, args) {
-        var saved = scopes
-        scopes = [globalScope, {}]
-        if (self != undefined) declVar("this", self)
-        for (var i = 0; i < params.length; i++) {
-            declVar(params[i], i < args.length ? args[i] : undefined)
-        }
-        var r = body()
-        scopes = saved
-        return (r != undefined && r.isRet) ? r.v : undefined
-    }
-
     function buildClassFrom(name, members, recordParams) {
         var cls = {__isclass: true, __name: name}
         var fields = []
@@ -794,7 +592,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             initFields(self)
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            invokeBody(info.params, info.body, self, args)
+            invokeBody(info.params, info.body, self, "this", args)
         }
     }
     function makeInstanceClosure(m) {
@@ -802,14 +600,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, self, args)
+            return invokeBody(m.params, m.body, self, "this", args)
         }
     }
     function makeStaticClosure(m) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, undefined, args)
+            return invokeBody(m.params, m.body, undefined, "this", args)
         }
     }
 
@@ -821,12 +619,12 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
 
     // Appends b to a copy of a (kept as a plain function to stay inside MetaJS).
-    function concat2impl(a, b) {
-        var out = []
-        var i
-        for (i = 0; i < a.length; i++) out.push(a[i])
-        for (i = 0; i < b.length; i++) out.push(b[i])
-        return out
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "java"
+    core.add = jadd
+    core.getField = function(o, name) {
+        if (name == "length" && Array.isArray(o)) { return o.length }
+        return o[name]
     }
 
     c.compile(c.asg)

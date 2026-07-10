@@ -132,7 +132,7 @@ FInit       <~~ push({k:"init", t:pop()}) ~~> = SimpleStmt2 ;
 FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
 SimpleStmt2 = ShortDecl | IncDecStmt | Assign ;
-ForCond     <~~ push(makeForCond(pop(), pop())) ~~>
+ForCond     <~~ push(makeWhile(pop(), pop())) ~~>
             = "for" KwEnd CondOn Expression CondOff Block ;
 
 // Go switch: no fallthrough (an implicit break ends every case), several values per
@@ -277,79 +277,9 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 :startScript(~~
 
-    function takeAll() {
-        var items = []
-        var v
-        while ((v = pop()) != null) items.unshift(v)
-        return items
-    }
-    function popName() {
-        var items = takeAll()
-        var name = ""
-        for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].mname != undefined) { name = items[i].mname }
-            else { push(items[i]) }
-        }
-        return name
-    }
-
-    function fail(msg) {
-        println("go interpreter error: " + msg)
-        exit(1)
-    }
-
-    function hexAt(s, pos, len) {
-        var v = 0
-        for (var i = 0; i < len; i++) {
-            var c = s.charCodeAt(pos + i)
-            var d = (c >= 48 && c <= 57) ? c - 48 : (c >= 97 ? c - 87 : c - 55)
-            v = v * 16 + d
-        }
-        return v
-    }
-    function unescapeJs(s) {
-        var out = ""
-        var i = 0
-        while (i < s.length) {
-            var c = s.charCodeAt(i)
-            if (c != 92) { out += String.fromCharCode(c); i++; continue }
-            var e = s.charCodeAt(i + 1)
-            if (e == 110) { out += "\n"; i += 2; continue }
-            if (e == 116) { out += "\t"; i += 2; continue }
-            if (e == 114) { out += "\r"; i += 2; continue }
-            if (e == 117) { out += String.fromCharCode(hexAt(s, i + 2, 4)); i += 6; continue }
-            out += String.fromCharCode(e)
-            i += 2
-        }
-        return out
-    }
-    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
-    function concat2impl(a, b) {
-        var out = []
-        var i
-        for (i = 0; i < a.length; i++) out.push(a[i])
-        for (i = 0; i < b.length; i++) out.push(b[i])
-        return out
-    }
-
-    // ----- Scopes -----
-    var globalScope = {}
-    var scopes = [globalScope]
-    function declVar(name, value) { if (name != "_") scopes[scopes.length - 1][name] = value }
-    function getVar(name) {
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) return scopes[i][name]
-        }
-        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
-        fail("unknown name: " + name)
-    }
-    function setVar(name, value) {
-        if (name == "_") { return }
-        for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
-        }
-        fail("assignment to unknown name: " + name)
-    }
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); language-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
 
     // ----- Maps: {__dict, keys, vals, zero} with two parallel arrays. The arrays keep
     // the insertion order; missing keys read as the zero value of the value type. -----
@@ -381,7 +311,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return null
     }
 
-    var hostGlobals = {}
     hostGlobals["fmt"] = {
         Println: function() {
             var out = ""
@@ -458,77 +387,13 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return f.apply(undefined, args)
     }
 
-    var BRK = {sig: "break"}
-    var CONT = {sig: "continue"}
 
     // ----- Expression thunks -----
-
-    function makeConst(v) { return function() { return v } }
-    function makeVarRef(name) { return function() { return getVar(name) } }
-    function makeNeg(t) { return function() { return (0 - t()) | 0 } }
-    function makeNot(t) { return function() { return !t() } }
 
     function gadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return l + r
         return (l + r) | 0
     }
-    function binOp(op, l, r) {
-        if (op == "+") return gadd(l, r)
-        if (op == "-") return (l - r) | 0
-        if (op == "*") return (l * r) | 0
-        if (op == "/") return (l / r) | 0
-        if (op == "%") return (l % r) | 0
-        if (op == "==") return l === r
-        if (op == "!=") return l !== r
-        if (op == "<")  return l < r
-        if (op == ">")  return l > r
-        if (op == "<=") return l <= r
-        if (op == ">=") return l >= r
-    }
-    function foldBinary(items) {
-        if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
-            return v
-        }
-    }
-    function makeOrAnd(items, isOr) {
-        if (items.length == 1) return items[0]
-        return function() {
-            var v = items[0]()
-            for (var i = 1; i < items.length; i++) {
-                if (isOr) { if (v) return true }
-                else      { if (!v) return false }
-                v = items[i]()
-            }
-            return v ? true : false
-        }
-    }
-
-    function foldCallMember(items) {
-        if (items.length == 1) return items[0]
-        var primary = items[0]
-        var suffixes = items.slice(1)
-        return function() {
-            var cur = primary()
-            for (var i = 0; i < suffixes.length; i++) {
-                var s = suffixes[i]
-                if (s.kind == "mcall") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                    cur = mcall(cur, s.name, argv)
-                } else if (s.kind == "field") {
-                    if (cur === undefined || cur === null) fail("field ." + s.name + " of nil")
-                    cur = cur[s.name]
-                } else {
-                    cur = isMap(cur) ? mapGet(cur, s.idx()) : cur[s.idx()]
-                }
-            }
-            return cur
-        }
-    }
-
     function makeCall(items) {
         var name = items[0]
         var args = items.slice(1)
@@ -615,27 +480,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
     function zeroLike(v) { return 0 }
 
-    function makeTargetRef(items) {
-        return {name: items[0], path: items.slice(1)}
-    }
-    function resolveRef(ref) {
-        var o = getVar(ref.name)
-        for (var i = 0; i < ref.path.length - 1; i++) {
-            var s = ref.path[i]
-            if (s.key != undefined) { o = o[s.key] }
-            else { o = isMap(o) ? mapGet(o, s.idx()) : o[s.idx()] }
-            if (o === undefined || o === null) fail("nil in assignment path of " + ref.name)
-        }
-        var last = ref.path[ref.path.length - 1]
-        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
-    }
-    function applyOp(op, a, b) {
-        if (op == "+=") return gadd(a, b)
-        if (op == "-=") return (a - b) | 0
-        if (op == "*=") return (a * b) | 0
-        if (op == "/=") return (a / b) | 0
-        if (op == "%=") return (a % b) | 0
-    }
     function assignRef(ref, v) {
         if (ref.path.length == 0) { setVar(ref.name, v); return }
         var p = resolveRef(ref)
@@ -694,7 +538,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // ----- Statement thunks -----
 
-    function exprToStmt(t) { return function() { t() } }
     function makeVarDecl(items) {
         var name = items[0]
         var i = 1
@@ -710,43 +553,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             else if (ty.charCodeAt(0) == 91) { v = [] } // A slice type: [ ...
             else { v = null }
             declVar(name, v)
-        }
-    }
-    function makeSeq(items) {
-        return function() {
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i]()
-                if (r != undefined) return r
-            }
-        }
-    }
-    function makeBlockStmt(items) {
-        var seq = makeSeq(items)
-        return function() {
-            scopes.push({})
-            var r = seq()
-            scopes.pop()
-            return r
-        }
-    }
-    function makeIf(items) {
-        var cond = items[0]
-        var thenT = items[1]
-        var elseT = items.length > 2 ? items[2] : null
-        return function() {
-            if (cond()) return thenT()
-            if (elseT != null) return elseT()
-        }
-    }
-    function makeForCond(bodyT, condT) {
-        return function() {
-            while (condT()) {
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) return r
-                }
-            }
         }
     }
     function makeForClassic(items) {
@@ -862,9 +668,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return undefined
         }
     }
-    function makeBreak() { return function() { return BRK } }
-    function makeContinue() { return function() { return CONT } }
-
     // ----- Defer -----
     // One frame per running function; a defer statement appends {f, args} to the
     // innermost frame, the function exit runs its frame in reverse (LIFO).
@@ -895,20 +698,6 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
 
     // ----- Functions, methods and structs -----
-
-    function invokeBody(params, body, self, recvName, args) {
-        var saved = scopes
-        scopes = [globalScope, {}]
-        if (self != undefined) declVar(recvName, self)
-        for (var i = 0; i < params.length; i++) {
-            declVar(params[i], i < args.length ? args[i] : undefined)
-        }
-        deferFrames.push([])
-        var r = body()
-        runDefers(deferFrames.pop())
-        scopes = saved
-        return (r != undefined && r.isRet) ? r.v : undefined
-    }
 
     var structs = {}
     // items = [name, fieldName...]
@@ -948,6 +737,14 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return invokeBody(mm.params, mm.body, self, mm.recvName, args)
         }
     }
+
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "go"
+    core.blank = "_"
+    core.nullWord = "nil"
+    core.getIndex = function(o, i) { return isMap(o) ? mapGet(o, i) : o[i] }
+    core.framePush = function() { deferFrames.push([]) }
+    core.framePop = function() { runDefers(deferFrames.pop()) }
 
     c.compile(c.asg)
 
