@@ -2393,6 +2393,7 @@ func (rt *jsrt) toInt32(v interface{}) int32 {
 // This is the program runtime, so the -cfg and -trace hooks live here.
 func runJSModule(m *ir.Module, entry string) *RunResult {
 	maybeDumpCFG(m)
+	maybeDumpCallgraph(m)
 	rt := newJSRT(standardJSBindings())
 	rt.enableTrace()
 	ma := rt.attach(m)

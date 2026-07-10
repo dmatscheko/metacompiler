@@ -62,7 +62,8 @@ func main() {
 
 	param_cfg := flag.String("cfg", "", "Write the control flow graph of every executed IR module to this file (Graphviz DOT; Mermaid when the name ends in .mmd)")
 	param_traceOut := flag.String("trace", "", "Stream the runtime events of compiled programs (llvm.RunJS) to this file as JSON lines; also the input file of -render")
-	param_render := flag.String("render", "", "Render the -trace file to Graphviz DOT on stdout: 'calls' (dynamic call graph) or 'vars' (function/variable access graph)")
+	param_callgraph := flag.String("callgraph", "", "Write the static call graph of every executed IR module: a .jsonl path appends records for -render static (accumulate a codebase over several runs), anything else writes Graphviz DOT")
+	param_render := flag.String("render", "", "Render the -trace file to Graphviz DOT on stdout: 'calls' (dynamic call graph), 'vars' (function/variable access graph) or 'static' (-callgraph records, clustered per file)")
 
 	flag.Parse()
 
@@ -85,6 +86,7 @@ func main() {
 	abnf.UseFrozenScripts = *param_frozen
 	abnf.CFGOutPath = *param_cfg
 	abnf.TraceOutPath = *param_traceOut
+	abnf.CallgraphOutPath = *param_callgraph
 	defer abnf.CloseTrace()
 
 	if *param_a == "" {

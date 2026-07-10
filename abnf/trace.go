@@ -39,9 +39,10 @@ var (
 
 // TraceMarkersWanted reports whether the compilers should emit js_srcpos
 // statement markers (the c.tracing value the tag scripts read): positions
-// serve both the event stream and the CFG line annotations.
+// serve the event stream, the CFG line annotations, and the call graph
+// definition lines.
 func TraceMarkersWanted() bool {
-	return TraceOutPath != "" || CFGOutPath != ""
+	return TraceOutPath != "" || CFGOutPath != "" || CallgraphOutPath != ""
 }
 
 // SetTraceSource registers the program source, so events and CFG labels can
@@ -386,9 +387,11 @@ func writeCFGMermaid(m *ir.Module, buf *strings.Builder) {
 // ----------------------------------------------------------------------------
 // Trace rendering (-render)
 
-// RenderTrace reads a -trace JSONL file and writes a DOT graph to stdout.
-// Kinds: "calls" (dynamic call graph, edge labels are call counts) and "vars"
-// (which function touches which variable; decl/write solid, read dashed).
+// RenderTrace reads a -trace / -callgraph JSONL file and writes a DOT graph to
+// stdout. Kinds: "calls" (dynamic call graph, edge labels are call counts),
+// "vars" (which function touches which variable; decl/write solid, read
+// dashed), and "static" (the -callgraph records: definitions clustered per
+// source file, cross-file edges merged by name, undefined callees dashed).
 func RenderTrace(kind, path string) error {
 	if path == "" {
 		return fmt.Errorf("-render needs the -trace <file> flag as its input")
@@ -404,6 +407,8 @@ func RenderTrace(kind, path string) error {
 	varNodes := map[string]bool{}
 	fnNodes := map[string]bool{"(top)": true}
 	stack := []string{"(top)"}
+	var sDefs []cgDef
+	var sCalls []cgCall
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
@@ -428,9 +433,20 @@ func RenderTrace(kind, path string) error {
 		case "read":
 			edges[edgeKey{cur, ev.Name, "read"}]++
 			varNodes[ev.Name] = true
+		case "sdef":
+			sDefs = append(sDefs, cgDef{Name: ev.Name, File: ev.Obj, Line: ev.Line})
+		case "scall":
+			sCalls = append(sCalls, cgCall{From: ev.Name, To: ev.Key, File: ev.Obj})
 		}
 	}
 	if err := sc.Err(); err != nil {
+		return err
+	}
+
+	if kind == "static" {
+		out := &strings.Builder{}
+		writeStaticDot(sDefs, sCalls, out)
+		_, err = os.Stdout.WriteString(out.String())
 		return err
 	}
 

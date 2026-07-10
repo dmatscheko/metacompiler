@@ -312,11 +312,37 @@ streams of one program are identical. `-render` turns a stream into DOT on stdou
 Events carry source lines: every tag sees the position of its node as up.pos, and
 the compiler grammars wrap their Statement production with stmtPos()
 (lib/compile-core.js), which plants a js_srcpos marker per statement - but only
-while -trace or -cfg is active (the tag scripts read the switch as c.tracing), so
+while -trace, -cfg or -callgraph is active (the tag scripts read the switch as
+c.tracing), so
 the emitted IR is untouched otherwise. The runtime remembers the marker as the
 current position and stamps it on every event; -cfg labels the blocks with their
-line ranges (entry L15-16). The flags default to off and change nothing when
-unused; interpreter-grammar runs and a stepper are the planned next layers.
+line ranges (entry L15-16).
+
+`-callgraph` extracts a STATIC call graph from the compiled module - the written
+calls, whether they run or not. The integer-IR languages have direct call
+instructions; for the handle-IR languages the names are recovered from the IR
+patterns: method names and js_scope_get callee names are string constants, a
+closure pairs with its source name where it is stored (js_tdecl('fib',
+js_closure(N, ...)), also method slots of class descriptors), and 'new Counter'
+falls out of the js_get(class, '__ctor') chain. And because the dynamic languages
+never resolve names at compile time, a file that calls functions defined in OTHER
+files still compiles alone - so a whole codebase graphs file by file:
+
+```
+rm -f cg.jsonl
+for f in src/*.js; do
+  ./mec -a languages/metajs-to-llvm-ir.abnf -b "$f" -q -callgraph cg.jsonl || true
+done                                   # .jsonl appends; a run without main() may exit 1
+./mec -render static -trace cg.jsonl > codebase.dot
+```
+
+The result clusters the definitions per source file, merges the nodes by name (a
+cross-file call connects to the defining file's node), draws undefined callees
+dashed, and labels edges with the number of call sites. A non-.jsonl -callgraph
+path writes the DOT of one run directly. Same-named methods of different classes
+merge into one node (class attribution is a planned refinement). The flags
+default to off and change nothing when unused; interpreter-grammar runs and a
+stepper are the planned next layers.
 
 ### High level overview
 

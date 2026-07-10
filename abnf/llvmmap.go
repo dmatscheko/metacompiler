@@ -1093,6 +1093,7 @@ func (ma *machine) callByName(name string, args []uint64) uint64 {
 // its return value together with the produced output.
 func run(m *ir.Module, start string, input string) *RunResult {
 	maybeDumpCFG(m)
+	maybeDumpCallgraph(m)
 	ma := newMachine(m, input)
 	f, ok := ma.funcs[start]
 	if !ok {
