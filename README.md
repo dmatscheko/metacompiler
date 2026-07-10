@@ -138,15 +138,15 @@ When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
 
 ```
 go build .
-./mec -a languages/brainfuck-interpreter.abnf -b tests/brainfuck-test-2.txt
+./mec languages/brainfuck-interpreter.abnf tests/brainfuck-test-2.txt
 ```
 or
 ```
-go run . -a languages/abnf-of-abnf.abnf -b languages/abnf-of-abnf.abnf
+go run . languages/abnf-of-abnf.abnf languages/abnf-of-abnf.abnf
 ```
 or, to parse a C file with the full C99 grammar:
 ```
-go run . -a languages/c99-parser.abnf -b tests/c99-test-1.c -q
+go run . languages/c99-parser.abnf tests/c99-test-1.c -q
 ```
 
 #### The example languages in languages/
@@ -264,7 +264,7 @@ Normally the annotation scripts run on goja (a JS engine in Go). The frozen mode
 ```
 ./mec -freeze languages/metajs-to-llvm-ir.abnf    # snapshot: abnf/jsagrammar.go + abnf/jsbootstrap.ll
 go build .                                    # embed the snapshot
-./mec -a languages/tinyc-to-llvm-ir.abnf -b tests/tinyc-test-1.txt -q -frozen
+./mec languages/tinyc-to-llvm-ir.abnf tests/tinyc-test-1.txt -q -frozen
 ```
 
 `-freeze` runs metajs-to-llvm-ir.abnf once under goja and lets it compile its *own* tag scripts
@@ -292,7 +292,7 @@ Python, Lisp and MetaJS programs alike - under goja and under -frozen, with byte
 identical event streams (abnf/trace.go):
 
 ```
-./mec -a languages/java-to-llvm-ir.abnf -b tests/java-test-1.java -q \
+./mec languages/java-to-llvm-ir.abnf tests/java-test-1.java -q \
       -cfg java.dot -trace java.jsonl   # run + control flow graph + event stream
 ./mec -render calls -trace java.jsonl > calls.dot   # dynamic call graph (counts)
 ./mec -render vars  -trace java.jsonl > vars.dot    # which function touches which variable
@@ -331,7 +331,7 @@ files still compiles alone - so a whole codebase graphs file by file:
 ```
 rm -f cg.jsonl
 for f in src/*.js; do
-  ./mec -a languages/metajs-to-llvm-ir.abnf -b "$f" -q -callgraph cg.jsonl || true
+  ./mec languages/metajs-to-llvm-ir.abnf "$f" -q -callgraph cg.jsonl || true
 done                                   # .jsonl appends; a run without main() may exit 1
 ./mec -render static -trace cg.jsonl > codebase.dot
 ```
@@ -350,7 +350,7 @@ stepper are the planned next layers.
 (it does not process a target file):
 
 ```
-./mec -a languages/java-interpreter.abnf -verify
+./mec languages/java-interpreter.abnf -verify
 ```
 
 It reports three things, each with the source line: **undefined** names - an
@@ -368,7 +368,7 @@ grammars with no `:startRule()` skip the reachability check. It is the modern
 successor of an old standalone verifier, rewritten to walk the current
 a-grammar by name (it resolves nothing and mutates nothing).
 
-A companion flag, `-pretty`, compiles the `-a` grammar and prints its serialized
+A companion flag, `-pretty`, compiles the first file (the grammar) and prints its serialized
 a-grammar as a pretty Go literal (one brace per line, the runtime `:origin()`
 stamp dropped so it matches `abnf/agrammar.go`'s form), then exits - handy for
 inspecting a compiled grammar or regenerating the example dump above.
@@ -389,19 +389,28 @@ The above parser and compiler are not only used once but twice. The first time, 
 
 The whole process can be shown a bit more formal as follows:
 
+The files are given as positional arguments; flags (`-q`, `-v`, `-frozen`, ...) may
+appear anywhere among them. The first file is the grammar, every further file a stage:
+
+```
+./mec grammar.abnf program.txt                  # one stage
+./mec meta.abnf lang.abnf program.x             # two stages (meta builds lang)
+./mec meta.abnf lang.abnf mid.x program.y       # and beyond
+```
+
 This is the input to the default main process:
 * `initial-a-grammar` = Default annotated grammar of annotated EBNF.
-* `inputA` = The content of the file given with command line parameter `-a`.
-* `inputB` = The content of the file given with command line parameter `-b`.
+* `file[1]` = The content of the first file (a grammar in ABNF).
+* `file[i]` = The content of the i-th file, processed by the previous stage's grammar.
 * `*-a-grammar-startScript` = The code, defined via `:startScript()` inside the grammar / the ABNF. This code starts the rest of the compile process during the compile step.
 
-This is how that input is processed:
-1. `parse(initial-a-grammar, inputA)`  = `inputA-ASG`.
-2. `compile(inputA-ASG, initial-a-grammar-startScript)`  = `new-a-grammar`.
-3. `parse(new-a-grammar, inputB)`  = `inputB-ASG`.
-4. `compile(inputB-ASG, new-a-grammar-startScript)`  = `result`.
+This is how that input is processed (with `grammar[0]` = `initial-a-grammar`):
+1. `parse(grammar[i-1], file[i])`  = `file[i]-ASG`.
+2. `compile(file[i]-ASG, grammar[i-1]-startScript)`  = `grammar[i]`.
 
-Of course, the `result` can again (but doesn't have to) be an `a-grammar` and can be used as input for `parse()`.
+Each stage feeds its compiled `grammar[i]` (which must be an a-grammar, except at the last stage, where it may be a final result such as an emitted module or a program's exit code) into the parser for the next file. After the last file, if its compiled grammar is *startScript-only* (has a `:startScript()` but no `:startRule()`, so it takes no input), that startScript is run on empty input - which lets the last file be a grammar that builds and runs a module entirely in JS. So `./mec llvm-ir-tests.abnf` runs on its own, and `./mec abnf-of-abnf.abnf llvm-ir-tests.abnf` builds that grammar with a meta-layer first and then runs it.
+
+Per-stage diagnostics: `-v` shows the ASG and compiled result of every stage, `-v<n>` of stage `n` alone (1-indexed); `-vv` / `-vv<n>` add the parser+compiler trace.
 
 An example of this process, done fully inside the `:startScript()` code of an ABNF:
 
@@ -1079,7 +1088,7 @@ LineComment = "//" :whitespace() { NoLinebreak } :whitespace(Whitespace) ;
 
 ### Its output, when it gets applied on itself:
 
-This output is exactly the data structure that controls the parser when it is used as an ABNF parser. It is what makes the parser to an ABNF parser. It is the pretty-printed serialized a-grammar (the same structure as `abnf/agrammar.go`); regenerate this dump with `./mec -a languages/abnf-of-abnf.abnf -pretty`:
+This output is exactly the data structure that controls the parser when it is used as an ABNF parser. It is what makes the parser to an ABNF parser. It is the pretty-printed serialized a-grammar (the same structure as `abnf/agrammar.go`); regenerate this dump with `./mec languages/abnf-of-abnf.abnf -pretty`:
 
 <details>
   <summary>Click to expand!</summary>

@@ -1,341 +1,372 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"14.gy/mec/abnf"
+	r "14.gy/mec/abnf/r"
 )
 
-// The first option(s) of an OR must not be the beginning of a later option. Otherwise only the first option would be found and success would be returned.
-// No option of a production can be equal to the production itself. This means that e.g. the production 'Test' must not have an option 'Test'.
+// The metacompiler runs a pipeline over the files given on the command line:
+//
+//	./mec grammar.abnf program.txt
+//	./mec meta.abnf lang.abnf mid.x program.y
+//
+// The FIRST file is parsed and compiled by the built-in a-grammar (the one that
+// understands ABNF), which yields its a-grammar. Every FURTHER file is parsed
+// and compiled by the a-grammar the previous stage produced. So each stage feeds
+// its compiled grammar into the next file - a chain of any length. After the last
+// file, if the grammar it produced is startScript-only (no :startRule(), so it
+// takes no input), its startScript is run; that lets the last file be a
+// startScript-only grammar (e.g. one that builds and runs a module by hand).
+//
+// Flags may appear anywhere among the files:
+//
+//	-v / -vN     verbose for all stages / for stage N (parse ASG + compiled result)
+//	-vv / -vvN   parser+compiler trace for all stages / for stage N
+//	-q / -qq     quiet (only program output+errors / only errors)
+//	-frozen      run the annotation scripts goja-free (see abnf/frozen.go)
+//	-verify      lint the first file's grammar and exit
+//	-pretty      print the first file's serialized a-grammar and exit
+//	-cfg F       write the CFG of every executed module to F (DOT; .mmd = Mermaid)
+//	-trace F     stream runtime events to F (JSON lines); also the -render input
+//	-callgraph F write the static call graph (.jsonl appends for -render static)
+//	-render K    render a -trace/-callgraph file to DOT: calls | vars | static
+//	-freeze F    (re)create the frozen bootstrap snapshot from grammar F, then exit
+//	-lb / -lf    parser block-list / found-list (debugging aids)
+//	-s           speed test (100 cycles on the first file)
 
-// TODO: Maybe use the system of the default go EBNF parser with classes instead of r.Rule. This would be one less value to store (but is implicitly stored anyway).
-// TODO: Define an :EOF() symbol for the EBNF syntax.
-// An unknown Name still resolves to the -1 marker at parse time instead of a clear error up front; the -verify flag (abnf/verifier.go) reports such names (also those used as command parameters or in tags) before a run.
+// options is the parsed command line.
+type options struct {
+	files        []string
+	verboseAll   bool
+	traceAll     bool
+	verboseStage map[int]bool // 1-indexed by stage.
+	traceStage   map[int]bool
 
-// rule == production | expression | term.
-// link == identifier == name             //  <=  Identifies another rule (== position of the other rule inside the grammar rules array).
-// string == token == terminal == text.
-// or == alternative.
+	quietMost, quietFull                  bool
+	frozen, verify, pretty                bool
+	speedTest, useBlockList, useFoundList bool
 
-// This is the default main process:
-// parse(initial-a-grammar, inputA)  = inputA-ASG -->  compile(inputA-ASG)  = new-a-grammar -->  parse(new-a-grammar, inputB)  = inputB-ASG -->  compile(inputB-ASG)  = result
+	freezePath, cfgPath, tracePath, callgraphPath, renderKind string
+}
+
+// parseArgs classifies the command line into files (positional) and flags
+// (anything starting with '-'), so the two may be freely interspersed - unlike
+// the standard flag package, which stops at the first positional argument.
+func parseArgs(args []string) (*options, error) {
+	o := &options{verboseStage: map[int]bool{}, traceStage: map[int]bool{}}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if len(a) == 0 || a[0] != '-' || a == "-" {
+			o.files = append(o.files, a)
+			continue
+		}
+		name, val, hasVal := a, "", false
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			name, val, hasVal = a[:eq], a[eq+1:], true
+		}
+		// takeVal returns the value of a value-flag: from "-flag=value", or the
+		// next argument otherwise.
+		takeVal := func() (string, error) {
+			if hasVal {
+				return val, nil
+			}
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("flag %s needs a value", name)
+			}
+			i++
+			return args[i], nil
+		}
+
+		var err error
+		switch name {
+		case "-q":
+			o.quietMost = true
+		case "-qq":
+			o.quietMost, o.quietFull = true, true
+		case "-frozen":
+			o.frozen = true
+		case "-verify":
+			o.verify = true
+		case "-pretty":
+			o.pretty = true
+		case "-s":
+			o.speedTest = true
+		case "-lb":
+			o.useBlockList = true
+		case "-lf":
+			o.useFoundList = true
+		case "-v":
+			o.verboseAll = true
+		case "-vv":
+			o.traceAll = true
+		case "-freeze":
+			o.freezePath, err = takeVal()
+		case "-cfg":
+			o.cfgPath, err = takeVal()
+		case "-trace":
+			o.tracePath, err = takeVal()
+		case "-callgraph":
+			o.callgraphPath, err = takeVal()
+		case "-render":
+			o.renderKind, err = takeVal()
+		default:
+			if n, ok := stageFlag(name, "-vv"); ok {
+				o.traceStage[n] = true
+			} else if n, ok := stageFlag(name, "-v"); ok {
+				o.verboseStage[n] = true
+			} else {
+				return nil, fmt.Errorf("unknown flag %q", a)
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return o, nil
+}
+
+// stageFlag parses a stage-numbered verbose/trace flag like -v3 or -vv12.
+func stageFlag(name, prefix string) (int, bool) {
+	if !strings.HasPrefix(name, prefix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(name[len(prefix):])
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
+}
+
 func main() {
-	param_a := flag.String("a", "", "The path of the ABNF file")
-	param_b := flag.String("b", "", "The path of the file to process with the a-grammar from file -a")
-	param_c := flag.String("c", "", "The path of the file to process with the a-grammar from file -b")
+	o, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		printUsage()
+		os.Exit(2)
+	}
 
-	param_slot_b := flag.Int("sb", 0, "The tag slot to use when compiling file b with the a-grammar from file -a (default is 0)")
-	param_slot_c := flag.Int("sc", 0, "The tag slot to use when compiling file c with the a-grammar from file -b (default is 0)")
-
-	param_useBlockList := flag.Bool("lb", false, "Block list. Prevent a second execution of the same rule at the same position (slow)")
-	param_useFoundList := flag.Bool("lf", false, "Found list. Caches all found blocks even if the surrounding does not match. Immediately return the found block if the same rule would be applied again at the same place (very slow)")
-
-	param_verbose_Ap := flag.Bool("va1", false, "Show verbose output for step one. The a-grammar parser, parsing the ABNF from file -a to an ASG")
-	param_verbose_Ac := flag.Bool("va2", false, "Show verbose output for step two. The ASG compiler, compiling the ASG generated in step one to an a-grammar")
-	param_verbose_Bp := flag.Bool("vb1", false, "Show verbose output for step three. The a-grammar parser, parsing the target file -b by applying the in step two generated a-grammar")
-	param_verbose_Bc := flag.Bool("vb2", false, "Show verbose output for step four. The ASG compiler, compiling the ASG generated in step three")
-	param_verbose_Cp := flag.Bool("vc1", false, "Show verbose output for step five. The a-grammar parser, parsing the target file -c by applying the in step four generated a-grammar")
-	param_verbose_Cc := flag.Bool("vc2", false, "Show verbose output for step six. The ASG compiler, compiling the ASG generated in step five")
-	param_verbose_All := flag.Bool("v", false, "Show all verbose output")
-
-	param_trace_Ap := flag.Bool("vva1", false, "Show trace output for step one")
-	param_trace_Ac := flag.Bool("vva2", false, "Show trace output for step two")
-	param_trace_Bp := flag.Bool("vvb1", false, "Show trace output for step three")
-	param_trace_Bc := flag.Bool("vvb2", false, "Show trace output for step four")
-	param_trace_Cp := flag.Bool("vvc1", false, "Show trace output for step five")
-	param_trace_Cc := flag.Bool("vvc2", false, "Show trace output for step six")
-	param_trace_All := flag.Bool("vv", false, "Show all trace output")
-
-	param_quiet_Most := flag.Bool("q", false, "Show only JS output or errors")
-	param_quiet_Full := flag.Bool("qq", false, "Show only errors, hide JS output")
-
-	param_speedTest := flag.Bool("s", false, "Run speed test with 100 cycles")
-
-	param_freeze := flag.String("freeze", "", "Create the frozen MetaJS bootstrap snapshot from the given metajs-to-llvm-ir grammar (writes abnf/jsagrammar.go and abnf/jsbootstrap.ll, then rebuild)")
-	param_frozen := flag.Bool("frozen", false, "Run all annotation scripts goja free: parse them with the frozen a-grammar, compile them with the frozen bootstrap on the IR machine, and execute the emitted IR")
-
-	param_verify := flag.Bool("verify", false, "Lint the -a grammar: report used-but-undefined names (error) and defined-but-unreachable productions (warning), then exit without running the program")
-	param_pretty := flag.Bool("pretty", false, "Print the compiled -a grammar as a pretty-printed Go literal (the serialized a-grammar, one brace per line, as in the README example) to stdout, then exit")
-
-	param_cfg := flag.String("cfg", "", "Write the control flow graph of every executed IR module to this file (Graphviz DOT; Mermaid when the name ends in .mmd)")
-	param_traceOut := flag.String("trace", "", "Stream the runtime events of compiled programs (llvm.RunJS) to this file as JSON lines; also the input file of -render")
-	param_callgraph := flag.String("callgraph", "", "Write the static call graph of every executed IR module: a .jsonl path appends records for -render static (accumulate a codebase over several runs), anything else writes Graphviz DOT")
-	param_render := flag.String("render", "", "Render the -trace file to Graphviz DOT on stdout: 'calls' (dynamic call graph), 'vars' (function/variable access graph) or 'static' (-callgraph records, clustered per file)")
-
-	flag.Parse()
-
-	if *param_freeze != "" {
-		if err := abnf.Freeze(*param_freeze, "abnf"); err != nil {
+	// Modes that do not run the file pipeline.
+	if o.freezePath != "" {
+		if err := abnf.Freeze(o.freezePath, "abnf"); err != nil {
 			fmt.Fprintln(os.Stderr, "Freeze failed: ", err)
 			os.Exit(1)
 		}
 		return
 	}
-
-	if *param_render != "" {
-		if err := abnf.RenderTrace(*param_render, *param_traceOut); err != nil {
+	if o.renderKind != "" {
+		if err := abnf.RenderTrace(o.renderKind, o.tracePath); err != nil {
 			fmt.Fprintln(os.Stderr, "Render failed: ", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	abnf.UseFrozenScripts = *param_frozen
-	abnf.CFGOutPath = *param_cfg
-	abnf.TraceOutPath = *param_traceOut
-	abnf.CallgraphOutPath = *param_callgraph
+	abnf.UseFrozenScripts = o.frozen
+	abnf.CFGOutPath = o.cfgPath
+	abnf.TraceOutPath = o.tracePath
+	abnf.CallgraphOutPath = o.callgraphPath
 	defer abnf.CloseTrace()
 
-	if *param_a == "" {
-		flag.Usage()
+	if len(o.files) == 0 {
+		printUsage()
 		os.Exit(2)
 	}
-
-	dat, err := ioutil.ReadFile(*param_a)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error: ", err)
-		os.Exit(1)
+	for stage := range o.verboseStage {
+		if stage > len(o.files) {
+			fmt.Fprintf(os.Stderr, "Error: -v%d, but there are only %d stage(s)\n", stage, len(o.files))
+			os.Exit(2)
+		}
 	}
-	srcA := string(dat) // This should be an ABNF.
+	for stage := range o.traceStage {
+		if stage > len(o.files) {
+			fmt.Fprintf(os.Stderr, "Error: -vv%d, but there are only %d stage(s)\n", stage, len(o.files))
+			os.Exit(2)
+		}
+	}
 
-	srcB := ""
-	if *param_b != "" {
-		dat, err = ioutil.ReadFile(*param_b)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error: ", err)
+	srcs := make([]string, len(o.files))
+	for i, f := range o.files {
+		dat, e := ioutil.ReadFile(f)
+		if e != nil {
+			fmt.Fprintln(os.Stderr, "Error: ", e)
 			os.Exit(1)
 		}
-		srcB = string(dat) // This can be anything that the ABNF understands.
-	}
-
-	srcC := ""
-	if *param_c != "" {
-		dat, err = ioutil.ReadFile(*param_c)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error: ", err)
-			os.Exit(1)
-		}
-		srcC = string(dat) // This can be anything that the a-grammar from srcB understands.
-	}
-
-	// The program whose positions traces and diagrams refer to is the last
-	// input of the pipeline: -c when present, else -b.
-	if *param_c != "" {
-		abnf.SetTraceSource(*param_c, srcC)
-	} else if *param_b != "" {
-		abnf.SetTraceSource(*param_b, srcB)
-	}
-
-	if *param_speedTest {
-		speedtest(srcA, *param_a, 100, *param_useBlockList, *param_useFoundList)
-		return
-	}
-
-	if *param_verbose_All {
-		*param_verbose_Ap = true
-		*param_verbose_Ac = true
-		*param_verbose_Bp = true
-		*param_verbose_Bc = true
-		*param_verbose_Cp = true
-		*param_verbose_Cc = true
-	}
-
-	if *param_trace_All {
-		*param_trace_Ap = true
-		*param_trace_Ac = true
-		*param_trace_Bp = true
-		*param_trace_Bc = true
-		*param_trace_Cp = true
-		*param_trace_Cc = true
-	}
-
-	if *param_quiet_Full {
-		*param_quiet_Most = true
+		srcs[i] = string(dat)
 	}
 
 	parseropts := &abnf.Parseropts{
-		UseBlockList:         *param_useBlockList,
-		UseFoundList:         *param_useFoundList,
-		TraceEnabled:         *param_trace_Ap,
-		PreventDefaultOutput: *param_quiet_Full,
+		UseBlockList:         o.useBlockList,
+		UseFoundList:         o.useFoundList,
+		PreventDefaultOutput: o.quietFull,
 	}
 
-	// MAIN PROCESS ----------------------------------------------------------------------------------------------
-
-	// Part A:
-
-	// Use the initial a-grammar to parse an ABNF. It generates an ASG (abstract semantic graph) of the ABNF.
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "Parse source ABNF file A with initial a-grammar")
-	}
-	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, srcA, *param_a, parseropts)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "  ==> Fail")
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
-	}
-	if *param_verbose_Ap || *param_trace_Ap {
-		fmt.Fprintf(os.Stderr, "   => ASG:  %s\n\n", asg.Serialize())
-	}
-	// Use the annotations inside the ASG to compile it. This should generate a new a-grammar.
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "Compile ASG of source ABNF")
-	}
-	aGrammar, err := abnf.CompileASG(asg, abnf.AbnfAgrammar, *param_a, 0, *param_trace_Ac, *param_quiet_Full)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "  ==> Fail")
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if aGrammar == nil { // There should be a generated a-grammar
-		fmt.Fprintln(os.Stderr, "  ==> Fail")
-		fmt.Fprintln(os.Stderr, "Did not receive a valid a-grammar from compiler")
-		os.Exit(1)
-	}
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, " ==> Success, received an a-grammar from compiler")
-	}
-	if *param_verbose_Ac || *param_trace_Ac {
-		fmt.Fprintf(os.Stderr, "   => a-grammar:  %s\n\n", aGrammar.Serialize())
-	}
-
-	// -pretty: print the compiled a-grammar as a pretty serialized Go literal and exit.
-	if *param_pretty {
-		fmt.Println(abnf.SerializeGrammarPretty(aGrammar))
+	if o.speedTest {
+		speedtest(srcs[0], o.files[0], 100, o.useBlockList, o.useFoundList)
 		return
 	}
 
-	// -verify: lint the a-grammar and exit (do not run the program). The grammar
-	// must be assembled first - a parse merges any :include() fragments into it in
-	// place (its setup phase runs before matching, and ParseWithAgrammar recovers
-	// from a failed match), so an empty target is enough when no -b was given.
-	if *param_verify {
-		ownNames := abnf.ProductionNames(aGrammar) // Before assembly: the grammar's own productions.
-		// Assemble the grammar (merge :include() fragments) only if it has any.
-		// A parse triggers the merge, but it also runs the grammar - which would
-		// diverge or overflow on a pathological (e.g. left-recursive) grammar, so
-		// it is skipped when there is nothing to include.
-		if abnf.HasInclude(aGrammar) {
-			abnf.ParseWithAgrammar(aGrammar, srcB, *param_b, parseropts)
+	// -verify / -pretty inspect the first file's compiled a-grammar and exit.
+	if o.verify || o.pretty {
+		grammar := compileFirst(o.files[0], srcs[0], parseropts, o.quietMost, o.quietFull)
+		if o.pretty {
+			fmt.Println(abnf.SerializeGrammarPretty(grammar))
+			return
 		}
-		issues := abnf.Verify(aGrammar, srcA, ownNames)
-		errors := 0
-		for _, iss := range issues {
-			where := ""
-			if iss.Line > 0 {
-				where = fmt.Sprintf("%s:%d: ", *param_a, iss.Line)
-			}
-			tag := "warning"
-			if iss.IsError() {
-				tag = "error"
-				errors++
-			}
-			fmt.Fprintf(os.Stderr, "%s%s: %s\n", where, tag, iss.Message())
-		}
-		if len(issues) == 0 {
-			fmt.Fprintf(os.Stderr, "%s: verified, no issues.\n", *param_a)
-		} else {
-			fmt.Fprintf(os.Stderr, "%s: %d issue(s), %d error(s).\n", *param_a, len(issues), errors)
-		}
-		if errors > 0 {
-			os.Exit(1)
-		}
+		runVerify(o, grammar, srcs, parseropts)
 		return
 	}
 
-	// Part B:
-
-	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "Parse target file B with new a-grammar")
+	// The pipeline.
+	grammar := abnf.AbnfAgrammar
+	for i := range o.files {
+		stage := i + 1
+		verbose := o.verboseAll || o.verboseStage[stage]
+		trace := o.traceAll || o.traceStage[stage]
+		if i == len(o.files)-1 {
+			// Positions in traces/diagrams refer to the last file (the program).
+			abnf.SetTraceSource(o.files[i], srcs[i])
+		}
+		grammar = runStage(grammar, o.files[i], srcs[i], stage, verbose, trace, o.quietMost, o.quietFull, parseropts)
 	}
-	parseropts.TraceEnabled = *param_trace_Bp
-	asg, err = abnf.ParseWithAgrammar(aGrammar, srcB, *param_b, parseropts)
+
+	// If the last file produced a startScript-only grammar, run it on empty input.
+	if abnf.GrammarStartScriptOnly(grammar) {
+		last := len(o.files)
+		verbose := o.verboseAll || o.verboseStage[last]
+		trace := o.traceAll || o.traceStage[last]
+		runStage(grammar, "", "", last, verbose, trace, o.quietMost, o.quietFull, parseropts)
+	}
+}
+
+// runStage parses a file with the given a-grammar and compiles the resulting
+// ASG; the compiled result is the a-grammar for the next stage. It exits the
+// process on any error (the exit code of a compiled program is set by the
+// program itself, via the exit() it calls).
+func runStage(grammar *r.Rules, file, src string, stage int, verbose, trace, quietMost, quietFull bool, parseropts *abnf.Parseropts) *r.Rules {
+	target := file
+	if target == "" {
+		target = "(run)"
+	}
+	if !quietMost {
+		fmt.Fprintf(os.Stderr, "Stage %d: parse %s\n", stage, target)
+	}
+	parseropts.TraceEnabled = trace
+	asg, err := abnf.ParseWithAgrammar(grammar, src, file, parseropts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if !*param_quiet_Most {
+	if !quietMost {
 		fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
 	}
-	if *param_verbose_Bp || *param_trace_Bp {
+	if verbose && asg != nil {
 		fmt.Fprintf(os.Stderr, "   => ASG:  %s\n\n", asg.Serialize())
 	}
-	// Use the annotations inside the ASG to compile it.
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "Compile ASG")
+
+	if !quietMost {
+		fmt.Fprintf(os.Stderr, "Stage %d: compile\n", stage)
 	}
-	result, err := abnf.CompileASG(asg, aGrammar, *param_b, *param_slot_b, *param_trace_Bc, *param_quiet_Full)
+	result, err := abnf.CompileASG(asg, grammar, file, 0, trace, quietFull)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if !*param_quiet_Most {
+	if !quietMost {
 		fmt.Fprintln(os.Stderr, " ==> Success")
 	}
-	if *param_verbose_Bc || *param_trace_Bc {
-		if result != nil {
-			fmt.Fprintf(os.Stderr, "   => Result:  %s\n\n", result.Serialize())
-		}
+	if verbose && result != nil {
+		fmt.Fprintf(os.Stderr, "   => Result:  %s\n\n", result.Serialize())
 	}
+	return result
+}
 
-	// Part C:
-
-	// Part C only runs if a file -c was given and part B generated an a-grammar to process it with.
-	if *param_c == "" {
-		return
-	}
-	if result == nil {
-		fmt.Fprintln(os.Stderr, "  ==> Fail")
-		fmt.Fprintln(os.Stderr, "File -c was given, but compiling file -b did not generate an a-grammar to process it with")
-		os.Exit(1)
-	}
-
-	// Use the a-grammar to parse the text it describes. It generates the ASG (abstract semantic graph) of the parsed text.
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "Parse target file C with new a-grammar")
-	}
-	parseropts.TraceEnabled = *param_trace_Cp
-	asg, err = abnf.ParseWithAgrammar(result, srcC, *param_c, parseropts)
+// compileFirst parses and compiles the first file with the built-in a-grammar,
+// returning its a-grammar (used by -verify and -pretty). Exits on failure.
+func compileFirst(file, src string, parseropts *abnf.Parseropts, quietMost, quietFull bool) *r.Rules {
+	asg, err := abnf.ParseWithAgrammar(abnf.AbnfAgrammar, src, file, parseropts)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "  ==> Success, generated abstract semantic graph (ASG)")
-	}
-	if *param_verbose_Cp || *param_trace_Cp {
-		fmt.Fprintf(os.Stderr, "   => ASG:  %s\n\n", asg.Serialize())
-	}
-	// Use the annotations inside the ASG to compile it.
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, "Compile ASG")
-	}
-	result, err = abnf.CompileASG(asg, result, *param_c, *param_slot_c, *param_trace_Cc, *param_quiet_Full)
+	grammar, err := abnf.CompileASG(asg, abnf.AbnfAgrammar, file, 0, false, quietFull)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "  ==> Fail")
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if !*param_quiet_Most {
-		fmt.Fprintln(os.Stderr, " ==> Success")
+	if grammar == nil {
+		fmt.Fprintln(os.Stderr, "Error: the first file did not compile to an a-grammar")
+		os.Exit(1)
 	}
-	if *param_verbose_Cc || *param_trace_Cc {
-		if result != nil {
-			fmt.Fprintf(os.Stderr, "   => Result:  %s\n\n", result.Serialize())
+	return grammar
+}
+
+// runVerify lints a compiled a-grammar and exits with the right code.
+func runVerify(o *options, grammar *r.Rules, srcs []string, parseropts *abnf.Parseropts) {
+	ownNames := abnf.ProductionNames(grammar) // Before assembly: the grammar's own productions.
+	if abnf.HasInclude(grammar) {
+		// Assemble the :include() fragments by parsing the second file (or empty).
+		assemblySrc, assemblyName := "", ""
+		if len(o.files) > 1 {
+			assemblySrc, assemblyName = srcs[1], o.files[1]
 		}
+		abnf.ParseWithAgrammar(grammar, assemblySrc, assemblyName, parseropts)
 	}
+	issues := abnf.Verify(grammar, srcs[0], ownNames)
+	errors := 0
+	for _, iss := range issues {
+		where := ""
+		if iss.Line > 0 {
+			where = fmt.Sprintf("%s:%d: ", o.files[0], iss.Line)
+		}
+		tag := "warning"
+		if iss.IsError() {
+			tag = "error"
+			errors++
+		}
+		fmt.Fprintf(os.Stderr, "%s%s: %s\n", where, tag, iss.Message())
+	}
+	if len(issues) == 0 {
+		fmt.Fprintf(os.Stderr, "%s: verified, no issues.\n", o.files[0])
+	} else {
+		fmt.Fprintf(os.Stderr, "%s: %d issue(s), %d error(s).\n", o.files[0], len(issues), errors)
+	}
+	if errors > 0 {
+		os.Exit(1)
+	}
+}
+
+func printUsage() {
+	fmt.Fprint(os.Stderr, `Usage: mec [flags] grammar.abnf [file ...]
+
+The first file is compiled by the built-in ABNF a-grammar; each further file is
+parsed and compiled by the grammar the previous stage produced. Flags may appear
+anywhere among the files.
+
+  -v, -vN       verbose for all stages / stage N (ASG + compiled result)
+  -vv, -vvN     parser+compiler trace for all stages / stage N
+  -q, -qq       quiet (program output + errors / errors only)
+  -frozen       run the annotation scripts without goja
+  -verify       lint the first file's grammar and exit
+  -pretty       print the first file's serialized a-grammar and exit
+  -cfg F        write the control flow graph of every executed module to F
+  -trace F      stream runtime events to F as JSON lines
+  -callgraph F  write the static call graph (.jsonl appends for -render static)
+  -render K     render a -trace/-callgraph file to DOT: calls | vars | static
+  -freeze F     (re)create the frozen bootstrap snapshot from grammar F, then exit
+  -lb, -lf      parser block-list / found-list debugging aids
+  -s            speed test (100 cycles on the first file)
+`)
 }
 
 func speedtest(srcA, fileNameA string, count int, useBlockList, useFoundList bool) {

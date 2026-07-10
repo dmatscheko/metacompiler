@@ -224,6 +224,14 @@ func CompileASG(asg *r.Rules, aGrammar *r.Rules, fileName string, slot int, trac
 	return res, nil
 }
 
+// GrammarStartScriptOnly reports whether an a-grammar has a :startScript() but
+// no :startRule(). Such a grammar takes no input - it can only be run, with its
+// startScript executing on an empty ASG. The pipeline runs it as the final
+// stage, so the last file of a run may be a startScript-only grammar.
+func GrammarStartScriptOnly(aGrammar *r.Rules) bool {
+	return aGrammar != nil && r.GetStartRule(aGrammar) == nil && r.GetStartScript(aGrammar) != nil
+}
+
 // SerializeGrammarPretty renders an a-grammar as a pretty-printed Go literal in
 // the canonical bootstrap form used by abnf/agrammar.go: the runtime :origin()
 // provenance stamp that CompileASG adds is dropped, so the output is the
