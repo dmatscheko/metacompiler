@@ -731,7 +731,8 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			switch ks {
 			case "length":
 				return float64(len(o))
-			case "charCodeAt", "charAt", "indexOf", "replace", "slice", "substring", "split":
+			case "charCodeAt", "charAt", "indexOf", "replace", "slice", "substring", "split",
+				"toUpperCase", "toLowerCase", "trim":
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
@@ -1422,6 +1423,12 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 				out.elems = append(out.elems, p)
 			}
 			return out
+		case "toUpperCase":
+			return strings.ToUpper(recv)
+		case "toLowerCase":
+			return strings.ToLower(recv)
+		case "trim":
+			return strings.TrimSpace(recv)
 		}
 	}
 	rt.fail("unknown method %s on %s", m.name, rt.typeOf(m.recv))

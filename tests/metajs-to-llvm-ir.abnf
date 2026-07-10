@@ -40,9 +40,20 @@ define it - that is what makes the frozen, goja free bootstrap possible.") ;
 Program     <~~ buildMain(takeAll()) ~~>
             = { Statement } ;
 
-// Every statement production pushes exactly one thunk: function(block) -> nextBlock.
-Statement   = Block | VarDecl | If | While | Do | For | Return | Break | Continue | Throw
-            | FuncDecl | Empty | ExprStmt ;
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
+            | Throw | FuncDecl | Empty | ExprStmt ;
+
+// The JS switch: === comparison, fallthrough until break, stacked labels, default
+// anywhere. The body is a flat list - the labels must be tried before Statement,
+// because 'case 1:' would otherwise parse as two expression statements (semicolons
+// are optional).
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { CaseLabel | DefaultLabel | Statement } "}" ;
+CaseLabel   <~~ push({casev: pop()}) ~~>
+            = KwCase AssignExpr ":" ;
+DefaultLabel <~~ push({isdflt: true}) ~~>
+            = KwDefault ":" ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -150,7 +161,10 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | BitNot | Typeof | PostfixExpr ;
+UnaryExpr   = PreIncDec | Neg | Not | BitNot | Typeof | PostfixExpr ;
+// Prefix ++/--: the expression value is the new one.
+PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeUnary(pop(), "js_neg")) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeUnary(pop(), "js_not")) ~~>
@@ -160,7 +174,7 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 Typeof      <~~ push(makeUnary(pop(), "js_typeof")) ~~>
             = KwTypeof UnaryExpr ;
 
-// Only the postfix forms exist: i++ evaluates to the old value.
+// The postfix forms: i++ evaluates to the old value.
 PostfixExpr = IncDec | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
@@ -232,6 +246,9 @@ KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
 KwThrow     = "throw" KwEnd ;
 KwTypeof    = "typeof" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
 
 KwEnd = :script(~~
     (function() {
@@ -601,6 +618,26 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return {b: b, v: oldM}
         }
     }
+    // Prefix ++/--: like makeIncDec, but the expression value is the new one.
+    function makePreIncDec(ref, op) {
+        var extName = (op == "++") ? "js_add" : "js_sub"
+        return function(b) {
+            var oneV = callExt(b, "js_num_i", [handle(1)])
+            if (ref.path.length == 0) {
+                var nameV = emitStr(b, ref.name)
+                var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+                var newV = callExt(b, extName, [oldV, oneV])
+                callExt(b, "js_scope_set", [curScopeV, nameV, newV])
+                return {b: b, v: newV}
+            }
+            var p = emitRefPath(b, ref)
+            b = p.b
+            var oldM = callExt(b, "js_tonum", [callExt(b, "js_get", [p.obj, p.key])])
+            var newM = callExt(b, extName, [oldM, oneV])
+            callExt(b, "js_set", [p.obj, p.key, newM])
+            return {b: b, v: newM}
+        }
+    }
 
     // A function body: an own IR function jsf_N(env, args) whose entry opens a scope on
     // the passed environment, binds the parameters and 'arguments', and runs the body.
@@ -795,6 +832,58 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             callExt(r.b, "js_throw", [r.v])
             r.b.NewRet(hUndef) // Never reached: js_throw aborts on the host side.
             return deadBlock()
+        }
+    }
+    // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement
+    // list is grouped at build time. The dispatch chain compares with js_seq (===);
+    // the case bodies fall through into each other, break jumps to the exit, and
+    // continue still targets the enclosing loop.
+    function makeSwitch(items) {
+        var subj = items[0]
+        var cases = []
+        var cur = null
+        for (var i = 1; i < items.length; i++) {
+            var p = items[i]
+            if (p != undefined && (p.casev != undefined || p.isdflt != undefined)) {
+                cur = {isDefault: p.isdflt != undefined, v: p.casev, body: []}
+                cases.push(cur)
+            } else {
+                if (cur == null) {
+                    println("js compiler error: switch: a statement before the first case label")
+                    exit(1)
+                }
+                cur.body.push(p)
+            }
+        }
+        return function(b) {
+            var r = subj(b)
+            b = r.b
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDefault && dfltB === exitB) { dfltB = bodyBs[i] }
+            }
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { continue }
+                var rc = cases[i].v(b)
+                b = rc.b
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [r.v, rc.v])), bodyBs[i], nextB)
+                b = nextB
+            }
+            b.NewBr(dfltB)
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var i = 0; i < cases.length; i++) {
+                var bb = bodyBs[i]
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                bb.NewBr(i + 1 < cases.length ? bodyBs[i + 1] : exitB)
+            }
+            loopStack.pop()
+            return exitB
         }
     }
     // Local stack = [name, [paramNames...], bodyThunk] -- declares the closure when executed.

@@ -302,6 +302,78 @@ function main() {
     check("typeof null", typeof null, "object");
     check("typeof object", typeof {}, "object");
 
+    // ----- switch -----
+    function classify(x) {
+        var r = 0;
+        switch (x) {
+        case 0:
+            r = 100;
+            break;
+        case 1:                         // stacked labels
+        case 2:
+            r = 12;
+            break;
+        case 3:
+            r = 3;                      // falls through into case 4
+        case 4:
+            r += 40;
+            break;
+        default:
+            r = -1;
+        }
+        return r;
+    }
+    check("switch first", classify(0), 100);
+    check("switch stacked", classify(1), 12);
+    check("switch fallthrough", classify(3), 43);
+    check("switch late entry", classify(4), 40);
+    check("switch default", classify(9), -1);
+    check("switch is strict", classify("3"), -1);   // === comparison, like JS
+
+    function dayKind(d) {
+        switch (d) {
+        case "sat":
+        case "sun": return "weekend";
+        default: return "workday";
+        }
+    }
+    check("string switch", dayKind("sun"), "weekend");
+    check("string switch default", dayKind("wed"), "workday");
+
+    var sc = 0;
+    for (var si = 0; si < 6; si++) {    // continue skips the tail, break only the switch
+        switch (si % 3) {
+        case 0: continue;
+        case 1: sc += 10; break;
+        default: sc += 1;
+        }
+        sc += 100;
+    }
+    check("switch in loop", sc, 422);
+
+    // ----- prefix inc/dec -----
+    var pn = 5;
+    check("pre inc value", ++pn, 6);
+    check("pre inc effect", pn, 6);
+    check("pre dec value", --pn, 5);
+    check("pre dec effect", pn, 5);
+    var po = {n: 3};
+    check("member pre inc", ++po.n, 4);
+    check("member pre effect", po.n, 4);
+    check("pre and post mixed", ++pn + pn++, 12);
+    check("mixed effect", pn, 7);
+
+    // ----- more string and array methods -----
+    check("substring", "metacompiler".substring(4, 8), "comp");
+    check("substring open", "metajs".substring(4), "js");
+    check("toUpperCase", "up".toUpperCase(), "UP");
+    check("toLowerCase", "DoWn".toLowerCase(), "down");
+    check("trim", "  pad  ".trim(), "pad");
+    check("split count", "a,b,c".split(",").length, 3);
+    check("split part", "a,b,c".split(",")[1], "b");
+    check("join", ["x", "y", "z"].join("-"), "x-y-z");
+    check("split join", "1 2 3".split(" ").join("+"), "1+2+3");
+
     // ----- host builtins -----
     check("parseInt", parseInt("42"), 42);
     check("parseInt stops", parseInt("7.9"), 7);

@@ -93,6 +93,26 @@ function main() {
     arr.push(0);
     check("arrays", arr.length + arr[0], 7);
 
+    // switch keeps the pinned types happy (the subject stays a number).
+    var sw = 0;
+    switch (arr.length) {
+    case 3:
+        sw = 3;
+        break;
+    case 4:                             // falls through into default
+        sw = 4;
+    default:
+        sw += 100;
+    }
+    check("switch", sw, 104);
+
+    // Prefix ++/-- pin and keep the number type; the value is the new one.
+    var pn = 7;
+    check("pre inc", ++pn, 8);
+    check("pre dec", --pn, 7);
+    check("post after pre", pn++, 7);
+    check("effects", pn, 8);
+
     if (failures == 0) { println("Typed MetaJS self test passed"); }
     return failures;
 }
