@@ -56,11 +56,9 @@ Number      = ( "0" | "1"..."9" { "0"..."9" } )
     // takeAll empties the local stack of the current tag and returns its items in push order.
     function takeAll() {
         var items = []
-        while (true) {
-            var v = pop() // Redeclared per iteration: consecutive pops may yield different types.
-            if (v == null) { return items }
-            items.unshift(v)
-        }
+        var v = anytype // The tags push values of every type.
+        while ((v = pop()) != null) items.unshift(v)
+        return items
     }
 
     // items = [value, op, value, op, value, ...] -> the left folded result.

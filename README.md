@@ -163,7 +163,7 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | Brainfuck    | brainfuck-interpreter.abnf                                   | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt        |
 | TinyC        | tinyc-interpreter.abnf                                       | tinyc-to-llvm-ir.abnf        | tinyc-test-1.txt, tinyc-test-2.txt                |
 | Lisp         | lisp-interpreter.abnf                                        | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                                   |
-| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js, metajs-test-2.js, metajs-fail-test.js, metajs-fail-test-undeclared.js |
+| MetaJS       | metajs-interpreter.abnf                                      | metajs-to-llvm-ir.abnf       | metajs-test-1.js, metajs-test-2.js, metajs-fail-test.js, metajs-fail-test-undeclared.js, metajs-fail-test-anytype.js |
 | C (subset)   | c-interpreter.abnf                                           | c-to-llvm-ir.abnf            | c-test-1.c                                        |
 | Java         | java-interpreter.abnf                                        | java-to-llvm-ir.abnf         | java-test-1.java                                  |
 | Kotlin       | kotlin-interpreter.abnf                                      | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                                  |
@@ -197,9 +197,12 @@ engines).
 MetaJS pins types: every variable must be declared (var/let/const) before use, and a
 variable's type class is pinned by the first non-undefined, non-null value it holds -
 enforced by both engines, positively tested by metajs-test-2.js and demonstrated by
-metajs-fail-test.js and metajs-fail-test-undeclared.js (both SHOULD FAIL). The rule was
-prototyped in a separate 'Typed MetaJS' dialect pair that has since been folded into the
-base language (the js_tdecl/js_tset extern names remember it).
+metajs-fail-test.js and metajs-fail-test-undeclared.js (both SHOULD FAIL). A variable
+that is meant to change its type declares it: `var v = anytype` starts as undefined and
+is exempt from pinning (assigning anytype to an existing variable is an error,
+metajs-fail-test-anytype.js). The rule was prototyped in a separate 'Typed MetaJS'
+dialect pair that has since been folded into the base language (the js_tdecl/js_tset
+extern names remember it).
 
 The big-language grammars (Java, Kotlin, Go, Python, C and MetaJS -
 interpreters and compilers) draw their common machinery from `languages/lib/`: the
@@ -248,9 +251,11 @@ It also means the discipline rules apply to the tag scripts themselves: under -f
 declare and assign through the pinning externals (js_tdecl/js_tset), while goja enforces
 only the declaration rule (the scripts are compiled as strict-mode JS; a JS engine cannot
 pin types) - so the -frozen leg of a test sweep is the conformance check for tag scripts.
-A variable that legitimately hops between types (an interpreter folding obj.name.length
-walks object, string, number) is written as the parameter of a recursive helper instead
-of a loop-carried assignment: parameters pin fresh on every call.
+A variable that legitimately hops between types (takeAll popping mixed pushes, an
+interpreter folding obj.name.length across object, string, number) declares it:
+`var v = anytype` starts as undefined and is exempt from pinning. The marker is a
+plain host global, so the declaration stays valid JavaScript for goja (whose anytype
+is simply undefined - it cannot pin types anyway).
 
 #### The frozen bootstrap (running without goja)
 

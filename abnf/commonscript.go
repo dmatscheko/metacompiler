@@ -137,6 +137,11 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("unescape", r.Unescape)
 	vm.Set("unescapeTilde", UnescapeTilde)
 
+	// The MetaJS 'anytype' declaration marker (var v = anytype). Goja cannot pin
+	// types, so here it is plain undefined: the variable starts as undefined
+	// exactly like under the enforcing engines, and the name always resolves.
+	vm.Set("anytype", goja.Undefined())
+
 	vm.Set("include", func(fileName string) bool {
 		if fileName == "" {
 			return false

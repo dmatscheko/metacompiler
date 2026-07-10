@@ -107,6 +107,12 @@
             "program": "${workspaceFolder}","args": ["-a", "languages/metajs-interpreter.abnf", "-b", "tests/metajs-fail-test-undeclared.js", "-q"]
         },
         {
+            "name": "MetaJS anytype assignment (SHOULD FAIL)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-a", "languages/metajs-interpreter.abnf", "-b", "tests/metajs-fail-test-anytype.js", "-q"]
+        },
+        {
             "name": "C (subset) interpreter",
             "type": "go",
             "request": "launch",

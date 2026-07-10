@@ -60,11 +60,9 @@ function setVar(name, value) {
 
 function takeAll() {
     var items = []
-    while (true) {
-        var v = pop() // Redeclared per iteration: consecutive pops may yield different types.
-        if (v == null) { return items }
-        items.unshift(v)
-    }
+    var v = anytype // The tags push values of every type.
+    while ((v = pop()) != null) items.unshift(v)
+    return items
 }
 
 function popName() {
@@ -125,28 +123,28 @@ function makeNeg(t) { return function() { return (0 - t()) | 0 } }
 
 function makeNot(t) { return function() { return !t() } }
 
-// The running value lives in a parameter, so every step pins its type fresh
-// (a comparison turns the number into a boolean, for example).
 function foldBinary(items) {
     if (items.length == 1) return items[0]
-    return function() { return foldBinaryFrom(items[0](), items, 1) }
-}
-
-function foldBinaryFrom(v, items, i) {
-    if (i >= items.length) return v
-    return foldBinaryFrom(binOp(items[i], v, items[i + 1]()), items, i + 2)
+    return function() {
+        var v = anytype // A comparison fold turns the running number into a boolean.
+        v = items[0]()
+        for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
+        return v
+    }
 }
 
 function makeOrAnd(items, isOr) {
     if (items.length == 1) return items[0]
-    return function() { return orAndFrom(items[0](), items, 1, isOr) }
-}
-
-function orAndFrom(v, items, i, isOr) {
-    if (isOr) { if (v) return true }
-    else      { if (!v) return false }
-    if (i >= items.length) return v ? true : false
-    return orAndFrom(items[i](), items, i + 1, isOr)
+    return function() {
+        var v = anytype // The operands may be of mixed types.
+        v = items[0]()
+        for (var i = 1; i < items.length; i++) {
+            if (isOr) { if (v) return true }
+            else      { if (!v) return false }
+            v = items[i]()
+        }
+        return v ? true : false
+    }
 }
 
 function makeTargetRef(items) {
@@ -232,46 +230,43 @@ function applyOp(op, a, b) {
 
 // Folds a primary expression with .method(args) / .field / [index] suffixes.
 // Method dispatch goes through the language file's mcall(target, name, args).
-// The folded value is a parameter, so each suffix step pins its type fresh
-// (a member chain hops between types: obj.name.length is object, string, number).
 function foldCallMember(items) {
     if (items.length == 1) return items[0]
     var primary = items[0]
     var suffixes = items.slice(1)
-    return function() { return foldSuffix(primary(), suffixes, 0) }
-}
-
-function foldSuffix(cur, suffixes, i) {
-    if (i >= suffixes.length) return cur
-    var s = suffixes[i]
-    if (s.kind == "mcall") {
-        var argv = []
-        for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-        return foldSuffix(mcall(cur, s.name, argv), suffixes, i + 1)
+    return function() {
+        var cur = anytype // A member chain hops between types: obj.name.length is object, string, number.
+        cur = primary()
+        for (var i = 0; i < suffixes.length; i++) {
+            var s = suffixes[i]
+            if (s.kind == "mcall") {
+                var argv = []
+                for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                cur = mcall(cur, s.name, argv)
+            } else if (s.kind == "field") {
+                if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
+                cur = core.getField(cur, s.name)
+            } else {
+                cur = core.getIndex(cur, s.idx())
+            }
+        }
+        return cur
     }
-    if (s.kind == "field") {
-        if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
-        return foldSuffix(core.getField(cur, s.name), suffixes, i + 1)
-    }
-    return foldSuffix(core.getIndex(cur, s.idx()), suffixes, i + 1)
 }
 
 // Walks an assignment target's path up to the last step and returns the
-// container/key pair the assignment writes to. The walked container is a
-// parameter, so each path step pins its type fresh.
+// container/key pair the assignment writes to.
 function resolveRef(ref) {
-    return refWalk(getVar(ref.name), ref, 0)
-}
-
-function refWalk(o, ref, i) {
-    if (i >= ref.path.length - 1) {
-        var last = ref.path[ref.path.length - 1]
-        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+    var o = anytype // The containers along the path may be of mixed types.
+    o = getVar(ref.name)
+    for (var i = 0; i < ref.path.length - 1; i++) {
+        var s = ref.path[i]
+        if (s.key != undefined) { o = o[s.key] }
+        else { o = core.getIndex(o, s.idx()) }
+        if (o === undefined || o === null) fail(core.nullWord + " in assignment path of " + ref.name)
     }
-    var s = ref.path[i]
-    var next = (s.key != undefined) ? o[s.key] : core.getIndex(o, s.idx())
-    if (next === undefined || next === null) fail(core.nullWord + " in assignment path of " + ref.name)
-    return refWalk(next, ref, i + 1)
+    var last = ref.path[ref.path.length - 1]
+    return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
 }
 
 // Runs a function body in a fresh frame: the receiver (if any) is bound to recvName,

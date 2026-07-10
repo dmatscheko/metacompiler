@@ -45,6 +45,21 @@ type jsNullT struct{}
 var jsUndef = jsUndefT{}
 var jsNull = jsNullT{}
 
+// jsAnyT is the value of the host global 'anytype'. Declaring a variable with
+// it (var v = anytype) starts the variable as undefined WITHOUT pinning: it may
+// hold values of every type class for its whole (re)declared life. Only valid
+// as a declaration initializer; assigning it to an existing variable fails.
+// (Goja binds 'anytype' to plain undefined instead - it cannot pin types
+// anyway, and this way the variable starts as undefined under both engines.)
+type jsAnyT struct{}
+
+var jsAnytype = jsAnyT{}
+
+func isAnytype(v interface{}) bool {
+	_, ok := v.(jsAnyT)
+	return ok
+}
+
 // jsObject is a plain MetaJS object. The key order is kept for deterministic behavior.
 type jsObject struct {
 	props map[string]interface{}
@@ -657,11 +672,18 @@ func (rt *jsrt) typeClass(v interface{}) string {
 // typedDecl declares a variable and pins its type if the value already has one.
 // This is the declaration of MetaJS itself: the compiled MetaJS programs and
 // (through the frozen bootstrap) every tag script declare through it.
+// Declaring with the anytype marker starts the variable as undefined and
+// exempts it from pinning ("*") until a redeclaration says otherwise.
 func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
-	sc.vars[name] = v
 	if sc.types == nil {
 		sc.types = map[string]string{}
 	}
+	if isAnytype(v) {
+		sc.vars[name] = jsUndef
+		sc.types[name] = "*"
+		return
+	}
+	sc.vars[name] = v
 	if tc := rt.typeClass(v); tc != "" {
 		sc.types[name] = tc
 	} else {
@@ -670,18 +692,26 @@ func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
 }
 
 // typedSet assigns like scopeSet but refuses to change a pinned type.
-// Assigning undefined or null is allowed and keeps the pinned type.
+// Assigning undefined or null is allowed and keeps the pinned type; a
+// variable declared as anytype ("*") accepts every class and never pins.
 func (rt *jsrt) typedSet(sc *jsScope, name string, v interface{}) {
+	if isAnytype(v) {
+		rt.fail("MetaJS: anytype can only initialize a declaration")
+	}
 	for s := sc; s != nil; s = s.parent {
 		if _, ok := s.vars[name]; ok {
 			if tc := rt.typeClass(v); tc != "" {
-				if old, pinned := s.types[name]; pinned && old != tc {
+				old, pinned := s.types[name]
+				if pinned && old == "*" {
+					// anytype variable: no check, and nothing re-pins it.
+				} else if pinned && old != tc {
 					rt.fail("MetaJS: variable '%s' has type %s and cannot hold a %s", name, old, tc)
+				} else {
+					if s.types == nil {
+						s.types = map[string]string{}
+					}
+					s.types[name] = tc
 				}
-				if s.types == nil {
-					s.types = map[string]string{}
-				}
-				s.types[name] = tc
 			}
 			s.vars[name] = v
 			return
@@ -2168,6 +2198,9 @@ func standardJSBindings() map[string]interface{} {
 		"String": stringObj,
 		"Object": objectObj,
 		"Array":  arrayObj,
+		// The declaration marker: var v = anytype declares v as never pinning.
+		// frozenBaseBindings inherits it, so tag scripts get it under -frozen too.
+		"anytype": jsAnytype,
 	}
 }
 

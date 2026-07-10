@@ -47,11 +47,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // order as a plain JS array.
     function takeAll() {
         var items = []
-        while (true) {
-            var v = pop() // Redeclared per iteration: consecutive pops may yield different types.
-            if (v == null) { return items }
-            items.unshift(v)
-        }
+        var v = anytype // The tags push values of every type.
+        while ((v = pop()) != null) items.unshift(v)
+        return items
     }
 
     function fail(msg) {

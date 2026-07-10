@@ -22,6 +22,9 @@ non-undefined, non-null value it holds - later assignments must keep that type c
 (number, string, boolean, function or object; arrays and objects share the object
 class like typeof does). undefined and null pin nothing and are always assignable,
 and a redeclaration starts the pin fresh. A violation aborts the run.
+A variable that must hold values of changing types declares it: var v = anytype
+(a host global) starts the variable as undefined and exempts it from pinning;
+assigning anytype to an already existing variable is an error.
 
 Deliberately not in the subset: this, new, prototypes, try/catch, regex, for-in,
 getters/setters, and hoisting (a binding must be executed before it is used;
@@ -274,10 +277,14 @@ KwDefault   = "default" KwEnd ;
 
     // The host names that a MetaJS program can use. Everything resolves to the goja
     // natives, so e.g. Math.imul or the string/array methods behave exactly like in JS.
+    // The 'anytype' declaration marker of the interpreted programs: a unique
+    // object a program can only obtain through the anytype global below.
+    var anytypeMarker = {}
+
     var hostGlobals = {
         "println": println, "print": print, "printf": printf, "sprintf": sprintf,
         "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
-        "exit": exit
+        "exit": exit, "anytype": anytypeMarker
     }
 
     // The type class that pins a variable: undefined and null pin nothing.
@@ -285,7 +292,8 @@ KwDefault   = "default" KwEnd ;
         if (v === undefined || v === null) return ""
         return typeof v
     }
-    // Scope entries are {v, t} type boxes: reads unbox, declarations pin the type.
+    // Scope entries are {v, t} type boxes: reads unbox, declarations pin the
+    // type; t '*' marks an anytype variable (starts undefined, never pins).
     getVar = function(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], name)) return scopes[i][name].v
@@ -294,14 +302,16 @@ KwDefault   = "default" KwEnd ;
         fail("variable not defined: " + name)
     }
     declVar = function(name, value) {
+        if (value === anytypeMarker) { scopes[scopes.length - 1][name] = {v: undefined, t: "*"}; return }
         scopes[scopes.length - 1][name] = {v: value, t: typeClass(value)}
     }
     setVar = function(name, value) {
+        if (value === anytypeMarker) { fail("MetaJS: anytype can only initialize a declaration") }
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], name)) {
                 var entry = scopes[i][name]
                 var tc = typeClass(value)
-                if (tc != "") {
+                if (tc != "" && entry.t != "*") {
                     if (entry.t != "" && entry.t != tc) {
                         fail("MetaJS: variable '" + name + "' has type " + entry.t + " and cannot hold a " + tc)
                     }
@@ -328,7 +338,9 @@ KwDefault   = "default" KwEnd ;
             var saved = scopes
             scopes = env.slice()
             var sc = {}
-            for (var j = 0; j < params.length; j++) sc[params[j]] = {v: args[j], t: typeClass(args[j])}
+            for (var j = 0; j < params.length; j++) {
+                sc[params[j]] = (args[j] === anytypeMarker) ? {v: undefined, t: "*"} : {v: args[j], t: typeClass(args[j])}
+            }
             sc["arguments"] = {v: args, t: "object"}
             scopes.push(sc)
             var r = bodyT()
@@ -394,25 +406,30 @@ KwDefault   = "default" KwEnd ;
         if (op == ">>>") return l >>> r
     }
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
-    // || and && evaluate lazily and return the deciding operand, like in JS. The
-    // running operand is a parameter, so mixed operand types pin fresh per step.
+    // || and && evaluate lazily and return the deciding operand, like in JS.
     function makeOr(items) {
         if (items.length == 1) return items[0]
-        return function() { return orFrom(items[0](), items, 1) }
-    }
-    function orFrom(v, items, i) {
-        if (v) return v
-        if (i >= items.length) return v
-        return orFrom(items[i](), items, i + 1)
+        return function() {
+            var v = anytype // The operands may be of mixed types.
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (v) return v
+                v = items[i]()
+            }
+            return v
+        }
     }
     function makeAnd(items) {
         if (items.length == 1) return items[0]
-        return function() { return andFrom(items[0](), items, 1) }
-    }
-    function andFrom(v, items, i) {
-        if (!v) return v
-        if (i >= items.length) return v
-        return andFrom(items[i](), items, i + 1)
+        return function() {
+            var v = anytype // The operands may be of mixed types.
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (!v) return v
+                v = items[i]()
+            }
+            return v
+        }
     }
     // items = [thunk] or [condThunk, thenThunk, elseThunk].
     function makeCond(items) {
@@ -421,48 +438,56 @@ KwDefault   = "default" KwEnd ;
     }
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
-    // its object, so that a directly following call uses it as 'this'. The folded value
-    // and the remembered receiver are parameters, so every step pins their types fresh.
+    // its object, so that a directly following call uses it as 'this'.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        return function() { return foldJsSuffix(primary(), undefined, suffixes, 0) }
-    }
-    function foldJsSuffix(cur, curThis, suffixes, i) {
-        if (i >= suffixes.length) return cur
-        var s = suffixes[i]
-        if (s.kind == "member") {
-            return foldJsSuffix(getMember(cur, s.key()), cur, suffixes, i + 1)
+        return function() {
+            var cur = anytype     // A member chain hops between types,
+            var curThis = anytype // and so does the remembered receiver.
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "member") {
+                    curThis = cur
+                    cur = getMember(cur, s.key())
+                } else {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    if (typeof cur != "function") fail("call of a non function value: " + cur)
+                    cur = cur.apply(curThis, argv)
+                    curThis = undefined
+                }
+            }
+            return cur
         }
-        var argv = []
-        for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-        if (typeof cur != "function") fail("call of a non function value: " + cur)
-        return foldJsSuffix(cur.apply(curThis, argv), undefined, suffixes, i + 1)
     }
 
     // Target items = [nameString, suffix marker...] -> reference descriptor.
     // Walks a target path (members and calls) up to the last element and returns
-    // the assignable place {obj, key}. The last element must be a member. The walked
-    // value and receiver are parameters, so every step pins their types fresh.
+    // the assignable place {obj, key}. The last element must be a member.
     resolveRef = function(ref) {
-        return jsRefWalk(getVar(ref.name), undefined, ref, 0)
-    }
-    function jsRefWalk(cur, curThis, ref, i) {
-        if (i >= ref.path.length - 1) {
-            var last = ref.path[ref.path.length - 1]
-            if (last.kind != "member") fail("assignment target must end in a member")
-            if (cur == undefined) fail("member assignment on " + cur)
-            return {obj: cur, key: last.key()}
+        var cur = anytype     // The walked values and receivers
+        var curThis = anytype // may be of mixed types.
+        cur = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.kind == "member") {
+                curThis = cur
+                cur = getMember(cur, s.key())
+            } else {
+                var argv = []
+                for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                if (typeof cur != "function") fail("call of a non function value: " + cur)
+                cur = cur.apply(curThis, argv)
+                curThis = undefined
+            }
         }
-        var s = ref.path[i]
-        if (s.kind == "member") {
-            return jsRefWalk(getMember(cur, s.key()), cur, ref, i + 1)
-        }
-        var argv = []
-        for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-        if (typeof cur != "function") fail("call of a non function value: " + cur)
-        return jsRefWalk(cur.apply(curThis, argv), undefined, ref, i + 1)
+        var last = ref.path[ref.path.length - 1]
+        if (last.kind != "member") fail("assignment target must end in a member")
+        if (cur == undefined) fail("member assignment on " + cur)
+        return {obj: cur, key: last.key()}
     }
     applyOp = function(op, a, b) {
         if (op == "+=") return a + b
@@ -471,25 +496,23 @@ KwDefault   = "default" KwEnd ;
         if (op == "/=") return a / b
         if (op == "%=") return a % b
     }
-    // items = [ref, opString, valueThunk]. Returns the assigned value (assignment is an
-    // expression). The compound result gets its own binding: s += n may change the type.
+    // items = [ref, opString, valueThunk]. Returns the assigned value (assignment is an expression).
     function makeAssign(items) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
         return function() {
-            var v = valT()
+            var v = anytype // A compound assignment (s += n) may change the value's type.
+            v = valT()
             if (ref.path.length == 0) {
-                if (op == "=") { setVar(ref.name, v); return v }
-                var w = applyOp(op, getVar(ref.name), v)
-                setVar(ref.name, w)
-                return w
+                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                setVar(ref.name, v)
+            } else {
+                var p = resolveRef(ref)
+                if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                p.obj[p.key] = v
             }
-            var p = resolveRef(ref)
-            if (op == "=") { p.obj[p.key] = v; return v }
-            var w2 = applyOp(op, p.obj[p.key], v)
-            p.obj[p.key] = w2
-            return w2
+            return v
         }
     }
     // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.

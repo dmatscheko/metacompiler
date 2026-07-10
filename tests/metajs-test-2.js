@@ -83,6 +83,17 @@ function main() {
     box.v = "free";
     check("members are free", box.v, "free");
 
+    // anytype declares a variable that is exempt from pinning (starts undefined).
+    var any = anytype;
+    check("anytype starts undefined", any, undefined);
+    any = 1;
+    any = "one";
+    any = [1, 2];
+    check("anytype changes type", any.length, 2);
+    var any = 7; // A redeclaration with a value pins normally again.
+    any = 8;
+    check("anytype redeclared repins", any, 8);
+
     // The normal language still works.
     var sum = 0;
     for (var i = 1; i <= 10; i++) { sum += i; }

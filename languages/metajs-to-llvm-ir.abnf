@@ -32,9 +32,11 @@ This grammar has a second purpose: its own tag scripts (and every annotation scr
 the other grammars) are written in MetaJS, so this compiler can compile the scripts that
 define it - that is what makes the frozen, goja free bootstrap possible. As a
 consequence, every tag script runs under the MetaJS discipline rules when frozen:
-declaration before use and the pinned type class. Under goja only the declaration rule
-holds (the scripts are compiled as strict-mode JS; goja cannot pin types), so the
--frozen leg of the test matrix is the conformance check for tag scripts.") ;
+declaration before use and the pinned type class, with var v = anytype as the
+declared exemption. Under goja only the declaration rule holds (the scripts are
+compiled as strict-mode JS; goja cannot pin types, and its anytype is plain
+undefined), so the -frozen leg of the test matrix is the conformance check for
+tag scripts.") ;
 
 
 // --- main rules
