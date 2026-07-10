@@ -3,7 +3,8 @@
 straight arithmetic (llvm.Eval), globals with loads and stores, external functions,
 control flow with blocks and phi, putchar/getchar via llvm.Run, and the whole integer
 instruction set (sub, div/rem, the bitwise group, shifts, select, trunc/zext/sext, all
-ten icmp predicates, and getelementptr). Exits with 1 on a mismatch, so this file is a
+ten icmp predicates, getelementptr into arrays and packed structs, and the pointer
+casts ptrtoint/inttoptr/bitcast). Exits with 1 on a mismatch, so this file is a
 self checking test.") ;
 
 
@@ -35,8 +36,8 @@ self checking test.") ;
     //    int seed = 0;
     //    int rand(void) { seed = seed * 0x15A4E35 + 1; return abs(seed); }
 
-    // The multiplier of the PRNG, 0x15A4E35 (MetaJS has no hex literals).
-    var a = llvm.constant.NewInt(i32, 22695477)
+    // The multiplier of the PRNG.
+    var a = llvm.constant.NewInt(i32, 0x15A4E35)
     var c = one                                  // increment of the PRNG.
 
     var abs = m.NewFunc("abs", i32, llvm.ir.NewParam("x", i32))
@@ -180,6 +181,27 @@ self checking test.") ;
         b.NewStore(ci(77), b.NewGetElementPtr(i32x4, aPtr, ci(0), ci(2)))
         return b.NewLoad(i32, b.NewGetElementPtr(i32x4, aPtr, ci(0), ci(2)))
     })
+    // A struct with mixed field sizes ({i8, i32, [2 x i32]}, packed layout) through
+    // getelementptr: write 30 into .f1 and 25 into .f2[1], read both back.
+    var stTy = llvm.types.NewStruct([i8, i32, llvm.types.NewArray(2, i32)])
+    opFunc("opStructGep", function(b) {
+        var sPtr = b.NewAlloca(stTy)
+        b.NewStore(llvm.constant.NewZeroInitializer(stTy), sPtr)
+        b.NewStore(ci(30), b.NewGetElementPtr(stTy, sPtr, ci(0), llvm.constant.NewInt(i32, 1)))
+        b.NewStore(ci(25), b.NewGetElementPtr(stTy, sPtr, ci(0), llvm.constant.NewInt(i32, 2), ci(1)))
+        var v1 = b.NewLoad(i32, b.NewGetElementPtr(stTy, sPtr, ci(0), llvm.constant.NewInt(i32, 1)))
+        var v2 = b.NewLoad(i32, b.NewGetElementPtr(stTy, sPtr, ci(0), llvm.constant.NewInt(i32, 2), ci(1)))
+        return b.NewAdd(v1, v2)                                                          // 55
+    })
+    // The pointer cast group: an address survives ptrtoint (i64) and inttoptr,
+    // and a bitcast pointer still reaches the stored value.
+    opFunc("opPtrCasts", function(b) {
+        var p = b.NewAlloca(i32)
+        b.NewStore(ci(66), p)
+        var back = b.NewIntToPtr(b.NewPtrToInt(p, llvm.types.I64), llvm.types.I32Ptr)
+        var cast = b.NewBitCast(back, llvm.types.I32Ptr)
+        return b.NewLoad(i32, cast)                                                      // 66
+    })
 
     // -----------------
 
@@ -214,6 +236,8 @@ self checking test.") ;
     check("trunc + sext + 2", llvm.Eval(m, "opTruncSext"), 1)
     check("icmp predicates", llvm.Eval(m, "opPreds"), 5)
     check("getelementptr", llvm.Eval(m, "opGep"), 77)
+    check("struct getelementptr", llvm.Eval(m, "opStructGep"), 55)
+    check("pointer casts", llvm.Eval(m, "opPtrCasts"), 66)
 
     if (failures > 0) { exit(1) }
     println("All LLVM IR tests OK")

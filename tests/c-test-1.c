@@ -9,6 +9,13 @@ int nfail = 0;
 int global_counter;
 int primes[10];
 
+struct Point { int x; int y; };
+struct Node { int value; struct Node *next; };      /* self referencing pointer */
+struct Rect { struct Point min; struct Point max; }; /* nested struct values */
+
+struct Point corners[3];                /* global array of structs */
+struct Node *chain;                     /* global struct pointer */
+
 int check(int got, int want) {
     if (got != want) {
         nfail++;
@@ -66,6 +73,19 @@ int classify(int x) {                  /* switch with fallthrough and default */
         r = -1;
     }
     return r;
+}
+
+int rect_area(struct Rect *r) {        // struct pointer parameter, nested access
+    return (r->max.x - r->min.x) * (r->max.y - r->min.y);
+}
+
+int list_sum(struct Node *head) {      // walks a linked list
+    int s = 0;
+    while (head != 0) {
+        s += head->value;
+        head = head->next;
+    }
+    return s;
 }
 
 int count_primes(int limit) {          // nested loops, break/continue, arrays
@@ -176,6 +196,49 @@ int main() {
     check(p[2], 9);
     *(p + 3) = 7;
     check(arr[4], 7);
+
+    // structs
+    struct Point pt;
+    pt.x = 3;
+    pt.y = 4;
+    check(pt.x + pt.y, 7);
+    pt.x += 10;
+    check(pt.x, 13);
+
+    struct Point *pp = &pt;             // pointer to a struct, with initializer
+    pp->y = 40;
+    check(pt.y, 40);
+    check(pp->x, 13);
+    pp->x++;
+    check(pt.x, 14);
+
+    struct Rect rc;                     // nested struct values
+    rc.min.x = 1; rc.min.y = 2;
+    rc.max.x = 5; rc.max.y = 8;
+    check(rect_area(&rc), 24);
+    check(rc.max.y - rc.min.y, 6);
+
+    struct Node nodes[3];               // a linked list without malloc
+    nodes[0].value = 5;  nodes[0].next = &nodes[1];
+    nodes[1].value = 30; nodes[1].next = &nodes[2];
+    nodes[2].value = 7;  nodes[2].next = 0;
+    check(list_sum(&nodes[0]), 42);
+    check(nodes[0].next->value, 30);
+    check(nodes[0].next->next->value, 7);
+
+    struct Node *it = &nodes[0];        // long mixed paths
+    it->next->value += 1;
+    check(nodes[1].value, 31);
+    check(list_sum(it), 43);
+    it = it->next;
+    check(it->value, 31);
+
+    corners[1].x = 9;                   // global struct array (zero initialized)
+    corners[2].y = corners[1].x + 1;
+    check(corners[0].x + corners[1].x + corners[2].y, 19);
+    chain = &nodes[2];                  // global struct pointer
+    check(chain->value, 7);
+    check(chain->next == 0, 1);
 
     // switch
     check(classify(0), 100);

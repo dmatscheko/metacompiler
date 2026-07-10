@@ -1110,7 +1110,9 @@ func (ma *machine) alloc(size uint64) uint64 {
 	return off
 }
 
-// sizeOf returns the storage size of a type in bytes.
+// sizeOf returns the storage size of a type in bytes. Struct fields lie back to
+// back (packed layout): the interpreter defines its own ABI, real alignment
+// padding does not exist here.
 func (ma *machine) sizeOf(t types.Type) uint64 {
 	switch t := t.(type) {
 	case *types.IntType:
@@ -1119,8 +1121,32 @@ func (ma *machine) sizeOf(t types.Type) uint64 {
 		return t.Len * ma.sizeOf(t.ElemType)
 	case *types.PointerType:
 		return 8
+	case *types.StructType:
+		var size uint64
+		for _, f := range t.Fields {
+			size += ma.sizeOf(f)
+		}
+		return size
 	default:
 		panic("IR interpreter: unsupported type: " + t.LLString())
+	}
+}
+
+// gepStep resolves one inner getelementptr index: it returns the byte offset of
+// the selected element and the type to continue with. Arrays step by the element
+// size, struct indices select a field (packed layout, see sizeOf).
+func (ma *machine) gepStep(t types.Type, idx uint64) (uint64, types.Type) {
+	switch t := t.(type) {
+	case *types.ArrayType:
+		return idx * ma.sizeOf(t.ElemType), t.ElemType
+	case *types.StructType:
+		var off uint64
+		for i := uint64(0); i < idx; i++ {
+			off += ma.sizeOf(t.Fields[i])
+		}
+		return off, t.Fields[idx]
+	default:
+		panic("IR interpreter: getelementptr only supports arrays and structs, not " + t.LLString())
 	}
 }
 
@@ -1211,16 +1237,13 @@ func (ma *machine) constValue(c constant.Constant) uint64 {
 	case *constant.ExprGetElementPtr:
 		// The same address computation as the getelementptr instruction:
 		// the first index scales by the whole element type, the following
-		// ones step into arrays.
+		// ones step into arrays and structs.
 		off := ma.constValue(c.Src) + ma.constValue(c.Indices[0])*ma.sizeOf(c.ElemType)
 		t := c.ElemType
 		for _, index := range c.Indices[1:] {
-			arr, ok := t.(*types.ArrayType)
-			if !ok {
-				panic("IR interpreter: getelementptr expression only supports arrays, not " + t.LLString())
-			}
-			off += ma.constValue(index) * ma.sizeOf(arr.ElemType)
-			t = arr.ElemType
+			d, next := ma.gepStep(t, ma.constValue(index))
+			off += d
+			t = next
 		}
 		return off
 	default:
@@ -1236,7 +1259,11 @@ func (ma *machine) writeConst(off uint64, c constant.Constant) {
 	case *constant.Null:
 		ma.store(off, 0, 8)
 	case *constant.ZeroInitializer:
-		// The arena memory is already zeroed.
+		// Fresh arena memory is already zero, but a store of a zeroinitializer
+		// must also clear memory that was written before.
+		for i := uint64(0); i < ma.sizeOf(c.Typ); i++ {
+			ma.mem[off+i] = 0
+		}
 	case *constant.CharArray:
 		copy(ma.mem[off:off+uint64(len(c.X))], c.X)
 	case *constant.Array:
@@ -1324,25 +1351,24 @@ func (ma *machine) exec(fr *frame, inst ir.Instruction, prevBlock *ir.Block) {
 	case *ir.InstLoad:
 		fr.vals[inst] = ma.load(ma.valueOf(fr, inst.Src), ma.sizeOf(inst.ElemType))
 	case *ir.InstStore:
-		// Aggregate constants (e.g. zeroinitializer of an array) are written as a whole.
+		// Aggregate constants (e.g. zeroinitializer of an array or struct) are written as a whole.
 		if c, ok := inst.Src.(constant.Constant); ok {
-			if _, isArray := inst.Src.Type().(*types.ArrayType); isArray {
+			switch inst.Src.Type().(type) {
+			case *types.ArrayType, *types.StructType:
 				ma.writeConst(ma.valueOf(fr, inst.Dst), c)
 				return
 			}
 		}
 		ma.store(ma.valueOf(fr, inst.Dst), ma.valueOf(fr, inst.Src), ma.sizeOf(inst.Src.Type()))
 	case *ir.InstGetElementPtr:
-		// The first index scales by the whole element type, the following ones step into arrays.
+		// The first index scales by the whole element type, the following ones step
+		// into arrays and structs.
 		off := ma.valueOf(fr, inst.Src) + ma.valueOf(fr, inst.Indices[0])*ma.sizeOf(inst.ElemType)
 		t := inst.ElemType
 		for _, index := range inst.Indices[1:] {
-			arr, ok := t.(*types.ArrayType)
-			if !ok {
-				panic("IR interpreter: getelementptr only supports arrays, not " + t.LLString())
-			}
-			off += ma.valueOf(fr, index) * ma.sizeOf(arr.ElemType)
-			t = arr.ElemType
+			d, next := ma.gepStep(t, ma.valueOf(fr, index))
+			off += d
+			t = next
 		}
 		fr.vals[inst] = off
 	case *ir.InstAdd:
@@ -1383,6 +1409,13 @@ func (ma *machine) exec(fr *frame, inst ir.Instruction, prevBlock *ir.Block) {
 		fr.vals[inst] = maskTo(uint64(signedOf(ma.valueOf(fr, inst.From), widthOf(inst.From.Type()))), widthOf(inst.To))
 	case *ir.InstTrunc:
 		fr.vals[inst] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
+	case *ir.InstIntToPtr:
+		// Addresses are plain offsets into the arena; the width already fits.
+		fr.vals[inst] = ma.valueOf(fr, inst.From)
+	case *ir.InstPtrToInt:
+		fr.vals[inst] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
+	case *ir.InstBitCast:
+		fr.vals[inst] = ma.valueOf(fr, inst.From)
 	case *ir.InstSelect:
 		if maskTo(ma.valueOf(fr, inst.Cond), 1) != 0 {
 			fr.vals[inst] = ma.valueOf(fr, inst.ValueTrue)

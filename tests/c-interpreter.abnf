@@ -2,20 +2,26 @@
 :description("Parses a C subset and executes it directly, without generating code.
 
 The language is a real C subset, richer than TinyC: the types int, int* and int[N]
-(globals and locals, globals with constant initializers), address-of (&x, &a[i]),
+(globals and locals, globals with constant initializers), structs (struct definitions
+with int, pointer and nested struct value fields - including pointers to the struct
+itself for linked lists -, struct locals, globals and arrays of structs, struct
+pointers with initializers, . and -> member access along whole paths like
+nodes[i].next->value, &s and struct pointer parameters), address-of (&x, &a[i]),
 dereferencing (*p, also as assignment target), pointer arithmetic (p + i steps whole
 ints), pre and post ++/--, assignment as an expression with = += -= *= /= %=, the
 ternary operator, || and && with real C short circuit evaluation, the bitwise operators
 | ^ & << >> and unary - ! ~, char literals ('A', '\n'), comparisons, function calls and
 recursion, switch with real C fallthrough (stacked case labels, default, break), and
 putchar()/getchar(). int is 32 bit, / and % truncate towards zero.
-Not in the subset: structs, typedef, sizeof, strings, casts, and multi level
+Not in the subset: struct assignment/initializers, struct values as parameters or
+return types, (*p).f on struct pointers (use p->f), pointer arithmetic on struct
+pointers (index them instead), typedef, sizeof, strings, casts, and multi level
 pointers (int**).
 
 The interpreter uses one flat, word addressed memory array: every variable lives at an
-address, scopes map names to addresses, and pointers are plain indexes. That makes the
-semantics exactly match the compiled version (c-to-llvm-ir.abnf), where the same programs
-run as LLVM IR.
+address, scopes map names to addresses, and pointers are plain indexes; every int,
+pointer and struct field takes one word. That makes the semantics exactly match the
+compiled version (c-to-llvm-ir.abnf), where the same programs run as LLVM IR.
 
 Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
 Lvalue thunks return an address, expression thunks return the value, statement thunks
@@ -30,21 +36,33 @@ programs are self checking: they return 0 on success.") ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { FuncDef | Proto | GlobalDecl } ;
+Program     = { StructDef | StructGDecl | FuncDef | Proto | GlobalDecl } ;
+
+// struct Point { int x; int y; }; -- the fields: int, int* and, of already defined
+// structs, nested struct values and struct pointers (also of the struct itself:
+// that is how linked lists work).
+StructDef   <~~ defineStruct(takeAll()) ~~>
+            = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
+FieldLine   <~~ push(makeFieldLine(takeAll())) ~~>
+            = FieldType FDecl { "," FDecl } ";" ;
+FieldType   = TypeInt <~~ push({bty: "int"}) ~~>
+            | KwStruct Id <~~ push({bty: up.in}) ~~> ;
+FDecl       = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
 
 // A function prototype (int putchar(int c);) is accepted and ignored: the callees
 // are resolved by name anyway. It keeps the test programs valid for a real C compiler.
 Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
             = TypeInt [ "*" ] Id <~~ push(up.in) ~~> ParamList ";" ;
 
-// The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr}.
+// The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
 FuncDef     <~~ defineFunction() ~~>
             = TypeInt Id <~~ push(up.in) ~~> ParamList Block ;
 
 ParamList   <~~ push(takeAll()) ~~>
             = "(" [ ( "void" KwEnd | Param { "," Param } ) ] ")" ;
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = TypeInt [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
+            = ParamType [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
+ParamType   = TypeInt | KwStruct Id <~~ push({sname: up.in}) ~~> ;
 
 // Globals are declared like locals but registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
@@ -55,8 +73,22 @@ GDeclarator <~~ push(makeGDecl(takeAll())) ~~>
 ArraySize   <~~ push({size: pop()}) ~~>
             = "[" Number "]" ;
 
+// Global struct variables, pointers and arrays (zero initialized like all globals).
+StructGDecl <~~ defineStructGlobals(takeAll()) ~~>
+            = KwStruct Id <~~ push(up.in) ~~> SGDecl { "," SGDecl } ";" ;
+SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
+            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> [ ArraySize ] ;
+
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue | Decl | Empty | ExprStmt ;
+Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
+            | StructDecl | Decl | Empty | ExprStmt ;
+
+// Local struct variables, struct pointers (with optional initializer) and struct arrays.
+StructDecl  <~~ push(makeStructDecl(takeAll())) ~~>
+            = KwStruct Id <~~ push(up.in) ~~> SDeclarator { "," SDeclarator } ";" ;
+SDeclarator <~~ push(makeSDecl(takeAll())) ~~>
+            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
+              [ ArraySize | "=" AssignExpr ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -115,12 +147,18 @@ AssignExpr  = Assignment | CondExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Lvalue ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
-// An lvalue thunk evaluates to an address.
+// An lvalue thunk evaluates to an address. A place is a variable followed by any
+// mix of indexing and struct member steps: a[i], p.x, r.min.y, head->next->value.
 Lvalue      = Deref | VarPlace ;
 Deref       <~~ push(makeDerefPlace(pop())) ~~>
             = "*" UnaryExpr ;
 VarPlace    <~~ push(makeVarPlace(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ "[" Expression "]" ] ;
+            = Id <~~ push(up.in) ~~> { PlaceSfx } ;
+PlaceSfx    = Index | Arrow | Member ;
+Index       <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+Arrow       = "->" Id <~~ push({arw: up.in}) ~~> ;
+Member      = "." Id <~~ push({fld: up.in}) ~~> ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
@@ -184,9 +222,10 @@ Call        <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
 // A plain variable reference loads the value; an array name yields its address.
-Primary     = "(" Expression ")" | NumberLit | CharLit | IndexedRef | VarRef ;
-IndexedRef  <~~ push(makeLoad(makeVarPlace(takeAll()))) ~~>
-            = Id <~~ push(up.in) ~~> "[" Expression "]" ;
+// A place path as an expression (a[i], p.x, head->next) loads the resolved cell.
+Primary     = "(" Expression ")" | NumberLit | CharLit | PlaceRef | VarRef ;
+PlaceRef    <~~ push(makeLoad(makeVarPlace(takeAll()))) ~~>
+            = Id <~~ push(up.in) ~~> PlaceSfx { PlaceSfx } ;
 NumberLit   <~~ push(makeInt(pop())) ~~>
             = Number ;
 CharLit     = "'" :whitespace() CChar <~~ push(makeInt(charCode(unescapeC(up.in)))) ~~> "'" :whitespace(Whitespace) ;
@@ -200,6 +239,7 @@ Number      <~~ push(parseInt(up.in)) ~~>
 Id          = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 TypeInt     = "int" KwEnd ;
+KwStruct    = "struct" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
@@ -275,17 +315,70 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return mem[addr]
     }
 
-    // ----- Scopes map names to {addr, arr} (arr marks array names: they yield their address) -----
+    // ----- Scopes map names to {addr, arr, ct} (arr marks array names: they yield
+    // their address; for arrays ct is the ELEMENT type) -----
     var globalScope = {}
     var scopes = [globalScope]
-    function declVar(name, addr, arr) {
-        scopes[scopes.length - 1][name] = {addr: addr, arr: arr}
+    function declVar(name, addr, arr, ct) {
+        scopes[scopes.length - 1][name] = {addr: addr, arr: arr, ct: ct}
     }
     function findVar(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (scopes[i][name] != undefined) return scopes[i][name]
         }
         fail("variable not defined: " + name)
+    }
+
+    // ----- C types and struct layouts -----
+    // A ct descriptor is {k:"int"} | {k:"ptr", to:"int"|structName} | {k:"struct", s:name}.
+    // structs[name] = {size: words, fields: {fname: {off, ct}}}; fields lie back to
+    // back, ints and pointers take one word each (matching the compiled layout).
+    var ctInt = {k: "int"}
+    var structs = {}
+    function ctSize(ct) { return ct.k == "struct" ? structs[ct.s].size : 1 }
+    function pointeeCt(ct) { return ct.to == "int" ? ctInt : {k: "struct", s: ct.to} }
+    function structOf(sname) {
+        var st = structs[sname]
+        if (st == undefined) fail("struct not defined: " + sname)
+        return st
+    }
+    function fieldOf(sname, fname) {
+        var f = structOf(sname).fields[fname]
+        if (f == undefined) fail("struct " + sname + " has no field " + fname)
+        return f
+    }
+    // FieldLine items = [{bty}, "*"?, name, "*"?, name...] -> {fields: [{name, bty, star}...]}.
+    function makeFieldLine(items) {
+        var bty = items[0].bty
+        var fields = []
+        var star = false
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] == "*") { star = true; continue }
+            fields.push({name: items[i], bty: bty, star: star})
+            star = false
+        }
+        return {fields: fields}
+    }
+    // StructDef items = [name, {fields}...]. Nested struct values need a complete
+    // (already defined) struct; pointer fields may point at the struct itself.
+    function defineStruct(items) {
+        var name = items[0]
+        if (structs[name] != undefined) fail("struct defined twice: " + name)
+        var st = {size: 0, fields: {}}
+        for (var i = 1; i < items.length; i++) {
+            var fl = items[i].fields
+            for (var j = 0; j < fl.length; j++) {
+                var f = fl[j]
+                var ct
+                if (f.star) { ct = {k: "ptr", to: f.bty} }           // May point at any (even later) struct.
+                else if (f.bty == "int") { ct = ctInt }
+                else { structOf(f.bty); ct = {k: "struct", s: f.bty} }
+                if (st.fields[f.name] != undefined) fail("duplicate field " + f.name + " in struct " + name)
+                st.fields[f.name] = {off: st.size, ct: ct}
+                st.size += ctSize(ct)
+            }
+        }
+        structs[name] = st
     }
 
     // All user defined functions by name: {params: [{name, ptr}...], body: thunk}.
@@ -306,7 +399,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         for (var i = 0; i < f.params.length; i++) {
             var a = alloc(1)
             mem[a] = (i < argValues.length ? argValues[i] : 0) | 0
-            declVar(f.params[i].name, a, false)
+            declVar(f.params[i].name, a, false, f.params[i].ct)
         }
         var r = f.body()
         scopes = callerScopes
@@ -322,18 +415,43 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             return v.arr ? v.addr : load(v.addr) // An array name decays to its address.
         }
     }
-    // Id [index] as a place: x -> its address; a[i] -> element address (a can be an array or a pointer).
+    // A place path: the variable, then indexing and member steps. The walk keeps the
+    // address of the current place and its C type: a[i] steps by whole elements (the
+    // array in place, a pointer through its loaded base), .f adds the field offset,
+    // ->f loads the pointer and adds the field offset. The result is the final address.
     function makeVarPlace(items) {
         var name = items[0]
-        var idxT = items.length > 1 ? items[1] : null
+        var path = items.slice(1)
         return function() {
             var v = findVar(name)
-            if (idxT == null) {
+            if (path.length == 0) {
                 if (v.arr) fail("an array is not assignable: " + name)
                 return v.addr
             }
-            var base = v.arr ? v.addr : load(v.addr) // Pointer variables hold the base address.
-            return base + idxT()
+            var addr = v.addr
+            var ct = v.ct != undefined ? v.ct : ctInt
+            var arr = v.arr
+            for (var i = 0; i < path.length; i++) {
+                var s = path[i]
+                if (s.idx != undefined) {
+                    var idx = s.idx()
+                    if (arr) { addr = addr + idx * ctSize(ct) }
+                    else if (ct.k == "ptr") { ct = pointeeCt(ct); addr = load(addr) + idx * ctSize(ct) }
+                    else fail("indexing needs an array or a pointer: " + name)
+                } else if (s.fld != undefined) {
+                    if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
+                    var f = fieldOf(ct.s, s.fld)
+                    addr += f.off
+                    ct = f.ct
+                } else {
+                    if (ct.k != "ptr" || ct.to == "int") fail("'->' needs a struct pointer: ->" + s.arw)
+                    var f2 = fieldOf(ct.to, s.arw)
+                    addr = load(addr) + f2.off
+                    ct = f2.ct
+                }
+                arr = false
+            }
+            return addr
         }
     }
     function makeDerefPlace(t) { return function() { return t() } }
@@ -438,17 +556,59 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // items = ["*"?] name [{size}|initThunk] -> declaration thunk.
     function makeDecl(items) {
         var i = 0
-        if (items[i] == "*") i++ // A pointer is just an int sized cell holding an address.
+        var isPtr = false
+        if (items[i] == "*") { isPtr = true; i++ } // A pointer is an int sized cell holding an address.
         var name = items[i]
         var opt = items[i + 1]
+        var ct = isPtr ? {k: "ptr", to: "int"} : ctInt
         return function() {
             if (opt != undefined && opt.size != undefined) {
-                declVar(name, alloc(opt.size), true)
+                declVar(name, alloc(opt.size), true, ct)
             } else {
                 var a = alloc(1)
                 if (opt != undefined) mem[a] = opt() | 0
-                declVar(name, a, false)
+                declVar(name, a, false, ct)
             }
+        }
+    }
+    // SDeclarator/SGDecl items = ["*"?] name [{size}|initThunk] -> a plain descriptor.
+    function makeSDecl(items) {
+        var i = 0
+        var star = false
+        if (items[i] == "*") { star = true; i++ }
+        var name = items[i]
+        var opt = items[i + 1]
+        if (opt != undefined && opt.size != undefined) return {name: name, star: star, size: opt.size}
+        return {name: name, star: star, init: opt}
+    }
+    // One declared struct entity: struct S v / struct S *p (= expr) / struct S a[N].
+    function declStructVar(sname, d) {
+        if (d.star) {
+            var a = alloc(1)
+            if (d.init != undefined) mem[a] = d.init() | 0
+            declVar(d.name, a, false, {k: "ptr", to: sname})
+        } else if (d.size != undefined) {
+            declVar(d.name, alloc(d.size * structOf(sname).size), true, {k: "struct", s: sname})
+        } else {
+            if (d.init != undefined) fail("struct initializers are not supported: " + d.name)
+            declVar(d.name, alloc(structOf(sname).size), false, {k: "struct", s: sname})
+        }
+    }
+    // StructDecl items = [structName, descriptor...] -> declaration thunk.
+    function makeStructDecl(items) {
+        var sname = items[0]
+        var decls = items.slice(1)
+        return function() {
+            for (var i = 0; i < decls.length; i++) declStructVar(sname, decls[i])
+        }
+    }
+    // StructGDecl: like makeStructDecl, but registered at build time (initializers
+    // would run before main, so they are not allowed on globals).
+    function defineStructGlobals(items) {
+        var sname = items[0]
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].init != undefined) fail("global struct pointers take no initializer: " + items[i].name)
+            declStructVar(sname, items[i])
         }
     }
     function makeSeq(items) {
@@ -562,22 +722,31 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     // ----- Top level -----
 
+    // Param items = [{sname}?, "*"?, name]: int, int*, or a struct pointer.
     function makeParam(items) {
-        if (items[0] == "*") return {name: items[1], ptr: true}
-        return {name: items[0], ptr: false}
+        var i = 0
+        var sname
+        if (items[i] != undefined && items[i].sname != undefined) { sname = items[i].sname; i++ }
+        var ptr = false
+        if (items[i] == "*") { ptr = true; i++ }
+        if (sname != undefined && !ptr) fail("struct parameters must be pointers (struct " + sname + " *)")
+        var ct = ptr ? {k: "ptr", to: (sname != undefined ? sname : "int")} : ctInt
+        return {name: items[i], ptr: ptr, ct: ct}
     }
     // Global declarator: ["*"?] name [{size}|{init: n}] -> registered immediately.
     function makeGDecl(items) {
         var i = 0
-        if (items[i] == "*") i++
+        var isPtr = false
+        if (items[i] == "*") { isPtr = true; i++ }
         var name = items[i]
         var opt = items[i + 1]
+        var ct = isPtr ? {k: "ptr", to: "int"} : ctInt
         if (opt != undefined && opt.size != undefined) {
-            declVar(name, alloc(opt.size), true)
+            declVar(name, alloc(opt.size), true, ct)
         } else {
             var a = alloc(1)
             if (opt != undefined) mem[a] = opt.init | 0
-            declVar(name, a, false)
+            declVar(name, a, false, ct)
         }
     }
     function defineGlobals(items) {} // makeGDecl already registered them.
