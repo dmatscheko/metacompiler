@@ -13,7 +13,8 @@
 
 // ----- Configuration knobs -----
 var core = {
-    indexExt: "js_get"  // The external for [i] reads (Go: "js_map_get", map-aware).
+    indexExt: "js_get",       // The external for [i] reads (Go: "js_map_get", map-aware).
+    scopeGetExt: "js_scope_get" // The external for reading a name (Kotlin: "js_kget", this-aware).
 }
 
 function takeAll() {
@@ -134,7 +135,7 @@ function makeConst(v) {
 }
 function makeVarRef(name) {
     return function(b) {
-        return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+        return {b: b, v: callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, name)])}
     }
 }
 function makeNeg(t) {

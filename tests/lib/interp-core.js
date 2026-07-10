@@ -25,7 +25,9 @@ var core = {
     getField: function(o, name) { return o[name] },  // .name reads (Java: array .length).
     getIndex: function(o, i) { return o[i] },        // [i] reads (Go: map-aware).
     framePush: null,    // Called on function entry (Go: open a defer frame).
-    framePop: null      // Called after the body, before locals are dropped (Go: run defers).
+    framePop: null,     // Called after the body, before locals are dropped (Go: run defers).
+    varMiss: null,      // Name not in any scope: return {v: value} or null (Kotlin: this properties).
+    setMiss: null       // Assignment target not in any scope: handle it and return true (Kotlin).
 }
 
 // ----- Shared interpreter state -----
@@ -51,6 +53,7 @@ function setVar(name, value) {
     for (var i = scopes.length - 1; i >= 0; i--) {
         if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
     }
+    if (core.setMiss != null && core.setMiss(name, value)) { return }
     fail("assignment to unknown variable: " + name)
 }
 
@@ -104,6 +107,7 @@ function getVar(name) {
     for (var i = scopes.length - 1; i >= 0; i--) {
         if (hasOwn(scopes[i], name)) return scopes[i][name]
     }
+    if (core.varMiss != null) { var h = core.varMiss(name); if (h != null) return h.v }
     if (hasOwn(hostGlobals, name)) return hostGlobals[name]
     fail("unknown name: " + name)
 }
