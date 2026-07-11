@@ -284,7 +284,15 @@ MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
 // RawStr before Template (both open with "), FloatLit before IntLit (a plain integer
 // falls through), AnonFun/CallableRef before Call/VarRef (they would otherwise eat the
 // leading identifier). RawStr/FloatLit/CallableRef/AnonFun are recognised, not lowered.
-Primary     = "(" Expression ")" | RawStr | Template | FloatLit | IntLit | True | False | Null | Lambda | AnonFun | CallableRef | Call | VarRef ;
+Primary     = "(" Expression ")" | RawStr | Template | FloatLit | IntLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | Call | VarRef ;
+
+// An anonymous object expression - object [: Supertypes] { members } - in value
+// position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).
+// Anonymous-class method dispatch is outside the subset, so the body is skipped and
+// the expression is reported as not implemented (it yields undefined); it must come
+// before Call/VarRef, which would otherwise read `object` as an identifier.
+ObjectExpr  <~~ push(notImplExpr("object expression", up.pos)) ~~>
+            = KwObject [ ":" SuperList ] SkipBlock ;
 
 // A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
 // one expression; without parameters the single argument is bound to 'it'.

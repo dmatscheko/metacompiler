@@ -1625,6 +1625,30 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-delegation.kt", "-q", "-warn-unsupported"]
         },
         {
+            "name": "Kotlin object expression SHOULD FAIL (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-object-expr.kt", "-q"]
+        },
+        {
+            "name": "Kotlin object expression SHOULD FAIL (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-object-expr.kt", "-q"]
+        },
+        {
+            "name": "Kotlin object expression warned+ignored (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-object-expr.kt", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Kotlin object expression warned+ignored (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-object-expr.kt", "-q", "-warn-unsupported"]
+        },
+        {
             "name": "Go recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
