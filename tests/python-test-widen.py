@@ -4,10 +4,11 @@
 # annotated assignment, assert) run and self-check under both the default run and
 # -warn-unsupported.
 #
-# The ACCEPT-AND-NOT-IMPLEMENTED constructs (try/except/finally, raise, with,
-# lambda, yield, global/nonlocal, del, decorators, async/await, *args/defaults)
-# abort a plain run at the first such construct with a clean file:line message;
-# under -warn-unsupported they warn and the file runs to exit(fails[0]).
+# The ACCEPT-AND-NOT-IMPLEMENTED constructs (with, lambda, yield, global/nonlocal,
+# del, decorators, async/await, *args/defaults) abort a plain run at the first such
+# construct with a clean file:line message; under -warn-unsupported they warn and the
+# file runs to exit(fails[0]). (try/except/finally and raise are now implemented and
+# run genuinely here - see python-test-try.py.)
 
 fails = [0]
 

@@ -154,8 +154,8 @@ TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
             = "try" KwEnd TryBody ( ExceptClause { ExceptClause } [ TryElse ] [ TryFinally ] | TryFinally ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Suite ;
-ExceptClause <~~ push({handler: pop()}) ~~>
-            = SameLevel "except" KwEnd [ DiscardExpr [ KwAs Id ] ] Suite ;
+ExceptClause <~~ push(makeExcept(takeAll())) ~~>
+            = SameLevel "except" KwEnd [ DiscardExpr [ KwAs Id <~~ push(up.in) ~~> ] ] Suite ;
 TryElse     <~~ push({elsebody: pop()}) ~~>
             = SameLevel "else" KwEnd Suite ;
 TryFinally  <~~ push({finalbody: pop()}) ~~>
@@ -914,8 +914,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 b = r.b
                 v = r.v
             }
-            b.NewRet(v)
-            return deadBlock()
+            return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
     }
     // ----- Widened surface: newly accepted constructs -----
@@ -1017,29 +1016,60 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return okB
         }
     }
-    // try/except/else/finally: not implemented (no exception model). Under
-    // -warn-unsupported the try body and any finally body emit in sequence; the
-    // except/else handlers are dropped.
+    // items = [name, suiteThunk] or [suiteThunk] (except with no `as` binding).
+    function makeExcept(items) {
+        if (items.length > 1) { return {handler: items[1], hname: items[0]} }
+        return {handler: items[0], hname: undefined}
+    }
+    // try/except/else/finally: the try body and the first except handler compile to ctl
+    // closures handed to js_try (raise -> js_throw is recovered, the handler binds the
+    // value via its parameter); the else clause is appended to the try body so it runs
+    // only when the body completes without a raise (an exception in an else clause is
+    // then caught by the except - a rare deviation). A return/break/continue leaving the
+    // try or except becomes a control signal that excDispatch re-issues here.
     function makeTry(items, pos) {
-        notImpl("try/except", pos)
-        var tryBody = null
-        var finalBody = null
+        var tryT = anytype, handlerT = anytype, hname = anytype, elseT = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {
-            if (items[i].trybody != undefined) { tryBody = items[i].trybody }
-            if (items[i].finalbody != undefined) { finalBody = items[i].finalbody }
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].handler != undefined) {
+                if (handlerT == undefined) { handlerT = items[i].handler; hname = items[i].hname }
+            }
+            else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
+            else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
+        }
+        var bodyT = tryT
+        if (elseT != undefined) {
+            bodyT = function(b) { return elseT(tryT(b)) }
         }
         return function(b) {
-            if (tryBody != null) { b = tryBody(b) }
-            if (finalBody != null) { b = finalBody(b) }
-            return b
+            var tryClo = callExt(b, "js_closure", [handle(emitClosure([], bodyT, true)), curScopeV])
+            var catchClo = hUndef
+            if (handlerT != undefined) {
+                var cn = (hname != undefined) ? hname : "__caught"
+                catchClo = callExt(b, "js_closure", [handle(emitClosure([cn], handlerT, true)), curScopeV])
+            }
+            var finClo = hUndef
+            if (finallyT != undefined) {
+                finClo = callExt(b, "js_closure", [handle(emitClosure([], finallyT, false)), curScopeV])
+            }
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
+            return excDispatch(b, ctl)
         }
     }
-    // raise: not implemented (no unwinding). The raised expression still emits.
+    // raise EXPR: evaluate the value and raise it with js_throw; a bare raise re-raise
+    // is approximated by raising undefined, and the `from` cause is ignored.
     function makeRaise(items, pos) {
-        notImpl("raise", pos)
+        var t = items.length > 0 ? items[0] : null
         return function(b) {
-            for (var i = 0; i < items.length; i++) { b = items[i](b).b }
-            return b
+            var v = hUndef
+            if (t != null) {
+                var r = t(b)
+                b = r.b
+                v = r.v
+            }
+            callExt(b, "js_throw", [v])
+            b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            return deadBlock()
         }
     }
     // with EXPR [as T]: a simple form (no context-manager protocol) - run each
@@ -1085,29 +1115,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // def: an own IR function; the body shares one function scope (no block scopes).
     // A signature using *args/**kwargs/defaults is reported as not implemented (the
     // plain names still bind).
+    // Emits an own IR function jsf_N(env, args) binding params, running bodyT; returns
+    // its index. isCtl marks a try/catch body closure (a return/break/continue leaving
+    // it emits a control signal - see compile-core inCtlBody / excDispatch).
+    function emitClosure(params, bodyT, isCtl) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedTag = curFTag
+        curF = f
+        curFTag = idx
+        loopStack = []
+        if (isCtl) { ctlEnter(idx) }
+        var fb = f.NewBlock("entry")
+        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        for (var i = 0; i < params.length; i++) {
+            callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, params[i]),
+                                          callExt(fb, "js_arg", [f.Params[1], handle(i)])])
+        }
+        var endB = bodyT(fb)
+        endB.NewRet(hUndef)
+        if (isCtl) { ctlLeave() }
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return idx
+    }
     function makeDef(bodyT, plist, name, pos) {
         if (plist.complex) { notImpl("*args/keyword/default parameters", pos) }
         var params = plist.params
         return function(b) {
-            funcCount++
-            var idx = funcCount
-            var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-            var savedF = curF
-            var savedScope = curScopeV
-            var savedLoops = loopStack
-            curF = f
-            loopStack = []
-            var fb = f.NewBlock("entry")
-            curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
-            for (var i = 0; i < params.length; i++) {
-                callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, params[i]),
-                                              callExt(fb, "js_arg", [f.Params[1], handle(i)])])
-            }
-            var endB = bodyT(fb)
-            endB.NewRet(hUndef)
-            curF = savedF
-            curScopeV = savedScope
-            loopStack = savedLoops
+            var idx = emitClosure(params, bodyT, false)
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name),
                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b

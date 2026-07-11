@@ -491,6 +491,18 @@
             "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-try.java", "-q"]
         },
         {
+            "name": "Python try/except (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-try.py", "-q"]
+        },
+        {
+            "name": "Python try/except (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-try.py", "-q"]
+        },
+        {
             "name": "JavaScript implicit global interpreter",
             "type": "go",
             "request": "launch",

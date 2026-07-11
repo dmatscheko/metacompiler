@@ -141,8 +141,8 @@ TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
             = "try" KwEnd TryBody ( ExceptClause { ExceptClause } [ TryElse ] [ TryFinally ] | TryFinally ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Suite ;
-ExceptClause <~~ push({handler: pop()}) ~~>
-            = SameLevel "except" KwEnd [ DiscardExpr [ KwAs Id ] ] Suite ;
+ExceptClause <~~ push(makeExcept(takeAll())) ~~>
+            = SameLevel "except" KwEnd [ DiscardExpr [ KwAs Id <~~ push(up.in) ~~> ] ] Suite ;
 TryElse     <~~ push({elsebody: pop()}) ~~>
             = SameLevel "else" KwEnd Suite ;
 TryFinally  <~~ push({finalbody: pop()}) ~~>
@@ -935,32 +935,61 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // try/except/else/finally: not implemented (no exception model). Under
     // -warn-unsupported the try body and any finally body run in sequence; the
     // except/else handlers are dropped.
+    // items = [name, suiteThunk] or [suiteThunk] (except with no `as` binding).
+    function makeExcept(items) {
+        if (items.length > 1) { return {handler: items[1], hname: items[0]} }
+        return {handler: items[0], hname: undefined}
+    }
+    // try/except/else/finally: raise unwinds to the first except (exception types are
+    // parsed but not discriminated), which binds the value to its `as` name; else runs
+    // only if the body completed without an exception or a return/break/continue;
+    // finally always runs. The body's control-flow signals still propagate. The scope
+    // chain is restored on the way out of a raise.
     function makeTry(items, pos) {
-        notImpl("try/except", pos)
-        var tryBody = null
-        var finalBody = null
+        var tryT = anytype, handlerT = anytype, hname = anytype, elseT = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {
-            if (items[i].trybody != undefined) { tryBody = items[i].trybody }
-            if (items[i].finalbody != undefined) { finalBody = items[i].finalbody }
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].handler != undefined) {
+                if (handlerT == undefined) { handlerT = items[i].handler; hname = items[i].hname }
+            }
+            else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
+            else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
         }
         return function() {
-            var r = anytype // May carry a control-flow signal from the body.
-            r = undefined
-            if (tryBody != null) { r = tryBody() }
-            if (finalBody != null) {
-                var rf = finalBody()
-                if (rf != undefined) { return rf }
+            var savedChain = scopes.slice()
+            var box = {sig: undefined}
+            var threw = false
+            try {
+                box.sig = tryT()
+            } catch (e) {
+                scopes = savedChain.slice()
+                if (excIsUser(e) && handlerT != undefined) {
+                    threw = true
+                    scopes.push({})
+                    if (hname != undefined) { declVar(hname, e.v) }
+                    box.sig = handlerT()
+                    scopes.pop()
+                } else {
+                    throw e
+                }
+            } finally {
+                scopes = savedChain.slice()
+                if (!threw && box.sig == undefined && elseT != undefined) {
+                    box.sig = elseT()
+                }
+                if (finallyT != undefined) {
+                    var fr = finallyT()
+                    if (fr != undefined) { box.sig = fr }
+                }
             }
-            return r
+            return box.sig
         }
     }
-    // raise: not implemented (no unwinding). The raised expression still runs.
+    // raise EXPR: wrap the value and raise it as a real host exception (a bare raise
+    // re-raise is approximated by raising undefined). The `from` cause is ignored.
     function makeRaise(items, pos) {
-        notImpl("raise", pos)
-        return function() {
-            for (var i = 0; i < items.length; i++) { items[i]() }
-            return undefined
-        }
+        var t = items.length > 0 ? items[0] : null
+        return function() { throw {__exc: true, v: (t != null ? t() : undefined)} }
     }
     // with EXPR [as T]: a simple form (no context-manager protocol) - run each
     // context expression, bind the target to its value, then run the body.
@@ -1025,7 +1054,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The whole file runs top to bottom.
     function runProgram(items) {
         var progT = makeSeq(items)
-        progT()
+        // A raise that escapes the top level is reported like any runtime error.
+        try {
+            progT()
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
     }
 
     // ----- Core library config (see lib/interp-core.js) -----
