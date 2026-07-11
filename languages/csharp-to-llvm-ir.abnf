@@ -232,25 +232,40 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // new Point(1, 2) | new List<int>() | new Dictionary<K,V>() | new int[]{...} | new int[n]
-NewExpr     = NewArrLit | NewArrSize | NewObject ;
+// | new Foo{ X = 1 } (object initializer) | new Foo(a){ X = 1 } (ctor + initializer)
+NewExpr     = NewObjInit | NewArrLit | NewArrSize | NewObject ;
+// An object initializer without constructor parens: 'new Foo{ X = 1, Y = 2 }' runs the
+// parameterless constructor, then assigns each named member. Tried before NewArrLit so a
+// collection literal ('new List<int>{1, 2}', whose entries are plain expressions) still
+// falls through to it.
+NewObjInit  <~~ push(makeNew(takeAll())) ~~>
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] ObjInit ;
 // The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
 NewArrSize  <~~ push(makeNewArray(pop())) ~~>
             = KwNew Type "[" Expression "]" ;
 NewObject   <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" [ SkipBlock ] ;
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" [ ObjInit | SkipBlock ] ;
+// { X = expr, ... }: the trailing member initializer of an object creation.
+ObjInit     <~~ push({objinit: takeAll()}) ~~>
+            = "{" [ MemberInit { "," MemberInit } ] "}" ;
+MemberInit  <~~ push(makeMemberInit(pop(), pop())) ~~>
+            = Id <~~ push(up.in) ~~> "=" Expression ;
 
 // base.M(args): the method search starts at the base class of the class the call
 // appears in (curClassName is set while the class body is being built).
 BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
             = KwBase "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 
-// A primary followed by method calls, field reads and indexing.
+// A primary followed by method calls, delegate calls, field reads and indexing. A bare
+// '(args)' suffix invokes a delegate / lambda value (a closure call).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | CallSfx | FieldSfx | IndexSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -258,12 +273,23 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 Primary     = Lambda | LinqQuery | "(" Expression ")" | InterpStr | DqString
             | IntLit | True | False | Null | VarRef ;
 
-// A lambda ('=>' expression / block): no delegate model, so not implemented.
-Lambda      <~~ push(makeLambdaExpr(takeAll(), up.pos)) ~~>
+// A lambda ('x => e', '(a, b) => { ... }') is a real closure value (a Func / Action
+// delegate): it captures the current scope chain and is invoked at a call site (CallSfx).
+Lambda      <~~ push(makeLambda(takeAll())) ~~>
             = LambdaHead "=>" LambdaBody ;
-LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | Id ;
-LamParam    = [ Type ] Id ;
-LambdaBody  = Block | DiscardExpr ;
+LambdaHead  = LamParenHead | LamBareHead ;
+LamParenHead <~~ push({params: takeAll()}) ~~>
+            = "(" [ LamParam { "," LamParam } ] ")" ;
+LamBareHead <~~ push({params: takeAll()}) ~~>
+            = Id <~~ push(up.in) ~~> ;
+// A parameter name, with or without a (parsed, ignored) type. The typed form is an
+// ordered alternative so an untyped name is not swallowed by a greedy optional type.
+LamParam    = LamTypedParam | LamBareParam ;
+LamTypedParam = Type Id <~~ push(up.in) ~~> ;
+LamBareParam = Id <~~ push(up.in) ~~> ;
+LambdaBody  = LamBlock | LamExpr ;
+LamBlock    <~~ push({body: pop()}) ~~> = Block ;
+LamExpr     <~~ push({ebody: pop()}) ~~> = Expression ;
 // A LINQ query expression: accepted, reported as not implemented.
 LinqQuery   <~~ push(makeLinq(up.pos)) ~~>
             = KwFrom Id KwIn DiscardExpr LinqTail ;
@@ -504,10 +530,17 @@ KwLet       = "let" KwEnd ;
         }
     }
 
-    // new C(args) | new List<T>(...) | new Dictionary<K,V>(...).
+    // new C(args) | new C(args){ F = e } | new C{ F = e } | new List<T>(...) |
+    // new Dictionary<K,V>(...). An object initializer ({objinit} marker) assigns the named
+    // members after construction; the remaining thunks are the constructor arguments.
     function makeNew(items) {
         var clsName = items[0]
-        var args = items.slice(1)
+        var args = []
+        var minits = null
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "function") { args.push(items[i]) }
+            else if (items[i].objinit != undefined) { minits = items[i].objinit }
+        }
         return function(b) {
             if (clsName == "List") {
                 for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b }
@@ -529,9 +562,18 @@ KwLet       = "let" KwEnd ;
             }
             var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
             callExt(b, "js_call", [ctorV, hUndef, argsV])
+            if (minits != null) {
+                for (var q = 0; q < minits.length; q++) {
+                    var mr = minits[q].mval(b)
+                    b = mr.b
+                    callExt(b, "js_set", [objV, emitStr(b, minits[q].mfield), mr.v])
+                }
+            }
             return {b: b, v: objV}
         }
     }
+    // { F = e, ... } member initializer entry: the field name and its value thunk.
+    function makeMemberInit(valT, name) { return {mfield: name, mval: valT} }
     function makeArray(items) {
         return function(b) {
             var arr = callExt(b, "js_arr_new", [])
@@ -552,8 +594,20 @@ KwLet       = "let" KwEnd ;
     }
     // A cast is identity: (Type) expr lowers to expr.
     function makeCast(inner) { return inner }
-    // Lambdas / LINQ: no delegate model, so not implemented.
-    function makeLambdaExpr(items, pos) { return notImplExpr("lambda expression", pos) }
+    // A lambda lowers to an own IR function (emitFunc) captured as a closure over the
+    // current scope (js_closure), exactly like a class method; a call site invokes it with
+    // js_call. An expression body is an implicit 'return <expr>'. LINQ stays unimplemented.
+    function makeLambda(items) {
+        var params = items[0].params
+        var bm = items[1]
+        var bodyT = anytype // A block statement thunk, or a synthesized 'return <expr>'.
+        if (bm.body != undefined) { bodyT = bm.body }
+        else { bodyT = makeArrowBody(bm.ebody) }
+        return function(b) {
+            var idx = emitFunc(params, bodyT, false, null, undefined)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
     function makeLinq(pos) { return notImplExpr("LINQ query", pos) }
 
     // ----- $"...{expr}..." interpolation (js_jadd string concat, integers as "5") -----
@@ -605,6 +659,10 @@ KwLet       = "let" KwEnd ;
                         b = ea2.b
                         cur = callExt(b, "js_mcall", [cur, emitStr(b, csMName(s.name)), ea2.v])
                     }
+                } else if (s.kind == "call") {
+                    var eac = emitArgs(b, s.args)
+                    b = eac.b
+                    cur = callExt(b, "js_call", [cur, hUndef, eac.v])
                 } else if (s.kind == "field") {
                     if (s.name == "Count" || s.name == "Length") {
                         cur = callExt(b, "js_pylen", [cur])

@@ -310,7 +310,14 @@ DiscardExpr <~~ pop() ~~> = Expression ;
 UnsupType   = Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias ;
 Interface   <~~ notImpl("interface", up.pos) ~~>
             = KwInterface Id [ SkipAngle ] [ ":" SuperList ] SkipBlock ;
-ObjectDecl  <~~ notImpl("object declaration", up.pos) ~~>
+// object Name { ... } is a real singleton: its member body is built into a
+// backing js_obj_new (properties initialized once, methods reachable via the
+// name). A body outside the subset (e.g. a char literal) falls back to ObjectSkip
+// (notImplemented), so the widened surface still parses.
+ObjectDecl  = ObjectReal | ObjectSkip ;
+ObjectReal  <~~ buildObject(takeAll()) ~~>
+            = KwObject Id <~~ push(up.in) ~~> [ ":" SuperList ] "{" { Member } "}" ;
+ObjectSkip  <~~ notImpl("object declaration", up.pos) ~~>
             = KwObject Id [ ":" SuperList ] SkipBlock ;
 EnumClass   <~~ notImpl("enum class", up.pos) ~~>
             = KwEnum KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
@@ -322,7 +329,13 @@ TypeAlias   <~~ notImpl("typealias", up.pos) ~~>
 // Member forms accepted structurally, then reported as not implemented.
 InitBlock   <~~ notImpl("init block", up.pos) ~~>
             = KwInit SkipBlock ;
-CompanionObject <~~ notImpl("companion object", up.pos) ~~>
+// companion object { ... } inside a class: its members are attached to the class
+// descriptor (properties as fields, methods reachable through the class name), so
+// ClassName.member works. A body outside the subset falls back to CompanionSkip.
+CompanionObject = CompanionReal | CompanionSkip ;
+CompanionReal <~~ push({companion: takeAll()}) ~~>
+            = KwCompanion KwObject [ Id ] [ ":" SuperList ] "{" { Member } "}" ;
+CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
             = KwCompanion KwObject [ Id ] [ ":" SuperList ] SkipBlock ;
 SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
             = KwConstructor "(" [ SParam { "," SParam } ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } ] ")" ] SkipBlock ;
@@ -800,9 +813,11 @@ KwStep      = "step" KwEnd ;
         }
         var props = []
         var methods = []
+        var comp = null
         for (; i < items.length; i++) {
-            if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
-            if (items[i].method != undefined) methods.push(items[i].method)
+            if (items[i].companion != undefined) { comp = items[i].companion }
+            else if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
+            else if (items[i].method != undefined) methods.push(items[i].method)
         }
         var cls = {__isclass: true, __name: name}
         // The constructor: bind the primary constructor parameters, store the
@@ -826,7 +841,64 @@ KwStep      = "step" KwEnd ;
         for (var m2 = 0; m2 < methods.length; m2++) {
             cls[methods[m2].name] = makeMethodClosure(methods[m2])
         }
+        attachCompanion(cls, comp)
         globalScope[name] = cls
+    }
+
+    // A companion object's members are attached to the class descriptor: properties
+    // become fields of the descriptor (so ClassName.prop reads them), methods go into
+    // a holder the descriptor's __class points at (so ClassName.m() dispatches through
+    // js_mcall with the descriptor as the receiver). The property initializers see the
+    // descriptor as 'this'.
+    function attachCompanion(cls, comp) {
+        if (comp == null) { return }
+        var cprops = []
+        var cmethods = []
+        for (var i = 0; i < comp.length; i++) {
+            if (comp[i].prop != undefined && comp[i].init != undefined) { cprops.push(comp[i]) }
+            else if (comp[i].method != undefined) { cmethods.push(comp[i].method) }
+        }
+        if (cmethods.length > 0) {
+            var holder = {}
+            for (var k = 0; k < cmethods.length; k++) {
+                holder[cmethods[k].name] = makeMethodClosure(cmethods[k])
+            }
+            cls.__class = holder
+        }
+        var saved = scopes
+        scopes = [globalScope, {}]
+        declVar("this", cls)
+        for (var p = 0; p < cprops.length; p++) {
+            cls[cprops[p].prop] = cprops[p].init()
+        }
+        scopes = saved
+    }
+
+    // object Name { ... }: build a singleton backing object right away (like a class
+    // instance whose descriptor holds the methods and whose fields are the once
+    // initialized properties), bound to the name in the global scope. The property
+    // initializers see the object as 'this' (implicit member access works).
+    function buildObject(items) {
+        var name = items[0]
+        var props = []
+        var methods = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]) }
+            else if (items[i].method != undefined) { methods.push(items[i].method) }
+        }
+        var cls = {__isclass: true, __name: name}
+        for (var m2 = 0; m2 < methods.length; m2++) {
+            cls[methods[m2].name] = makeMethodClosure(methods[m2])
+        }
+        var obj = {__class: cls}
+        var saved = scopes
+        scopes = [globalScope, {}]
+        declVar("this", obj)
+        for (var p = 0; p < props.length; p++) {
+            obj[props[p].prop] = props[p].init()
+        }
+        scopes = saved
+        globalScope[name] = obj
     }
 
     // ----- Core library config (see lib/interp-core.js) -----

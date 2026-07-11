@@ -267,17 +267,26 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 
 Primary     = Lambda | MethodRef | "(" Expression ")" | DqString | IntLit | True | False | Null | VarRef ;
 
-// Lambdas and method references parse fully but are not implemented (no functional
-// interfaces). A lambda body (block or expression) is accepted and discarded.
+// Lambdas and method references are real closures on the handle runtime. A lambda
+// captures the defining scope (js_closure); a functional-interface call site (any
+// method call on the value, whatever the single abstract method is named) invokes
+// it (js_call). The body is an expression (its value is the result) or a block (a
+// return supplies the result).
 Lambda      <~~ push(makeLambdaExpr(takeAll(), up.pos)) ~~>
             = LambdaHead "->" LambdaBody ;
-LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | Id ;
-LamParam    = [ "final" KwEnd ] [ Type ] Id ;
-LambdaBody  = Block | DiscardExpr ;
-MethodRef   <~~ push(makeMethodRef(up.pos)) ~~>
+LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | LamId ;
+// A parameter is an optional type then a name; the explicit "Type LamId | LamId"
+// alternation lets an untyped "(x)" work despite the possessive optional (Type
+// would otherwise greedily consume the sole identifier).
+LamParam    = [ "final" KwEnd ] ( Type LamId | LamId ) ;
+LamId       <~~ push({lparam: up.in}) ~~> = Id ;
+LambdaBody  = LamBlock | LamExpr ;
+LamBlock    <~~ push({lblock: pop()}) ~~> = Block ;
+LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
+// A method reference Recv::m becomes a closure that forwards its arguments to
+// Recv.m(...). Constructor references (::new) stay not implemented.
+MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
             = Id { "." Id } "::" ( Id | KwNew ) ;
-DiscardExpr <~~ pop() ~~>
-            = Expression ;
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
@@ -533,9 +542,108 @@ KwDefault   = "default" KwEnd ;
     }
     // A cast is identity: (Type) expr lowers to expr.
     function makeCast(inner) { return inner }
-    // A lambda / method reference: no functional-interface model, so not implemented.
-    function makeLambdaExpr(items, pos) { return notImplExpr("lambda expression", pos) }
-    function makeMethodRef(pos) { return notImplExpr("method reference", pos) }
+    // A lambda is a real closure: its body becomes an own IR function jsf_N(env,
+    // args) and the site yields js_closure(N, currentScope), so it captures the
+    // defining scope. An expression body returns its value; a block body returns
+    // via its return statement (or undefined when control falls through).
+    function lamExprBody(exprBody) {
+        return function(b) {
+            var r = exprBody(b)
+            r.b.NewRet(r.v)
+            return deadBlock()
+        }
+    }
+    function makeLambdaExpr(items, pos) {
+        var params = []
+        var exprBody = null
+        var blockBody = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].lparam != undefined) { params.push(items[i].lparam) }
+            else if (items[i].lexpr != undefined) { exprBody = items[i].lexpr }
+            else if (items[i].lblock != undefined) { blockBody = items[i].lblock }
+        }
+        var bodyStmt = blockBody != null ? blockBody : lamExprBody(exprBody)
+        return function(b) {
+            var idx = emitFunc(params, bodyStmt, false, null)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+    // A method reference Recv::m -> jsf_N(env, args) that resolves the receiver from
+    // the captured scope and forwards the exact args array to js_mcall(recv, "m",
+    // args). Static / bound / unbound all work (js_mcall picks the this-binding from
+    // the receiver kind). ::new is not modelled.
+    function makeMethodRef(text, pos) {
+        var sep = text.indexOf("::")
+        var tgtPath = text.slice(0, sep)
+        var methodPart = text.slice(sep + 2)
+        if (methodPart == "new") { return notImplExpr("constructor reference", pos) }
+        var parts = splitDots(tgtPath)
+        var bodyStmt = function(b) {
+            var recv = callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, parts[0])])
+            for (var k = 1; k < parts.length; k++) {
+                recv = callExt(b, "js_get", [recv, emitStr(b, parts[k])])
+            }
+            var ret = callExt(b, "js_mcall", [recv, emitStr(b, methodPart), curF.Params[1]])
+            b.NewRet(ret)
+            return deadBlock()
+        }
+        return function(b) {
+            var idx = emitFunc([], bodyStmt, false, null)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+    // Splits a dotted path "a.b.c" into ["a", "b", "c"].
+    function splitDots(s) {
+        var parts = []
+        var cur = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == ".") { parts.push(cur); cur = "" }
+            else { cur = cur + ch }
+        }
+        parts.push(cur)
+        return parts
+    }
+    // A method call is a functional-interface invocation when the receiver is a
+    // closure (a lambda / method reference): route it to js_call(receiver, args)
+    // instead of js_mcall, which only dispatches named methods on objects/strings.
+    // The receiver kind is decided at runtime with js_typeof, so ordinary method
+    // calls are unaffected. This overrides the compile-core foldCallMember.
+    foldCallMember = function(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function(b) {
+            var r = primary(b)
+            b = r.b
+            var cur = r.v
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var ea = emitArgs(b, s.args)
+                    b = ea.b
+                    var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [cur]), emitStr(b, "function")]))
+                    var callB = curF.NewBlock("")
+                    var mcallB = curF.NewBlock("")
+                    var mergeB = curF.NewBlock("")
+                    b.NewCondBr(isFn, callB, mcallB)
+                    var cv = callExt(callB, "js_call", [cur, hUndef, ea.v])
+                    callB.NewBr(mergeB)
+                    var mv = callExt(mcallB, "js_mcall", [cur, emitStr(mcallB, s.name), ea.v])
+                    mcallB.NewBr(mergeB)
+                    cur = mergeB.NewPhi([llvm.ir.NewIncoming(cv, callB), llvm.ir.NewIncoming(mv, mcallB)])
+                    b = mergeB
+                } else if (s.kind == "field") {
+                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                } else {
+                    var ir2 = s.idx(b)
+                    b = ir2.b
+                    cur = callExt(b, core.indexExt, [cur, ir2.v])
+                }
+            }
+            return {b: b, v: cur}
+        }
+    }
 
     // ----- Statement thunks: function(block) -> block -----
 

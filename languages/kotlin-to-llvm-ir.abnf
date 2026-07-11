@@ -326,7 +326,14 @@ DiscardExpr <~~ pop() ~~> = Expression ;
 UnsupType   = Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias ;
 Interface   <~~ push(notImplStmt("interface", up.pos)) ~~>
             = KwInterface Id [ SkipAngle ] [ ":" SuperList ] SkipBlock ;
-ObjectDecl  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
+// object Name { ... } is a real singleton: its member body is lowered into a backing
+// js_obj_new (properties initialized once at program start, methods reachable via the
+// name and dispatched through js_mcall). A body outside the subset (e.g. a char
+// literal) falls back to ObjectSkip (notImplemented), so the widened surface parses.
+ObjectDecl  = ObjectReal | ObjectSkip ;
+ObjectReal  <~~ push(makeObjectStmt(takeAll())) ~~>
+            = KwObject Id <~~ push(up.in) ~~> [ ":" SuperList ] "{" { Member } "}" ;
+ObjectSkip  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
             = KwObject Id [ ":" SuperList ] SkipBlock ;
 EnumClass   <~~ push(notImplStmt("enum class", up.pos)) ~~>
             = KwEnum KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
@@ -339,7 +346,14 @@ TypeAlias   <~~ push(notImplStmt("typealias", up.pos)) ~~>
 // notImpl at compile time and pushes nothing, so makeClassStmt simply skips it.
 InitBlock   <~~ notImpl("init block", up.pos) ~~>
             = KwInit SkipBlock ;
-CompanionObject <~~ notImpl("companion object", up.pos) ~~>
+// companion object { ... } inside a class: its members are attached to the class
+// descriptor (properties as fields, methods into a holder the descriptor's __class
+// points at), so ClassName.member and ClassName.m() work. A body outside the subset
+// falls back to CompanionSkip (notImplemented).
+CompanionObject = CompanionReal | CompanionSkip ;
+CompanionReal <~~ push({companion: takeAll()}) ~~>
+            = KwCompanion KwObject [ Id ] [ ":" SuperList ] "{" { Member } "}" ;
+CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
             = KwCompanion KwObject [ Id ] [ ":" SuperList ] SkipBlock ;
 SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
             = KwConstructor "(" [ SParam { "," SParam } ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } ] ")" ] SkipBlock ;
@@ -960,9 +974,11 @@ KwStep      = "step" KwEnd ;
         }
         var props = []
         var methods = []
+        var comp = null
         for (; i < items.length; i++) {
-            if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
-            if (items[i].method != undefined) methods.push(items[i].method)
+            if (items[i].companion != undefined) { comp = items[i].companion }
+            else if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
+            else if (items[i].method != undefined) methods.push(items[i].method)
         }
         classNames[name] = 1
         return function(b) {
@@ -976,6 +992,75 @@ KwStep      = "step" KwEnd ;
                 var idx = emitFunc(methods[k].params, methods[k].body, true)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
+            if (comp != null) { b = emitCompanion(b, clsV, comp) }
+            return b
+        }
+    }
+
+    // A companion object attaches its members to the class descriptor clsV: methods go
+    // into a holder that clsV.__class points at (so ClassName.m() dispatches through
+    // js_mcall, which prepends clsV as the receiver), properties become fields of clsV
+    // (so ClassName.prop reads them). The property initializers see clsV as 'this'.
+    function emitCompanion(b, clsV, comp) {
+        var cprops = []
+        var cmethods = []
+        for (var i = 0; i < comp.length; i++) {
+            if (comp[i].prop != undefined && comp[i].init != undefined) { cprops.push(comp[i]) }
+            else if (comp[i].method != undefined) { cmethods.push(comp[i].method) }
+        }
+        if (cmethods.length > 0) {
+            var holderV = callExt(b, "js_obj_new", [])
+            for (var k = 0; k < cmethods.length; k++) {
+                var idx = emitFunc(cmethods[k].params, cmethods[k].body, true)
+                callExt(b, "js_set", [holderV, emitStr(b, cmethods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, "__class"), holderV])
+        }
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), clsV])
+        for (var p = 0; p < cprops.length; p++) {
+            var r = cprops[p].init(b)
+            b = r.b
+            callExt(b, "js_set", [clsV, emitStr(b, cprops[p].prop), r.v])
+        }
+        curScopeV = saved
+        return b
+    }
+
+    // object Name { ... }: lower to a singleton backing object bound to the name at
+    // program start - a descriptor holding the methods, an instance whose __class is
+    // the descriptor and whose fields are the once initialized properties. The property
+    // initializers see the instance as 'this' (implicit member access works); method
+    // calls dispatch through js_mcall exactly like class instances.
+    function makeObjectStmt(items) {
+        var name = items[0]
+        var props = []
+        var methods = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
+            else if (items[i].method != undefined) methods.push(items[i].method)
+        }
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            for (var k = 0; k < methods.length; k++) {
+                var idx = emitFunc(methods[k].params, methods[k].body, true)
+                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+            var objV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), objV])
+            for (var p = 0; p < props.length; p++) {
+                var r = props[p].init(b)
+                b = r.b
+                callExt(b, "js_set", [objV, emitStr(b, props[p].prop), r.v])
+            }
+            curScopeV = saved
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), objV])
             return b
         }
     }

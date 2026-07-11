@@ -309,10 +309,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var kk = luaKey(k)
         return hasOwn(o, kk) ? o[kk] : undefined
     }
+    // A table carries a hidden __keys array recording its keys in insertion order
+    // (MetaJS has no key enumeration, so pairs/next need this side list; the compiler
+    // uses the js_keys extern instead). luaRawSet is the one write path that keeps it.
+    function luaRawSet(o, kk, v) {
+        if (!hasOwn(o, "__keys")) { o.__keys = [] }
+        if (!hasOwn(o, kk)) { o.__keys.push(kk) }
+        o[kk] = v
+    }
     function luaSetIndex(o, k, v) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
         if (typeof o != "object") { fail("attempt to index a " + luaType(o) + " value") }
-        o[luaKey(k)] = v
+        luaRawSet(o, luaKey(k), v)
     }
     // #t: the sequence border - the largest n with t[1..n] all non nil (strings by length).
     function luaLen(v) {
@@ -404,12 +412,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeTable(items) {
         return function() {
             var t = {}
+            t.__keys = []
             var pos = 1
             for (var i = 0; i < items.length; i++) {
                 var f = items[i]
-                if (f.fkind == "pos") { t["" + pos] = f.v(); pos++ }
-                else if (f.fkind == "name") { t[f.name] = f.v() }
-                else { t[luaKey(f.k())] = f.v() }
+                if (f.fkind == "pos") { luaRawSet(t, "" + pos, f.v()); pos++ }
+                else if (f.fkind == "name") { luaRawSet(t, f.name, f.v()) }
+                else { luaRawSet(t, luaKey(f.k()), f.v()) }
             }
             return t
         }
@@ -601,6 +610,43 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else if (it.gname != undefined) { names.push(it.gname) }
             else { iter = it }
         }
+        // pairs(t): full key/value enumeration over the table's own keys in insertion
+        // order (the hidden __keys list), skipping keys whose value is nil. The key is
+        // yielded in its stored (string) form, matching the compiler's js_keys view.
+        if (iter.iterkind == "pairs") {
+            var tblTp = iter.tbl
+            return function() {
+                var t = anytype // The iterated table.
+                t = tblTp()
+                if (t === undefined || t === null || typeof t != "object") {
+                    fail("bad argument to 'pairs' (table expected, got " + luaType(t) + ")")
+                }
+                scopes.push({})
+                var frame = scopes[scopes.length - 1]
+                var res = undefined
+                var keys = []
+                if (hasOwn(t, "__keys")) { keys = t.__keys.slice() }
+                var ki = 0
+                var running = true
+                while (running && ki < keys.length) {
+                    var kk = keys[ki]
+                    var v = anytype // The value at the current key.
+                    v = luaIndex(t, kk)
+                    if (v !== undefined && v !== null) {
+                        frame[names[0]] = kk
+                        if (names.length > 1) { frame[names[1]] = v }
+                        var r = block()
+                        if (r != undefined) {
+                            if (r === BRK) { running = false }
+                            else if (r !== CONT) { res = r; running = false }
+                        }
+                    }
+                    ki = ki + 1
+                }
+                scopes.pop()
+                return res
+            }
+        }
         if (iter.iterkind != "ipairs") {
             return notImplStmt("generic for over " + iter.iterkind + "()", pos)
         }
@@ -665,6 +711,61 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         println(out)
     }
     globalScope["exit"] = function(code) { exit(code | 0) }
+
+    // next(t [, k]): the array-part iterator. next(t) yields index 1 (or nil when the
+    // table has no [1]); next(t, i) yields i+1 while t[i+1] is non-nil, else nil. The
+    // subset's calls return one value, so this is the key only (Lua's first result).
+    globalScope["next"] = function(t, k) {
+        var i = 0
+        if (k !== undefined && k !== null) { i = k }
+        var nk = i + 1
+        var v = anytype // The probed element.
+        v = luaIndex(t, nk)
+        if (v === undefined || v === null) { return undefined }
+        return nk
+    }
+
+    // math.*: a small numeric library backed by JS Math (floor/abs/max/min, plus ceil
+    // derived from floor so no host Math.ceil is required in frozen mode).
+    globalScope["math"] = {
+        floor: function(x) { return Math.floor(x) },
+        ceil: function(x) { return -Math.floor(-x) },
+        abs: function(x) { return Math.abs(x) },
+        max: function(a, b) { return Math.max(a, b) },
+        min: function(a, b) { return Math.min(a, b) }
+    }
+
+    // string.*: 1-based, matching Lua. sub(s, i, j) maps to JS slice(i-1, j) (j omitted
+    // reaches the end); rep(s, n) concatenates n copies.
+    globalScope["string"] = {
+        len: function(s) { return s.length },
+        upper: function(s) { return s.toUpperCase() },
+        lower: function(s) { return s.toLowerCase() },
+        sub: function(s, i, j) { return s.slice(i - 1, j) },
+        rep: function(s, n) {
+            var out = ""
+            var k = 0
+            while (k < n) { out = out + s; k = k + 1 }
+            return out
+        }
+    }
+
+    // table.*: insert appends at the sequence border (#t + 1); remove drops and returns
+    // the last element (setting its slot to nil so #t shrinks).
+    globalScope["table"] = {
+        insert: function(t, v) {
+            var n = luaLen(t)
+            luaRawSet(t, "" + (n + 1), v)
+        },
+        remove: function(t) {
+            var n = luaLen(t)
+            if (n === 0) { return undefined }
+            var val = anytype // The removed element.
+            val = luaIndex(t, n)
+            luaRawSet(t, "" + n, undefined)
+            return val
+        }
+    }
 
     c.compile(c.asg)
 

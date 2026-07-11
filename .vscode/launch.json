@@ -479,10 +479,16 @@
             "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-2.lua", "-q"]
         },
         {
-            "name": "Lua not-implemented warned+ignored",
+            "name": "Lua pairs iteration interpreter",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-3.lua", "-q", "-warn-unsupported"]
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-3.lua", "-q"]
+        },
+        {
+            "name": "Lua pairs iteration compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-3.lua", "-q"]
         },
         {
             "name": "Ruby widened (case/ternary/<</attr) interpreter",
@@ -573,6 +579,150 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-1.swift", "-q"]
+        },
+        {
+            "name": "JavaScript completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-complete.js", "-q"]
+        },
+        {
+            "name": "JavaScript completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-complete.js", "-q"]
+        },
+        {
+            "name": "TypeScript completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-test-complete.ts", "-q"]
+        },
+        {
+            "name": "TypeScript completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-complete.ts", "-q"]
+        },
+        {
+            "name": "Java completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-complete.java", "-q"]
+        },
+        {
+            "name": "Java completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-complete.java", "-q"]
+        },
+        {
+            "name": "C# completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-test-complete.cs", "-q"]
+        },
+        {
+            "name": "C# completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-complete.cs", "-q"]
+        },
+        {
+            "name": "Kotlin completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-complete.kt", "-q"]
+        },
+        {
+            "name": "Kotlin completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-complete.kt", "-q"]
+        },
+        {
+            "name": "Go completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-test-complete.go", "-q"]
+        },
+        {
+            "name": "Go completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-complete.go", "-q"]
+        },
+        {
+            "name": "Python completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-complete.py", "-q"]
+        },
+        {
+            "name": "Python completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-complete.py", "-q"]
+        },
+        {
+            "name": "Lua completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-complete.lua", "-q"]
+        },
+        {
+            "name": "Lua completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-complete.lua", "-q"]
+        },
+        {
+            "name": "Ruby completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-complete.rb", "-q"]
+        },
+        {
+            "name": "Ruby completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-complete.rb", "-q"]
+        },
+        {
+            "name": "PHP completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-complete.php", "-q"]
+        },
+        {
+            "name": "PHP completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-complete.php", "-q"]
+        },
+        {
+            "name": "Dart completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-test-complete.dart", "-q"]
+        },
+        {
+            "name": "Dart completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-complete.dart", "-q"]
+        },
+        {
+            "name": "Swift completed (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-test-complete.swift", "-q"]
+        },
+        {
+            "name": "Swift completed (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-complete.swift", "-q"]
         },
         {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",

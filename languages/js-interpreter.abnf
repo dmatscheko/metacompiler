@@ -254,13 +254,23 @@ ForOf       <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor "(" [ KwVar ] Id <~~ push(up.in) ~~>
               ( KwOf | KwIn ) <~~ push(up.in) ~~> Expression ")" Statement ;
 
-// A destructuring binding (var [a, b] = xs / var {x, y} = o) is accepted but not
-// lowered; the initializer still runs so its calls stay visible under -warn.
-Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
+// A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and nested
+// combinations of the two. The pattern is reified on the stack (arr/obj/id nodes)
+// and lowered by makeDestructure: the initializer runs once, then every leaf name
+// binds to its array element (by index) or object property (by key). The compiler
+// grammar mirrors this exactly, so both engines and both grammars agree.
+Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = KwVar DPattern "=" AssignExpr [ ";" ] ;
-DPattern    = "[" [ DElem { "," DElem } ] "]" | "{" [ DField { "," DField } ] "}" ;
-DElem       = Id | DPattern ;
-DField      = Id [ ":" DElem ] ;
+DPattern    = ArrPattern | ObjPattern ;
+ArrPattern  <~~ push({dtype: "arr", elems: takeAll()}) ~~>
+            = "[" [ DElem { "," DElem } ] "]" ;
+ObjPattern  <~~ push({dtype: "obj", fields: takeAll()}) ~~>
+            = "{" [ DField { "," DField } ] "}" ;
+DElem       = DIdElem | DPattern ;
+DIdElem     <~~ push({dtype: "id", name: up.in}) ~~>
+            = Id ;
+DField      <~~ push(makeDField(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ ":" DElem ] ;
 
 // try/catch/finally is accepted but not implemented (there is no exception model:
 // throw already terminates). Under -warn-unsupported the try block runs; catch and
@@ -496,11 +506,33 @@ KwExtends   = "extends" KwEnd ;
         }
     }
 
-    // A destructuring binding is not lowered; run the initializer (so its calls stay
-    // visible) and bind nothing.
-    function makeDestructure(init, pos) {
-        notImpl("destructuring declaration", pos)
-        return function() { init(); return undefined }
+    // A destructuring binding. makeDField turns a parsed object field into
+    // {key, pat}: a shorthand {x} binds property x to a name x, {x: t} binds
+    // property x to the sub-pattern t. bindPattern walks a pattern node
+    // ({dtype:"id"|"arr"|"obj"}) against a value, declaring each leaf name to its
+    // array element (by index) or object property (by key). The compiler lowers
+    // the identical pattern tree the same way.
+    function makeDField(items) {
+        if (items.length == 1) return {key: items[0], pat: {dtype: "id", name: items[0]}}
+        return {key: items[0], pat: items[1]}
+    }
+    function bindPattern(pat, value) {
+        if (pat.dtype == "id") { declVar(pat.name, value) }
+        else if (pat.dtype == "arr") {
+            for (var i = 0; i < pat.elems.length; i++) { bindPattern(pat.elems[i], value[i]) }
+        } else {
+            for (var j = 0; j < pat.fields.length; j++) { bindPattern(pat.fields[j].pat, value[pat.fields[j].key]) }
+        }
+    }
+    // items = [patternNode, initThunk]. Evaluate the initializer once, then bind.
+    function makeDestructure(items, pos) {
+        var pat = items[0]
+        var init = items[1]
+        return function() {
+            var v = anytype // The initializer may be an array or an object.
+            v = init()
+            bindPattern(pat, v)
+        }
     }
 
     // try/catch/finally is not implemented; under -warn the try block runs.

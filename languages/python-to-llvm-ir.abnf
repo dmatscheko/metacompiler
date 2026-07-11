@@ -272,7 +272,7 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
 Primary     = "(" Expression ")" | FString | StringLit | DecLit | True | False | None
-            | ListComp | ListLit | DictLit | VarRef ;
+            | ListComp | ListLit | DictComp | DictLit | VarRef ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
@@ -280,6 +280,12 @@ ListComp    <~~ push(makeListComp(takeAll())) ~~>
               [ CompIf ] "]" ;
 CompIf      <~~ push({cif: pop()}) ~~>
             = "if" KwEnd Expression ;
+
+// {k: v for x in iterable if cond} builds a dict; tried before DictLit ('for' after
+// the first entry is what tells them apart) and the variable is comprehension local.
+DictComp    <~~ push(makeDictComp(takeAll())) ~~>
+            = "{" Expression ":" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
+              "in" KwEnd Expression [ CompIf ] "}" ;
 
 // {k: v, ...}: keys and values are expressions; entries keep their insertion order.
 DictLit     <~~ push(makeDict(takeAll())) ~~>
@@ -457,9 +463,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     b = ea.b
                     cur = callExt(b, "js_call", [cur, hUndef, ea.v])
                 } else if (s.kind == "mcall") {
-                    var ea2 = emitArgs(b, s.args)
-                    b = ea2.b
-                    cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea2.v])
+                    // .items(): the runtime's js_mcall has no dict "items", so lower it
+                    // here to a loop over js_keys building [key, value] pairs.
+                    if (s.name == "items" && s.args.length == 0) {
+                        var ri = emitItems(b, cur)
+                        b = ri.b
+                        cur = ri.v
+                    } else {
+                        var ea2 = emitArgs(b, s.args)
+                        b = ea2.b
+                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea2.v])
+                    }
                 } else if (s.kind == "slice") {
                     var loV = hUndef
                     var hiV = hUndef
@@ -564,6 +578,102 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curScopeV = saved
             return {b: exitB, v: outV}
         }
+    }
+    // items = [kExprT, vExprT, {cvar}, iterT, {cif}?]. Like a list comprehension but
+    // builds a dict (js_dict_new + js_pyset); the variable lives in an own scope.
+    function makeDictComp(items) {
+        var kExprT = items[0]
+        var vExprT = items[1]
+        var name = items[2].cvar
+        var iterT = items[3]
+        var condT = items.length > 4 ? items[4].cif : null
+        return function(b) {
+            hidCount++
+            var iName = "$dci" + hidCount
+            var aName = "$dca" + hidCount
+            var oName = "$dco" + hidCount
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var r = iterT(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [r.v])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_dict_new", [])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            var bb = bodyB
+            var iV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iName)])
+            var aV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, aName)])
+            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, name), callExt(bb, "js_get", [aV2, iV2])])
+            if (condT != null) {
+                var rc = condT(bb)
+                bb = rc.b
+                var keepB = curF.NewBlock("")
+                bb.NewCondBr(truthy(bb, rc.v), keepB, postB)
+                bb = keepB
+            }
+            var rk = kExprT(bb)
+            bb = rk.b
+            var rv = vExprT(bb)
+            bb = rv.b
+            var oV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, oName)])
+            callExt(bb, "js_pyset", [oV, rk.v, rv.v])
+            bb.NewBr(postB)
+            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
+            postB.NewBr(headB)
+            var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])
+            curScopeV = saved
+            return {b: exitB, v: outV}
+        }
+    }
+    // dict.items(): loop over js_keys(d) building a list of [key, value] 2 element lists
+    // (the subset has no tuples), reading each value with js_pyget. Deterministic across
+    // engines because js_keys returns the keys in insertion order.
+    function emitItems(b, dictV) {
+        hidCount++
+        var iName = "$iti" + hidCount
+        var kName = "$itk" + hidCount
+        var dName = "$itd" + hidCount
+        var oName = "$ito" + hidCount
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, dName), dictV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, kName), callExt(b, "js_keys", [dictV])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_arr_new", [])])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        var kV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, kName)])
+        var lenV = callExt(headB, "js_get", [kV, emitStr(headB, "length")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var bb = bodyB
+        var iV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iName)])
+        var kV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, kName)])
+        var dV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, dName)])
+        var keyV = callExt(bb, "js_get", [kV2, iV2])
+        var valV = callExt(bb, "js_pyget", [dV2, keyV])
+        var pair = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [pair, keyV])
+        callExt(bb, "js_arr_push", [pair, valV])
+        var oV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, oName)])
+        callExt(bb, "js_arr_push", [oV, pair])
+        callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, iName), callExt(bb, "js_add", [iV2, emitNum(bb, 1)])])
+        bb.NewBr(headB)
+        var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])
+        curScopeV = saved
+        return {b: exitB, v: outV}
     }
 
     function emitRefRead(b, ref) {

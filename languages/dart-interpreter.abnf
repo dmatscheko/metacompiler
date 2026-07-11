@@ -110,13 +110,25 @@ FArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
 // A parameter list. this.x is a field-initialising formal; a bare or typed name is a plain
 // parameter. TypedParam is tried before PlainParam (both are separate alternatives).
 ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+            = "(" [ ParamItems ] ")" ;
+ParamItems  = NamedGroup | Param { "," Param } [ "," NamedGroup ] [ "," ] ;
 Param       = ThisParam | TypedParam | PlainParam ;
 ThisParam   <~~ push({thisf: popName()}) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> ;
 TypedParam  <~~ push({pname: popName()}) ~~>
             = Type Id <~~ push({mname: up.in}) ~~> ;
 PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
+
+// Named (curly) parameters: foo({int a = 1, this.x = 0}). Optional, each with a default;
+// unsupplied ones fall back to the default, else null. Marked named:true in the descriptor.
+NamedGroup  = "{" NamedParam { "," NamedParam } [ "," ] "}" ;
+NamedParam  = NamedThisParam | NamedTypedParam | NamedPlainParam ;
+NamedThisParam  <~~ push(makeNamedParam(true, takeAll())) ~~>
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+NamedTypedParam <~~ push(makeNamedParam(false, takeAll())) ~~>
+            = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+NamedPlainParam <~~ push(makeNamedParam(false, takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
 // A type: name with optional generics <...> (skipped), dotted names and a nullable ? marker,
 // all parsed and erased.
@@ -171,9 +183,20 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = AssignExpr ;
-AssignExpr  = Assignment | CondExpr ;
+AssignExpr  = Assignment | Cascade ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+
+// Cascade: target..m(args)..field = v . Every section acts on the one target and the
+// whole expression evaluates to that target. With no sections it is just the CondExpr,
+// so ordinary expressions stay unaffected.
+Cascade     <~~ push(makeCascade(takeAll())) ~~>
+            = CondExpr { CascadeSection } ;
+CascadeSection = CascadeCall | CascadeSet ;
+CascadeCall <~~ push({kind: "ccall", name: popName(), args: takeAll()}) ~~>
+            = ".." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+CascadeSet  <~~ var cv = pop(); var cn = pop(); push({kind: "cset", name: cn.mname, val: cv}) ~~>
+            = ".." Id <~~ push({mname: up.in}) ~~> "=" CondExpr ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
 DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
@@ -209,7 +232,7 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx | BangSfx } ;
 BangSfx     <~~ notImpl("null-assertion", up.pos); push({kind:"bang"}) ~~> = "!" !"=" ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -229,10 +252,23 @@ NewExpr     = KwNew Call ;
 
 // f(args): a top level function, a builtin, or (when the name is a class) a constructor.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+            = Id <~~ push(up.in) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+
+// A call argument is positional (a bare expression, pushed as a thunk) or named
+// (name: expr, pushed as a {named, val} marker collected into a trailing options dict).
+Arg         = NamedArg | AssignExpr ;
+NamedArg    <~~ var av = pop(); var an = pop(); push({named: an.aname, val: av}) ~~>
+            = Id <~~ push({aname: up.in}) ~~> ":" AssignExpr ;
 
 ListLit     <~~ push(makeList(takeAll())) ~~>
-            = "[" [ AssignExpr { "," AssignExpr } [ "," ] ] "]" ;
+            = "[" [ ListElem { "," ListElem } [ "," ] ] "]" ;
+// A list element is a plain expression, a spread (...e / ...?e splicing e's elements)
+// or a collection-if (conditionally include an element).
+ListElem    = SpreadElem | IfElem | ExprElem ;
+SpreadElem  <~~ push({ekind: "spread", t: pop()}) ~~> = "..." [ "?" ] AssignExpr ;
+IfElem      <~~ push(makeIfElem(takeAll())) ~~>
+            = KwIf "(" Expression ")" ListElem [ KwElse ListElem ] ;
+ExprElem    <~~ push({ekind: "val", t: pop()}) ~~> = AssignExpr ;
 MapLit      <~~ push(makeMap(takeAll())) ~~>
             = "{" [ MapEntry { "," MapEntry } [ "," ] ] "}" ;
 MapEntry    <~~ var v = pop(); push({mk: pop(), mv: v}) ~~>
@@ -333,10 +369,26 @@ KwLate      = "late" KwEnd ;
             return d
         }
     }
+    // items are element descriptors: {ekind:"val"|"spread", t} or {ekind:"if", cond, then, els}.
+    function makeIfElem(items) {
+        return {ekind: "if", cond: items[0], then: items[1], els: items.length > 2 ? items[2] : null}
+    }
+    function appendElem(a, e) {
+        if (e.ekind == "val") { a.push(e.t()) }
+        else if (e.ekind == "spread") {
+            var s = anytype
+            s = e.t()
+            var n = dlen(s)
+            for (var i = 0; i < n; i++) { a.push(dget(s, i)) }
+        } else {
+            if (core.test(e.cond())) { appendElem(a, e.then) }
+            else if (e.els != null) { appendElem(a, e.els) }
+        }
+    }
     function makeList(items) {
         return function() {
             var a = []
-            for (var i = 0; i < items.length; i++) { a.push(items[i]()) }
+            for (var i = 0; i < items.length; i++) { appendElem(a, items[i]) }
             return a
         }
     }
@@ -383,8 +435,7 @@ KwLate      = "late" KwEnd ;
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
+                    var argv = evalArgs(s.args)
                     if (s.name == "containsKey") { cur = dictFind(cur, argv[0]) >= 0 }
                     else { cur = mcall(cur, s.name, argv) }
                 } else if (s.kind == "field") {
@@ -433,11 +484,120 @@ KwLate      = "late" KwEnd ;
         fail("method call '" + name + "' on " + dstr(target))
     }
 
+    // ----- cascade: t..m()..f = v evaluates the target once and returns it -----
+    function makeCascade(items) {
+        if (items.length == 1) { return items[0] }
+        var targetT = items[0]
+        var sections = items.slice(1)
+        return function() {
+            var t = anytype
+            t = targetT()
+            for (var i = 0; i < sections.length; i++) {
+                var s = sections[i]
+                if (s.kind == "ccall") {
+                    mcall(t, s.name, evalArgs(s.args))
+                } else {
+                    t[s.name] = s.val()
+                }
+            }
+            return t
+        }
+    }
+
     // ----- functions, closures, classes -----
     function bodyToStmt(bd) {
         if (bd.body != undefined) { return bd.body }
         var et = bd.ebody
         return function() { return {isRet: true, v: et()} }
+    }
+    // ----- parameters (positional + named-with-defaults) and argument evaluation -----
+    // A named-param descriptor from a curly group is {pname|thisf, named:true, def:thunk|null}.
+    function makeNamedParam(isThis, items) {
+        var nm = ""
+        var def = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { nm = items[i].mname }
+            else { def = items[i] }
+        }
+        if (isThis) { return {thisf: nm, named: true, def: def} }
+        return {pname: nm, named: true, def: def}
+    }
+    // The trailing options dict a caller passes for the named args, or undefined.
+    function optsAt(args, idx) {
+        var o = anytype
+        o = (idx < args.length) ? args[idx] : undefined
+        return o
+    }
+    function namedValue(np, opts) {
+        var key = (np.thisf != undefined) ? np.thisf : np.pname
+        if (isDict(opts)) {
+            var fi = dictFind(opts, key)
+            if (fi >= 0) { return opts.vals[fi] }
+        }
+        return (np.def != null) ? np.def() : null
+    }
+    function countPositional(params) {
+        var n = 0
+        for (var i = 0; i < params.length; i++) { if (params[i].named !== true) { n++ } }
+        return n
+    }
+    // Bind params (no field-initialising formals) into scope sc; off skips a leading self.
+    function bindPlainParams(sc, params, args, off) {
+        var posCount = 0
+        var i
+        for (i = 0; i < params.length; i++) {
+            if (params[i].named === true) { continue }
+            sc[params[i].pname] = (off + posCount < args.length) ? args[off + posCount] : null
+            posCount++
+        }
+        if (posCount < params.length) {
+            var opts = optsAt(args, off + posCount)
+            for (i = 0; i < params.length; i++) {
+                if (params[i].named !== true) { continue }
+                sc[params[i].pname] = namedValue(params[i], opts)
+            }
+        }
+    }
+    // Like bindPlainParams but this.x formals also initialise the field on self.
+    function bindCtorParams(sc, self, params, args, off) {
+        var posCount = 0
+        var i
+        for (i = 0; i < params.length; i++) {
+            if (params[i].named === true) { continue }
+            var pv = anytype
+            pv = (off + posCount < args.length) ? args[off + posCount] : null
+            if (params[i].thisf != undefined) { sc[params[i].thisf] = pv; self[params[i].thisf] = pv }
+            else { sc[params[i].pname] = pv }
+            posCount++
+        }
+        if (posCount < params.length) {
+            var opts = optsAt(args, off + posCount)
+            for (i = 0; i < params.length; i++) {
+                if (params[i].named !== true) { continue }
+                var key = (params[i].thisf != undefined) ? params[i].thisf : params[i].pname
+                var val = anytype
+                val = namedValue(params[i], opts)
+                sc[key] = val
+                if (params[i].thisf != undefined) { self[params[i].thisf] = val }
+            }
+        }
+    }
+    // Evaluate a call's args: positional thunks become values; named {named,val} markers
+    // collect into one trailing options dict (matching the callee's named-param reads).
+    function evalArgs(args) {
+        var argv = []
+        var named = null
+        for (var i = 0; i < args.length; i++) {
+            var a = anytype
+            a = args[i]
+            if (typeof a == "function") { argv.push(a()) }
+            else {
+                if (named == null) { named = {__dict: true, keys: [], vals: []} }
+                dictSet(named, a.named, a.val())
+            }
+        }
+        if (named != null) { argv.push(named) }
+        return argv
     }
     function makeClosure(params, bodyStmt, defScopes) {
         var env = defScopes.slice()
@@ -447,21 +607,21 @@ KwLate      = "late" KwEnd ;
             var saved = scopes
             scopes = env.slice()
             var sc = {}
-            for (var j = 0; j < params.length; j++) { sc[params[j]] = j < args.length ? args[j] : null }
             scopes.push(sc)
+            bindPlainParams(sc, params, args, 0)
             var r = bodyStmt()
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
     }
     function makeArrow(items) {
-        var params = pnames(items[0].params)
+        var params = items[0].params
         var bodyStmt = bodyToStmt(items[1])
         return function() { return makeClosure(params, bodyStmt, scopes) }
     }
     function makeFuncDecl(items) {
         var name = items[0].fname
-        var params = pnames(items[1].params)
+        var params = items[1].params
         var bodyStmt = bodyToStmt(items[2])
         return function() { declVar(name, makeClosure(params, bodyStmt, scopes)) }
     }
@@ -475,8 +635,7 @@ KwLate      = "late" KwEnd ;
         var name = items[0]
         var args = items.slice(1)
         return function() {
-            var argv = []
-            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var argv = evalArgs(args)
             var f = getVar(name)
             if (f != undefined && f != null && f.__isclass === true) { return construct(f, argv) }
             if (typeof f != "function") { fail("call of a non-function: " + name) }
@@ -495,7 +654,7 @@ KwLate      = "late" KwEnd ;
         var params = items[1].params
         var bodyDesc = items[items.length - 1]
         if (!isTyped && name == curClassName) { return {ctor: {params: params, body: bodyDesc}} }
-        return {method: {name: name, params: pnames(params), body: bodyDesc}}
+        return {method: {name: name, params: params, body: bodyDesc}}
     }
     function makeFieldDecl(items) {
         return {field: items[0].fn, init: items.length > 1 ? items[1] : null}
@@ -525,15 +684,14 @@ KwLate      = "late" KwEnd ;
         var bodyStmt = (bodyDesc != null && bodyDesc.none == undefined) ? bodyToStmt(bodyDesc) : null
         return function() {
             var self = arguments[0]
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             var saved = scopes
             scopes = [globalScope, {}]
             declVar("this", self)
+            var sc = scopes[scopes.length - 1]
             for (var f = 0; f < fields.length; f++) { self[fields[f].field] = null }
-            for (var k = 0; k < cparams.length; k++) {
-                var v = (k + 1 < arguments.length) ? arguments[k + 1] : null
-                if (cparams[k].thisf != undefined) { declVar(cparams[k].thisf, v); self[cparams[k].thisf] = v }
-                else { declVar(cparams[k].pname, v) }
-            }
+            bindCtorParams(sc, self, cparams, args, 1)
             for (var fi = 0; fi < fields.length; fi++) {
                 if (fields[fi].init != null) { self[fields[fi].field] = fields[fi].init() }
             }
@@ -543,14 +701,16 @@ KwLate      = "late" KwEnd ;
     }
     function makeMethodClosure(mth) {
         var bodyStmt = bodyToStmt(mth.body)
+        var params = mth.params
         return function() {
             var self = arguments[0]
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             var saved = scopes
             scopes = [globalScope, {}]
             declVar("this", self)
-            for (var i = 0; i < mth.params.length; i++) {
-                declVar(mth.params[i], (i + 1 < arguments.length) ? arguments[i + 1] : null)
-            }
+            var sc = scopes[scopes.length - 1]
+            bindPlainParams(sc, params, args, 1)
             var r = bodyStmt()
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
@@ -661,6 +821,7 @@ KwLate      = "late" KwEnd ;
         return function() {
             var it = anytype
             it = iterT()
+            if (isDict(it)) { it = it.keys.slice(0) } // for (x in map) walks the keys
             scopes.push({})
             var res = undefined
             var n = dlen(it)

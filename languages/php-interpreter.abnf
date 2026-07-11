@@ -142,9 +142,26 @@ Continue    <~~ push(makeContinue(takeAll())) ~~>
             = KwContinue [ Expression ] ";" ;
 
 // Every expression pushes exactly one thunk: function() -> value.
-Expression  = Assignment | Ternary ;
+Expression  = DestructAssign | Assignment | Ternary ;
+
+// list($a, $b) = e  /  [$a, $b] = e  -- positional destructuring of an indexed
+// array into a list of assignment targets (tried before a plain expression so a
+// bracketed target list is not mistaken for an array literal).
+DestructAssign <~~ push(makeDestructure(takeAll())) ~~>
+            = DestructLhs "=" !"=" Expression ;
+DestructLhs = KwList "(" DTarget { "," DTarget } ")"
+            | "[" DTarget { "," DTarget } "]" ;
+DTarget     <~~ push({dt: pop()}) ~~>
+            = Target ;
+
+// cond ? a : b  /  cond ?: b (Elvis, yields cond when truthy) ; '??' null-coalescing
+// binds tighter than the ternary but looser than ||.
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
-            = OrExpr [ "?" Expression ":" Expression ] ;
+            = Coalesce [ Elvis | "?" Expression ":" Expression ] ;
+Elvis       <~~ push({elvis: pop()}) ~~>
+            = "?:" Expression ;
+Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
+            = OrExpr { "??" OrExpr } ;
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target AssignOp <~~ push(up.in) ~~> Expression ;
@@ -316,6 +333,7 @@ KwContinue  = "continue" KwEnd ;
 KwEcho      = ( "echo" | "print" ) KwEnd ;
 KwUse       = "use" KwEnd ;
 KwArray     = "array" KwEnd ;
+KwList      = "list" KwEnd ;
 KwGlobal    = "global" KwEnd ;
 KwExtends   = "extends" KwEnd ;
 KwInterface = "interface" KwEnd ;
@@ -469,15 +487,56 @@ KwNamespace = "namespace" KwEnd ;
     function phpRangeKey(v, i) { if (isDict(v)) { return v.keys[i] } return i }
     function phpRangeVal(v, i) { if (isDict(v)) { return v.vals[i] } return v[i] }
 
-    // ----- ternary -----
+    // ----- ternary / Elvis / null-coalescing -----
+    // items: [cond] plain, [cond, {elvis}] Elvis, [cond, then, else] full ternary.
     function makeTernary(items) {
         if (items.length == 1) { return items[0] }
+        if (items.length == 2) {
+            var condE = items[0]
+            var rightE = items[1].elvis
+            return function() {
+                var l = anytype
+                l = condE()
+                if (phptest(l)) { return l }
+                return rightE()
+            }
+        }
         var condT = items[0]
         var thenT = items[1]
         var elseT = items[2]
         return function() {
             if (phptest(condT())) { return thenT() }
             return elseT()
+        }
+    }
+    // a ?? b ?? c : first operand that is not null (left fold; associative for '??').
+    function makeCoalesce(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = anytype
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (v !== null && v !== undefined) { return v }
+                v = items[i]()
+            }
+            return v
+        }
+    }
+    // list($a, $b) = e / [$a, $b] = e : bind targets from the array's positions.
+    function makeDestructure(items) {
+        var targets = []
+        var valT = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].dt != undefined) { targets.push(items[i].dt) }
+            else { valT = items[i] }
+        }
+        return function() {
+            var arr = anytype
+            arr = valT()
+            for (var i = 0; i < targets.length; i++) {
+                writeTargetVal(targets[i], phpIndex(arr, i))
+            }
+            return arr
         }
     }
 

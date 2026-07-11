@@ -89,7 +89,7 @@ IfaceBody   <~~ push({iface: true}) ~~>
 FuncDecl    <~~ push(makeFuncStmt(takeAll())) ~~>
             = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> ParamList [ RetTypes ] Block ;
 Receiver    <~~ push({recv: takeAll()}) ~~>
-            = "(" Id <~~ push(up.in) ~~> Id <~~ push(up.in) ~~> ")" ;
+            = "(" Id <~~ push(up.in) ~~> [ "*" ] Id <~~ push(up.in) ~~> ")" ;
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Id <~~ push(up.in) ~~> Type { "," Id <~~ push(up.in) ~~> Type } ] ")" ;
 RetTypes    = Type | "(" Type { "," Type } ")" ;
@@ -753,12 +753,26 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5f" | "\x61"..."\x
                 callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
                                                 callExt(bodyB, "js_range_key", [aV2, cV2])])
             }
+            var bb = bodyB
             if (vName != null && vName != "_") {
-                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, vName),
-                                                callExt(bodyB, "js_range_val", [aV2, cV2])])
+                // Ranging a string yields its i-th one-character substring (js_range_val
+                // only knows lists and maps); a runtime typeof picks the string path.
+                var strB = curF.NewBlock("")
+                var elseB = curF.NewBlock("")
+                var joinB = curF.NewBlock("")
+                var isStr = callExt(bb, "js_seq", [callExt(bb, "js_typeof", [aV2]), emitStr(bb, "string")])
+                bb.NewCondBr(truthy(bb, isStr), strB, elseB)
+                var kS = callExt(strB, "js_range_key", [aV2, cV2])
+                callExt(strB, "js_scope_set", [curScopeV, emitStr(strB, vName),
+                                               callExt(strB, "js_pyslice", [aV2, kS, callExt(strB, "js_jadd", [kS, emitNum(strB, 1)])])])
+                strB.NewBr(joinB)
+                callExt(elseB, "js_scope_set", [curScopeV, emitStr(elseB, vName),
+                                                callExt(elseB, "js_range_val", [aV2, cV2])])
+                elseB.NewBr(joinB)
+                bb = joinB
             }
             loopStack.push({cont: postB, brk: exitB})
-            bodyT(bodyB).NewBr(postB)
+            bodyT(bb).NewBr(postB)
             loopStack.pop()
             var cV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, cName), callExt(postB, "js_jadd", [cV3, emitNum(postB, 1)])])

@@ -115,13 +115,25 @@ FArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
 // A parameter list. this.x is a field-initialising formal; a bare or typed name is a plain
 // parameter. TypedParam is tried before PlainParam (both are separate alternatives).
 ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+            = "(" [ ParamItems ] ")" ;
+ParamItems  = NamedGroup | Param { "," Param } [ "," NamedGroup ] [ "," ] ;
 Param       = ThisParam | TypedParam | PlainParam ;
 ThisParam   <~~ push({thisf: popName()}) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> ;
 TypedParam  <~~ push({pname: popName()}) ~~>
             = Type Id <~~ push({mname: up.in}) ~~> ;
 PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
+
+// Named (curly) parameters: foo({int a = 1, this.x = 0}). Optional, each with a default;
+// unsupplied ones fall back to the default, else null. Marked named:true in the descriptor.
+NamedGroup  = "{" NamedParam { "," NamedParam } [ "," ] "}" ;
+NamedParam  = NamedThisParam | NamedTypedParam | NamedPlainParam ;
+NamedThisParam  <~~ push(makeNamedParam(true, takeAll())) ~~>
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+NamedTypedParam <~~ push(makeNamedParam(false, takeAll())) ~~>
+            = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+NamedPlainParam <~~ push(makeNamedParam(false, takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
 // A type: name with optional generics <...> (skipped), dotted names and a nullable ? marker,
 // all parsed and erased.
@@ -176,9 +188,20 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 
 // Every expression production pushes exactly one thunk: function(block) -> {b, v}.
 Expression  = AssignExpr ;
-AssignExpr  = Assignment | CondExpr ;
+AssignExpr  = Assignment | Cascade ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+
+// Cascade: target..m(args)..field = v . Every section acts on the one target and the
+// whole expression evaluates to that target. With no sections it is just the CondExpr,
+// so ordinary expressions stay unaffected.
+Cascade     <~~ push(makeCascade(takeAll())) ~~>
+            = CondExpr { CascadeSection } ;
+CascadeSection = CascadeCall | CascadeSet ;
+CascadeCall <~~ push({kind: "ccall", name: popName(), args: takeAll()}) ~~>
+            = ".." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+CascadeSet  <~~ var cv = pop(); var cn = pop(); push({kind: "cset", name: cn.mname, val: cv}) ~~>
+            = ".." Id <~~ push({mname: up.in}) ~~> "=" CondExpr ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
 DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
@@ -214,7 +237,7 @@ CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx | BangSfx } ;
 BangSfx     <~~ notImpl("null-assertion", up.pos); push({kind:"bang"}) ~~> = "!" !"=" ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -234,10 +257,23 @@ NewExpr     = KwNew Call ;
 
 // f(args): a top level function, a builtin, or (when the name is a class) a constructor.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+            = Id <~~ push(up.in) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+
+// A call argument is positional (a bare expression, pushed as a thunk) or named
+// (name: expr, pushed as a {named, val} marker collected into a trailing options dict).
+Arg         = NamedArg | AssignExpr ;
+NamedArg    <~~ var av = pop(); var an = pop(); push({named: an.aname, val: av}) ~~>
+            = Id <~~ push({aname: up.in}) ~~> ":" AssignExpr ;
 
 ListLit     <~~ push(makeList(takeAll())) ~~>
-            = "[" [ AssignExpr { "," AssignExpr } [ "," ] ] "]" ;
+            = "[" [ ListElem { "," ListElem } [ "," ] ] "]" ;
+// A list element is a plain expression, a spread (...e / ...?e splicing e's elements)
+// or a collection-if (conditionally include an element).
+ListElem    = SpreadElem | IfElem | ExprElem ;
+SpreadElem  <~~ push({ekind: "spread", t: pop()}) ~~> = "..." [ "?" ] AssignExpr ;
+IfElem      <~~ push(makeIfElem(takeAll())) ~~>
+            = KwIf "(" Expression ")" ListElem [ KwElse ListElem ] ;
+ExprElem    <~~ push({ekind: "val", t: pop()}) ~~> = AssignExpr ;
 MapLit      <~~ push(makeMap(takeAll())) ~~>
             = "{" [ MapEntry { "," MapEntry } [ "," ] ] "}" ;
 MapEntry    <~~ var v = pop(); push({mk: pop(), mv: v}) ~~>
@@ -317,13 +353,101 @@ KwLate      = "late" KwEnd ;
         return out
     }
 
+    // ----- parameters (positional + named-with-defaults) and argument bundling -----
+    // A named-param descriptor from a curly group is {pname|thisf, named:true, def:thunk|null}.
+    function makeNamedParam(isThis, items) {
+        var nm = ""
+        var def = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { nm = items[i].mname }
+            else { def = items[i] }
+        }
+        if (isThis) { return {thisf: nm, named: true, def: def} }
+        return {pname: nm, named: true, def: def}
+    }
+    function namedKey(np) { return (np.thisf != undefined) ? np.thisf : np.pname }
+    // Copy every key of srcDict into dstDict with a runtime counter loop.
+    function emitCopyKeys(b, dstDict, srcDict) {
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ks"), callExt(b, "js_keys", [srcDict])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0src"), srcDict])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0dst"), dstDict])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ki"), callExt(b, "js_num_i", [handle(0)])])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0ki")])
+        var ksC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0ks")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, callExt(headB, "js_pylen", [ksC])])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ki")])
+        var ksB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ks")])
+        var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0src")])
+        var dstB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0dst")])
+        var kB = callExt(bodyB, "js_pyget", [ksB, iB])
+        callExt(bodyB, "js_pyset", [dstB, kB, callExt(bodyB, "js_pyget", [srcB, kB])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0ki"),
+                                        callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+        bodyB.NewBr(headB)
+        curScopeV = saved
+        return exitB
+    }
+    // Bind named params: build a dict seeded with the defaults, override it with whatever
+    // the caller passed in its trailing options dict (if any), then declare each param.
+    function emitNamedBind(b, named, optsIdx, thisV) {
+        var r = callExt(b, "js_dict_new", [])
+        var i
+        for (i = 0; i < named.length; i++) {
+            var dv = hNull
+            if (named[i].def != null) { var dr = named[i].def(b); b = dr.b; dv = dr.v }
+            callExt(b, "js_pyset", [r, emitStr(b, namedKey(named[i])), dv])
+        }
+        var rawOpts = callExt(b, "js_arg", [curF.Params[1], handle(optsIdx)])
+        var haveB = curF.NewBlock("")
+        var afterB = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, rawOpts, handle(0)), haveB, afterB)
+        emitCopyKeys(haveB, r, rawOpts).NewBr(afterB)
+        b = afterB
+        for (i = 0; i < named.length; i++) {
+            var val = callExt(b, "js_pyget", [r, emitStr(b, namedKey(named[i]))])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, namedKey(named[i])), val])
+            if (named[i].thisf != undefined && thisV != null) { callExt(b, "js_set", [thisV, emitStr(b, named[i].thisf), val]) }
+        }
+        return b
+    }
+    // Push a call's positional args, then (if any) one trailing options dict for the named
+    // args, into argsV. Positional args are thunks; named args are {named, val} markers.
+    function emitCallArgsInto(b, argsV, args) {
+        var named = []
+        for (var i = 0; i < args.length; i++) {
+            var a = anytype
+            a = args[i]
+            if (typeof a == "function") {
+                var r = a(b)
+                b = r.b
+                callExt(b, "js_arr_push", [argsV, r.v])
+            } else { named.push(a) }
+        }
+        if (named.length > 0) {
+            var d = callExt(b, "js_dict_new", [])
+            for (var j = 0; j < named.length; j++) {
+                var rv = named[j].val(b)
+                b = rv.b
+                callExt(b, "js_pyset", [d, emitStr(b, named[j].named), rv.v])
+            }
+            callExt(b, "js_arr_push", [argsV, d])
+        }
+        return b
+    }
+
     // ----- functions, closures, methods -----
     function bodyToStmt(bd) {
         if (bd.body != undefined) { return bd.body }
         var et = bd.ebody
         return function(b) { var r = et(b); r.b.NewRet(r.v); return deadBlock() }
     }
-    function emitFunc(paramNames, bodyStmt, isInstance) {
+    function emitFunc(params, bodyStmt, isInstance) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -339,10 +463,15 @@ KwLate      = "late" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
         }
-        for (var i = 0; i < paramNames.length; i++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, paramNames[i]),
-                                         callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+        var posCount = 0
+        var named = []
+        for (var i = 0; i < params.length; i++) {
+            if (params[i].named === true) { named.push(params[i]); continue }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i].pname),
+                                         callExt(b, "js_arg", [f.Params[1], handle(posCount + off)])])
+            posCount++
         }
+        if (named.length > 0) { b = emitNamedBind(b, named, posCount + off, null) }
         var endB = bodyStmt(b)
         endB.NewRet(hUndef)
         curF = savedF
@@ -351,7 +480,7 @@ KwLate      = "late" KwEnd ;
         return idx
     }
     function makeArrow(items) {
-        var params = pnames(items[0].params)
+        var params = items[0].params
         var bodyStmt = bodyToStmt(items[1])
         return function(b) {
             var idx = emitFunc(params, bodyStmt, false)
@@ -360,7 +489,7 @@ KwLate      = "late" KwEnd ;
     }
     function makeFuncDecl(items) {
         var name = items[0].fname
-        var params = pnames(items[1].params)
+        var params = items[1].params
         var bodyStmt = bodyToStmt(items[2])
         return function(b) {
             var idx = emitFunc(params, bodyStmt, false)
@@ -381,19 +510,15 @@ KwLate      = "late" KwEnd ;
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, objV])
-                for (var i = 0; i < args.length; i++) {
-                    var r = args[i](b)
-                    b = r.b
-                    callExt(b, "js_arr_push", [argsV, r.v])
-                }
+                b = emitCallArgsInto(b, argsV, args)
                 var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
                 callExt(b, "js_call", [ctorV, hUndef, argsV])
                 return {b: b, v: objV}
             }
             var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
-            var ea = emitArgs(b, args)
-            b = ea.b
-            return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
+            var argsV2 = callExt(b, "js_arr_new", [])
+            b = emitCallArgsInto(b, argsV2, args)
+            return {b: b, v: callExt(b, "js_call", [fV, hUndef, argsV2])}
         }
     }
 
@@ -415,9 +540,9 @@ KwLate      = "late" KwEnd ;
                         b = ar.b
                         cur = callExt(b, "js_pyin", [ar.v, cur])
                     } else {
-                        var ea = emitArgs(b, s.args)
-                        b = ea.b
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                        var margs = callExt(b, "js_arr_new", [])
+                        b = emitCallArgsInto(b, margs, s.args)
+                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), margs])
                     }
                 } else if (s.kind == "field") {
                     if (s.name == "length") { cur = callExt(b, "js_pylen", [cur]) }
@@ -438,13 +563,38 @@ KwLate      = "late" KwEnd ;
         }
     }
 
+    // ----- cascade: t..m()..f = v evaluates the target once and returns it -----
+    function makeCascade(items) {
+        if (items.length == 1) { return items[0] }
+        var targetT = items[0]
+        var sections = items.slice(1)
+        return function(b) {
+            var r = targetT(b)
+            b = r.b
+            var t = r.v
+            for (var i = 0; i < sections.length; i++) {
+                var s = sections[i]
+                if (s.kind == "ccall") {
+                    var argsV = callExt(b, "js_arr_new", [])
+                    b = emitCallArgsInto(b, argsV, s.args)
+                    callExt(b, "js_mcall", [t, emitStr(b, s.name), argsV])
+                } else {
+                    var rv = s.val(b)
+                    b = rv.b
+                    callExt(b, "js_set", [t, emitStr(b, s.name), rv.v])
+                }
+            }
+            return {b: b, v: t}
+        }
+    }
+
     // ----- classes -----
     function makeMember(isTyped, items) {
         var name = items[0].mn
         var params = items[1].params
         var bodyDesc = items[items.length - 1]
         if (!isTyped && name == curClassName) { return {ctor: {params: params, body: bodyDesc}} }
-        return {method: {name: name, params: pnames(params), body: bodyDesc}}
+        return {method: {name: name, params: params, body: bodyDesc}}
     }
     function makeFieldDecl(items) {
         return {field: items[0].fn, init: items.length > 1 ? items[1] : null}
@@ -468,12 +618,17 @@ KwLate      = "late" KwEnd ;
         for (var d = 0; d < fields.length; d++) {
             callExt(b, "js_set", [thisV, emitStr(b, fields[d].field), hNull])
         }
+        var posCount = 0
+        var namedC = []
         for (var k = 0; k < cparams.length; k++) {
-            var pv = callExt(b, "js_arg", [f.Params[1], handle(k + 1)])
+            if (cparams[k].named === true) { namedC.push(cparams[k]); continue }
+            var pv = callExt(b, "js_arg", [f.Params[1], handle(posCount + 1)])
             var pn = cparams[k].thisf != undefined ? cparams[k].thisf : cparams[k].pname
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pn), pv])
             if (cparams[k].thisf != undefined) { callExt(b, "js_set", [thisV, emitStr(b, cparams[k].thisf), pv]) }
+            posCount++
         }
+        if (namedC.length > 0) { b = emitNamedBind(b, namedC, posCount + 1, thisV) }
         for (var fi = 0; fi < fields.length; fi++) {
             if (fields[fi].init != null) {
                 var r = fields[fi].init(b)
@@ -517,14 +672,58 @@ KwLate      = "late" KwEnd ;
     }
 
     // ----- collections and templates -----
+    // items are element descriptors: {ekind:"val"|"spread", t} or {ekind:"if", cond, then, els}.
+    function makeIfElem(items) {
+        return {ekind: "if", cond: items[0], then: items[1], els: items.length > 2 ? items[2] : null}
+    }
+    // Splice every element of srcV into arr with a runtime counter loop (arr stays one handle).
+    function emitSpreadInto(b, arr, srcV) {
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0sp"), srcV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0spi"), callExt(b, "js_num_i", [handle(0)])])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0spi")])
+        var spC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0sp")])
+        var lenC = callExt(headB, "js_pylen", [spC])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, lenC])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0spi")])
+        var spB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0sp")])
+        callExt(bodyB, "js_arr_push", [arr, callExt(bodyB, "js_pyget", [spB, iB])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0spi"),
+                                        callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+        bodyB.NewBr(headB)
+        curScopeV = saved
+        return exitB
+    }
+    function emitListElem(b, arr, e) {
+        if (e.ekind == "val") {
+            var r = e.t(b)
+            b = r.b
+            callExt(b, "js_arr_push", [arr, r.v])
+            return b
+        }
+        if (e.ekind == "spread") {
+            var sr = e.t(b)
+            b = sr.b
+            return emitSpreadInto(b, arr, sr.v)
+        }
+        var cr = e.cond(b)
+        var thenB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        var elseB = (e.els != null) ? curF.NewBlock("") : mergeB
+        cr.b.NewCondBr(truthy(cr.b, cr.v), thenB, elseB)
+        emitListElem(thenB, arr, e.then).NewBr(mergeB)
+        if (e.els != null) { emitListElem(elseB, arr, e.els).NewBr(mergeB) }
+        return mergeB
+    }
     function makeList(items) {
         return function(b) {
             var arr = callExt(b, "js_arr_new", [])
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i](b)
-                b = r.b
-                callExt(b, "js_arr_push", [arr, r.v])
-            }
+            for (var i = 0; i < items.length; i++) { b = emitListElem(b, arr, items[i]) }
             return {b: b, v: arr}
         }
     }
@@ -685,8 +884,11 @@ KwLate      = "late" KwEnd ;
             curScopeV = callExt(b, "js_scope_new", [saved])
             var ir = iterT(b)
             b = ir.b
-            var lenV = callExt(b, "js_pylen", [ir.v])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), ir.v])
+            // js_pyiter normalizes the iterable: a map yields its keys (js_keys order),
+            // a string its chars, a list itself - so for (x in coll) walks all three.
+            var itV = callExt(b, "js_pyiter", [ir.v])
+            var lenV = callExt(b, "js_pylen", [itV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), itV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), lenV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])

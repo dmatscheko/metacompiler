@@ -112,7 +112,7 @@ TypeCore    = "[" Type [ ":" Type ] "]"
 
 // Every statement production pushes exactly one thunk: function(block) -> block.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Decl | If | While | Repeat | For | Return | Break | Continue | Empty | ExprStmt ;
+            = Decl | If | Guard | While | Repeat | For | Switch | Return | Break | Continue | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -137,6 +137,23 @@ RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor Id <~~ push(up.in) ~~> KwIn Expression Block ;
+
+// guard COND else { ... }: a false condition branches into the else block (which
+// normally diverges via return/break/continue); a true condition falls through.
+Guard       <~~ push(makeGuard(takeAll())) ~~>
+            = KwGuard Expression KwElse Block ;
+
+// switch SUBJ { case V1, V2: ...  default: ... } - a chain of == tests, no
+// fallthrough. Body parsed FLAT (labels before Statement, a bare 'case' is a valid
+// identifier); the builder groups statements under the label they follow. break in
+// a case leaves the switch (loop stack), continue reaches the enclosing loop.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch SwitchSubj "{" { CaseLabel | Statement } "}" ;
+SwitchSubj  <~~ push({subj: pop()}) ~~>
+            = Expression ;
+CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
+            = ( KwCase Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+              | KwDefault ) ":" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
@@ -256,6 +273,9 @@ KwProtocol  = "protocol" KwEnd ;
 KwExtension = "extension" KwEnd ;
 KwTypealias = "typealias" KwEnd ;
 KwIf        = "if" KwEnd ;
+KwGuard     = "guard" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwDefault   = "default" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
 KwRepeat    = "repeat" KwEnd ;
@@ -621,6 +641,86 @@ KwContinue  = "continue" KwEnd ;
             }
             b.NewRet(v)
             return deadBlock()
+        }
+    }
+
+    // guard COND else BLOCK: a true condition jumps to the continuation, a false one
+    // into the else block; the else normally diverges (its trailing branch is dead).
+    function makeGuard(items) {
+        var condT = items[0]
+        var elseT = items[1]
+        return function(b) {
+            var r = condT(b)
+            b = r.b
+            var elseB = curF.NewBlock("")
+            var contB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, r.v), contB, elseB)
+            elseT(elseB).NewBr(contB)
+            return contB
+        }
+    }
+
+    // A case label carries its value thunks (empty for default).
+    function makeCaseLabel(items) {
+        var vals = []
+        for (var i = 0; i < items.length; i++) { vals.push(items[i].v) }
+        return {isDefault: items.length == 0, vals: vals}
+    }
+    // items = [{subj}, label or statement thunk...]: the flat item list is regrouped
+    // (every statement belongs to the last label). The dispatch compares (js_seq) the
+    // subject to each case value in source order; every body branches to the exit (no
+    // fallthrough), a break inside a case leaves the switch, continue reaches the loop.
+    function makeSwitch(items) {
+        var subj = null
+        var cases = []
+        var cur = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") {
+                if (cur != null) { cur.body.push(it) }
+            } else if (it.subj != undefined) {
+                subj = it.subj
+            } else {
+                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+                cases.push(cur)
+            }
+        }
+        return function(b) {
+            var subjV = null
+            if (subj != null) {
+                var rs = subj(b)
+                b = rs.b
+                subjV = rs.v
+            }
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDefault) { dfltB = bodyBs[i] }
+            }
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { continue }
+                for (var v = 0; v < cases[i].vals.length; v++) {
+                    var rv = cases[i].vals[v](b)
+                    b = rv.b
+                    var condV = subjV != null ? callExt(b, "js_seq", [subjV, rv.v]) : rv.v
+                    var nextB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, condV), bodyBs[i], nextB)
+                    b = nextB
+                }
+            }
+            b.NewBr(dfltB)
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var i = 0; i < cases.length; i++) {
+                var bb = bodyBs[i]
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                bb.NewBr(exitB)
+            }
+            loopStack.pop()
+            return exitB
         }
     }
 

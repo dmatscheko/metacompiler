@@ -13,8 +13,11 @@ JavaScript: variables are NOT type pinned and need NOT be declared before assign
 
 It has: var/let/const (all block scoped), function declarations and anonymous function
 expressions with real closures and an 'arguments' array, arrow functions, if/else,
-while, do-while, for(;;), for-of, switch (=== comparison, fallthrough, stacked labels,
-default), break, continue, return, throw (terminates, there is no try/catch), numbers
+while, do-while, for(;;), for-of, for-in (over an object's own keys), switch (===
+comparison, fallthrough, stacked labels, default), classes (fields with initializers, a
+constructor, instance and static methods, 'this', 'new', single inheritance with
+super(...) and super.method(), with access modifiers and type annotations erased),
+break, continue, return, throw (terminates, there is no try/catch), numbers
 (doubles, hex 0x literals included), strings with the methods length/charAt/charCodeAt/
 indexOf/replace/slice/substring/split/toUpperCase/toLowerCase/trim, template literals,
 booleans, null, undefined, arrays (push/pop/shift/unshift/slice/indexOf/join/concat),
@@ -24,9 +27,9 @@ prefix and postfix ++/--, the ternary operator, || and && (short circuit, return
 operand), == != === !== < > <= >= + - * / % | ^ & << >> >>> and unary - ! ~ typeof.
 
 Deliberately not in the runnable subset (accepted structurally, then reported as
-not-implemented under -warn-unsupported): this, new, classes, prototypes, try/catch,
-destructuring, decorators, namespaces. The type syntax is erased, never executed, so an
-invalid type never affects the result.
+not-implemented under -warn-unsupported): prototypes, try/catch, destructuring,
+decorators, namespaces. The type syntax is erased, never executed, so an invalid type
+never affects the result.
 
 Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
 Expression thunks return the value, statement thunks return undefined or a signal object
@@ -216,9 +219,14 @@ Typeof      <~~ push(makeTypeof(pop())) ~~>
             = KwTypeof UnaryExpr ;
 
 // The postfix forms: i++ evaluates to the old value.
-PostfixExpr = IncDec | CallMember ;
+PostfixExpr = IncDec | SuperCall | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// super(args) delegates to the parent constructor; super.m(args) invokes the parent's
+// method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
+SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
+            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
 // A call after a member access is a method call: the object becomes 'this' of the callee
@@ -236,8 +244,13 @@ IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
 NonNullSuffix = "!" !"=" ;
 AsCast      = KwAs Type ;
 
-Primary     = ArrowFn | "(" Expression ")" | FunctionExpr | TemplateLit | ObjectLit | ArrayLit | StringLit | NumberLit
+Primary     = ArrowFn | NewExpr | "(" Expression ")" | FunctionExpr | TemplateLit | ObjectLit | ArrayLit | StringLit | NumberLit
             | True | False | Null | Undefined | VarRef ;
+
+// new C(args) | new C<T>(args): build an instance of the class named C. The generic
+// type arguments are erased. Member/call suffixes may follow (new C().m()).
+NewExpr     <~~ push(makeNew(takeAll())) ~~>
+            = KwNew Id <~~ push({cls: up.in}) ~~> [ TypeArgs ] "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
 // The optional name of a function expression is accepted but not bound; generics and
 // the return type are erased.
@@ -307,12 +320,44 @@ DField      = Id [ ":" DElem ] ;
 TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
             = KwTry Block [ KwCatch [ "(" Id ")" ] Block ] [ KwFinally Block ] ;
 
-// A class declaration is accepted but not implemented (no prototype/new in the
-// subset). The body is skipped; the class name is bound to undefined so later
-// references do not crash under -warn-unsupported.
-ClassDecl   <~~ push(makeClass(takeAll(), up.pos)) ~~>
-            = KwClass Id <~~ push(up.in) ~~> [ KwExtends DiscardExpr ] SkipBlock ;
-DiscardExpr <~~ pop() ~~> = AssignExpr ;
+// A class declaration: fields, a constructor and instance/static methods, executed
+// directly. An instance is a plain object carrying a __class descriptor; the descriptor
+// holds the methods and the constructor. A method call on an instance dispatches through
+// mcall (which follows __super for inheritance); super.m() calls the parent's method on
+// 'this'. Access modifiers and every type annotation are parsed and erased.
+ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = [ "abstract" KwEnd ] KwClass Id <~~ push({cname: up.in}); curClassName = up.in ~~> [ TypeParams ]
+              [ KwExtends Id <~~ push({ext: up.in}) ~~> [ TypeArgs ] ]
+              [ KwImplements TypeList ]
+              "{" { ClassMember } "}" ;
+
+// The members: a constructor, methods and fields (tried in that order so 'constructor'
+// and a method's '(' are recognized before the field form). A stray ';' is skipped.
+ClassMember = ClassSemi | CtorDef | MethodDef | FieldDef ;
+ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
+
+// A constructor. Its parameters may carry access modifiers (erased) and types (erased).
+CtorDef     <~~ push(makeCtor(takeAll())) ~~>
+            = { CtorMod } KwConstructor CtorParams Block ;
+CtorMod     = ( "public" | "private" | "protected" ) KwEnd ;
+CtorParams  <~~ push(takeAll()) ~~>
+            = "(" [ CtorParam { "," CtorParam } ] ")" ;
+CtorParam   = { PropMod } Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] ;
+PropMod     = ( "public" | "private" | "protected" | "readonly" ) KwEnd ;
+
+// A method (instance unless 'static'). Generics on the method, the parameter types and
+// the return type are all erased; only the name, the parameter names and the body count.
+MethodDef   <~~ push(makeMethod(takeAll())) ~~>
+            = MemberMods Id <~~ push({mname: up.in}) ~~> [ TypeParams ] ParamList [ TypeAnnot ] Block ;
+
+// A field (instance unless 'static'), with an optional '?'/'!' marker, an erased type
+// annotation and an optional initializer.
+FieldDef    <~~ push(makeField(takeAll())) ~~>
+            = MemberMods Id <~~ push({fname: up.in}) ~~> [ "?" | "!" ] [ TypeAnnot ] [ "=" AssignExpr ] [ ";" ] ;
+
+MemberMods  <~~ push({mods: takeAll()}) ~~>
+            = { MemberMod <~~ push(up.in) ~~> } ;
+MemberMod   = ( "public" | "private" | "protected" | "static" | "readonly" | "abstract" | "override" | "async" | "declare" ) KwEnd ;
 
 // A balanced { ... } body consumed without interpreting it, so a construct can be
 // ACCEPTED without being understood. Full string and template literals are matched
@@ -394,6 +439,10 @@ KwCatch     = "catch" KwEnd ;
 KwFinally   = "finally" KwEnd ;
 KwClass     = "class" KwEnd ;
 KwExtends   = "extends" KwEnd ;
+KwImplements = "implements" KwEnd ;
+KwNew       = "new" KwEnd ;
+KwSuper     = "super" KwEnd ;
+KwConstructor = "constructor" KwEnd ;
 KwInterface = "interface" KwEnd ;
 KwType      = "type" KwEnd ;
 KwEnum      = "enum" KwEnd ;
@@ -497,12 +546,47 @@ KwAs        = "as" KwEnd ;
     function makeProp(valT, key) {
         return {k: (typeof key == "string") ? key : key(), t: valT}
     }
+    // Objects carry a hidden __keys array recording their own keys in insertion order.
+    // The tag dialect has no for-in and no Object.keys, and the -frozen engine cannot
+    // enumerate a native object, so for-in reads this list instead. It matches the
+    // compiler's js_keys (insertion order, __-prefixed keys never recorded).
+    // A key that js_keys hides: the __-prefixed internal slots (__class, __keys, ...).
+    function isInternalKey(key) {
+        return typeof key == "string" && key.length >= 2 && key.charAt(0) == "_" && key.charAt(1) == "_"
+    }
     function makeObject(props) {
         return function() {
             var o = {}
-            for (var i = 0; i < props.length; i++) o[props[i].k] = props[i].t()
+            var keys = []
+            for (var i = 0; i < props.length; i++) {
+                o[props[i].k] = props[i].t()
+                if (!isInternalKey(props[i].k)) {
+                    var found = false
+                    for (var j = 0; j < keys.length; j++) { if (keys[j] === props[i].k) { found = true } }
+                    if (!found) keys.push(props[i].k)
+                }
+            }
+            o["__keys"] = keys
             return o
         }
+    }
+    // Records a newly assigned key on a tracked object (an object carrying __keys). Plain
+    // arrays and untracked values are left alone; only string, non-internal keys count.
+    function trackKey(o, key) {
+        if (o == undefined || o == null) { return }
+        if (typeof key != "string") { return }
+        if (isInternalKey(key)) { return }
+        if (!hasOwn(o, "__keys")) { return }
+        var ks = o["__keys"]
+        for (var i = 0; i < ks.length; i++) { if (ks[i] === key) { return } }
+        ks.push(key)
+    }
+    // The own keys of an object for for-in: a snapshot (so the body may add keys), the
+    // __-prefixed internals never appear (they are never recorded in __keys).
+    function jsKeys(o) {
+        if (o == undefined || o == null) fail("for-in over " + o)
+        if (hasOwn(o, "__keys")) return o["__keys"].slice()
+        return []
     }
 
     function makeFunctionExpr(bodyT, params) {
@@ -546,8 +630,25 @@ KwAs        = "as" KwEnd ;
         var iterT = items[2]
         var bodyT = items[3]
         if (items[1] == "in") {
-            notImpl("for-in", pos)
-            return function() { iterT(); return undefined } // Iterable evaluated, body skipped.
+            // for-in iterates the object's own keys (jsKeys), binding the loop variable
+            // to each key string - mirrors the compiler's js_keys.
+            return function() {
+                var obj = anytype // The object whose keys are enumerated.
+                obj = iterT()
+                var ks = jsKeys(obj)
+                scopes.push({})
+                var res = undefined
+                for (var i = 0; i < ks.length; i++) {
+                    declVar(name, ks[i])
+                    var r = bodyT()
+                    if (r != undefined) {
+                        if (r === BRK) break
+                        if (r !== CONT) { res = r; break }
+                    }
+                }
+                scopes.pop()
+                return res
+            }
         }
         return function() {
             var it = anytype // The iterable is an array or a string.
@@ -577,11 +678,190 @@ KwAs        = "as" KwEnd ;
     // try/catch/finally is not implemented; under -warn the try block runs.
     function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
 
-    // A class declaration is not implemented; bind the name to undefined.
-    function makeClass(items, pos) {
-        notImpl("class declaration", pos)
-        var name = items[0]
-        return function() { declVar(name, undefined); return undefined }
+    // ----- Classes (the __class machinery, mirrors typescript-to-llvm-ir.abnf) -----
+    // An instance is a plain object carrying a __class descriptor; the descriptor holds
+    // the methods (closures over the class-defining scope) and the __ctor. A method call
+    // dispatches through mcall (below), which prepends the instance as the receiver and
+    // follows __super for inheritance; super.m() invokes the parent's method on 'this'.
+
+    // The class whose body is being built, captured by super() / super.m() at build time.
+    var curClassName = ""
+
+    // An instance method: a closure binding this = arguments[0], params from arguments[1..].
+    function makeInstanceClosure(params, bodyT, defScopes) {
+        var env = defScopes.slice()
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            var saved = scopes
+            scopes = env.slice()
+            var sc = {}
+            sc["this"] = self
+            for (var j = 0; j < params.length; j++) sc[params[j]] = args[j]
+            sc["arguments"] = args
+            scopes.push(sc)
+            var r = bodyT()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+
+    // A constructor closure: binds this = arguments[0], runs (for a default subclass ctor)
+    // the implicit no-argument super, then the field initializers, then the body.
+    function makeCtorClosure(params, bodyT, fields, defScopes, superName, isDefault) {
+        var env = defScopes.slice()
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            var saved = scopes
+            scopes = env.slice()
+            var sc = {}
+            sc["this"] = self
+            for (var j = 0; j < params.length; j++) sc[params[j]] = args[j]
+            sc["arguments"] = args
+            scopes.push(sc)
+            if (isDefault && superName != null) {
+                var supCls = getVar(superName)
+                supCls.__ctor.apply(undefined, [self])
+            }
+            for (var k = 0; k < fields.length; k++) {
+                var fv = (fields[k].init != null) ? fields[k].init() : undefined
+                self[fields[k].name] = fv
+                trackKey(self, fields[k].name)
+            }
+            if (bodyT != null) bodyT()
+            scopes = saved
+            return undefined
+        }
+    }
+
+    // Method dispatch on an instance: follow the __class / __super chain. Native and
+    // object-literal methods never reach here - foldCallMember calls this only when the
+    // looked-up member was not itself a function value.
+    function mcall(target, name, args) {
+        if (target != undefined && target != null && target.__class != undefined) {
+            var m = undefined
+            for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) m = cl[name]
+            if (typeof m != "function") fail("unknown method '" + name + "' on an instance")
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        fail("call of a non function value (method '" + name + "')")
+    }
+
+    function makeMethod(items) {
+        var mods = items[0].mods
+        var name = items[1].mname
+        var params = items[2]   // The parameter names array (from ParamList).
+        var body = items[3]
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
+        return {kind: "method", name: name, statik: isStatic, params: params, body: body}
+    }
+    function makeCtor(items) {
+        return {kind: "ctor", params: items[0], body: items[1]}
+    }
+    function makeField(items) {
+        var mods = items[0].mods
+        var name = items[1].fname
+        var init = items.length > 2 ? items[2] : null
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
+        return {kind: "field", name: name, statik: isStatic, init: init}
+    }
+
+    // A class declaration: build the descriptor object, attach static fields, the
+    // constructor and the methods, then bind it in the current scope.
+    function makeClassStmt(items) {
+        var name = items[0].cname
+        var superName = null
+        var members = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].ext != undefined) { superName = items[i].ext }
+            else if (items[i].skip != undefined) { continue }
+            else { members.push(items[i]) }
+        }
+        var fields = []
+        var methods = []
+        var statics = []
+        var ctorInfo = null
+        for (var j = 0; j < members.length; j++) {
+            var mm = members[j]
+            if (mm.kind == "field") { if (mm.statik) { statics.push(mm) } else { fields.push(mm) } }
+            else if (mm.kind == "method") { methods.push(mm) }
+            else if (mm.kind == "ctor") { ctorInfo = mm }
+        }
+        return function() {
+            var defScopes = scopes.slice()
+            var cls = {}
+            cls["__isclass"] = true
+            cls["__name"] = name
+            if (superName != null) {
+                var sup = getVar(superName)
+                if (sup == undefined || !sup.__isclass) fail("unknown superclass: " + superName)
+                cls["__super"] = sup
+            }
+            for (var s = 0; s < statics.length; s++) {
+                cls[statics[s].name] = (statics[s].init != null) ? statics[s].init() : undefined
+            }
+            if (ctorInfo != null) {
+                cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, defScopes, superName, false)
+            } else {
+                cls["__ctor"] = makeCtorClosure([], null, fields, defScopes, superName, true)
+            }
+            for (var mi = 0; mi < methods.length; mi++) {
+                if (methods[mi].statik) { cls[methods[mi].name] = makeClosure(methods[mi].params, methods[mi].body, defScopes) }
+                else { cls[methods[mi].name] = makeInstanceClosure(methods[mi].params, methods[mi].body, defScopes) }
+            }
+            declVar(name, cls)
+            return undefined
+        }
+    }
+
+    // new C(args): build the instance, attach __class, run the constructor as
+    // __ctor(instance, args...).
+    function makeNew(items) {
+        var clsName = items[0].cls
+        var argThunks = items.slice(1)
+        return function() {
+            var cls = getVar(clsName)
+            if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
+            var obj = {}
+            obj["__class"] = cls
+            obj["__keys"] = []
+            var argv = [obj]
+            for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
+            cls.__ctor.apply(undefined, argv)
+            return obj
+        }
+    }
+
+    // super(args): delegate to the parent constructor. super.m(args): dispatch m on the
+    // parent class. The defining class is captured at build time (curClassName).
+    function makeSuperCall(name, argThunks) {
+        var defName = curClassName
+        if (name == "") {
+            return function() {
+                var self = getVar("this")
+                var supCls = getVar(defName).__super
+                if (supCls == undefined) fail("super() with no superclass")
+                var argv = [self]
+                for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
+                supCls.__ctor.apply(undefined, argv)
+                return undefined
+            }
+        }
+        return function() {
+            var self = getVar("this")
+            var m = undefined
+            for (var cl = getVar(defName).__super; cl != undefined && m == undefined; cl = cl.__super) m = cl[name]
+            if (typeof m != "function") fail("unknown super method '" + name + "'")
+            var argv = [self]
+            for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
+            return m.apply(undefined, argv)
+        }
     }
 
     // ----- TypeScript enum -----
@@ -671,24 +951,34 @@ KwAs        = "as" KwEnd ;
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
     // its object, so that a directly following call uses it as 'this'.
+    // A member access remembers its object and its key. A directly following call is a
+    // method call: if the looked-up member is a function value it is applied with the
+    // object as 'this' (native string/array methods, object-literal methods); otherwise
+    // it is a __class instance method, routed through mcall (which prepends the receiver
+    // and follows __super). A call not preceded by a member is a plain function call.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
         return function() {
             var cur = anytype     // A member chain hops between types,
-            var curThis = anytype // and so does the remembered receiver.
+            var curThis = anytype // so do the remembered receiver
+            var lastKey = anytype // and the remembered key.
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "member") {
                     curThis = cur
-                    cur = getMember(cur, s.key())
+                    lastKey = s.key()
+                    cur = getMember(cur, lastKey)
                 } else {
                     var argv = []
                     for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                    if (typeof cur != "function") fail("call of a non function value: " + cur)
-                    cur = cur.apply(curThis, argv)
+                    if (typeof cur == "function") {
+                        cur = cur.apply(curThis, argv)
+                    } else {
+                        cur = mcall(curThis, lastKey, argv)
+                    }
                     curThis = undefined
                 }
             }
@@ -743,6 +1033,7 @@ KwAs        = "as" KwEnd ;
                 var p = resolveRef(ref)
                 if (op != "=") v = applyOp(op, p.obj[p.key], v)
                 p.obj[p.key] = v
+                trackKey(p.obj, p.key) // Keep the object's for-in key list up to date.
             }
             return v
         }

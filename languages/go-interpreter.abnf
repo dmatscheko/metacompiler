@@ -73,7 +73,7 @@ IfaceBody   <~~ push({iface: true}) ~~>
 FuncDecl    <~~ buildFunc(takeAll()) ~~>
             = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> ParamList [ RetTypes ] Block ;
 Receiver    <~~ push({recv: takeAll()}) ~~>
-            = "(" Id <~~ push(up.in) ~~> Id <~~ push(up.in) ~~> ")" ;
+            = "(" Id <~~ push(up.in) ~~> [ "*" ] Id <~~ push(up.in) ~~> ")" ;
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Id <~~ push(up.in) ~~> Type { "," Id <~~ push(up.in) ~~> Type } ] ")" ;
 RetTypes    = Type | "(" Type { "," Type } ")" ;

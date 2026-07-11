@@ -112,7 +112,7 @@ TypeCore    = "[" Type [ ":" Type ] "]"
             | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Decl | If | While | Repeat | For | Return | Break | Continue | Empty | ExprStmt ;
+Statement   = Decl | If | Guard | While | Repeat | For | Switch | Return | Break | Continue | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -138,6 +138,25 @@ RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor Id <~~ push(up.in) ~~> KwIn Expression Block ;
+
+// guard COND else { ... }: if COND is false the else block runs (and normally
+// exits via return/break/continue, which propagates); otherwise control falls
+// through past the guard.
+Guard       <~~ push(makeGuard(takeAll())) ~~>
+            = KwGuard Expression KwElse Block ;
+
+// switch SUBJ { case V1, V2: stmts  case V3: stmts  default: stmts } - lowered to
+// a chain of == tests (no fallthrough). The body is parsed FLAT: the labels must
+// be tried before Statement (a bare 'case' would parse as an identifier), and the
+// builder groups the statements under the label they follow. A bare break ends the
+// case; return/continue propagate to the function/enclosing loop.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch SwitchSubj "{" { CaseLabel | Statement } "}" ;
+SwitchSubj  <~~ push({subj: pop()}) ~~>
+            = Expression ;
+CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
+            = ( KwCase Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+              | KwDefault ) ":" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
@@ -266,6 +285,9 @@ KwProtocol  = "protocol" KwEnd ;
 KwExtension = "extension" KwEnd ;
 KwTypealias = "typealias" KwEnd ;
 KwIf        = "if" KwEnd ;
+KwGuard     = "guard" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwDefault   = "default" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
 KwRepeat    = "repeat" KwEnd ;
@@ -599,6 +621,65 @@ KwContinue  = "continue" KwEnd ;
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : makeConst(undefined)
         return function() { return {isRet: true, v: t()} }
+    }
+
+    // guard COND else BLOCK: run the else block only when COND is falsey, and
+    // propagate its signal (typically a return); otherwise fall through.
+    function makeGuard(items) {
+        var condT = items[0]
+        var elseT = items[1]
+        return function() {
+            if (core.test(condT())) { return undefined }
+            return elseT()
+        }
+    }
+
+    // A case label carries its value thunks (empty for default).
+    function makeCaseLabel(items) {
+        var vals = []
+        for (var i = 0; i < items.length; i++) { vals.push(items[i].v) }
+        return {isDefault: items.length == 0, vals: vals}
+    }
+    // items = [{subj}, label or statement thunk...]: the flat item list is regrouped
+    // so every statement belongs to the last label; no fallthrough. The subject is
+    // evaluated once and compared (==) to each case value in source order; a bare
+    // break ends the switch, other signals (return/continue) propagate.
+    function makeSwitch(items) {
+        var subj = null
+        var cases = []
+        var cur = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") {
+                if (cur != null) { cur.body.push(it) }
+            } else if (it.subj != undefined) {
+                subj = it.subj
+            } else {
+                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+                cases.push(cur)
+            }
+        }
+        return function() {
+            var s = subj != null ? subj() : undefined
+            var dflt = -1
+            var hit = -1
+            for (var i = 0; i < cases.length && hit < 0; i++) {
+                if (cases[i].isDefault) { dflt = i; continue }
+                for (var v = 0; v < cases[i].vals.length && hit < 0; v++) {
+                    var val = cases[i].vals[v]()
+                    if (s === val) { hit = i }
+                }
+            }
+            if (hit < 0) { hit = dflt }
+            if (hit < 0) { return undefined }
+            var body = cases[hit].body
+            for (var j = 0; j < body.length; j++) {
+                var r = body[j]()
+                if (r === BRK) { return undefined }
+                if (r != undefined) { return r }
+            }
+            return undefined
+        }
     }
 
     // ----- Functions, methods and classes -----

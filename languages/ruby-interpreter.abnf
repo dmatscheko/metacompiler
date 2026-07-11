@@ -72,7 +72,20 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
             = { Statement } ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
-Statement   = PutsStmt | MultiAssign | ExprStmt ;
+// A statement may be a post-condition loop (begin..end while/until COND, runs its
+// body at least once) or carry a trailing modifier (STMT if/unless/while/until
+// COND). A modifier only binds when its keyword sits on the SAME source line as
+// the statement (SameLine), so a block 'if'/'while' that opens the next line stays
+// a separate statement.
+Statement   = DoWhileStmt | ModStmt ;
+DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
+            = KwBegin Body End SameLine DoWhileKw Expression ;
+DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
+ModStmt     <~~ push(applyMod(takeAll())) ~~>
+            = SimpleStmt [ SameLine ModKw Expression ] ;
+SimpleStmt  = PutsStmt | MultiAssign | ExprStmt ;
+ModKw       = KwIf <~~ push({mod: "if"}) ~~> | KwUnless <~~ push({mod: "unless"}) ~~>
+            | KwWhile <~~ push({mod: "while"}) ~~> | KwUntil <~~ push({mod: "until"}) ~~> ;
 
 // a, b = 1, 2 (and the swap a, b = b, a): every right-hand value is evaluated
 // before any target is written; a single right-hand array is unpacked positionally.
@@ -135,10 +148,15 @@ Neg         <~~ push(makeNeg(pop())) ~~>
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
 PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
 MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
 FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
+// Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
+// evaluating the arguments) when the receiver is nil, else a normal method/field.
+SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
+            = "&." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
+SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 MArgs       = "(" [ Expression { "," Expression } ] ")" [ Block ] | Block ;
@@ -176,7 +194,14 @@ UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
 CaseExpr    <~~ push(makeCase(takeAll())) ~~>
             = KwCase [ Expression ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
 WhenClause  <~~ push(makeWhen(takeAll())) ~~>
-            = KwWhen Expression { "," Expression } [ KwThen ] Body ;
+            = KwWhen WhenVal { "," WhenVal } [ KwThen ] Body ;
+// A when value: a range LO..HI / LO...HI matches by membership (Range#===); any
+// other expression matches by == (subject form) or truthiness (subjectless form).
+WhenVal     = RangeVal | ScalarVal ;
+RangeVal    <~~ push(makeRangeVal(takeAll())) ~~>
+            = ShiftExpr ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ;
+ScalarVal   <~~ push({t: pop(), isRange: false}) ~~>
+            = Expression ;
 
 // begin / rescue / ensure: accepted but not implemented (no exception model).
 // Under -warn-unsupported the begin body and any ensure body run in sequence, so
@@ -265,6 +290,26 @@ NotKw       = :script(~~
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
+        return undefined
+    })()
+~~) ;
+
+// SameLine succeeds (matching empty) only when the current position and the token
+// just before it are on the SAME source line: no line break (nor a '#' comment
+// that would run to end of line) in the whitespace immediately before or after the
+// position. It gates the statement modifiers and the post-condition loop keyword,
+// so a block 'if'/'while'/'until' opening the next line is never read as a modifier.
+// Runs at parse time; peeks the raw source both backward and forward, self contained.
+SameLine    = :script(~~
+    (function() {
+        var i = -1
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
+        if (cc === 10) { return abnf.newToken("\x01nl", 0) }
+        var j = 0
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd === 10 || dd === 35 || dd === -1) { return abnf.newToken("\x01nl", 0) }
         return undefined
     })()
 ~~) ;
@@ -643,8 +688,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var argv = []
                     for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
                     cur = mcall(cur, s.name, argv)
+                } else if (s.kind == "smcall") {
+                    if (cur === null || cur === undefined) { cur = null }
+                    else {
+                        var sargv = []
+                        for (var sj = 0; sj < s.args.length; sj++) { sargv.push(s.args[sj]()) }
+                        cur = mcall(cur, s.name, sargv)
+                    }
                 } else if (s.kind == "field") {
                     if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
+                    else if (s.name == "to_s") { cur = rstr(cur) }
+                    else { cur = mcall(cur, s.name, []) }
+                } else if (s.kind == "sfield") {
+                    if (cur === null || cur === undefined) { cur = null }
+                    else if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
                     else if (s.name == "to_s") { cur = rstr(cur) }
                     else { cur = mcall(cur, s.name, []) }
                 } else {
@@ -902,8 +959,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var w = 0; w < whens.length; w++) {
                 var vals = whens[w].vals
                 for (var k = 0; k < vals.length; k++) {
-                    var cv = vals[k]()
-                    var matched = hasSubj ? (subj === cv) : rtest(cv)
+                    var val = vals[k]
+                    var cv = val.t()
+                    var matched = false
+                    if (hasSubj) { matched = val.isRange ? (cv.indexOf(subj) >= 0) : (subj === cv) }
+                    else { matched = rtest(cv) }
                     if (matched) { return whens[w].whenbody() }
                 }
             }
@@ -911,14 +971,66 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return null
         }
     }
+    // A when value is {t: thunk, isRange: bool}; a range value matches by membership.
+    function makeRangeVal(items) { return {t: makeRange(items), isRange: true} }
     function makeWhen(items) {
         var vals = []
         var body = null
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "function") { vals.push(items[i]) }
-            else { body = items[i].body }
+            if (items[i].body != undefined) { body = items[i].body }
+            else { vals.push(items[i]) }
         }
         return {vals: vals, whenbody: body}
+    }
+
+    // A trailing statement modifier: STMT if/unless COND (run once when the guard
+    // holds) or STMT while/until COND (a pre-condition loop). Break/next/return that
+    // reach up from the statement thread through runLoopBody just like a plain loop.
+    function applyMod(items) {
+        if (items.length == 1) { return items[0] }
+        var stmt = items[0]
+        var mod = items[1].mod
+        var cond = items[2]
+        if (mod == "if") { return function() { if (rtest(cond())) { return stmt() } return null } }
+        if (mod == "unless") { return function() { if (!rtest(cond())) { return stmt() } return null } }
+        if (mod == "while") {
+            return function() {
+                while (rtest(cond())) {
+                    var s = runLoopBody(stmt)
+                    if (s.sig != undefined) { return s.sig }
+                    if (s.stop) { return s.v }
+                }
+                return null
+            }
+        }
+        return function() {
+            while (!rtest(cond())) {
+                var s = runLoopBody(stmt)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return s.v }
+            }
+            return null
+        }
+    }
+
+    // begin BODY end while/until COND: a post-condition loop; BODY always runs once,
+    // then the guard decides whether to repeat (while: while truthy, until: until
+    // truthy). No rescue/ensure here - those still route through makeBegin (notImpl).
+    function makeDoWhile(items) {
+        var body = items[0].body
+        var op = items[1].dw
+        var cond = items[2]
+        return function() {
+            while (true) {
+                var s = runLoopBody(body)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return s.v }
+                var cv = cond()
+                if (op == "while") { if (!rtest(cv)) { break } }
+                else { if (rtest(cv)) { break } }
+            }
+            return null
+        }
     }
 
     // cond ? a : b - short-circuiting.

@@ -141,9 +141,26 @@ Continue    <~~ push(makeContinue(takeAll())) ~~>
             = KwContinue [ Expression ] ";" ;
 
 // Every expression pushes exactly one thunk: function(block) -> {b, v}.
-Expression  = Assignment | Ternary ;
+Expression  = DestructAssign | Assignment | Ternary ;
+
+// list($a, $b) = e  /  [$a, $b] = e  -- positional destructuring of an indexed
+// array into a list of assignment targets (tried before a plain expression so a
+// bracketed target list is not mistaken for an array literal).
+DestructAssign <~~ push(makeDestructure(takeAll())) ~~>
+            = DestructLhs "=" !"=" Expression ;
+DestructLhs = KwList "(" DTarget { "," DTarget } ")"
+            | "[" DTarget { "," DTarget } "]" ;
+DTarget     <~~ push({dt: pop()}) ~~>
+            = Target ;
+
+// cond ? a : b  /  cond ?: b (Elvis, yields cond when truthy) ; '??' null-coalescing
+// binds tighter than the ternary but looser than ||.
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
-            = OrExpr [ "?" Expression ":" Expression ] ;
+            = Coalesce [ Elvis | "?" Expression ":" Expression ] ;
+Elvis       <~~ push({elvis: pop()}) ~~>
+            = "?:" Expression ;
+Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
+            = OrExpr { "??" OrExpr } ;
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target AssignOp <~~ push(up.in) ~~> Expression ;
@@ -315,6 +332,7 @@ KwContinue  = "continue" KwEnd ;
 KwEcho      = ( "echo" | "print" ) KwEnd ;
 KwUse       = "use" KwEnd ;
 KwArray     = "array" KwEnd ;
+KwList      = "list" KwEnd ;
 KwGlobal    = "global" KwEnd ;
 KwExtends   = "extends" KwEnd ;
 KwInterface = "interface" KwEnd ;
@@ -489,9 +507,27 @@ KwNamespace = "namespace" KwEnd ;
         }
     }
 
-    // ----- ternary (expression) -----
+    // ----- ternary / Elvis / null-coalescing (expressions) -----
+    // items: [cond] plain, [cond, {elvis}] Elvis, [cond, then, else] full ternary.
     function makeTernary(items) {
         if (items.length == 1) { return items[0] }
+        if (items.length == 2) {
+            var condE = items[0]
+            var rightE = items[1].elvis
+            return function(b) {
+                var rc = condE(b)
+                b = rc.b
+                var thenB = curF.NewBlock("")
+                var elseB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, rc.v), thenB, elseB)
+                thenB.NewBr(mergeB)
+                var re = rightE(elseB)
+                re.b.NewBr(mergeB)
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rc.v, thenB), llvm.ir.NewIncoming(re.v, re.b)])
+                return {b: mergeB, v: phi}
+            }
+        }
         var condT = items[0]
         var thenT = items[1]
         var elseT = items[2]
@@ -508,6 +544,53 @@ KwNamespace = "namespace" KwEnd ;
             re.b.NewBr(mergeB)
             var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
             return {b: mergeB, v: phi}
+        }
+    }
+    // a ?? b : the first operand that is not null (left fold; associative for '??').
+    function makeCoalesce(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i++) {
+                var rightB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                var isNull = b.NewICmp(llvm.enum.IPredEQ, v, hNull)
+                b.NewCondBr(isNull, rightB, mergeB)
+                var r2 = items[i](rightB)
+                r2.b.NewBr(mergeB)
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(r2.v, r2.b)])
+                b = mergeB
+                v = phi
+            }
+            return {b: b, v: v}
+        }
+    }
+    // list($a, $b) = e / [$a, $b] = e : bind targets from the array's positions.
+    function makeDestructure(items) {
+        var targets = []
+        var valT = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].dt != undefined) { targets.push(items[i].dt) }
+            else { valT = items[i] }
+        }
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            var arr = r.v
+            for (var i = 0; i < targets.length; i++) {
+                var elem = callExt(b, "js_pyget", [arr, emitNum(b, i)])
+                var ref = targets[i]
+                if (ref.path.length == 0) {
+                    callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), elem])
+                } else {
+                    var p = emitRefPath(b, ref)
+                    b = p.b
+                    writeRefSlot(b, p, elem)
+                }
+            }
+            return {b: b, v: arr}
         }
     }
 

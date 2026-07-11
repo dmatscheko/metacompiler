@@ -253,12 +253,23 @@ ForOf       <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor "(" [ KwVar ] Id <~~ push(up.in) ~~>
               ( KwOf | KwIn ) <~~ push(up.in) ~~> Expression ")" Statement ;
 
-// A destructuring binding is accepted but not lowered; the initializer still runs.
-Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
+// A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and nested
+// combinations of the two. The pattern is reified on the stack (arr/obj/id nodes)
+// and lowered by makeDestructure: the initializer runs once, then every leaf name
+// is declared with js_scope_decl to its array element (js_get by index) or object
+// property (js_get by key). The interpreter grammar mirrors this exactly.
+Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = KwVar DPattern "=" AssignExpr [ ";" ] ;
-DPattern    = "[" [ DElem { "," DElem } ] "]" | "{" [ DField { "," DField } ] "}" ;
-DElem       = Id | DPattern ;
-DField      = Id [ ":" DElem ] ;
+DPattern    = ArrPattern | ObjPattern ;
+ArrPattern  <~~ push({dtype: "arr", elems: takeAll()}) ~~>
+            = "[" [ DElem { "," DElem } ] "]" ;
+ObjPattern  <~~ push({dtype: "obj", fields: takeAll()}) ~~>
+            = "{" [ DField { "," DField } ] "}" ;
+DElem       = DIdElem | DPattern ;
+DIdElem     <~~ push({dtype: "id", name: up.in}) ~~>
+            = Id ;
+DField      <~~ push(makeDField(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ ":" DElem ] ;
 
 // try/catch/finally is accepted but not implemented; under -warn the try block runs.
 TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
@@ -681,10 +692,42 @@ KwExtends   = "extends" KwEnd ;
         }
     }
 
-    // A destructuring binding is not lowered; run the initializer (calls stay visible).
-    function makeDestructure(init, pos) {
-        notImpl("destructuring declaration", pos)
-        return function(b) { return init(b).b }
+    // A destructuring binding. makeDField turns a parsed object field into
+    // {key, pat}: a shorthand {x} binds property x to a name x, {x: t} binds
+    // property x to the sub-pattern t. bindPatternC walks a pattern node
+    // ({dtype:"id"|"arr"|"obj"}) against a value handle, emitting js_scope_decl for
+    // each leaf name; array elements are fetched by js_get with a numeric index,
+    // object properties by js_get with the key string. Same tree as the interpreter.
+    function makeDField(items) {
+        if (items.length == 1) return {key: items[0], pat: {dtype: "id", name: items[0]}}
+        return {key: items[0], pat: items[1]}
+    }
+    function bindPatternC(b, pat, valueH) {
+        if (pat.dtype == "id") {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.name), valueH])
+        } else if (pat.dtype == "arr") {
+            for (var i = 0; i < pat.elems.length; i++) {
+                var subA = callExt(b, "js_get", [valueH, callExt(b, "js_num_i", [handle(i)])])
+                b = bindPatternC(b, pat.elems[i], subA)
+            }
+        } else {
+            for (var j = 0; j < pat.fields.length; j++) {
+                var subO = callExt(b, "js_get", [valueH, emitStr(b, pat.fields[j].key)])
+                b = bindPatternC(b, pat.fields[j].pat, subO)
+            }
+        }
+        return b
+    }
+    // items = [patternNode, initThunk]. Evaluate the initializer once, then bind.
+    function makeDestructure(items, pos) {
+        var pat = items[0]
+        var init = items[1]
+        return function(b) {
+            var r = init(b)
+            b = r.b
+            b = bindPatternC(b, pat, r.v)
+            return b
+        }
     }
 
     // try/catch/finally is not implemented; under -warn the try block runs.

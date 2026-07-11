@@ -67,7 +67,20 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
             = { Statement } ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
-Statement   = PutsStmt | MultiAssign | ExprStmt ;
+// A statement may be a post-condition loop (begin..end while/until COND, runs its
+// body at least once) or carry a trailing modifier (STMT if/unless/while/until
+// COND). A modifier only binds when its keyword sits on the SAME source line as
+// the statement (SameLine), so a block 'if'/'while' that opens the next line stays
+// a separate statement.
+Statement   = DoWhileStmt | ModStmt ;
+DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
+            = KwBegin Body End SameLine DoWhileKw Expression ;
+DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
+ModStmt     <~~ push(applyMod(takeAll())) ~~>
+            = SimpleStmt [ SameLine ModKw Expression ] ;
+SimpleStmt  = PutsStmt | MultiAssign | ExprStmt ;
+ModKw       = KwIf <~~ push({mod: "if"}) ~~> | KwUnless <~~ push({mod: "unless"}) ~~>
+            | KwWhile <~~ push({mod: "while"}) ~~> | KwUntil <~~ push({mod: "until"}) ~~> ;
 
 // a, b = 1, 2 (and the swap a, b = b, a): every right-hand value is evaluated
 // before any target is written; a single right-hand array is unpacked positionally.
@@ -130,10 +143,15 @@ Neg         <~~ push(makeNeg(pop())) ~~>
 // obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
 // block (do..end or {..}) becomes the last argument of the method call.
 PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | FieldSfx | SafeMethodSfx | SafeFieldSfx | IndexSfx } ;
 MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
             = "." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
 FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
+// Safe navigation obj&.m / obj&.m(args): yields nil (and skips the call, not even
+// evaluating the arguments) when the receiver is nil, else a normal method/field.
+SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
+            = "&." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
+SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 MArgs       = "(" [ Expression { "," Expression } ] ")" [ Block ] | Block ;
@@ -171,7 +189,14 @@ UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
 CaseExpr    <~~ push(makeCase(takeAll())) ~~>
             = KwCase [ Expression ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
 WhenClause  <~~ push(makeWhen(takeAll())) ~~>
-            = KwWhen Expression { "," Expression } [ KwThen ] Body ;
+            = KwWhen WhenVal { "," WhenVal } [ KwThen ] Body ;
+// A when value: a range LO..HI / LO...HI matches by membership (Range#===); any
+// other expression matches by == (subject form) or truthiness (subjectless form).
+WhenVal     = RangeVal | ScalarVal ;
+RangeVal    <~~ push(makeRangeVal(takeAll())) ~~>
+            = ShiftExpr ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ;
+ScalarVal   <~~ push({t: pop(), isRange: false}) ~~>
+            = Expression ;
 
 // begin / rescue / ensure: accepted but not implemented (no exception model).
 // Under -warn-unsupported the begin body and any ensure body emit in sequence, so
@@ -260,6 +285,26 @@ NotKw       = :script(~~
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
+        return undefined
+    })()
+~~) ;
+
+// SameLine succeeds (matching empty) only when the current position and the token
+// just before it are on the SAME source line: no line break (nor a '#' comment
+// that would run to end of line) in the whitespace immediately before or after the
+// position. It gates the statement modifiers and the post-condition loop keyword,
+// so a block 'if'/'while'/'until' opening the next line is never read as a modifier.
+// Runs at parse time; peeks the raw source both backward and forward, self contained.
+SameLine    = :script(~~
+    (function() {
+        var i = -1
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
+        if (cc === 10) { return abnf.newToken("\x01nl", 0) }
+        var j = 0
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd === 10 || dd === 35 || dd === -1) { return abnf.newToken("\x01nl", 0) }
         return undefined
     })()
 ~~) ;
@@ -610,6 +655,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         b = ea.b
                         cur = callExt(b, "js_rmcall", [cur, emitStr(b, s.name), ea.v])
                     }
+                } else if (s.kind == "smcall" || s.kind == "sfield") {
+                    // Safe navigation: guard on nil (skip the call, keep nil) via a
+                    // hidden result variable; only the non-nil branch evaluates args.
+                    hidCount++
+                    var snName = "$sn" + hidCount
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, snName), hNull])
+                    var callBk = curF.NewBlock("")
+                    var snEnd = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, callExt(b, "js_seq", [cur, hNull])), snEnd, callBk)
+                    var snRes = hNull
+                    if (s.kind == "smcall") {
+                        var sea = emitArgs(callBk, s.args)
+                        callBk = sea.b
+                        snRes = callExt(callBk, "js_rmcall", [cur, emitStr(callBk, s.name), sea.v])
+                    } else if (s.name == "length" || s.name == "size") {
+                        snRes = callExt(callBk, "js_pylen", [cur])
+                    } else if (s.name == "to_s") {
+                        snRes = callExt(callBk, "js_jadd", [emitStr(callBk, ""), cur])
+                    } else {
+                        snRes = callExt(callBk, "js_rmcall", [cur, emitStr(callBk, s.name), callExt(callBk, "js_arr_new", [])])
+                    }
+                    callExt(callBk, "js_scope_set", [curScopeV, emitStr(callBk, snName), snRes])
+                    callBk.NewBr(snEnd)
+                    cur = callExt(snEnd, "js_scope_get", [curScopeV, emitStr(snEnd, snName)])
+                    b = snEnd
                 } else if (s.kind == "field") {
                     if (s.name == "length" || s.name == "size") {
                         cur = callExt(b, "js_pylen", [cur])
@@ -788,12 +858,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var vals = whens[w].vals
                 var bodyBk = curF.NewBlock("")
                 for (var k = 0; k < vals.length; k++) {
-                    var rv = vals[k](b)
+                    var rv = vals[k].t(b)
                     b = rv.b
                     var testV
                     if (subject != null) {
                         var subjV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, subjName)])
-                        testV = truthy(b, callExt(b, "js_seq", [subjV, rv.v]))
+                        if (vals[k].isRange) { testV = truthy(b, callExt(b, "js_pyin", [subjV, rv.v])) }
+                        else { testV = truthy(b, callExt(b, "js_seq", [subjV, rv.v])) }
                     } else {
                         testV = truthy(b, rv.v)
                     }
@@ -815,14 +886,81 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: endB, v: out}
         }
     }
+    // A when value is {t: thunk, isRange: bool}; a range value matches by membership.
+    function makeRangeVal(items) { return {t: makeRange(items), isRange: true} }
     function makeWhen(items) {
         var vals = []
         var body = null
         for (var i = 0; i < items.length; i++) {
-            if (typeof items[i] == "function") { vals.push(items[i]) }
-            else { body = items[i].body }
+            if (items[i].body != undefined) { body = items[i].body }
+            else { vals.push(items[i]) }
         }
         return {vals: vals, whenbody: body}
+    }
+
+    // A trailing statement modifier. if/unless: run the statement once when the
+    // guard holds, the branch value travels through a hidden result var (like
+    // makeIf). while/until: a pre-condition loop over the single statement.
+    function applyMod(items) {
+        if (items.length == 1) { return items[0] }
+        var stmt = items[0]
+        var mod = items[1].mod
+        var cond = items[2]
+        if (mod == "if" || mod == "unless") {
+            return function(b) {
+                hidCount++
+                var rName = "$mod" + hidCount
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rName), hNull])
+                var rc = cond(b)
+                b = rc.b
+                var thenBk = curF.NewBlock("")
+                var endB = curF.NewBlock("")
+                if (mod == "if") { b.NewCondBr(truthy(b, rc.v), thenBk, endB) }
+                else { b.NewCondBr(truthy(b, rc.v), endB, thenBk) }
+                var rb = stmt(thenBk)
+                callExt(rb.b, "js_scope_set", [curScopeV, emitStr(rb.b, rName), rb.v])
+                rb.b.NewBr(endB)
+                var out = callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, rName)])
+                return {b: endB, v: out}
+            }
+        }
+        return function(b) {
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var r = cond(headB)
+            if (mod == "while") { r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB) }
+            else { r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB) }
+            loopStack.push({cont: headB, brk: exitB})
+            var rb = stmt(bodyB)
+            rb.b.NewBr(headB)
+            loopStack.pop()
+            return {b: exitB, v: hNull}
+        }
+    }
+
+    // begin BODY end while/until COND: a post-condition loop; BODY always runs once,
+    // then the guard decides whether to repeat. next -> the guard, break -> the exit.
+    // No rescue/ensure here - those still route through makeBegin (notImpl).
+    function makeDoWhile(items) {
+        var body = items[0].body
+        var op = items[1].dw
+        var cond = items[2]
+        return function(b) {
+            var bodyB = curF.NewBlock("")
+            var condB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(bodyB)
+            loopStack.push({cont: condB, brk: exitB})
+            var rb = body(bodyB)
+            rb.b.NewBr(condB)
+            loopStack.pop()
+            var rc = cond(condB)
+            if (op == "while") { rc.b.NewCondBr(truthy(rc.b, rc.v), bodyB, exitB) }
+            else { rc.b.NewCondBr(truthy(rc.b, rc.v), exitB, bodyB) }
+            return {b: exitB, v: hNull}
+        }
     }
 
     // cond ? a : b - the two arms meet in a phi (only the taken arm runs).

@@ -259,7 +259,7 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
 Primary     = "(" Expression ")" | FString | StringLit | DecLit | True | False | None
-            | ListComp | ListLit | DictLit | VarRef ;
+            | ListComp | ListLit | DictComp | DictLit | VarRef ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
@@ -267,6 +267,12 @@ ListComp    <~~ push(makeListComp(takeAll())) ~~>
               [ CompIf ] "]" ;
 CompIf      <~~ push({cif: pop()}) ~~>
             = "if" KwEnd Expression ;
+
+// {k: v for x in iterable if cond} builds a dict; tried before DictLit ('for' after
+// the first entry is what tells them apart) and the variable is comprehension local.
+DictComp    <~~ push(makeDictComp(takeAll())) ~~>
+            = "{" Expression ":" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
+              "in" KwEnd Expression [ CompIf ] "}" ;
 
 // {k: v, ...}: keys and values are expressions; entries keep their insertion order.
 DictLit     <~~ push(makeDict(takeAll())) ~~>
@@ -490,6 +496,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (isDict(target)) {
             if (name == "keys") return target.keys.slice(0)
             if (name == "values") return target.vals.slice(0)
+            // .items(): a list of [key, value] pairs in insertion order (each pair a
+            // 2 element list, since the subset has no tuples). pair[0]/pair[1] read them.
+            if (name == "items") {
+                var pairs = []
+                for (var ii = 0; ii < target.keys.length; ii++) {
+                    pairs.push([target.keys[ii], target.vals[ii]])
+                }
+                return pairs
+            }
             if (name == "get") {
                 var i = dictFind(target, args[0])
                 if (i >= 0) return target.vals[i]
@@ -634,6 +649,26 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             scopes.pop()
             return out
+        }
+    }
+    // items = [kExprT, vExprT, {cvar}, iterT, {cif}?]. Like a list comprehension but
+    // builds a dict; the variable lives in an own scope (it does not leak).
+    function makeDictComp(items) {
+        var kExprT = items[0]
+        var vExprT = items[1]
+        var name = items[2].cvar
+        var iterT = items[3]
+        var condT = items.length > 4 ? items[4].cif : null
+        return function() {
+            var arr = iterToList(iterT())
+            var d = newDict()
+            scopes.push({})
+            for (var i = 0; i < arr.length; i++) {
+                scopes[scopes.length - 1][name] = arr[i]
+                if (condT == null || pytruthy(condT())) dictSet(d, kExprT(), vExprT())
+            }
+            scopes.pop()
+            return d
         }
     }
 
