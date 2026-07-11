@@ -190,10 +190,21 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
 Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
 
-// try/catch/finally and throw parse fully but are not implemented (no exception model).
-Try         <~~ push(makeTry(takeAll(), up.pos)) ~~>
-            = KwTry Block { KwCatch [ "(" Type [ Id ] ")" ] [ KwWhen "(" DiscardExpr ")" ] Block } [ KwFinally Block ] ;
-Throw       <~~ push(makeThrow(takeAll(), up.pos)) ~~>
+// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
+// raises the value, catch binds it (the first catch clause wins - the exception type and
+// an optional 'when (cond)' filter are parsed but not discriminated / evaluated), finally
+// always runs. return/break/continue inside a try still propagate. A catch may omit the
+// parens ('catch { }'), the binding ('catch (T) { }') or bind a name ('catch (T e) { }').
+Try         <~~ push(excTry(takeAll())) ~~>
+            = KwTry TryBody { CatchClause } [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(excCatch(takeAll())) ~~>
+            = KwCatch [ "(" Type [ Id <~~ push(up.in) ~~> ] ")" ] [ KwWhen "(" DiscardExpr ")" ] Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
+// throw e; raises e; a bare throw; (rethrow) has no value here, so it raises undefined.
+Throw       <~~ push(excThrow(csThrowVal(takeAll()))) ~~>
             = KwThrow [ Expression ] ";" ;
 
 Decl        = DeclCore ";" ;
@@ -865,13 +876,10 @@ KwLet       = "let" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // try/catch/finally has no exception model; the try block still runs. throw
-    // evaluates its expression (keeping calls visible) but does not unwind.
-    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
-    function makeThrow(items, pos) {
-        notImpl("throw", pos)
-        return function() { for (var i = 0; i < items.length; i++) { items[i]() } }
-    }
+    // try/catch/finally and throw are handled by excTry/excThrow (lib/interp-core.js).
+    // csThrowVal supplies the thrown-value thunk: the expression for 'throw e;', or an
+    // undefined constant for a bare 'throw;' rethrow (which carries no value in this model).
+    function csThrowVal(items) { return items.length > 0 ? items[0] : makeConst(undefined) }
 
     function makeDecl(items) {
         var name = items[0]
@@ -1137,7 +1145,14 @@ KwLet       = "let" KwEnd ;
     if (progCls == undefined || typeof progCls["Main"] != "function") {
         fail("C# programs need a class Program with a static Main method.")
     }
-    var ret = progCls["Main"]()
+    // A user exception that escapes Main() is reported like any runtime error.
+    var ret = anytype
+    try {
+        ret = progCls["Main"]()
+    } catch (e) {
+        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+        throw e
+    }
     exit(ret === undefined ? 0 : ret | 0)
 
 ~~) ;

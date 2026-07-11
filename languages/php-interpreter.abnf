@@ -125,19 +125,34 @@ Statement   = EchoStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEa
             | Return | Break | Continue | Empty | ExprStmt ;
 
 // ----- widened statement surface -----
-// switch / do-while / try-catch-finally / throw / declare / static-locals: recognized
-// structurally and routed to notImplemented (no runtime model here). Braced bodies are
-// balanced-skipped (Switch/Declare) or parsed then dropped (DoWhile/Try) so that a
-// whole real-world file parses; under -warn-unsupported each becomes a no-op.
+// switch / do-while / declare / static-locals: recognized structurally and routed to
+// notImplemented (no runtime model here). Braced bodies are balanced-skipped
+// (Switch/Declare) or parsed then dropped (DoWhile) so that a whole real-world file
+// parses; under -warn-unsupported each becomes a no-op. (try/catch/finally and throw
+// below are genuinely modelled, not notImplemented.)
 StaticVarStmt <~~ takeAll(); push(notImplStmt("static local variable", up.pos)) ~~>
             = KwStatic DollarName [ "=" Expression ] { "," DollarName [ "=" Expression ] } ";" ;
 Switch      <~~ takeAll(); push(notImplStmt("switch", up.pos)) ~~>
             = KwSwitch SkipParen SkipBlock ;
 DoWhile     <~~ takeAll(); push(notImplStmt("do-while", up.pos)) ~~>
             = KwDo Block KwWhile SkipParen ";" ;
-Try         <~~ takeAll(); push(notImplStmt("try/catch/finally", up.pos)) ~~>
-            = KwTry Block { KwCatch "(" CatchType [ DollarName ] ")" Block } [ KwFinally Block ] ;
-Throw       <~~ takeAll(); push(notImplStmt("throw", up.pos)) ~~>
+// try/catch/finally + throw are genuinely modelled (excThrow/excTry, lib/interp-core.js):
+// throw raises a value that unwinds to the nearest catch; catch binds it (the first catch
+// clause wins - the exception type list, including multi-catch A | B, is parsed but not
+// discriminated, and the catch variable is optional); finally always runs; a
+// return/break/continue inside a try still propagates. A PHP Block is {body: thunk}, so
+// the marked sub-rules unwrap it (pop().body). finBody makes a normally-completing finally
+// yield undefined so it never clobbers the try/catch signal (finally control flow is
+// unsupported, matching the compiler's js_try, which discards the finally closure's value).
+Try         <~~ push(excTry(takeAll())) ~~>
+            = KwTry TryBody { CatchClause } [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop().body}) ~~>
+            = Block ;
+CatchClause <~~ push(excCatch(takeAll())) ~~>
+            = KwCatch "(" CatchType [ DollarName ] ")" Block <~~ push(pop().body) ~~> ;
+FinallyClause <~~ push({finbody: finBody(pop().body)}) ~~>
+            = KwFinally Block ;
+Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ";" ;
 Declare     <~~ takeAll(); push(notImplStmt("declare", up.pos)) ~~>
             = KwDeclare SkipParen ( ";" | Block ) ;
@@ -483,6 +498,12 @@ KwInstanceof = "instanceof" KwEnd ;
     makeContinue = function(items) {
         return function() { return {cont: true} }
     }
+    // A finally body always runs but never contributes a value: a normal completion
+    // yields undefined so excTry (lib/interp-core.js) does not overwrite the try/catch
+    // signal with the body's last statement value (PHP's makeBody returns null, not
+    // undefined). Control flow inside a finally is unsupported, so this is byte-for-byte
+    // what the compiler's js_try does (it discards the finally closure's return).
+    function finBody(t) { return function() { t() } }
 
     // ----- PHP truthiness: false, 0, "" and null are falsy (matches js_truthy for
     // the value kinds this subset uses). -----
@@ -933,7 +954,17 @@ KwInstanceof = "instanceof" KwEnd ;
         return {name: name, params: params, body: body != null ? body : makeBody([])}
     }
     function runProgram(items) {
-        for (var i = 0; i < items.length; i++) { items[i]() }
+        // A user exception (throw) that escapes the whole program is reported like any
+        // other runtime error. The wrap sits here, not around c.compile, because the
+        // program runs as a side effect of executing the statement thunks (unlike Java,
+        // whose main() is called explicitly), so this is where the throw actually
+        // propagates. excIsUser lives in lib/interp-core.js.
+        try {
+            for (var i = 0; i < items.length; i++) { items[i]() }
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
     }
     function invokePhp(fn, self, args) {
         var saved = scopes

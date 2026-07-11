@@ -277,16 +277,20 @@ RangeVal    <~~ push(makeRangeVal(takeAll())) ~~>
 ScalarVal   <~~ push({t: pop(), isRange: false}) ~~>
             = Expression ;
 
-// begin / rescue / ensure: accepted but not implemented (no exception model).
-// Under -warn-unsupported the begin body and any ensure body run in sequence, so
-// their calls stay visible; the rescue handlers are parsed and dropped.
-BeginExpr   <~~ push(makeBegin(takeAll(), up.pos)) ~~>
-            = KwBegin Body { RescueClause } [ KwElse Body <~~ push({begelse: pop().body}) ~~> ] [ EnsureClause ] End ;
-RescueClause <~~ takeAll(); push({rescue: true}) ~~>
-            = KwRescue [ ErrList ] [ "=>" Name ] [ KwThen ] Body ;
+// begin / rescue / else / ensure: genuinely executed (like Python try/except/else/
+// finally). A raise in the body unwinds to the first rescue (exception types are
+// parsed but not discriminated), which binds its `=> Id` name; else runs only when the
+// body raised nothing and produced no return/break/next; ensure always runs. A
+// return/break/next leaving the body propagates as the ordinary control signal.
+BeginExpr   <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwBegin Body <~~ push({trybody: pop().body}) ~~> { RescueClause }
+              [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
+              [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ] End ;
+// rescue [Type[, Type]] [=> Id]: the type list is parsed and discarded (types are not
+// discriminated); the `=> Id` name is pushed so makeExcept can bind it to the value.
+RescueClause <~~ push(makeExcept(takeAll())) ~~>
+            = KwRescue [ ErrList ] [ "=>" Name <~~ push(up.in) ~~> ] [ KwThen ] Body <~~ push(pop().body) ~~> ;
 ErrList     = Name { "," Name } ;
-EnsureClause <~~ push({ensure: pop().body}) ~~>
-            = KwEnsure Body ;
 
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ;
@@ -295,8 +299,8 @@ BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
             = KwNext [ Expression ] ;
 
-// raise: accepted but not implemented (no unwinding). The raised expression still
-// runs under -warn-unsupported, so its calls stay visible.
+// raise [EXPR[, EXPR]]: raise the first expression's value (a bare raise re-raise is
+// approximated as raising nil); a trailing message argument is parsed and ignored.
 RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
             = KwRaise [ Expression { "," Expression } ] ;
 
@@ -948,7 +952,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {name: name, params: params, body: body != null ? body : makeBody([])}
     }
     function runProgram(items) {
-        for (var i = 0; i < items.length; i++) { items[i]() }
+        // A raise that escapes the top level is reported like any runtime error.
+        try {
+            for (var i = 0; i < items.length; i++) { items[i]() }
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + rstr(e.v)) }
+            throw e
+        }
     }
     // module M ... end: not implemented (no namespacing). Run the body items in
     // sequence in the current scope so any defs / classes / calls stay visible.
@@ -1112,7 +1122,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // begin BODY end while/until COND: a post-condition loop; BODY always runs once,
     // then the guard decides whether to repeat (while: while truthy, until: until
-    // truthy). No rescue/ensure here - those still route through makeBegin (notImpl).
+    // truthy). No rescue/ensure here - a begin with those routes through makeTry.
     function makeDoWhile(items) {
         var body = items[0].body
         var op = items[1].dw
@@ -1183,29 +1193,63 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    // begin / rescue / ensure: not implemented. Run the begin body and any ensure
-    // body (calls stay visible under -warn-unsupported); drop the rescue handlers.
-    function makeBegin(items, pos) {
-        notImpl("begin/rescue", pos)
-        var body = items[0].body
-        var ensure = null
-        for (var i = 1; i < items.length; i++) {
-            if (items[i].ensure != undefined) { ensure = items[i].ensure }
+    // begin / rescue / else / ensure. items = [{trybody}, {handler,hname}*, {elsebody}?,
+    // {finalbody}?]. makeExcept pairs a rescue's `=> Id` name (if any) with its body.
+    // items = [name, bodyThunk] or [bodyThunk] (rescue with no binding).
+    function makeExcept(items) {
+        if (items.length > 1) { return {handler: items[1], hname: items[0]} }
+        return {handler: items[0], hname: undefined}
+    }
+    // A raise in the body unwinds (a host throw) to the first rescue, which binds its
+    // `=> Id` name to the value; else runs only when the body raised nothing AND produced
+    // no return/break/next signal; ensure always runs and a control signal from it
+    // overrides. A return/break/next signal from the body propagates as the begin's value.
+    // The scope chain is restored to its begin-entry snapshot on the way out of a throw.
+    function makeTry(items, pos) {
+        var tryT = anytype, handlerT = anytype, hname = anytype, elseT = anytype, finallyT = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].handler != undefined) {
+                if (handlerT == undefined) { handlerT = items[i].handler; hname = items[i].hname }
+            }
+            else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
+            else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
         }
         return function() {
-            var r = anytype
-            r = body()
-            if (ensure != null) { ensure() }
-            return r
+            var savedChain = scopes.slice()
+            var box = {v: null}
+            var threw = false
+            try {
+                box.v = tryT()
+            } catch (e) {
+                scopes = savedChain.slice()
+                if (excIsUser(e) && handlerT != undefined) {
+                    threw = true
+                    scopes.push({})
+                    if (hname != undefined) { declVar(hname, e.v) }
+                    box.v = handlerT()
+                    scopes.pop()
+                } else {
+                    throw e
+                }
+            } finally {
+                scopes = savedChain.slice()
+                if (!threw && !isSig(box.v) && elseT != undefined) {
+                    box.v = elseT()
+                }
+                if (finallyT != undefined) {
+                    var fr = finallyT()
+                    if (isSig(fr)) { box.v = fr }
+                }
+            }
+            return box.v
         }
     }
-    // raise: not implemented; the raised expression still runs.
+    // raise [EXPR[, EXPR]]: raise the first expression's value as a host exception (a
+    // bare raise re-raise is approximated by raising nil); the message argument is ignored.
     function makeRaise(items, pos) {
-        notImpl("raise", pos)
-        return function() {
-            for (var i = 0; i < items.length; i++) { items[i]() }
-            return null
-        }
+        var t = items.length > 0 ? items[0] : null
+        return function() { throw {__exc: true, v: (t != null ? t() : null)} }
     }
 
     // ----- Builtins -----

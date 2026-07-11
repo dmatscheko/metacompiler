@@ -27,6 +27,8 @@ become descriptor objects with a __ctor (default property initializers) and an
 init closure; construction runs __ctor then init. Method calls dispatch through
 js_mcall, subscript through js_pyget/js_pyset, dictionaries through js_dict_new,
 and ?? compiles to a null test branching around the right side (a phi merges).
+throw calls js_throw and do/catch compiles each body to a js_closure handed to
+js_try (Swift has no finally; the first catch wins, an unbound catch binds `error`).
 The whole program becomes jsmain(env, args) executed in order.
 Top level self checking programs count failures and end with exit(failures).
 The same language with the same semantics is interpreted directly by
@@ -130,8 +132,9 @@ TypeCore    = "[" Type [ ":" Type ] "]"
             | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function(block) -> block.
-// The Cplx* / Local* / do / defer / throw / fallthrough forms are recognized but
-// not lowered; they route to notImplStmt (a warning under -warn-unsupported).
+// do/throw are genuinely lowered (try/catch via js_try, throw via js_throw); the
+// Cplx* / Local* / defer / fallthrough forms are recognized but not lowered - they
+// route to notImplStmt (a warning under -warn-unsupported).
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
@@ -143,14 +146,29 @@ LocalFunc   <~~ push(notImplStmt("nested function", up.pos)) ~~>
 LocalType   <~~ push(notImplStmt("nested type declaration", up.pos)) ~~>
             = ( KwStruct | KwClass | KwEnum ) Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
 
-// do { ... } catch [pattern] { ... }, defer { ... }, throw EXPR, fallthrough.
-Do          <~~ push(notImplStmt("do/catch", up.pos)) ~~>
-            = KwDo SkipBlock { KwCatch { CatchTok } SkipBlock } ;
-CatchTok    = SkipStr | SkipChar | SkipOther ;
+// do { STMTS } catch [pattern] { STMTS } [catch ...]: genuine try/catch (Swift has NO
+// finally). throw calls js_throw (a Go panic the runtime unwinds); each body compiles
+// to its own IR closure handed to js_try. The first catch clause wins (patterns are
+// parsed but not discriminated). A return/break/continue leaving a try or catch body
+// becomes a control signal that excDispatch re-issues in the enclosing frame. A catch
+// with no `let NAME` binds the implicit name `error`. Each part is marked so makeTry
+// can tell them apart. defer and fallthrough stay not lowered.
+Do          <~~ push(makeTry(takeAll())) ~~>
+            = KwDo TryBody { CatchClause } ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(makeCatch(takeAll())) ~~>
+            = KwCatch ( CatchLet | CatchPat ) Block ;
+// catch let e / catch let e as T / catch let e where c: bind e (the caught value).
+CatchLet    = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ "as" KwEnd Type ] [ KwWhere DiscardExpr ] ;
+// catch SomeError / catch .case / catch { }: no `let` binding, so the caught value
+// binds to the implicit name `error` (always pushed, so makeCatch binds it).
+CatchPat    <~~ push("error") ~~>
+            = [ Pattern ] [ KwWhere DiscardExpr ] ;
 Defer       <~~ push(notImplStmt("defer", up.pos)) ~~>
             = KwDefer SkipBlock ;
-Throw       <~~ push(notImplStmt("throw", up.pos)) ~~>
-            = KwThrow DiscardExpr [ ";" ] ;
+Throw       <~~ push(makeThrow(pop())) ~~>
+            = KwThrow Expression [ ";" ] ;
 Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
             = KwFallthrough [ ";" ] ;
 
@@ -265,12 +283,15 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | TryAwait | CallMember ;
+UnaryExpr   = Neg | Not | TryExpr | Await | CallMember ;
 Neg         <~~ push(makeNeg(pop())) ~~>   = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
-// try / try? / try! / await: recognized as a prefix, routed to notImplExpr.
-TryAwait    <~~ pop(); push(notImplExpr("try/await expression", up.pos)) ~~>
-            = ( KwTry [ "?" | "!" ] | KwAwait ) UnaryExpr ;
+// try / try? / try! : the prefix is parsed and ignored and the inner expression is
+// lowered normally (a throw inside the call unwinds via js_throw regardless).
+TryExpr     = ( KwTry [ "?" | "!" ] ) UnaryExpr ;
+// await: recognized as a prefix, routed to notImplExpr.
+Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
+            = KwAwait UnaryExpr ;
 
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx } ;
@@ -403,6 +424,47 @@ KwContinue  = "continue" KwEnd ;
     var classNames = {}  // Known struct/class names (constructor calls).
 
     function fail(msg) { println("swift compiler error: " + msg); exit(1) }
+
+    // ----- try/catch and throw (Swift has no finally) -----
+    // Each do/catch body compiles to its own IR closure handed to js_try (jsrt.go): it
+    // runs the try under a Go recover and routes a thrown value to the catch closure (a
+    // one-parameter function bound to the catch name). The first catch clause wins.
+    // items = [name, blockThunk] (a name is always pushed, so length is 2).
+    function makeCatch(items) {
+        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
+        return {catchbody: items[0], catchname: undefined}
+    }
+    function makeTry(items) {
+        var tryT = anytype, catchT = anytype, catchName = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].catchbody != undefined) {
+                if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
+            }
+        }
+        return function(b) {
+            // The try and catch bodies are ctl closures (isCtl), so a return/break/
+            // continue leaving them becomes a control signal that excDispatch re-issues.
+            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
+            var catchClo = hUndef
+            if (catchT != undefined) {
+                var cn = (catchName != undefined) ? catchName : "error"
+                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false, true)), curScopeV])
+            }
+            // Swift has no finally, so the finally closure is always undefined.
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            return excDispatch(b, ctl)
+        }
+    }
+    // throw e: evaluate e and raise it with js_throw (a Go panic the runtime unwinds).
+    function makeThrow(e) {
+        return function(b) {
+            var r = e(b)
+            callExt(r.b, "js_throw", [r.v])
+            r.b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            return deadBlock()
+        }
+    }
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
@@ -758,8 +820,7 @@ KwContinue  = "continue" KwEnd ;
                 b = r.b
                 v = r.v
             }
-            b.NewRet(v)
-            return deadBlock()
+            return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
     }
 
@@ -849,15 +910,20 @@ KwContinue  = "continue" KwEnd ;
 
     // Every user function/method/init/closure becomes jsf_N(env, args). Instance
     // functions bind arg 0 to both this and self so implicit property access works.
-    function emitFunc(params, body, isInstance) {
+    // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
+    // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
+    function emitFunc(params, body, isInstance, isCtl) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var savedF = curF
         var savedScope = curScopeV
         var savedLoops = loopStack
+        var savedTag = curFTag
         curF = f
+        curFTag = idx
         loopStack = []
+        if (isCtl) { ctlEnter(idx) }
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
@@ -873,9 +939,11 @@ KwContinue  = "continue" KwEnd ;
         }
         var endB = body(b)
         endB.NewRet(hUndef)
+        if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
+        curFTag = savedTag
         return idx
     }
     // The default-property initializer: sets the properties that have a default
@@ -887,7 +955,9 @@ KwContinue  = "continue" KwEnd ;
         var savedF = curF
         var savedScope = curScopeV
         var savedLoops = loopStack
+        var savedTag = curFTag
         curF = f
+        curFTag = idx
         loopStack = []
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
@@ -903,6 +973,7 @@ KwContinue  = "continue" KwEnd ;
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
+        curFTag = savedTag
         return idx
     }
     function makeFun(items) {

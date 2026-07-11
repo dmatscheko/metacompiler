@@ -503,6 +503,66 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-try.py", "-q"]
         },
         {
+            "name": "Ruby begin/rescue (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-try.rb", "-q"]
+        },
+        {
+            "name": "Ruby begin/rescue (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-try.rb", "-q"]
+        },
+        {
+            "name": "PHP try/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-try.php", "-q"]
+        },
+        {
+            "name": "PHP try/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-try.php", "-q"]
+        },
+        {
+            "name": "C# try/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-test-try.cs", "-q"]
+        },
+        {
+            "name": "C# try/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-try.cs", "-q"]
+        },
+        {
+            "name": "Swift do/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-test-try.swift", "-q"]
+        },
+        {
+            "name": "Swift do/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-try.swift", "-q"]
+        },
+        {
+            "name": "Dart try/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-test-try.dart", "-q"]
+        },
+        {
+            "name": "Dart try/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-try.dart", "-q"]
+        },
+        {
             "name": "JavaScript implicit global interpreter",
             "type": "go",
             "request": "launch",
@@ -549,12 +609,6 @@
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-2.rb", "-q"]
-        },
-        {
-            "name": "Ruby not-implemented warned+ignored",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-3-warn.rb", "-q", "-warn-unsupported"]
         },
         {
             "name": "Ruby method parity (str/arr/hash) interpreter",

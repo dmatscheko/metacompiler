@@ -243,19 +243,35 @@ Continue    <~~ push(makeContinue()) ~~> = KwContinue [ LoopLabel ] ";" ;
 LoopLabel   <~~ notImpl("labeled break/continue", up.pos) ~~> = Id ;
 Empty       <~~ push(function() {}) ~~>  = ";" ;
 
-// switch, do-while, try/catch/finally, rethrow and assert: accepted, not implemented.
-// Their bodies are matched with the balanced skips (SkipParen / SkipBlock) so the whole
-// construct parses; do-while and assert evaluate nothing (takeAll drops the child thunks).
+// switch and do-while: accepted, not implemented. Their bodies are matched with the
+// balanced skips (SkipParen / SkipBlock) so the whole construct parses; do-while
+// evaluates nothing (takeAll drops the child thunks).
 Switch      <~~ push(notImplStmt("switch statement", up.pos)) ~~>
             = KwSwitch SkipParen SkipBlock ;
 DoWhile     <~~ takeAll(); push(notImplStmt("do-while loop", up.pos)) ~~>
             = KwDo Statement KwWhile "(" Expression ")" ";" ;
-TryStmt     <~~ push(notImplStmt("try/catch", up.pos)) ~~>
-            = KwTry SkipBlock { CatchClause } [ KwFinally SkipBlock ] ;
-CatchClause = OnClause | CatchClauseOnly ;
-OnClause    = KwOn Type [ KwCatch "(" Id [ "," Id ] ")" ] SkipBlock ;
-CatchClauseOnly = KwCatch "(" Id [ "," Id ] ")" SkipBlock ;
-Rethrow     <~~ push(notImplStmt("rethrow", up.pos)) ~~>
+
+// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
+// raises the value, catch binds it (the leftmost catch clause wins - exception types are
+// parsed but not discriminated), finally always runs. return/break/continue inside a try
+// still propagate to the enclosing loop or function. Each part is marked so excTry can
+// tell them apart on the stack.
+TryStmt     <~~ push(excTry(takeAll())) ~~>
+            = KwTry TryBody { CatchClause } [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
+// Dart catch forms: `on Type catch (e)`, `on Type catch (e, st)`, `on Type { }` (no
+// binding), `catch (e)`, `catch (e, st)`. The `on Type` type is parsed and discarded; the
+// first binder is the caught value's name (pushed), the optional second binder (the stack
+// trace) is parsed and dropped. excCatch reads [name?, blockThunk].
+CatchClause <~~ push(excCatch(takeAll())) ~~>
+            = ( KwOn Type [ KwCatch "(" Id <~~ push(up.in) ~~> [ "," Id ] ")" ]
+              | KwCatch "(" Id <~~ push(up.in) ~~> [ "," Id ] ")" ) Block ;
+// rethrow re-raises inside a catch. There is no current-exception register, so it is
+// approximated as `throw null` (a genuine unwind carrying an undefined value).
+Rethrow     <~~ push(excThrow(makeConst(undefined))) ~~>
             = KwRethrow ";" ;
 Assert      <~~ takeAll(); push(notImplStmt("assert statement", up.pos)) ~~>
             = KwAssert "(" Expression [ "," Expression ] [ "," ] ")" ";" ;
@@ -270,9 +286,10 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = AssignExpr ;
 AssignExpr  = ThrowExpr | Assignment | Cascade ;
-// throw is an expression in Dart (=> throw e, cond ? a : throw e). Accepted, not
-// implemented; the operand is still evaluated so its calls stay visible.
-ThrowExpr   <~~ push(makeThrow(pop(), up.pos)) ~~>
+// throw is an expression in Dart (=> throw e, cond ? a : throw e). It raises its operand
+// with excThrow (languages/lib), unwinding through expression evaluation to the nearest
+// catch.
+ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow AssignExpr ;
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "??=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
@@ -546,12 +563,8 @@ KwFactory   = "factory" KwEnd ;
         return function() { operand(); return undefined }
     }
 
-    // throw e : accepted, not implemented. The operand is evaluated (its calls stay
-    // visible) and the expression yields undefined.
-    function makeThrow(t, pos) {
-        notImpl("throw expression", pos)
-        return function() { t(); return undefined }
-    }
+    // throw / rethrow are wired to excThrow (lib/interp-core.js); try/catch/finally to
+    // excTry/excCatch. No local makeThrow is needed.
     // a ?? b ?? c : items = [op, marker, op, marker, ...]. Not implemented; evaluate
     // every operand (calls stay visible) and yield the first. Single operand: pass-through.
     function makeIfNull(items) {
@@ -1095,7 +1108,14 @@ KwFactory   = "factory" KwEnd ;
     if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
         fail("Dart programs need an int main() function.")
     }
-    var ret = globalScope["main"]()
+    // A user exception that escapes main() is reported like any runtime error.
+    var ret = anytype
+    try {
+        ret = globalScope["main"]()
+    } catch (e) {
+        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+        throw e
+    }
     println("dart interpreter: main() returned " + ret)
     exit(ret | 0)
 
