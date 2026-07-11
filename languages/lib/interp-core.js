@@ -95,6 +95,60 @@ function notImpl(construct, pos) {
 function notImplStmt(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
 function notImplExpr(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
 
+// ----- Exceptions (try/catch/finally/throw), shared across the interpreters -----
+// A throw wraps its value in a marker object and raises it as a real host exception,
+// so it unwinds through any depth of expression evaluation up to the nearest catch.
+// The target program's return/break/continue inside a try are the ORDINARY statement
+// signals ({isRet}/BRK/CONT) that the body thunk returns, so they keep propagating;
+// only a genuine throw uses host unwinding. On the way out of a throw the scope chain
+// is restored to its try-entry snapshot (a call replaces `scopes`, so an interrupted
+// call would otherwise leave the callee's chain in place). Distinct names (exc*) keep
+// these clear of a grammar's own make* helpers, avoiding the include override trap.
+function excThrow(t) { return function() { throw {__exc: true, v: t()} } }
+function excIsUser(e) { return e != undefined && e.__exc == true }
+// items = [name, blockThunk] or [blockThunk] (no binding).
+function excCatch(items) {
+    if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
+    return {catchbody: items[0], catchname: undefined}
+}
+// items = [{trybody}, {catchbody,catchname}*, {finbody}?]. The first catch clause wins
+// (exception types cannot be discriminated without runtime types), finally always runs
+// and its own control-flow signal overrides.
+function excTry(items) {
+    var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].trybody != undefined) { tryT = items[i].trybody }
+        else if (items[i].catchbody != undefined) {
+            if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
+        }
+        else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+    }
+    return function() {
+        var savedChain = scopes.slice()
+        var box = {sig: undefined}
+        try {
+            box.sig = tryT()
+        } catch (e) {
+            scopes = savedChain.slice()
+            if (excIsUser(e) && catchT != undefined) {
+                scopes.push({})
+                if (catchName != undefined) { declVar(catchName, e.v) }
+                box.sig = catchT()
+                scopes.pop()
+            } else {
+                throw e
+            }
+        } finally {
+            scopes = savedChain.slice()
+            if (finallyT != undefined) {
+                var fr = finallyT()
+                if (fr != undefined) { box.sig = fr }
+            }
+        }
+        return box.sig
+    }
+}
+
 function declVar(name, value) { if (name != core.blank) scopes[scopes.length - 1][name] = value }
 
 function setVar(name, value) {

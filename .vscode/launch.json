@@ -1649,6 +1649,18 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-object-expr.kt", "-q", "-warn-unsupported"]
         },
         {
+            "name": "Kotlin try/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-try.kt", "-q"]
+        },
+        {
+            "name": "Kotlin try/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-try.kt", "-q"]
+        },
+        {
             "name": "Go recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",

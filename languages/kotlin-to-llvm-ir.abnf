@@ -130,13 +130,21 @@ Statement   <~~ push(stmtPos(pop())) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | [ LabelDef ] ( Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ;
 
-// try/catch/finally and throw parse fully; without an exception model they are
-// not implemented (see makeTry/makeThrow). Under -warn-unsupported the try block
-// is still compiled and the thrown expression still evaluated, so their calls
-// remain visible to graphs.
-TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
-            = KwTry Block { KwCatch "(" Id [ ":" Type ] ")" Block } [ KwFinally Block ] ;
-Throw       <~~ push(makeThrow(pop(), up.pos)) ~~>
+// try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
+// runtime unwinds), and each try/catch/finally body is compiled to its own closure
+// handed to js_try (see makeTry). The first catch clause wins (exception types are
+// parsed but not discriminated). LIMITATION: a return/break/continue that LEAVES a
+// try body is not supported by the compiler (the body is a separate IR function) -
+// keep such jumps outside the try. Each part is marked so makeTry can tell them apart.
+TryStmt     <~~ push(makeTry(takeAll())) ~~>
+            = KwTry TryBody { CatchClause } [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(makeCatch(takeAll())) ~~>
+            = KwCatch "(" Id <~~ push(up.in) ~~> [ ":" Type ] ")" Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
+Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
@@ -522,10 +530,47 @@ KwStep      = "step" KwEnd ;
     // grammars). This grammar sets core.stdlibImports (above) and keeps the
     // Kotlin-specific builders below (they call notImpl from the lib).
 
-    // try/catch/finally: keep the try block (its calls stay visible); drop catch/finally.
-    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
-    // throw e: evaluate e (so its calls count) then fall through - no real unwinding.
-    function makeThrow(e, pos) { notImpl("throw", pos); return exprToStmt(e) }
+    // try/catch/finally: each body becomes its own IR closure over the current scope;
+    // js_try (jsrt.go) runs the try under a Go recover, routes a thrown value to the
+    // catch closure (a one-parameter function bound to the catch name) and always runs
+    // finally. The first catch clause wins. See the TryStmt LIMITATION note above.
+    function makeCatch(items) {
+        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
+        return {catchbody: items[0], catchname: undefined}
+    }
+    function makeTry(items) {
+        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].catchbody != undefined) {
+                if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
+            }
+            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+        }
+        return function(b) {
+            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false)), curScopeV])
+            var catchClo = hUndef
+            if (catchT != undefined) {
+                var cn = (catchName != undefined) ? catchName : "__caught"
+                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false)), curScopeV])
+            }
+            var finClo = hUndef
+            if (finallyT != undefined) {
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false)), curScopeV])
+            }
+            callExt(b, "js_try", [tryClo, catchClo, finClo])
+            return b
+        }
+    }
+    // throw e: evaluate e and raise it with js_throw (a Go panic the runtime unwinds).
+    function makeThrow(e) {
+        return function(b) {
+            var r = e(b)
+            callExt(r.b, "js_throw", [r.v])
+            r.b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            return deadBlock()
+        }
+    }
     // x is T / x !is T: undecidable without runtime types; evaluate x, yield undefined.
     function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function(b) { var r = operand(b); return {b: r.b, v: hUndef} } }
     // TypeOp collects the operand thunk and (if present) an is/as marker at

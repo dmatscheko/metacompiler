@@ -112,12 +112,20 @@ Type        = ( "(" [ Type { "," Type } ] ")" "->" Type | Id [ SkipAngle ] { "."
 Statement   = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | [ LabelDef ] ( Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ;
 
-// try/catch/finally and throw parse fully but are not implemented (no exception
-// model). Under -warn-unsupported the try block runs and the thrown expression is
-// still evaluated (see makeTry/makeThrow), so their calls stay visible.
-TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
-            = KwTry Block { KwCatch "(" Id [ ":" Type ] ")" Block } [ KwFinally Block ] ;
-Throw       <~~ push(makeThrow(pop(), up.pos)) ~~>
+// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib):
+// throw raises the value, catch binds it (the first catch clause wins - exception
+// types are parsed but not discriminated), finally always runs. return/break/continue
+// inside a try still propagate to the enclosing loop or function. Each part is marked
+// so excTry can tell them apart on the stack.
+TryStmt     <~~ push(excTry(takeAll())) ~~>
+            = KwTry TryBody { CatchClause } [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(excCatch(takeAll())) ~~>
+            = KwCatch "(" Id <~~ push(up.in) ~~> [ ":" Type ] ")" Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
+Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
@@ -490,8 +498,7 @@ KwStep      = "step" KwEnd ;
     // stripWs, importResolvable, resolveImport and the notImpl / notImplStmt /
     // notImplExpr family now live in lib/interp-core.js (shared). This grammar sets
     // core.stdlibImports (above) and keeps the Kotlin-specific builders below.
-    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
-    function makeThrow(e, pos) { notImpl("throw", pos); return exprToStmt(e) }
+    // try/catch/finally and throw are handled by excTry/excThrow (lib/interp-core.js).
     function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function() { operand(); return undefined } }
     function applyTypeOp(items) {
         if (items.length == 1) { return items[0] }
@@ -1009,7 +1016,14 @@ KwStep      = "step" KwEnd ;
     if (typeof globalScope["main"] != "function") {
         fail("Kotlin programs need a top level main() function.")
     }
-    var ret = globalScope["main"]()
+    // A user exception that escapes main() is reported like any runtime error.
+    var ret = anytype
+    try {
+        ret = globalScope["main"]()
+    } catch (e) {
+        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+        throw e
+    }
     println("kotlin interpreter: main() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
