@@ -140,14 +140,20 @@ function callExt(b, name, args) {
 var strGlobals = {}
 var strCount = 0
 function emitStr(b, s) {
-    var g = strGlobals[s]
+    // Prefix the cache key: a bare string like "toString" or "valueOf" would resolve to
+    // an inherited Object.prototype member under a host JS engine (goja), so the
+    // undefined check would miss and g.ptr/g.len read off a function - malformed IR. The
+    // "$" prefix cannot name any Object.prototype property, so the lookup is honest in
+    // both the host and the frozen engine.
+    var key = "$" + s
+    var g = strGlobals[key]
     if (g == undefined) {
         strCount++
         g = {}
         g.glob = m.NewGlobalDef("str." + strCount, llvm.constant.NewCharArrayFromString(s))
         g.len = handle(s.length)
         g.ptr = llvm.constant.NewGetElementPtr(g.glob.ContentType, g.glob, [handle(0), handle(0)])
-        strGlobals[s] = g
+        strGlobals[key] = g
     }
     return callExt(b, "js_str_mem", [g.ptr, g.len])
 }
