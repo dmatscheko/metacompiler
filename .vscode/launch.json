@@ -149,6 +149,18 @@
             "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-2.js", "-q"]
         },
         {
+            "name": "MetaJS try/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-test-try.js", "-q"]
+        },
+        {
+            "name": "MetaJS try/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-try.js", "-q"]
+        },
+        {
             "name": "Java interpreter",
             "type": "go",
             "request": "launch",

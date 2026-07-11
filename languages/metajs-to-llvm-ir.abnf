@@ -58,7 +58,7 @@ Program     <~~ buildMain(takeAll()) ~~>
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
-            | Throw | FuncDecl | Empty | ExprStmt ;
+            | TryStmt | Throw | FuncDecl | Empty | ExprStmt ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
 // anywhere. The body is a flat list - the labels must be tried before Statement,
@@ -113,6 +113,20 @@ Continue    <~~ push(makeContinue()) ~~>
 
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
+
+// try/catch/finally: the try, catch and finally bodies are each compiled to their
+// own closure and handed to the js_try runtime helper, which runs the try under a
+// recover, routes a thrown value to the catch closure (bound to the optional name)
+// and always runs finally. Non-local control flow (return/break/continue) that
+// leaves a try body is outside this subset - see makeTry.
+TryStmt     <~~ push(makeTry(takeAll())) ~~>
+            = KwTry TryBody [ CatchClause ] [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(makeCatch(takeAll())) ~~>
+            = KwCatch [ "(" Id <~~ push(up.in) ~~> ")" ] Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
@@ -247,6 +261,9 @@ KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
 KwThrow     = "throw" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
 KwTypeof    = "typeof" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
@@ -619,8 +636,45 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var r = t(b)
             callExt(r.b, "js_throw", [r.v])
-            r.b.NewRet(hUndef) // Never reached: js_throw aborts on the host side.
+            r.b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
             return deadBlock()
+        }
+    }
+    // items = [name, blockThunk] or [blockThunk] (no binding).
+    function makeCatch(items) {
+        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
+        return {catchbody: items[0], catchname: undefined}
+    }
+    // items = [{trybody}, {catchbody,catchname}?, {finbody}?]. Each body becomes its
+    // own IR closure over the current scope; js_try (jsrt.go) runs the try under a
+    // Go recover, hands a thrown value to the catch closure (a one-parameter function
+    // bound to the catch name) and always runs the finally closure. A return/break/
+    // continue that would leave a try body is not supported here (the body is a
+    // separate IR function): it either returns from that closure or, for break/
+    // continue, has no enclosing loop - keep such jumps outside the try/catch/finally.
+    function makeTry(items) {
+        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].catchbody != undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
+            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+        }
+        return function(b) {
+            var tryIdx = emitFunction([], tryT)
+            var tryClo = callExt(b, "js_closure", [handle(tryIdx), curScopeV])
+            var catchClo = hUndef
+            if (catchT != undefined) {
+                var cn = (catchName != undefined) ? catchName : "__caught"
+                var catchIdx = emitFunction([cn], catchT)
+                catchClo = callExt(b, "js_closure", [handle(catchIdx), curScopeV])
+            }
+            var finClo = hUndef
+            if (finallyT != undefined) {
+                var finIdx = emitFunction([], finallyT)
+                finClo = callExt(b, "js_closure", [handle(finIdx), curScopeV])
+            }
+            callExt(b, "js_try", [tryClo, catchClo, finClo])
+            return b
         }
     }
     // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement

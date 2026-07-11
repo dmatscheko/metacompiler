@@ -92,6 +92,14 @@ type jsClosure struct {
 	ma  *machine
 }
 
+// jsThrown carries a user-thrown value (any handle) as a Go panic. js_throw raises
+// it; js_try recovers it (a Go panic unwinds the native machine.call frames until
+// the recover installed by the nearest enclosing js_try). Runtime errors (rt.fail)
+// panic a plain string instead, so js_try re-panics anything that is not a jsThrown.
+type jsThrown struct {
+	value interface{}
+}
+
 // jsScope is one link of a scope chain. Variables can hold undefined, so
 // existence is the map key, not the value.
 type jsScope struct {
@@ -2032,8 +2040,38 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_typeof": func(a []uint64) uint64 { return rt.wrapStr(rt.typeOf(u(a[0]))) },
 		"js_tonum":  func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
 		"js_throw": func(a []uint64) uint64 {
-			rt.fail("thrown: %s", rt.toString(u(a[0])))
-			return 0
+			// Raise the thrown value as a Go panic; the nearest js_try recovers it.
+			// An uncaught one is turned into a clean runtime error at the program
+			// boundary (runJSModule) or surfaces as a tag-script bug under -frozen.
+			panic(&jsThrown{value: u(a[0])})
+		},
+		"js_try": func(a []uint64) uint64 { // (try closure, catch closure|undef, finally closure|undef)
+			tryC, catchC, finallyC := u(a[0]), u(a[1]), u(a[2])
+			hasCatch := isCallable(catchC)
+			hasFinally := isCallable(finallyC)
+			var result interface{} = jsUndef
+			// The finally defer is registered first so it runs LAST (after the catch
+			// handler); either normal completion, a handled throw, or a re-panic
+			// still runs it, and a throw from finally itself overrides.
+			func() {
+				if hasFinally {
+					defer rt.call(finallyC, jsUndef, nil)
+				}
+				defer func() {
+					if r := recover(); r != nil {
+						exc, ok := r.(*jsThrown)
+						if !ok {
+							panic(r) // A runtime error, not a user throw: propagate.
+						}
+						if !hasCatch {
+							panic(r) // try/finally with no catch: re-throw after finally.
+						}
+						result = rt.call(catchC, jsUndef, []interface{}{exc.value})
+					}
+				}()
+				result = rt.call(tryC, jsUndef, nil)
+			}()
+			return w(result)
 		},
 
 		// The Python dialect externals.
@@ -2595,6 +2633,17 @@ func runJSModule(m *ir.Module, entry string) *RunResult {
 	rt := newJSRT(standardJSBindings())
 	rt.enableTrace()
 	ma := rt.attach(m)
+	// An exception that escapes the program's entry point is an uncaught throw;
+	// report it like any other runtime error (rt.fail panics a string that the
+	// caller's recover turns into a clean message and a non-zero exit).
+	defer func() {
+		if r := recover(); r != nil {
+			if exc, ok := r.(*jsThrown); ok {
+				rt.fail("uncaught exception: %s", rt.toString(exc.value))
+			}
+			panic(r)
+		}
+	}()
 	h := rt.callEntry(ma, entry, 0)
 	return &RunResult{Ret: uint32(rt.toInt32(rt.unwrap(h))), Out: ""}
 }

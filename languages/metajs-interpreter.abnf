@@ -59,7 +59,7 @@ Program     <~~ pushg(makeSeq(takeAll())) ~~>
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
-            | Throw | FuncDecl | Empty | ExprStmt ;
+            | TryStmt | Throw | FuncDecl | Empty | ExprStmt ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
 // anywhere. The body is a flat list - the labels must be tried before Statement,
@@ -114,6 +114,19 @@ Continue    <~~ push(makeContinue()) ~~>
 
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
+
+// try/catch/finally. The catch binding is optional (ES2019 `catch {}`), and either
+// catch or finally may be omitted. Each part is wrapped with a marker so makeTry can
+// tell them apart on the stack; the catch clause scopes its own takeAll to pair the
+// optional binding name with the block.
+TryStmt     <~~ push(makeTry(takeAll())) ~~>
+            = KwTry TryBody [ CatchClause ] [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(makeCatch(takeAll())) ~~>
+            = KwCatch [ "(" Id <~~ push(up.in) ~~> ")" ] Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
@@ -249,6 +262,9 @@ KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwContinue  = "continue" KwEnd ;
 KwThrow     = "throw" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
 KwTypeof    = "typeof" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
@@ -599,7 +615,58 @@ KwDefault   = "default" KwEnd ;
         var t = items.length > 0 ? items[0] : makeConst(undefined)
         return function() { return {isRet: true, v: t()} }
     }
-    function makeThrow(t) { return function() { fail("thrown: " + t()) } }
+    // throw wraps the thrown value in a marker object and raises it as a real host
+    // exception, so it unwinds through any depth of expression evaluation and calls
+    // up to the nearest catch. isUserExc distinguishes it from a host/runtime error
+    // (which a catch must not swallow - it is re-thrown).
+    function makeThrow(t) { return function() { throw {__exc: true, v: t()} } }
+    function isUserExc(e) { return e != undefined && e.__exc == true }
+
+    // items = [name, blockThunk] or [blockThunk] (no binding).
+    function makeCatch(items) {
+        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
+        return {catchbody: items[0], catchname: undefined}
+    }
+    // items = [{trybody}, {catchbody,catchname}?, {finbody}?]. The try block runs; a
+    // user exception routes to the catch (binding the value); finally always runs and
+    // its own control-flow signal (return/break/continue) overrides. A non-user
+    // exception, or a throw with no catch clause, propagates after finally. The try/
+    // catch bodies return the target program's statement signal (undefined/BRK/CONT/
+    // {isRet}), so return/break/continue INSIDE them still propagate to the enclosing
+    // loop or function; the scope chain is healed on the way out of a throw.
+    function makeTry(items) {
+        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].catchbody != undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
+            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+        }
+        return function() {
+            var savedChain = scopes.slice()
+            var box = {sig: undefined}
+            try {
+                box.sig = tryT()
+            } catch (e) {
+                scopes = savedChain.slice()
+                if (isUserExc(e) && catchT != undefined) {
+                    var sc = {}
+                    if (catchName != undefined) { sc[catchName] = {v: e.v, t: typeClass(e.v)} }
+                    scopes.push(sc)
+                    box.sig = catchT()
+                    scopes.pop()
+                } else {
+                    throw e
+                }
+            } finally {
+                scopes = savedChain.slice()
+                if (finallyT != undefined) {
+                    var fr = finallyT()
+                    if (fr != undefined) { box.sig = fr }
+                }
+            }
+            return box.sig
+        }
+    }
 
     // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement
     // list is grouped into case descriptors at build time; at run time the first ===
@@ -654,11 +721,18 @@ KwDefault   = "default" KwEnd ;
 
     // Run the top level (it binds the functions), then call main(). The exit code of
     // this metacompiler run is what main() returned, so test programs are self checking.
-    progT()
-    if (!hasOwn(globalScope, "main") || typeof globalScope["main"].v != "function") {
-        fail("MetaJS programs need a main() function.")
+    // A user exception that escapes main() is reported like any runtime error.
+    var ret = anytype
+    try {
+        progT()
+        if (!hasOwn(globalScope, "main") || typeof globalScope["main"].v != "function") {
+            fail("MetaJS programs need a main() function.")
+        }
+        ret = globalScope["main"].v()
+    } catch (e) {
+        if (isUserExc(e)) { fail("uncaught exception: " + e.v) }
+        throw e
     }
-    var ret = globalScope["main"].v()
     println("js interpreter: main() returned " + ret)
     exit(ret | 0)
 
