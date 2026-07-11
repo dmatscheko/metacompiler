@@ -1,0 +1,196 @@
+/* TinyC self test -- theme 2: heavy recursion & deep control flow.
+ *
+ * Classic recursions (factorial, both Fibonacci styles cross-checked, integer power,
+ * Ackermann, Towers-of-Hanoi move count, McCarthy 91, triangular sum), mutual
+ * recursion (isEven/isOdd), and control-flow depth (triple-nested Pythagorean-triple
+ * search, 9x9 multiplication-table checksum, Collatz peak, do-while countdown,
+ * for-loops with empty init and empty post clauses, if/else-if chains).
+ *
+ * main() returns the number of failed checks -> exit code 0 means success. **/
+
+func fact(int n) {                          // recursion
+    if (n <= 1) { return 1; }
+    return n * fact(n - 1);
+}
+
+func fibRec(int n) {                         // naive two-way recursion
+    if (n < 2) { return n; }
+    return fibRec(n - 1) + fibRec(n - 2);
+}
+
+func fibIter(int n) {                        // iterative, for-loop with block-scoped temp
+    if (n < 2) { return n; }
+    int a = 0, b = 1;
+    for (int i = 2; i <= n; i++) {
+        int t = a + b;
+        a = b;
+        b = t;
+    }
+    return b;
+}
+
+func ipow(int base, int exp) {               // integer power by recursion
+    if (exp == 0) { return 1; }
+    return base * ipow(base, exp - 1);
+}
+
+func ackermann(int m, int n) {               // classic non-primitive-recursive function
+    if (m == 0) { return n + 1; }
+    if (n == 0) { return ackermann(m - 1, 1); }
+    return ackermann(m - 1, ackermann(m, n - 1));   // nested calls
+}
+
+func hanoi(int n) {                          // number of moves to solve = 2^n - 1
+    if (n <= 0) { return 0; }
+    return 2 * hanoi(n - 1) + 1;
+}
+
+func mccarthy91(int n) {                      // M(n) == 91 for all n <= 100
+    if (n > 100) { return n - 10; }
+    return mccarthy91(mccarthy91(n + 11));
+}
+
+func triangular(int n) {                      // 1 + 2 + ... + n by recursion
+    if (n <= 0) { return 0; }
+    return n + triangular(n - 1);
+}
+
+func isEven(int n) {                          // mutual recursion (forward reference)
+    if (n == 0) { return 1; }
+    return isOdd(n - 1);
+}
+
+func isOdd(int n) {
+    if (n == 0) { return 0; }
+    return isEven(n - 1);
+}
+
+func signOf(int n) {                          // if / else-if / else chain
+    if (n < 0) {
+        return 0 - 1;
+    } else if (n == 0) {
+        return 0;
+    } else {
+        return 1;
+    }
+}
+
+func countDown(int n) {                       // do-while + post-decrement
+    int c = 0;
+    do {
+        n--;
+        c++;
+    } while (n > 0);
+    return c;
+}
+
+func countPythag(int limit) {                 // triple-nested loop, a<b<c<=limit
+    int count = 0;
+    for (int a = 1; a <= limit; a++) {
+        for (int b = a + 1; b <= limit; b++) {
+            for (int c = b + 1; c <= limit; c++) {
+                if (a * a + b * b == c * c) { count++; }
+            }
+        }
+    }
+    return count;
+}
+
+func multTableChecksum(int n) {               // sum of the n x n multiplication table
+    int sum = 0;
+    for (int i = 1; i <= n; i++) {
+        for (int j = 1; j <= n; j++) {
+            sum = sum + i * j;
+        }
+    }
+    return sum;
+}
+
+func collatzMax(int n) {                       // highest value the sequence reaches
+    int mx = n;
+    while (n != 1) {
+        if (n % 2 == 0) {
+            n = n / 2;
+        } else {
+            n = 3 * n + 1;
+        }
+        if (n > mx) { mx = n; }
+    }
+    return mx;
+}
+
+func printBits(int n) {                        // n >= 0, prints binary via recursion
+    if (n >= 2) { printBits(n / 2); }
+    putchar(48 + n % 2);
+    return 0;
+}
+
+func main() {
+    int failures = 0;
+
+    // --- factorial ---
+    if (fact(0) != 1 || fact(5) != 120)          { failures++; }
+    if (fact(10) != 3628800)                     { failures++; }
+    if (fact(12) != 479001600)                   { failures++; }
+
+    // --- Fibonacci: recursive and iterative must agree for every n in 0..20 ---
+    int mismatches = 0;
+    for (int n = 0; n <= 20; n++) {
+        if (fibRec(n) != fibIter(n)) { mismatches++; }
+    }
+    if (mismatches != 0)                         { failures++; }
+    if (fibIter(30) != 832040)                   { failures++; }
+    if (fibIter(40) != 102334155)                { failures++; }
+
+    // --- integer power ---
+    if (ipow(2, 10) != 1024 || ipow(3, 4) != 81) { failures++; }
+    if (ipow(5, 0) != 1 || ipow(7, 2) != 49)     { failures++; }
+
+    // --- Ackermann ---
+    if (ackermann(0, 0) != 1)                    { failures++; }
+    if (ackermann(1, 7) != 9)                    { failures++; }
+    if (ackermann(2, 3) != 9 || ackermann(2, 4) != 11)  { failures++; }
+    if (ackermann(3, 2) != 29 || ackermann(3, 3) != 61) { failures++; }
+
+    // --- Hanoi ---
+    if (hanoi(1) != 1 || hanoi(5) != 31)         { failures++; }
+    if (hanoi(10) != 1023)                       { failures++; }
+
+    // --- McCarthy 91 ---
+    if (mccarthy91(50) != 91 || mccarthy91(99) != 91)   { failures++; }
+    if (mccarthy91(100) != 91 || mccarthy91(101) != 91) { failures++; }
+    if (mccarthy91(200) != 190)                  { failures++; }
+
+    // --- triangular / mutual recursion ---
+    if (triangular(100) != 5050)                 { failures++; }
+    if (isEven(10) != 1 || isEven(7) != 0)       { failures++; }
+    if (isOdd(50) != 0 || isOdd(51) != 1)        { failures++; }
+
+    // --- sign / do-while ---
+    if (signOf(0 - 5) != -1 || signOf(0) != 0 || signOf(7) != 1) { failures++; }
+    if (countDown(5) != 5 || countDown(1) != 1)  { failures++; }
+
+    // --- nested loops ---
+    if (countPythag(20) != 6)                    { failures++; }
+    if (multTableChecksum(9) != 2025)            { failures++; }
+
+    // --- Collatz peak ---
+    if (collatzMax(1) != 1 || collatzMax(6) != 16)  { failures++; }
+    if (collatzMax(27) != 9232)                  { failures++; }
+
+    // --- for-loops with empty clauses ---
+    int i2 = 0;
+    int acc = 0;
+    for (; i2 < 5; i2++) { acc = acc + i2; }         // empty init
+    int acc2 = 0;
+    for (int k = 0; k < 5; ) { acc2 = acc2 + k; k++; }   // empty post
+    if (acc != 10 || acc2 != 10)                 { failures++; }
+
+    // deterministic output: binary of 10 and 5, then result
+    printBits(10); putchar(10);                  // "1010\n"
+    printBits(5);  putchar(10);                  // "101\n"
+    if (failures == 0) {
+        putchar(79); putchar(75); putchar(10);   // "OK\n"
+    }
+    return failures;
+}

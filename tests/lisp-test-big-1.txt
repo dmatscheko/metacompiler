@@ -1,0 +1,142 @@
+; Lisp big test 1 - DATA STRUCTURES & ALGORITHMS.
+;
+; This Lisp has integers only: there is no quote, no cons/car/cdr, no arrays.
+; So we build a real data structure the only way the language allows: we encode a
+; sequence of small elements (each 0..99) into a single 32-bit integer, using 1 as
+; the empty sentinel and appending each new element as the two least significant
+; decimal digits. That gives a genuine stack / list on which we implement length,
+; sum, min, max, membership, reverse, map, filter, insertion sort and is-sorted.
+;
+; The value of the last top level form is the exit code, so this program ends in 0
+; exactly when every check passed.
+
+; --- the encoded stack / list -------------------------------------------------
+
+(define empty 1)                                 ; the empty list sentinel
+(define (empty? s) (= s 1))
+(define (push s x) (+ (* s 100) x))              ; append x (0..99) as the new top
+(define (top s) (mod s 100))                     ; the last pushed element
+(define (pop s) (/ s 100))                       ; the list without its top
+(define (list1 x) (push empty x))                ; a one element list
+
+; --- basic queries ------------------------------------------------------------
+
+(define (len s) (if (empty? s) 0 (+ 1 (len (pop s)))))
+(define (lsum s) (if (empty? s) 0 (+ (top s) (lsum (pop s)))))
+
+(define (lmax s)
+  (if (empty? s)
+      -1
+      (let ((t (top s)) (r (lmax (pop s))))
+        (if (> t r) t r))))
+
+(define (lmin s)
+  (if (empty? s)
+      99999
+      (let ((t (top s)) (r (lmin (pop s))))
+        (if (< t r) t r))))
+
+(define (has? s x)
+  (if (empty? s)
+      0
+      (if (= (top s) x) 1 (has? (pop s) x))))
+
+; nth element counted from the top (index 0 = top)
+(define (nth s i)
+  (if (= i 0) (top s) (nth (pop s) (- i 1))))
+
+; --- transformations ----------------------------------------------------------
+
+; reverse via an accumulator: repeatedly move the top of s onto acc
+(define (rev-acc s acc)
+  (if (empty? s) acc (rev-acc (pop s) (push acc (top s)))))
+(define (rev s) (rev-acc s empty))
+
+; map: double every element while preserving order
+(define (map-double s)
+  (if (empty? s)
+      empty
+      (push (map-double (pop s)) (* 2 (top s)))))
+
+; filter: keep only the even elements
+(define (even? n) (= (mod n 2) 0))
+(define (filter-even s)
+  (if (empty? s)
+      empty
+      (let ((rest (filter-even (pop s))))
+        (if (even? (top s)) (push rest (top s)) rest))))
+
+; --- insertion sort (ascending from front to top) -----------------------------
+
+(define (insert s x)
+  (if (empty? s)
+      (list1 x)
+      (if (>= x (top s))
+          (push s x)                              ; x is the new largest -> new top
+          (push (insert (pop s) x) (top s)))))     ; otherwise insert deeper
+
+(define (sort s)
+  (if (empty? s) empty (insert (sort (pop s)) (top s))))
+
+; a list is sorted when every element sits below one that is >= it
+(define (sorted? s)
+  (if (empty? s)
+      1
+      (if (empty? (pop s))
+          1
+          (if (<= (top (pop s)) (top s)) (sorted? (pop s)) 0))))
+
+; --- a second algorithm: binary gcd over the encoded elements -----------------
+
+(define (gcd a b) (if (= b 0) a (gcd b (mod a b))))
+
+; fold gcd across the whole list (empty -> 0, the gcd identity)
+(define (list-gcd s)
+  (if (empty? s) 0 (gcd (top s) (list-gcd (pop s)))))
+
+; --- test data ----------------------------------------------------------------
+
+(define sample (push (push (push (push empty 5) 2) 8) 1))   ; [5 2 8 1], top = 1
+(define twelves (push (push (push empty 12) 18) 30))        ; [12 18 30]
+
+(define (check got want) (if (= got want) 0 1))
+
+; --- self check ---------------------------------------------------------------
+
+(let ((failures
+       (+ ; queries
+          (check (len sample) 4)
+          (check (len empty) 0)
+          (check (lsum sample) 16)
+          (check (lmax sample) 8)
+          (check (lmin sample) 1)
+          (check (has? sample 8) 1)
+          (check (has? sample 3) 0)
+          (check (top sample) 1)
+          (check (nth sample 0) 1)                 ; top
+          (check (nth sample 3) 5)                 ; bottom
+          ; reverse
+          (check (rev (rev sample)) sample)        ; involution
+          (check (top (rev sample)) 5)             ; front becomes the new top
+          (check (lsum (rev sample)) 16)
+          (check (len (rev sample)) 4)
+          ; map / filter
+          (check (lsum (map-double sample)) 32)
+          (check (len (map-double sample)) 4)
+          (check (lsum (filter-even sample)) 10)   ; 2 + 8
+          (check (len (filter-even sample)) 2)
+          ; insertion sort
+          (check (sorted? sample) 0)
+          (check (sorted? (sort sample)) 1)
+          (check (lsum (sort sample)) 16)          ; sort preserves the multiset
+          (check (len (sort sample)) 4)
+          (check (sort sample) 101020508)          ; exact encoded [1 2 5 8]
+          (check (nth (sort sample) 0) 8)          ; largest sits on top
+          (check (nth (sort sample) 3) 1)          ; smallest at the bottom
+          ; gcd fold
+          (check (list-gcd twelves) 6)             ; gcd(12,18,30) = 6
+          (check (gcd 48 36) 12)
+          (check (list-gcd (list1 7)) 7))))
+  (if (= failures 0)
+      (begin (putchar 79) (putchar 75) (putchar 10) 0)   ; print "OK\n"
+      failures))

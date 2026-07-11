@@ -737,6 +737,822 @@
             "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-complete.swift", "-q"]
         },
         {
+            "name": "Brainfuck big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/brainfuck-interpreter.abnf", "tests/brainfuck-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "Brainfuck big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/brainfuck-to-llvm-ir.abnf", "tests/brainfuck-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "Brainfuck big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/brainfuck-interpreter.abnf", "tests/brainfuck-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "Brainfuck big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/brainfuck-to-llvm-ir.abnf", "tests/brainfuck-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "Brainfuck big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/brainfuck-interpreter.abnf", "tests/brainfuck-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "Brainfuck big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/brainfuck-to-llvm-ir.abnf", "tests/brainfuck-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "C big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-big-1.c", "-q"]
+        },
+        {
+            "name": "C big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-big-1.c", "-q"]
+        },
+        {
+            "name": "C big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-big-2.c", "-q"]
+        },
+        {
+            "name": "C big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-big-2.c", "-q"]
+        },
+        {
+            "name": "C big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-big-3.c", "-q"]
+        },
+        {
+            "name": "C big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-big-3.c", "-q"]
+        },
+        {
+            "name": "C big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-big-4.c", "-q"]
+        },
+        {
+            "name": "C big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-big-4.c", "-q"]
+        },
+        {
+            "name": "Calculator big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "tests/calculator-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "Calculator big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-to-llvm-ir.abnf", "tests/calculator-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "Calculator big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "tests/calculator-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "Calculator big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-to-llvm-ir.abnf", "tests/calculator-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "Calculator big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "tests/calculator-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "Calculator big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-to-llvm-ir.abnf", "tests/calculator-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "C# big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-test-big-1.cs", "-q"]
+        },
+        {
+            "name": "C# big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-big-1.cs", "-q"]
+        },
+        {
+            "name": "C# big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-test-big-2.cs", "-q"]
+        },
+        {
+            "name": "C# big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-big-2.cs", "-q"]
+        },
+        {
+            "name": "C# big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-test-big-3.cs", "-q"]
+        },
+        {
+            "name": "C# big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-big-3.cs", "-q"]
+        },
+        {
+            "name": "C# big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-test-big-4.cs", "-q"]
+        },
+        {
+            "name": "C# big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-big-4.cs", "-q"]
+        },
+        {
+            "name": "Dart big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-test-big-1.dart", "-q"]
+        },
+        {
+            "name": "Dart big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-big-1.dart", "-q"]
+        },
+        {
+            "name": "Dart big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-test-big-2.dart", "-q"]
+        },
+        {
+            "name": "Dart big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-big-2.dart", "-q"]
+        },
+        {
+            "name": "Dart big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-test-big-3.dart", "-q"]
+        },
+        {
+            "name": "Dart big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-big-3.dart", "-q"]
+        },
+        {
+            "name": "Dart big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-interpreter.abnf", "tests/dart-test-big-4.dart", "-q"]
+        },
+        {
+            "name": "Dart big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-big-4.dart", "-q"]
+        },
+        {
+            "name": "Go big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-test-big-1.go", "-q"]
+        },
+        {
+            "name": "Go big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-big-1.go", "-q"]
+        },
+        {
+            "name": "Go big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-test-big-2.go", "-q"]
+        },
+        {
+            "name": "Go big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-big-2.go", "-q"]
+        },
+        {
+            "name": "Go big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-test-big-3.go", "-q"]
+        },
+        {
+            "name": "Go big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-big-3.go", "-q"]
+        },
+        {
+            "name": "Go big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-test-big-4.go", "-q"]
+        },
+        {
+            "name": "Go big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-big-4.go", "-q"]
+        },
+        {
+            "name": "Java big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-big-1.java", "-q"]
+        },
+        {
+            "name": "Java big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-big-1.java", "-q"]
+        },
+        {
+            "name": "Java big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-big-2.java", "-q"]
+        },
+        {
+            "name": "Java big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-big-2.java", "-q"]
+        },
+        {
+            "name": "Java big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-big-3.java", "-q"]
+        },
+        {
+            "name": "Java big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-big-3.java", "-q"]
+        },
+        {
+            "name": "Java big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-big-4.java", "-q"]
+        },
+        {
+            "name": "Java big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-big-4.java", "-q"]
+        },
+        {
+            "name": "JavaScript big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-big-1.js", "-q"]
+        },
+        {
+            "name": "JavaScript big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-big-1.js", "-q"]
+        },
+        {
+            "name": "JavaScript big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-big-2.js", "-q"]
+        },
+        {
+            "name": "JavaScript big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-big-2.js", "-q"]
+        },
+        {
+            "name": "JavaScript big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-big-3.js", "-q"]
+        },
+        {
+            "name": "JavaScript big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-big-3.js", "-q"]
+        },
+        {
+            "name": "JavaScript big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-big-4.js", "-q"]
+        },
+        {
+            "name": "JavaScript big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-big-4.js", "-q"]
+        },
+        {
+            "name": "Kotlin big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-big-1.kt", "-q"]
+        },
+        {
+            "name": "Kotlin big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-big-1.kt", "-q"]
+        },
+        {
+            "name": "Kotlin big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-big-2.kt", "-q"]
+        },
+        {
+            "name": "Kotlin big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-big-2.kt", "-q"]
+        },
+        {
+            "name": "Kotlin big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-big-3.kt", "-q"]
+        },
+        {
+            "name": "Kotlin big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-big-3.kt", "-q"]
+        },
+        {
+            "name": "Kotlin big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-big-4.kt", "-q"]
+        },
+        {
+            "name": "Kotlin big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-big-4.kt", "-q"]
+        },
+        {
+            "name": "Lisp big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-interpreter.abnf", "tests/lisp-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "Lisp big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "Lisp big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-interpreter.abnf", "tests/lisp-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "Lisp big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "Lisp big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-interpreter.abnf", "tests/lisp-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "Lisp big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "Lua big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-big-1.lua", "-q"]
+        },
+        {
+            "name": "Lua big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-big-1.lua", "-q"]
+        },
+        {
+            "name": "Lua big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-big-2.lua", "-q"]
+        },
+        {
+            "name": "Lua big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-big-2.lua", "-q"]
+        },
+        {
+            "name": "Lua big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-big-3.lua", "-q"]
+        },
+        {
+            "name": "Lua big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-big-3.lua", "-q"]
+        },
+        {
+            "name": "Lua big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-big-4.lua", "-q"]
+        },
+        {
+            "name": "Lua big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-big-4.lua", "-q"]
+        },
+        {
+            "name": "MetaJS big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-test-big-1.js", "-q"]
+        },
+        {
+            "name": "MetaJS big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-big-1.js", "-q"]
+        },
+        {
+            "name": "MetaJS big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-test-big-2.js", "-q"]
+        },
+        {
+            "name": "MetaJS big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-big-2.js", "-q"]
+        },
+        {
+            "name": "MetaJS big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-test-big-3.js", "-q"]
+        },
+        {
+            "name": "MetaJS big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-big-3.js", "-q"]
+        },
+        {
+            "name": "MetaJS big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-interpreter.abnf", "tests/metajs-test-big-4.js", "-q"]
+        },
+        {
+            "name": "MetaJS big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-big-4.js", "-q"]
+        },
+        {
+            "name": "PHP big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-big-1.php", "-q"]
+        },
+        {
+            "name": "PHP big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-big-1.php", "-q"]
+        },
+        {
+            "name": "PHP big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-big-2.php", "-q"]
+        },
+        {
+            "name": "PHP big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-big-2.php", "-q"]
+        },
+        {
+            "name": "PHP big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-big-3.php", "-q"]
+        },
+        {
+            "name": "PHP big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-big-3.php", "-q"]
+        },
+        {
+            "name": "PHP big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-interpreter.abnf", "tests/php-test-big-4.php", "-q"]
+        },
+        {
+            "name": "PHP big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-big-4.php", "-q"]
+        },
+        {
+            "name": "Python big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-big-1.py", "-q"]
+        },
+        {
+            "name": "Python big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-big-1.py", "-q"]
+        },
+        {
+            "name": "Python big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-big-2.py", "-q"]
+        },
+        {
+            "name": "Python big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-big-2.py", "-q"]
+        },
+        {
+            "name": "Python big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-big-3.py", "-q"]
+        },
+        {
+            "name": "Python big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-big-3.py", "-q"]
+        },
+        {
+            "name": "Python big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-big-4.py", "-q"]
+        },
+        {
+            "name": "Python big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-big-4.py", "-q"]
+        },
+        {
+            "name": "Ruby big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-big-1.rb", "-q"]
+        },
+        {
+            "name": "Ruby big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-big-1.rb", "-q"]
+        },
+        {
+            "name": "Ruby big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-big-2.rb", "-q"]
+        },
+        {
+            "name": "Ruby big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-big-2.rb", "-q"]
+        },
+        {
+            "name": "Ruby big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-big-3.rb", "-q"]
+        },
+        {
+            "name": "Ruby big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-big-3.rb", "-q"]
+        },
+        {
+            "name": "Ruby big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-big-4.rb", "-q"]
+        },
+        {
+            "name": "Ruby big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-big-4.rb", "-q"]
+        },
+        {
+            "name": "Swift big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-test-big-1.swift", "-q"]
+        },
+        {
+            "name": "Swift big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-big-1.swift", "-q"]
+        },
+        {
+            "name": "Swift big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-test-big-2.swift", "-q"]
+        },
+        {
+            "name": "Swift big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-big-2.swift", "-q"]
+        },
+        {
+            "name": "Swift big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-test-big-3.swift", "-q"]
+        },
+        {
+            "name": "Swift big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-big-3.swift", "-q"]
+        },
+        {
+            "name": "Swift big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-interpreter.abnf", "tests/swift-test-big-4.swift", "-q"]
+        },
+        {
+            "name": "Swift big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-big-4.swift", "-q"]
+        },
+        {
+            "name": "TinyC big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-interpreter.abnf", "tests/tinyc-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "TinyC big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-to-llvm-ir.abnf", "tests/tinyc-test-big-1.txt", "-q"]
+        },
+        {
+            "name": "TinyC big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-interpreter.abnf", "tests/tinyc-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "TinyC big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-to-llvm-ir.abnf", "tests/tinyc-test-big-2.txt", "-q"]
+        },
+        {
+            "name": "TinyC big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-interpreter.abnf", "tests/tinyc-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "TinyC big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/tinyc-to-llvm-ir.abnf", "tests/tinyc-test-big-3.txt", "-q"]
+        },
+        {
+            "name": "TypeScript big 1 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-test-big-1.ts", "-q"]
+        },
+        {
+            "name": "TypeScript big 1 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-big-1.ts", "-q"]
+        },
+        {
+            "name": "TypeScript big 2 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-test-big-2.ts", "-q"]
+        },
+        {
+            "name": "TypeScript big 2 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-big-2.ts", "-q"]
+        },
+        {
+            "name": "TypeScript big 3 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-test-big-3.ts", "-q"]
+        },
+        {
+            "name": "TypeScript big 3 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-big-3.ts", "-q"]
+        },
+        {
+            "name": "TypeScript big 4 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-test-big-4.ts", "-q"]
+        },
+        {
+            "name": "TypeScript big 4 (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-big-4.ts", "-q"]
+        },
+        {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",

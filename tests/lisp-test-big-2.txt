@@ -1,0 +1,158 @@
+; Lisp big test 2 - HEAVY RECURSION & CONTROL FLOW.
+;
+; Deep and mutual recursion, tail recursion with accumulators, a function with a
+; known closed form (McCarthy 91), binary search, a Collatz walk, and dense
+; branching that exercises cond / and / or / not together, plus a small finite
+; state machine that reads the decimal digits of an integer.
+;
+; The value of the last top level form is the exit code, so this program ends in 0
+; exactly when every check passed.
+
+; --- classic recursions -------------------------------------------------------
+
+(define (fact n) (if (< n 2) 1 (* n (fact (- n 1)))))
+
+(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+
+; tail recursive Fibonacci - must agree with the naive one
+(define (fib-iter n a b) (if (= n 0) a (fib-iter (- n 1) b (+ a b))))
+(define (fib2 n) (fib-iter n 0 1))
+
+(define (sum-to n) (if (= n 0) 0 (+ n (sum-to (- n 1)))))
+
+(define (ackermann m n)
+  (if (= m 0)
+      (+ n 1)
+      (if (= n 0)
+          (ackermann (- m 1) 1)
+          (ackermann (- m 1) (ackermann m (- n 1))))))
+
+; McCarthy 91: returns 91 for every n <= 100, and n-10 above it
+(define (mc n) (if (> n 100) (- n 10) (mc (mc (+ n 11)))))
+
+; --- mutual recursion ---------------------------------------------------------
+
+(define (my-even? n) (if (= n 0) 1 (my-odd? (- n 1))))
+(define (my-odd? n) (if (= n 0) 0 (my-even? (- n 1))))
+
+; --- number theory recursions -------------------------------------------------
+
+(define (gcd a b) (if (= b 0) a (gcd b (mod a b))))
+(define (lcm a b) (/ (* a b) (gcd a b)))
+(define (even? n) (= (mod n 2) 0))
+
+; fast exponentiation by squaring
+(define (pow b e)
+  (if (= e 0)
+      1
+      (if (even? e)
+          (let ((h (pow b (/ e 2)))) (* h h))
+          (* b (pow b (- e 1))))))
+
+; number of moves for the Tower of Hanoi = 2^n - 1
+(define (hanoi n) (if (= n 0) 0 (+ (* 2 (hanoi (- n 1))) 1)))
+
+; length of the Collatz sequence from n down to 1
+(define (collatz n)
+  (if (= n 1)
+      0
+      (if (even? n)
+          (+ 1 (collatz (/ n 2)))
+          (+ 1 (collatz (+ (* 3 n) 1))))))
+
+; --- binary search: integer square root ---------------------------------------
+
+(define (isqrt-bs n lo hi)
+  (if (> lo hi)
+      hi
+      (let ((mid (/ (+ lo hi) 2)))
+        (if (> (* mid mid) n)
+            (isqrt-bs n lo (- mid 1))
+            (isqrt-bs n (+ mid 1) hi)))))
+(define (isqrt n) (isqrt-bs n 0 n))
+
+; --- dense branching: classify a triangle from its three sides ----------------
+; 0 invalid, 1 scalene, 2 isosceles, 3 equilateral
+
+(define (triangle a b c)
+  (cond ((or (<= (+ a b) c) (<= (+ a c) b) (<= (+ b c) a)) 0)
+        ((and (= a b) (= b c)) 3)
+        ((or (= a b) (= b c) (= a c)) 2)
+        (else 1)))
+
+; --- a finite state machine over the decimal digits of n ----------------------
+; state = parity of the count of digits equal to 1 seen so far (a 2 state DFA)
+
+(define (dfa-ones n state)
+  (if (= n 0)
+      state
+      (let ((d (mod n 10)))
+        (dfa-ones (/ n 10)
+                  (if (= d 1) (mod (+ state 1) 2) state)))))
+
+(define (check got want) (if (= got want) 0 1))
+
+; --- self check ---------------------------------------------------------------
+
+(let ((failures
+       (+ ; factorials and fibonacci
+          (check (fact 5) 120)
+          (check (fact 10) 3628800)
+          (check (fib 10) 55)
+          (check (fib 15) 610)
+          (check (fib2 15) 610)                    ; two Fibonaccis must agree
+          (check (fib2 25) 75025)
+          (check (sum-to 100) 5050)
+          ; heavy recursion
+          (check (ackermann 2 3) 9)
+          (check (ackermann 3 3) 61)
+          (check (mc 50) 91)
+          (check (mc 99) 91)
+          (check (mc 100) 91)
+          (check (mc 101) 91)
+          (check (mc 234) 224)
+          ; mutual recursion
+          (check (my-even? 10) 1)
+          (check (my-even? 7) 0)
+          (check (my-odd? 7) 1)
+          ; number theory
+          (check (gcd 48 36) 12)
+          (check (gcd 17 5) 1)
+          (check (lcm 4 6) 12)
+          (check (lcm 21 6) 42)
+          (check (pow 2 10) 1024)
+          (check (pow 3 4) 81)
+          (check (pow 5 3) 125)
+          (check (pow 7 0) 1)
+          (check (hanoi 10) 1023)
+          (check (hanoi 4) 15)
+          (check (collatz 1) 0)
+          (check (collatz 6) 8)
+          (check (collatz 27) 111)
+          ; binary search
+          (check (isqrt 49) 7)
+          (check (isqrt 48) 6)
+          (check (isqrt 10000) 100)
+          (check (isqrt 9999) 99)
+          (check (isqrt 2) 1)
+          ; dense branching
+          (check (triangle 3 3 3) 3)
+          (check (triangle 3 3 5) 2)
+          (check (triangle 3 4 5) 1)
+          (check (triangle 1 1 5) 0)
+          (check (triangle 5 1 1) 0)
+          ; finite state machine (parity of the '1' digits)
+          (check (dfa-ones 1011 0) 1)              ; three ones -> odd
+          (check (dfa-ones 1010 0) 0)              ; two ones  -> even
+          (check (dfa-ones 1111 0) 0)              ; four ones -> even
+          (check (dfa-ones 2222 0) 0)              ; no ones   -> even
+          ; short circuit value semantics
+          (check (and 2 3 4) 4)
+          (check (and 1 0 5) 0)
+          (check (or 0 0 9) 9)
+          (check (or 0 0 0) 0)
+          (check (not 0) 1)
+          (check (not 42) 0))))
+  (if (= failures 0)
+      (begin (putchar 79) (putchar 75) (putchar 10) 0)   ; print "OK\n"
+      failures))

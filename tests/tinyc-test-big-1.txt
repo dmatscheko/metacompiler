@@ -1,0 +1,222 @@
+/* TinyC self test -- theme 1: number theory & integer algorithms.
+ *
+ * gcd/lcm, modular exponentiation, primality (isPrime / countPrimes / nthPrime),
+ * integer square root by binary search, digit sum / count / reversal / palindrome,
+ * Euler's totient, perfect numbers, Pascal's-triangle binomials, Collatz length.
+ *
+ * main() counts the failed checks and returns that count, so the metacompiler run
+ * exits with 0 exactly when everything works. Output "OK\n" only on success. **/
+
+func gcd_iter(int a, int b) {               // iterative Euclid: while, block scope, %
+    while (b != 0) {
+        int t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+
+func gcd_rec(int a, int b) {                // recursive Euclid
+    if (b == 0) { return a; }
+    return gcd_rec(b, a % b);
+}
+
+func lcm(int a, int b) {                    // divide first to stay inside 32 bit
+    return a / gcd_rec(a, b) * b;
+}
+
+func modpow(int base, int exp, int mod) {   // (base^exp) mod  -- keep mod small (<46341)
+    int result = 1;
+    base = base % mod;
+    while (exp > 0) {
+        if (exp % 2 == 1) { result = result * base % mod; }
+        base = base * base % mod;
+        exp = exp / 2;
+    }
+    return result;
+}
+
+func isPrime(int n) {                       // trial division, d*d <= n
+    if (n < 2) { return 0; }
+    for (int d = 2; d * d <= n; d++) {
+        if (n % d == 0) { return 0; }
+    }
+    return 1;
+}
+
+func countPrimesBelow(int n) {
+    int c = 0;
+    for (int i = 2; i < n; i++) {
+        if (isPrime(i)) { c++; }
+    }
+    return c;
+}
+
+func nthPrime(int k) {                      // 1-indexed: nthPrime(1) == 2
+    int count = 0;
+    int n = 1;
+    while (count < k) {
+        n++;
+        if (isPrime(n)) { count++; }
+    }
+    return n;
+}
+
+func isqrt(int n) {                         // floor(sqrt(n)) via binary search
+    if (n < 0) { return 0; }
+    int lo = 0;
+    int hi = n;
+    if (hi > 46340) { hi = 46340; }         // keeps mid*mid within 32 bit
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;        // upper mid: search largest x with x*x<=n
+        if (mid * mid <= n) { lo = mid; } else { hi = mid - 1; }
+    }
+    return lo;
+}
+
+func digitSum(int n) {                      // n >= 0
+    int s = 0;
+    while (n > 0) {
+        s = s + n % 10;
+        n = n / 10;
+    }
+    return s;
+}
+
+func numDigits(int n) {                     // n >= 0
+    if (n == 0) { return 1; }
+    int c = 0;
+    while (n > 0) {
+        c++;
+        n = n / 10;
+    }
+    return c;
+}
+
+func reverseNum(int n) {                    // n >= 0
+    int r = 0;
+    while (n > 0) {
+        r = r * 10 + n % 10;
+        n = n / 10;
+    }
+    return r;
+}
+
+func isPalindrome(int n) {                  // uses && and a helper call
+    return n >= 0 && reverseNum(n) == n;
+}
+
+func totient(int n) {                       // Euler's phi
+    int count = 0;
+    for (int k = 1; k <= n; k++) {
+        if (gcd_rec(n, k) == 1) { count++; }
+    }
+    return count;
+}
+
+func sumProperDivisors(int n) {
+    int sum = 0;
+    for (int d = 1; d < n; d++) {
+        if (n % d == 0) { sum = sum + d; }
+    }
+    return sum;
+}
+
+func isPerfect(int n) {                     // 6, 28, 496 ...
+    return n > 0 && sumProperDivisors(n) == n;
+}
+
+func binom(int n, int k) {                  // Pascal recursion C(n,k)
+    if (k < 0 || k > n) { return 0; }
+    if (k == 0 || k == n) { return 1; }
+    return binom(n - 1, k - 1) + binom(n - 1, k);
+}
+
+func collatzSteps(int n) {                  // steps to reach 1
+    int steps = 0;
+    while (n != 1) {
+        if (n % 2 == 0) {
+            n = n / 2;
+        } else {
+            n = 3 * n + 1;
+        }
+        steps++;
+    }
+    return steps;
+}
+
+func main() {
+    int failures = 0;
+
+    // --- gcd / lcm ---
+    if (gcd_iter(48, 36) != 12)                  { failures++; }
+    if (gcd_iter(1071, 462) != 21)               { failures++; }
+    if (gcd_rec(48, 36) != 12)                   { failures++; }
+    if (gcd_iter(17, 5) != gcd_rec(17, 5))       { failures++; }
+    if (lcm(4, 6) != 12)                         { failures++; }
+    if (lcm(21, 6) != 42)                        { failures++; }
+
+    // --- modular exponentiation ---
+    if (modpow(2, 10, 1000) != 24)               { failures++; }
+    if (modpow(3, 5, 100) != 43)                 { failures++; }
+    if (modpow(5, 3, 13) != 8)                   { failures++; }
+    if (modpow(7, 4, 1000) != 401)               { failures++; }
+    if (modpow(2, 0, 1000) != 1)                 { failures++; }
+
+    // --- primes ---
+    if (isPrime(2) != 1 || isPrime(3) != 1)      { failures++; }
+    if (isPrime(4) != 0 || isPrime(1) != 0)      { failures++; }
+    if (isPrime(97) != 1 || isPrime(100) != 0)   { failures++; }
+    if (countPrimesBelow(50) != 15)              { failures++; }
+    if (countPrimesBelow(20) != 8)               { failures++; }
+    if (nthPrime(1) != 2)                        { failures++; }
+    if (nthPrime(6) != 13)                       { failures++; }
+    if (nthPrime(10) != 29)                      { failures++; }
+
+    // --- integer square root ---
+    if (isqrt(0) != 0 || isqrt(1) != 1)          { failures++; }
+    if (isqrt(15) != 3 || isqrt(16) != 4)        { failures++; }
+    if (isqrt(17) != 4 || isqrt(99) != 9)        { failures++; }
+    if (isqrt(100) != 10)                        { failures++; }
+    if (isqrt(1000000) != 1000)                  { failures++; }
+
+    // --- digit work ---
+    if (digitSum(0) != 0 || digitSum(12345) != 15)   { failures++; }
+    if (digitSum(9999) != 36)                        { failures++; }
+    if (numDigits(0) != 1 || numDigits(7) != 1)      { failures++; }
+    if (numDigits(100) != 3 || numDigits(99999) != 5){ failures++; }
+    if (reverseNum(0) != 0 || reverseNum(1200) != 21){ failures++; }
+    if (reverseNum(12345) != 54321)                  { failures++; }
+    if (isPalindrome(0) != 1 || isPalindrome(121) != 1)  { failures++; }
+    if (isPalindrome(123) != 0 || isPalindrome(1221) != 1){ failures++; }
+
+    // --- number theory ---
+    if (totient(1) != 1 || totient(7) != 6)      { failures++; }
+    if (totient(9) != 6 || totient(10) != 4)     { failures++; }
+    if (totient(12) != 4)                        { failures++; }
+    if (isPerfect(6) != 1 || isPerfect(28) != 1) { failures++; }
+    if (isPerfect(12) != 0 || isPerfect(1) != 0) { failures++; }
+    if (sumProperDivisors(12) != 16)             { failures++; }
+
+    // --- binomials (Pascal recursion) ---
+    if (binom(5, 2) != 10 || binom(6, 3) != 20)  { failures++; }
+    if (binom(7, 3) != 35)                       { failures++; }
+    if (binom(10, 0) != 1 || binom(10, 10) != 1) { failures++; }
+    if (binom(4, 5) != 0)                        { failures++; }
+
+    // --- Collatz ---
+    if (collatzSteps(1) != 0)                    { failures++; }
+    if (collatzSteps(6) != 8)                    { failures++; }
+    if (collatzSteps(27) != 111)                 { failures++; }
+
+    // --- operator / precedence sanity ---
+    if (2 + 3 * 4 != 14)                         { failures++; }
+    if ((2 + 3) * 4 != 20)                       { failures++; }
+    if (-6 / 4 != -1)                            { failures++; }   // truncation toward zero
+    if (17 % 5 != 2)                             { failures++; }
+
+    if (failures == 0) {
+        putchar(79); putchar(75); putchar(10);   // "OK\n"
+    }
+    return failures;
+}
