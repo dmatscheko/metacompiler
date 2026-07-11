@@ -40,7 +40,58 @@ programs are self checking: they return 0 on success.") ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { Include | StructDef | StructGDecl | FuncDef | Proto | GlobalDecl } ;
+Program     = { Include | PPLine | EnumDef | UnionDef | TypedefDecl | GFloatDecl
+              | StructDef | StructGDecl | FuncDef | Proto | GlobalDecl } ;
+
+// Preprocessor directives other than #include are accepted and skipped (object-like
+// #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
+// #line). The line (with backslash continuations) is consumed as text and ignored;
+// macro bodies are NOT expanded, so a name #define'd to a value stays unresolved if
+// used later. Include is tried first, so #include keeps its header resolution.
+PPLine      = "#" :whitespace() { PPCont | PPChar } :whitespace(Whitespace) ;
+PPCont      = "\\" [ "\r" ] "\n" ;
+PPChar      = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+// enum Color { RED, GREEN = 5, BLUE }; -- genuinely lowered to named int constants
+// (sequential from 0, or from an explicit value). The optional tag is ignored; the
+// constants live in a global table and resolve wherever a bare name is read.
+EnumDef     <~~ defineEnum(takeAll()) ~~>
+            = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
+              "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ";" ;
+Enumerator  <~~ push(makeEnumerator(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" EnumInit ] ;
+EnumInit    <~~ push({val: makeEnumVal(takeAll())}) ~~>
+            = [ "-" <~~ push("-") ~~> ] Number ;
+
+// union U { ... }; -- accepted structurally, then reported as not implemented (the
+// flat one-word memory has no overlapping layout). The balanced body is skipped.
+UnionDef    <~~ notImpl("union", up.pos) ~~>
+            = KwUnion [ Id ] SkipBlock ";" ;
+
+// typedef <anything> Name; -- accepted and reported as not implemented (there is no
+// symbol table, so the introduced name cannot later be used as a type). The whole
+// declaration, including a braced struct/union/enum body, is skipped up to its ';'.
+TypedefDecl <~~ notImpl("typedef", up.pos) ~~>
+            = KwTypedef { SkipBlock | TdChar } ";" ;
+TdChar      = "\x00"..."\x3a" | "\x3c"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// Global float/double declarations: accepted and reported as not implemented (the
+// machine is integer only). The initializer / array size text is skipped to the ';'.
+GFloatDecl  <~~ notImpl("floating-point declaration", up.pos) ~~>
+            = KwFloating { SkipBlock | TdChar } ";" ;
+
+// A balanced { ... } body consumed without interpreting it (string and char literals
+// are matched first so braces inside them are never miscounted). Copied from the
+// shared widening pattern (see the Kotlin/Java grammars).
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
+SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipStrChar = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(Whitespace) ;
+SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
+SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 // #include <stdio.h> or #include "local.h": the header is routed through the
 // shared resolveImport (lib/interp-core.js). System <...> headers listed in
@@ -63,6 +114,7 @@ StructDef   <~~ defineStruct(takeAll()) ~~>
 FieldLine   <~~ push(makeFieldLine(takeAll())) ~~>
             = FieldType FDecl { "," FDecl } ";" ;
 FieldType   = TypeInt <~~ push({bty: "int"}) ~~>
+            | EnumRef <~~ push({bty: "int"}) ~~>
             | KwStruct Id <~~ push({bty: up.in}) ~~> ;
 FDecl       = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
 
@@ -75,15 +127,18 @@ Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
 FuncDef     <~~ defineFunction() ~~>
             = TypeInt Id <~~ push(up.in) ~~> ParamList Block ;
 
+// Param is tried before the empty (void): 'void' as a base type only makes a
+// parameter with '*' (void *p); a bare '(void)' has no declarator, so Param fails
+// on the missing name and the '(void)' fallback matches.
 ParamList   <~~ push(takeAll()) ~~>
-            = "(" [ ( "void" KwEnd | Param { "," Param } ) ] ")" ;
+            = "(" [ ( Param { "," Param } | "void" KwEnd ) ] ")" ;
 Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
-ParamType   = TypeInt | KwStruct Id <~~ push({sname: up.in}) ~~> ;
+ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~> ;
 
 // Globals are declared like locals but registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
-            = TypeInt GDeclarator { "," GDeclarator } ";" ;
+            = BaseInt GDeclarator { "," GDeclarator } ";" ;
 GDeclarator <~~ push(makeGDecl(takeAll())) ~~>
             = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
               [ ArraySize | "=" Number <~~ push({init: pop()}) ~~> ] ;
@@ -98,7 +153,43 @@ SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
-            | StructDecl | Decl | Empty | ExprStmt ;
+            | StructDecl | Decl | LFloatDecl | Goto | PPStmt | Label | Empty | ExprStmt ;
+
+// goto is accepted and reported as not implemented (the structured lowering has no
+// arbitrary jumps); a plain label passes its statement straight through, so labelled
+// code that is not jumped to still runs.
+Goto        <~~ push(notImplStmt("goto", up.pos)) ~~>
+            = KwGoto Id ";" ;
+// A label must not be 'case' or 'default': those are switch labels and must be left
+// for the enclosing switch (a case body is a { Statement } run, so without this guard
+// a label would swallow the following 'default:' clause).
+Label       = NotSwitchKw Id ":" Statement ;
+NotSwitchKw = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var kws = ["case", "default"]
+        var hit = false
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(s + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01switch-label", 0) : undefined
+    })()
+~~) ;
+
+// A preprocessor line inside a function body is skipped (no-op statement).
+PPStmt      <~~ push(function() {}) ~~>
+            = PPLine ;
+
+// A local float/double declaration: accepted, reported as not implemented.
+LFloatDecl  <~~ push(notImplStmt("floating-point declaration", up.pos)) ~~>
+            = KwFloating { SkipBlock | TdChar } ";" ;
 
 // Local struct variables, struct pointers (with optional initializer) and struct arrays.
 StructDecl  <~~ push(makeStructDecl(takeAll())) ~~>
@@ -145,7 +236,7 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
 
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeSeq(takeAll())) ~~>
-            = TypeInt InitDecl { "," InitDecl } ;
+            = BaseInt InitDecl { "," InitDecl } ;
 InitDecl    <~~ push(makeDecl(takeAll())) ~~>
             = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
               [ ArraySize | "=" AssignExpr ] ;
@@ -157,7 +248,9 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression ";" ;
 
 // Every expression production pushes exactly one thunk: function() -> 32 bit value.
-Expression  = AssignExpr ;
+// The comma operator evaluates each side in order and yields the last (real C).
+Expression  <~~ push(makeComma(takeAll())) ~~>
+            = AssignExpr { "," AssignExpr } ;
 
 // Assignment is an expression: the target is an lvalue (a variable, *expr or a[i]).
 AssignExpr  = Assignment | CondExpr ;
@@ -217,7 +310,20 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 
 // Prefix operators. ++/-- work on lvalues; & takes the address of an lvalue;
 // * dereferences (as an expression it loads the pointed to value).
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | PostfixExpr ;
+
+// sizeof(type): a compile-time constant. Scalars are 4 bytes, any pointer 8; a
+// struct value or a sizeof over an expression is reported as not implemented.
+Sizeof      = KwSizeof ( SizeofType | SizeofExpr ) ;
+SizeofType  <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
+            = "(" SizeName ")" ;
+SizeofExpr  <~~ pop(); push(cNIExpr("sizeof expression", up.pos)) ~~>
+            = UnaryExpr ;
+SizeName    <~~ push(makeSizeName(takeAll())) ~~>
+            = SizeBase { "*" <~~ push("*") ~~> } ;
+SizeBase    = TypeInt <~~ push({kind: "int"}) ~~>
+            | EnumRef <~~ push({kind: "int"}) ~~>
+            | KwStruct Id <~~ push({kind: "struct"}) ~~> ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Lvalue ;
 AddrOf      <~~ push(pop() /* The lvalue thunk already yields the address. */) ~~>
@@ -253,8 +359,25 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 Number      <~~ push(parseInt(up.in)) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
-TypeInt     = "int" KwEnd ;
+// The scalar integer type: any run of int-family keywords and qualifiers, all of
+// which collapse to the one 32-bit int model (unsigned/signed/short/long widths and
+// const/volatile qualifiers are parsed and ignored; char is a full int-sized word;
+// void is accepted here so that void and void* parse). Pushes nothing.
+TypeInt     = TypeTok { TypeTok } ;
+TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
+            | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
+            | "const" KwEnd | "volatile" KwEnd ;
+// A declaration base type: a scalar, or an enum tag used as an int. Pushes nothing.
+BaseInt     = TypeInt | EnumRef ;
+EnumRef     = KwEnum Id ;
+
 KwStruct    = "struct" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwUnion     = "union" KwEnd ;
+KwTypedef   = "typedef" KwEnd ;
+KwGoto      = "goto" KwEnd ;
+KwSizeof    = "sizeof" KwEnd ;
+KwFloating  = "float" KwEnd | "double" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
@@ -310,11 +433,55 @@ KwDefault   = "default" KwEnd ;
     declVar = function(name, addr, arr, ct) {
         scopes[scopes.length - 1][name] = {addr: addr, arr: arr, ct: ct}
     }
-    function findVar(name) {
+    function lookupVar(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (scopes[i][name] != undefined) return scopes[i][name]
         }
-        fail("variable not defined: " + name)
+        return undefined
+    }
+    function findVar(name) {
+        var v = lookupVar(name)
+        if (v == undefined) fail("variable not defined: " + name)
+        return v
+    }
+
+    // enum constants: name -> integer value, filled by defineEnum, read in makeVarRef.
+    var enumConsts = {}
+    // A C-appropriate placeholder for an unlowered expression: yields a constant 0
+    // (the shared notImplExpr returns undefined, which is not a valid C int value).
+    function cNIExpr(construct, pos) { notImpl(construct, pos); return function() { return 0 } }
+    // enum: sequential values from 0, or continuing after an explicit '= n'.
+    function makeEnumVal(items) { return items.length > 1 ? -items[1] : items[0] }
+    function makeEnumerator(items) {
+        if (items.length > 1) return {name: items[0], explicit: items[1].val}
+        return {name: items[0]}
+    }
+    function defineEnum(items) {
+        var next = 0
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tag != undefined) continue // The enum tag is not tracked.
+            if (items[i].explicit != undefined) next = items[i].explicit | 0
+            enumConsts[items[i].name] = next
+            next = next + 1
+        }
+    }
+    // The comma operator: evaluate each side left to right, yield the last value.
+    function makeComma(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = 0
+            for (var i = 0; i < items.length; i++) v = items[i]()
+            return v
+        }
+    }
+    // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
+    // into a constant thunk (pointer 8, scalar/enum 4) or a notImpl for a struct value.
+    function makeSizeName(items) { return {kind: items[0].kind, ptr: items.length > 1} }
+    function makeSizeof(items, pos) {
+        var d = items[0]
+        if (d.ptr) return function() { return 8 }
+        if (d.kind == "struct") return cNIExpr("sizeof of a struct value", pos)
+        return function() { return 4 }
     }
 
     // ----- C types and struct layouts -----
@@ -399,8 +566,10 @@ KwDefault   = "default" KwEnd ;
     function makeInt(n) { return function() { return n | 0 } }
     makeVarRef = function(name) {
         return function() {
-            var v = findVar(name)
-            return v.arr ? v.addr : load(v.addr) // An array name decays to its address.
+            var v = lookupVar(name)
+            if (v != undefined) return v.arr ? v.addr : load(v.addr) // An array name decays to its address.
+            if (enumConsts[name] != undefined) return enumConsts[name] | 0
+            fail("variable not defined: " + name)
         }
     }
     // A place path: the variable, then indexing and member steps. The walk keeps the

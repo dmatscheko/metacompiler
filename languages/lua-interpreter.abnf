@@ -8,16 +8,18 @@ numbers, strings, booleans and nil, string concatenation with .. , arithmetic + 
 (true division) // (floor division) % (floor modulo), comparisons == ~= < > <= >= ,
 and / or / not with Lua truthiness (only false and nil are falsy; 0 and '' are true) and
 operand values, if cond then ... elseif ... else ... end, while cond do ... end, numeric
-for i = a, b [, step] do ... end, functions (function f(a, b) ... end, local function,
-function(...) ... end expressions, closures over their defining scope) with return,
-break, tables as arrays and maps ({} , {1, 2, 3} , {x = 1} , t.x , t[k] , 1 based array
-indexing), the length operator #t (the sequence border of a table), multiple assignment
-(a, b = 1, 2), and print.
+for i = a, b [, step] do ... end, the generic for over ipairs (for i, v in ipairs(t) do
+... end), repeat ... until cond, functions (function f(a, b) ... end, function tbl.field
+and the method sugar function tbl:m() with an implicit self, local function, function(...)
+... end expressions, closures over their defining scope) with return, break, method calls
+obj:m(args) (the receiver is passed as self), tables as arrays and maps ({} , {1, 2, 3} ,
+{x = 1} , t.x , t[k] , 1 based array indexing), the length operator #t (the sequence
+border of a table), multiple assignment (a, b = 1, 2), and print.
 
-Not in the subset: the ^ power operator, bitwise operators, goto, repeat/until, generic
-for (pairs/ipairs), metatables, coroutines, the string/table/math libraries, method
-calls with the colon syntax, varargs, and true multiple return values (a call yields its
-first value only).
+Not in the subset: the ^ power operator, bitwise operators, goto, metatables, coroutines,
+the string/table/math libraries, varargs, true multiple return values (a call yields its
+first value only), and the generic for over pairs() or any custom iterator (accepted, but
+reported as not implemented; -warn-unsupported skips it).
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -42,10 +44,10 @@ Chunk       <~~ buildChunk(takeAll()) ~~>
 Block       <~~ push(makeSeq(takeAll())) ~~>
             = { NotEnders Statement } ;
 
-// NotEnders stops a block at the keywords that terminate it (end / else / elseif),
-// which the plain identifier statements would otherwise swallow. It consumes nothing
-// and only fails (via the impossible-token trick) when one of those words - as a whole
-// word, not merely a prefix like 'ending' - is next.
+// NotEnders stops a block at the keywords that terminate it (end / else / elseif /
+// until), which the plain identifier statements would otherwise swallow. It consumes
+// nothing and only fails (via the impossible-token trick) when one of those words - as
+// a whole word, not merely a prefix like 'ending' - is next.
 NotEnders = :script(~~
     (function() {
         // Skip leading whitespace and -- line comments (a :script sees the raw input).
@@ -60,19 +62,27 @@ NotEnders = :script(~~
             } else { scanning = false }
         }
         var p0 = c.peek(off)
-        if (p0 !== 101) { return undefined }
-        var p1 = c.peek(off + 1)
-        var p2 = c.peek(off + 2)
-        var p3 = c.peek(off + 3)
         var after = -1
         var hit = false
-        if (p1 === 110 && p2 === 100) {
-            after = c.peek(off + 3)
-            hit = true
-        } else if (p1 === 108 && p2 === 115 && p3 === 101) {
-            after = c.peek(off + 4)
-            if (after === 105 && c.peek(off + 5) === 102) { after = c.peek(off + 6) }
-            hit = true
+        if (p0 === 101) {
+            var p1 = c.peek(off + 1)
+            var p2 = c.peek(off + 2)
+            var p3 = c.peek(off + 3)
+            if (p1 === 110 && p2 === 100) {
+                after = c.peek(off + 3)
+                hit = true
+            } else if (p1 === 108 && p2 === 115 && p3 === 101) {
+                after = c.peek(off + 4)
+                if (after === 105 && c.peek(off + 5) === 102) { after = c.peek(off + 6) }
+                hit = true
+            }
+        } else if (p0 === 117) {
+            if (c.peek(off + 1) === 110 && c.peek(off + 2) === 116 && c.peek(off + 3) === 105 && c.peek(off + 4) === 108) {
+                after = c.peek(off + 5)
+                hit = true
+            }
+        } else {
+            return undefined
         }
         if (!hit) { return undefined }
         if ((after >= 48 && after <= 57) || (after >= 65 && after <= 90) || after === 95 || (after >= 97 && after <= 122)) {
@@ -86,8 +96,8 @@ NotEnders = :script(~~
 // first (they commit on their unique keyword); an assignment is tried before a bare
 // call statement, because its targets look like the start of a call until the '='.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = If | While | NumFor | DoBlock | LocalFunc | Local | Func | Return | Break
-            | AssignStat | CallStat ;
+            = If | While | Repeat | NumFor | GenFor | DoBlock | LocalFunc | Local | Func
+            | Return | Break | AssignStat | CallStat ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
@@ -99,11 +109,31 @@ Else        <~~ push(makeElse(pop())) ~~>
 While       <~~ push(makeWhile(pop(), pop())) ~~>
             = KwWhile Expression KwDo Block KwEndKw ;
 
+// repeat ... until cond: the body runs at least once and repeats while cond is false;
+// unlike while, the condition sees the locals declared in the body (same scope).
+Repeat      <~~ var cond = pop(); var block = pop(); push(makeRepeat(block, cond)) ~~>
+            = KwRepeat Block KwUntil Expression ;
+
 // for i = start, limit [, step] do ... end. The loop variable is local to the loop.
 NumFor      <~~ push(makeNumFor(takeAll())) ~~>
             = KwFor ForName "=" Expression "," Expression [ "," Expression ] KwDo Block KwEndKw ;
 ForName     <~~ push({fname: up.in}) ~~>
             = Id ;
+
+// for k, v in <iter> do ... end. Only the pairs()/ipairs() iterators are recognized;
+// ipairs is lowered to a 1-based array walk (index, value) that stops at the first nil.
+// pairs (key enumeration) and any other iterator are accepted but not implemented.
+GenFor      <~~ push(makeGenFor(takeAll(), up.pos)) ~~>
+            = KwFor GenName { "," GenName } KwIn IterExpr KwDo Block KwEndKw ;
+GenName     <~~ push({gname: up.in}) ~~>
+            = Id ;
+IterExpr    = IpairsIter | PairsIter | GenericIter ;
+IpairsIter  <~~ push({iterkind: "ipairs", tbl: pop()}) ~~>
+            = "ipairs" KwEnd "(" Expression ")" ;
+PairsIter   <~~ push({iterkind: "pairs", tbl: pop()}) ~~>
+            = "pairs" KwEnd "(" Expression ")" ;
+GenericIter <~~ takeAll(); push({iterkind: "generic"}) ~~>
+            = Expression { "," Expression } ;
 
 DoBlock     <~~ push(makeDoBlock(pop())) ~~>
             = KwDo Block KwEndKw ;
@@ -116,8 +146,12 @@ Local       <~~ push(makeLocal(takeAll())) ~~>
 LocalName   <~~ push({lname: up.in}) ~~>
             = Id ;
 
+// function name(...) end, function tbl.field(...) end, and the method-definition sugar
+// function tbl:method(...) end (which binds an implicit first parameter 'self').
 Func        <~~ push(makeFunc(pop(), pop(), pop())) ~~>
-            = KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
+            = KwFunction FuncName ParamList Block KwEndKw ;
+FuncName    <~~ push(makeFuncName(takeAll())) ~~>
+            = Id <~~ push({fnbase: up.in}) ~~> { "." Id <~~ push({fnstep: up.in}) ~~> } [ ":" Id <~~ push({fnstep: up.in, fnself: true}) ~~> ] ;
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
@@ -168,11 +202,16 @@ LenExpr     <~~ push(makeLen(pop())) ~~>
 NegExpr     <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 
-// f(a), t.x, t[k] in any mix.
+// f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | DotSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | DotSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Expression { "," Expression } ] ")" ;
+// obj:m(args): sugar for obj.m(obj, args) - the receiver is passed as the first arg.
+MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, args: it.slice(1)}) ~~>
+            = ":" MethodName "(" [ Expression { "," Expression } ] ")" ;
+MethodName  <~~ push({mname: up.in}) ~~>
+            = Id ;
 DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -210,8 +249,11 @@ KwElseif    = "elseif" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwEndKw     = "end" KwEnd ;
 KwWhile     = "while" KwEnd ;
+KwRepeat    = "repeat" KwEnd ;
+KwUntil     = "until" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwFor       = "for" KwEnd ;
+KwIn        = "in" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwAnd       = "and" KwEnd ;
@@ -340,6 +382,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
                     if (typeof cur != "function") { fail("attempt to call a " + luaType(cur) + " value") }
                     cur = cur.apply(undefined, argv)
+                } else if (s.kind == "method") {
+                    var fn = anytype // The looked-up method value.
+                    fn = luaIndex(cur, s.name)
+                    if (typeof fn != "function") { fail("attempt to call method '" + s.name + "' (a " + luaType(fn) + " value)") }
+                    var margv = []
+                    margv.push(cur) // The receiver becomes the first argument (self).
+                    for (var mj = 0; mj < s.args.length; mj++) { margv.push(s.args[mj]()) }
+                    cur = fn.apply(undefined, margv)
                 } else if (s.kind == "field") {
                     cur = luaIndex(cur, s.name)
                 } else {
@@ -432,8 +482,37 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeFuncExpr(bodyT, plist) {
         return function() { return makeClosure(plist.params, bodyT) }
     }
-    function makeFunc(bodyT, plist, name) {
-        return function() { setVar(name, makeClosure(plist.params, bodyT)) }
+    // A function-definition name: a base variable, a chain of .field steps, and a flag
+    // marking a trailing :method step (which binds an implicit leading 'self' parameter).
+    function makeFuncName(items) {
+        var base = items[0].fnbase
+        var steps = []
+        var isMethod = false
+        for (var i = 1; i < items.length; i++) {
+            steps.push(items[i].fnstep)
+            if (items[i].fnself === true) { isMethod = true }
+        }
+        return {fbase: base, fsteps: steps, fmethod: isMethod}
+    }
+    // function name(...) / function tbl.field(...) / function tbl:method(...). A method
+    // definition prepends 'self'; a plain name assigns the variable, a dotted/method name
+    // writes the closure into the last field of the resolved table path.
+    function makeFunc(bodyT, plist, nameDesc) {
+        var params = plist.params
+        if (nameDesc.fmethod) {
+            var mp = []
+            mp.push("self")
+            for (var i = 0; i < plist.params.length; i++) { mp.push(plist.params[i]) }
+            params = mp
+        }
+        return function() {
+            var cl = makeClosure(params, bodyT)
+            if (nameDesc.fsteps.length == 0) { setVar(nameDesc.fbase, cl); return }
+            var o = anytype // The containers along the path may be of mixed types.
+            o = getVar(nameDesc.fbase)
+            for (var i = 0; i < nameDesc.fsteps.length - 1; i++) { o = luaIndex(o, nameDesc.fsteps[i]) }
+            luaSetIndex(o, nameDesc.fsteps[nameDesc.fsteps.length - 1], cl)
+        }
     }
     function makeLocalFunc(bodyT, plist, name) {
         return function() {
@@ -482,6 +561,72 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     if (r !== CONT) { res = r; break }
                 }
                 i = i + step
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    // repeat body until cond: the body runs, then cond is tested in the body's own scope;
+    // it loops while cond is falsy, so the body always runs at least once.
+    function makeRepeat(block, cond) {
+        return function() {
+            var res = undefined
+            var running = true
+            while (running) {
+                scopes.push({})
+                var r = block()
+                var brk = false
+                if (r != undefined && r === BRK) { brk = true }
+                if (r != undefined && r !== BRK && r !== CONT) { res = r; brk = true }
+                if (brk) { scopes.pop(); running = false }
+                else {
+                    var stop = luatruthy(cond())
+                    scopes.pop()
+                    if (stop) { running = false }
+                }
+            }
+            return res
+        }
+    }
+    // Generic for. items = [{gname}..., {iterkind, tbl?}, blockThunk]. Only ipairs is
+    // lowered (a 1-based array walk that stops at the first nil); pairs and any other
+    // iterator are accepted, then reported as not implemented.
+    function makeGenFor(items, pos) {
+        var names = []
+        var iter = null
+        var block = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { block = it }
+            else if (it.gname != undefined) { names.push(it.gname) }
+            else { iter = it }
+        }
+        if (iter.iterkind != "ipairs") {
+            return notImplStmt("generic for over " + iter.iterkind + "()", pos)
+        }
+        var tblT = iter.tbl
+        return function() {
+            var t = anytype // The iterated table.
+            t = tblT()
+            scopes.push({})
+            var frame = scopes[scopes.length - 1]
+            var res = undefined
+            var idx = 1
+            var running = true
+            while (running) {
+                var v = anytype // The element at the current index.
+                v = luaIndex(t, idx)
+                if (v === undefined || v === null) { running = false }
+                else {
+                    frame[names[0]] = idx
+                    if (names.length > 1) { frame[names[1]] = v }
+                    var r = block()
+                    if (r != undefined) {
+                        if (r === BRK) { running = false }
+                        else if (r !== CONT) { res = r; running = false }
+                        else { idx = idx + 1 }
+                    } else { idx = idx + 1 }
+                }
             }
             scopes.pop()
             return res

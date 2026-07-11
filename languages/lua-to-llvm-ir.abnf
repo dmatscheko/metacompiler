@@ -9,7 +9,9 @@ The emitted IR is handle threaded: every dynamic value is an i64 handle into the
 table of the Go side MetaJS runtime (abnf/jsrt.go), and every operation with real
 semantics is a call to one of its js_* externals. Only the control flow is real IR:
 if/elseif/while/numeric-for/and/or compile to basic blocks, branches and phis, driven by
-a Lua truthiness test (only false and nil are falsy) built from js_seq. The handles 0..3
+a Lua truthiness test (only false and nil are falsy) built from js_seq. repeat/until and
+the ipairs generic for lower to basic blocks the same way; a method call obj:m(a) loads m
+via js_get and js_call's it with the receiver prepended as self. The handles 0..3
 are nil, null, false and true. Locals live in scope chain objects (js_scope_new /
 js_scope_decl / js_scope_get / js_scope_set); a bare assignment goes through
 js_pyset_var (assign up the chain, else create). Tables are host objects (js_obj_new,
@@ -41,10 +43,10 @@ Chunk       <~~ buildChunk(takeAll()) ~~>
 Block       <~~ push(makeSeq(takeAll())) ~~>
             = { NotEnders Statement } ;
 
-// NotEnders stops a block at the keywords that terminate it (end / else / elseif),
-// which the plain identifier statements would otherwise swallow. It consumes nothing
-// and only fails (via the impossible-token trick) when one of those words - as a whole
-// word, not merely a prefix like 'ending' - is next.
+// NotEnders stops a block at the keywords that terminate it (end / else / elseif /
+// until), which the plain identifier statements would otherwise swallow. It consumes
+// nothing and only fails (via the impossible-token trick) when one of those words - as
+// a whole word, not merely a prefix like 'ending' - is next.
 NotEnders = :script(~~
     (function() {
         // Skip leading whitespace and -- line comments (a :script sees the raw input).
@@ -59,19 +61,27 @@ NotEnders = :script(~~
             } else { scanning = false }
         }
         var p0 = c.peek(off)
-        if (p0 !== 101) { return undefined }
-        var p1 = c.peek(off + 1)
-        var p2 = c.peek(off + 2)
-        var p3 = c.peek(off + 3)
         var after = -1
         var hit = false
-        if (p1 === 110 && p2 === 100) {
-            after = c.peek(off + 3)
-            hit = true
-        } else if (p1 === 108 && p2 === 115 && p3 === 101) {
-            after = c.peek(off + 4)
-            if (after === 105 && c.peek(off + 5) === 102) { after = c.peek(off + 6) }
-            hit = true
+        if (p0 === 101) {
+            var p1 = c.peek(off + 1)
+            var p2 = c.peek(off + 2)
+            var p3 = c.peek(off + 3)
+            if (p1 === 110 && p2 === 100) {
+                after = c.peek(off + 3)
+                hit = true
+            } else if (p1 === 108 && p2 === 115 && p3 === 101) {
+                after = c.peek(off + 4)
+                if (after === 105 && c.peek(off + 5) === 102) { after = c.peek(off + 6) }
+                hit = true
+            }
+        } else if (p0 === 117) {
+            if (c.peek(off + 1) === 110 && c.peek(off + 2) === 116 && c.peek(off + 3) === 105 && c.peek(off + 4) === 108) {
+                after = c.peek(off + 5)
+                hit = true
+            }
+        } else {
+            return undefined
         }
         if (!hit) { return undefined }
         if ((after >= 48 && after <= 57) || (after >= 65 && after <= 90) || after === 95 || (after >= 97 && after <= 122)) {
@@ -85,8 +95,8 @@ NotEnders = :script(~~
 // first (they commit on their unique keyword); an assignment is tried before a bare
 // call statement, because its targets look like the start of a call until the '='.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = If | While | NumFor | DoBlock | LocalFunc | Local | Func | Return | Break
-            | AssignStat | CallStat ;
+            = If | While | Repeat | NumFor | GenFor | DoBlock | LocalFunc | Local | Func
+            | Return | Break | AssignStat | CallStat ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
@@ -98,11 +108,31 @@ Else        <~~ push(makeElse(pop())) ~~>
 While       <~~ push(makeWhile(pop(), pop())) ~~>
             = KwWhile Expression KwDo Block KwEndKw ;
 
+// repeat ... until cond: the body runs at least once and repeats while cond is false;
+// unlike while, the condition sees the locals declared in the body (same scope).
+Repeat      <~~ var cond = pop(); var block = pop(); push(makeRepeat(block, cond)) ~~>
+            = KwRepeat Block KwUntil Expression ;
+
 // for i = start, limit [, step] do ... end. The loop variable is local to the loop.
 NumFor      <~~ push(makeNumFor(takeAll())) ~~>
             = KwFor ForName "=" Expression "," Expression [ "," Expression ] KwDo Block KwEndKw ;
 ForName     <~~ push({fname: up.in}) ~~>
             = Id ;
+
+// for k, v in <iter> do ... end. Only the pairs()/ipairs() iterators are recognized;
+// ipairs is lowered to a 1-based array walk (index, value) that stops at the first nil.
+// pairs (key enumeration) and any other iterator are accepted but not implemented.
+GenFor      <~~ push(makeGenFor(takeAll(), up.pos)) ~~>
+            = KwFor GenName { "," GenName } KwIn IterExpr KwDo Block KwEndKw ;
+GenName     <~~ push({gname: up.in}) ~~>
+            = Id ;
+IterExpr    = IpairsIter | PairsIter | GenericIter ;
+IpairsIter  <~~ push({iterkind: "ipairs", tbl: pop()}) ~~>
+            = "ipairs" KwEnd "(" Expression ")" ;
+PairsIter   <~~ push({iterkind: "pairs", tbl: pop()}) ~~>
+            = "pairs" KwEnd "(" Expression ")" ;
+GenericIter <~~ takeAll(); push({iterkind: "generic"}) ~~>
+            = Expression { "," Expression } ;
 
 DoBlock     <~~ push(makeDoBlock(pop())) ~~>
             = KwDo Block KwEndKw ;
@@ -115,8 +145,12 @@ Local       <~~ push(makeLocal(takeAll())) ~~>
 LocalName   <~~ push({lname: up.in}) ~~>
             = Id ;
 
+// function name(...) end, function tbl.field(...) end, and the method-definition sugar
+// function tbl:method(...) end (which binds an implicit first parameter 'self').
 Func        <~~ push(makeFunc(pop(), pop(), pop())) ~~>
-            = KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
+            = KwFunction FuncName ParamList Block KwEndKw ;
+FuncName    <~~ push(makeFuncName(takeAll())) ~~>
+            = Id <~~ push({fnbase: up.in}) ~~> { "." Id <~~ push({fnstep: up.in}) ~~> } [ ":" Id <~~ push({fnstep: up.in, fnself: true}) ~~> ] ;
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
@@ -167,11 +201,16 @@ LenExpr     <~~ push(makeLen(pop())) ~~>
 NegExpr     <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 
-// f(a), t.x, t[k] in any mix.
+// f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | DotSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | DotSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Expression { "," Expression } ] ")" ;
+// obj:m(args): sugar for obj.m(obj, args) - the receiver is passed as the first arg.
+MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, args: it.slice(1)}) ~~>
+            = ":" MethodName "(" [ Expression { "," Expression } ] ")" ;
+MethodName  <~~ push({mname: up.in}) ~~>
+            = Id ;
 DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -209,8 +248,11 @@ KwElseif    = "elseif" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwEndKw     = "end" KwEnd ;
 KwWhile     = "while" KwEnd ;
+KwRepeat    = "repeat" KwEnd ;
+KwUntil     = "until" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwFor       = "for" KwEnd ;
+KwIn        = "in" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwAnd       = "and" KwEnd ;
@@ -331,6 +373,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var ea = emitArgs(b, s.args)
                     b = ea.b
                     cur = callExt(b, "js_call", [cur, hUndef, ea.v])
+                } else if (s.kind == "method") {
+                    // obj:m(args): look up m on the receiver, then call it with the
+                    // receiver prepended as the first argument (self).
+                    var fn = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                    var margs = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [margs, cur])
+                    for (var mj = 0; mj < s.args.length; mj++) {
+                        var mar = s.args[mj](b)
+                        b = mar.b
+                        callExt(b, "js_arr_push", [margs, mar.v])
+                    }
+                    cur = callExt(b, "js_call", [fn, hUndef, margs])
                 } else if (s.kind == "field") {
                     cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
                 } else {
@@ -463,11 +517,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
-    function makeFunc(bodyT, plist, name) {
+    // A function-definition name: a base variable, a chain of .field steps, and a flag
+    // marking a trailing :method step (which binds an implicit leading 'self' parameter).
+    function makeFuncName(items) {
+        var base = items[0].fnbase
+        var steps = []
+        var isMethod = false
+        for (var i = 1; i < items.length; i++) {
+            steps.push(items[i].fnstep)
+            if (items[i].fnself === true) { isMethod = true }
+        }
+        return {fbase: base, fsteps: steps, fmethod: isMethod}
+    }
+    // function name(...) / function tbl.field(...) / function tbl:method(...). A method
+    // definition prepends 'self'; a plain name assigns the variable, a dotted/method name
+    // writes the closure into the last field of the resolved table path.
+    function makeFunc(bodyT, plist, nameDesc) {
+        var params = plist.params
+        if (nameDesc.fmethod) {
+            var mp = []
+            mp.push("self")
+            for (var i = 0; i < plist.params.length; i++) { mp.push(plist.params[i]) }
+            params = mp
+        }
         return function(b) {
-            var idx = emitFunction(plist.params, bodyT)
+            var idx = emitFunction(params, bodyT)
             var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), cl])
+            if (nameDesc.fsteps.length == 0) {
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, nameDesc.fbase), cl])
+                return b
+            }
+            var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nameDesc.fbase)])
+            for (var i = 0; i < nameDesc.fsteps.length - 1; i++) {
+                o = callExt(b, "js_get", [o, emitStr(b, nameDesc.fsteps[i])])
+            }
+            callExt(b, "js_set", [o, emitStr(b, nameDesc.fsteps[nameDesc.fsteps.length - 1]), cl])
             return b
         }
     }
@@ -563,6 +647,79 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             var stpV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, stepName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV2, stpV2])])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    // repeat body until cond. The body block gets a fresh scope each iteration (so the
+    // until condition, evaluated in that scope, sees the body's locals); it loops back
+    // while cond is falsy. break -> exit, continue -> the until test.
+    function makeRepeat(block, condT) {
+        return function(b) {
+            var saved = curScopeV
+            var bodyB = curF.NewBlock("")
+            var contB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(bodyB)
+            curScopeV = callExt(bodyB, "js_scope_new", [saved])
+            loopStack.push({cont: contB, brk: exitB})
+            block(bodyB).NewBr(contB)
+            loopStack.pop()
+            var r = condT(contB)
+            r.b.NewCondBr(truthy(r.b, r.v), exitB, bodyB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    // Generic for. items = [{gname}..., {iterkind, tbl?}, blockThunk]. Only ipairs is
+    // lowered (a 1-based array walk that stops at the first nil); pairs and any other
+    // iterator are accepted, then reported as not implemented.
+    function makeGenFor(items, pos) {
+        var names = []
+        var iter = null
+        var block = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { block = it }
+            else if (it.gname != undefined) { names.push(it.gname) }
+            else { iter = it }
+        }
+        if (iter.iterkind != "ipairs") {
+            return notImplStmt("generic for over " + iter.iterkind + "()", pos)
+        }
+        var tblT = iter.tbl
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            hidCount++
+            var iName = "$gi" + hidCount
+            var tName = "$gt" + hidCount
+            var rt = tblT(b)
+            b = rt.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), rt.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 1)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[0]), hUndef])
+            if (names.length > 1) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[1]), hUndef]) }
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
+            var elem = callExt(headB, "js_get", [tV, iV])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_sne", [elem, hUndef])), bodyB, exitB)
+            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var tV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, tName)])
+            var elem2 = callExt(bodyB, "js_get", [tV2, iV2])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, names[0]), iV2])
+            if (names.length > 1) { callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, names[1]), elem2]) }
+            loopStack.push({cont: postB, brk: exitB})
+            block(bodyB).NewBr(postB)
+            loopStack.pop()
+            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
             postB.NewBr(headB)
             curScopeV = saved
             return exitB

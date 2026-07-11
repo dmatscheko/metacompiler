@@ -55,9 +55,14 @@ Param       = Name <~~ push({param: up.in}) ~~> ;
 // Method / call names may end with ? or ! (empty?, include?); Name may not.
 MethodName  = Id [ "?" | "!" ] ;
 
-// class C ... end with instance methods; C.new builds an instance.
+// class C ... end with instance methods; C.new builds an instance. attr_reader /
+// attr_writer / attr_accessor declare @ivar getters/setters on the class.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Name <~~ push(up.in) ~~> { Def <~~ push({method: pop()}) ~~> } End ;
+            = KwClass Name <~~ push(up.in) ~~> { Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
+AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
+            = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
+AttrKind    = ( "attr_accessor" | "attr_reader" | "attr_writer" ) KwEnd ;
+AttrSym     = ":" SymName <~~ push({aname: up.in}) ~~> :whitespace(Whitespace) ;
 
 End         = "end" KwEnd ;
 
@@ -67,7 +72,14 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
             = { Statement } ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
-Statement   = PutsStmt | ExprStmt ;
+Statement   = PutsStmt | MultiAssign | ExprStmt ;
+
+// a, b = 1, 2 (and the swap a, b = b, a): every right-hand value is evaluated
+// before any target is written; a single right-hand array is unpacked positionally.
+// Kept at statement level (needs a comma after the first target) so it never
+// interferes with a nested expression.
+MultiAssign <~~ push(makeMultiAssign(takeAll())) ~~>
+            = Target "," Target { "," Target } "=" Expression { "," Expression } [ ";" ] ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
@@ -75,8 +87,11 @@ PutsStmt    <~~ push(makePuts(takeAll())) ~~>
 
 ExprStmt    = Expression [ ";" ] ;
 
-// Every expression pushes exactly one thunk: function() -> value.
-Expression  = Assignment | OrExpr ;
+// Every expression pushes exactly one thunk: function() -> value. A ternary
+// cond ? a : b binds looser than the boolean operators (like Ruby).
+Expression  = Assignment | Ternary ;
+Ternary     <~~ push(makeTernary(takeAll())) ~~>
+            = OrExpr [ "?" Expression ":" Expression ] ;
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target AssignOp <~~ push(up.in) ~~> Expression ;
@@ -103,7 +118,11 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = RangeExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> RangeExpr } ;
 // A range 1..5 (inclusive) or 1...5 (exclusive); built as an eager array.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = AddExpr [ ( "..." | ".." ) <~~ push(up.in) ~~> AddExpr ] ;
+            = ShiftExpr [ ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ] ;
+// The << append operator: arr << x pushes onto the array and yields the array
+// (so a << b << c chains). Binds tighter than range/comparison, looser than +.
+ShiftExpr   <~~ push(makeShift(takeAll())) ~~>
+            = AddExpr { "<<" AddExpr } ;
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -132,8 +151,8 @@ BlockParams <~~ push({bparams: takeAll()}) ~~>
             = "|" [ Param { "," Param } ] "|" ;
 
 Primary     = "(" Expression ")"
-            | IfExpr | UnlessExpr | WhileExpr | UntilExpr
-            | ReturnExpr | BreakExpr | NextExpr
+            | IfExpr | UnlessExpr | WhileExpr | UntilExpr | CaseExpr | BeginExpr
+            | ReturnExpr | BreakExpr | NextExpr | RaiseExpr
             | DqStr | SqStr | IntLit | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
@@ -152,12 +171,35 @@ WhileExpr   <~~ push(makeWhile(pop().body, pop())) ~~>
 UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
             = KwUntil Expression [ KwDo ] Body End ;
 
+// case SUBJ / when V1, V2 / else - lowered to a chain of == tests (a switch). A
+// subject-less case (case / when COND) tests each when expression for truthiness.
+CaseExpr    <~~ push(makeCase(takeAll())) ~~>
+            = KwCase [ Expression ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
+WhenClause  <~~ push(makeWhen(takeAll())) ~~>
+            = KwWhen Expression { "," Expression } [ KwThen ] Body ;
+
+// begin / rescue / ensure: accepted but not implemented (no exception model).
+// Under -warn-unsupported the begin body and any ensure body run in sequence, so
+// their calls stay visible; the rescue handlers are parsed and dropped.
+BeginExpr   <~~ push(makeBegin(takeAll(), up.pos)) ~~>
+            = KwBegin Body { RescueClause } [ KwElse Body <~~ push({begelse: pop().body}) ~~> ] [ EnsureClause ] End ;
+RescueClause <~~ takeAll(); push({rescue: true}) ~~>
+            = KwRescue [ ErrList ] [ "=>" Name ] [ KwThen ] Body ;
+ErrList     = Name { "," Name } ;
+EnsureClause <~~ push({ensure: pop().body}) ~~>
+            = KwEnsure Body ;
+
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ;
 BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
             = KwBreak [ Expression ] ;
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
             = KwNext [ Expression ] ;
+
+// raise: accepted but not implemented (no unwinding). The raised expression still
+// runs under -warn-unsupported, so its calls stay visible.
+RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
+            = KwRaise [ Expression { "," Expression } ] ;
 
 // f(args): a top level method or a class (for C.new the .new is a method suffix).
 Call        <~~ push(makeCall(takeAll())) ~~>
@@ -219,7 +261,7 @@ NotKw       = :script(~~
         var kws = ["def", "end", "if", "elsif", "else", "unless", "while", "until",
                    "do", "then", "return", "break", "next", "class", "self", "nil",
                    "true", "false", "and", "or", "not", "case", "when", "in", "yield",
-                   "begin", "rescue", "ensure", "puts", "print"]
+                   "begin", "rescue", "ensure", "raise", "puts", "print"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -237,6 +279,12 @@ KwThen      = "then" KwEnd ;
 KwWhile     = "while" KwEnd ;
 KwUntil     = "until" KwEnd ;
 KwDo        = "do" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwWhen      = "when" KwEnd ;
+KwBegin     = "begin" KwEnd ;
+KwRescue    = "rescue" KwEnd ;
+KwEnsure    = "ensure" KwEnd ;
+KwRaise     = "raise" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwNext      = "next" KwEnd ;
@@ -793,6 +841,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var methods = []
         for (var i = 1; i < items.length; i++) {
             if (items[i].method != undefined) { methods.push(items[i].method) }
+            else if (items[i].attr != undefined) {
+                var a = items[i].attr
+                for (var j = 0; j < a.names.length; j++) {
+                    if (a.kind == "attr_reader" || a.kind == "attr_accessor") { methods.push(attrGetterFn(a.names[j])) }
+                    if (a.kind == "attr_writer" || a.kind == "attr_accessor") { methods.push(attrSetterFn(a.names[j])) }
+                }
+            }
         }
         return function() {
             var cls = {__isclass: true, __name: name}
@@ -800,6 +855,146 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 cls[methods[m2].name] = makeMethodClosure(methods[m2])
             }
             declVar(name, cls)
+            return null
+        }
+    }
+    // attr_reader / attr_writer / attr_accessor become @ivar getter/setter methods
+    // synthesized as ordinary function descriptors on the class descriptor.
+    function makeAttr(items) {
+        var kind = ""
+        var names = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].akind != undefined) { kind = items[i].akind }
+            else if (items[i].aname != undefined) { names.push(items[i].aname) }
+        }
+        return {attr: {kind: kind, names: names}}
+    }
+    function attrGetterFn(n) { return {name: n, params: [], body: makeIvarRef(n)} }
+    function attrSetterFn(n) {
+        var body = function() {
+            var s = findSelf()
+            if (s === null || s === undefined) { fail("@" + n + " outside of a method") }
+            var v = getVar("v")
+            s[n] = v
+            return v
+        }
+        return {name: n + "=", params: ["v"], body: body}
+    }
+
+    // ----- case / ternary / << / multiple assignment / begin / raise -----
+
+    // case SUBJ / when V.. / else - a switch built from == tests. A subject-less
+    // case tests each when expression for truthiness instead.
+    function makeCase(items) {
+        var subject = null
+        var whens = []
+        var els = null
+        var idx = 0
+        if (items.length > 0 && typeof items[0] == "function") { subject = items[0]; idx = 1 }
+        for (var i = idx; i < items.length; i++) {
+            if (items[i].els != undefined) { els = items[i].els }
+            else { whens.push(items[i]) }
+        }
+        return function() {
+            var subj = anytype
+            var hasSubj = subject != null
+            if (hasSubj) { subj = subject() }
+            for (var w = 0; w < whens.length; w++) {
+                var vals = whens[w].vals
+                for (var k = 0; k < vals.length; k++) {
+                    var cv = vals[k]()
+                    var matched = hasSubj ? (subj === cv) : rtest(cv)
+                    if (matched) { return whens[w].whenbody() }
+                }
+            }
+            if (els != null) { return els() }
+            return null
+        }
+    }
+    function makeWhen(items) {
+        var vals = []
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { vals.push(items[i]) }
+            else { body = items[i].body }
+        }
+        return {vals: vals, whenbody: body}
+    }
+
+    // cond ? a : b - short-circuiting.
+    function makeTernary(items) {
+        if (items.length == 1) { return items[0] }
+        var condT = items[0]
+        var thenT = items[1]
+        var elseT = items[2]
+        return function() {
+            if (rtest(condT())) { return thenT() }
+            return elseT()
+        }
+    }
+
+    // arr << x: push and yield the array (so a << b << c chains).
+    function appendOp(l, r) {
+        if (Array.isArray(l)) { l.push(r); return l }
+        fail("<< requires an array")
+    }
+    function makeShift(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = anytype
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) { v = appendOp(v, items[i]()) }
+            return v
+        }
+    }
+
+    // a, b = x, y: evaluate every right-hand value first, then write each target.
+    function assignTargetRef(ref, v) {
+        if (ref.path.length == 0) { writeTarget(ref, v); return }
+        var p = resolveRefRuby(ref)
+        if (isDict(p.obj)) { dictSet(p.obj, p.key, v) } else { p.obj[p.key] = v }
+    }
+    function makeMultiAssign(items) {
+        var targets = []
+        var values = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { values.push(items[i]) }
+            else { targets.push(items[i]) }
+        }
+        return function() {
+            var vals = []
+            if (values.length == 1 && targets.length > 1) {
+                var it = values[0]()
+                for (var j = 0; j < it.length; j++) { vals.push(it[j]) }
+            } else {
+                for (var k = 0; k < values.length; k++) { vals.push(values[k]()) }
+            }
+            for (var m = 0; m < targets.length; m++) { assignTargetRef(targets[m], m < vals.length ? vals[m] : null) }
+            return vals
+        }
+    }
+
+    // begin / rescue / ensure: not implemented. Run the begin body and any ensure
+    // body (calls stay visible under -warn-unsupported); drop the rescue handlers.
+    function makeBegin(items, pos) {
+        notImpl("begin/rescue", pos)
+        var body = items[0].body
+        var ensure = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].ensure != undefined) { ensure = items[i].ensure }
+        }
+        return function() {
+            var r = anytype
+            r = body()
+            if (ensure != null) { ensure() }
+            return r
+        }
+    }
+    // raise: not implemented; the raised expression still runs.
+    function makeRaise(items, pos) {
+        notImpl("raise", pos)
+        return function() {
+            for (var i = 0; i < items.length; i++) { items[i]() }
             return null
         }
     }

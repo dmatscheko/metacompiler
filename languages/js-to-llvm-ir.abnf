@@ -54,7 +54,7 @@ Program     <~~ buildMain(takeAll()) ~~>
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
+            = Block | ClassDecl | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | FuncDecl | Empty | ExprStmt ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
@@ -202,7 +202,7 @@ DotSuffix   = "." Id <~~ push({kind:"member", key: makeConst(up.in)}) ~~> ;
 IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FunctionExpr | ObjectLit | ArrayLit | StringLit | NumberLit
+Primary     = ArrowFn | "(" Expression ")" | FunctionExpr | TemplateLit | ObjectLit | ArrayLit | StringLit | NumberLit
             | True | False | Null | Undefined | VarRef ;
 
 // The optional name of a function expression is accepted but not bound.
@@ -217,6 +217,70 @@ PropKey     = Id <~~ push(up.in) ~~> | StringLit ;
 
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ AssignExpr { "," AssignExpr } ] "]" ;
+
+// Arrow functions: x => x+1, (a, b) => a+b, () => { ... }. They reuse the same
+// closure machinery (emitFunction/js_closure) as function expressions; an expression
+// body is an implicit 'return <expr>'. Tried before "(" Expression ")" and VarRef.
+ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
+            = ArrowParams "=>" ArrowBody ;
+ArrowParams <~~ push({aparams: takeAll()}) ~~>
+            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")"
+            | Id <~~ push(up.in) ~~> ;
+ArrowBody   = ArrowBlock | ArrowExpr ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
+ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
+
+// Template literals: `text ${expr} more`. Each ${...} is evaluated and coerced to
+// string (js_add); the result is always a string. Whitespace is disabled inside the
+// backticks and re-enabled inside a ${...}. A lone '$' is a literal character.
+TemplateLit <~~ push(makeTemplate(takeAll())) ~~>
+            = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
+TplExpr     <~~ push({expr: pop()}) ~~>
+            = "${" :whitespace(Whitespace) Expression "}" ;
+TplChars    <~~ push({str: unescapeJs(up.in)}) ~~>
+            = TplChar { TplChar } ;
+TplChar     = TplEsc | TplPlain ;
+TplEsc      = "\\" "\x00"..."\U0010ffff" ;
+TplPlain    = "\x00"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
+TplDollar   <~~ push({str: "$"}) ~~>
+            = "$" ;
+
+// for-of over an array or string iterates its elements/characters (genuine).
+// for-in is not implemented (host key enumeration is an off-limits extern);
+// under -warn-unsupported its iterable is evaluated and the body skipped.
+ForOf       <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor "(" [ KwVar ] Id <~~ push(up.in) ~~>
+              ( KwOf | KwIn ) <~~ push(up.in) ~~> Expression ")" Statement ;
+
+// A destructuring binding is accepted but not lowered; the initializer still runs.
+Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
+            = KwVar DPattern "=" AssignExpr [ ";" ] ;
+DPattern    = "[" [ DElem { "," DElem } ] "]" | "{" [ DField { "," DField } ] "}" ;
+DElem       = Id | DPattern ;
+DField      = Id [ ":" DElem ] ;
+
+// try/catch/finally is accepted but not implemented; under -warn the try block runs.
+TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwTry Block [ KwCatch [ "(" Id ")" ] Block ] [ KwFinally Block ] ;
+
+// A class declaration is accepted but not implemented; the name is bound to undefined.
+ClassDecl   <~~ push(makeClass(takeAll(), up.pos)) ~~>
+            = KwClass Id <~~ push(up.in) ~~> [ KwExtends DiscardExpr ] SkipBlock ;
+DiscardExpr <~~ pop() ~~> = AssignExpr ;
+
+// A balanced { ... } body consumed without interpreting it. String and template
+// literals are matched first, so braces inside them are never miscounted.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipDq | SkipSq | SkipTpl | SkipBlock | SkipOther ;
+SkipDq      = '"' :whitespace() { SkipStrEsc | SkipDqChar } '"' :whitespace(Whitespace) ;
+SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whitespace) ;
+SkipTpl     = "`" :whitespace() { SkipTplSub | SkipStrEsc | SkipTplChar } "`" :whitespace(Whitespace) ;
+SkipTplSub  = "${" :whitespace(Whitespace) { SkipItem } "}" ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipDqChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipTplChar = "\x00"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5f" | "\x61"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
@@ -248,6 +312,13 @@ KwTypeof    = "typeof" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
 KwDefault   = "default" KwEnd ;
+KwOf        = "of" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwExtends   = "extends" KwEnd ;
 
 // ---
 
@@ -261,6 +332,11 @@ KwDefault   = "default" KwEnd ;
     // takeAll empties the local stack of the current tag and returns its items in push
     // order as a plain JS array.
     // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
+
+    // A clean compile-time abort (used by the shared notImpl helper in compile-core.js
+    // for constructs that parse but cannot be lowered).
+    function fail(msg) { println("js compiler error: " + msg); exit(1) }
+
     // ----- The emitter state -----
 
     var i8 = llvm.types.I8
@@ -514,6 +590,107 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var idx = emitFunction(paramNames, bodyT)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+
+    // Arrow function: items = [{aparams:[names]}, {body: stmtThunk} | {ebody: exprThunk}].
+    // A block body is a statement thunk; an expression body becomes 'return <expr>'.
+    function makeArrow(items) {
+        var params = items[0].aparams
+        var bm = items[1]
+        var bodyT = anytype // Either a block statement thunk or a synthesized return.
+        if (bm.body != undefined) {
+            bodyT = bm.body
+        } else {
+            var et = bm.ebody
+            bodyT = function(b) { var r = et(b); r.b.NewRet(r.v); return deadBlock() }
+        }
+        return function(b) {
+            var idx = emitFunction(params, bodyT)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+
+    // Template literal: items = [{str:"chunk"} | {expr: thunk}...]. Seeding with ""
+    // forces JS string coercion on every interpolated part (js_add).
+    function makeTemplate(items) {
+        return function(b) {
+            var v = emitStr(b, "")
+            for (var i = 0; i < items.length; i++) {
+                var pv = anytype // The chunk handle: a literal string or an expression value.
+                if (items[i].str != undefined) { pv = emitStr(b, items[i].str) }
+                else {
+                    var r = items[i].expr(b)
+                    b = r.b
+                    pv = r.v
+                }
+                v = callExt(b, "js_add", [v, pv])
+            }
+            return {b: b, v: v}
+        }
+    }
+
+    // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
+    // for-of genuinely iterates by index over an array/string: it opens its own scope
+    // holding the iterable, the length, and the index (hidden 0-prefixed names that no
+    // JS identifier can collide with), then loops name = iter[i] while i < length.
+    function makeForOf(items, pos) {
+        var name = items[0]
+        var iterT = items[2]
+        var bodyT = items[3]
+        if (items[1] == "in") {
+            notImpl("for-in", pos)
+            return function(b) { return iterT(b).b } // Iterable evaluated, body skipped.
+        }
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            var ir = iterT(b)
+            b = ir.b
+            var lenV = callExt(b, "js_tonum", [callExt(b, "js_get", [ir.v, emitStr(b, "length")])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), ir.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), lenV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0i")])
+            var lC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0len")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, lC])), bodyB, exitB)
+            var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0i")])
+            var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0it")])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [itB, iB])])
+            loopStack.push({cont: postB, brk: exitB})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var iP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, "0i")])
+            var nextV = callExt(postB, "js_add", [iP, callExt(postB, "js_num_i", [handle(1)])])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, "0i"), nextV])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+
+    // A destructuring binding is not lowered; run the initializer (calls stay visible).
+    function makeDestructure(init, pos) {
+        notImpl("destructuring declaration", pos)
+        return function(b) { return init(b).b }
+    }
+
+    // try/catch/finally is not implemented; under -warn the try block runs.
+    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+
+    // A class declaration is not implemented; declare the name as undefined.
+    function makeClass(items, pos) {
+        notImpl("class declaration", pos)
+        var name = items[0]
+        return function(b) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            return b
         }
     }
 

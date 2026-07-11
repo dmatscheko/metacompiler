@@ -49,9 +49,14 @@ Param       = Name <~~ push({param: up.in}) ~~> ;
 // Method / call names may end with ? or ! (empty?, include?); Name may not.
 MethodName  = Id [ "?" | "!" ] ;
 
-// class C ... end with instance methods; C.new builds an instance.
+// class C ... end with instance methods; C.new builds an instance. attr_reader /
+// attr_writer / attr_accessor declare @ivar getters/setters on the class.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Name <~~ push(up.in) ~~> { Def <~~ push({method: pop()}) ~~> } End ;
+            = KwClass Name <~~ push(up.in) ~~> { Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
+AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
+            = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
+AttrKind    = ( "attr_accessor" | "attr_reader" | "attr_writer" ) KwEnd ;
+AttrSym     = ":" SymName <~~ push({aname: up.in}) ~~> :whitespace(Whitespace) ;
 
 End         = "end" KwEnd ;
 
@@ -61,7 +66,14 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
             = { Statement } ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
-Statement   = PutsStmt | ExprStmt ;
+Statement   = PutsStmt | MultiAssign | ExprStmt ;
+
+// a, b = 1, 2 (and the swap a, b = b, a): every right-hand value is evaluated
+// before any target is written; a single right-hand array is unpacked positionally.
+// Kept at statement level (needs a comma after the first target) so it never
+// interferes with a nested expression.
+MultiAssign <~~ push(makeMultiAssign(takeAll())) ~~>
+            = Target "," Target { "," Target } "=" Expression { "," Expression } [ ";" ] ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
@@ -69,8 +81,11 @@ PutsStmt    <~~ push(makePuts(takeAll())) ~~>
 
 ExprStmt    = Expression [ ";" ] ;
 
-// Every expression pushes exactly one thunk: function() -> value.
-Expression  = Assignment | OrExpr ;
+// Every expression pushes exactly one thunk: function() -> value. A ternary
+// cond ? a : b binds looser than the boolean operators (like Ruby).
+Expression  = Assignment | Ternary ;
+Ternary     <~~ push(makeTernary(takeAll())) ~~>
+            = OrExpr [ "?" Expression ":" Expression ] ;
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target AssignOp <~~ push(up.in) ~~> Expression ;
@@ -97,7 +112,11 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = RangeExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> RangeExpr } ;
 // A range 1..5 (inclusive) or 1...5 (exclusive); built as an eager array.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = AddExpr [ ( "..." | ".." ) <~~ push(up.in) ~~> AddExpr ] ;
+            = ShiftExpr [ ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ] ;
+// The << append operator: arr << x pushes onto the array and yields the array
+// (so a << b << c chains). Binds tighter than range/comparison, looser than +.
+ShiftExpr   <~~ push(makeShift(takeAll())) ~~>
+            = AddExpr { "<<" AddExpr } ;
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
@@ -126,8 +145,8 @@ BlockParams <~~ push({bparams: takeAll()}) ~~>
             = "|" [ Param { "," Param } ] "|" ;
 
 Primary     = "(" Expression ")"
-            | IfExpr | UnlessExpr | WhileExpr | UntilExpr
-            | ReturnExpr | BreakExpr | NextExpr
+            | IfExpr | UnlessExpr | WhileExpr | UntilExpr | CaseExpr | BeginExpr
+            | ReturnExpr | BreakExpr | NextExpr | RaiseExpr
             | DqStr | SqStr | IntLit | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
@@ -146,12 +165,35 @@ WhileExpr   <~~ push(makeWhile(pop().body, pop())) ~~>
 UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
             = KwUntil Expression [ KwDo ] Body End ;
 
+// case SUBJ / when V1, V2 / else - lowered to a chain of == tests (a switch). A
+// subject-less case (case / when COND) tests each when expression for truthiness.
+CaseExpr    <~~ push(makeCase(takeAll())) ~~>
+            = KwCase [ Expression ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
+WhenClause  <~~ push(makeWhen(takeAll())) ~~>
+            = KwWhen Expression { "," Expression } [ KwThen ] Body ;
+
+// begin / rescue / ensure: accepted but not implemented (no exception model).
+// Under -warn-unsupported the begin body and any ensure body emit in sequence, so
+// their calls stay visible; the rescue handlers are parsed and dropped.
+BeginExpr   <~~ push(makeBegin(takeAll(), up.pos)) ~~>
+            = KwBegin Body { RescueClause } [ KwElse Body <~~ push({begelse: pop().body}) ~~> ] [ EnsureClause ] End ;
+RescueClause <~~ takeAll(); push({rescue: true}) ~~>
+            = KwRescue [ ErrList ] [ "=>" Name ] [ KwThen ] Body ;
+ErrList     = Name { "," Name } ;
+EnsureClause <~~ push({ensure: pop().body}) ~~>
+            = KwEnsure Body ;
+
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ;
 BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
             = KwBreak [ Expression ] ;
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
             = KwNext [ Expression ] ;
+
+// raise: accepted but not implemented (no unwinding). The raised expression still
+// emits under -warn-unsupported, so its calls stay visible.
+RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
+            = KwRaise [ Expression { "," Expression } ] ;
 
 // f(args): a top level method or a class (for C.new the .new is a method suffix).
 Call        <~~ push(makeCall(takeAll())) ~~>
@@ -213,7 +255,7 @@ NotKw       = :script(~~
         var kws = ["def", "end", "if", "elsif", "else", "unless", "while", "until",
                    "do", "then", "return", "break", "next", "class", "self", "nil",
                    "true", "false", "and", "or", "not", "case", "when", "in", "yield",
-                   "begin", "rescue", "ensure", "puts", "print"]
+                   "begin", "rescue", "ensure", "raise", "puts", "print"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -231,6 +273,12 @@ KwThen      = "then" KwEnd ;
 KwWhile     = "while" KwEnd ;
 KwUntil     = "until" KwEnd ;
 KwDo        = "do" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwWhen      = "when" KwEnd ;
+KwBegin     = "begin" KwEnd ;
+KwRescue    = "rescue" KwEnd ;
+KwEnsure    = "ensure" KwEnd ;
+KwRaise     = "raise" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwNext      = "next" KwEnd ;
@@ -534,6 +582,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- member chain: .method(args)/.method{block}, .field, [index], .new -----
+    // C.new / C.new(args): build the instance, attach __class, run initialize.
+    // Works both with parens (mcall) and without (a bare .new field access).
+    function emitNew(b, cur, argThunks) {
+        var objV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [objV, emitStr(b, "__class"), cur])
+        var argsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsV, objV])
+        for (var k = 0; k < argThunks.length; k++) {
+            var ra = argThunks[k](b)
+            b = ra.b
+            callExt(b, "js_arr_push", [argsV, ra.v])
+        }
+        var initV = callExt(b, "js_get", [cur, emitStr(b, "initialize")])
+        callExt(b, "js_call", [initV, hUndef, argsV])
+        return {b: b, v: objV}
+    }
     core.indexExt = "js_pyget"    // [i] works for arrays, strings and hashes
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
@@ -547,18 +611,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
                     if (s.name == "new") {
-                        var objV = callExt(b, "js_obj_new", [])
-                        callExt(b, "js_set", [objV, emitStr(b, "__class"), cur])
-                        var argsV = callExt(b, "js_arr_new", [])
-                        callExt(b, "js_arr_push", [argsV, objV])
-                        for (var k = 0; k < s.args.length; k++) {
-                            var ra = s.args[k](b)
-                            b = ra.b
-                            callExt(b, "js_arr_push", [argsV, ra.v])
-                        }
-                        var initV = callExt(b, "js_get", [cur, emitStr(b, "initialize")])
-                        callExt(b, "js_call", [initV, hUndef, argsV])
-                        cur = objV
+                        var rn = emitNew(b, cur, s.args)
+                        b = rn.b
+                        cur = rn.v
                     } else {
                         var ea = emitArgs(b, s.args)
                         b = ea.b
@@ -571,6 +626,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         cur = callExt(b, "js_jadd", [emitStr(b, ""), cur])
                     } else if (s.name == "to_a") {
                         cur = cur
+                    } else if (s.name == "new") {
+                        // Foo.new without parens: a zero argument constructor call.
+                        var rn2 = emitNew(b, cur, [])
+                        b = rn2.b
+                        cur = rn2.v
                     } else {
                         // A bare .name is a zero argument method call (Ruby getters,
                         // pop, keys, ...); routed through js_mcall like the interpreter.
@@ -685,13 +745,202 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
-                if (op != "=") {
-                    var oldm = callExt(b, "js_pyget", [p.obj, p.key])
-                    v = emitBin(b, op, oldm, v)
+                // A .field path targets an object property (js_get/js_set); a
+                // [i] path targets an array/hash element (js_pyget/js_pyset).
+                if (p.dict) {
+                    if (op != "=") {
+                        var oldf = callExt(b, "js_get", [p.obj, p.key])
+                        v = emitBin(b, op, oldf, v)
+                    }
+                    callExt(b, "js_set", [p.obj, p.key, v])
+                } else {
+                    if (op != "=") {
+                        var oldm = callExt(b, "js_pyget", [p.obj, p.key])
+                        v = emitBin(b, op, oldm, v)
+                    }
+                    callExt(b, "js_pyset", [p.obj, p.key, v])
                 }
-                callExt(b, "js_pyset", [p.obj, p.key, v])
             }
             return {b: b, v: v}
+        }
+    }
+
+    // ----- case / ternary / << / multiple assignment / begin / raise -----
+
+    // case SUBJ / when V.. / else - a switch built from == tests. A subject-less
+    // case tests each when expression for truthiness instead. The branch value
+    // travels through a hidden result var (like makeIf).
+    function makeCase(items) {
+        var subject = null
+        var whens = []
+        var els = null
+        var idx = 0
+        if (items.length > 0 && typeof items[0] == "function") { subject = items[0]; idx = 1 }
+        for (var i = idx; i < items.length; i++) {
+            if (items[i].els != undefined) { els = items[i].els }
+            else { whens.push(items[i]) }
+        }
+        return function(b) {
+            hidCount++
+            var rName = "$case" + hidCount
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rName), hNull])
+            var subjName = null
+            if (subject != null) {
+                var rs = subject(b)
+                b = rs.b
+                hidCount++
+                subjName = "$subj" + hidCount
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, subjName), rs.v])
+            }
+            var endB = curF.NewBlock("")
+            for (var w = 0; w < whens.length; w++) {
+                var vals = whens[w].vals
+                var bodyBk = curF.NewBlock("")
+                for (var k = 0; k < vals.length; k++) {
+                    var rv = vals[k](b)
+                    b = rv.b
+                    var testV
+                    if (subject != null) {
+                        var subjV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, subjName)])
+                        testV = truthy(b, callExt(b, "js_seq", [subjV, rv.v]))
+                    } else {
+                        testV = truthy(b, rv.v)
+                    }
+                    var nextTest = curF.NewBlock("")
+                    b.NewCondBr(testV, bodyBk, nextTest)
+                    b = nextTest
+                }
+                var rb = whens[w].whenbody(bodyBk)
+                callExt(rb.b, "js_scope_set", [curScopeV, emitStr(rb.b, rName), rb.v])
+                rb.b.NewBr(endB)
+            }
+            if (els != null) {
+                var re = els(b)
+                b = re.b
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, rName), re.v])
+            }
+            b.NewBr(endB)
+            var out = callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, rName)])
+            return {b: endB, v: out}
+        }
+    }
+    function makeWhen(items) {
+        var vals = []
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { vals.push(items[i]) }
+            else { body = items[i].body }
+        }
+        return {vals: vals, whenbody: body}
+    }
+
+    // cond ? a : b - the two arms meet in a phi (only the taken arm runs).
+    function makeTernary(items) {
+        if (items.length == 1) { return items[0] }
+        var condT = items[0]
+        var thenT = items[1]
+        var elseT = items[2]
+        return function(b) {
+            var rc = condT(b)
+            b = rc.b
+            var thenB = curF.NewBlock("")
+            var elseB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, rc.v), thenB, elseB)
+            var rt = thenT(thenB)
+            rt.b.NewBr(mergeB)
+            var re = elseT(elseB)
+            re.b.NewBr(mergeB)
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
+            return {b: mergeB, v: phi}
+        }
+    }
+
+    // arr << x: push and yield the array (so a << b << c chains); js_arr_push
+    // mutates the array in place, so the array handle is kept as the value.
+    function makeShift(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i++) {
+                var rr = items[i](b)
+                b = rr.b
+                callExt(b, "js_arr_push", [v, rr.v])
+            }
+            return {b: b, v: v}
+        }
+    }
+
+    // a, b = x, y: evaluate every right-hand value first, then write each target;
+    // a single right-hand array is unpacked positionally (js_pyget by index).
+    function emitAssignTarget(b, ref, v) {
+        if (ref.path.length == 0) {
+            if (ref.ivar != undefined) {
+                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+                callExt(b, "js_set", [selfV, emitStr(b, ref.ivar), v])
+            } else {
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+            }
+            return b
+        }
+        var p = emitRefPath(b, ref)
+        b = p.b
+        if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]) }
+        else { callExt(b, "js_pyset", [p.obj, p.key, v]) }
+        return b
+    }
+    function makeMultiAssign(items) {
+        var targets = []
+        var values = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { values.push(items[i]) }
+            else { targets.push(items[i]) }
+        }
+        return function(b) {
+            var vals = []
+            if (values.length == 1 && targets.length > 1) {
+                var rr = values[0](b)
+                b = rr.b
+                for (var j = 0; j < targets.length; j++) {
+                    vals.push(callExt(b, "js_pyget", [rr.v, emitNum(b, j)]))
+                }
+            } else {
+                for (var k = 0; k < values.length; k++) {
+                    var rv = values[k](b)
+                    b = rv.b
+                    vals.push(rv.v)
+                }
+            }
+            for (var m = 0; m < targets.length; m++) { b = emitAssignTarget(b, targets[m], vals[m]) }
+            return {b: b, v: hNull}
+        }
+    }
+
+    // begin / rescue / ensure: not implemented. Emit the begin body and any ensure
+    // body in sequence (calls stay visible under -warn); drop the rescue handlers.
+    function makeBegin(items, pos) {
+        notImpl("begin/rescue", pos)
+        var body = items[0].body
+        var ensure = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].ensure != undefined) { ensure = items[i].ensure }
+        }
+        return function(b) {
+            var r = body(b)
+            b = r.b
+            var v = r.v
+            if (ensure != null) { var re = ensure(b); b = re.b }
+            return {b: b, v: v}
+        }
+    }
+    // raise: not implemented; the raised expression still emits.
+    function makeRaise(items, pos) {
+        notImpl("raise", pos)
+        return function(b) {
+            for (var i = 0; i < items.length; i++) { var r = items[i](b); b = r.b }
+            return {b: b, v: hNull}
         }
     }
 
@@ -752,6 +1001,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: hNull}
         }
     }
+    // attr_reader / attr_writer / attr_accessor become @ivar getter/setter methods
+    // synthesized as ordinary method descriptors (body: function(b) -> {b, v}).
+    function makeAttr(items) {
+        var kind = ""
+        var names = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].akind != undefined) { kind = items[i].akind }
+            else if (items[i].aname != undefined) { names.push(items[i].aname) }
+        }
+        return {attr: {kind: kind, names: names}}
+    }
+    function attrGetterMethod(n) {
+        return {name: n, params: [], body: function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            return {b: b, v: callExt(b, "js_get", [selfV, emitStr(b, n)])}
+        }}
+    }
+    function attrSetterMethod(n) {
+        return {name: n + "=", params: ["v"], body: function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var vv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "v")])
+            callExt(b, "js_set", [selfV, emitStr(b, n), vv])
+            return {b: b, v: vv}
+        }}
+    }
+
     function makeClassStmt(items) {
         var name = items[0]
         var methods = []
@@ -760,6 +1035,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (items[i].method != undefined) {
                 methods.push(items[i].method)
                 if (items[i].method.name == "initialize") { hasInit = true }
+            } else if (items[i].attr != undefined) {
+                var a = items[i].attr
+                for (var j = 0; j < a.names.length; j++) {
+                    if (a.kind == "attr_reader" || a.kind == "attr_accessor") { methods.push(attrGetterMethod(a.names[j])) }
+                    if (a.kind == "attr_writer" || a.kind == "attr_accessor") { methods.push(attrSetterMethod(a.names[j])) }
+                }
             }
         }
         return function(b) {

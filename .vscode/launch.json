@@ -383,6 +383,90 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-widen.py", "-q"]
         },
         {
+            "name": "C widened features (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-widen.c", "-q"]
+        },
+        {
+            "name": "C widened features (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen.c", "-q"]
+        },
+        {
+            "name": "C not-implemented surface SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen-notimpl.c", "-q"]
+        },
+        {
+            "name": "C not-implemented surface warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen-notimpl.c", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "JavaScript widened (arrow/template/for-of) interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-2.js", "-q"]
+        },
+        {
+            "name": "JavaScript widened (arrow/template/for-of) compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-2.js", "-q"]
+        },
+        {
+            "name": "JavaScript unsupported SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-3.js", "-q"]
+        },
+        {
+            "name": "JavaScript unsupported warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-3.js", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Lua widened (repeat/ipairs/methods) interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-2.lua", "-q"]
+        },
+        {
+            "name": "Lua widened (repeat/ipairs/methods) compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-2.lua", "-q"]
+        },
+        {
+            "name": "Lua not-implemented warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-3.lua", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Ruby widened (case/ternary/<</attr) interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-2.rb", "-q"]
+        },
+        {
+            "name": "Ruby widened (case/ternary/<</attr) compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-2.rb", "-q"]
+        },
+        {
+            "name": "Ruby not-implemented warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-3-warn.rb", "-q", "-warn-unsupported"]
+        },
+        {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",
