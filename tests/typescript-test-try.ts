@@ -1,34 +1,33 @@
-// JavaScript try/catch/finally/throw, genuinely executed (interpreter and compiler).
+// TypeScript try/catch/finally/throw, genuinely executed (interpreter and compiler).
 //
-// throw raises a value that unwinds through any depth of calls to the nearest catch;
-// catch binds the value (the binding is optional - ES2019 catch {}); finally always
-// runs. A return/break/continue that leaves a try or catch body works in both engines
-// (the compiler re-issues it as a control signal). An uncaught throw is a clean
-// runtime error. (Other unsupported JS surface is covered by js-test-recognize.js.)
+// Same runtime model as JavaScript (types are erased): throw raises a value that
+// unwinds to the nearest catch; the catch binding is optional and may carry a type
+// (catch (e: unknown)); finally always runs; a return/break/continue leaving a try or
+// catch body works in both engines. An uncaught throw is a clean runtime error.
 //
 // main() counts failed checks and returns the count, so the run exits 0 exactly when
 // every check passes; the interpreter and compiler must agree.
 
-var failures = 0;
-function check(cond) { if (!cond) { failures = failures + 1; } }
+let failures: number = 0;
+function check(cond: boolean): void { if (!cond) { failures = failures + 1; } }
 
-function risky(n) {
-    if (n > 3) { throw {code: n}; }
+function risky(n: number): number {
+    if (n > 3) { throw { code: n }; }
     return n * 2;
 }
 
-// return out of a try, and out of a catch.
-function classify(n) {
+// return out of a try, and out of a catch (with a typed binding).
+function classify(n: number): number {
     try {
         if (n > 0) { return n * 10; }
         throw "neg";
-    } catch (e) {
+    } catch (e: unknown) {
         return -1;
     } finally { }
 }
 
 // A return out of an INNER try propagates through the OUTER try.
-function nestedReturn() {
+function nestedReturn(): number {
     try {
         try { return 9; } finally { }
     } finally { }
@@ -36,23 +35,23 @@ function nestedReturn() {
 }
 
 // break / continue leaving a try body inside a loop.
-function loopBreak() {
-    var sum = 0;
-    for (var i = 0; i < 10; i = i + 1) {
+function loopBreak(): number {
+    let sum: number = 0;
+    for (let i: number = 0; i < 10; i = i + 1) {
         try { if (i === 3) { break; } sum = sum + i; } finally { }
     }
     return sum;              // 0+1+2 = 3
 }
-function loopContinue() {
-    var sum = 0;
-    for (var i = 0; i < 5; i = i + 1) {
+function loopContinue(): number {
+    let sum: number = 0;
+    for (let i: number = 0; i < 5; i = i + 1) {
         try { if (i === 2) { continue; } sum = sum + i; } catch (e) { }
     }
     return sum;              // 0+1+3+4 = 8
 }
 
-function main() {
-    var log = "";
+function main(): number {
+    let log: string = "";
     try {
         log = log + "a";
         throw "boom";
@@ -64,13 +63,13 @@ function main() {
     }
     check(log === "abc");
 
-    var caught = -1;
+    let caught: number = -1;
     try { risky(5); check(false); } catch (e) { caught = e.code; }
     check(caught === 5);
     check(risky(2) === 4);
 
     // ES2019 optional catch binding.
-    var ok = 0;
+    let ok: number = 0;
     try { throw "z"; } catch { ok = 1; }
     check(ok === 1);
 
@@ -80,6 +79,6 @@ function main() {
     check(loopBreak() === 3);
     check(loopContinue() === 8);
 
-    if (failures === 0) { println("JavaScript try/catch OK"); }
+    if (failures === 0) { println("TypeScript try/catch OK"); }
     return failures;
 }

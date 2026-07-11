@@ -106,7 +106,7 @@ Break       <~~ push(makeBreak()) ~~>
 Continue    <~~ push(makeContinue()) ~~>
             = KwContinue [ ";" ] ;
 
-Throw       <~~ push(makeThrow(pop())) ~~>
+Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
 
 // A function declaration binds the closure in the current scope when it executes.
@@ -359,11 +359,18 @@ DIdElem     <~~ push({dtype: "id", name: up.in}) ~~>
 DField      <~~ push(makeDField(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" DElem ] ;
 
-// try/catch/finally is accepted but not implemented (there is no exception model:
-// throw already terminates). Under -warn-unsupported the try block runs; catch and
-// finally blocks are parsed and dropped.
-TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
-            = KwTry Block [ KwCatch [ "(" Id ")" ] Block ] [ KwFinally Block ] ;
+// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
+// raises the value, catch binds it (the binding is optional - ES2019 catch {}), finally
+// always runs. return/break/continue inside a try still propagate. Each part is marked
+// so excTry can tell them apart on the stack.
+TryStmt     <~~ push(excTry(takeAll())) ~~>
+            = KwTry TryBody [ CatchClause ] [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(excCatch(takeAll())) ~~>
+            = KwCatch [ "(" Id <~~ push(up.in) ~~> ")" ] Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
 
 // A class declaration: fields, a constructor and instance/static methods, executed
 // directly. An instance is a plain object carrying a __class descriptor; the descriptor
@@ -784,8 +791,7 @@ KwInstanceof = "instanceof" KwEnd ;
         }
     }
 
-    // try/catch/finally is not implemented; under -warn the try block runs.
-    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+    // try/catch/finally and throw are handled by excTry/excThrow (lib/interp-core.js).
 
     // ----- Classes (the __class machinery, mirrors js-to-llvm-ir.abnf) -----
     // An instance is a plain object carrying a __class descriptor; the descriptor holds
@@ -1203,7 +1209,6 @@ KwInstanceof = "instanceof" KwEnd ;
         var t = items.length > 0 ? items[0] : makeConst(undefined)
         return function() { return {isRet: true, v: t()} }
     }
-    function makeThrow(t) { return function() { fail("thrown: " + t()) } }
 
     // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement
     // list is grouped into case descriptors at build time; at run time the first ===
@@ -1262,7 +1267,14 @@ KwInstanceof = "instanceof" KwEnd ;
     if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
         fail("JavaScript programs need a main() function.")
     }
-    var ret = globalScope["main"]()
+    // A user exception that escapes main() is reported like any runtime error.
+    var ret = anytype
+    try {
+        ret = globalScope["main"]()
+    } catch (e) {
+        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+        throw e
+    }
     println("js interpreter: main() returned " + ret)
     exit(ret | 0)
 

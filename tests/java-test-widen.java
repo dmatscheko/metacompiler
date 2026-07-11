@@ -1,14 +1,14 @@
 /* Java widened-surface test.
  * Exercises constructs added on top of the base subset: generics (parsed and
- * ignored), annotations, casts (identity), try/catch/finally + throw, interfaces,
- * enums, annotation types, nested types, lambdas, method references and anonymous
- * classes.
+ * ignored), annotations, casts (identity), interfaces, enums, annotation types,
+ * nested types, lambdas, method references and anonymous classes.
  *
  * Under a DEFAULT run this ABORTS at the first not-implemented construct (the
  * top-level interface below) with a clean file:line message. Under
  * -warn-unsupported every not-implemented construct warns and the genuinely
- * lowered parts (casts, generics, the try body) run; Main.main self checks them
- * and exits with the failure count (0 when all pass). **/
+ * lowered parts (casts, generics) run; Main.main self checks them and exits with
+ * the failure count (0 when all pass). (try/catch/finally + throw are now
+ * implemented - see java-test-try.java.) **/
 
 import java.util.List;
 
@@ -107,21 +107,7 @@ public class Main {
         Big big = new Big();                    // super(7) accepted; own field init runs
         Main.check("subclass own field init", big.extra, 100);
 
-        // the try block still runs; catch/finally are not modelled
-        int tv = 0;
-        try {
-            tv = 5;
-        } catch (Exception e) {
-            tv = 99;                            // not reached (no exception model)
-        } finally {
-            tv = tv + 1;                        // not reached either
-        }
-        Main.check("try body ran", tv, 5);
-
-        // throw parses and (in an untaken branch) does not run
-        if (Main.fails < 0) {
-            throw new MyErr();
-        }
+        // (try/catch/finally and throw are now implemented - see java-test-try.java.)
 
         // lambdas, method references and anonymous classes: parsed, not implemented
         var f = (int x, int y) -> x + y;

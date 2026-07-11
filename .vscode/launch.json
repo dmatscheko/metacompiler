@@ -455,16 +455,40 @@
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-2.js", "-q"]
         },
         {
-            "name": "JavaScript unsupported SHOULD FAIL",
+            "name": "JavaScript try/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-3.js", "-q"]
+        },
+        {
+            "name": "JavaScript try/catch (compiler)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-3.js", "-q"]
         },
         {
-            "name": "JavaScript unsupported warned+ignored",
+            "name": "TypeScript try/catch (interpreter)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-3.js", "-q", "-warn-unsupported"]
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-test-try.ts", "-q"]
+        },
+        {
+            "name": "TypeScript try/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-try.ts", "-q"]
+        },
+        {
+            "name": "Java try/catch (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-try.java", "-q"]
+        },
+        {
+            "name": "Java try/catch (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-try.java", "-q"]
         },
         {
             "name": "JavaScript implicit global interpreter",

@@ -187,12 +187,20 @@ NotSwitchKw = :script(~~
     })()
 ~~) ;
 
-// try/catch/finally and throw parse fully but are not implemented (no exception
-// model). Under -warn-unsupported the try block runs and the thrown expression is
-// still evaluated (see makeTry/makeThrow), so their calls stay visible in graphs.
-Try         <~~ push(makeTry(takeAll(), up.pos)) ~~>
-            = KwTry [ SkipParen ] Block { KwCatch "(" CatchType Id ")" Block } [ KwFinally Block ] ;
-Throw       <~~ push(makeThrow(pop(), up.pos)) ~~>
+// try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
+// raises the value, catch binds it (the first catch clause wins - exception types,
+// including multi-catch A | B, are parsed but not discriminated), finally always runs.
+// return/break/continue inside a try still propagate. A try-with-resources header is
+// skipped (SkipParen), so its resources are not bound or auto-closed.
+Try         <~~ push(excTry(takeAll())) ~~>
+            = KwTry [ SkipParen ] TryBody { CatchClause } [ FinallyClause ] ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Block ;
+CatchClause <~~ push(excCatch(takeAll())) ~~>
+            = KwCatch "(" CatchType Id <~~ push(up.in) ~~> ")" Block ;
+FinallyClause <~~ push({finbody: pop()}) ~~>
+            = KwFinally Block ;
+Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression ";" ;
 
 // An explicit constructor invocation (super(args) or this(args)): accepted and
@@ -771,10 +779,7 @@ KwSync      = "synchronized" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // try/catch/finally has no exception model; the try block still runs. throw
-    // evaluates its expression (keeping calls visible) but does not unwind.
-    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
-    function makeThrow(e, pos) { notImpl("throw", pos); return exprToStmt(e) }
+    // try/catch/finally and throw are handled by excTry/excThrow (lib/interp-core.js).
     // super(args) / this(args): not implemented; evaluate the arguments and continue.
     function makeCtorCall(args, pos) {
         notImpl("explicit constructor invocation", pos)
@@ -1044,7 +1049,14 @@ KwSync      = "synchronized" KwEnd ;
     if (mainCls == undefined || typeof mainCls["main"] != "function") {
         fail("Java programs need a class Main with a static main method.")
     }
-    var ret = mainCls["main"]([])
+    // A user exception that escapes main() is reported like any runtime error.
+    var ret = anytype
+    try {
+        ret = mainCls["main"]([])
+    } catch (e) {
+        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+        throw e
+    }
     println("java interpreter: main() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
