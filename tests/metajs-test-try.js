@@ -5,10 +5,9 @@
  * catch binds the thrown value. A non-user exception and an uncaught throw are
  * reported as runtime errors.
  *
- * Note: a return/break/continue that leaves a try/catch/finally body is not in the
- * subset for the COMPILER (each body is its own IR closure), so this test keeps such
- * jumps outside the try - the value is captured in a variable and returned after.
- * The interpreter propagates them via the statement-signal protocol either way.
+ * A return/break/continue that leaves a try or catch body works in both engines - the
+ * compiler turns it into a control signal re-issued in the enclosing function/loop
+ * (see withReturn / loopBreak / loopContinue). (A jump out of finally is not supported.)
  *
  * main() counts failed checks and returns the count, so the run exits 0 exactly when
  * every check passes; the interpreter and compiler must agree. **/
@@ -32,6 +31,35 @@ function relabel() {
         result = e2;
     }
     return result;
+}
+
+// return that leaves a try body, and one that leaves a catch body.
+function withReturn(n) {
+    try { if (n > 0) { return n * 10; } throw "neg"; }
+    catch (e) { return -1; }
+    finally { }
+}
+// A return out of an INNER try propagates through the OUTER try (nested).
+function nestedReturn() {
+    try {
+        try { return 9; } finally { }
+    } finally { }
+    return 0;
+}
+// break / continue that leave a try body inside a loop.
+function loopBreak() {
+    var sum = 0;
+    for (var i = 0; i < 10; i = i + 1) {
+        try { if (i == 3) { break; } sum = sum + i; } finally { }
+    }
+    return sum;          // 0+1+2 = 3
+}
+function loopContinue() {
+    var sum = 0;
+    for (var i = 0; i < 5; i = i + 1) {
+        try { if (i == 2) { continue; } sum = sum + i; } catch (e) { }
+    }
+    return sum;          // 0+1+3+4 = 8
 }
 
 function main() {
@@ -66,6 +94,13 @@ function main() {
 
     // Nested try + re-throw.
     check(relabel() == "rethrown:inner");
+
+    // return / break / continue that leave a try or catch body.
+    check(withReturn(4) == 40);      // return out of try
+    check(withReturn(-1) == -1);     // return out of catch
+    check(nestedReturn() == 9);      // return through nested tries
+    check(loopBreak() == 3);
+    check(loopContinue() == 8);
 
     // try/finally with no catch: finally runs on the normal path.
     var fin = 0;

@@ -5,10 +5,10 @@
  * exception types are parsed but not discriminated without runtime types); finally
  * always runs. An uncaught throw is a clean runtime error.
  *
- * Note: a return/break/continue that LEAVES a try/catch/finally body is genuine in the
- * interpreter but outside the subset for the compiler (each body is a separate IR
- * closure), so this dual test keeps such jumps outside the try - the result is captured
- * in a variable and returned after.
+ * A return/break/continue that LEAVES a try or catch body works in both engines: the
+ * interpreter propagates the statement signal, and the compiler turns it into a control
+ * signal that is re-issued in the enclosing function/loop (see relabelReturn / loopBreak
+ * / loopContinue below). (A jump out of a finally block is still not supported.)
  *
  * main() counts failed checks and returns the count, so the run exits 0 exactly when
  * every check passes; the interpreter and compiler must agree byte-for-byte. **/
@@ -31,6 +31,50 @@ fun relabel(): String {
         result = "handled"
     }
     return result
+}
+
+// return that LEAVES a try body (and one that leaves a catch body): the enclosing
+// function returns the value, finally still runs on the way out.
+fun relabelReturn(n: Int): Int {
+    try {
+        if (n > 0) { return n * 10 }     // return out of the try
+        throw "neg"
+    } catch (e: Exception) {
+        return -1                        // return out of the catch
+    } finally {
+        // runs on both paths
+    }
+}
+
+// A return out of an INNER try propagates through the OUTER try (nested), re-signalled
+// each level until it reaches the enclosing function.
+fun nestedReturn(): Int {
+    try {
+        try { return 9 } finally { }
+    } finally { }
+    return 0
+}
+
+// break / continue that LEAVE a try body while inside a loop.
+fun loopBreak(): Int {
+    var sum = 0
+    for (i in 0..9) {
+        try {
+            if (i == 3) { break }
+            sum = sum + i
+        } finally { }
+    }
+    return sum                           // 0+1+2 = 3
+}
+fun loopContinue(): Int {
+    var sum = 0
+    for (i in 0..4) {
+        try {
+            if (i == 2) { continue }
+            sum = sum + i
+        } catch (e: Exception) { }
+    }
+    return sum                           // 0+1+3+4 = 8
 }
 
 fun main() {
@@ -67,6 +111,13 @@ fun main() {
 
     // Nested try + re-throw.
     if (relabel() != "handled") { fails = fails + 1 }
+
+    // return / break / continue that leave a try or catch body.
+    if (relabelReturn(4) != 40) { fails = fails + 1 }    // return out of try
+    if (relabelReturn(-1) != -1) { fails = fails + 1 }   // return out of catch
+    if (nestedReturn() != 9) { fails = fails + 1 }       // return through nested tries
+    if (loopBreak() != 3) { fails = fails + 1 }
+    if (loopContinue() != 8) { fails = fails + 1 }
 
     // try/finally with no catch: finally runs on the normal path.
     var fin = 0

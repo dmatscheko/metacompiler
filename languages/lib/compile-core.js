@@ -164,6 +164,77 @@ var loopStack = []
 var funcCount = 0
 var deadCount = 0
 
+// ----- Non-local control flow out of a try body -----
+// A try/catch/finally body compiles to its own IR closure (so a Go recover can wrap
+// it), so a return/break/continue that LEAVES the body cannot ret/br the enclosing
+// frame directly. Instead such a jump returns a control signal (js_ctl_*), which
+// js_try passes through and excDispatch (emitted after the js_try call) turns back
+// into a real ret/br in the enclosing function/loop.
+// ctlStack holds the function tag of each active try-body closure; curFTag is the tag
+// of the function currently being emitted. A grammar's function emitter maintains
+// curFTag (save/restore around each function) and, for a try body, pushes its tag
+// with ctlEnter/ctlLeave. inCtlBody() is then true exactly when the code being emitted
+// sits DIRECTLY in a try-body closure (a nested function has its own curFTag; an inner
+// loop grows loopStack past the boundary), so its jump is the non-local kind.
+var ctlStack = []
+var curFTag = 0
+function ctlEnter(tag) { ctlStack.push(tag) }
+function ctlLeave() { ctlStack.pop() }
+function inCtlBody() { return ctlStack.length > 0 && curFTag == ctlStack[ctlStack.length - 1] }
+
+// retStmt is the return emitter every grammar's makeReturn calls: a plain ret, unless
+// it leaves a try body, in which case it returns a control signal.
+function retStmt(b, v) {
+    if (inCtlBody()) {
+        b.NewRet(callExt(b, "js_ctl_return", [v]))
+    } else {
+        b.NewRet(v)
+    }
+    return deadBlock()
+}
+
+// emitBreak / emitContinue emit a break/continue at block b: a branch to the enclosing
+// loop, or a control signal when the jump leaves a try body with no loop of its own.
+// makeBreak/makeContinue and excDispatch (re-issuing a signal) all go through these.
+function emitBreak(b) {
+    if (inCtlBody() && loopStack.length == 0) { b.NewRet(callExt(b, "js_ctl_break", [])) }
+    else { b.NewBr(loopStack[loopStack.length - 1].brk) }
+}
+function emitContinue(b) {
+    if (inCtlBody() && loopStack.length == 0) { b.NewRet(callExt(b, "js_ctl_continue", [])) }
+    else { b.NewBr(loopStack[loopStack.length - 1].cont) }
+}
+
+// excDispatch is emitted right after a js_try call: ctl is its result. If ctl is a
+// control signal, re-issue the return/break/continue AS IF a return/break/continue
+// statement stood here - so if this try is itself inside another try body, the signal
+// re-signals (via retStmt/emitBreak/emitContinue) and propagates outward. Otherwise
+// fall through. Returns the block to continue in.
+function excDispatch(b, ctl) {
+    var kind = callExt(b, "js_ctl_kind", [ctl])
+    var normB = curF.NewBlock("")
+    var retB = curF.NewBlock("")
+    var afterRet = curF.NewBlock("")
+    b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, handle(1)), retB, afterRet)
+    retStmt(retB, callExt(retB, "js_ctl_value", [ctl]))
+    // break/continue can only arise from valid code if there is somewhere to send them:
+    // an enclosing loop, or an enclosing try body to re-signal through. Otherwise (a
+    // stray break/continue at a try not in a loop) fall through rather than emit an
+    // invalid branch.
+    if (loopStack.length > 0 || inCtlBody()) {
+        var brkB = curF.NewBlock("")
+        var contB = curF.NewBlock("")
+        var afterBrk = curF.NewBlock("")
+        afterRet.NewCondBr(afterRet.NewICmp(llvm.enum.IPredEQ, kind, handle(2)), brkB, afterBrk)
+        emitBreak(brkB)
+        afterBrk.NewCondBr(afterBrk.NewICmp(llvm.enum.IPredEQ, kind, handle(3)), contB, normB)
+        emitContinue(contB)
+    } else {
+        afterRet.NewBr(normB)
+    }
+    return normB
+}
+
 // stmtPos wraps a statement thunk with a js_srcpos marker carrying the source
 // position of its node (up.pos), so traces, diagrams and steppers know which
 // statement executes. Only when the host collects positions (c.tracing, i.e.
@@ -360,16 +431,13 @@ function makeWhile(bodyT, condT) {
     }
 }
 
+// break/continue: a normal branch to the enclosing loop, unless it leaves a try body
+// with no loop of its own inside (loopStack was reset at the closure boundary), in
+// which case it returns a control signal for excDispatch to re-issue (see emitBreak).
 function makeBreak() {
-    return function(b) {
-        b.NewBr(loopStack[loopStack.length - 1].brk)
-        return deadBlock()
-    }
+    return function(b) { emitBreak(b); return deadBlock() }
 }
 function makeContinue() {
-    return function(b) {
-        b.NewBr(loopStack[loopStack.length - 1].cont)
-        return deadBlock()
-    }
+    return function(b) { emitContinue(b); return deadBlock() }
 }
 

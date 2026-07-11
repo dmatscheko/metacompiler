@@ -504,7 +504,9 @@ KwDefault   = "default" KwEnd ;
 
     // A function body: an own IR function jsf_N(env, args) whose entry opens a scope on
     // the passed environment, binds the parameters and 'arguments', and runs the body.
-    function emitFunction(paramNames, bodyT) {
+    // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
+    // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
+    function emitFunction(paramNames, bodyT, isCtl) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -512,8 +514,11 @@ KwDefault   = "default" KwEnd ;
         var savedF = curF
         var savedScope = curScopeV
         var savedLoops = loopStack
+        var savedTag = curFTag
         curF = f
+        curFTag = idx
         loopStack = []
+        if (isCtl) { ctlEnter(idx) }
 
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
@@ -525,9 +530,11 @@ KwDefault   = "default" KwEnd ;
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
 
+        if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
+        curFTag = savedTag
         return idx
     }
     function makeFunctionExpr(bodyT, paramNames) {
@@ -617,7 +624,9 @@ KwDefault   = "default" KwEnd ;
             return exitB
         }
     }
-    // items = [] or [exprThunk].
+    // items = [] or [exprThunk]. retStmt (compile-core) emits a plain ret, or a control
+    // signal when this return leaves a try body. Code behind it is unreachable but
+    // still lands in a valid (dead) block.
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : null
         return function(b) {
@@ -627,9 +636,7 @@ KwDefault   = "default" KwEnd ;
                 b = r.b
                 v = r.v
             }
-            b.NewRet(v)
-            // Code behind a return is unreachable but must still land in a valid block.
-            return deadBlock()
+            return retStmt(b, v)
         }
     }
     function makeThrow(t) {
@@ -646,12 +653,12 @@ KwDefault   = "default" KwEnd ;
         return {catchbody: items[0], catchname: undefined}
     }
     // items = [{trybody}, {catchbody,catchname}?, {finbody}?]. Each body becomes its
-    // own IR closure over the current scope; js_try (jsrt.go) runs the try under a
-    // Go recover, hands a thrown value to the catch closure (a one-parameter function
-    // bound to the catch name) and always runs the finally closure. A return/break/
-    // continue that would leave a try body is not supported here (the body is a
-    // separate IR function): it either returns from that closure or, for break/
-    // continue, has no enclosing loop - keep such jumps outside the try/catch/finally.
+    // own IR closure over the current scope; js_try (jsrt.go) runs the try under a Go
+    // recover, hands a thrown value to the catch closure (a one-parameter function
+    // bound to the catch name) and always runs the finally closure. The try and catch
+    // bodies are ctl closures, so a return/break/continue leaving them becomes a control
+    // signal that excDispatch re-issues here. (A jump out of a finally is still lost -
+    // js_try discards the finally closure's result.)
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {
@@ -660,21 +667,18 @@ KwDefault   = "default" KwEnd ;
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
         return function(b) {
-            var tryIdx = emitFunction([], tryT)
-            var tryClo = callExt(b, "js_closure", [handle(tryIdx), curScopeV])
+            var tryClo = callExt(b, "js_closure", [handle(emitFunction([], tryT, true)), curScopeV])
             var catchClo = hUndef
             if (catchT != undefined) {
                 var cn = (catchName != undefined) ? catchName : "__caught"
-                var catchIdx = emitFunction([cn], catchT)
-                catchClo = callExt(b, "js_closure", [handle(catchIdx), curScopeV])
+                catchClo = callExt(b, "js_closure", [handle(emitFunction([cn], catchT, true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                var finIdx = emitFunction([], finallyT)
-                finClo = callExt(b, "js_closure", [handle(finIdx), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT)), curScopeV])
             }
-            callExt(b, "js_try", [tryClo, catchClo, finClo])
-            return b
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
+            return excDispatch(b, ctl)
         }
     }
     // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement

@@ -133,9 +133,9 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 // try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
 // runtime unwinds), and each try/catch/finally body is compiled to its own closure
 // handed to js_try (see makeTry). The first catch clause wins (exception types are
-// parsed but not discriminated). LIMITATION: a return/break/continue that LEAVES a
-// try body is not supported by the compiler (the body is a separate IR function) -
-// keep such jumps outside the try. Each part is marked so makeTry can tell them apart.
+// parsed but not discriminated). A return/break/continue that leaves a try or catch
+// body becomes a control signal that excDispatch re-issues in the enclosing frame
+// (compile-core). Each part is marked so makeTry can tell them apart.
 TryStmt     <~~ push(makeTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop()}) ~~>
@@ -548,18 +548,20 @@ KwStep      = "step" KwEnd ;
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
         return function(b) {
-            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false)), curScopeV])
+            // The try and catch bodies are ctl closures (isCtl), so a return/break/
+            // continue leaving them becomes a control signal that excDispatch re-issues.
+            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
             var catchClo = hUndef
             if (catchT != undefined) {
                 var cn = (catchName != undefined) ? catchName : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false)), curScopeV])
+                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false, true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, false)), curScopeV])
             }
-            callExt(b, "js_try", [tryClo, catchClo, finClo])
-            return b
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
+            return excDispatch(b, ctl)
         }
     }
     // throw e: evaluate e and raise it with js_throw (a Go panic the runtime unwinds).
@@ -1009,8 +1011,7 @@ KwStep      = "step" KwEnd ;
                 b = r.b
                 v = r.v
             }
-            b.NewRet(v)
-            return deadBlock()
+            return retStmt(b, v) // plain ret, or a control signal when leaving a try body
         }
     }
     function makeExprBody(t) {
@@ -1023,15 +1024,20 @@ KwStep      = "step" KwEnd ;
 
     // ----- Functions and classes -----
 
-    function emitFunc(params, body, isInstance) {
+    // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
+    // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
+    function emitFunc(params, body, isInstance, isCtl) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var savedF = curF
         var savedScope = curScopeV
         var savedLoops = loopStack
+        var savedTag = curFTag
         curF = f
+        curFTag = idx
         loopStack = []
+        if (isCtl) { ctlEnter(idx) }
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
@@ -1045,9 +1051,11 @@ KwStep      = "step" KwEnd ;
         }
         var endB = body(b)
         endB.NewRet(hUndef)
+        if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
+        curFTag = savedTag
         return idx
     }
     function makeFun(items) {

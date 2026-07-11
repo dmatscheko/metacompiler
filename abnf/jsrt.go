@@ -100,6 +100,16 @@ type jsThrown struct {
 	value interface{}
 }
 
+// jsCtl is a control-flow signal for a return/break/continue that LEAVES a try body.
+// A try/catch/finally body compiles to its own IR closure, so a non-local jump inside
+// it cannot branch to the enclosing function/loop directly; instead the closure
+// returns a jsCtl, which js_try passes through and the try's compiled dispatch
+// (compile-core excDispatch) re-issues as a real ret/br in the enclosing frame.
+type jsCtl struct {
+	kind  byte        // 1 = return, 2 = break, 3 = continue
+	value interface{} // the returned value (kind 1); ignored otherwise
+}
+
 // jsScope is one link of a scope chain. Variables can hold undefined, so
 // existence is the map key, not the value.
 type jsScope struct {
@@ -2072,6 +2082,22 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				result = rt.call(tryC, jsUndef, nil)
 			}()
 			return w(result)
+		},
+		// Control-flow signals for a return/break/continue that leaves a try body.
+		"js_ctl_return":   func(a []uint64) uint64 { return w(&jsCtl{kind: 1, value: u(a[0])}) },
+		"js_ctl_break":    func(a []uint64) uint64 { return w(&jsCtl{kind: 2}) },
+		"js_ctl_continue": func(a []uint64) uint64 { return w(&jsCtl{kind: 3}) },
+		"js_ctl_kind": func(a []uint64) uint64 { // 1/2/3 for a signal, 0 for an ordinary value
+			if c, ok := u(a[0]).(*jsCtl); ok {
+				return uint64(c.kind)
+			}
+			return 0
+		},
+		"js_ctl_value": func(a []uint64) uint64 {
+			if c, ok := u(a[0]).(*jsCtl); ok {
+				return w(c.value)
+			}
+			return jsHUndefined
 		},
 
 		// The Python dialect externals.
