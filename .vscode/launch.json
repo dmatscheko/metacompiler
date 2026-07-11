@@ -593,6 +593,18 @@
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-complete.js", "-q"]
         },
         {
+            "name": "JavaScript classes + for-in interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-classes.js", "-q"]
+        },
+        {
+            "name": "JavaScript classes + for-in compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-classes.js", "-q"]
+        },
+        {
             "name": "TypeScript completed (interpreter)",
             "type": "go",
             "request": "launch",

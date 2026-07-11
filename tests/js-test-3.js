@@ -1,11 +1,11 @@
-// Exercises the JavaScript constructs that are ACCEPTED structurally but NOT
-// lowered (no runtime model in the subset): try/catch/finally, class
-// declarations, destructuring bindings, and for-in.
+// Exercises the one JavaScript construct that is still ACCEPTED structurally but NOT
+// lowered (no runtime model in the subset): try/catch/finally. (class declarations and
+// for-in are now genuinely implemented; destructuring bindings genuinely bind.)
 //
-// A default run of either grammar aborts cleanly at the FIRST such construct
-// (a "not implemented (file:line); use -warn-unsupported to ignore" message).
-// With -warn-unsupported every construct is warned and skipped, the genuinely
-// supported code around them runs, and main() returns 0 (a clean exit).
+// A default run of either grammar aborts cleanly at the FIRST not-lowered construct
+// (a "not implemented (file:line); use -warn-unsupported to ignore" message) - here the
+// try/catch in testTry(). With -warn-unsupported the try block runs, the genuinely
+// supported code around it runs, and main() returns 0 (a clean exit).
 
 var failures = 0;
 
@@ -27,37 +27,21 @@ function testTry() {
     check(reached === 1);
 }
 
-// A class declaration is accepted, its body skipped, the name bound to undefined.
-class Shape {
-    constructor(kind) { this.kind = kind; }
-    area() { return 0; }
-}
-class Circle extends Shape {
-    area() { return 3; }
-}
-
-// Destructuring bindings: the initializer runs (so its calls are visible), but no
-// names are bound - do not read them afterwards.
+// Destructuring bindings genuinely bind here (real JS), so the initializer runs and
+// its side effect is visible. (This test keeps them to still exercise a construct
+// around the notImplemented try/catch.)
 function testDestructure() {
     var sideEffect = 0;
     var bump = () => { sideEffect = sideEffect + 1; return [1, 2]; };
     var [a, b] = bump();          // array pattern; bump() runs
     var {x, y} = {x: 10, y: 20};  // object pattern
     check(sideEffect === 1);
-}
-
-// for-in is accepted; under -warn the iterable is evaluated and the body skipped.
-function testForIn() {
-    var obj = {p: 1, q: 2};
-    var touched = 0;
-    for (var k in obj) { touched = touched + 1; }
-    check(touched === 0); // body skipped under -warn
+    check(a === 1 && b === 2);
+    check(x === 10 && y === 20);
 }
 
 function main() {
     testTry();
     testDestructure();
-    testForIn();
-    check(typeof Shape === "undefined"); // class name lowered to undefined
     return failures;
 }
