@@ -1883,6 +1883,27 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			arr.elems = append(arr.elems, u(a[1]))
 			return 0
 		},
+		// js_keys returns an object's own keys in insertion order (deterministic, so
+		// for-in / Lua pairs / dict key enumeration stay byte-identical across engines).
+		// A dict ({__dict,keys,vals}) yields its key array; a plain object yields its
+		// string keys, skipping the internal __-prefixed slots (__class, __super, ...).
+		"js_keys": func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				rt.fail("js_keys: not an object (got %s)", rt.typeOf(u(a[0])))
+			}
+			if keys, _, isDict := dictParts(o); isDict {
+				return w(&jsArray{elems: append([]interface{}{}, keys.elems...)})
+			}
+			out := &jsArray{}
+			for _, k := range o.keys {
+				if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+					continue
+				}
+				out.elems = append(out.elems, k)
+			}
+			return w(out)
+		},
 		"js_get": func(a []uint64) uint64 {
 			rt.noteGet(a[0], a[1])
 			v := rt.getMember(u(a[0]), u(a[1]))
