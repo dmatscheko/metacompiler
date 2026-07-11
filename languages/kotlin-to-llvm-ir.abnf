@@ -51,7 +51,7 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp ) } ;
+            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | UnsupFun | ClassDecl | TopProp ) } ;
 
 // Modifiers and annotations before a declaration are parsed and ignored (they do
 // not change what we lower). Annotations accept ALL forms: an argument list
@@ -94,6 +94,16 @@ FunBody     = Block | "=" ExprBody ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
 
+// A function declaration outside the executable subset: an extension function
+// (fun Receiver.name(...), receiver dispatch unsupported) or an abstract / bodiless
+// declaration (abstract fun name(): R). The header - a possibly dotted, possibly
+// generic name, a parameter list, an optional return type, and an optional body - is
+// recognised and reported as not implemented; a present body is skipped. It follows
+// FunDecl in every choice, so a normal `fun name(...) body` is matched there first.
+UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
+            = KwFun [ SkipAngle ] FunName ParamList [ ":" Type ] [ Block | "=" DiscardExpr ] ;
+FunName     = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Param { "," Param } ] ")" ;
 // Parameter modifiers (vararg/noinline/crossinline) and a default value are parsed
@@ -108,7 +118,7 @@ CtorParams  <~~ push({cparams: takeAll()}) ~~>
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
 
-Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | UnsupFun ) ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
 // A delegated property (val/var x [: T] by <expr>, e.g. `by lazy { ... }` or the
@@ -127,8 +137,8 @@ Type        = ( "(" [ Type { "," Type } ] ")" "->" Type | Id [ SkipAngle ] { "."
 // labelled statement still lowers. Labelled jumps (break@l / continue@l / return@l)
 // route to notImpl (the target label cannot be resolved in the subset).
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
-            | [ LabelDef ] ( Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ;
+            = { Annotation } ( ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
+            | [ LabelDef ] ( Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ) ;
 
 // try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
 // runtime unwinds), and each try/catch/finally body is compiled to its own closure
@@ -211,15 +221,24 @@ IfExpr      <~~ push(makeIfExpr(pop(), pop(), pop())) ~~>
 
 // when { c1 -> e1; else -> e } and when (x) { 1, 2 -> e1; else -> e }.
 WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
-            = KwWhen [ "(" Expression <~~ push({subj: pop()}) ~~> ")" ] "{"
+            = KwWhen [ "(" WhenSubj ")" ] "{"
               { WhenElse | WhenArm } "}" ;
+// The subject is a plain expression, or a val/var binding - when (val x = e) { ... } -
+// whose name is in scope in every arm body. The type annotation is parsed and ignored.
+WhenSubj    = WhenBind | WhenExprSubj ;
+WhenBind    <~~ var e = pop(); push({subj: e, subjName: pop()}) ~~>
+            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression ;
+WhenExprSubj <~~ push({subj: pop()}) ~~>
+            = Expression ;
 // The else arm must be tried first: otherwise 'else' would parse as a variable arm
 // (and only fail at run time, when no other arm matches).
 WhenElse    = KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ;
 WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
             = WhenCond { "," WhenCond } "->" Expression [ ";" ] ;
-// A branch condition: an inclusive range test (in / !in) or a value to compare with.
-WhenCond    = WhenIn | WhenNotIn | WhenVal ;
+// A branch condition: an inclusive range test (in / !in), a type test (is T / !is T,
+// undecidable so it never matches and warns), or a value to compare with.
+WhenCond    = WhenIn | WhenNotIn | WhenIs | WhenVal ;
+WhenIs      <~~ push({isType: true, pos: up.pos}) ~~> = ( KwIs | KwNotIs ) Type ;
 WhenIn      <~~ var h = pop(); push({lo: pop(), hi: h, neg: false}) ~~>
             = KwIn Expression ".." Expression ;
 WhenNotIn   <~~ var h = pop(); push({lo: pop(), hi: h, neg: true}) ~~>
@@ -248,12 +267,35 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // implemented (makeIsCheck). The suffix is optional, so plain expressions are
 // unaffected. Type is parsed and (apart from steering as/is) ignored.
 TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = Elvis [ IsSfx | AsSfx ] ;
-IsSfx       <~~ push({isType: true, pos: up.pos}) ~~> = ( KwIs | KwNotIs ) Type ;
+// A postfix `is T` must not fire when `->` immediately follows: there the `is T` leads
+// the next `when` arm (is CellInfoGsm -> ...), and slurping it as a postfix would strand
+// the arrow. `is T ->` occurs only at a when-arm boundary, so the guard is safe globally.
+IsSfx       <~~ push({isType: true, pos: up.pos}) ~~> = ( KwIs | KwNotIs ) Type NotArrow ;
 AsSfx       <~~ push({asType: true}) ~~> = ( KwAsSafe | KwAs ) Type ;
+// A zero-width guard that fails when the next non-whitespace token is `->`.
+NotArrow    = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        return (cc === 45 && c.peek(i + 1) === 62)
+            ? abnf.newToken("\x01arrow-follows", 0)
+            : undefined
+    })()
+~~) ;
 
 // a ?: b yields a unless it is null (the elvis operator; the right side only runs then).
 Elvis       <~~ push(makeElvis(takeAll())) ~~>
-            = AddExpr { "?:" AddExpr } ;
+            = InfixExpr { "?:" InfixExpr } ;
+
+// A stdlib infix call - a to b (Pair), a and b / a shl b (bitwise) - binds tighter than
+// elvis and looser than +/-, matching Kotlin. The operand types (Pair, bitwise Int) are
+// outside the value subset, so the operands run and the result is reported as not
+// implemented. Only these built-in infix names are recognised (not arbitrary user infix
+// funs); the InfixOp token pushes nothing, so makeInfix just sees the operand thunks.
+InfixExpr   <~~ push(makeInfix(takeAll(), up.pos)) ~~>
+            = AddExpr { InfixOp AddExpr } ;
+InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) KwEnd ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -280,9 +322,9 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
+            = "." Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] MArgs ;
 SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}) ~~>
-            = "?." Id <~~ push({mname: up.in}) ~~> MArgs ;
+            = "?." Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] MArgs ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 SafeFieldSfx = "?." Id <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
@@ -292,7 +334,7 @@ MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
 // RawStr before Template (both open with "), FloatLit before IntLit (a plain integer
 // falls through), AnonFun/CallableRef before Call/VarRef (they would otherwise eat the
 // leading identifier). RawStr/FloatLit/CallableRef/AnonFun are recognised, not lowered.
-Primary     = "(" Expression ")" | RawStr | Template | FloatLit | IntLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | Call | VarRef ;
+Primary     = "(" Expression ")" | RawStr | Template | FloatLit | IntLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | ThisExpr | Call | VarRef ;
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
 // position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).
@@ -301,6 +343,14 @@ Primary     = "(" Expression ")" | RawStr | Template | FloatLit | IntLit | True 
 // before Call/VarRef, which would otherwise read `object` as an identifier.
 ObjectExpr  <~~ push(notImplExpr("object expression", up.pos)) ~~>
             = KwObject [ ":" SuperList ] SkipBlock ;
+
+// A labelled receiver - this@Label (this@TriangleApplication). The subset has a single
+// receiver, so it resolves to the nearest enclosing `this` exactly like a bare `this`;
+// the label names an outer scope we do not model, so it is parsed and ignored. Bare
+// `this` is a plain VarRef; this must precede Call/VarRef so `this` is not read as an
+// identifier before the `@Label` is seen.
+ThisExpr    <~~ push(makeVarRef("this")) ~~>
+            = "this" KwEnd "@" Id ;
 
 // A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
 // one expression; without parameters the single argument is bound to 'it'.
@@ -322,9 +372,13 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
             = LParam { "," LParam } "->" ;
 LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 
-// f(a, b): a top level function, a builtin, or a class constructor.
+// f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
+// becomes the last argument (Kotlin): after a parenthesized list - f(a) { ... } - or on
+// its own - f { ... } (the sole argument, e.g. module { single { ... } }). Either form
+// works as a Primary anywhere, including as an argument to an outer call
+// (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = Id <~~ push(up.in) ~~> [ SkipAngle ] ( "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ) ;
 
 // String templates: "x=$x sum=${a + b}".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
@@ -575,6 +629,14 @@ KwStep      = "step" KwEnd ;
     }
     // x is T / x !is T: undecidable without runtime types; evaluate x, yield undefined.
     function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function(b) { var r = operand(b); return {b: r.b, v: hUndef} } }
+    // A curated stdlib infix call (a to b, a and b, ...). Recognised, not lowered: the
+    // operands are emitted (side effects, nested warnings) and the value is undefined.
+    // items holds only operand thunks (InfixOp pushes nothing).
+    function makeInfix(items, pos) {
+        if (items.length == 1) { return items[0] }
+        notImpl("infix operator", pos)
+        return function(b) { for (var i = 0; i < items.length; i++) { var r = items[i](b); b = r.b } return {b: b, v: hUndef} }
+    }
     // TypeOp collects the operand thunk and (if present) an is/as marker at
     // production level (a sibling inline tag cannot pop the operand). as = identity.
     function applyTypeOp(items) {
@@ -633,12 +695,23 @@ KwStep      = "step" KwEnd ;
     }
     function makeWhen(items) {
         var subj = null
+        var subjName = null
         var els = null
         var arms = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].subj != undefined) subj = items[i].subj
+            if (items[i].subj != undefined) {
+                subj = items[i].subj
+                if (items[i].subjName != undefined) subjName = items[i].subjName
+            }
             else if (items[i].els != undefined) els = items[i].els
             else arms.push(items[i])
+        }
+        // An `is T` / `!is T` arm is undecidable (no runtime types): warn once now; it
+        // never matches at run time, so a following else arm handles it.
+        for (var a1 = 0; a1 < arms.length; a1++) {
+            for (var c1 = 0; c1 < arms[a1].conds.length; c1++) {
+                if (arms[a1].conds[c1].isType) notImpl("is type check", arms[a1].conds[c1].pos)
+            }
         }
         return function(b) {
             hidCount++
@@ -650,6 +723,8 @@ KwStep      = "step" KwEnd ;
                 var rs = subj(b)
                 b = rs.b
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, wName), rs.v])
+                // when (val x = e): x is visible to every arm body.
+                if (subjName != null) callExt(b, "js_scope_decl", [curScopeV, emitStr(b, subjName), rs.v])
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rName), hUndef])
             var endB = curF.NewBlock("")
@@ -658,7 +733,12 @@ KwStep      = "step" KwEnd ;
                 for (var v2 = 0; v2 < arms[a].conds.length; v2++) {
                     var cond = arms[a].conds[v2]
                     var nextB = curF.NewBlock("")
-                    if (cond.v != undefined) {
+                    if (cond.isType) {
+                        // undecidable type test: an always-false branch, so it never
+                        // matches yet matchB keeps a predecessor (an orphan block with no
+                        // predecessor is malformed IR and panics when the module prints).
+                        b.NewCondBr(truthy(b, hFalse), matchB, nextB)
+                    } else if (cond.v != undefined) {
                         var rv = cond.v(b)
                         b = rv.b
                         var condV
