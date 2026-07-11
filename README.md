@@ -19,6 +19,7 @@ This system should allow to define and use compiler for arbitrary computer langu
     - [Small Example](#small-example)
   - [Documentation](#documentation)
     - [Build / Usage](#build--usage)
+    - [Running the tests](#running-the-tests)
     - [High level overview](#high-level-overview)
       - [Default processing steps](#default-processing-steps)
     - [ABNF Syntax](#abnf-syntax)
@@ -153,6 +154,34 @@ or, to parse a C file with the full C99 grammar:
 ```
 go run . languages/c99-parser.abnf tests/c99-test-1.c -q
 ```
+
+### Running the tests
+
+The test suite is `.vscode/launch.json`: every configuration with an `args` list is one
+grammar/input run. `test.sh` runs the whole matrix and checks the two invariants the
+project guarantees:
+
+```
+./test.sh                # run everything (a few minutes; the brainfuck big tests are large)
+./test.sh --quick        # skip the slow brainfuck-test-big-* entries
+./test.sh --filter kotlin # run only entries whose name or args contain "kotlin"
+./test.sh --list         # list the matrix entries without running them
+./test.sh --help         # full option list
+```
+
+Each entry is run twice - once with the default goja tag engine and once goja free
+(with `-frozen` appended, see [the frozen bootstrap](#the-frozen-bootstrap-running-without-goja))
+- and the script verifies that
+
+1. every `-q` (quiet) run produces **byte-identical** output under goja and `-frozen`, and
+2. the exit status is correct: the language tests are self checking (exit 0 means the
+   program's own checks passed), so ordinary entries must exit 0 on both engines, while
+   the by-design failures - the entries whose name says `SHOULD FAIL` plus the
+   `smaller-match-first` and `infinite-loop` grammar guards - must exit non-zero on both.
+
+`test.sh` exits 0 iff the whole matrix is green. It needs only `go` (to build the
+compiler) and a POSIX shell; `timeout`/`gtimeout`/`perl`, if present, guard each run
+against hangs.
 
 #### The example languages in languages/
 
