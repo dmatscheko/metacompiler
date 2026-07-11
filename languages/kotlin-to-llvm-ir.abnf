@@ -51,19 +51,30 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp ) } ;
+            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp ) } ;
 
 // Modifiers and annotations before a declaration are parsed and ignored (they do
-// not change what we lower). Annotation arguments are not yet accepted. Modifiers
-// that would change the shape of the body (enum/annotation/companion) are NOT
-// consumed here - those declaration forms are not accepted yet.
+// not change what we lower). Annotations accept ALL forms: an argument list
+// @Suppress("Unused") / @Deprecated("m", ReplaceWith("n")), qualified names
+// @a.b.C, use-site targets @field:A / @get:A / @file:A, and annotation arrays
+// @[A B C(x)]. Modifiers that would change the shape of the body
+// (enum/annotation/companion) are NOT consumed here - those declaration forms
+// route to notImplemented instead.
 Modifiers   = { Modifier | Annotation } ;
 Modifier    = ( "public" | "private" | "protected" | "internal" | "open" | "final"
               | "abstract" | "sealed" | "data" | "override" | "lateinit" | "const"
               | "inner" | "vararg" | "noinline" | "crossinline" | "tailrec"
               | "operator" | "infix" | "inline" | "external" | "suspend"
               | "expect" | "actual" | "reified" ) KwEnd ;
-Annotation  = "@" Id { "." Id } ;
+// An annotation: an optional use-site target, then either an @[...] set or a single
+// entry (a possibly-qualified name with an optional balanced argument list).
+Annotation  = "@" [ AnnTarget ":" ] ( AnnSet | AnnEntry ) ;
+// Use-site targets are word-bounded, so @fieldOf stays a plain annotation named
+// "fieldOf" rather than the target "field".
+AnnTarget   = ( "field" | "property" | "get" | "set" | "receiver" | "param"
+              | "setparam" | "delegate" | "file" ) KwEnd ;
+AnnSet      = "[" { AnnEntry } "]" ;
+AnnEntry    = Id { "." Id } [ SkipParen ] ;
 
 // package / import headers. The package name is parsed and ignored. Each import
 // is resolved against the runtime builtins (core.stdlibImports); one that does

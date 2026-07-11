@@ -202,8 +202,10 @@ CtorCall    <~~ push(makeCtorCall(takeAll(), up.pos)) ~~>
             = ( KwSuper | "this" KwEnd ) "(" [ Expression { "," Expression } ] ")" ";" ;
 
 Decl        = DeclCore ";" ;
+// A local declaration may carry annotations / `final` (e.g. @SuppressWarnings("x")
+// int y = 1); LeadMods drops them (they do not change the interpretation).
 DeclCore    <~~ push(makeSeq(takeAll())) ~~>
-            = Type Declarator { "," Declarator } ;
+            = [ LeadMods ] Type Declarator { "," Declarator } ;
 Declarator  <~~ push(makeDecl(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
 

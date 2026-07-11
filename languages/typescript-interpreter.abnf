@@ -205,7 +205,7 @@ ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. *
 // or a destructuring pattern (not implemented, bound to a hidden placeholder name). The
 // optional '?' marker, ': Type' annotation and '= default' initializer are erased; only
 // the name reaches the closure machinery.
-TSParam     = RestParam | DestructParam | NormalParam ;
+TSParam     = { Decorator } ( RestParam | DestructParam | NormalParam ) ;
 NormalParam = Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] [ ParamDefault ] ;
 RestParam   = "..." Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] ;
 DestructParam <~~ notImpl("destructuring parameter", up.pos); push("0destructured") ~~>

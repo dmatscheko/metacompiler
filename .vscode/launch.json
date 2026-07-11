@@ -1709,6 +1709,42 @@
             "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-recognize.lua", "-q", "-warn-unsupported"]
         },
         {
+            "name": "Kotlin annotations (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-annotations.kt", "-q"]
+        },
+        {
+            "name": "Kotlin annotations (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-annotations.kt", "-q"]
+        },
+        {
+            "name": "Java annotations (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-annotations.java", "-q"]
+        },
+        {
+            "name": "Java annotations (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-annotations.java", "-q"]
+        },
+        {
+            "name": "TypeScript annotations (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-interpreter.abnf", "tests/typescript-test-annotations.ts", "-q"]
+        },
+        {
+            "name": "TypeScript annotations (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-annotations.ts", "-q"]
+        },
+        {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",

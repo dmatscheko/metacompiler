@@ -41,18 +41,24 @@ The entry point is fun main(); self checking programs end with exitProcess(failu
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ registerFun(pop()) ~~> | ClassDecl | TopProp ) } ;
+Program     = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ registerFun(pop()) ~~> | ClassDecl | TopProp ) } ;
 
-// Modifiers/annotations before a declaration are parsed and ignored (no-arg
-// annotations only). Body-shaping modifiers (enum/annotation/companion) are not
-// consumed - those declaration forms are not accepted yet.
+// Modifiers/annotations before a declaration are parsed and ignored. Annotations
+// accept ALL forms: an argument list @Suppress("Unused"), qualified names @a.b.C,
+// use-site targets @field:A / @get:A / @file:A, and annotation arrays @[A B C(x)].
+// Body-shaping modifiers (enum/annotation/companion) are not consumed - those
+// declaration forms route to notImplemented instead.
 Modifiers   = { Modifier | Annotation } ;
 Modifier    = ( "public" | "private" | "protected" | "internal" | "open" | "final"
               | "abstract" | "sealed" | "data" | "override" | "lateinit" | "const"
               | "inner" | "vararg" | "noinline" | "crossinline" | "tailrec"
               | "operator" | "infix" | "inline" | "external" | "suspend"
               | "expect" | "actual" | "reified" ) KwEnd ;
-Annotation  = "@" Id { "." Id } ;
+Annotation  = "@" [ AnnTarget ":" ] ( AnnSet | AnnEntry ) ;
+AnnTarget   = ( "field" | "property" | "get" | "set" | "receiver" | "param"
+              | "setparam" | "delegate" | "file" ) KwEnd ;
+AnnSet      = "[" { AnnEntry } "]" ;
+AnnEntry    = Id { "." Id } [ SkipParen ] ;
 
 // package / import headers (same policy as kotlin-to-llvm-ir.abnf): the package
 // name is ignored; each import is resolved against the runtime builtins, and an
