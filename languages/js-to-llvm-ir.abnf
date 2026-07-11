@@ -31,9 +31,10 @@ The exit code of the metacompiler run is the value that main() returns, so the t
 programs are self checking: they return 0 on success.
 The same language with the same semantics is interpreted directly by js-interpreter.abnf.
 
-Note: js_scope_set aborts when assigning to a name that was never declared, so the
-implicit global (assigning to an undeclared name) that js-interpreter.abnf supports is
-not modelled here; declare with var/let/const first.") ;
+A plain `=` assignment to a name that was never declared becomes an implicit global
+(created in the root scope) through js_scope_set_or_create, matching the non-strict
+JavaScript semantics of js-interpreter.abnf. A compound assignment (+=, ++, ...) reads
+the old value first and so still requires a prior var/let/const declaration.") ;
 
 
 // --- main rules
@@ -501,11 +502,16 @@ KwExtends   = "extends" KwEnd ;
             var v = r.v
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
+                // Plain `=` to an undeclared name becomes an implicit global
+                // (js_scope_set_or_create). A compound assignment first reads the
+                // old value, so it still requires a prior declaration.
+                var setExt = "js_scope_set_or_create"
                 if (op != "=") {
                     var old = callExt(b, "js_scope_get", [curScopeV, nameV])
                     v = callExt(b, binExt[op], [old, v])
+                    setExt = "js_scope_set"
                 }
-                callExt(b, "js_scope_set", [curScopeV, nameV, v])
+                callExt(b, setExt, [curScopeV, nameV, v])
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b

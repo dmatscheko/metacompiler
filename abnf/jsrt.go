@@ -670,6 +670,28 @@ func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
 	rt.fail("assignment to undeclared variable: %s", name)
 }
 
+// scopeSetOrCreate is scopeSet without the undeclared check: a name that is
+// nowhere in the chain is created in the root (global) scope. This models the
+// implicit global of non-strict JavaScript (assigning to an undeclared name),
+// matching the setVar of js-interpreter.abnf. Only plain `=` assignment uses
+// it; compound assignment (+=, ++, ...) reads the old value first and so still
+// requires a prior declaration.
+func (rt *jsrt) scopeSetOrCreate(sc *jsScope, name string, v interface{}) {
+	for s := sc; s != nil; s = s.parent {
+		if _, ok := s.vars[name]; ok {
+			s.vars[name] = v
+			if rt.traced {
+				rt.trVar("write", name, v)
+			}
+			return
+		}
+	}
+	rt.root.vars[name] = v
+	if rt.traced {
+		rt.trVar("decl", name, v)
+	}
+}
+
 // typeClass returns the fixed type class of a value for MetaJS type pinning.
 // undefined and null return "" (they never pin a type and are always
 // assignable): null is the deliberate absence of a value, not an object.
@@ -1592,6 +1614,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_scope_set": func(a []uint64) uint64 {
 			rt.scopeSet(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
+			return 0
+		},
+		// Like js_scope_set, but an undeclared name becomes an implicit global
+		// (created in the root scope) instead of an error. Used by normal JS for
+		// plain `=` assignment; see scopeSetOrCreate.
+		"js_scope_set_or_create": func(a []uint64) uint64 {
+			rt.scopeSetOrCreate(rt.scopeOf(a[0]), rt.toString(u(a[1])), u(a[2]))
 			return 0
 		},
 

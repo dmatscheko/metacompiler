@@ -431,6 +431,18 @@
             "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-3.js", "-q", "-warn-unsupported"]
         },
         {
+            "name": "JavaScript implicit global interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-implicit-global.js", "-q"]
+        },
+        {
+            "name": "JavaScript implicit global compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-implicit-global.js", "-q"]
+        },
+        {
             "name": "Lua widened (repeat/ipairs/methods) interpreter",
             "type": "go",
             "request": "launch",
