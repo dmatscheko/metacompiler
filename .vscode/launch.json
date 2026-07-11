@@ -227,6 +227,24 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen.kt", "-q"]
         },
         {
+            "name": "Kotlin widen2 declarations +warn (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-widen2.kt", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Kotlin widen2 declarations +warn (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen2.kt", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Kotlin widen2 declarations SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen2.kt", "-q"]
+        },
+        {
             "name": "Go interpreter",
             "type": "go",
             "request": "launch",

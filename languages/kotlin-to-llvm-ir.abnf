@@ -51,7 +51,7 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ Package ] { Import } { [ Modifiers ] ( FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp ) } ;
+            = [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ClassDecl | TopProp ) } ;
 
 // Modifiers and annotations before a declaration are parsed and ignored (they do
 // not change what we lower). Annotation arguments are not yet accepted. Modifiers
@@ -78,7 +78,7 @@ QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 TopProp     = Decl ;
 
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFun Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
+            = KwFun [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
 FunBody     = Block | "=" ExprBody ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
@@ -89,21 +89,23 @@ Param       = Id <~~ push(up.in) ~~> ":" Type ;
 
 // class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ "data" KwEnd ] KwClass Id <~~ push(up.in) ~~> [ CtorParams ] [ "{" { Member } "}" ] ;
+            = [ "data" KwEnd ] KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" SuperList ] [ "{" { Member } "}" ] ;
 CtorParams  <~~ push({cparams: takeAll()}) ~~>
             = "(" [ CtorParam { "," CtorParam } ] ")" ;
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
 
-Member      = [ Modifiers ] ( PropDecl | FunDecl <~~ push({method: pop()}) ~~> ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDecl | FunDecl <~~ push({method: pop()}) ~~> ) ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
 
-Type        = Id [ "?" ] [ "<" Type ">" ] ;
+// Type is parsed and (apart from steering as/is) ignored. Generics (<...>) and the
+// nullable ? are accepted and dropped; dotted names and simple function types too.
+Type        = ( "(" [ Type { "," Type } ] ")" "->" Type | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | Decl | If | While | Do | For | TryStmt | Throw | Return | Break | Continue | Empty | ExprStmt ;
+            = Block | Destructure | Decl | If | While | Do | For | TryStmt | Throw | Return | Break | Continue | Empty | ExprStmt ;
 
 // try/catch/finally and throw parse fully; without an exception model they are
 // not implemented (see makeTry/makeThrow). Under -warn-unsupported the try block
@@ -250,7 +252,18 @@ Primary     = "(" Expression ")" | Template | IntLit | True | False | Null | Lam
 // A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
 // one expression; without parameters the single argument is bound to 'it'.
 Lambda      <~~ push(makeLambda(takeAll())) ~~>
-            = "{" [ LambdaParams ] Expression "}" ;
+            = "{" [ LambdaParams ] { LamStmt } "}" ;
+// A lambda body is a sequence of statements whose value is its last expression
+// (a single expression is the common case). Genuinely lowered, not notImpl.
+// Keyword-led statements first; then any expression (if/when as an expression keep
+// their value); then a bare if/when statement; then an empty statement.
+LamStmt     = LamCtrl | LamExpr | LamIf | ";" ;
+LamCtrl     <~~ push({stmt: pop()}) ~~>
+            = Decl | While | Do | For | TryStmt | Throw | Return | Break | Continue ;
+LamExpr     <~~ push({expr: pop()}) ~~>
+            = Expression [ ";" ] ;
+LamIf       <~~ push({stmt: pop()}) ~~>
+            = If ;
 LambdaParams <~~ push({lparams: takeAll()}) ~~>
             = LParam { "," LParam } "->" ;
 LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
@@ -276,6 +289,80 @@ Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
+
+// ----- Widened surface: constructs accepted structurally but not lowered -----
+
+// A balanced { ... } body consumed without interpreting it, so a construct can be
+// ACCEPTED without being understood. Full string/char literals and ${...} templates
+// are matched first, so braces inside them are never miscounted. No tags: nothing is
+// pushed, so the consuming production is free to push its own placeholder.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
+SkipStr     = '"' :whitespace() { SkipTpl | SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
+SkipTpl     = "${" :whitespace(Whitespace) { SkipItem } "}" ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipStrChar = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(Whitespace) ;
+SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
+SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// A balanced < ... > run (generic parameters / arguments), parsed and ignored.
+SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+// A tag-less primary-constructor parameter list for headers we only skip.
+CtorParamsSkip = "(" [ CParamSkip { "," CParamSkip } ] ")" ;
+CParamSkip  = [ Modifiers ] [ ( "val" | "var" ) KwEnd ] Id ":" Type [ "=" DiscardExpr ] ;
+
+// A supertype list (types with optional constructor-call args). No inheritance in
+// the subset, so it is parsed and ignored; DiscardExpr drops the arg thunks.
+SuperList   = SuperItem { "," SuperItem } ;
+SuperItem   = Type [ "(" [ DiscardExpr { "," DiscardExpr } ] ")" ] ;
+DiscardExpr <~~ pop() ~~> = Expression ;
+
+// Type declarations accepted structurally, then reported as not implemented (so a
+// full Kotlin file parses; -warn-unsupported lets the rest compile). Body is skipped.
+UnsupType   = Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias ;
+Interface   <~~ push(notImplStmt("interface", up.pos)) ~~>
+            = KwInterface Id [ SkipAngle ] [ ":" SuperList ] SkipBlock ;
+ObjectDecl  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
+            = KwObject Id [ ":" SuperList ] SkipBlock ;
+EnumClass   <~~ push(notImplStmt("enum class", up.pos)) ~~>
+            = KwEnum KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
+AnnotationClass <~~ push(notImplStmt("annotation class", up.pos)) ~~>
+            = KwAnnotation KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ SkipBlock ] ;
+TypeAlias   <~~ push(notImplStmt("typealias", up.pos)) ~~>
+            = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
+
+// Member forms accepted structurally, then reported as not implemented. Each fires
+// notImpl at compile time and pushes nothing, so makeClassStmt simply skips it.
+InitBlock   <~~ notImpl("init block", up.pos) ~~>
+            = KwInit SkipBlock ;
+CompanionObject <~~ notImpl("companion object", up.pos) ~~>
+            = KwCompanion KwObject [ Id ] [ ":" SuperList ] SkipBlock ;
+SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
+            = KwConstructor "(" [ SParam { "," SParam } ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } ] ")" ] SkipBlock ;
+SParam      = [ Modifiers ] Id ":" Type [ "=" DiscardExpr ] ;
+PropAccessor <~~ notImpl("property accessor", up.pos) ~~>
+            = ( "val" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
+Accessor    = ( KwGet | KwSet ) "(" [ Id [ ":" Type ] ] ")" [ ":" Type ] [ SkipBlock | "=" DiscardExpr ] [ ";" ] ;
+
+// A destructuring declaration: accepted, reported as not implemented; the
+// initializer still runs so its calls stay visible under -warn-unsupported.
+Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
+            = ( "val" | "var" ) KwEnd "(" Id { "," Id } ")" [ ":" Type ] "=" Expression [ ";" ] ;
+
+KwInterface = "interface" KwEnd ;
+KwObject    = "object" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwAnnotation = "annotation" KwEnd ;
+KwCompanion = "companion" KwEnd ;
+KwTypealias = "typealias" KwEnd ;
+KwConstructor = "constructor" KwEnd ;
+KwInit      = "init" KwEnd ;
+KwGet       = "get" KwEnd ;
+KwSet       = "set" KwEnd ;
 
 KwFun       = "fun" KwEnd ;
 KwImport    = "import" KwEnd ;
@@ -502,22 +589,43 @@ KwStep      = "step" KwEnd ;
         }
     }
 
-    // Lambda items = [{lparams}?, bodyThunk]. A lambda becomes an own IR function
-    // closed over the current scope (js_closure); the body expression is its return
-    // value. Without a parameter list the single argument is bound to 'it'.
+    // Lambda items = [{lparams}?, {stmt}|{expr}...]. A lambda becomes an own IR
+    // function closed over the current scope (js_closure); the body is a sequence of
+    // statements and its value is the last expression (a trailing non-expression
+    // yields Unit). Without a parameter list the single argument is bound to 'it'.
     function makeLambda(items) {
         var params = ["it"]
-        var body = items[items.length - 1]
-        if (items.length > 1) params = items[0].lparams
+        var start = 0
+        if (items.length > 0 && items[0] != undefined && items[0].lparams != undefined) {
+            params = items[0].lparams
+            start = 1
+        }
+        var body = items.slice(start)
         var bodyStmt = function(b) {
-            var r = body(b)
-            r.b.NewRet(r.v)
+            var v = hUndef
+            for (var k = 0; k < body.length; k++) {
+                if (body[k].expr != undefined) {
+                    var r = body[k].expr(b)
+                    b = r.b
+                    v = r.v
+                } else {
+                    b = body[k].stmt(b)
+                    v = hUndef
+                }
+            }
+            b.NewRet(v)
             return deadBlock()
         }
         return function(b) {
             var idx = emitFunc(params, bodyStmt, false)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
+    }
+    // A destructuring declaration is not lowered; evaluate the initializer (so its
+    // calls stay visible) and bind nothing.
+    function makeDestructure(init, pos) {
+        notImpl("destructuring declaration", pos)
+        return function(b) { var r = init(b); return r.b }
     }
 
     // f(args): a class constructor (known at compile time) or a function value.
