@@ -84,7 +84,7 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // recognised and reported as not implemented; a present body is skipped. It follows
 // FunDecl in every choice, so a normal `fun name(...) body` is matched there first.
 UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
-            = KwFun [ SkipAngle ] FunName ParamList [ ":" Type ] [ Block | "=" DiscardExpr ] ;
+            = KwFun [ SkipAngle ] FunName SkipParen [ ":" Type ] [ SkipBlock | "=" DiscardExpr ] ;
 FunName     = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 ParamList   <~~ push({params: takeAll()}) ~~>
