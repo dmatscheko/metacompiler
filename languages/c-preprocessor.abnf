@@ -1,0 +1,257 @@
+:title("C preprocessor (object-like macros)") ;
+:description("A source-to-source C preprocessor: it reads C source, expands object-like
+#define macros and honors #undef, and prints the resulting source. It is meant to be
+piped into a C front end with the -pipe pipeline mode of the metacompiler, e.g.
+
+    ./mec languages/c-preprocessor.abnf prog.c -pipe languages/c-to-llvm-ir.abnf
+    ./mec languages/c-preprocessor.abnf prog.c -pipe languages/c-interpreter.abnf
+
+so that the C grammar downstream sees the macros already expanded. This is the
+'output of one language is the input of another' generalization: the preprocessor is
+just another language whose output happens to be text.
+
+Scope: object-like macros only - '#define NAME body' where NAME is not immediately
+followed by '(' - expanded wherever NAME appears as a whole identifier token (not inside
+strings, character literals or comments), recursively and cycle-guarded, with '#undef'
+removing a definition and backslash-newline continuations joined. A body may be empty
+(a bare '#define FLAG'). Every OTHER directive - function-like '#define NAME(...)',
+'#include', the '#if/#ifdef/#ifndef/#else/#elif/#endif' family, '#pragma', '#error',
+'#line' - is passed through UNCHANGED for the downstream language to handle (which, for
+the C grammars, means #include resolves and the rest are skipped). Conditionals are NOT
+evaluated: a guarded block is always emitted. Macro uses inside pass-through directives
+are not expanded. The tokenizer reproduces every byte, so non-macro source is emitted
+verbatim; removed directive lines are replaced by their newlines so line numbers hold.") ;
+
+:startRule(File) ;
+// Skip NOTHING: every byte is significant and reproduced verbatim. NoWs is a negative
+// lookahead that matches the empty string (C source has no NUL bytes), so no whitespace
+// is ever skipped - the tokenizer captures spaces and newlines as their own tokens.
+// (An explicit rule is needed because the whitespace setting otherwise carries over from
+// the ABNF grammar that compiled this file.)
+:whitespace(NoWs) ;
+NoWs     = !"\x00" ;
+
+File     <~~ preprocess(takeAll()) ~~> = { Item } ;
+
+// Order matters (PEG first match): the compound tokens (strings, char literals,
+// comments) are tried before the single-char Other fallback so their delimiters and
+// contents are never miscut. Ident groups whole words (so only whole identifiers can
+// be macro names); Other consumes any remaining single byte, so every byte is covered.
+Item     = Str | Char | LComment | BComment | Nl | Hws | Hash | Ident | Other ;
+
+// A double-quoted string, kept verbatim (macros are never expanded inside it).
+Str      <~~ push({kind: "other", text: up.in}) ~~>
+         = '"' { StrEsc | StrChar } '"' ;
+StrEsc   = "\\" "\x00"..."\U0010ffff" ;
+StrChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ; // not '"' (0x22) or '\' (0x5c)
+
+// A character literal, kept verbatim.
+Char     <~~ push({kind: "other", text: up.in}) ~~>
+         = "'" { ChEsc | ChChar } "'" ;
+ChEsc    = "\\" "\x00"..."\U0010ffff" ;
+ChChar   = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ; // not "'" (0x27) or '\' (0x5c)
+
+// // line comment (up to, but not including, the newline). Tagged "comment" so it is
+// kept verbatim in ordinary code (the downstream language skips it) but dropped from
+// macro bodies - C removes comments before macro replacement.
+LComment <~~ push({kind: "comment", text: up.in}) ~~>
+         = "//" { NotNl } ;
+NotNl    = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ; // not '\n'
+
+// /* block comment */ (may span newlines).
+BComment <~~ push({kind: "comment", text: up.in}) ~~>
+         = "/*" { !"*/" AnyByte } "*/" ;
+AnyByte  = "\x00"..."\U0010ffff" ;
+
+// A single newline: its own token so the start script can track line starts (a
+// directive is a '#' whose line has only whitespace before it).
+Nl       <~~ push({kind: "nl", text: up.in}) ~~>
+         = "\r\n" | "\n" | "\r" ;
+
+// A run of horizontal whitespace (spaces and tabs), kept but not line-breaking.
+Hws      <~~ push({kind: "hws", text: up.in}) ~~>
+         = @+" \t" ;
+
+Hash     <~~ push({kind: "hash", text: up.in}) ~~>
+         = "#" ;
+
+// A whole identifier (the only thing a macro name can match).
+Ident    <~~ push({kind: "ident", text: up.in}) ~~>
+         = IdStart { IdCont } ;
+IdStart  = "A"..."Z" | "a"..."z" | "_" ;
+IdCont   = "A"..."Z" | "a"..."z" | "0"..."9" | "_" ;
+
+// Any other single byte (operators, punctuation, digits, ...), kept verbatim.
+Other    <~~ push({kind: "other", text: up.in}) ~~>
+         = "\x00"..."\U0010ffff" ;
+
+
+:startScript(~~
+
+    // takeAll empties the local stack of the current tag and returns its items in push
+    // order as a plain JS array (the File tag collects every token this way).
+    function takeAll() {
+        var items = []
+        var v = anytype // The token tags push objects of one shape, but be permissive.
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    // A macro maps its name to an array of body tokens; expandIdent splices them in,
+    // recursively, guarding against cycles with the `active` set. See the title for scope.
+
+    function skipHws(tokens, p) {
+        while (p < tokens.length && tokens[p].kind == "hws") { p = p + 1 }
+        return p
+    }
+
+    // The index of the newline that ends the directive line starting at `start`,
+    // treating a backslash-newline as a continuation. Returns tokens.length at EOF.
+    function lineEndOf(tokens, start) {
+        var j = start
+        while (j < tokens.length) {
+            if (tokens[j].kind == "nl") {
+                if (j > start && tokens[j - 1].kind == "other" && tokens[j - 1].text == "\\") {
+                    j = j + 1
+                } else {
+                    return j
+                }
+            } else {
+                j = j + 1
+            }
+        }
+        return tokens.length
+    }
+
+    // Concatenate the raw text of tokens[a .. b) (b exclusive).
+    function rawText(tokens, a, b) {
+        var s = ""
+        var k = a
+        while (k < b) { s = s + tokens[k].text; k = k + 1 }
+        return s
+    }
+
+    // The newline texts inside tokens[a .. b] (b inclusive), so a removed directive can
+    // emit the same number of blank lines and keep downstream line numbers aligned.
+    function newlinesText(tokens, a, b) {
+        var s = ""
+        var k = a
+        while (k <= b && k < tokens.length) {
+            if (tokens[k].kind == "nl") { s = s + tokens[k].text }
+            k = k + 1
+        }
+        return s
+    }
+
+    // Collect an object-like macro body from tokens[start .. end): leading and trailing
+    // horizontal whitespace and comments trimmed, interior comments and backslash-newline
+    // continuations dropped (C removes comments and splices continuations before
+    // replacement). Interior horizontal whitespace is kept.
+    function collectBody(tokens, start, end) {
+        var body = []
+        var s = start
+        while (s < end && (tokens[s].kind == "hws" || tokens[s].kind == "comment")) { s = s + 1 }
+        var e = end
+        while (e > s && (tokens[e - 1].kind == "hws" || tokens[e - 1].kind == "comment")) { e = e - 1 }
+        var k = s
+        while (k < e) {
+            var t = tokens[k]
+            if (t.kind == "other" && t.text == "\\" && k + 1 < e && tokens[k + 1].kind == "nl") {
+                k = k + 2
+            } else if (t.kind == "nl" || t.kind == "comment") {
+                k = k + 1
+            } else {
+                body.push(t)
+                k = k + 1
+            }
+        }
+        return body
+    }
+
+    // Expand an identifier through the macro table, recursively, cycle-guarded.
+    function expandIdent(name, macros, active) {
+        if (macros[name] == undefined || active[name] == true) { return name }
+        var body = macros[name]
+        active[name] = true
+        var s = ""
+        var k = 0
+        while (k < body.length) {
+            var bt = body[k]
+            if (bt.kind == "ident") { s = s + expandIdent(bt.text, macros, active) }
+            else { s = s + bt.text }
+            k = k + 1
+        }
+        active[name] = undefined
+        return s
+    }
+
+    // The keyword right after '#': skip hws, then the directive name if it is an ident.
+    function directiveKeyword(tokens, i) {
+        var p = skipHws(tokens, i + 1)
+        if (p < tokens.length && tokens[p].kind == "ident") { return {word: tokens[p].text, at: p} }
+        return {word: "", at: p}
+    }
+
+    // Handle a directive at index i (the '#' token). Returns {text, next}: `text` is what
+    // to emit (blank newlines for a removed #define/#undef, the verbatim line otherwise),
+    // `next` is the index to resume scanning at (just past the terminating newline).
+    function handleDirective(tokens, i, macros) {
+        var end = lineEndOf(tokens, i)
+        var afterLine = end < tokens.length ? end + 1 : end
+        var kw = directiveKeyword(tokens, i)
+        var word = kw.word
+
+        if (word == "define") {
+            var p = skipHws(tokens, kw.at + 1)
+            if (p >= end || tokens[p].kind != "ident") {
+                return {text: rawText(tokens, i, afterLine), next: afterLine}
+            }
+            var name = tokens[p].text
+            var q = p + 1
+            if (q < end && tokens[q].kind == "other" && tokens[q].text == "(") {
+                // Function-like macro: not supported, passed through verbatim.
+                return {text: rawText(tokens, i, afterLine), next: afterLine}
+            }
+            macros[name] = collectBody(tokens, q, end)
+            return {text: newlinesText(tokens, i, end), next: afterLine}
+        }
+        if (word == "undef") {
+            var p2 = skipHws(tokens, kw.at + 1)
+            if (p2 < end && tokens[p2].kind == "ident") { macros[tokens[p2].text] = undefined }
+            return {text: newlinesText(tokens, i, end), next: afterLine}
+        }
+        // Every other directive passes through for the downstream language to handle.
+        return {text: rawText(tokens, i, afterLine), next: afterLine}
+    }
+
+    // Walk the token stream in order, keeping a live macro table, and emit the result.
+    function preprocess(tokens) {
+        var macros = {}
+        var out = ""
+        var col0 = true          // only whitespace seen since the last newline
+        var i = 0
+        while (i < tokens.length) {
+            var t = tokens[i]
+            if (t.kind == "hash" && col0) {
+                var r = handleDirective(tokens, i, macros)
+                out = out + r.text
+                i = r.next
+                col0 = true
+            } else if (t.kind == "ident") {
+                out = out + expandIdent(t.text, macros, {})
+                col0 = false
+                i = i + 1
+            } else {
+                out = out + t.text
+                if (t.kind == "nl") { col0 = true }
+                else if (t.kind != "hws") { col0 = false }
+                i = i + 1
+            }
+        }
+        print(out)
+    }
+
+    // Fire the File tag (which calls preprocess) by compiling the parsed token stream.
+    c.compile(c.asg)
+
+~~) ;

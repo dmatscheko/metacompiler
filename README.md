@@ -417,6 +417,17 @@ Each stage feeds its compiled `grammar[i]` (which must be an a-grammar, except a
 
 Per-stage diagnostics: `-v` shows the ASG and compiled result of every stage, `-v<n>` of stage `n` alone (1-indexed); `-vv` / `-vv<n>` add the parser+compiler trace. `-slot<n> <v>` compiles stage `n` with tag slot `<v>` (default 0), for grammars whose tags carry more than one code slot.
 
+### Piping one language's output into another (`-pipe`)
+
+The stages above chain *a-grammars*: each grammar compiles the next file. `-pipe` chains along a second, orthogonal axis - *text*. It splits the command line into independent segments; the text a segment prints becomes the program input of the next segment. So one language can transform the source that another language then consumes:
+
+```
+./mec languages/c-preprocessor.abnf prog.c -pipe languages/c-to-llvm-ir.abnf
+./mec languages/c-preprocessor.abnf prog.c -pipe languages/c-interpreter.abnf
+```
+
+Here [`c-preprocessor.abnf`](languages/c-preprocessor.abnf) is just another language whose output happens to be C source: it expands object-like `#define` macros (and honors `#undef`), passing every other directive through, and prints the result. The C front end downstream then sees the macros already expanded. Because the preprocessor is an ordinary grammar, this generalizes - any language whose output is text can feed any other language, as long as their syntaxes do not collide. Each segment is a full a-grammar chain in its own right, so `meta.abnf lang.abnf prog.x -pipe other.abnf` works too.
+
 An example of this process, done fully inside the `:startScript()` code of an ABNF:
 
 <details>

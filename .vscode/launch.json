@@ -407,6 +407,30 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen-notimpl.c", "-q", "-warn-unsupported"]
         },
         {
+            "name": "C preprocessor (object-like macros) standalone",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-preprocessor.abnf", "tests/c-test-preprocess.c", "-q"]
+        },
+        {
+            "name": "C preprocessor -pipe interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-preprocessor.abnf", "tests/c-test-preprocess.c", "-pipe", "languages/c-interpreter.abnf", "-q"]
+        },
+        {
+            "name": "C preprocessor -pipe compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-preprocessor.abnf", "tests/c-test-preprocess.c", "-pipe", "languages/c-to-llvm-ir.abnf", "-q"]
+        },
+        {
+            "name": "C preprocessor identity (macro-free c-test-1) -pipe compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-preprocessor.abnf", "tests/c-test-1.c", "-pipe", "languages/c-to-llvm-ir.abnf", "-q"]
+        },
+        {
             "name": "JavaScript widened (arrow/template/for-of) interpreter",
             "type": "go",
             "request": "launch",
