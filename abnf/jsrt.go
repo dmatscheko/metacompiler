@@ -2307,7 +2307,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				out += rt.pyString(e)
 			}
-			fmt.Println(out)
+			fmt.Fprintln(outWriter, out)
 			return 0
 		},
 
@@ -2418,18 +2418,18 @@ func standardJSBindings() map[string]interface{} {
 
 	return map[string]interface{}{
 		"println": jsHostFunc("println", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			fmt.Println(rt.printArgs(args)...)
+			fmt.Fprintln(outWriter, rt.printArgs(args)...)
 			return jsUndef
 		}),
 		"print": jsHostFunc("print", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			fmt.Print(rt.printArgs(args)...)
+			fmt.Fprint(outWriter, rt.printArgs(args)...)
 			return jsUndef
 		}),
 		"printf": jsHostFunc("printf", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			if len(args) == 0 {
 				return jsUndef
 			}
-			fmt.Printf(rt.toString(args[0]), rt.printArgs(args[1:])...)
+			fmt.Fprintf(outWriter, rt.toString(args[0]), rt.printArgs(args[1:])...)
 			return jsUndef
 		}),
 		"sprintf": jsHostFunc("sprintf", func(rt *jsrt, this uint64, args []interface{}) interface{} {

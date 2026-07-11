@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"strconv"
@@ -37,6 +39,10 @@ import (
 //  -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
 //  -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
 //                lets call graphs / CFGs / traces be built from partially understood languages
+//  -pipe         start a new pipeline segment: the text a language prints becomes the
+//                program input of the next segment, so one language (e.g. a preprocessor)
+//                can transform the source another language then consumes. Example:
+//                mec c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
 //  -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
 //  -trace F      stream runtime events to file F as JSON lines; also the -render input
 //  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
@@ -61,7 +67,8 @@ type options struct {
 	warnImports                           bool // -warn-imports: warn+skip unresolved imports instead of aborting.
 	warnUnsupported                       bool // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
 	speedTest, useBlockList, useFoundList bool
-	speedCount                            int // Timed cycle count for -speed (>0 when set).
+	speedCount                            int   // Timed cycle count for -speed (>0 when set).
+	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
 
 	freezePath, cfgPath, tracePath, callgraphPath, renderKind string
 }
@@ -110,6 +117,13 @@ func parseArgs(args []string) (*options, error) {
 			o.warnImports = true
 		case "-warn-unsupported":
 			o.warnUnsupported = true
+		case "-pipe":
+			// A pipeline segment boundary: the TEXT output of the segment so far
+			// becomes the program input of the next segment (see runPipeline).
+			if len(o.files) == 0 {
+				return nil, fmt.Errorf("-pipe needs a preceding segment (grammar + program)")
+			}
+			o.pipeBounds = append(o.pipeBounds, len(o.files))
 		case "-speed":
 			var v string
 			if v, err = takeVal(); err == nil {
@@ -211,6 +225,16 @@ func main() {
 		printUsage()
 		os.Exit(2)
 	}
+	// No -pipe segment may be empty (that includes a trailing or doubled -pipe).
+	{
+		b := append(append([]int{0}, o.pipeBounds...), len(o.files))
+		for i := 0; i+1 < len(b); i++ {
+			if b[i] >= b[i+1] {
+				fmt.Fprintln(os.Stderr, "Error: empty -pipe segment (each segment needs at least one file)")
+				os.Exit(2)
+			}
+		}
+	}
 	for stage := range o.verboseStage {
 		if stage > len(o.files) {
 			fmt.Fprintf(os.Stderr, "Error: -v%d, but there are only %d stage(s)\n", stage, len(o.files))
@@ -262,25 +286,69 @@ func main() {
 		return
 	}
 
-	// The pipeline.
-	grammar := abnf.AbnfAgrammar
-	for i := range o.files {
-		stage := i + 1
-		verbose := o.verboseAll || o.verboseStage[stage]
-		trace := o.traceAll || o.traceStage[stage]
-		if i == len(o.files)-1 {
-			// Positions in traces/diagrams refer to the last file (the program).
-			abnf.SetTraceSource(o.files[i], srcs[i])
-		}
-		grammar = runStage(grammar, o.files[i], srcs[i], stage, o.slotStage[stage], verbose, trace, o.quietMost, o.quietFull, parseropts)
-	}
+	runPipeline(o, srcs, parseropts)
+}
 
-	// If the last file produced a startScript-only grammar, run it on empty input.
-	if abnf.GrammarStartScriptOnly(grammar) {
-		last := len(o.files)
-		verbose := o.verboseAll || o.verboseStage[last]
-		trace := o.traceAll || o.traceStage[last]
-		runStage(grammar, "", "", last, o.slotStage[last], verbose, trace, o.quietMost, o.quietFull, parseropts)
+// runPipeline executes the file pipeline. Without -pipe there is a single
+// segment and it behaves exactly like the original loop (a chain of a-grammars,
+// each stage's compiled grammar feeding the next file). Each -pipe starts a new
+// segment: an independent a-grammar chain whose PROGRAM input is the captured
+// text output (script print) of the previous segment - so a language (e.g. a
+// preprocessor) can transform the source before another language consumes it.
+func runPipeline(o *options, srcs []string, parseropts *abnf.Parseropts) {
+	// Segment [start,end) ranges over o.files, split at the -pipe boundaries.
+	bounds := append(append([]int{0}, o.pipeBounds...), len(o.files))
+	globalStage := 0
+	var piped *string // Text output of the previous segment, or nil for the first.
+	for s := 0; s+1 < len(bounds); s++ {
+		start, end := bounds[s], bounds[s+1]
+		isLast := s+2 == len(bounds)
+
+		// This segment's grammar files and their sources; a piped-in text from the
+		// previous segment is appended as the final program input.
+		files := append([]string{}, o.files[start:end]...)
+		segSrcs := append([]string{}, srcs[start:end]...)
+		if piped != nil {
+			files = append(files, "(piped)")
+			segSrcs = append(segSrcs, *piped)
+		}
+
+		// A non-last (producer) segment has its stdout captured and fed forward, so
+		// its script output must be enabled even under -q/-qq.
+		quietFull := o.quietFull
+		var buf bytes.Buffer
+		var prevOut io.Writer
+		if !isLast {
+			quietFull = false
+			prevOut = abnf.SetOutput(&buf)
+		}
+		parseropts.PreventDefaultOutput = quietFull
+
+		grammar := abnf.AbnfAgrammar
+		for j := range files {
+			globalStage++
+			verbose := o.verboseAll || o.verboseStage[globalStage]
+			trace := o.traceAll || o.traceStage[globalStage]
+			if isLast && j == len(files)-1 {
+				// Positions in traces/diagrams refer to the final program.
+				abnf.SetTraceSource(files[j], segSrcs[j])
+			}
+			grammar = runStage(grammar, files[j], segSrcs[j], globalStage, o.slotStage[globalStage], verbose, trace, o.quietMost, quietFull, parseropts)
+		}
+
+		// A startScript-only trailing grammar (last segment only) runs on empty input.
+		if isLast && abnf.GrammarStartScriptOnly(grammar) {
+			globalStage++
+			verbose := o.verboseAll || o.verboseStage[globalStage]
+			trace := o.traceAll || o.traceStage[globalStage]
+			runStage(grammar, "", "", globalStage, o.slotStage[globalStage], verbose, trace, o.quietMost, quietFull, parseropts)
+		}
+
+		if !isLast {
+			abnf.SetOutput(prevOut)
+			t := buf.String()
+			piped = &t
+		}
 	}
 }
 
@@ -402,6 +470,8 @@ anywhere among the files.
   -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
   -warn-unsupported  warn+placeholder parsed-but-unimplemented syntax instead of aborting;
                 lets call graphs / CFGs / traces be built from partially understood languages
+  -pipe         start a new pipeline segment fed by the previous segment's text output
+                (e.g. c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf)
   -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
   -trace F      stream runtime events to file F as JSON lines
   -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
