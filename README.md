@@ -174,6 +174,15 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | Kotlin       | kotlin-interpreter.abnf                                      | kotlin-to-llvm-ir.abnf       | kotlin-test-1.kt                                  |
 | Go           | go-interpreter.abnf                                          | go-to-llvm-ir.abnf           | go-test-1.go                                      |
 | Python       | python-interpreter.abnf                                      | python-to-llvm-ir.abnf       | python-test-1.py                                  |
+| JavaScript   | js-interpreter.abnf                                          | js-to-llvm-ir.abnf           | js-test-1.js, js-test-classes.js                  |
+| TypeScript   | typescript-interpreter.abnf                                  | typescript-to-llvm-ir.abnf   | typescript-test-1.ts                              |
+| Lua          | lua-interpreter.abnf                                         | lua-to-llvm-ir.abnf          | lua-test-1.lua                                    |
+| Ruby         | ruby-interpreter.abnf                                        | ruby-to-llvm-ir.abnf         | ruby-test-1.rb                                    |
+| PHP          | php-interpreter.abnf                                         | php-to-llvm-ir.abnf          | php-test-1.php                                    |
+| C#           | csharp-interpreter.abnf                                      | csharp-to-llvm-ir.abnf       | csharp-test-1.cs                                  |
+| Dart         | dart-interpreter.abnf                                        | dart-to-llvm-ir.abnf         | dart-test-1.dart                                  |
+| Swift        | swift-interpreter.abnf                                       | swift-to-llvm-ir.abnf        | swift-test-1.swift                                |
+| C preproc.   | c-preprocessor.abnf (source-to-source, via `-pipe`)          | -                            | c-test-preprocess.c                               |
 | C99          | c99-parser.abnf (parses only)                                | -                            | c99-test-1.c                                      |
 
 Every language is a well chosen executable subset; the exact feature list and the
@@ -199,6 +208,11 @@ i64 handles, methods dispatch through the shared class descriptor convention (js
 with a __super chain for Java's inheritance). Go maps and Python dicts share one handle
 shape (two parallel key/value arrays, so the insertion order is deterministic in both
 engines).
+The same handle runtime backs the dynamic and scripting family - JavaScript (with
+classes/for-in/destructuring), its type-erasing sibling TypeScript, Ruby, Lua, PHP, C#,
+Dart and Swift - which all reuse the shared class descriptor, closures (js_closure) and
+deterministic key enumeration (js_keys, powering for-in / pairs / range-over-map). None
+of them needed a new runtime primitive.
 MetaJS pins types: every variable must be declared (var/let/const) before use, and a
 variable's type class is pinned by the first non-undefined, non-null value it holds -
 enforced by both engines, positively tested by metajs-test-2.js and demonstrated by
