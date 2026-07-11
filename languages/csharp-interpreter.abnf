@@ -1,0 +1,839 @@
+:title("C# (subset) interpreter") ;
+:description("Parses a C# subset and executes it directly, without generating code.
+
+The subset: 'using' directives (resolved against the runtime builtins, like imports),
+'namespace X.Y { ... }' blocks (unwrapped; declarations inside behave like top level
+ones), classes with instance and static fields (with initializers), instance and static
+methods (block bodied and expression bodied '=> e;'), constructors (with an optional
+': base(...)' / ': this(...)' header that is parsed and skipped), single inheritance
+('class B : A' inherits fields and methods, overrides with dynamic dispatch, runs the
+implicit base constructor, and 'base.M()' calls; a base class must appear before its
+subclasses), object creation with 'new', arrays (new int[n], new int[]{...}, a.Length,
+indexing), List<T> (new List<T>(), .Add, [i], .Count, .Contains, foreach), Dictionary<K,V>
+(new Dictionary<K,V>(), d[k] get/set, .Count, .ContainsKey, .Keys, .Values), the 'foreach
+(var x in coll)' loop, 'var' and typed locals/params/returns (types are parsed; the
+semantics are dynamic), string concatenation with +, '$\"...{expr}...\"' interpolation,
+the String members .Length, .Substring, .IndexOf and .Equals, Console.WriteLine /
+Console.Write mapped to the print builtin, if/else, while, do-while, both for forms, the
+colon switch on int or string (fallthrough with break, stacked labels, default),
+break/continue, return, assignment (also += -= *= /= %=), postfix ++/--, the ternary
+operator, || && with short circuit, == != < > <= >= (== compares objects by identity and
+strings by value) and + - * / % (int arithmetic is 32 bit, / truncates) and unary - !.
+
+Widened surface (parsed so a whole C# file is accepted): generics (<...>), nullable ('?')
+and array type suffixes are parsed and dropped; casts ((Type) expr) are identity;
+modifier keywords are parsed and ignored. Interfaces, structs, enums, delegates,
+nested types, properties ({ get; set; } bodies), lambdas ('=>' as an expression) and LINQ
+query expressions are accepted and reported as not implemented; -warn-unsupported
+downgrades that to a warning so call graphs / CFGs / traces still work on partly
+understood files.
+
+Not genuinely modelled: char/decimal/float literals, overloading, implicit field access
+(fields are reached via this.x or ClassName.x), real exception unwinding, properties,
+delegates/events, async/await and LINQ.
+
+Fields live directly on the instance object, methods on the class descriptor; a
+constructor always exists (a default one is generated) and first applies the field
+initializers. The static Main of class Program is the entry point; the process exit code
+is Main's return value, so self checking programs 'return failures;'.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     = { Using } { TopDecl } ;
+
+// A 'using' directive (also 'using static' and the 'using Alias = Path;' form) is
+// resolved against the runtime builtins (core.stdlibImports); one that does not resolve
+// aborts, unless -warn-imports downgrades it to a warning (see resolveImport). It leaves
+// no value on the stack.
+Using       <~~ resolveImport(pop(), up.pos) ~~>
+            = KwUsing [ "static" KwEnd ] [ Id "=" ] QualName ";" ;
+QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
+
+TopDecl     = Namespace | UnsupType | ClassDecl ;
+
+// namespace X.Y { ... }: unwrapped. The inner declarations register themselves
+// (their tags run during the match); the namespace tag just clears its own name.
+Namespace   <~~ takeAll() ~~>
+            = KwNamespace QualName "{" { Using | TopDecl } "}" ;
+
+ClassDecl   <~~ buildClass(takeAll()) ~~>
+            = [ LeadMods ] KwClass Id <~~ push(up.in); curClassName = up.in ~~> [ SkipAngle ]
+              [ ":" Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] { "," Type } ] "{" { Member } "}" ;
+
+Member      = NestedType | Ctor | Method | Property | Field ;
+
+// A constructor: name matches the class; an optional ': base(...)' / ': this(...)'
+// header is parsed and skipped (the implicit base constructor already ran).
+Ctor        <~~ push(makeCtor(takeAll())) ~~>
+            = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] Block ;
+CtorInit    = ":" ( KwBase | KwThis ) SkipParen ;
+
+Method      <~~ push(makeMethod(takeAll())) ~~>
+            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
+MethodBody  = Block | ArrowBody ;
+ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
+            = "=>" Expression ";" ;
+
+// A property ({ get; set; } / expression bodied): accepted, reported as not implemented.
+Property    <~~ notImpl("property", up.pos) ~~>
+            = LeadMods Type Id ( SkipBlock [ "=" DiscardExpr ";" ] | "=>" DiscardExpr ";" ) ;
+
+Field       <~~ push(makeField(takeAll())) ~~>
+            = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
+
+// Modifiers before a member; ModWord keeps the text so 'static' stays detectable.
+Mods        <~~ push({mods: takeAll()}) ~~>
+            = { ModWord } ;
+ModWord     <~~ push(up.in) ~~>
+            = ModKw ;
+FType       <~~ push({ty: up.in}) ~~>
+            = Type ;
+
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Param { "," Param } ] ")" ;
+Param       = { ParamMod } Type [ "..." ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
+ParamMod    = ( "ref" | "out" | "in" | "params" | "this" | "readonly" ) KwEnd ;
+
+// Types are parsed and (apart from field defaults) ignored: generic arguments (<...>),
+// dotted names, array suffixes and the nullable '?' are accepted and dropped.
+Type        = TypeName { "[" { "," } "]" } [ "?" ] ;
+TypeName    = PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "void" KwEnd
+            | "var" KwEnd | "dynamic" KwEnd | UserType ;
+PrimType    = ( "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "byte" | "sbyte"
+              | "double" | "float" | "decimal" | "bool" | "char" ) KwEnd ;
+UserType    = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
+            | Try | Throw | Decl | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+
+// The colon switch (on int or string): starts at the first matching label and runs
+// until a break or the end of the switch. Labels may stack.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
+SwitchCase  = Case | Default ;
+Case        <~~ push(makeCase(takeAll())) ~~>
+            = KwCase CondExpr ":" { Statement } ;
+Default     <~~ push(makeDefault(takeAll())) ~~>
+            = KwDefault ":" { Statement } ;
+
+// foreach (var x in coll) body.
+ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
+            = KwForeach "(" Type Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      = DeclCore ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+
+Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+
+// try/catch/finally and throw parse fully but are not implemented (no exception model).
+Try         <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwTry Block { KwCatch [ "(" Type [ Id ] ")" ] [ KwWhen "(" DiscardExpr ")" ] Block } [ KwFinally Block ] ;
+Throw       <~~ push(makeThrow(takeAll(), up.pos)) ~~>
+            = KwThrow [ Expression ] ";" ;
+
+Decl        = DeclCore ";" ;
+DeclCore    <~~ push(makeSeq(takeAll())) ~~>
+            = Type Declarator { "," Declarator } ;
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
+
+Empty       <~~ push(function() {}) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ";" ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ) <~~ push(stripWs(up.in)) ~~> Expression ;
+
+// An assignable place: a variable (this and class names are variables too), or a
+// member/index path: this.x, p.X, Program.Fails, arr[i], dict[k].
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" Expression ":" Expression ] ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Cast | Neg | Not | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+
+// A cast is identity ((Type) expr yields expr). A primitive cast accepts any unary
+// operand; a reference cast excludes a leading '-'/'+' so '(a) - b' stays subtraction.
+Cast        = PrimCast | RefCast ;
+PrimCast    <~~ push(makeCast(pop())) ~~>
+            = "(" PrimType { "[" "]" } ")" UnaryExpr ;
+RefCast     <~~ push(makeCast(pop())) ~~>
+            = "(" RefType ")" UnaryNoPM ;
+UnaryNoPM   = Not | PostfixExpr ;
+RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "[" "]" } ;
+
+PostfixExpr = IncDec | NewExpr | BaseCall | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// new Point(1, 2) | new List<int>() | new Dictionary<K,V>() | new int[]{...} | new int[n]
+NewExpr     = NewArrLit | NewArrSize | NewObject ;
+// The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
+NewArrLit   <~~ push(makeArray(takeAll())) ~~>
+            = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
+NewArrSize  <~~ push(makeNewArray(pop())) ~~>
+            = KwNew Type "[" Expression "]" ;
+NewObject   <~~ push(makeNew(takeAll())) ~~>
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" [ SkipBlock ] ;
+
+// base.M(args): the method search starts at the base class of the class the call
+// appears in (curClassName is set while the class body is being built).
+BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
+            = KwBase "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+// A primary followed by method calls, field reads and indexing.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = Lambda | LinqQuery | "(" Expression ")" | InterpStr | DqString
+            | IntLit | True | False | Null | VarRef ;
+
+// A lambda ('=>' expression / block): no delegate model, so not implemented.
+Lambda      <~~ push(makeLambdaExpr(takeAll(), up.pos)) ~~>
+            = LambdaHead "=>" LambdaBody ;
+LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | Id ;
+LamParam    = [ Type ] Id ;
+LambdaBody  = Block | DiscardExpr ;
+// A LINQ query expression: accepted, reported as not implemented.
+LinqQuery   <~~ push(makeLinq(up.pos)) ~~>
+            = KwFrom Id KwIn DiscardExpr LinqTail ;
+LinqTail    = { LinqClause } KwSelect DiscardExpr ;
+LinqClause  = KwWhere DiscardExpr | KwOrderby DiscardExpr | KwLet Id "=" DiscardExpr ;
+DiscardExpr <~~ pop() ~~>
+            = Expression ;
+
+Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
+
+// 'this' and class names resolve like variables.
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+// $"...{expr}..." interpolated string; a plain "..." (DqString) does not interpolate.
+InterpStr   <~~ push(makeTemplate(takeAll())) ~~>
+            = "$" '"' :whitespace() { IsExpr | IsChunk } '"' :whitespace(Whitespace) ;
+IsExpr      <~~ push({e: pop()}) ~~>
+            = "{" :whitespace(Whitespace) Expression :whitespace() "}" ;
+IsChunk     <~~ push({s: unescapeJs(up.in)}) ~~>
+            = IsChar { IsChar } ;
+IsChar      = IsEsc | IsPlain ;
+IsEsc       = "\\" "\x20"..b"\x7e" ;
+IsPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" | @"\t" ;
+
+// ----- Widened surface: generics, casts, unsupported declarations (see :description) -----
+
+// Balanced skips let a construct be ACCEPTED without being understood. String and char
+// literals are matched first so braces/brackets inside them are never miscounted.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
+SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipStrChar = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(Whitespace) ;
+SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
+SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// A balanced < ... > run (generic parameters / arguments), parsed and ignored.
+SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+// A balanced ( ... ) run (constructor init arguments), parsed and ignored.
+SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
+SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
+
+ModKw       = ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
+              | "sealed" | "virtual" | "override" | "readonly" | "const" | "partial"
+              | "unsafe" | "async" | "extern" | "volatile" ) KwEnd ;
+LeadMods    = { ModKw } ;
+
+// Type declarations accepted structurally, then reported as not implemented (so a whole
+// C# file parses; -warn-unsupported lets the rest run). Bodies are skipped.
+UnsupType   = Interface | StructDecl | EnumDecl | DelegateDecl ;
+Interface   <~~ notImpl("interface", up.pos) ~~>
+            = LeadMods KwInterface Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
+StructDecl  <~~ notImpl("struct", up.pos) ~~>
+            = LeadMods KwStruct Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
+EnumDecl    <~~ notImpl("enum", up.pos) ~~>
+            = LeadMods KwEnum Id [ ":" Type ] SkipBlock ;
+DelegateDecl <~~ notImpl("delegate", up.pos) ~~>
+            = LeadMods KwDelegate Type Id [ SkipAngle ] SkipParen ";" ;
+
+// A type declared inside a class body (nested): accepted, reported as not implemented.
+NestedType  <~~ notImpl("nested type", up.pos) ~~>
+            = LeadMods NestedKw Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
+NestedKw    = ( "class" | "interface" | "enum" | "struct" | "record" ) KwEnd ;
+
+KwUsing     = "using" KwEnd ;
+KwNamespace = "namespace" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwInterface = "interface" KwEnd ;
+KwStruct    = "struct" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwDelegate  = "delegate" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwWhen      = "when" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwForeach   = "foreach" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwNew       = "new" KwEnd ;
+KwBase      = "base" KwEnd ;
+KwThis      = "this" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
+KwFrom      = "from" KwEnd ;
+KwSelect    = "select" KwEnd ;
+KwWhere     = "where" KwEnd ;
+KwOrderby   = "orderby" KwEnd ;
+KwLet       = "let" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); C#-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
+
+    // The host names a program can see. Console is built here.
+    hostGlobals["Console"] = {
+        WriteLine: function(x) { println(x === undefined ? "" : csStr(x)) },
+        Write: function(x) { print(x === undefined ? "" : csStr(x)) }
+    }
+
+    // The class whose body is currently being built (for base calls).
+    var curClassName = ""
+
+    // C# to-string for the interpolated / concatenated subset (integers as "5").
+    function csStr(v) {
+        if (v === undefined || v === null) return ""
+        if (v === true) return "true"
+        if (v === false) return "false"
+        if (typeof v == "string") return v
+        return "" + v
+    }
+    function csStr2(v) {
+        if (typeof v == "string") return v
+        return csStr(v)
+    }
+    // The + operator and +=: string concat when either side is a string, else 32-bit add.
+    function csAdd(l, r) {
+        if (typeof l == "string" || typeof r == "string") return csStr2(l) + csStr2(r)
+        return (l + r) | 0
+    }
+
+    // ----- Dictionaries mirror the compiled runtime's js_dict handle -----
+    function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+    function dictFind(d, k) {
+        for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) return i }
+        return -1
+    }
+    function dictSet(d, k, v) {
+        var i = dictFind(d, k)
+        if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
+    }
+    // .Count / .Length and indexing understand strings, arrays and dictionaries. Defined
+    // before their core.* hookup below (the frozen engine does not hoist declarations).
+    function csLen(o) {
+        if (isDict(o)) return o.keys.length
+        if (o === undefined || o === null) fail("Length/Count of null")
+        return o.length
+    }
+    function csGetIndex(o, i) {
+        if (isDict(o)) {
+            var di = dictFind(o, i)
+            if (di < 0) fail("KeyError: " + i)
+            return o.vals[di]
+        }
+        if (typeof o == "string") {
+            if (i < 0 || i >= o.length) fail("string index out of range: " + i)
+            return o.charAt(i)
+        }
+        if (o === undefined || o === null) fail("index of null")
+        if (i < 0 || i >= o.length) fail("index out of range: " + i)
+        return o[i]
+    }
+
+    // ----- Method dispatch (mirrors the js_mcall external of the compiled world) -----
+    function mcall(target, name, args) {
+        if (typeof target == "string") {
+            if (name == "Substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
+            if (name == "IndexOf") return target.indexOf(args[0])
+            if (name == "Equals") return target === args[0]
+            fail("unknown string method: " + name)
+        }
+        if (isDict(target)) {
+            if (name == "ContainsKey") return dictFind(target, args[0]) >= 0
+            if (name == "keys") return target.keys.slice(0)
+            if (name == "values") return target.vals.slice(0)
+            if (name == "Count") return target.keys.length
+            fail("unknown Dictionary method: " + name)
+        }
+        if (Array.isArray(target)) {
+            if (name == "Add") { target.push(args[0]); return true }
+            if (name == "Contains") return target.indexOf(args[0]) >= 0
+            if (name == "Count") return target.length
+            fail("unknown List method: " + name)
+        }
+        if (target === undefined || target === null) fail("method call ." + name + "() on null")
+        if (target.__class != undefined) {
+            // The lookup follows the __super chain (inheritance).
+            var m = undefined
+            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) m = c[name]
+            if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        if (target.__isclass === true) {
+            var sm = target[name]
+            if (typeof sm == "function") return sm.apply(undefined, args)
+            fail("unknown static method '" + name + "' on " + target.__name)
+        }
+        var f = target[name]
+        if (typeof f != "function") fail("unknown method '" + name + "'")
+        return f.apply(undefined, args)
+    }
+
+    // ----- Expression thunks: function() -> value -----
+
+    function makeCond(items) {
+        if (items.length == 1) return items[0]
+        return function() { return core.test(items[0]()) ? items[1]() : items[2]() }
+    }
+
+    // A member/index target: obj[key] / obj.field. Dict-aware for Dictionary targets.
+    function csResolveRef(ref) {
+        var o = anytype // The containers along the path may be of mixed types.
+        o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.key != undefined) { o = o[s.key] } else { o = csGetIndex(o, s.idx()) }
+            if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
+        }
+        var last = ref.path[ref.path.length - 1]
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = anytype
+            v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                setVar(ref.name, v)
+            } else {
+                var p = csResolveRef(ref)
+                if (isDict(p.obj)) {
+                    if (op != "=") { var di = dictFind(p.obj, p.key); v = applyOp(op, di < 0 ? 0 : p.obj.vals[di], v) }
+                    dictSet(p.obj, p.key, v)
+                } else {
+                    if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                    p.obj[p.key] = v
+                }
+            }
+            return v
+        }
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var d = (items[1] == "++") ? 1 : -1
+        return function() {
+            if (ref.path.length == 0) {
+                var n = getVar(ref.name)
+                setVar(ref.name, (n + d) | 0)
+                return n
+            }
+            var p = csResolveRef(ref)
+            if (isDict(p.obj)) {
+                var di = dictFind(p.obj, p.key)
+                var m = di < 0 ? 0 : p.obj.vals[di]
+                dictSet(p.obj, p.key, (m + d) | 0)
+                return m
+            }
+            var m2 = p.obj[p.key]
+            p.obj[p.key] = (m2 + d) | 0
+            return m2
+        }
+    }
+
+    // base.M(args): the search starts at the base class of the DEFINING class.
+    function makeBaseCall(name, argThunks) {
+        var defName = curClassName
+        return function() {
+            var self = getVar("this")
+            var m = undefined
+            for (var c = getVar(defName).__super; c != undefined && m == undefined; c = c.__super) m = c[name]
+            if (typeof m != "function") fail("unknown base method '" + name + "'")
+            var argv = [self]
+            for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
+            return m.apply(undefined, argv)
+        }
+    }
+
+    // new C(args) | new List<T>(...) | new Dictionary<K,V>(...).
+    function makeNew(items) {
+        var clsName = items[0]
+        var args = items.slice(1)
+        return function() {
+            if (clsName == "List") {
+                for (var i = 0; i < args.length; i++) { args[i]() }
+                return []
+            }
+            if (clsName == "Dictionary") {
+                for (var j = 0; j < args.length; j++) { args[j]() }
+                return {__dict: true, keys: [], vals: []}
+            }
+            var cls = getVar(clsName)
+            if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
+            var obj = {__class: cls}
+            var argv = [obj]
+            for (var k = 0; k < args.length; k++) argv.push(args[k]())
+            cls.__ctor.apply(undefined, argv)
+            return obj
+        }
+    }
+    function makeArray(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            return a
+        }
+    }
+    function makeNewArray(sizeT) {
+        return function() {
+            var n = sizeT()
+            var a = []
+            for (var i = 0; i < n; i++) a.push(0)
+            return a
+        }
+    }
+    // A cast is identity: (Type) expr evaluates to expr.
+    function makeCast(inner) { return inner }
+    // Lambdas / LINQ: no delegate model, so not implemented.
+    function makeLambdaExpr(items, pos) { return notImplExpr("lambda expression", pos) }
+    function makeLinq(pos) { return notImplExpr("LINQ query", pos) }
+
+    // ----- Statement thunks -----
+
+    // try/catch/finally has no exception model; the try block still runs. throw
+    // evaluates its expression (keeping calls visible) but does not unwind.
+    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+    function makeThrow(items, pos) {
+        notImpl("throw", pos)
+        return function() { for (var i = 0; i < items.length; i++) { items[i]() } }
+    }
+
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeConst(0)
+        return function() { declVar(name, init()) }
+    }
+    // An expression bodied method '=> e;' behaves like { return e; }.
+    function makeArrowBody(t) {
+        return function() { return {isRet: true, v: t()} }
+    }
+    function makeDo(condT, bodyT) {
+        return function() {
+            do {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            } while (core.test(condT()))
+        }
+    }
+    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
+    function makeDefault(items) { return {isDefault: true, body: items} }
+    // The switch compares with === (identity for ints and value for strings, matching
+    // js_seq of the compiled world). Execution falls through until a break.
+    function makeSwitch(items) {
+        var scrut = items[0]
+        var cases = items.slice(1)
+        return function() {
+            var v = scrut()
+            var start = -1
+            var dflt = -1
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { dflt = i; continue }
+                if (start < 0 && cases[i].v() === v) { start = i }
+            }
+            if (start < 0) { start = dflt }
+            if (start < 0) { return undefined }
+            for (var j = start; j < cases.length; j++) {
+                var body = cases[j].body
+                for (var k = 0; k < body.length; k++) {
+                    var r = body[k]()
+                    if (r === BRK) { return undefined }
+                    if (r != undefined) { return r }
+                }
+            }
+            return undefined
+        }
+    }
+    // foreach (var x : coll) body -- pops reversed: body, coll, name.
+    function makeForEach(bodyT, arrT, name) {
+        return function() {
+            var arr = arrT()
+            scopes.push({})
+            declVar(name, undefined)
+            var res = undefined
+            for (var i = 0; i < arr.length; i++) {
+                setVar(name, arr[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function() {
+            scopes.push({})
+            var res = undefined
+            if (init != null) init()
+            while (cond == null || core.test(cond())) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+                if (post != null) post()
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { return {isRet: true, v: t()} }
+    }
+
+    // ----- $"...{expr}..." interpolation -----
+    function makeTemplate(items) {
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].s != undefined) { out += items[i].s }
+                else { out += csStr(items[i].e()) }
+            }
+            return out
+        }
+    }
+
+    // ----- Class building -----
+
+    function makeMethod(items) {
+        var mods = items[0].mods
+        var name = items[1]
+        var params = items[2].params
+        var body = items[3]
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        return {kind: "method", name: name, statik: isStatic, params: params, body: body}
+    }
+    function makeCtor(items) {
+        return {kind: "ctor", name: items[0], params: items[1].params, body: items[2]}
+    }
+    function makeField(items) {
+        var mods = items[0].mods
+        var ty = stripWs(items[1].ty)
+        var name = items[2]
+        var init = items.length > 3 ? items[3] : null
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
+                  || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
+                  || ty == "float" || ty == "decimal")
+        var dflt = null
+        if (ty == "bool") dflt = false
+        else if (isNum && ty.indexOf("[") < 0) dflt = 0
+        return {kind: "field", name: name, statik: isStatic, init: init, dflt: dflt}
+    }
+
+    function buildClassFrom(name, members) {
+        var cls = {__isclass: true, __name: name}
+        var fields = []
+        var ctorInfo = null
+        var sup = null
+        var i
+        for (i = 0; i < members.length; i++) {
+            if (members[i].ext != undefined) {
+                // Lenient: a base that is not a known class (an interface) is ignored.
+                sup = globalScope[members[i].ext]
+                if (sup != undefined) cls.__super = sup
+            }
+        }
+        for (i = 0; i < members.length; i++) {
+            var mm = members[i]
+            if (mm.kind == "field") {
+                if (mm.statik) { cls[mm.name] = (mm.init != null) ? mm.init() : mm.dflt }
+                else { fields.push(mm) }
+            }
+            if (mm.kind == "ctor") ctorInfo = mm
+        }
+        // The constructor: the implicit base() first (the whole parent constructor,
+        // without arguments), then this class' field defaults and initializers.
+        function initFields(self) {
+            if (sup != null) sup.__ctor(self)
+            for (var k = 0; k < fields.length; k++) {
+                self[fields[k].name] = (fields[k].init != null && fields[k].init != undefined) ? fields[k].init() : fields[k].dflt
+            }
+        }
+        if (ctorInfo != null) {
+            cls.__ctor = makeCtorClosure(ctorInfo, initFields)
+        } else {
+            cls.__ctor = function() { initFields(arguments[0]) }
+        }
+        for (i = 0; i < members.length; i++) {
+            var m2 = members[i]
+            if (m2.kind == "method") {
+                cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
+            }
+        }
+        globalScope[name] = cls
+    }
+    function makeCtorClosure(info, initFields) {
+        return function() {
+            var self = arguments[0]
+            initFields(self)
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            invokeBody(info.params, info.body, self, "this", args)
+        }
+    }
+    function makeInstanceClosure(m) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(m.params, m.body, self, "this", args)
+        }
+    }
+    function makeStaticClosure(m) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+            return invokeBody(m.params, m.body, undefined, "this", args)
+        }
+    }
+
+    function buildClass(items) {
+        buildClassFrom(items[0], items.slice(1))
+    }
+
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "csharp"
+    core.add = csAdd
+    core.getField = function(o, name) {
+        if (name == "Count" || name == "Length") return csLen(o)
+        if (name == "Keys") return mcall(o, "keys", [])
+        if (name == "Values") return mcall(o, "values", [])
+        return o[name]
+    }
+    core.getIndex = csGetIndex
+
+    // Import roots the runtime already provides (Console, collections, ...); importing
+    // them is a no-op. Anything else is a library we cannot resolve.
+    core.stdlibImports = ["System", "Microsoft"]
+
+    c.compile(c.asg)
+
+    var progCls = globalScope["Program"]
+    if (progCls == undefined || typeof progCls["Main"] != "function") {
+        fail("C# programs need a class Program with a static Main method.")
+    }
+    var ret = progCls["Main"]()
+    exit(ret === undefined ? 0 : ret | 0)
+
+~~) ;

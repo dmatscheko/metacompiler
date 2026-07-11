@@ -1,0 +1,711 @@
+:title("Dart interpreter") ;
+:description("Parses a practical subset of Dart and executes it directly with a tree-walking
+interpreter, without generating code.
+
+Dart is a dynamic/OO language modelled here on the js and kotlin subsets. It has: top level
+and nested functions with block bodies and arrow bodies (Type name(params) => expr), typed
+declarations whose type is parsed and erased (int x = 1), var/final/const, classes with
+fields, methods, constructors and field-initialising formals (Rectangle(this.width)),
+construction with or without new, this.field and implicit field access inside methods, List
+literals [ ... ] and Map literals { key: value }, index/member access, string interpolation
+with the dollar-var and dollar-brace-expr forms inside single and double quotes, if/else,
+while, C-style for and for (x in coll), closures with real captured scopes, print(...), the
+arithmetic + - * / ~/ % , comparisons, && || ! and the ternary operator.
+
+Every tag composes a small closure (a thunk) out of the thunks of its children. Expression
+thunks return the value; statement thunks return undefined or a signal object
+(return/break/continue) that the enclosing statements route. Methods dispatch through a
+class descriptor object (instances carry a __class), exactly like the compiler.
+
+Not in the subset (accepted structurally and reported as not implemented under
+-warn-unsupported, else aborting): mixins/inheritance, generics beyond being skipped,
+async/await, named constructors and the null-assertion ! . The nullable type marker ? is
+accepted and erased. The program must define int main(); its return value is the exit code
+of the metacompiler run, so the test programs are self checking (0 on success). The same
+subset is compiled to LLVM IR by dart-to-llvm-ir.abnf.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// The merged pushes of all top level declarations become one program thunk on the global stack.
+Program     <~~ pushg(makeSeq(takeAll())) ~~>
+            = { Statement } ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+// The keyword-led statements come first: otherwise 'return x;' would parse as a variable
+// declaration of a variable x with the (identifier-shaped) type 'return'.
+Statement   = Block | ClassDecl | If | While | For | Return | Break | Continue
+            | FuncDecl | VarDecl | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+// class Name { fields; constructors; methods }. Inheritance/mixins are not implemented.
+ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = KwClass Id <~~ push({cname: up.in}); curClassName = up.in ~~>
+              [ SkipAngle ] [ SuperClause ] "{" { Member } "}" ;
+SuperClause <~~ notImpl("inheritance/mixins", up.pos) ~~>
+            = SuperPart { SuperPart } ;
+SuperPart   = ( KwExtends | KwWith | KwImplements ) Type { "," Type } ;
+
+// A member is a field, a method (Type? name(params) body) or a constructor (name == the
+// class name). NamedCtorMember is a named constructor - accepted, not implemented.
+Member      = NamedCtorMember | PlainFnMember | TypedFnMember | FieldMember ;
+NamedCtorMember <~~ takeAll(); push({skip: notImpl("named constructor", up.pos)}) ~~>
+            = Id "." Id ParamList [ CtorInit ] MemberBody ;
+PlainFnMember <~~ push(makeMember(false, takeAll())) ~~>
+            = MName ParamList [ CtorInit ] MemberBody ;
+TypedFnMember <~~ push(makeMember(true, takeAll())) ~~>
+            = Type MName ParamList MemberBody ;
+MName       <~~ push({mn: up.in}) ~~> = Id ;
+
+// A constructor initializer list ( : super(...), : this.x = e ) is accepted and reported
+// as not implemented; the super/redirect chain and field initializers are dropped.
+CtorInit    <~~ takeAll(); notImpl("constructor initializer list", up.pos) ~~>
+            = ":" InitItem { "," InitItem } ;
+InitItem    = SuperOrRedirect | FieldInit ;
+SuperOrRedirect = ( "super" | "this" ) KwEnd [ "." Id ] "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+FieldInit   = [ "this" KwEnd "." ] Id "=" AssignExpr ;
+
+MemberBody  = [ AsyncMod ] MemberBodyKind ;
+MemberBodyKind = MBlock | MArrow | MSemi ;
+MBlock      <~~ push({body: pop()}) ~~>  = Block ;
+MArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
+MSemi       <~~ push({none: true}) ~~>   = ";" ;
+AsyncMod    <~~ notImpl("async function", up.pos) ~~> = ( "async" | "sync" ) KwEnd [ "*" ] ;
+
+// Fields: (Type | var | final [Type]) name [= init] { , name [= init] } ; - separate
+// complete alternatives so the leading-type / no-type cases never get stuck in an optional.
+FieldMember = FieldVar | FieldFinalTyped | FieldFinal | FieldTyped ;
+FieldVar        = KwVar        FieldList ";" ;
+FieldFinalTyped = KwFinal Type FieldList ";" ;
+FieldFinal      = KwFinal      FieldList ";" ;
+FieldTyped      = Type         FieldList ";" ;
+FieldList   = FieldDecl { "," FieldDecl } ;
+FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
+            = Id <~~ push({fn: up.in}) ~~> [ "=" AssignExpr ] ;
+
+// Function declarations (top level and nested). Two alternatives so the optional return
+// type does not get stuck when it is absent.
+FuncDecl    = FuncTyped | FuncPlain ;
+FuncTyped   <~~ push(makeFuncDecl(takeAll())) ~~>
+            = Type FName ParamList FnBody ;
+FuncPlain   <~~ push(makeFuncDecl(takeAll())) ~~>
+            = FName ParamList FnBody ;
+FName       <~~ push({fname: up.in}) ~~> = Id ;
+FnBody      = [ AsyncMod ] FnBodyKind ;
+FnBodyKind  = FBlock | FArrow ;
+FBlock      <~~ push({body: pop()}) ~~>  = Block ;
+FArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
+
+// A parameter list. this.x is a field-initialising formal; a bare or typed name is a plain
+// parameter. TypedParam is tried before PlainParam (both are separate alternatives).
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+Param       = ThisParam | TypedParam | PlainParam ;
+ThisParam   <~~ push({thisf: popName()}) ~~>
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> ;
+TypedParam  <~~ push({pname: popName()}) ~~>
+            = Type Id <~~ push({mname: up.in}) ~~> ;
+PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
+
+// A type: name with optional generics <...> (skipped), dotted names and a nullable ? marker,
+// all parsed and erased.
+Type        = Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ "?" ] ;
+
+// Local variable declarations. Separate complete alternatives avoid the optional-type trap.
+// A 'late' modifier is accepted and reported as not implemented (the initialiser still runs).
+VarDecl     = VarLate | VarKwDecl | VarFinalTyped | VarFinal | VarConstTyped | VarConst | VarTyped ;
+VarLate     <~~ notImpl("late variable", up.pos) ~~>
+            = KwLate ( KwFinal Type | KwFinal | Type ) DeclTail ;
+VarKwDecl     = KwVar         DeclTail ;
+VarFinalTyped = KwFinal Type  DeclTail ;
+VarFinal      = KwFinal       DeclTail ;
+VarConstTyped = KwConst Type  DeclTail ;
+VarConst      = KwConst       DeclTail ;
+VarTyped      = Type          DeclTail ;
+DeclTail    <~~ push(makeSeq(takeAll())) ~~>
+            = Declarator { "," Declarator } ";" ;
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+// for (x in coll) is tried before the C-style for; both start with 'for ('.
+For         = ForInTyped | ForInBare | ForCStyle ;
+ForInTyped  <~~ push(makeForIn(takeAll())) ~~>
+            = KwFor "(" ForInLead Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+ForInBare   <~~ push(makeForIn(takeAll())) ~~>
+            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+ForInLead   = KwVar | KwFinal | Type ;
+ForCStyle   <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      <~~ push(makeSeq(takeAll())) ~~> = ForVarHead Declarator { "," Declarator } ;
+ForVarHead  = KwVar | KwFinal Type | KwFinal | Type ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+Empty       <~~ push(function() {}) ~~>  = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ";" ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = AssignExpr ;
+AssignExpr  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
+DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
+IndexTarget <~~ push({idx: pop()}) ~~> = "[" Expression "]" ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "~/" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Await | Neg | Not | PostfixExpr ;
+Await       <~~ notImpl("await", up.pos) ~~> = "await" KwEnd UnaryExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~> = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~> = "!" UnaryExpr ;
+
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// A primary followed by any mix of method calls, field reads, index reads and the (not
+// implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx | BangSfx } ;
+BangSfx     <~~ notImpl("null-assertion", up.pos); push({kind:"bang"}) ~~> = "!" !"=" ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = ArrowFn | "(" Expression ")" | ListLit | MapLit | StrLit | IntLit
+            | True | False | Null | NewExpr | Call | VarRef ;
+
+// A closure: (params) => expr or (params) { statements }.
+ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
+            = ParamList ArrowTail ;
+ArrowTail   = ArrowExpr | ArrowBlock ;
+ArrowExpr   <~~ push({ebody: pop()}) ~~> = "=>" AssignExpr ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
+
+// new Type(args) - equivalent to Type(args); both construct.
+NewExpr     = KwNew Call ;
+
+// f(args): a top level function, a builtin, or (when the name is a class) a constructor.
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+
+ListLit     <~~ push(makeList(takeAll())) ~~>
+            = "[" [ AssignExpr { "," AssignExpr } [ "," ] ] "]" ;
+MapLit      <~~ push(makeMap(takeAll())) ~~>
+            = "{" [ MapEntry { "," MapEntry } [ "," ] ] "}" ;
+MapEntry    <~~ var v = pop(); push({mk: pop(), mv: v}) ~~>
+            = AssignExpr ":" AssignExpr ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~> = Id ;
+Null        <~~ push(makeConst(null)) ~~>   = "null" KwEnd ;
+
+// Single and double quoted strings, both interpolating $name and ${expr}.
+StrLit      = SqTpl | DqTpl ;
+SqTpl       <~~ push(makeTemplate(takeAll())) ~~>
+            = "'" :whitespace() { TplExpr | TplVar | TplDollar | SqChunk } "'" :whitespace(Whitespace) ;
+DqTpl       <~~ push(makeTemplate(takeAll())) ~~>
+            = '"' :whitespace() { TplExpr | TplVar | TplDollar | DqChunk } '"' :whitespace(Whitespace) ;
+TplExpr     <~~ push({e: pop()}) ~~>
+            = "${" :whitespace(Whitespace) Expression "}" ;
+TplVar      = "$" TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
+TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+TplDollar   <~~ push({s: "$"}) ~~> = "$" ;
+SqChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = SqTChar { SqTChar } ;
+DqChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = DqTChar { DqTChar } ;
+SqTChar     = TplEsc | SqPlain ;
+DqTChar     = TplEsc | DqPlain ;
+TplEsc      = "\\" "\x00"..."\U0010ffff" ;
+SqPlain     = "\x00"..."\x23" | "\x25"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+DqPlain     = "\x00"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\U0010ffff" ;
+
+// A balanced < ... > run (generic parameters / arguments), parsed and ignored.
+SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+// Keywords end with a negative lookahead so 'ify' or 'classy' stay identifiers.
+KwClass     = "class" KwEnd ;
+KwNew       = "new" KwEnd ;
+KwVar       = "var" KwEnd ;
+KwFinal     = "final" KwEnd ;
+KwConst     = "const" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwExtends   = "extends" KwEnd ;
+KwWith      = "with" KwEnd ;
+KwImplements = "implements" KwEnd ;
+KwLate      = "late" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and statement
+    // builders); Dart-specific behaviour is configured on `core` and defined below.
+    include("lib/interp-core.js")
+
+    // takeAll empties the local stack and returns the items in push order.
+    // unescapeJs resolves the JS/Dart string escapes.
+
+    var curClassName = ""
+
+    // print(x) writes x's string form followed by a newline (Dart print).
+    hostGlobals["print"] = function(x) { println(dstr(x)) }
+
+    // ----- string rendering (agrees with the compiler's js_jadd / toString) -----
+    function dstr(v) {
+        if (v === null || v === undefined) { return "null" }
+        if (v === true) { return "true" }
+        if (v === false) { return "false" }
+        if (typeof v == "string") { return v }
+        return "" + v
+    }
+
+    // ----- integer ~/ division on top of the shared binOp -----
+    var baseBinOp = binOp
+    binOp = function(op, l, r) {
+        if (op == "~/") { return (l / r) | 0 }
+        return baseBinOp(op, l, r)
+    }
+
+    // ----- Maps (dicts): insertion-ordered {keys, vals} boxes -----
+    function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+    function dictFind(d, k) {
+        for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) { return i } }
+        return -1
+    }
+    function dictSet(d, k, v) {
+        var i = dictFind(d, k)
+        if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
+    }
+    function makeMap(entries) {
+        return function() {
+            var d = {__dict: true, keys: [], vals: []}
+            for (var i = 0; i < entries.length; i++) { dictSet(d, entries[i].mk(), entries[i].mv()) }
+            return d
+        }
+    }
+    function makeList(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) { a.push(items[i]()) }
+            return a
+        }
+    }
+
+    // ----- length / indexing that understand lists, strings and maps -----
+    function dlen(v) {
+        if (isDict(v)) { return v.keys.length }
+        if (v === null || v === undefined) { fail("length of null") }
+        return v.length
+    }
+    function dget(o, i) {
+        if (isDict(o)) {
+            var di = dictFind(o, i)
+            if (di < 0) { fail("map has no key " + dstr(i)) }
+            return o.vals[di]
+        }
+        if (o === null || o === undefined) { fail("index of null") }
+        if (typeof o == "string") {
+            if (i < 0 || i >= o.length) { fail("string index out of range") }
+            return o.charAt(i)
+        }
+        if (i < 0 || i >= o.length) { fail("list index out of range") }
+        return o[i]
+    }
+    function dsetIndex(o, i, v) {
+        if (isDict(o)) { dictSet(o, i, v); return }
+        if (o === null || o === undefined) { fail("index assign on null") }
+        o[i] = v
+    }
+    function getFieldD(o, name) {
+        if (o === null || o === undefined) { fail("field ." + name + " of null") }
+        return o[name]
+    }
+
+    // ----- member chains: .method(args), .field, [index] -----
+    core.getIndex = dget
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = anytype // a member chain hops between types
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
+                    if (s.name == "containsKey") { cur = dictFind(cur, argv[0]) >= 0 }
+                    else { cur = mcall(cur, s.name, argv) }
+                } else if (s.kind == "field") {
+                    if (s.name == "length") { cur = dlen(cur) }
+                    else if (s.name == "isEmpty") { cur = dlen(cur) == 0 }
+                    else if (s.name == "isNotEmpty") { cur = dlen(cur) != 0 }
+                    else if (s.name == "keys") { cur = mcall(cur, "keys", []) }
+                    else if (s.name == "values") { cur = mcall(cur, "values", []) }
+                    else { cur = getFieldD(cur, s.name) }
+                } else if (s.kind == "bang") {
+                    cur = cur // the postfix ! is a no-op (accepted, not implemented)
+                } else {
+                    cur = dget(cur, s.idx())
+                }
+            }
+            return cur
+        }
+    }
+
+    // ----- method dispatch (agrees with the compiler's js_mcall / memberCall) -----
+    function mcall(target, name, args) {
+        if (typeof target == "string") {
+            if (name == "substring") { return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0]) }
+            if (name == "indexOf") { return target.indexOf(args[0]) }
+            if (name == "charAt") { return target.charAt(args[0]) }
+            if (name == "isEmpty") { return target.length == 0 }
+            fail("unknown String method: " + name)
+        }
+        if (isDict(target)) {
+            if (name == "keys") { return target.keys.slice(0) }
+            if (name == "values") { return target.vals.slice(0) }
+            fail("unknown Map method: " + name)
+        }
+        if (Array.isArray(target)) {
+            if (name == "add") { target.push(args[0]); return true }
+            if (name == "contains") { return target.indexOf(args[0]) >= 0 }
+            if (name == "get") { return target[args[0]] }
+            if (name == "removeLast") { return target.pop() }
+            fail("unknown List method: " + name)
+        }
+        if (target != null && target != undefined && target.__class != undefined) {
+            var m = target.__class[name]
+            if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        fail("method call '" + name + "' on " + dstr(target))
+    }
+
+    // ----- functions, closures, classes -----
+    function bodyToStmt(bd) {
+        if (bd.body != undefined) { return bd.body }
+        var et = bd.ebody
+        return function() { return {isRet: true, v: et()} }
+    }
+    function makeClosure(params, bodyStmt, defScopes) {
+        var env = defScopes.slice()
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            var saved = scopes
+            scopes = env.slice()
+            var sc = {}
+            for (var j = 0; j < params.length; j++) { sc[params[j]] = j < args.length ? args[j] : null }
+            scopes.push(sc)
+            var r = bodyStmt()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+    function makeArrow(items) {
+        var params = pnames(items[0].params)
+        var bodyStmt = bodyToStmt(items[1])
+        return function() { return makeClosure(params, bodyStmt, scopes) }
+    }
+    function makeFuncDecl(items) {
+        var name = items[0].fname
+        var params = pnames(items[1].params)
+        var bodyStmt = bodyToStmt(items[2])
+        return function() { declVar(name, makeClosure(params, bodyStmt, scopes)) }
+    }
+    function pnames(params) {
+        var out = []
+        for (var i = 0; i < params.length; i++) { out.push(params[i].pname) }
+        return out
+    }
+
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var f = getVar(name)
+            if (f != undefined && f != null && f.__isclass === true) { return construct(f, argv) }
+            if (typeof f != "function") { fail("call of a non-function: " + name) }
+            return f.apply(undefined, argv)
+        }
+    }
+    function construct(cls, argv) {
+        var obj = {__class: cls}
+        cls.__ctor.apply(undefined, concat2impl([obj], argv))
+        return obj
+    }
+
+    // items = [{cname}, member markers...]. A member is {field}, {method}, {ctor} or {skip}.
+    function makeMember(isTyped, items) {
+        var name = items[0].mn
+        var params = items[1].params
+        var bodyDesc = items[items.length - 1]
+        if (!isTyped && name == curClassName) { return {ctor: {params: params, body: bodyDesc}} }
+        return {method: {name: name, params: pnames(params), body: bodyDesc}}
+    }
+    function makeFieldDecl(items) {
+        return {field: items[0].fn, init: items.length > 1 ? items[1] : null}
+    }
+    function makeClassStmt(items) {
+        var name = items[0].cname
+        var fields = []
+        var methods = []
+        var ctor = null
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.field != undefined) { fields.push(it) }
+            else if (it.method != undefined) { methods.push(it.method) }
+            else if (it.ctor != undefined) { ctor = it.ctor }
+        }
+        return function() {
+            var cls = {__isclass: true, __name: name}
+            cls.__ctor = makeCtorFn(fields, ctor)
+            for (var m = 0; m < methods.length; m++) { cls[methods[m].name] = makeMethodClosure(methods[m]) }
+            declVar(name, cls)
+        }
+    }
+    function makeCtorFn(fields, ctor) {
+        var cparams = ctor != null ? ctor.params : []
+        var bodyDesc = ctor != null ? ctor.body : null
+        var bodyStmt = (bodyDesc != null && bodyDesc.none == undefined) ? bodyToStmt(bodyDesc) : null
+        return function() {
+            var self = arguments[0]
+            var saved = scopes
+            scopes = [globalScope, {}]
+            declVar("this", self)
+            for (var f = 0; f < fields.length; f++) { self[fields[f].field] = null }
+            for (var k = 0; k < cparams.length; k++) {
+                var v = (k + 1 < arguments.length) ? arguments[k + 1] : null
+                if (cparams[k].thisf != undefined) { declVar(cparams[k].thisf, v); self[cparams[k].thisf] = v }
+                else { declVar(cparams[k].pname, v) }
+            }
+            for (var fi = 0; fi < fields.length; fi++) {
+                if (fields[fi].init != null) { self[fields[fi].field] = fields[fi].init() }
+            }
+            if (bodyStmt != null) { bodyStmt() }
+            scopes = saved
+        }
+    }
+    function makeMethodClosure(mth) {
+        var bodyStmt = bodyToStmt(mth.body)
+        return function() {
+            var self = arguments[0]
+            var saved = scopes
+            scopes = [globalScope, {}]
+            declVar("this", self)
+            for (var i = 0; i < mth.params.length; i++) {
+                declVar(mth.params[i], (i + 1 < arguments.length) ? arguments[i + 1] : null)
+            }
+            var r = bodyStmt()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+
+    // ----- templates -----
+    function makeTemplate(items) {
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].s != undefined) { out = out + items[i].s }
+                else { out = out + dstr(items[i].e()) }
+            }
+            return out
+        }
+    }
+
+    // ----- ternary, return -----
+    function makeCond(items) {
+        if (items.length == 1) { return items[0] }
+        return function() { return core.test(items[0]()) ? items[1]() : items[2]() }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(null)
+        return function() { return {isRet: true, v: t()} }
+    }
+
+    // ----- declarations, assignment, ++/-- -----
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeConst(null)
+        return function() { declVar(name, init()) }
+    }
+    function resolveRefDart(ref) {
+        var o = anytype
+        o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.key != undefined) { o = getFieldD(o, s.key) } else { o = dget(o, s.idx()) }
+        }
+        var last = ref.path[ref.path.length - 1]
+        if (last.key != undefined) { return {obj: o, key: last.key, field: true} }
+        return {obj: o, key: last.idx(), field: false}
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = anytype
+            v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
+                setVar(ref.name, v)
+            } else {
+                var p = resolveRefDart(ref)
+                if (p.field) {
+                    if (op != "=") { v = applyOp(op, p.obj[p.key], v) }
+                    p.obj[p.key] = v
+                } else {
+                    if (op != "=") { v = applyOp(op, dget(p.obj, p.key), v) }
+                    dsetIndex(p.obj, p.key, v)
+                }
+            }
+            return v
+        }
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var delta = (items[1] == "++") ? 1 : -1
+        return function() {
+            var n = getVar(ref.name) - 0
+            setVar(ref.name, (n + delta) | 0)
+            return n
+        }
+    }
+
+    // ----- for and for-in -----
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") { init = items[i].t }
+            if (items[i].k == "cond") { cond = items[i].t }
+            if (items[i].k == "post") { post = items[i].t }
+        }
+        return function() {
+            scopes.push({})
+            var res = undefined
+            if (init != null) { init() }
+            while (cond == null || core.test(cond())) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) { break }
+                    if (r !== CONT) { res = r; break }
+                }
+                if (post != null) { post() }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeForIn(items) {
+        var name = items[0]
+        var iterT = items[1]
+        var bodyT = items[2]
+        return function() {
+            var it = anytype
+            it = iterT()
+            scopes.push({})
+            var res = undefined
+            var n = dlen(it)
+            for (var i = 0; i < n; i++) {
+                declVar(name, dget(it, i))
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) { break }
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "dart"
+    core.varMiss = function(name) {
+        var self = findThis()
+        if (self != undefined && self != null && hasOwn(self, name)) { return {v: self[name]} }
+        return null
+    }
+    core.setMiss = function(name, value) {
+        var self = findThis()
+        if (self != undefined && self != null && hasOwn(self, name)) { self[name] = value; return true }
+        return false
+    }
+    function findThis() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "this")) { return scopes[i]["this"] }
+        }
+        return undefined
+    }
+
+    c.compile(c.asg)
+    var progT = popg()
+
+    // Run the top level (binds functions and classes), then call int main().
+    progT()
+    if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
+        fail("Dart programs need an int main() function.")
+    }
+    var ret = globalScope["main"]()
+    println("dart interpreter: main() returned " + ret)
+    exit(ret | 0)
+
+~~) ;

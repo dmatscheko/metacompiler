@@ -1,0 +1,973 @@
+:title("C# (subset) to LLVM IR compiler") ;
+:description("Compiles a C# subset to an LLVM IR module and runs it with the built-in
+IR interpreter and the MetaJS handle runtime (llvm.RunJS).
+
+The subset matches csharp-interpreter.abnf: 'using' directives (resolved against the
+runtime builtins), 'namespace X.Y { ... }' blocks (unwrapped), classes with instance and
+static fields (with initializers), instance and static methods (block bodied and
+expression bodied '=> e;'), constructors (with an optional ': base(...)' / ': this(...)'
+header that is parsed and skipped), single inheritance ('class B : A' inherits fields and
+methods, overrides with dynamic dispatch, runs the implicit base constructor, and
+'base.M()' calls; a base class must appear before its subclasses), object creation with
+'new', arrays (new int[n], new int[]{...}, a.Length, indexing), List<T> (new List<T>(),
+.Add, [i], .Count, .Contains, foreach), Dictionary<K,V> (new Dictionary<K,V>(), d[k]
+get/set, .Count, .ContainsKey, .Keys, .Values), the 'foreach (var x in coll)' loop, 'var'
+and typed locals/params/returns (parsed; dynamic semantics), string concatenation with +,
+'$\"...{expr}...\"' interpolation, the String members .Length, .Substring, .IndexOf and
+.Equals, Console.WriteLine / Console.Write mapped to the print builtin, if/else, while,
+do-while, both for forms, the colon switch on int or string (fallthrough with break,
+stacked labels, default), break/continue, return, assignment (also += -= *= /= %=),
+postfix ++/--, the ternary operator, || && with short circuit, == != < > <= >= and
++ - * / % (int arithmetic is 32 bit, / truncates) and unary - !.
+
+Widened surface (parsed so a whole C# file is accepted): generics (<...>), nullable ('?')
+and array type suffixes are parsed and dropped; casts ((Type) expr) are identity;
+modifier keywords are parsed and ignored. Interfaces, structs, enums, delegates, nested
+types, properties ({ get; set; } bodies), lambdas ('=>' as an expression) and LINQ query
+expressions are accepted and reported as not implemented; -warn-unsupported downgrades
+that to a warning so call graphs / CFGs / traces still work on partly understood files.
+
+Fields live directly on the instance object (js_get/js_set), methods become own IR
+functions jsf_N(env, args) with the instance prepended to the arguments, stored on the
+class descriptor object; calls dispatch through the js_mcall external. Lists compile to the
+handle array runtime, dictionaries to js_dict handles (indexing via js_pyget/js_pyset). A
+constructor always exists (a default one is generated) and first applies the field
+initializers. The whole program becomes jsmain(env, args): it builds Console, the class
+descriptors, then calls Program.Main; the process exit code is Main's return value.
+The same language with the same semantics is interpreted directly by
+csharp-interpreter.abnf.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+Program     <~~ buildMain(takeAll()) ~~>
+            = { Using } { TopDecl } ;
+
+// A 'using' directive (also 'using static' and the 'using Alias = Path;' form) is
+// resolved against the runtime builtins (core.stdlibImports); one that does not resolve
+// aborts the compile, unless -warn-imports downgrades it to a warning. It pushes no
+// statement, so buildMain never sees it.
+Using       <~~ resolveImport(pop(), up.pos) ~~>
+            = KwUsing [ "static" KwEnd ] [ Id "=" ] QualName ";" ;
+QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
+
+TopDecl     = Namespace | UnsupType | ClassDecl ;
+
+// namespace X.Y { ... }: the inner declaration thunks are collected into one sequence.
+Namespace   <~~ push(makeNamespace(takeAll())) ~~>
+            = KwNamespace QualName "{" { Using | TopDecl } "}" ;
+
+ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = [ LeadMods ] KwClass Id <~~ push(up.in); curClassName = up.in ~~> [ SkipAngle ]
+              [ ":" Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] { "," Type } ] "{" { Member } "}" ;
+
+Member      = NestedType | Ctor | Method | Property | Field ;
+
+// A constructor: name matches the class; an optional ': base(...)' / ': this(...)'
+// header is parsed and skipped (the implicit base constructor already ran).
+Ctor        <~~ push(makeCtor(takeAll())) ~~>
+            = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] Block ;
+CtorInit    = ":" ( KwBase | KwThis ) SkipParen ;
+
+Method      <~~ push(makeMethod(takeAll())) ~~>
+            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
+MethodBody  = Block | ArrowBody ;
+ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
+            = "=>" Expression ";" ;
+
+// A property ({ get; set; } / expression bodied): accepted, reported as not implemented.
+Property    <~~ push(notImplStmt("property", up.pos)) ~~>
+            = LeadMods Type Id ( SkipBlock [ "=" DiscardExpr ";" ] | "=>" DiscardExpr ";" ) ;
+
+Field       <~~ push(makeField(takeAll())) ~~>
+            = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
+
+// Modifiers before a member; ModWord keeps the text so 'static' stays detectable.
+Mods        <~~ push({mods: takeAll()}) ~~>
+            = { ModWord } ;
+ModWord     <~~ push(up.in) ~~>
+            = ModKw ;
+FType       <~~ push({ty: up.in}) ~~>
+            = Type ;
+
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Param { "," Param } ] ")" ;
+Param       = { ParamMod } Type [ "..." ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
+ParamMod    = ( "ref" | "out" | "in" | "params" | "this" | "readonly" ) KwEnd ;
+
+// Types are parsed and (apart from field defaults) ignored: generic arguments (<...>),
+// dotted names, array suffixes and the nullable '?' are accepted and dropped.
+Type        = TypeName { "[" { "," } "]" } [ "?" ] ;
+TypeName    = PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "void" KwEnd
+            | "var" KwEnd | "dynamic" KwEnd | UserType ;
+PrimType    = ( "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "byte" | "sbyte"
+              | "double" | "float" | "decimal" | "bool" | "char" ) KwEnd ;
+UserType    = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+
+// Every statement production pushes exactly one thunk: function(block) -> nextBlock.
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
+            | Try | Throw | Decl | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+
+// The colon switch (on int or string): starts at the first matching label and runs
+// until a break or the end of the switch. Labels may stack.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
+SwitchCase  = Case | Default ;
+Case        <~~ push(makeCase(takeAll())) ~~>
+            = KwCase CondExpr ":" { Statement } ;
+Default     <~~ push(makeDefault(takeAll())) ~~>
+            = KwDefault ":" { Statement } ;
+
+// foreach (var x in coll) body.
+ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
+            = KwForeach "(" Type Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      = DeclCore ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+
+Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+
+// try/catch/finally and throw parse fully; without an exception model they are not
+// implemented (the try block is still compiled, a throw still lowers its expression).
+Try         <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwTry Block { KwCatch [ "(" Type [ Id ] ")" ] [ KwWhen "(" DiscardExpr ")" ] Block } [ KwFinally Block ] ;
+Throw       <~~ push(makeThrow(takeAll(), up.pos)) ~~>
+            = KwThrow [ Expression ] ";" ;
+
+Decl        = DeclCore ";" ;
+DeclCore    <~~ push(makeSeq(takeAll())) ~~>
+            = Type Declarator { "," Declarator } ;
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
+
+Empty       <~~ push(function(b) { return b }) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ";" ;
+
+// Every expression production pushes exactly one thunk: function(block) -> {b, v}.
+Expression  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ) <~~ push(stripWs(up.in)) ~~> Expression ;
+
+// An assignable place: a variable (this and class names are variables too), or a
+// member/index path: this.x, p.X, Program.Fails, arr[i], dict[k].
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" Expression ":" Expression ] ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Cast | Neg | Not | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+
+// A cast is lowered as identity ((Type) expr yields expr). A primitive cast accepts any
+// unary operand; a reference cast excludes a leading '-'/'+' so '(a) - b' stays subtraction.
+Cast        = PrimCast | RefCast ;
+PrimCast    <~~ push(makeCast(pop())) ~~>
+            = "(" PrimType { "[" "]" } ")" UnaryExpr ;
+RefCast     <~~ push(makeCast(pop())) ~~>
+            = "(" RefType ")" UnaryNoPM ;
+UnaryNoPM   = Not | PostfixExpr ;
+RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "[" "]" } ;
+
+PostfixExpr = IncDec | NewExpr | BaseCall | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// new Point(1, 2) | new List<int>() | new Dictionary<K,V>() | new int[]{...} | new int[n]
+NewExpr     = NewArrLit | NewArrSize | NewObject ;
+// The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
+NewArrLit   <~~ push(makeArray(takeAll())) ~~>
+            = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
+NewArrSize  <~~ push(makeNewArray(pop())) ~~>
+            = KwNew Type "[" Expression "]" ;
+NewObject   <~~ push(makeNew(takeAll())) ~~>
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" [ SkipBlock ] ;
+
+// base.M(args): the method search starts at the base class of the class the call
+// appears in (curClassName is set while the class body is being built).
+BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
+            = KwBase "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+// A primary followed by method calls, field reads and indexing.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = Lambda | LinqQuery | "(" Expression ")" | InterpStr | DqString
+            | IntLit | True | False | Null | VarRef ;
+
+// A lambda ('=>' expression / block): no delegate model, so not implemented.
+Lambda      <~~ push(makeLambdaExpr(takeAll(), up.pos)) ~~>
+            = LambdaHead "=>" LambdaBody ;
+LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | Id ;
+LamParam    = [ Type ] Id ;
+LambdaBody  = Block | DiscardExpr ;
+// A LINQ query expression: accepted, reported as not implemented.
+LinqQuery   <~~ push(makeLinq(up.pos)) ~~>
+            = KwFrom Id KwIn DiscardExpr LinqTail ;
+LinqTail    = { LinqClause } KwSelect DiscardExpr ;
+LinqClause  = KwWhere DiscardExpr | KwOrderby DiscardExpr | KwLet Id "=" DiscardExpr ;
+DiscardExpr <~~ pop() ~~>
+            = Expression ;
+
+Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
+
+// 'this' and class names resolve like variables.
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+// $"...{expr}..." interpolated string; a plain "..." (DqString) does not interpolate.
+InterpStr   <~~ push(makeTemplate(takeAll())) ~~>
+            = "$" '"' :whitespace() { IsExpr | IsChunk } '"' :whitespace(Whitespace) ;
+IsExpr      <~~ push({e: pop()}) ~~>
+            = "{" :whitespace(Whitespace) Expression :whitespace() "}" ;
+IsChunk     <~~ push({s: unescapeJs(up.in)}) ~~>
+            = IsChar { IsChar } ;
+IsChar      = IsEsc | IsPlain ;
+IsEsc       = "\\" "\x20"..b"\x7e" ;
+IsPlain     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" | @"\t" ;
+
+// ----- Widened surface: generics, casts, unsupported declarations (see :description) -----
+
+// Balanced skips let a construct be ACCEPTED without being understood. String and char
+// literals are matched first so braces/brackets inside them are never miscounted.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
+SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipStrChar = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(Whitespace) ;
+SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
+SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// A balanced < ... > run (generic parameters / arguments), parsed and ignored.
+SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+// A balanced ( ... ) run (constructor init arguments), parsed and ignored.
+SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
+SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
+
+ModKw       = ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
+              | "sealed" | "virtual" | "override" | "readonly" | "const" | "partial"
+              | "unsafe" | "async" | "extern" | "volatile" ) KwEnd ;
+LeadMods    = { ModKw } ;
+
+// Type declarations accepted structurally, then reported as not implemented (so a whole
+// C# file compiles; -warn-unsupported lets the rest run). Bodies are skipped.
+UnsupType   = Interface | StructDecl | EnumDecl | DelegateDecl ;
+Interface   <~~ push(notImplStmt("interface", up.pos)) ~~>
+            = LeadMods KwInterface Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
+StructDecl  <~~ push(notImplStmt("struct", up.pos)) ~~>
+            = LeadMods KwStruct Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
+EnumDecl    <~~ push(notImplStmt("enum", up.pos)) ~~>
+            = LeadMods KwEnum Id [ ":" Type ] SkipBlock ;
+DelegateDecl <~~ push(notImplStmt("delegate", up.pos)) ~~>
+            = LeadMods KwDelegate Type Id [ SkipAngle ] SkipParen ";" ;
+
+// A type declared inside a class body (nested): accepted, reported as not implemented; it
+// fires notImpl and pushes nothing, so makeClassStmt simply skips it.
+NestedType  <~~ notImpl("nested type", up.pos) ~~>
+            = LeadMods NestedKw Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
+NestedKw    = ( "class" | "interface" | "enum" | "struct" | "record" ) KwEnd ;
+
+KwUsing     = "using" KwEnd ;
+KwNamespace = "namespace" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwInterface = "interface" KwEnd ;
+KwStruct    = "struct" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwDelegate  = "delegate" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwWhen      = "when" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwForeach   = "foreach" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwNew       = "new" KwEnd ;
+KwBase      = "base" KwEnd ;
+KwThis      = "this" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
+KwFrom      = "from" KwEnd ;
+KwSelect    = "select" KwEnd ;
+KwWhere     = "where" KwEnd ;
+KwOrderby   = "orderby" KwEnd ;
+KwLet       = "let" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared emitter machinery (module, handle constants, externs, loopStack protocol,
+    // expression/statement builders); see the `core` knobs below.
+    include("lib/compile-core.js")
+
+    var feCount = 0 // Names hidden foreach counters.
+
+    // ----- Imports & errors -----
+    function fail(msg) { println("csharp compiler error: " + msg); exit(1) }
+
+    // Import roots the runtime already provides (Console, collections, ...); importing
+    // them is a no-op. Anything else is a library we cannot resolve.
+    core.stdlibImports = ["System", "Microsoft"]
+
+    // Index reads (arr[i], dict[k], s[i]) go through js_pyget (array/dict/string aware).
+    core.indexExt = "js_pyget"
+
+    // ----- Expression thunks: function(block) -> {b, v} -----
+
+    function makeCond(items) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            var thenB = curF.NewBlock("")
+            var elseB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            r.b.NewCondBr(truthy(r.b, r.v), thenB, elseB)
+            var rt = items[1](thenB)
+            rt.b.NewBr(mergeB)
+            var re = items[2](elseB)
+            re.b.NewBr(mergeB)
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
+            return {b: mergeB, v: phi}
+        }
+    }
+
+    // A member/index target: a '.field' step (js_get/js_set on objects) or an '[i]' step
+    // (js_pyget/js_pyset on arrays and dicts).
+    function emitRefPath(b, ref) {
+        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.key != undefined) {
+                o = callExt(b, "js_get", [o, emitStr(b, s.key)])
+            } else {
+                var r = s.idx(b)
+                b = r.b
+                o = callExt(b, "js_pyget", [o, r.v])
+            }
+        }
+        var last = ref.path[ref.path.length - 1]
+        if (last.key != undefined) return {b: b, obj: o, key: emitStr(b, last.key), isField: true}
+        var kr = last.idx(b)
+        return {b: kr.b, obj: o, key: kr.v, isField: false}
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            if (ref.path.length == 0) {
+                var nameV = emitStr(b, ref.name)
+                if (op != "=") {
+                    var old = callExt(b, "js_scope_get", [curScopeV, nameV])
+                    v = emitBin(b, op, old, v)
+                }
+                callExt(b, "js_scope_set", [curScopeV, nameV, v])
+            } else {
+                var p = emitRefPath(b, ref)
+                b = p.b
+                if (p.isField) {
+                    if (op != "=") {
+                        var oldf = callExt(b, "js_get", [p.obj, p.key])
+                        v = emitBin(b, op, oldf, v)
+                    }
+                    callExt(b, "js_set", [p.obj, p.key, v])
+                } else {
+                    if (op != "=") {
+                        var oldm = callExt(b, "js_pyget", [p.obj, p.key])
+                        v = emitBin(b, op, oldm, v)
+                    }
+                    callExt(b, "js_pyset", [p.obj, p.key, v])
+                }
+            }
+            return {b: b, v: v}
+        }
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var extName = (items[1] == "++") ? "js_jadd" : "js_sub"
+        return function(b) {
+            var oneV = emitNum(b, 1)
+            if (ref.path.length == 0) {
+                var nameV = emitStr(b, ref.name)
+                var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
+                callExt(b, "js_scope_set", [curScopeV, nameV, intWrap(b, callExt(b, extName, [oldV, oneV]))])
+                return {b: b, v: oldV}
+            }
+            var p = emitRefPath(b, ref)
+            b = p.b
+            if (p.isField) {
+                var oldM = callExt(b, "js_get", [p.obj, p.key])
+                callExt(b, "js_set", [p.obj, p.key, intWrap(b, callExt(b, extName, [oldM, oneV]))])
+                return {b: b, v: oldM}
+            }
+            var oldI = callExt(b, "js_pyget", [p.obj, p.key])
+            callExt(b, "js_pyset", [p.obj, p.key, intWrap(b, callExt(b, extName, [oldI, oneV]))])
+            return {b: b, v: oldI}
+        }
+    }
+
+    // base.M(args): resolved through js_supercall, starting at the base class of the
+    // class the call appears in (captured at build time).
+    function makeBaseCall(name, argThunks) {
+        var defName = curClassName
+        return function(b) {
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
+            var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            var argsV = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < argThunks.length; i++) {
+                var r = argThunks[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [argsV, r.v])
+            }
+            return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
+        }
+    }
+
+    // new C(args) | new List<T>(...) | new Dictionary<K,V>(...).
+    function makeNew(items) {
+        var clsName = items[0]
+        var args = items.slice(1)
+        return function(b) {
+            if (clsName == "List") {
+                for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b }
+                return {b: b, v: callExt(b, "js_arr_new", [])}
+            }
+            if (clsName == "Dictionary") {
+                for (var j = 0; j < args.length; j++) { var r2 = args[j](b); b = r2.b }
+                return {b: b, v: callExt(b, "js_dict_new", [])}
+            }
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+            var objV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, objV])
+            for (var k = 0; k < args.length; k++) {
+                var r3 = args[k](b)
+                b = r3.b
+                callExt(b, "js_arr_push", [argsV, r3.v])
+            }
+            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
+            callExt(b, "js_call", [ctorV, hUndef, argsV])
+            return {b: b, v: objV}
+        }
+    }
+    function makeArray(items) {
+        return function(b) {
+            var arr = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [arr, r.v])
+            }
+            return {b: b, v: arr}
+        }
+    }
+    function makeNewArray(sizeT) {
+        return function(b) {
+            var r = sizeT(b)
+            b = r.b
+            return {b: b, v: callExt(b, "js_arr_new_n", [r.v, emitNum(b, 0)])}
+        }
+    }
+    // A cast is identity: (Type) expr lowers to expr.
+    function makeCast(inner) { return inner }
+    // Lambdas / LINQ: no delegate model, so not implemented.
+    function makeLambdaExpr(items, pos) { return notImplExpr("lambda expression", pos) }
+    function makeLinq(pos) { return notImplExpr("LINQ query", pos) }
+
+    // ----- $"...{expr}..." interpolation (js_jadd string concat, integers as "5") -----
+    function makeTemplate(items) {
+        return function(b) {
+            var v = emitStr(b, "")
+            for (var i = 0; i < items.length; i++) {
+                var pv
+                if (items[i].s != undefined) { pv = emitStr(b, items[i].s) }
+                else {
+                    var r = items[i].e(b)
+                    b = r.b
+                    pv = r.v
+                }
+                v = callExt(b, "js_jadd", [v, pv])
+            }
+            return {b: b, v: v}
+        }
+    }
+
+    // ----- member chain: name translation + collection field access + indexing -----
+    // C# collection method / string method names map to the runtime's canonical names.
+    function csMName(name) {
+        if (name == "Add") return "add"
+        if (name == "Contains") return "contains"
+        if (name == "Substring") return "substring"
+        if (name == "IndexOf") return "indexOf"
+        if (name == "Equals") return "equals"
+        return name
+    }
+    foldCallMember = function(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function(b) {
+            var r = primary(b)
+            b = r.b
+            var cur = r.v
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    if (s.name == "ContainsKey") {
+                        var ea = emitArgs(b, s.args)
+                        b = ea.b
+                        var keysV = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
+                        cur = callExt(b, "js_mcall", [keysV, emitStr(b, "contains"), ea.v])
+                    } else {
+                        var ea2 = emitArgs(b, s.args)
+                        b = ea2.b
+                        cur = callExt(b, "js_mcall", [cur, emitStr(b, csMName(s.name)), ea2.v])
+                    }
+                } else if (s.kind == "field") {
+                    if (s.name == "Count" || s.name == "Length") {
+                        cur = callExt(b, "js_pylen", [cur])
+                    } else if (s.name == "Keys") {
+                        cur = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
+                    } else if (s.name == "Values") {
+                        cur = callExt(b, "js_mcall", [cur, emitStr(b, "values"), callExt(b, "js_arr_new", [])])
+                    } else {
+                        cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                    }
+                } else {
+                    var ir = s.idx(b)
+                    b = ir.b
+                    cur = callExt(b, core.indexExt, [cur, ir.v])
+                }
+            }
+            return {b: b, v: cur}
+        }
+    }
+
+    // ----- Statement thunks: function(block) -> block -----
+
+    // try/catch/finally has no exception model; the try block is still compiled. throw
+    // lowers its expression (keeping calls visible) but does not unwind.
+    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+    function makeThrow(items, pos) {
+        notImpl("throw", pos)
+        return function(b) {
+            for (var i = 0; i < items.length; i++) { var r = items[i](b); b = r.b }
+            return b
+        }
+    }
+
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeConst(0)
+        return function(b) {
+            var r = init(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
+            return b
+        }
+    }
+    // An expression bodied method '=> e;' behaves like { return e; }.
+    function makeArrowBody(t) {
+        return function(b) {
+            var r = t(b)
+            r.b.NewRet(r.v)
+            return deadBlock()
+        }
+    }
+    function makeDo(condT, bodyT) {
+        return function(b) {
+            var bodyB = curF.NewBlock("")
+            var condB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(bodyB)
+            loopStack.push({cont: condB, brk: exitB})
+            bodyT(bodyB).NewBr(condB)
+            loopStack.pop()
+            var r = condT(condB)
+            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            return exitB
+        }
+    }
+    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
+    function makeDefault(items) { return {isDefault: true, body: items} }
+    // The dispatch chain compares with js_seq (=== semantics: ints by value, strings by
+    // content). Bodies fall through; break jumps to the exit, continue targets the loop.
+    function makeSwitch(items) {
+        var scrut = items[0]
+        var cases = items.slice(1)
+        return function(b) {
+            var r = scrut(b)
+            b = r.b
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDefault) { dfltB = bodyBs[i] }
+            }
+            for (var j = 0; j < cases.length; j++) {
+                if (cases[j].isDefault) { continue }
+                var rc = cases[j].v(b)
+                b = rc.b
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [r.v, rc.v])), bodyBs[j], nextB)
+                b = nextB
+            }
+            b.NewBr(dfltB)
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var k = 0; k < cases.length; k++) {
+                var bb = bodyBs[k]
+                var body = cases[k].body
+                for (var n = 0; n < body.length; n++) { bb = body[n](bb) }
+                bb.NewBr(k + 1 < cases.length ? bodyBs[k + 1] : exitB)
+            }
+            loopStack.pop()
+            return exitB
+        }
+    }
+    // foreach (var x in coll): a hidden index variable in an own scope drives the loop.
+    function makeForEach(bodyT, arrT, name) {
+        return function(b) {
+            feCount++
+            var iName = "$fe" + feCount
+            var aName = "$fa" + feCount
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var r = arrT(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+            var lenV = callExt(headB, "js_pylen", [aV])
+            var condV = callExt(headB, "js_lt", [iV, lenV])
+            headB.NewCondBr(truthy(headB, condV), bodyB, exitB)
+            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_pyget", [aV2, iV2])])
+            loopStack.push({cont: postB, brk: exitB})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            if (init != null) b = init(b)
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            if (cond != null) {
+                var r = cond(headB)
+                r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            } else {
+                headB.NewBr(bodyB)
+            }
+            loopStack.push({cont: postB, brk: exitB})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var pb = postB
+            if (post != null) pb = post(postB)
+            pb.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function(b) {
+            var v = hUndef
+            if (t != null) {
+                var r = t(b)
+                b = r.b
+                v = r.v
+            }
+            b.NewRet(v)
+            return deadBlock()
+        }
+    }
+
+    // ----- Class building -----
+
+    function makeMethod(items) {
+        var mods = items[0].mods
+        var name = items[1]
+        var params = items[2].params
+        var body = items[3]
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        return {kind: "method", name: name, statik: isStatic, params: params, body: body}
+    }
+    function makeCtor(items) {
+        return {kind: "ctor", name: items[0], params: items[1].params, body: items[2]}
+    }
+    function makeField(items) {
+        var mods = items[0].mods
+        var ty = stripWs(items[1].ty)
+        var name = items[2]
+        var init = items.length > 3 ? items[3] : null
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
+        var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
+                  || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
+                  || ty == "float" || ty == "decimal")
+        var isInt = isNum && ty.indexOf("[") < 0
+        var dfltH = 1 // The handle constants: 2 false, 1 null.
+        if (ty == "bool") dfltH = 2
+        if (isInt) dfltH = 0
+        return {kind: "field", name: name, statik: isStatic, init: init, dfltH: dfltH, isInt: isInt}
+    }
+    function fieldDefault(b, f) {
+        if (f.isInt) return emitNum(b, 0)
+        return handle(f.dfltH)
+    }
+
+    // The class whose body is currently being built (for base calls).
+    var curClassName = ""
+
+    // Emits one method/ctor as jsf_N(env, args). For instance functions args[0] is this.
+    // fields != null marks a constructor: the field initializers run before the body.
+    function emitFunc(params, body, isInstance, fields, superName) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        curF = f
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var off = 0
+        if (isInstance) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
+            off = 1
+        }
+        for (var i = 0; i < params.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
+                                         callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+        }
+        if (superName != undefined && superName != null) {
+            // The implicit base(): run the whole parent constructor without arguments.
+            var supClsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
+            var supCtorV = callExt(b, "js_get", [supClsV, emitStr(b, "__ctor")])
+            var sargsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [sargsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])])
+            callExt(b, "js_call", [supCtorV, hUndef, sargsV])
+        }
+        if (fields != null) {
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            for (var k = 0; k < fields.length; k++) {
+                var fv
+                if (fields[k].init != null && fields[k].init != undefined) {
+                    var r = fields[k].init(b)
+                    b = r.b
+                    fv = r.v
+                } else {
+                    fv = fieldDefault(b, fields[k])
+                }
+                callExt(b, "js_set", [thisV, emitStr(b, fields[k].name), fv])
+            }
+        }
+        var endB = body != null ? body(b) : b
+        endB.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        return idx
+    }
+
+    function buildClassStmt(name, members) {
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            var fields = []
+            var ctorInfo = null
+            var superName = null
+            var i
+            for (i = 0; i < members.length; i++) {
+                if (members[i].ext != undefined) {
+                    superName = members[i].ext
+                    callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                          callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
+                }
+            }
+            for (i = 0; i < members.length; i++) {
+                var mm = members[i]
+                if (mm.kind == "field") {
+                    if (mm.statik) {
+                        var sv
+                        if (mm.init != null && mm.init != undefined) {
+                            var r = mm.init(b)
+                            b = r.b
+                            sv = r.v
+                        } else {
+                            sv = fieldDefault(b, mm)
+                        }
+                        callExt(b, "js_set", [clsV, emitStr(b, mm.name), sv])
+                    } else {
+                        fields.push(mm)
+                    }
+                }
+                if (mm.kind == "ctor") ctorInfo = mm
+            }
+            var ctorIdx
+            if (ctorInfo != null) {
+                ctorIdx = emitFunc(ctorInfo.params, ctorInfo.body, true, fields, superName)
+            } else {
+                ctorIdx = emitFunc([], null, true, fields, superName)
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+            for (i = 0; i < members.length; i++) {
+                var m2 = members[i]
+                if (m2.kind == "method") {
+                    var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined)
+                    callExt(b, "js_set", [clsV, emitStr(b, m2.name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+                }
+            }
+            return b
+        }
+    }
+    function makeClassStmt(items) {
+        return buildClassStmt(items[0], items.slice(1))
+    }
+    // namespace X.Y { ... }: run the inner declaration thunks in order (drop the name).
+    function makeNamespace(items) {
+        var stmts = []
+        for (var i = 0; i < items.length; i++) { if (typeof items[i] == "function") stmts.push(items[i]) }
+        return makeSeq(stmts)
+    }
+
+    // The program: jsmain(env, args) builds Console, the classes, then calls Program.Main.
+    function buildMain(items) {
+        var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = f
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // Console.WriteLine / Console.Write from the host globals.
+        var consoleV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [consoleV, emitStr(b, "WriteLine"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
+        callExt(b, "js_set", [consoleV, emitStr(b, "Write"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
+        b = makeSeq(items)(b)
+        var progCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Program")])
+        var mainV = callExt(b, "js_get", [progCls, emitStr(b, "Main")])
+        var argsV = callExt(b, "js_arr_new", [])
+        b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+    }
+
+    c.compile(c.asg)
+
+    println(m)
+
+    var res = llvm.RunJS(m, "jsmain")
+    println("csharp compiler: main() returned " + res.Ret)
+    exit(res.Ret)
+
+~~) ;

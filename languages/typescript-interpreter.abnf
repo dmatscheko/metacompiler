@@ -1,0 +1,897 @@
+:title("TypeScript interpreter") ;
+:description("Parses TypeScript and executes it directly, without generating code.
+
+TypeScript is JavaScript plus a static type layer that is erased at run time, so this is
+the JavaScript interpreter (see js-interpreter.abnf) widened to accept - and then throw
+away - the type syntax. Type annotations on variables, parameters and return values
+(': Type'), generic parameter lists ('<T>') on functions, 'as Type' casts (identity),
+non-null assertions ('!') and optional markers ('?') are all parsed and dropped. An
+'interface Name {...}' and a 'type Name = ...;' are pure type declarations and compile
+to nothing. An 'enum' of bare names becomes an object of integer constants
+(Color.Red === 0), so member access reads the values back. Everything runtime is exactly
+JavaScript: variables are NOT type pinned and need NOT be declared before assignment.
+
+It has: var/let/const (all block scoped), function declarations and anonymous function
+expressions with real closures and an 'arguments' array, arrow functions, if/else,
+while, do-while, for(;;), for-of, switch (=== comparison, fallthrough, stacked labels,
+default), break, continue, return, throw (terminates, there is no try/catch), numbers
+(doubles, hex 0x literals included), strings with the methods length/charAt/charCodeAt/
+indexOf/replace/slice/substring/split/toUpperCase/toLowerCase/trim, template literals,
+booleans, null, undefined, arrays (push/pop/shift/unshift/slice/indexOf/join/concat),
+object literals, member access (.name and [expr]), method calls, assignment
+(= += -= *= /= %=) as an expression (the target may reach through calls: obj[name] = v),
+prefix and postfix ++/--, the ternary operator, || and && (short circuit, returning the
+operand), == != === !== < > <= >= + - * / % | ^ & << >> >>> and unary - ! ~ typeof.
+
+Deliberately not in the runnable subset (accepted structurally, then reported as
+not-implemented under -warn-unsupported): this, new, classes, prototypes, try/catch,
+destructuring, decorators, namespaces. The type syntax is erased, never executed, so an
+invalid type never affects the result.
+
+Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
+Expression thunks return the value, statement thunks return undefined or a signal object
+(return/break/continue) that the enclosing statements route.
+
+The program must define main(); the exit code of the metacompiler run is what main()
+returns, so the test programs are self checking: they return 0 on success.
+The same language is compiled to LLVM IR by typescript-to-llvm-ir.abnf.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident-dollar.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// The merged pushes of all top level statements become one program thunk on the global stack.
+Program     <~~ pushg(makeSeq(takeAll())) ~~>
+            = { Statement } ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+// The TypeScript-only declarations (interface / type alias / enum) come first, before
+// VarDecl, so 'const enum' is not misread as a 'const' variable named 'enum'.
+Statement   = Block | Interface | TypeAlias | EnumDecl | ClassDecl | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
+            | Throw | FuncDecl | Empty | ExprStmt ;
+
+// --- TypeScript type-only declarations. ---
+// An interface and a type alias exist only in the type layer; they are erased to a
+// no-op statement (parsed for their syntax, they contribute nothing at run time).
+Interface   <~~ push(function() {}) ~~>
+            = KwInterface Id [ TypeParams ] [ KwExtends TypeList ] SkipBlock ;
+TypeAlias   <~~ push(function() {}) ~~>
+            = KwType Id [ TypeParams ] "=" Type [ ";" ] ;
+
+// An enum of bare names becomes an object binding: enum Color { Red, Green, Blue }
+// declares Color = {Red:0, Green:1, Blue:2}. Explicit integer values are honored and
+// the auto-increment continues from the last value. Both engines compute the same
+// {name: value} pairs at parse time, so the interpreter and the compiler agree.
+EnumDecl    <~~ push(makeEnum(takeAll())) ~~>
+            = [ "const" KwEnd ] KwEnum Id <~~ push({enumName: up.in}) ~~>
+              "{" [ EnumMember { "," EnumMember } [ "," ] ] "}" [ ";" ] ;
+EnumMember  <~~ push(makeEnumMember(takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ "=" EnumVal ] ;
+EnumVal     <~~ push({val: parseInt(up.in)}) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+
+// The JS switch: === comparison, fallthrough until break, stacked labels, default
+// anywhere. The body is a flat list - the labels must be tried before Statement,
+// because 'case 1:' would otherwise parse as two expression statements (semicolons
+// are optional).
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { CaseLabel | DefaultLabel | Statement } "}" ;
+CaseLabel   <~~ push({casev: pop()}) ~~>
+            = KwCase AssignExpr ":" ;
+DefaultLabel <~~ push({isdflt: true}) ~~>
+            = KwDefault ":" ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+// var, let and const all declare a block scoped variable in the current scope.
+VarDecl     = VarDeclCore [ ";" ] ;
+VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
+            = KwVar Declarator { "," Declarator } ;
+// The optional ': Type' annotation is parsed and erased (pushes nothing).
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ TypeAnnot ] [ "=" AssignExpr ] ;
+
+// [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
+
+// The three optional parts are wrapped with a kind marker, otherwise e.g.
+// 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      = VarDeclCore ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+// [] or [exprThunk].
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] [ ";" ] ;
+
+Break       <~~ push(makeBreak()) ~~>
+            = KwBreak [ ";" ] ;
+
+Continue    <~~ push(makeContinue()) ~~>
+            = KwContinue [ ";" ] ;
+
+Throw       <~~ push(makeThrow(pop())) ~~>
+            = KwThrow Expression [ ";" ] ;
+
+// A function declaration binds the closure in the current scope when it executes.
+// The generic parameter list '<T>', the parameter type annotations and the return
+// type are all parsed and erased; only the parameter names survive.
+FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
+            = KwFunction Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ TypeAnnot ] Block ;
+
+ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
+            = "(" [ TSParam { "," TSParam } ] ")" ;
+// A parameter with an optional '?' marker and an optional ': Type' annotation; only
+// the name is pushed.
+TSParam     = Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] ;
+
+Empty       <~~ push(function() {}) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression [ ";" ] ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = AssignExpr ;
+
+// Assignment is an expression and associates to the right: a = b = c.
+// If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
+AssignExpr  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+
+// An assignable place: a variable, or a member path that may reach through calls
+// but must end in a member: findScope(name)[name] = value.
+// The local stack holds [name, suffix marker, suffix marker, ...].
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { CallSuffix | DotSuffix | IndexSuffix } ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+
+OrExpr      <~~ push(makeOr(takeAll())) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeAnd(takeAll())) ~~>
+            = BitOrExpr { "&&" BitOrExpr } ;
+
+// The bitwise levels sit between && and equality, like in JS. A single "|" that
+// actually starts a "||" fails its right side, the iteration rolls back, and the
+// enclosing || level picks it up.
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { "|" <~~ push("|") ~~> BitXorExpr } ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push("^") ~~> BitAndExpr } ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
+
+// The longer operators must be tried before their prefixes ("===" before "==").
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
+
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = PreIncDec | Neg | Not | BitNot | Typeof | PostfixExpr ;
+// Prefix ++/--: the expression value is the new one.
+PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
+Typeof      <~~ push(makeTypeof(pop())) ~~>
+            = KwTypeof UnaryExpr ;
+
+// The postfix forms: i++ evaluates to the old value.
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
+// A call after a member access is a method call: the object becomes 'this' of the callee
+// (that is what makes items.slice(1) or str.charCodeAt(0) work on the native values).
+// The 'as Type' cast and the postfix non-null '!' are type-layer only: they push
+// nothing and so are transparent to foldCallMember (identity at run time). The '!'
+// carries a negative lookahead so it is never stolen from the '!=' / '!==' operators.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { CallSuffix | DotSuffix | IndexSuffix | NonNullSuffix | AsCast } ;
+CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+DotSuffix   = "." Id <~~ push({kind:"member", key: makeConst(up.in)}) ~~> ;
+IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
+            = "[" Expression "]" ;
+NonNullSuffix = "!" !"=" ;
+AsCast      = KwAs Type ;
+
+Primary     = ArrowFn | "(" Expression ")" | FunctionExpr | TemplateLit | ObjectLit | ArrayLit | StringLit | NumberLit
+            | True | False | Null | Undefined | VarRef ;
+
+// The optional name of a function expression is accepted but not bound; generics and
+// the return type are erased.
+FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
+            = KwFunction [ Id ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
+
+// A trailing comma before the closing brace/bracket is allowed (idiomatic TypeScript).
+ObjectLit   <~~ push(makeObject(takeAll())) ~~>
+            = "{" [ PropDef { "," PropDef } [ "," ] ] "}" ;
+PropDef     <~~ push(makeProp(pop(), pop())) ~~>
+            = PropKey ":" AssignExpr ;
+PropKey     = Id <~~ push(up.in) ~~> | StringLit ;
+
+ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+            = "[" [ AssignExpr { "," AssignExpr } [ "," ] ] "]" ;
+
+// Arrow functions: x => x+1, (a, b) => a+b, () => { ... }. They reuse the same
+// closure machinery as function expressions; an expression body is an implicit
+// 'return <expr>'. Tried before "(" Expression ")" and VarRef so the (params) and
+// single-Id forms win; a non-arrow "(" or bare Id fails the "=>" and backtracks.
+ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
+            = ArrowParams "=>" ArrowBody ;
+// The parenthesized form may carry typed parameters and a return type; the single-Id
+// form is untyped. Both push only the parameter names.
+ArrowParams <~~ push({aparams: takeAll()}) ~~>
+            = "(" [ TSParam { "," TSParam } ] ")" [ TypeAnnot ]
+            | Id <~~ push(up.in) ~~> ;
+ArrowBody   = ArrowBlock | ArrowExpr ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
+ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
+
+// Template literals: `text ${expr} more`. Each ${...} is evaluated and coerced to
+// string (JS +); the result is always a string. Whitespace is disabled inside the
+// backticks (scannerless), and re-enabled inside a ${...} so the expression may have
+// spaces. A lone '$' not starting a "${" is a literal character.
+TemplateLit <~~ push(makeTemplate(takeAll())) ~~>
+            = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
+TplExpr     <~~ push({expr: pop()}) ~~>
+            = "${" :whitespace(Whitespace) Expression "}" ;
+TplChars    <~~ push({str: unescapeJs(up.in)}) ~~>
+            = TplChar { TplChar } ;
+TplChar     = TplEsc | TplPlain ;
+TplEsc      = "\\" "\x00"..."\U0010ffff" ;
+TplPlain    = "\x00"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
+TplDollar   <~~ push({str: "$"}) ~~>
+            = "$" ;
+
+// for-of over an array or string iterates its elements/characters (genuine).
+// for-in is not implemented (it needs host key enumeration, an off-limits extern);
+// it is accepted and, under -warn-unsupported, its iterable is evaluated and the
+// body skipped. The loop variable may be preceded by var/let/const or be bare.
+ForOf       <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor "(" [ KwVar ] Id <~~ push(up.in) ~~>
+              ( KwOf | KwIn ) <~~ push(up.in) ~~> Expression ")" Statement ;
+
+// A destructuring binding (var [a, b] = xs / var {x, y} = o) is accepted but not
+// lowered; the initializer still runs so its calls stay visible under -warn.
+Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
+            = KwVar DPattern "=" AssignExpr [ ";" ] ;
+DPattern    = "[" [ DElem { "," DElem } ] "]" | "{" [ DField { "," DField } ] "}" ;
+DElem       = Id | DPattern ;
+DField      = Id [ ":" DElem ] ;
+
+// try/catch/finally is accepted but not implemented (there is no exception model:
+// throw already terminates). Under -warn-unsupported the try block runs; catch and
+// finally blocks are parsed and dropped.
+TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwTry Block [ KwCatch [ "(" Id ")" ] Block ] [ KwFinally Block ] ;
+
+// A class declaration is accepted but not implemented (no prototype/new in the
+// subset). The body is skipped; the class name is bound to undefined so later
+// references do not crash under -warn-unsupported.
+ClassDecl   <~~ push(makeClass(takeAll(), up.pos)) ~~>
+            = KwClass Id <~~ push(up.in) ~~> [ KwExtends DiscardExpr ] SkipBlock ;
+DiscardExpr <~~ pop() ~~> = AssignExpr ;
+
+// A balanced { ... } body consumed without interpreting it, so a construct can be
+// ACCEPTED without being understood. Full string and template literals are matched
+// first, so braces inside them are never miscounted.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipDq | SkipSq | SkipTpl | SkipBlock | SkipOther ;
+SkipDq      = '"' :whitespace() { SkipStrEsc | SkipDqChar } '"' :whitespace(Whitespace) ;
+SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whitespace) ;
+SkipTpl     = "`" :whitespace() { SkipTplSub | SkipStrEsc | SkipTplChar } "`" :whitespace(Whitespace) ;
+SkipTplSub  = "${" :whitespace(Whitespace) { SkipItem } "}" ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipDqChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipTplChar = "\x00"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5f" | "\x61"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// --- TypeScript type expressions: parsed structurally and fully erased. ---
+// NONE of these productions push onto the stack, so the value productions that embed a
+// type annotation see exactly the stack they would without it. The grammar is scannerless
+// but the global whitespace rule skips spaces after every terminal, so '< >', ':' and '|'
+// behave as expected. A type is bounded by the surrounding syntax ('=', ';', ')', '=>',
+// a function body '{'), so no explicit terminator token is needed.
+TypeAnnot   = ":" Type ;
+TypeList    = Type { "," Type } ;
+Type        = FuncType | UnionType ;
+FuncType    = [ TypeParams ] "(" [ FnTypeParam { "," FnTypeParam } ] ")" "=>" Type ;
+FnTypeParam = [ "..." ] Id [ "?" ] [ TypeAnnot ] | Type ;
+UnionType   = [ "|" ] IsectType { "|" IsectType } ;
+IsectType   = [ "&" ] PostfixType { "&" PostfixType } ;
+PostfixType = AtomType { ArraySfx } ;
+ArraySfx    = "[" [ Type ] "]" ;
+AtomType    = "(" Type ")" | ObjType | TupleType | LitType | NamedType ;
+ObjType     = SkipBlock ;
+TupleType   = "[" [ Type { "," Type } ] "]" ;
+NamedType   = Id [ TypeArgs ] { "." Id [ TypeArgs ] } ;
+TypeArgs    = "<" Type { "," Type } ">" ;
+LitType     = StrTypeLit | NumTypeLit | "true" KwEnd | "false" KwEnd | "null" KwEnd | "undefined" KwEnd ;
+StrTypeLit  = '"' :whitespace() { StrEsc | DqPlain } '"' :whitespace(Whitespace)
+            | "'" :whitespace() { StrEsc | SqPlain } "'" :whitespace(Whitespace) ;
+NumTypeLit  = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
+// A generic parameter declaration list: <T>, <K, V>, <T extends U>, <T = string>.
+TypeParams  = "<" TypeParamDecl { "," TypeParamDecl } ">" ;
+TypeParamDecl = Id [ KwExtends Type ] [ "=" Type ] ;
+
+Null        <~~ push(makeConst(null)) ~~>      = "null" KwEnd ;
+Undefined   <~~ push(makeConst(undefined)) ~~> = "undefined" KwEnd ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+StringLit   = DqString | SqString ;
+NumberLit   = HexLit | DecLit ;
+
+// Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
+HexLit      <~~ push(makeConst(hexAt(up.in, 2, up.in.length - 2))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+
+// The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
+KwVar       = ( "var" | "let" | "const" ) KwEnd ;
+KwFunction  = "function" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwTypeof    = "typeof" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
+KwOf        = "of" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwExtends   = "extends" KwEnd ;
+KwInterface = "interface" KwEnd ;
+KwType      = "type" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwAs        = "as" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); language-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
+
+    // takeAll empties the local stack of the current tag and returns its items in push
+    // order as a plain JS array. It only uses pop(), so it works independently of how
+    // the runtime wraps the Go slice behind up.stack.
+    // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
+    // The host unescape() is for the grammar token syntax and rejects \' and \", so the
+    // JS string literals bring their own unescaper.
+    // ----- Scopes -----
+    // 'scopes' is the active scope chain (innermost last). Every closure captures a copy
+    // of the chain array; the scope objects inside stay shared, so later declarations in
+    // an already captured scope are visible to the closure (that is what allows mutual
+    // recursion between top level functions).
+
+    // The host names that a JS program can use. Everything resolves to the goja
+    // natives, so e.g. Math.imul or the string/array methods behave exactly like in JS.
+    var hostGlobals = {
+        "println": println, "print": print, "printf": printf, "sprintf": sprintf,
+        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
+        "exit": exit
+    }
+
+    // Plain, unpinned scope entries: a variable holds its value directly and may
+    // change type freely. No declare-before-use discipline.
+    getVar = function(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
+        }
+        if (hasOwn(hostGlobals, name)) return hostGlobals[name]
+        fail("variable not defined: " + name)
+    }
+    declVar = function(name, value) {
+        scopes[scopes.length - 1][name] = value
+    }
+    // Assignment walks the chain; a name that is nowhere declared becomes an
+    // implicit global (real, non strict JavaScript), never an error.
+    setVar = function(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        globalScope[name] = value
+    }
+
+    // ----- Statement signals -----
+    // Statement thunks return undefined (fall through), BRK, CONT, or {isRet:true, v:...}.
+
+    // ----- Functions -----
+    // A MetaJS function value is a real (goja) JS function, so typeof, passing it around,
+    // and calling it work natively. It closes over the scope chain of its creation.
+    function makeClosure(params, bodyT, defScopes) {
+        var env = defScopes.slice()
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+            var saved = scopes
+            scopes = env.slice()
+            var sc = {}
+            for (var j = 0; j < params.length; j++) {
+                sc[params[j]] = args[j]
+            }
+            sc["arguments"] = args
+            scopes.push(sc)
+            var r = bodyT()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+
+    function getMember(o, k) {
+        if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
+        return o[k]
+    }
+
+    // ----- Expression thunks: function() -> value -----
+
+    makeNeg = function(t) { return function() { return -t() } }
+    function makeBitNot(t) { return function() { return ~t() } }
+    function makeTypeof(t) { return function() { return typeof t() } }
+
+    function makeArray(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            return a
+        }
+    }
+    // PropDef pops [valueThunk, key]; the key is an Id string or a constant string thunk
+    // (calling the pure thunk once at build time yields the key text).
+    function makeProp(valT, key) {
+        return {k: (typeof key == "string") ? key : key(), t: valT}
+    }
+    function makeObject(props) {
+        return function() {
+            var o = {}
+            for (var i = 0; i < props.length; i++) o[props[i].k] = props[i].t()
+            return o
+        }
+    }
+
+    function makeFunctionExpr(bodyT, params) {
+        return function() { return makeClosure(params, bodyT, scopes) }
+    }
+
+    // Arrow function: items = [{aparams:[names]}, {body: stmtThunk} | {ebody: exprThunk}].
+    // A block body is a statement thunk (returns undefined|signal, handled by
+    // makeClosure); an expression body becomes an implicit 'return <expr>'.
+    function makeArrow(items) {
+        var params = items[0].aparams
+        var bm = items[1]
+        var bodyT = anytype // Either a block statement thunk or a synthesized return.
+        if (bm.body != undefined) {
+            bodyT = bm.body
+        } else {
+            var et = bm.ebody
+            bodyT = function() { return {isRet: true, v: et()} }
+        }
+        return function() { return makeClosure(params, bodyT, scopes) }
+    }
+
+    // Template literal: items = [{str:"chunk"} | {expr: thunk}...] -> string thunk.
+    // Starting from "" forces JS string coercion on every interpolated part.
+    function makeTemplate(items) {
+        return function() {
+            var out = anytype // The running value is a string after the first "" seed.
+            out = ""
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].str != undefined) { out = out + items[i].str }
+                else { out = out + items[i].expr() }
+            }
+            return out
+        }
+    }
+
+    // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
+    // for-of genuinely iterates array elements / string characters by index.
+    function makeForOf(items, pos) {
+        var name = items[0]
+        var iterT = items[2]
+        var bodyT = items[3]
+        if (items[1] == "in") {
+            notImpl("for-in", pos)
+            return function() { iterT(); return undefined } // Iterable evaluated, body skipped.
+        }
+        return function() {
+            var it = anytype // The iterable is an array or a string.
+            it = iterT()
+            scopes.push({}) // The loop header/variable get their own scope.
+            var res = undefined
+            for (var i = 0; i < it.length; i++) {
+                declVar(name, it[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+
+    // A destructuring binding is not lowered; run the initializer (so its calls stay
+    // visible) and bind nothing.
+    function makeDestructure(init, pos) {
+        notImpl("destructuring declaration", pos)
+        return function() { init(); return undefined }
+    }
+
+    // try/catch/finally is not implemented; under -warn the try block runs.
+    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+
+    // A class declaration is not implemented; bind the name to undefined.
+    function makeClass(items, pos) {
+        notImpl("class declaration", pos)
+        var name = items[0]
+        return function() { declVar(name, undefined); return undefined }
+    }
+
+    // ----- TypeScript enum -----
+    // EnumMember pops [{mname}] or [{mname}, {val}]; the value is the explicit integer
+    // or null (auto-increment).
+    function makeEnumMember(items) {
+        var name = items[0].mname
+        var val = null
+        if (items.length > 1) { val = items[1].val }
+        return {member: name, val: val}
+    }
+    // makeEnum turns the member list into {name: value} pairs at parse time (the same
+    // computation runs in the compiler), then binds an object of those pairs to the
+    // enum name so that Color.Red reads the value.
+    function makeEnum(items) {
+        var ename = items[0].enumName
+        var members = items.slice(1)
+        var pairs = []
+        var next = 0
+        for (var i = 0; i < members.length; i++) {
+            var v = anytype // Either the explicit integer or the running counter.
+            v = members[i].val
+            if (v == null) { v = next }
+            pairs.push({k: members[i].member, v: v})
+            next = v + 1
+        }
+        return function() {
+            var o = {}
+            for (var j = 0; j < pairs.length; j++) { o[pairs[j].k] = pairs[j].v }
+            declVar(ename, o)
+            return undefined
+        }
+    }
+
+    binOp = function(op, l, r) {
+        if (op == "+") return l + r
+        if (op == "-") return l - r
+        if (op == "*") return l * r
+        if (op == "/") return l / r
+        if (op == "%") return l % r
+        if (op == "==") return l == r
+        if (op == "!=") return l != r
+        if (op == "===") return l === r
+        if (op == "!==") return l !== r
+        if (op == "<")  return l < r
+        if (op == ">")  return l > r
+        if (op == "<=") return l <= r
+        if (op == ">=") return l >= r
+        if (op == "|")  return l | r
+        if (op == "^")  return l ^ r
+        if (op == "&")  return l & r
+        if (op == "<<") return l << r
+        if (op == ">>") return l >> r
+        if (op == ">>>") return l >>> r
+    }
+    // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
+    // || and && evaluate lazily and return the deciding operand, like in JS.
+    function makeOr(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = anytype // The operands may be of mixed types.
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (v) return v
+                v = items[i]()
+            }
+            return v
+        }
+    }
+    function makeAnd(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = anytype // The operands may be of mixed types.
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (!v) return v
+                v = items[i]()
+            }
+            return v
+        }
+    }
+    // items = [thunk] or [condThunk, thenThunk, elseThunk].
+    function makeCond(items) {
+        if (items.length == 1) return items[0]
+        return function() { return items[0]() ? items[1]() : items[2]() }
+    }
+
+    // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
+    // its object, so that a directly following call uses it as 'this'.
+    foldCallMember = function(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = anytype     // A member chain hops between types,
+            var curThis = anytype // and so does the remembered receiver.
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "member") {
+                    curThis = cur
+                    cur = getMember(cur, s.key())
+                } else {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    if (typeof cur != "function") fail("call of a non function value: " + cur)
+                    cur = cur.apply(curThis, argv)
+                    curThis = undefined
+                }
+            }
+            return cur
+        }
+    }
+
+    // Target items = [nameString, suffix marker...] -> reference descriptor.
+    // Walks a target path (members and calls) up to the last element and returns
+    // the assignable place {obj, key}. The last element must be a member.
+    resolveRef = function(ref) {
+        var cur = anytype     // The walked values and receivers
+        var curThis = anytype // may be of mixed types.
+        cur = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.kind == "member") {
+                curThis = cur
+                cur = getMember(cur, s.key())
+            } else {
+                var argv = []
+                for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                if (typeof cur != "function") fail("call of a non function value: " + cur)
+                cur = cur.apply(curThis, argv)
+                curThis = undefined
+            }
+        }
+        var last = ref.path[ref.path.length - 1]
+        if (last.kind != "member") fail("assignment target must end in a member")
+        if (cur == undefined) fail("member assignment on " + cur)
+        return {obj: cur, key: last.key()}
+    }
+    applyOp = function(op, a, b) {
+        if (op == "+=") return a + b
+        if (op == "-=") return a - b
+        if (op == "*=") return a * b
+        if (op == "/=") return a / b
+        if (op == "%=") return a % b
+    }
+    // items = [ref, opString, valueThunk]. Returns the assigned value (assignment is an expression).
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = anytype // A compound assignment (s += n) may change the value's type.
+            v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") v = applyOp(op, getVar(ref.name), v)
+                setVar(ref.name, v)
+            } else {
+                var p = resolveRef(ref)
+                if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                p.obj[p.key] = v
+            }
+            return v
+        }
+    }
+    // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
+    function makeIncDec(items) {
+        var ref = items[0]
+        var delta = (items[1] == "++") ? 1 : -1
+        return function() {
+            if (ref.path.length == 0) {
+                var n = getVar(ref.name) - 0
+                setVar(ref.name, n + delta)
+                return n
+            }
+            var p = resolveRef(ref)
+            var m = p.obj[p.key] - 0
+            p.obj[p.key] = m + delta
+            return m
+        }
+    }
+    // Prefix ++/--: like makeIncDec, but the expression value is the new one.
+    function makePreIncDec(ref, op) {
+        var delta = (op == "++") ? 1 : -1
+        return function() {
+            if (ref.path.length == 0) {
+                var n = getVar(ref.name) - 0 + delta
+                setVar(ref.name, n)
+                return n
+            }
+            var p = resolveRef(ref)
+            var m = p.obj[p.key] - 0 + delta
+            p.obj[p.key] = m
+            return m
+        }
+    }
+
+    // ----- Statement thunks: function() -> undefined | BRK | CONT | {isRet, v} -----
+
+    // An expression in statement position: evaluate and discard the value.
+    // items = [name] or [name, initThunk].
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items.length > 1 ? items[1] : makeConst(undefined)
+        return function() { declVar(name, init()) }
+    }
+    // items = [cond, then] or [cond, then, else].
+    // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
+    function makeDo(condT, bodyT) {
+        return function() {
+            do {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) return r
+                }
+            } while (condT())
+        }
+    }
+    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function() {
+            scopes.push({}) // The for header is its own scope (for the loop variable).
+            var res = undefined
+            if (init != null) init()
+            while (cond == null || cond()) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r !== CONT) { res = r; break } // A return signal.
+                }
+                if (post != null) post()
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    // items = [] or [exprThunk].
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { return {isRet: true, v: t()} }
+    }
+    function makeThrow(t) { return function() { fail("thrown: " + t()) } }
+
+    // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement
+    // list is grouped into case descriptors at build time; at run time the first ===
+    // match (or default) starts execution, which falls through until a break.
+    function makeSwitch(items) {
+        var subj = items[0]
+        var cases = []
+        var cur = null
+        for (var i = 1; i < items.length; i++) {
+            var p = items[i]
+            if (p != undefined && (p.casev != undefined || p.isdflt != undefined)) {
+                cur = {isDefault: p.isdflt != undefined, v: p.casev, body: []}
+                cases.push(cur)
+            } else {
+                if (cur == null) fail("switch: a statement before the first case label")
+                cur.body.push(p)
+            }
+        }
+        return function() {
+            var v = subj()
+            var start = -1
+            var dflt = -1
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { if (dflt < 0) dflt = i; continue }
+                if (start < 0 && cases[i].v() === v) { start = i }
+            }
+            if (start < 0) { start = dflt }
+            if (start < 0) { return undefined }
+            for (var i = start; i < cases.length; i++) {
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) {
+                    var r = body[j]()
+                    if (r === BRK) { return undefined }        // break leaves the switch
+                    if (r != undefined) { return r }           // return/continue propagate
+                }
+            }
+            return undefined
+        }
+    }
+
+    // Local stack = [name, [paramNames...], bodyThunk] -- binds the closure when executed.
+    function makeFuncDecl(bodyT, paramNames, name) {
+        return function() { declVar(name, makeClosure(paramNames, bodyT, scopes)) }
+    }
+
+    // Build the program thunk out of the parsed source.
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "typescript"
+
+    c.compile(c.asg)
+    var progT = popg()
+
+    // Run the top level (it binds the functions), then call main(). The exit code of
+    // this metacompiler run is what main() returned, so test programs are self checking.
+    progT()
+    if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
+        fail("TypeScript programs need a main() function.")
+    }
+    var ret = globalScope["main"]()
+    println("typescript interpreter: main() returned " + ret)
+    exit(ret | 0)
+
+~~) ;

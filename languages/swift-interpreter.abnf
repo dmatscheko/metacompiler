@@ -1,0 +1,708 @@
+:title("Swift (subset) interpreter") ;
+:description("Parses a Swift subset and executes it directly, without generating code.
+
+The subset: top level code that runs in source order (declare before use, no
+hoisting), let/var declarations with an optional type annotation (types are
+parsed and ignored, let is not enforced), functions with LABELLED parameters
+(func greet(name: String, from town: String) -> String, called greet(name: x,
+from: y); the external label is parsed and the last identifier is the bound
+name), struct and class with stored properties (var value = 0, var step: Int),
+methods and an explicit init (self and implicit unqualified property access
+inside methods, construction without new: Counter(start: 10, step: 1)), if/else
+(braces required), while, repeat/while, for-in over the ranges 1...5 (closed)
+and 1..<5 (half-open) and over arrays, break/continue, closures { x in x * 2 }
+and { (a: Int, b: Int) -> Int in a + b } as values with trailing-closure call
+syntax (nums.map { x in x * 2 }), the array higher order methods map/filter/
+forEach plus append/contains/count, arrays [1, 2, 3] and dictionaries
+[\"a\": 1] (empty dict [:]) with subscript read/write and .count, string
+interpolation \\(expr), the nil-coalescing operator a ?? b, nil, print(...) and
+return. Int arithmetic is 32 bit and / truncates; + concatenates when a side is
+a String; == compares strings by value and objects by identity. A plain enum of
+bare cases becomes named string constants (Direction.north).
+
+Not in the subset (accepted structurally and reported as not implemented under
+-warn-unsupported, or simply not parsed): optionals beyond nil and ?? (Type?,
+if let, guard let, force unwrap !, optional chaining ?.), protocols, extensions,
+generics (parsed and ignored), enums with raw or associated values, switch,
+computed properties, tuples and tuple patterns, error handling (throws/try),
+struct value semantics (structs behave like classes) and bare (unqualified)
+method calls (methods are called via self.m() or obj.m()).
+
+Top level self checking programs count failures and end with exit(failures).") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// Top level items run in source order during the tree walk: functions and
+// types register themselves; a bare statement's thunk runs immediately.
+Program     = { TopItem } ;
+TopItem     = FunTop | TypeTop | UnsupTop | TopStmt ;
+FunTop      <~~ registerFun(pop()) ~~> = [ Modifiers ] FunDecl ;
+TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | EnumDecl ) ;
+UnsupTop    = [ Modifiers ] UnsupDecl ;
+TopStmt     <~~ var t = pop(); t() ~~> = Statement ;
+
+// Declaration modifiers are parsed and ignored.
+Modifiers   = { Modifier } ;
+Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
+              | "final" | "static" | "mutating" | "nonmutating"
+              | "override" | "lazy" | "weak" | "unowned" | "convenience"
+              | "required" | "dynamic" | "indirect" ) KwEnd ;
+
+// func name(label param: Type, ...) -> Ret { ... }
+FunDecl     <~~ push(makeFun(takeAll())) ~~>
+            = KwFunc [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ FnEffects ] [ "->" Type ] Block ;
+FnEffects   = { ( "throws" | "rethrows" | "async" ) KwEnd } ;
+
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Param { "," Param } ] ")" ;
+// A parameter is [externalLabel] internalName : Type; the last identifier is
+// the bound name (Swift's _ label is just an identifier here).
+Param       <~~ push(paramName(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ Id <~~ push(up.in) ~~> ] ":" [ "inout" KwEnd ] Type [ "..." ] [ "=" DiscardExpr ] ;
+
+// class / struct with stored properties, methods and an explicit init.
+StructDecl  <~~ buildClass(takeAll()) ~~>
+            = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+ClassDecl   <~~ buildClass(takeAll()) ~~>
+            = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+TypeList    = Type { "," Type } ;
+
+Member      = [ Modifiers ] ( InitDecl | MethodDecl | ComputedProp | PropDecl ) ;
+InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
+            = KwInit [ "?" ] [ SkipAngle ] ParamList [ FnEffects ] Block ;
+MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
+            = KwFunc [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ FnEffects ] [ "->" Type ] Block ;
+PropDecl    <~~ push(makeProp(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] [ ";" ] ;
+ComputedProp <~~ notImpl("computed property", up.pos) ~~>
+            = ( "let" | "var" ) KwEnd Id [ ":" Type ] SkipBlock ;
+
+// A plain enum of bare cases becomes named constants (Direction.north = "north").
+EnumDecl    = PlainEnum | ComplexEnum ;
+PlainEnum   <~~ buildEnum(takeAll()) ~~>
+            = KwEnum Id <~~ push(up.in) ~~> "{" { SimpleCase } "}" ;
+SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: up.in}) ~~> } [ ";" ] ;
+ComplexEnum <~~ notImpl("enum with raw or associated values", up.pos) ~~>
+            = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
+
+// protocol / extension / typealias: accepted structurally, not implemented.
+UnsupDecl   = ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
+ProtocolDecl <~~ notImpl("protocol", up.pos) ~~>
+            = KwProtocol Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
+ExtensionDecl <~~ notImpl("extension", up.pos) ~~>
+            = KwExtension Type [ ":" TypeList ] SkipBlock ;
+TypeAliasDecl <~~ notImpl("typealias", up.pos) ~~>
+            = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
+
+// Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
+// implicitly unwrapped T!, tuples/function types (A, B) -> C, dotted and generic.
+Type        = TypeCore { "?" | "!" } ;
+TypeCore    = "[" Type [ ":" Type ] "]"
+            | "(" [ Type { "," Type } ] ")" [ "->" Type ]
+            | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   = Decl | If | While | Repeat | For | Return | Break | Continue | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+Decl        <~~ push(makeDecl(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf Expression Block [ KwElse ElseBody ] ;
+ElseBody    = Block | If ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile Expression Block ;
+
+Repeat      <~~ push(makeDo(pop(), pop())) ~~>
+            = KwRepeat Block KwWhile Expression [ ";" ] ;
+
+// for x in 1...5 / 1..<5, and for x in array. The range form is tried first.
+For         = ForRange | ForList ;
+ForRange    <~~ push(makeForRange(takeAll())) ~~>
+            = KwFor Id <~~ push(up.in) ~~> KwIn Expression RangeOp Expression Block ;
+RangeOp     = "..." <~~ push({rop: "..."}) ~~>
+            | "..<" <~~ push({rop: "..<"}) ~~> ;
+ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
+            = KwFor Id <~~ push(up.in) ~~> KwIn Expression Block ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] [ ";" ] ;
+Break       <~~ push(makeBreak()) ~~>    = KwBreak [ ";" ] ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue [ ";" ] ;
+Empty       <~~ push(function() {}) ~~>  = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression [ ";" ] ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = Assignment | Ternary ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+// cond ? a : b (right associative). The ? cannot be confused with ?? (consumed
+// deeper, at Coalesce) or with an argument label's colon.
+Ternary     <~~ push(makeTernary(takeAll())) ~~>
+            = OrExpr [ "?" Expression ":" Ternary ] ;
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = Coalesce { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Coalesce } ;
+// a ?? b yields a unless it is nil (short circuit; the nil-coalescing operator).
+Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
+            = AddExpr { "??" AddExpr } ;
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Neg | Not | CallMember ;
+Neg         <~~ push(makeNeg(pop())) ~~>   = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
+
+// obj.m(args), obj.field, arr[i] - and a trailing closure becomes the last arg.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ Closure ] | Closure ;
+
+// Argument labels are parsed and dropped; arguments bind positionally.
+CallArg     = [ ArgLabel ] Expression ;
+ArgLabel    = Id ":" ;
+
+Primary     = "(" Expression ")" | Template | IntLit | True | False | Nil
+            | Closure | DictLit | ArrayLit | Call | VarRef ;
+
+// A closure: { x in x * 2 } or { (a: Int, b: Int) -> Int in a + b } or, with no
+// signature, { doThing() }. Its value is the last expression; a real closure
+// over the defining scope.
+Closure     <~~ push(makeClosure(takeAll())) ~~>
+            = "{" [ ClosureSig ] { LamStmt } "}" ;
+ClosureSig  <~~ push({cparams: takeAll()}) ~~>
+            = "(" [ ClParam { "," ClParam } ] ")" [ "->" Type ] KwIn
+            | ClParam { "," ClParam } KwIn ;
+ClParam     = Id <~~ push(up.in) ~~> [ ":" Type ] ;
+LamStmt     = LamCtrl | LamExpr ;
+LamCtrl     <~~ push({stmt: pop()}) ~~>
+            = Decl | While | Repeat | For | Return | Break | Continue | If ;
+LamExpr     <~~ push({expr: pop()}) ~~>
+            = Expression [ ";" ] ;
+
+// [k: v] dictionaries (empty [:]) tried before [e] arrays.
+DictLit     <~~ push(makeDict(takeAll())) ~~>
+            = "[" ( ":" | DictEntry { "," DictEntry } ) "]" ;
+DictEntry   <~~ var v = pop(); push({dk: pop(), dv: v}) ~~>
+            = Expression ":" Expression ;
+ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+            = "[" [ Expression { "," Expression } ] "]" ;
+
+// f(args): a global function or a struct/class constructor (calls init).
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" ;
+
+// String interpolation: "sum = \(a + b)".
+Template    <~~ push(makeTemplate(takeAll())) ~~>
+            = '"' :whitespace() { TplExpr | TplChunk } '"' :whitespace(Whitespace) ;
+TplExpr     <~~ push({e: pop()}) ~~>
+            = "\\(" :whitespace(Whitespace) Expression ")" ;
+TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+            = TplChar { TplChar } ;
+TplChar     = TplEsc | TplPlain ;
+TplEsc      = "\\" ( "n" | "t" | "r" | "0" | "\\" | @'"' | "'" ) ;
+TplPlain    = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+Nil         <~~ push(makeConst(null)) ~~>  = "nil" KwEnd ;
+VarRef      <~~ push(makeVarRef(up.in)) ~~> = Id ;
+
+// ----- Widened surface: a balanced { ... } / < ... > run consumed but ignored -----
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
+SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipStrChar = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(Whitespace) ;
+SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
+SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+DiscardExpr <~~ pop() ~~> = Expression ;
+
+KwFunc      = "func" KwEnd ;
+KwStruct    = "struct" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwInit      = "init" KwEnd ;
+KwProtocol  = "protocol" KwEnd ;
+KwExtension = "extension" KwEnd ;
+KwTypealias = "typealias" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwRepeat    = "repeat" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, expression and
+    // statement builders); Swift-specific behavior is configured on `core` below.
+    include("lib/interp-core.js")
+
+    // ----- Values: dictionaries, strings, indexing (js_pyget/js_pyset semantics) -----
+    function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+    function dictFind(d, k) {
+        for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) { return i } }
+        return -1
+    }
+    function dictSet(d, k, v) {
+        var i = dictFind(d, k)
+        if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
+    }
+    function swstr(v) {
+        if (v === undefined) { return "" }
+        if (v === null) { return "nil" }
+        if (v === true) { return "true" }
+        if (v === false) { return "false" }
+        if (typeof v == "string") { return v }
+        return "" + v
+    }
+    function swadd(l, r) {
+        if (typeof l == "string" || typeof r == "string") { return swstr(l) + swstr(r) }
+        return (l + r) | 0
+    }
+    function swlen(v) {
+        if (isDict(v)) { return v.keys.length }
+        if (v === null || v === undefined) { fail("count of nil") }
+        return v.length
+    }
+    function swGetField(o, name) {
+        if (name == "count") { return swlen(o) }
+        if (o === undefined || o === null) { fail("field ." + name + " of nil") }
+        return o[name]
+    }
+    function swIndex(o, i) {
+        if (isDict(o)) {
+            var di = dictFind(o, i)
+            if (di < 0) { fail("no value for dictionary key") }
+            return o.vals[di]
+        }
+        if (typeof o == "string") {
+            var si = i
+            if (si < 0) { si += o.length }
+            if (si < 0 || si >= o.length) { fail("string index out of range") }
+            return o.charAt(si)
+        }
+        if (o === null || o === undefined) { fail("index of nil") }
+        var ai = i
+        if (ai < 0) { ai += o.length }
+        if (ai < 0 || ai >= o.length) { fail("array index out of range") }
+        return o[ai]
+    }
+    function setElem(o, k, v) {
+        if (isDict(o)) { dictSet(o, k, v); return }
+        if (o === null || o === undefined) { fail("assignment into nil") }
+        if (Array.isArray(o)) {
+            var i = k
+            if (i < 0) { i += o.length }
+            o[i] = v
+            return
+        }
+        o[k] = v
+    }
+    function getElemP(o, k) {
+        if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
+        return o[k]
+    }
+
+    // ----- Builtins available to the running program -----
+    hostGlobals["print"] = function(x) { println(swstr(x)) }
+    hostGlobals["exit"] = function(code) { exit(code | 0) }
+    hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
+    hostGlobals["max"] = function(a, b) { return a > b ? a : b }
+    hostGlobals["min"] = function(a, b) { return a < b ? a : b }
+
+    // ----- Method dispatch (the js_mcall equivalent) -----
+    function mcall(target, name, args) {
+        if (typeof target == "string") {
+            if (name == "count") { return target.length }
+            if (name == "uppercased") { return target.toUpperCase() }
+            if (name == "lowercased") { return target.toLowerCase() }
+            if (name == "hasPrefix") { return target.slice(0, args[0].length) === args[0] }
+            if (name == "contains") { return target.indexOf(args[0]) >= 0 }
+            fail("unknown String method: " + name)
+        }
+        if (isDict(target)) {
+            if (name == "count") { return target.keys.length }
+            if (name == "keys") { return target.keys.slice(0) }
+            if (name == "values") { return target.vals.slice(0) }
+            fail("unknown Dictionary method: " + name)
+        }
+        if (target === null || target === undefined) { fail("method ." + name + " on nil") }
+        if (Array.isArray(target)) { return arrayMethod(target, name, args) }
+        if (target.__class != undefined) {
+            var m = target.__class[name]
+            if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        fail("unknown method '" + name + "'")
+    }
+    function arrayMethod(t, name, args) {
+        var i
+        var out
+        if (name == "count") { return t.length }
+        if (name == "append") { t.push(args[0]); return undefined }
+        if (name == "contains") { return t.indexOf(args[0]) >= 0 }
+        if (name == "first") { return t.length == 0 ? null : t[0] }
+        if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
+        if (name == "map") {
+            out = []
+            for (i = 0; i < t.length; i++) { out.push(args[0](t[i])) }
+            return out
+        }
+        if (name == "filter") {
+            out = []
+            for (i = 0; i < t.length; i++) { if (args[0](t[i])) { out.push(t[i]) } }
+            return out
+        }
+        if (name == "forEach") {
+            for (i = 0; i < t.length; i++) { args[0](t[i]) }
+            return undefined
+        }
+        fail("unknown Array method: " + name)
+    }
+
+    // ----- Expression thunks -----
+
+    // items = [cond] or [cond, then, else] -> the ternary conditional.
+    function makeTernary(items) {
+        if (items.length == 1) { return items[0] }
+        var condT = items[0]
+        var thenT = items[1]
+        var elseT = items[2]
+        return function() { return core.test(condT()) ? thenT() : elseT() }
+    }
+
+    // items = [thunk, thunk, ...]: a ?? b yields a unless it is nil (short circuit).
+    function makeCoalesce(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = items[0]()
+            for (var i = 1; i < items.length && (v === null || v === undefined); i++) { v = items[i]() }
+            return v
+        }
+    }
+
+    function makeArray(items) {
+        return function() {
+            var out = []
+            for (var i = 0; i < items.length; i++) { out.push(items[i]()) }
+            return out
+        }
+    }
+    function makeDict(items) {
+        return function() {
+            var d = {__dict: true, keys: [], vals: []}
+            for (var i = 0; i < items.length; i++) { dictSet(d, items[i].dk(), items[i].dv()) }
+            return d
+        }
+    }
+
+    // Closure items = [{cparams}?, {stmt}|{expr}...]; the body's value is the last
+    // expression. Captures the scope chain (a real closure). Without a signature
+    // it binds no names (Swift shorthand $0 is not supported).
+    function makeClosure(items) {
+        var params = []
+        var start = 0
+        if (items.length > 0 && items[0] != undefined && items[0].cparams != undefined) {
+            params = items[0].cparams
+            start = 1
+        }
+        var body = items.slice(start)
+        return function() {
+            var captured = scopes.slice(0)
+            return function() {
+                var args = arguments
+                var saved = scopes
+                scopes = captured.slice(0)
+                scopes.push({})
+                for (var i = 0; i < params.length; i++) {
+                    declVar(params[i], i < args.length ? args[i] : undefined)
+                }
+                var last = anytype // A block's value hops types across items.
+                last = undefined
+                for (var k = 0; k < body.length; k++) {
+                    if (body[k].expr != undefined) {
+                        last = body[k].expr()
+                    } else {
+                        last = undefined
+                        var r = body[k].stmt()
+                        if (r != undefined) { last = r; break }
+                    }
+                }
+                scopes = saved
+                return last
+            }
+        }
+    }
+
+    // f(args): a global function or a class/struct constructor (runs __ctor then init).
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var f = getVar(name)
+            if (f != undefined && f.__isclass === true) {
+                var obj = {__class: f}
+                if (typeof f.__ctor == "function") { f.__ctor(obj) }
+                var init = f["init"]
+                if (typeof init == "function") { init.apply(undefined, concat2impl([obj], argv)) }
+                return obj
+            }
+            if (typeof f != "function") { fail("call of a non function: " + name) }
+            return f.apply(undefined, argv)
+        }
+    }
+
+    // Assignment understands plain names, object properties (self.x), array
+    // elements and dictionary entries.
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
+                setVar(ref.name, v)
+            } else {
+                var p = resolveRef(ref)
+                if (op != "=") { v = applyOp(op, getElemP(p.obj, p.key), v) }
+                setElem(p.obj, p.key, v)
+            }
+            return v
+        }
+    }
+
+    // items = [{s: chunk} | {e: thunk}...] -> concatenation thunk.
+    function makeTemplate(items) {
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].s != undefined) { out += items[i].s }
+                else { out += swstr(items[i].e()) }
+            }
+            return out
+        }
+    }
+
+    // ----- Statement thunks -----
+
+    function makeDecl(items) {
+        var name = items[0]
+        var init = items[1]
+        return function() { declVar(name, init()) }
+    }
+    function makeDo(condT, bodyT) {
+        return function() {
+            do {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) { break }
+                    if (r !== CONT) { return r }
+                }
+            } while (condT())
+        }
+    }
+    // items = [name, fromT, {rop}, toT, bodyT]. ..< excludes the upper bound.
+    function makeForRange(items) {
+        var name = items[0]
+        var fromT = items[1]
+        var rop = items[2].rop
+        var toT = items[3]
+        var bodyT = items[4]
+        return function() {
+            var res = undefined
+            scopes.push({})
+            declVar(name, 0)
+            var from = fromT()
+            var last = toT()
+            if (rop == "..<") { last = (last - 1) | 0 }
+            for (var i = from; i <= last; i++) {
+                setVar(name, i)
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) { break }
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeForList(bodyT, listT, name) {
+        return function() {
+            var arr = listT()
+            var res = undefined
+            scopes.push({})
+            declVar(name, undefined)
+            var n = swlen(arr)
+            for (var i = 0; i < n; i++) {
+                setVar(name, isDict(arr) ? arr.keys[i] : arr[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) { break }
+                    if (r !== CONT) { res = r; break }
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : makeConst(undefined)
+        return function() { return {isRet: true, v: t()} }
+    }
+
+    // ----- Functions, methods and classes -----
+
+    function paramName(items) { return items[items.length - 1] }
+    function makeFun(items) {
+        return {name: items[0], params: items[1].params, body: items[2]}
+    }
+    function makeInit(items) {
+        return {name: "init", params: items[0].params, body: items[1]}
+    }
+    function registerFun(f) { globalScope[f.name] = makeFunClosure(f) }
+    function makeFunClosure(f) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return invokeBody(f.params, f.body, undefined, "self", args)
+        }
+    }
+    function makeMethodClosure(f) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            var saved = scopes
+            scopes = [globalScope, {}]
+            declVar("this", self)
+            declVar("self", self)
+            for (var j = 0; j < f.params.length; j++) {
+                declVar(f.params[j], j < args.length ? args[j] : undefined)
+            }
+            var r = f.body()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+    function makeProp(items) {
+        if (items.length > 1) { return {prop: items[0], hasInit: true, init: items[1]} }
+        return {prop: items[0], hasInit: false, init: null}
+    }
+
+    // items = [name, ({prop}|{method})...]
+    function buildClass(items) {
+        var name = items[0]
+        var props = []
+        var methods = []
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it.prop != undefined && it.hasInit) { props.push(it) }
+            if (it.method != undefined) { methods.push(it.method) }
+        }
+        var cls = {__isclass: true, __name: name}
+        // __ctor sets the default valued stored properties on a fresh instance,
+        // before init runs.
+        cls.__ctor = function(self) {
+            var saved = scopes
+            scopes = [globalScope, {}]
+            declVar("this", self)
+            declVar("self", self)
+            for (var p = 0; p < props.length; p++) { self[props[p].prop] = props[p].init() }
+            scopes = saved
+        }
+        for (var m2 = 0; m2 < methods.length; m2++) {
+            cls[methods[m2].name] = makeMethodClosure(methods[m2])
+        }
+        globalScope[name] = cls
+    }
+
+    // items = [name, {ecase}...] -> an object of name -> caseName constants.
+    function buildEnum(items) {
+        var name = items[0]
+        var e = {__enum: true, __name: name}
+        for (var i = 1; i < items.length; i++) { e[items[i].ecase] = items[i].ecase }
+        globalScope[name] = e
+    }
+
+    function findThis() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "self")) { return scopes[i]["self"] }
+        }
+        return undefined
+    }
+
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "swift"
+    core.add = swadd
+    core.getField = swGetField
+    core.getIndex = swIndex
+    // Unqualified names fall back to properties of the enclosing self.
+    core.varMiss = function(name) {
+        var self = findThis()
+        if (self != undefined && hasOwn(self, name)) { return {v: self[name]} }
+        return null
+    }
+    core.setMiss = function(name, value) {
+        var self = findThis()
+        if (self != undefined && hasOwn(self, name)) { self[name] = value; return true }
+        return false
+    }
+
+    c.compile(c.asg)
+
+    // Top level code has already run (in source order) during c.compile; if it
+    // did not call exit(), succeed.
+    exit(0)
+
+~~) ;

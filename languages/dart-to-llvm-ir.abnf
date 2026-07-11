@@ -1,0 +1,743 @@
+:title("Dart to LLVM IR compiler") ;
+:description("Compiles a practical subset of Dart to an LLVM IR module and runs it with the
+built-in IR interpreter.
+
+The language is exactly the one of dart-interpreter.abnf; see there for a description. It
+has top level and nested functions (block and arrow bodies), typed declarations whose type
+is erased, var/final/const, classes with fields, methods, constructors and
+field-initialising formals, construction with or without new, this.field and implicit field
+access inside methods, List and Map literals, index/member access, string interpolation
+($name and ${expr}) inside single and double quotes, if/else, while, C-style for and
+for (x in coll), closures with real captured scopes, print(...), + - * / ~/ % , comparisons,
+&& || ! and the ternary operator.
+
+The emitted IR is handle-threaded code: every dynamic value is an i64 handle into the value
+table of the shared Go side runtime (abnf/jsrt.go), and every operation with real semantics
+is a call to one of its js_* externals (js_jadd, js_get, js_call, js_mcall, js_pyget, ...).
+Only the control flow is real IR. Variables live in scope-chain objects (js_scope_* and the
+this-aware js_kget/js_kset); a function/closure becomes an own IR function jsf_N(env, args)
+plus a js_closure at the site of its creation. Classes become descriptor objects: an
+instance is a js_obj_new carrying a __class handle, methods are closures on the descriptor,
+and construction runs the __ctor closure with the fresh instance prepended, so a member call
+dispatches through js_mcall (Go memberCall) exactly like the interpreter.
+
+The top level becomes dartmain(env, args), which runs the program declarations and then
+calls int main(); its return value is the exit code of the metacompiler run, so the test
+programs are self checking (0 on success). The same subset is interpreted directly by
+dart-interpreter.abnf. Constructs outside the subset (mixins/inheritance, async/await, named
+constructors, the null-assertion !) are accepted structurally and reported as not
+implemented under -warn-unsupported; the nullable type marker ? is erased.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// The merged statement thunks of the top level become dartmain(env, args) in the module.
+Program     <~~ buildMain(takeAll()) ~~>
+            = { Statement } ;
+
+// Every statement production pushes exactly one thunk: function(block) -> block.
+// The keyword-led statements come first: otherwise 'return x;' would parse as a variable
+// declaration of a variable x with the (identifier-shaped) type 'return'.
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = Block | ClassDecl | If | While | For | Return | Break | Continue
+            | FuncDecl | VarDecl | Empty | ExprStmt ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+// class Name { fields; constructors; methods }. Inheritance/mixins are not implemented.
+ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = KwClass Id <~~ push({cname: up.in}); curClassName = up.in ~~>
+              [ SkipAngle ] [ SuperClause ] "{" { Member } "}" ;
+SuperClause <~~ notImpl("inheritance/mixins", up.pos) ~~>
+            = SuperPart { SuperPart } ;
+SuperPart   = ( KwExtends | KwWith | KwImplements ) Type { "," Type } ;
+
+// A member is a field, a method (Type? name(params) body) or a constructor (name == the
+// class name). NamedCtorMember is a named constructor - accepted, not implemented.
+Member      = NamedCtorMember | PlainFnMember | TypedFnMember | FieldMember ;
+NamedCtorMember <~~ takeAll(); push({skip: notImpl("named constructor", up.pos)}) ~~>
+            = Id "." Id ParamList [ CtorInit ] MemberBody ;
+PlainFnMember <~~ push(makeMember(false, takeAll())) ~~>
+            = MName ParamList [ CtorInit ] MemberBody ;
+TypedFnMember <~~ push(makeMember(true, takeAll())) ~~>
+            = Type MName ParamList MemberBody ;
+MName       <~~ push({mn: up.in}) ~~> = Id ;
+
+// A constructor initializer list ( : super(...), : this.x = e ) is accepted and reported
+// as not implemented; the super/redirect chain and field initializers are dropped.
+CtorInit    <~~ takeAll(); notImpl("constructor initializer list", up.pos) ~~>
+            = ":" InitItem { "," InitItem } ;
+InitItem    = SuperOrRedirect | FieldInit ;
+SuperOrRedirect = ( "super" | "this" ) KwEnd [ "." Id ] "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+FieldInit   = [ "this" KwEnd "." ] Id "=" AssignExpr ;
+
+MemberBody  = [ AsyncMod ] MemberBodyKind ;
+MemberBodyKind = MBlock | MArrow | MSemi ;
+MBlock      <~~ push({body: pop()}) ~~>  = Block ;
+MArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
+MSemi       <~~ push({none: true}) ~~>   = ";" ;
+AsyncMod    <~~ notImpl("async function", up.pos) ~~> = ( "async" | "sync" ) KwEnd [ "*" ] ;
+
+// Fields: (Type | var | final [Type]) name [= init] { , name [= init] } ; - separate
+// complete alternatives so the leading-type / no-type cases never get stuck in an optional.
+FieldMember = FieldVar | FieldFinalTyped | FieldFinal | FieldTyped ;
+FieldVar        = KwVar        FieldList ";" ;
+FieldFinalTyped = KwFinal Type FieldList ";" ;
+FieldFinal      = KwFinal      FieldList ";" ;
+FieldTyped      = Type         FieldList ";" ;
+FieldList   = FieldDecl { "," FieldDecl } ;
+FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
+            = Id <~~ push({fn: up.in}) ~~> [ "=" AssignExpr ] ;
+
+// Function declarations (top level and nested). Two alternatives so the optional return
+// type does not get stuck when it is absent.
+FuncDecl    = FuncTyped | FuncPlain ;
+FuncTyped   <~~ push(makeFuncDecl(takeAll())) ~~>
+            = Type FName ParamList FnBody ;
+FuncPlain   <~~ push(makeFuncDecl(takeAll())) ~~>
+            = FName ParamList FnBody ;
+FName       <~~ push({fname: up.in}) ~~> = Id ;
+FnBody      = [ AsyncMod ] FnBodyKind ;
+FnBodyKind  = FBlock | FArrow ;
+FBlock      <~~ push({body: pop()}) ~~>  = Block ;
+FArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
+
+// A parameter list. this.x is a field-initialising formal; a bare or typed name is a plain
+// parameter. TypedParam is tried before PlainParam (both are separate alternatives).
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+Param       = ThisParam | TypedParam | PlainParam ;
+ThisParam   <~~ push({thisf: popName()}) ~~>
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> ;
+TypedParam  <~~ push({pname: popName()}) ~~>
+            = Type Id <~~ push({mname: up.in}) ~~> ;
+PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
+
+// A type: name with optional generics <...> (skipped), dotted names and a nullable ? marker,
+// all parsed and erased.
+Type        = Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ "?" ] ;
+
+// Local variable declarations. Separate complete alternatives avoid the optional-type trap.
+// A 'late' modifier is accepted and reported as not implemented (the initialiser still runs).
+VarDecl     = VarLate | VarKwDecl | VarFinalTyped | VarFinal | VarConstTyped | VarConst | VarTyped ;
+VarLate     <~~ notImpl("late variable", up.pos) ~~>
+            = KwLate ( KwFinal Type | KwFinal | Type ) DeclTail ;
+VarKwDecl     = KwVar         DeclTail ;
+VarFinalTyped = KwFinal Type  DeclTail ;
+VarFinal      = KwFinal       DeclTail ;
+VarConstTyped = KwConst Type  DeclTail ;
+VarConst      = KwConst       DeclTail ;
+VarTyped      = Type          DeclTail ;
+DeclTail    <~~ push(makeSeq(takeAll())) ~~>
+            = Declarator { "," Declarator } ";" ;
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+// for (x in coll) is tried before the C-style for; both start with 'for ('.
+For         = ForInTyped | ForInBare | ForCStyle ;
+ForInTyped  <~~ push(makeForIn(takeAll())) ~~>
+            = KwFor "(" ForInLead Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+ForInBare   <~~ push(makeForIn(takeAll())) ~~>
+            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+ForInLead   = KwVar | KwFinal | Type ;
+ForCStyle   <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      <~~ push(makeSeq(takeAll())) ~~> = ForVarHead Declarator { "," Declarator } ;
+ForVarHead  = KwVar | KwFinal Type | KwFinal | Type ;
+ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+Empty       <~~ push(function(b) { return b }) ~~>  = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ";" ;
+
+// Every expression production pushes exactly one thunk: function(block) -> {b, v}.
+Expression  = AssignExpr ;
+AssignExpr  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
+DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
+IndexTarget <~~ push({idx: pop()}) ~~> = "[" Expression "]" ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = EqExpr { "&&" EqExpr } ;
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "~/" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Await | Neg | Not | PostfixExpr ;
+Await       <~~ notImpl("await", up.pos) ~~> = "await" KwEnd UnaryExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~> = "-" UnaryExpr ;
+Not         <~~ push(makeNot(pop())) ~~> = "!" UnaryExpr ;
+
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// A primary followed by any mix of method calls, field reads, index reads and the (not
+// implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx | BangSfx } ;
+BangSfx     <~~ notImpl("null-assertion", up.pos); push({kind:"bang"}) ~~> = "!" !"=" ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = ArrowFn | "(" Expression ")" | ListLit | MapLit | StrLit | IntLit
+            | True | False | Null | NewExpr | Call | VarRef ;
+
+// A closure: (params) => expr or (params) { statements }.
+ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
+            = ParamList ArrowTail ;
+ArrowTail   = ArrowExpr | ArrowBlock ;
+ArrowExpr   <~~ push({ebody: pop()}) ~~> = "=>" AssignExpr ;
+ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
+
+// new Type(args) - equivalent to Type(args); both construct.
+NewExpr     = KwNew Call ;
+
+// f(args): a top level function, a builtin, or (when the name is a class) a constructor.
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+
+ListLit     <~~ push(makeList(takeAll())) ~~>
+            = "[" [ AssignExpr { "," AssignExpr } [ "," ] ] "]" ;
+MapLit      <~~ push(makeMap(takeAll())) ~~>
+            = "{" [ MapEntry { "," MapEntry } [ "," ] ] "}" ;
+MapEntry    <~~ var v = pop(); push({mk: pop(), mv: v}) ~~>
+            = AssignExpr ":" AssignExpr ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~> = Id ;
+Null        <~~ push(makeConst(null)) ~~>   = "null" KwEnd ;
+
+// Single and double quoted strings, both interpolating $name and ${expr}.
+StrLit      = SqTpl | DqTpl ;
+SqTpl       <~~ push(makeTemplate(takeAll())) ~~>
+            = "'" :whitespace() { TplExpr | TplVar | TplDollar | SqChunk } "'" :whitespace(Whitespace) ;
+DqTpl       <~~ push(makeTemplate(takeAll())) ~~>
+            = '"' :whitespace() { TplExpr | TplVar | TplDollar | DqChunk } '"' :whitespace(Whitespace) ;
+TplExpr     <~~ push({e: pop()}) ~~>
+            = "${" :whitespace(Whitespace) Expression "}" ;
+TplVar      = "$" TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
+TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+TplDollar   <~~ push({s: "$"}) ~~> = "$" ;
+SqChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = SqTChar { SqTChar } ;
+DqChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = DqTChar { DqTChar } ;
+SqTChar     = TplEsc | SqPlain ;
+DqTChar     = TplEsc | DqPlain ;
+TplEsc      = "\\" "\x00"..."\U0010ffff" ;
+SqPlain     = "\x00"..."\x23" | "\x25"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+DqPlain     = "\x00"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\U0010ffff" ;
+
+// A balanced < ... > run (generic parameters / arguments), parsed and ignored.
+SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+// Keywords end with a negative lookahead so 'ify' or 'classy' stay identifiers.
+KwClass     = "class" KwEnd ;
+KwNew       = "new" KwEnd ;
+KwVar       = "var" KwEnd ;
+KwFinal     = "final" KwEnd ;
+KwConst     = "const" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwExtends   = "extends" KwEnd ;
+KwWith      = "with" KwEnd ;
+KwImplements = "implements" KwEnd ;
+KwLate      = "late" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared emitter machinery (module, handle constants, externs, loopStack protocol,
+    // expression/statement builders); Dart-specific behaviour is configured on `core` and
+    // defined below.
+    include("lib/compile-core.js")
+
+    // takeAll empties the local stack and returns the items in push order.
+    // unescapeJs resolves the JS/Dart string escapes.
+
+    // A clean compile-time abort (used by the shared notImpl helper in compile-core.js).
+    function fail(msg) { println("dart compiler error: " + msg); exit(1) }
+
+    var curClassName = ""
+    var classNames = {} // Known class names (bare-name construction).
+
+    // ~/ is integer division: reuse js_div and wrap the result to 32 bits.
+    binExt["~/"] = "js_div"
+    wraps["~/"] = 1
+
+    function pnames(params) {
+        var out = []
+        for (var i = 0; i < params.length; i++) { out.push(params[i].pname) }
+        return out
+    }
+
+    // ----- functions, closures, methods -----
+    function bodyToStmt(bd) {
+        if (bd.body != undefined) { return bd.body }
+        var et = bd.ebody
+        return function(b) { var r = et(b); r.b.NewRet(r.v); return deadBlock() }
+    }
+    function emitFunc(paramNames, bodyStmt, isInstance) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        curF = f
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var off = 0
+        if (isInstance) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
+            off = 1
+        }
+        for (var i = 0; i < paramNames.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, paramNames[i]),
+                                         callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+        }
+        var endB = bodyStmt(b)
+        endB.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        return idx
+    }
+    function makeArrow(items) {
+        var params = pnames(items[0].params)
+        var bodyStmt = bodyToStmt(items[1])
+        return function(b) {
+            var idx = emitFunc(params, bodyStmt, false)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+    function makeFuncDecl(items) {
+        var name = items[0].fname
+        var params = pnames(items[1].params)
+        var bodyStmt = bodyToStmt(items[2])
+        return function(b) {
+            var idx = emitFunc(params, bodyStmt, false)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
+                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            return b
+        }
+    }
+
+    // ----- calls and construction -----
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function(b) {
+            if (classNames[name] == 1) {
+                var clsV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+                var objV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+                var argsV = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [argsV, objV])
+                for (var i = 0; i < args.length; i++) {
+                    var r = args[i](b)
+                    b = r.b
+                    callExt(b, "js_arr_push", [argsV, r.v])
+                }
+                var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
+                callExt(b, "js_call", [ctorV, hUndef, argsV])
+                return {b: b, v: objV}
+            }
+            var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+            var ea = emitArgs(b, args)
+            b = ea.b
+            return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
+        }
+    }
+
+    // ----- member chains: .method(args), .field, [index] -----
+    core.indexExt = "js_pyget"
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function(b) {
+            var r = primary(b)
+            b = r.b
+            var cur = r.v
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    if (s.name == "containsKey") {
+                        var ar = s.args[0](b)
+                        b = ar.b
+                        cur = callExt(b, "js_pyin", [ar.v, cur])
+                    } else {
+                        var ea = emitArgs(b, s.args)
+                        b = ea.b
+                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                    }
+                } else if (s.kind == "field") {
+                    if (s.name == "length") { cur = callExt(b, "js_pylen", [cur]) }
+                    else if (s.name == "isEmpty") { cur = callExt(b, "js_seq", [callExt(b, "js_pylen", [cur]), emitNum(b, 0)]) }
+                    else if (s.name == "isNotEmpty") { cur = callExt(b, "js_gt", [callExt(b, "js_pylen", [cur]), emitNum(b, 0)]) }
+                    else if (s.name == "keys") { cur = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])]) }
+                    else if (s.name == "values") { cur = callExt(b, "js_mcall", [cur, emitStr(b, "values"), callExt(b, "js_arr_new", [])]) }
+                    else { cur = callExt(b, "js_get", [cur, emitStr(b, s.name)]) }
+                } else if (s.kind == "bang") {
+                    cur = cur // the postfix ! is a no-op (accepted, not implemented)
+                } else {
+                    var ir = s.idx(b)
+                    b = ir.b
+                    cur = callExt(b, "js_pyget", [cur, ir.v])
+                }
+            }
+            return {b: b, v: cur}
+        }
+    }
+
+    // ----- classes -----
+    function makeMember(isTyped, items) {
+        var name = items[0].mn
+        var params = items[1].params
+        var bodyDesc = items[items.length - 1]
+        if (!isTyped && name == curClassName) { return {ctor: {params: params, body: bodyDesc}} }
+        return {method: {name: name, params: pnames(params), body: bodyDesc}}
+    }
+    function makeFieldDecl(items) {
+        return {field: items[0].fn, init: items.length > 1 ? items[1] : null}
+    }
+    function emitCtor(fields, ctor) {
+        var cparams = ctor != null ? ctor.params : []
+        var bodyDesc = ctor != null ? ctor.body : null
+        var bodyStmt = (bodyDesc != null && bodyDesc.none == undefined) ? bodyToStmt(bodyDesc) : null
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        curF = f
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var thisV = callExt(b, "js_arg", [f.Params[1], handle(0)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), thisV])
+        for (var d = 0; d < fields.length; d++) {
+            callExt(b, "js_set", [thisV, emitStr(b, fields[d].field), hNull])
+        }
+        for (var k = 0; k < cparams.length; k++) {
+            var pv = callExt(b, "js_arg", [f.Params[1], handle(k + 1)])
+            var pn = cparams[k].thisf != undefined ? cparams[k].thisf : cparams[k].pname
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pn), pv])
+            if (cparams[k].thisf != undefined) { callExt(b, "js_set", [thisV, emitStr(b, cparams[k].thisf), pv]) }
+        }
+        for (var fi = 0; fi < fields.length; fi++) {
+            if (fields[fi].init != null) {
+                var r = fields[fi].init(b)
+                b = r.b
+                callExt(b, "js_set", [thisV, emitStr(b, fields[fi].field), r.v])
+            }
+        }
+        if (bodyStmt != null) { b = bodyStmt(b) }
+        b.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        return idx
+    }
+    function makeClassStmt(items) {
+        var name = items[0].cname
+        var fields = []
+        var methods = []
+        var ctor = null
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.field != undefined) { fields.push(it) }
+            else if (it.method != undefined) { methods.push(it.method) }
+            else if (it.ctor != undefined) { ctor = it.ctor }
+        }
+        classNames[name] = 1
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            var ctorIdx = emitCtor(fields, ctor)
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+            for (var k = 0; k < methods.length; k++) {
+                var mi = emitFunc(methods[k].params, bodyToStmt(methods[k].body), true)
+                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(mi), curScopeV])])
+            }
+            return b
+        }
+    }
+
+    // ----- collections and templates -----
+    function makeList(items) {
+        return function(b) {
+            var arr = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [arr, r.v])
+            }
+            return {b: b, v: arr}
+        }
+    }
+    function makeMap(entries) {
+        return function(b) {
+            var d = callExt(b, "js_dict_new", [])
+            for (var i = 0; i < entries.length; i++) {
+                var rk = entries[i].mk(b)
+                b = rk.b
+                var rv = entries[i].mv(b)
+                b = rv.b
+                callExt(b, "js_pyset", [d, rk.v, rv.v])
+            }
+            return {b: b, v: d}
+        }
+    }
+    function makeTemplate(items) {
+        return function(b) {
+            var v = emitStr(b, "")
+            for (var i = 0; i < items.length; i++) {
+                var pv = anytype
+                if (items[i].s != undefined) { pv = emitStr(b, items[i].s) }
+                else { var r = items[i].e(b); b = r.b; pv = r.v }
+                v = callExt(b, "js_jadd", [v, pv])
+            }
+            return {b: b, v: v}
+        }
+    }
+
+    // ----- ternary, return -----
+    function makeCond(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            var thenB = curF.NewBlock("")
+            var elseB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            r.b.NewCondBr(truthy(r.b, r.v), thenB, elseB)
+            var rt = items[1](thenB)
+            rt.b.NewBr(mergeB)
+            var re = items[2](elseB)
+            re.b.NewBr(mergeB)
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
+            return {b: mergeB, v: phi}
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function(b) {
+            var v = hNull
+            if (t != null) { var r = t(b); b = r.b; v = r.v }
+            b.NewRet(v)
+            return deadBlock()
+        }
+    }
+
+    // ----- declarations, assignment, ++/-- -----
+    function makeDecl(items) {
+        var name = items[0]
+        return function(b) {
+            var v = hNull
+            if (items.length > 1) { var r = items[1](b); b = r.b; v = r.v }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+            return b
+        }
+    }
+    function emitRefPath(b, ref) {
+        var o = callExt(b, "js_kget", [curScopeV, emitStr(b, ref.name)])
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
+            else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_pyget", [o, ri.v]) }
+        }
+        var last = ref.path[ref.path.length - 1]
+        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), field: true} }
+        var kr = last.idx(b)
+        return {b: kr.b, obj: o, key: kr.v, field: false}
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            if (ref.path.length == 0) {
+                var nameV = emitStr(b, ref.name)
+                if (op != "=") {
+                    var oldl = callExt(b, "js_kget", [curScopeV, nameV])
+                    v = emitBin(b, op, oldl, v)
+                }
+                callExt(b, "js_kset", [curScopeV, nameV, v])
+            } else {
+                var p = emitRefPath(b, ref)
+                b = p.b
+                if (p.field) {
+                    if (op != "=") { var oldf = callExt(b, "js_get", [p.obj, p.key]); v = emitBin(b, op, oldf, v) }
+                    callExt(b, "js_set", [p.obj, p.key, v])
+                } else {
+                    if (op != "=") { var oldm = callExt(b, "js_pyget", [p.obj, p.key]); v = emitBin(b, op, oldm, v) }
+                    callExt(b, "js_pyset", [p.obj, p.key, v])
+                }
+            }
+            return {b: b, v: v}
+        }
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var extName = (items[1] == "++") ? "js_add" : "js_sub"
+        return function(b) {
+            var nameV = emitStr(b, ref.name)
+            var oldV = callExt(b, "js_tonum", [callExt(b, "js_kget", [curScopeV, nameV])])
+            var newV = intWrap(b, callExt(b, extName, [oldV, callExt(b, "js_num_i", [handle(1)])]))
+            callExt(b, "js_kset", [curScopeV, nameV, newV])
+            return {b: b, v: oldV}
+        }
+    }
+
+    // ----- for and for-in -----
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") { init = items[i].t }
+            if (items[i].k == "cond") { cond = items[i].t }
+            if (items[i].k == "post") { post = items[i].t }
+        }
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            if (init != null) { b = init(b) }
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            if (cond != null) {
+                var r = cond(headB)
+                r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            } else { headB.NewBr(bodyB) }
+            loopStack.push({cont: postB, brk: exitB})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var pb = postB
+            if (post != null) { pb = post(postB) }
+            pb.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    function makeForIn(items) {
+        var name = items[0]
+        var iterT = items[1]
+        var bodyT = items[2]
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            var ir = iterT(b)
+            b = ir.b
+            var lenV = callExt(b, "js_pylen", [ir.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), ir.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), lenV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0i")])
+            var lC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0len")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, lC])), bodyB, exitB)
+            var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0i")])
+            var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0it")])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_pyget", [itB, iB])])
+            loopStack.push({cont: postB, brk: exitB})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var iP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, "0i")])
+            var nextV = callExt(postB, "js_add", [iP, callExt(postB, "js_num_i", [handle(1)])])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, "0i"), nextV])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+
+    // The top level statements become dartmain(env, args): declare the top level (functions,
+    // classes, top level vars), then call int main(). Its return value is the exit code.
+    function buildMain(items) {
+        var f = m.NewFunc("dartmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = f
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        // Dart print writes its argument followed by a newline (like println).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"),
+                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
+        b = makeSeq(items)(b)
+        var mainV = callExt(b, "js_kget", [curScopeV, emitStr(b, "main")])
+        var argsV = callExt(b, "js_arr_new", [])
+        b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+    }
+
+    // ----- Core library config (see lib/compile-core.js) -----
+    core.scopeGetExt = "js_kget" // Scope read with fallback to properties of this.
+
+    c.compile(c.asg)
+
+    println(m)
+
+    var res = llvm.RunJS(m, "dartmain")
+    println("dart compiler: main() returned " + res.Ret)
+    exit(res.Ret)
+
+~~) ;

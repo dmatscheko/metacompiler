@@ -1,0 +1,871 @@
+:title("PHP (subset) interpreter") ;
+:description("Parses a PHP subset and executes it directly, without generating code.
+
+The file begins with the '<?php' open tag (optionally closed by '?>'). The subset:
+dollar-sigil variables ($x = e, plus += -= *= /= %= .=), integers, double and single
+quoted strings with '$var' / '{$expr}' interpolation in double quotes, true/false/null,
+arithmetic (+ - * / %, / truncates toward zero) and comparison (== === != !== < > <= >=),
+the '.' string concatenation operator, the boolean operators && || ! and the word forms
+and/or, the ternary cond ? a : b, prefix/postfix ++ and --, if/elseif/else, while,
+for (;;), foreach ($a as $v) and foreach ($a as $k => $v), function name($a, $b){...}
+with return, closures function($x) use ($y) {...} (real closures), class C { public
+function m() {...} } with $this->prop, ->method(), new C(...), indexed arrays [1, 2] and
+array(1, 2) with [] indexing / assignment / $a[] append, associative arrays [k => v]
+with [] get/set, the builtins count/strlen/in_array/array_keys/array_values/array_push/
+abs/max/min, and echo/print.
+
+Int arithmetic is 32 bit and / truncates toward zero (like the sibling languages here);
+'.' concatenates and coerces its operands to string; == and === both compare structurally
+(the subset never mixes types), && || return booleans (PHP semantics).
+
+Not in the subset (deferred, routed to notImplemented): traits, interfaces, namespaces,
+static/double-colon (::), type declarations, switch, and by-reference use.
+
+The program runs top to bottom; a self checking program ends with exit(failures).
+The same subset with the same semantics is compiled to LLVM IR by php-to-llvm-ir.abnf.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib): identifiers, integers, booleans.
+:include("lib/ident.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// PHP whitespace: blanks plus '#' and '//' line comments and '/* */' block comments.
+Whitespace  = { @+" \t\r\n" | LineComment | BlockComment } ;
+LineComment = ( "//" | "#" ) :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// The whole program: the '<?php' tag, then definitions and statements in order,
+// then an optional '?>' close tag.
+Program     <~~ runProgram(takeAll()) ~~>
+            = OpenTag { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | TypeDecl | NsDecl | UseDecl | Statement } [ CloseTag ] ;
+OpenTag     = "<?php" :whitespace(Whitespace) ;
+CloseTag    = "?>" :whitespace(Whitespace) ;
+
+// A function definition: function name($a, $b) { ... } with explicit return. An
+// optional parameter type hint and return type are accepted and ignored (dynamic).
+Def         <~~ push(makeFun(takeAll())) ~~>
+            = KwFunction Name <~~ push(up.in) ~~> ParamList [ ReturnType ] Block ;
+ParamList   = "(" [ Param { "," Param } ] ")" ;
+Param       = [ TypeHint ] DollarName <~~ push({param: pop()}) ~~> ;
+TypeHint    = [ "?" ] TypeAtom { "|" [ "?" ] TypeAtom } ;
+TypeAtom    = KwArray | Id ;
+ReturnType  = ":" TypeHint ;
+
+// class C { public function m() {...} } -- method modifiers are accepted and ignored.
+ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = KwClass Name <~~ push(up.in) ~~> [ KwExtends Name ] "{" { Member } "}" ;
+Member      = MethodDecl | PropDecl ;
+MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
+            = { Modifier } KwFunction MethodName <~~ push(up.in) ~~> ParamList [ ReturnType ] Block ;
+
+// interface / trait / namespace / use-import: accepted structurally and routed to
+// notImplemented (no runtime model for them in this subset).
+TypeDecl    <~~ push(notImplStmt("interface/trait declaration", up.pos)) ~~>
+            = ( KwInterface | KwTrait ) SkipHead SkipBlock ;
+NsDecl      <~~ push(notImplStmt("namespace", up.pos)) ~~>
+            = KwNamespace { Id | "\\" } ";" ;
+UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
+            = KwUse { Id | "\\" } [ KwAs Id ] ";" ;
+SkipHead    = { Id | "," | "\\" } ;
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipDq | SkipSq | SkipBlock | SkipOther ;
+SkipDq      = '"' :whitespace() { SkipStrEsc | SkipDqChar } '"' :whitespace(Whitespace) ;
+SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whitespace) ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipDqChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+// A property declaration 'public $x;' or 'public $x = e;' is accepted; the
+// initializer is dropped (properties are created on first assignment / in the ctor).
+PropDecl    <~~ takeAll(); push({prop: true}) ~~>
+            = { Modifier } DollarName [ "=" Expression ] ";" ;
+Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" ) KwEnd ;
+
+// Body of a control structure / function: braces around a statement sequence.
+Block       <~~ push({body: makeBody(takeAll())}) ~~>
+            = "{" { Statement } "}" ;
+
+// Every statement pushes exactly one thunk: function() -> value | signal.
+Statement   = EchoStmt | GlobalStmt | Block | If | While | ForEach | For
+            | Return | Break | Continue | Empty | ExprStmt ;
+
+// echo e, e, e;  /  print e;
+EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
+            = KwEcho <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] ";" ;
+
+// global $a, $b; -- in this subset function bodies already resolve names through
+// the enclosing (global) scope chain, so 'global' is accepted as a no-op.
+GlobalStmt  <~~ takeAll(); push(makeConstStmt()) ~~>
+            = KwGlobal DollarName { "," DollarName } ";" ;
+
+Empty       <~~ push(makeConstStmt()) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression ";" ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Block { ElseIf } [ KwElse Block <~~ push({els: pop().body}) ~~> ] ;
+ElseIf      <~~ var b = pop(); push({elifCond: pop(), elifBody: b.body}) ~~>
+            = KwElseif "(" Expression ")" Block ;
+
+While       <~~ push(makeWhile(pop().body, pop())) ~~>
+            = KwWhile "(" Expression ")" Block ;
+
+// for (init; cond; post) { body }. The three clauses are optional and wrapped
+// with a kind marker so the builder can tell them apart on the stack.
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Block ;
+ForInit     <~~ push({k: "init", t: exprToStmt(pop())}) ~~> = Expression ;
+ForCond     <~~ push({k: "cond", t: pop()}) ~~> = Expression ;
+ForPost     <~~ push({k: "post", t: exprToStmt(pop())}) ~~> = Expression ;
+
+// foreach ($arr as $v) / foreach ($arr as $k => $v)
+ForEach     <~~ push(makeForeach(takeAll())) ~~>
+            = KwForeach "(" Expression KwAs ForeachVars ")" Block ;
+ForeachVars = DollarName <~~ push({v1: pop()}) ~~> [ "=>" DollarName <~~ push({v2: pop()}) ~~> ] ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ";" ;
+Break       <~~ push(makeBreak(takeAll())) ~~>
+            = KwBreak [ Expression ] ";" ;
+Continue    <~~ push(makeContinue(takeAll())) ~~>
+            = KwContinue [ Expression ] ";" ;
+
+// Every expression pushes exactly one thunk: function() -> value.
+Expression  = Assignment | Ternary ;
+Ternary     <~~ push(makeTernary(takeAll())) ~~>
+            = OrExpr [ "?" Expression ":" Expression ] ;
+
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target AssignOp <~~ push(up.in) ~~> Expression ;
+AssignOp    = "+=" | "-=" | "*=" | "/=" | "%=" | ".=" | ( "=" !"=" ) ;
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = TargetHead { ArrowField | TIndex | TAppend } ;
+TargetHead  = DollarName <~~ push({var: pop()}) ~~> ;
+ArrowField  = "->" MethodName <~~ push({key: up.in}) ~~> ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+TAppend     <~~ push({append: true}) ~~>
+            = "[" "]" ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { OrOp AndExpr } ;
+OrOp        = "||" | ( "or" KwEnd ) ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = NotExpr { AndOp NotExpr } ;
+AndOp       = "&&" | ( "and" KwEnd ) ;
+NotExpr     = NotOp | EqExpr ;
+NotOp       <~~ push(makeNot(pop())) ~~>
+            = "!" NotExpr ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" | "." ) <~~ push(up.in) ~~> MulExpr } ;
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = PreIncDec | Neg | Pos | PostfixExpr ;
+PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+Pos         = "+" UnaryExpr ;
+
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx | CallSfx | StaticSfx } ;
+MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
+            = "->" MethodName <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+FieldSfx    = "->" MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
+            = "(" [ Expression { "," Expression } ] ")" ;
+StaticSfx   <~~ push(makeStatic(takeAll(), up.pos)) ~~>
+            = "::" MethodName [ "(" [ Expression { "," Expression } ] ")" ] ;
+
+Primary     = "(" Expression ")"
+            | NewExpr | ClosureExpr | ArrayLit
+            | DqStr | SqStr | IntLit
+            | True | False | Null
+            | VarRef | StaticExpr | Call ;
+
+NewExpr     <~~ push(makeNew(takeAll())) ~~>
+            = KwNew Name <~~ push({cls: up.in}) ~~> [ "(" [ Expression { "," Expression } ] ")" ] ;
+
+// Class::CONST / Class::method(): accepted structurally and routed to notImplemented.
+StaticExpr  <~~ takeAll(); push(notImplExpr("static / :: access", up.pos)) ~~>
+            = Name <~~ push({cls: up.in}) ~~> "::" MethodName [ "(" [ Expression { "," Expression } ] ")" ] ;
+
+// A closure: function($a) use ($b, $c) { ... }. The use list is captured
+// lexically (this subset captures the whole defining scope).
+ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
+            = KwFunction ParamList [ UseClause ] [ ReturnType ] Block ;
+UseClause   = KwUse "(" [ UseVar { "," UseVar } ] ")" ;
+UseVar      = DollarName <~~ push({use: pop()}) ~~> ;
+
+// [1, 2] / [k => v] / array(1, 2). '=>' entries make an associative array
+// (ordered map); plain entries make an indexed array.
+ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+            = "[" [ ArrayItem { "," ArrayItem } [ "," ] ] "]"
+            | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
+ArrayItem   = KeyedItem | PlainItem ;
+KeyedItem   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
+            = Expression "=>" Expression ;
+PlainItem   <~~ push({elem: pop()}) ~~>
+            = Expression ;
+
+// f(args): a top-level function or builtin call.
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Name <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+VarRef      <~~ push(makeVarRef(pop())) ~~>
+            = DollarName ;
+Null        <~~ push(makeConst(null)) ~~> = "null" KwEnd ;
+
+// $name: the dollar sigil is part of the stored key (PHP variables and function
+// names live in separate namespaces). Attaching the capture to the whole
+// production keeps the '$' in up.in.
+DollarName  <~~ push(up.in) ~~>
+            = "$" Id ;
+
+// Double quoted strings interpolate '$var' and '{$expr}'; single quoted are literal.
+// A '$' or '{' that does not begin an interpolation falls through to TplSpecial as
+// a literal character (so no negative lookahead is needed).
+DqStr       <~~ push(makeTemplate(takeAll())) ~~>
+            = '"' :whitespace() { TplBraceExpr | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
+TplBraceExpr <~~ push({e: pop()}) ~~>
+            = "{" :whitespace(Whitespace) Expression "}" ;
+TplVar      <~~ push({e: makeVarRef(up.in)}) ~~>
+            = "$" TplId ;
+TplId       = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+            = TplC { TplC } ;
+TplC        = TplEsc | TplPlain ;
+TplEsc      = "\\" "\x20"..b"\x7e" ;
+TplPlain    = "\x20"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\x7a" | "\x7c"..."\U0010ffff" | @"\t" ;
+TplSpecial  <~~ push({s: up.in}) ~~>
+            = "$" | "{" ;
+
+SqStr       = "'" :whitespace() { SqEsc | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+SqEsc       = "\\" ( "'" | "\\" ) ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
+
+// A Name that is not a reserved word. The negative lookahead runs at PARSE time.
+Name        = NotKw Id ;
+// Method / property / call names after '->' may be any identifier.
+MethodName  = Id ;
+NotKw       = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (true) {
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) { return undefined }
+        var s = ""
+        while ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            s = s + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var kws = ["if", "elseif", "else", "while", "for", "foreach", "as", "do",
+                   "switch", "case", "default", "function", "return", "break",
+                   "continue", "echo", "print", "class", "new", "true", "false",
+                   "null", "and", "or", "xor", "use", "array", "public", "private",
+                   "protected", "static", "final", "abstract", "const", "interface",
+                   "trait", "namespace", "extends", "implements", "instanceof", "global"]
+        for (var k = 0; k < kws.length; k++) {
+            if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
+        }
+        return undefined
+    })()
+~~) ;
+
+KwFunction  = "function" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwNew       = "new" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElseif    = "elseif" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwForeach   = "foreach" KwEnd ;
+KwAs        = "as" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwEcho      = ( "echo" | "print" ) KwEnd ;
+KwUse       = "use" KwEnd ;
+KwArray     = "array" KwEnd ;
+KwGlobal    = "global" KwEnd ;
+KwExtends   = "extends" KwEnd ;
+KwInterface = "interface" KwEnd ;
+KwTrait     = "trait" KwEnd ;
+KwNamespace = "namespace" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared interpreter machinery (scopes, thunk helpers, unescapeJs, getVar/
+    // setVar, foldBinary/makeConst/makeNeg/makeNot). PHP specific behavior is
+    // defined below and configured on `core`.
+    include("lib/interp-core.js")
+
+    // ----- Control signals: return / break / continue travel as marker objects
+    // that a body or loop intercepts. -----
+    function isSig(r) {
+        return r !== null && r !== undefined && typeof r == "object"
+            && (r.ret === true || r.brk === true || r.cont === true)
+    }
+    function makeBody(items) {
+        return function() {
+            var last = anytype     // holds the last statement value of any type
+            last = null
+            for (var i = 0; i < items.length; i++) {
+                var r = anytype
+                r = items[i]()
+                if (isSig(r)) { return r }
+                last = r
+            }
+            return last
+        }
+    }
+    function makeConstStmt() { return function() { return null } }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function() { return {ret: true, v: t != null ? t() : null} }
+    }
+    makeBreak = function(items) {
+        return function() { return {brk: true} }
+    }
+    makeContinue = function(items) {
+        return function() { return {cont: true} }
+    }
+
+    // ----- PHP truthiness: false, 0, "" and null are falsy (matches js_truthy for
+    // the value kinds this subset uses). -----
+    function phptest(v) {
+        if (v === null || v === undefined || v === false) { return false }
+        if (v === 0) { return false }
+        if (v === "") { return false }
+        return true
+    }
+
+    // ----- if / elseif / else -----
+    // items = [cond, {body}, {elifCond, elifBody}..., {els}?]
+    makeIf = function(items) {
+        var cond = items[0]
+        var thenB = items[1].body
+        var elifs = []
+        var els = null
+        for (var i = 2; i < items.length; i++) {
+            if (items[i].els != undefined) { els = items[i].els }
+            else { elifs.push(items[i]) }
+        }
+        return function() {
+            if (phptest(cond())) { return thenB() }
+            for (var j = 0; j < elifs.length; j++) {
+                if (phptest(elifs[j].elifCond())) { return elifs[j].elifBody() }
+            }
+            if (els != null) { return els() }
+            return null
+        }
+    }
+    function runLoopBody(bodyT) {
+        var r = bodyT()
+        if (isSig(r)) {
+            if (r.brk === true) { return {stop: true} }
+            if (r.cont === true) { return {stop: false} }
+            return {stop: true, sig: r}         // a return propagates out
+        }
+        return {stop: false}
+    }
+    makeWhile = function(bodyT, condT) {
+        return function() {
+            while (phptest(condT())) {
+                var s = runLoopBody(bodyT)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return null }
+            }
+            return null
+        }
+    }
+    // items = [{k, t}..., {body}].  init/post are statement thunks, cond an expr thunk.
+    function makeFor(items) {
+        var body = null
+        var init = null
+        var cond = null
+        var post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].k == "init") { init = items[i].t }
+            else if (items[i].k == "cond") { cond = items[i].t }
+            else if (items[i].k == "post") { post = items[i].t }
+        }
+        return function() {
+            if (init != null) { init() }
+            while (cond == null || phptest(cond())) {
+                var s = runLoopBody(body)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return null }
+                if (post != null) { post() }
+            }
+            return null
+        }
+    }
+    // foreach: items = [iterThunk, {v1}, {v2}?, {body}].
+    function makeForeach(items) {
+        var iterT = items[0]
+        var keyName = null
+        var valName = null
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].v1 != undefined) { valName = items[i].v1 }
+            else if (items[i].v2 != undefined) { keyName = items[i].v2 }
+        }
+        // With 'as $k => $v' the first parsed name is the key and the second the value.
+        return function() {
+            var it = anytype
+            it = iterT()
+            var n = phpRangeLen(it)
+            for (var i = 0; i < n; i++) {
+                if (keyName != null) { phpSet(valName, phpRangeKey(it, i)); phpSet(keyName, phpRangeVal(it, i)) }
+                else { phpSet(valName, phpRangeVal(it, i)) }
+                var s = runLoopBody(body)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return null }
+            }
+            return null
+        }
+    }
+    // Uniform iteration over arrays (key = index) and dicts (key/value pairs).
+    function phpRangeLen(v) {
+        if (isDict(v)) { return v.keys.length }
+        if (v === null || v === undefined) { fail("foreach over null") }
+        return v.length
+    }
+    function phpRangeKey(v, i) { if (isDict(v)) { return v.keys[i] } return i }
+    function phpRangeVal(v, i) { if (isDict(v)) { return v.vals[i] } return v[i] }
+
+    // ----- ternary -----
+    function makeTernary(items) {
+        if (items.length == 1) { return items[0] }
+        var condT = items[0]
+        var thenT = items[1]
+        var elseT = items[2]
+        return function() {
+            if (phptest(condT())) { return thenT() }
+            return elseT()
+        }
+    }
+
+    // ----- values: arrays (indexed) and associative arrays (ordered maps) -----
+    function makeArray(items) {
+        var hasKeys = false
+        for (var i = 0; i < items.length; i++) { if (items[i].hk != undefined) { hasKeys = true } }
+        return function() {
+            if (!hasKeys) {
+                var out = []
+                for (var j = 0; j < items.length; j++) { out.push(items[j].elem()) }
+                return out
+            }
+            var d = {__dict: true, keys: [], vals: []}
+            var idx = 0
+            for (var k = 0; k < items.length; k++) {
+                if (items[k].hk != undefined) { dictSet(d, items[k].hk(), items[k].hv()) }
+                else { dictSet(d, idx, items[k].elem()); idx = (idx + 1) | 0 }
+            }
+            return d
+        }
+    }
+    function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+    function dictFind(d, k) {
+        for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) { return i } }
+        return -1
+    }
+    function dictSet(d, k, v) {
+        var i = dictFind(d, k)
+        if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
+    }
+
+    // ----- string coercion and concatenation (PHP '.') -----
+    function phpStr(v) {
+        if (v === null || v === undefined) { return "" }
+        if (v === true) { return "1" }
+        if (v === false) { return "" }
+        if (typeof v == "string") { return v }
+        if (Array.isArray(v) || isDict(v)) { return "Array" }
+        return "" + v
+    }
+    function phpConcat(l, r) { return phpStr(l) + phpStr(r) }
+
+    function makeTemplate(items) {
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].s != undefined) { out += items[i].s }
+                else { out += phpStr(items[i].e()) }
+            }
+            return out
+        }
+    }
+    function unescapeSq(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c == 92 && i + 1 < s.length) {
+                var e = s.charCodeAt(i + 1)
+                if (e == 39 || e == 92) { out += String.fromCharCode(e); i += 2; continue }
+            }
+            out += String.fromCharCode(c)
+            i++
+        }
+        return out
+    }
+
+    // ----- length / indexing -----
+    function phpIndex(o, i) {
+        if (isDict(o)) {
+            var di = dictFind(o, i)
+            return di < 0 ? null : o.vals[di]
+        }
+        if (typeof o == "string") {
+            if (i < 0 || i >= o.length) { return null }
+            return o.charAt(i)
+        }
+        if (o === null || o === undefined) { fail("index of null") }
+        if (i < 0 || i >= o.length) { return null }
+        return o[i]
+    }
+
+    // ----- method dispatch and member chains -----
+    function mcall(target, name, args) {
+        if (target === null || target === undefined) { fail("method ->" + name + "() on null") }
+        if (target.__class != undefined) {
+            var m = target.__class[name]
+            if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        fail("method ->" + name + "() on a non-object")
+    }
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = anytype
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
+                    cur = mcall(cur, s.name, argv)
+                } else if (s.kind == "field") {
+                    if (cur === null || cur === undefined) { fail("property ->" + s.name + " of null") }
+                    cur = hasOwn(cur, s.name) ? cur[s.name] : null
+                } else if (s.kind == "call") {
+                    var argv2 = []
+                    for (var k = 0; k < s.args.length; k++) { argv2.push(s.args[k]()) }
+                    if (typeof cur != "function") { fail("call of a non-callable value") }
+                    cur = cur.apply(undefined, argv2)
+                } else if (s.kind == "static") {
+                    cur = s.run()
+                } else {
+                    cur = phpIndex(cur, s.idx())
+                }
+            }
+            return cur
+        }
+    }
+    // Class C::CONST / C::method(): not implemented in this subset.
+    function makeStatic(items, pos) {
+        notImpl("static / :: access", pos)
+        return {kind: "static", run: function() { return null }}
+    }
+
+    // ----- closures (real, lexical capture over the defining scope) -----
+    function makeClosure(items) {
+        var params = []
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].param != undefined) { params.push(items[i].param) }
+            // {use:...} markers are informational: capture is lexical below.
+        }
+        return function() {
+            var captured = scopes.slice(0)
+            return function() {
+                var args = arguments
+                var saved = scopes
+                scopes = captured.slice(0)
+                scopes.push({})
+                for (var i = 0; i < params.length; i++) {
+                    declVar(params[i], i < args.length ? args[i] : null)
+                }
+                var r = body()
+                scopes = saved
+                if (isSig(r) && r.ret === true) { return r.v }
+                return null
+            }
+        }
+    }
+
+    // ----- new C(...) -----
+    function makeNew(items) {
+        var name = items[0].cls
+        var args = items.slice(1)
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var cls = getVar(name)
+            if (cls == undefined || cls == null || cls.__isclass !== true) { fail("new on a non-class: " + name) }
+            var obj = {__class: cls}
+            if (typeof cls["__construct"] == "function") {
+                cls["__construct"].apply(undefined, concat2impl([obj], argv))
+            }
+            return obj
+        }
+    }
+
+    // ----- echo / print -----
+    function makeEcho(items) {
+        var args = items.slice(1)
+        return function() {
+            var out = ""
+            for (var i = 0; i < args.length; i++) { out += phpStr(args[i]()) }
+            print(out)
+            return null
+        }
+    }
+
+    // ----- assignment (locals, ->field, [index], [] append) -----
+    makeTargetRef = function(items) {
+        var head = items[0]
+        return {name: head.var, path: items.slice(1)}
+    }
+    function phpSet(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        scopes[scopes.length - 1][name] = value
+    }
+    function resolveRefPhp(ref) {
+        var o = anytype
+        o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.key != undefined) { o = o[s.key] } else { o = phpIndex(o, s.idx()) }
+        }
+        var last = ref.path[ref.path.length - 1]
+        return {obj: o, last: last}
+    }
+    function storeAt(p, v) {
+        if (p.last.append === true) { p.obj.push(v); return }
+        if (p.last.key != undefined) { p.obj[p.last.key] = v; return }
+        var key = p.last.idx()
+        if (isDict(p.obj)) { dictSet(p.obj, key, v) } else { p.obj[key] = v }
+    }
+    function readAt(p) {
+        if (p.last.append === true) { return null }
+        if (p.last.key != undefined) { return hasOwn(p.obj, p.last.key) ? p.obj[p.last.key] : null }
+        return phpIndex(p.obj, p.last.idx())
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = anytype
+            v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") { v = applyPhp(op, getVar(ref.name), v) }
+                phpSet(ref.name, v)
+            } else {
+                var p = resolveRefPhp(ref)
+                if (op != "=") { v = applyPhp(op, readAt(p), v) }
+                storeAt(p, v)
+            }
+            return v
+        }
+    }
+    function applyPhp(op, a, b) {
+        if (op == "+=") { return (a + b) | 0 }
+        if (op == "-=") { return (a - b) | 0 }
+        if (op == "*=") { return (a * b) | 0 }
+        if (op == "/=") { return (a / b) | 0 }
+        if (op == "%=") { return (a % b) | 0 }
+        if (op == ".=") { return phpConcat(a, b) }
+    }
+    // ++ / -- (prefix yields the new value, postfix the old one).
+    function readTargetVal(ref) {
+        if (ref.path.length == 0) { return getVar(ref.name) }
+        return readAt(resolveRefPhp(ref))
+    }
+    function writeTargetVal(ref, v) {
+        if (ref.path.length == 0) { phpSet(ref.name, v); return }
+        storeAt(resolveRefPhp(ref), v)
+    }
+    function makeIncDec(items) {
+        var ref = items[0]
+        var delta = (items[1] == "++") ? 1 : -1
+        return function() {
+            var n = (readTargetVal(ref) + 0) | 0
+            writeTargetVal(ref, (n + delta) | 0)
+            return n
+        }
+    }
+    function makePreIncDec(ref, op) {
+        var delta = (op == "++") ? 1 : -1
+        return function() {
+            var n = ((readTargetVal(ref) + 0) + delta) | 0
+            writeTargetVal(ref, n)
+            return n
+        }
+    }
+
+    // ----- calls, defs, classes -----
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            if (hasOwn(phpBuiltins, name)) { return phpBuiltins[name].apply(undefined, argv) }
+            var f = getVar(name)
+            if (typeof f != "function") { fail("call of an undefined function: " + name) }
+            return f.apply(undefined, argv)
+        }
+    }
+    function makeFun(items) {
+        var name = items[0]
+        var params = []
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].param != undefined) { params.push(items[i].param) }
+        }
+        return {name: name, params: params, body: body != null ? body : makeBody([])}
+    }
+    function runProgram(items) {
+        for (var i = 0; i < items.length; i++) { items[i]() }
+    }
+    function invokePhp(fn, self, args) {
+        var saved = scopes
+        scopes = [globalScope, {}]
+        if (self !== undefined && self !== null) { declVar("$this", self) }
+        for (var i = 0; i < fn.params.length; i++) {
+            declVar(fn.params[i], i < args.length ? args[i] : null)
+        }
+        var r = fn.body()
+        scopes = saved
+        if (isSig(r) && r.ret === true) { return r.v }
+        return null
+    }
+    function makeFunClosure(fn) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return invokePhp(fn, null, args)
+        }
+    }
+    function makeMethodClosure(fn) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            return invokePhp(fn, self, args)
+        }
+    }
+    function makeDefStmt(fn) {
+        return function() { declVar(fn.name, makeFunClosure(fn)); return null }
+    }
+    function makeClassStmt(items) {
+        var name = items[0]
+        var methods = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].method != undefined) { methods.push(items[i].method) }
+        }
+        return function() {
+            var cls = {__isclass: true, __name: name}
+            for (var m2 = 0; m2 < methods.length; m2++) {
+                cls[methods[m2].name] = makeMethodClosure(methods[m2])
+            }
+            declVar(name, cls)
+            return null
+        }
+    }
+
+    // ----- builtins -----
+    var phpBuiltins = {
+        "count": function(a) { return phpLen(a) },
+        "strlen": function(s) { return s.length },
+        "in_array": function(n, a) { return a.indexOf(n) >= 0 },
+        "array_push": function(a, v) { a.push(v); return a.length },
+        "array_keys": function(d) { return isDict(d) ? d.keys.slice(0) : intRange(d.length) },
+        "array_values": function(d) { return isDict(d) ? d.vals.slice(0) : d.slice(0) },
+        "abs": function(n) { return n < 0 ? (0 - n) | 0 : n | 0 },
+        "max": function(a, b) { return a > b ? a : b },
+        "min": function(a, b) { return a < b ? a : b },
+        "intdiv": function(a, b) { return (a / b) | 0 }
+    }
+    function phpLen(v) {
+        if (isDict(v)) { return v.keys.length }
+        if (v === null || v === undefined) { fail("count() of null") }
+        return v.length
+    }
+    function intRange(n) {
+        var out = []
+        for (var i = 0; i < n; i++) { out.push(i) }
+        return out
+    }
+
+    hostGlobals["exit"] = function(code) { exit(code === undefined ? 0 : code | 0) }
+
+    // ----- core config -----
+    core.lang = "php"
+    core.test = phptest
+    binOp = function(op, l, r) {
+        if (op == ".") { return phpConcat(l, r) }
+        if (op == "+") { return (l + r) | 0 }
+        if (op == "-") { return (l - r) | 0 }
+        if (op == "*") { return (l * r) | 0 }
+        if (op == "/") { return (l / r) | 0 }
+        if (op == "%") { return (l % r) | 0 }
+        if (op == "==" || op == "===") { return l === r }
+        if (op == "!=" || op == "!==") { return l !== r }
+        if (op == "<")  { return l < r }
+        if (op == ">")  { return l > r }
+        if (op == "<=") { return l <= r }
+        if (op == ">=") { return l >= r }
+    }
+
+    c.compile(c.asg)
+
+    println("php interpreter: program finished")
+    exit(0)
+
+~~) ;
