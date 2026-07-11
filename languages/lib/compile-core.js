@@ -216,7 +216,10 @@ function excDispatch(b, ctl) {
     var retB = curF.NewBlock("")
     var afterRet = curF.NewBlock("")
     b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, handle(1)), retB, afterRet)
-    retStmt(retB, callExt(retB, "js_ctl_value", [ctl]))
+    // retStmt terminates retB and hands back a fresh unreachable block; nothing else
+    // flows into it, so terminate it too, or the emitted module has a block with no
+    // terminator (harmless at run time but it breaks IR printing / -cfg / -callgraph).
+    retStmt(retB, callExt(retB, "js_ctl_value", [ctl])).NewRet(hUndef)
     // break/continue can only arise from valid code if there is somewhere to send them:
     // an enclosing loop, or an enclosing try body to re-signal through. Otherwise (a
     // stray break/continue at a try not in a loop) fall through rather than emit an
