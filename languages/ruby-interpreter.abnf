@@ -1,0 +1,823 @@
+:title("Ruby (subset) interpreter") ;
+:description("Parses a Ruby subset and executes it directly, without generating code.
+
+The subset: local variables (x = e, plus += -= *= /= %=), integers, double and single
+quoted strings with '#{expr}' interpolation, true/false/nil, symbols :sym (approximated
+as strings), arithmetic (+ - * / %, / truncates toward zero) and comparison
+(== != < > <= >=), the boolean operators && || ! and their word forms and/or/not,
+def methods with an implicit return of the last expression (and explicit return),
+class C ... end with instance methods, @ivars and C.new, if/elsif/else/end and unless,
+if/unless/while as an expression, while/until with break/next, ranges 1..5 and 1...5
+(eager arrays) with .each, arrays [1, 2] with [] indexing / assignment, .push, .size,
+.length, .each, .map, .select, .include?, .pop, hashes {k => v} with [] get/set,
+.size, .keys, .values, blocks do |x| ... end and { |x| ... } (real closures, passed to
+.each/.map/.select), string interpolation, .to_s, .length, and puts/print.
+
+Int arithmetic is 32 bit and / truncates toward zero (like the sibling languages here,
+not Ruby's floor); + concatenates when one side is a String; == compares structurally
+for strings/numbers and by identity for arrays/hashes/objects.
+
+Not in the subset (deferred): optional call parentheses (calls other than puts/print
+need parens), method_missing and metaprogramming, modules/mixins, attr_accessor and
+setter methods (obj.x = v), predicate/bang top level calls, exceptions
+(begin/rescue/ensure), yield, multiple assignment, keyword/default arguments, non-local
+break/return out of a block, bignums and floats, and the case/when statement.
+
+The program runs top to bottom; a self checking program ends with exit(failures).
+The same subset with the same semantics is compiled to LLVM IR by ruby-to-llvm-ir.abnf.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib): identifiers, integers, booleans.
+:include("lib/ident.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// Ruby '#' line comments (the '#{' of an interpolation lives inside a string
+// token, which disables whitespace skipping, so it never reaches here).
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+// The whole program is a sequence of definitions and statements executed in order.
+Program     <~~ runProgram(takeAll()) ~~>
+            = { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | Statement } ;
+
+// A def: implicit return of the last expression, or an explicit return.
+Def         <~~ push(makeFun(takeAll())) ~~>
+            = KwDef MethodName <~~ push(up.in) ~~> [ ParamList ] Body End ;
+ParamList   = "(" [ Param { "," Param } ] ")" ;
+Param       = Name <~~ push({param: up.in}) ~~> ;
+// Method / call names may end with ? or ! (empty?, include?); Name may not.
+MethodName  = Id [ "?" | "!" ] ;
+
+// class C ... end with instance methods; C.new builds an instance.
+ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = KwClass Name <~~ push(up.in) ~~> { Def <~~ push({method: pop()}) ~~> } End ;
+
+End         = "end" KwEnd ;
+
+// Body collects its statements into a single marker so the enclosing production
+// (if/while/def/block) sees exactly one item on the stack for its body.
+Body        <~~ push({body: makeBody(takeAll())}) ~~>
+            = { Statement } ;
+
+// Every statement pushes exactly one thunk: function() -> value | signal.
+Statement   = PutsStmt | ExprStmt ;
+
+// puts / print command form: puts x, puts a, b, puts (no args), puts(x).
+PutsStmt    <~~ push(makePuts(takeAll())) ~~>
+            = KwPuts <~~ push({cmd: up.in}) ~~> [ Expression { "," Expression } ] ;
+
+ExprStmt    = Expression [ ";" ] ;
+
+// Every expression pushes exactly one thunk: function() -> value.
+Expression  = Assignment | OrExpr ;
+
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target AssignOp <~~ push(up.in) ~~> Expression ;
+AssignOp    = "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ;
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = TargetHead { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TargetHead  = "@" Id <~~ push({ivar: up.in}) ~~> | Name <~~ push({var: up.in}) ~~> ;
+TIndex      <~~ push({idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { OrOp AndExpr } ;
+OrOp        = "||" | ( "or" KwEnd ) ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = NotExpr { AndOp NotExpr } ;
+AndOp       = "&&" | ( "and" KwEnd ) ;
+NotExpr     = NotOp | EqExpr ;
+NotOp       <~~ push(makeNot(pop())) ~~>
+            = ( "!" | ( "not" KwEnd ) ) NotExpr ;
+
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = RangeExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> RangeExpr } ;
+// A range 1..5 (inclusive) or 1...5 (exclusive); built as an eager array.
+RangeExpr   <~~ push(makeRange(takeAll())) ~~>
+            = AddExpr [ ( "..." | ".." ) <~~ push(up.in) ~~> AddExpr ] ;
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = Neg | PostfixExpr ;
+Neg         <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+
+// obj.method(args), obj.method do |x| ... end, obj.field, arr[i]. A trailing
+// block (do..end or {..}) becomes the last argument of the method call.
+PostfixExpr <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
+            = "." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
+FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+MArgs       = "(" [ Expression { "," Expression } ] ")" [ Block ] | Block ;
+
+// A block passed to a method call: a real closure over the current scope.
+Block       <~~ push(makeBlock(takeAll())) ~~>
+            = KwDo [ BlockParams ] Body End
+            | "{" [ BlockParams ] Body "}" ;
+BlockParams <~~ push({bparams: takeAll()}) ~~>
+            = "|" [ Param { "," Param } ] "|" ;
+
+Primary     = "(" Expression ")"
+            | IfExpr | UnlessExpr | WhileExpr | UntilExpr
+            | ReturnExpr | BreakExpr | NextExpr
+            | DqStr | SqStr | IntLit | SymLit
+            | ArrayLit | HashLit
+            | True | False | Nil | Self
+            | IvarRef | Call | VarRef ;
+
+// if / unless usable as a statement and as an expression (yields the branch value).
+IfExpr      <~~ push(makeIf(takeAll())) ~~>
+            = KwIf Expression [ KwThen ] Body { Elsif } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
+Elsif       <~~ var b = pop(); push({elifCond: pop(), elifBody: b.body}) ~~>
+            = KwElsif Expression [ KwThen ] Body ;
+UnlessExpr  <~~ push(makeUnless(takeAll())) ~~>
+            = KwUnless Expression [ KwThen ] Body [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
+
+WhileExpr   <~~ push(makeWhile(pop().body, pop())) ~~>
+            = KwWhile Expression [ KwDo ] Body End ;
+UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
+            = KwUntil Expression [ KwDo ] Body End ;
+
+ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] ;
+BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
+            = KwBreak [ Expression ] ;
+NextExpr    <~~ push(makeNext(takeAll())) ~~>
+            = KwNext [ Expression ] ;
+
+// f(args): a top level method or a class (for C.new the .new is a method suffix).
+Call        <~~ push(makeCall(takeAll())) ~~>
+            = Name <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Name ;
+IvarRef     = "@" Id <~~ push(makeIvarRef(up.in)) ~~> ;
+Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
+Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
+
+ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+            = "[" [ Expression { "," Expression } ] "]" ;
+HashLit     <~~ push(makeHash(takeAll())) ~~>
+            = "{" [ HashEntry { "," HashEntry } ] "}" ;
+HashEntry   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
+            = Expression "=>" Expression ;
+
+SymLit      = ":" SymName <~~ push(makeConst(up.in)) ~~> :whitespace(Whitespace) ;
+SymName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+
+// Double quoted strings interpolate '#{expr}'; single quoted are literal.
+DqStr       <~~ push(makeTemplate(takeAll())) ~~>
+            = '"' :whitespace() { TplExpr | TplChunk } '"' :whitespace(Whitespace) ;
+TplExpr     <~~ push({e: pop()}) ~~>
+            = "#{" :whitespace(Whitespace) Expression "}" ;
+TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+            = TplChar { TplChar } ;
+TplChar     = TplEsc | HashChar | TplPlain ;
+TplEsc      = "\\" "\x20"..b"\x7e" ;
+HashChar    = "#" !"{" ;
+TplPlain    = "\x20"..."\x21" | "\x24"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+SqStr       = "'" :whitespace() { SqEsc | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+SqEsc       = "\\" ( "'" | "\\" ) ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
+
+// A Name that is not a reserved word (keywords, literals, puts/print). The
+// negative lookahead runs at PARSE time, so it must be self contained.
+Name        = NotKw Id ;
+NotKw       = :script(~~
+    (function() {
+        // Whitespace is skipped before tokens, not before this script, so the
+        // lookahead skips leading whitespace and '#' comments itself.
+        var i = 0
+        var cc = c.peek(i)
+        while (true) {
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) { return undefined }
+        var s = ""
+        while ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            s = s + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var kws = ["def", "end", "if", "elsif", "else", "unless", "while", "until",
+                   "do", "then", "return", "break", "next", "class", "self", "nil",
+                   "true", "false", "and", "or", "not", "case", "when", "in", "yield",
+                   "begin", "rescue", "ensure", "puts", "print"]
+        for (var k = 0; k < kws.length; k++) {
+            if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
+        }
+        return undefined
+    })()
+~~) ;
+
+KwDef       = "def" KwEnd ;
+KwClass     = "class" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElsif     = "elsif" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwUnless    = "unless" KwEnd ;
+KwThen      = "then" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwUntil     = "until" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwNext      = "next" KwEnd ;
+KwSelf      = "self" KwEnd ;
+KwPuts      = ( "puts" | "print" ) KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared interpreter machinery (scopes, thunk helpers, unescapeJs, getVar/
+    // setVar, foldBinary/makeConst/makeNeg/makeNot). Ruby specific behavior is
+    // defined below and configured on `core`.
+    include("lib/interp-core.js")
+
+    // ----- Control signals: everything is an expression, so a body threads the
+    // value of its last statement (Ruby's implicit return). break / next / return
+    // travel as marker objects that a body or loop intercepts. -----
+    function isSig(r) {
+        return r !== null && r !== undefined && typeof r == "object"
+            && (r.ret === true || r.brk === true || r.cont === true)
+    }
+    function makeBody(items) {
+        return function() {
+            var last = anytype        // holds the last statement value of any type
+            last = null               // an empty body is nil
+            for (var i = 0; i < items.length; i++) {
+                var r = anytype
+                r = items[i]()
+                if (isSig(r)) { return r }
+                last = r
+            }
+            return last
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function() { return {ret: true, v: t != null ? t() : null} }
+    }
+    makeBreak = function(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function() { return {brk: true, v: t != null ? t() : null} }
+    }
+    function makeNext(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function() { return {cont: true, v: t != null ? t() : null} }
+    }
+
+    // ----- Ruby truthiness: only nil and false are falsy. -----
+    function rtest(v) { return v !== null && v !== undefined && v !== false }
+
+    makeOrAnd = function(items, isOr) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = anytype   // operands may be of mixed types; || / && yield an operand
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (isOr) { if (rtest(v)) { return v } }
+                else      { if (!rtest(v)) { return v } }
+                v = items[i]()
+            }
+            return v
+        }
+    }
+
+    // ----- if / unless / while / until -----
+    // items = [cond, thenBody, {elifCond, elifBody}..., {els}?]
+    makeIf = function(items) {
+        var cond = items[0]
+        var thenB = items[1].body
+        var elifs = []
+        var els = null
+        for (var i = 2; i < items.length; i++) {
+            if (items[i].els != undefined) { els = items[i].els }
+            else { elifs.push(items[i]) }
+        }
+        return function() {
+            if (rtest(cond())) { return thenB() }
+            for (var j = 0; j < elifs.length; j++) {
+                if (rtest(elifs[j].elifCond())) { return elifs[j].elifBody() }
+            }
+            if (els != null) { return els() }
+            return null
+        }
+    }
+    function makeUnless(items) {
+        var cond = items[0]
+        var thenB = items[1].body
+        var els = null
+        if (items.length > 2 && items[2].els != undefined) { els = items[2].els }
+        return function() {
+            if (!rtest(cond())) { return thenB() }
+            if (els != null) { return els() }
+            return null
+        }
+    }
+    // The loop body runs in makeBody, so break / next / return arrive as markers.
+    function runLoopBody(bodyT) {
+        var r = bodyT()
+        if (isSig(r)) {
+            if (r.brk === true) { return {stop: true, v: r.v} }
+            if (r.cont === true) { return {stop: false, v: null} }
+            return {stop: true, sig: r}         // a return propagates out
+        }
+        return {stop: false, v: null}
+    }
+    makeWhile = function(bodyT, condT) {
+        return function() {
+            while (rtest(condT())) {
+                var s = runLoopBody(bodyT)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return s.v }
+            }
+            return null
+        }
+    }
+    function makeUntil(bodyT, condT) {
+        return function() {
+            while (!rtest(condT())) {
+                var s = runLoopBody(bodyT)
+                if (s.sig != undefined) { return s.sig }
+                if (s.stop) { return s.v }
+            }
+            return null
+        }
+    }
+
+    // ----- Values: self, @ivars, ranges, arrays, hashes, templates -----
+    function findSelf() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "self")) { return scopes[i]["self"] }
+        }
+        return null
+    }
+    function makeSelf() { return function() { return findSelf() } }
+    function makeIvarRef(name) {
+        return function() {
+            var s = findSelf()
+            if (s === null || s === undefined) { fail("@" + name + " outside of a method") }
+            return hasOwn(s, name) ? s[name] : null
+        }
+    }
+
+    function makeRange(items) {
+        if (items.length == 1) { return items[0] }
+        var loT = items[0]
+        var op = items[1]
+        var hiT = items[2]
+        return function() {
+            var lo = loT()
+            var hi = hiT()
+            var out = []
+            var end = op == "..." ? hi - 1 : hi
+            for (var i = lo; i <= end; i++) { out.push(i) }
+            return out
+        }
+    }
+    function makeArray(items) {
+        return function() {
+            var out = []
+            for (var i = 0; i < items.length; i++) { out.push(items[i]()) }
+            return out
+        }
+    }
+    function makeHash(items) {
+        return function() {
+            var d = {__dict: true, keys: [], vals: []}
+            for (var i = 0; i < items.length; i++) {
+                var k = items[i].hk()
+                var v = items[i].hv()
+                dictSet(d, k, v)
+            }
+            return d
+        }
+    }
+    function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+    function dictFind(d, k) {
+        for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) { return i } }
+        return -1
+    }
+    function dictSet(d, k, v) {
+        var i = dictFind(d, k)
+        if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
+    }
+
+    // Ruby to_s / interpolation and inspect.
+    function rstr(v) {
+        if (v === null || v === undefined) { return "" }
+        if (v === true) { return "true" }
+        if (v === false) { return "false" }
+        if (typeof v == "string") { return v }
+        if (Array.isArray(v)) { return rinspect(v) }
+        if (isDict(v)) { return rinspect(v) }
+        return "" + v
+    }
+    function rinspect(v) {
+        if (v === null || v === undefined) { return "nil" }
+        if (typeof v == "string") { return "\"" + v + "\"" }
+        if (Array.isArray(v)) {
+            var out = "["
+            for (var i = 0; i < v.length; i++) { if (i > 0) { out += ", " } out += rinspect(v[i]) }
+            return out + "]"
+        }
+        if (isDict(v)) {
+            var out2 = "{"
+            for (var k = 0; k < v.keys.length; k++) {
+                if (k > 0) { out2 += ", " }
+                out2 += rinspect(v.keys[k]) + " => " + rinspect(v.vals[k])
+            }
+            return out2 + "}"
+        }
+        return rstr(v)
+    }
+    function radd(l, r) {
+        if (typeof l == "string" || typeof r == "string") { return rstr(l) + rstr(r) }
+        return (l + r) | 0
+    }
+    function makeTemplate(items) {
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].s != undefined) { out += items[i].s }
+                else { out += rstr(items[i].e()) }
+            }
+            return out
+        }
+    }
+    function unescapeSq(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c == 92 && i + 1 < s.length) {
+                var e = s.charCodeAt(i + 1)
+                if (e == 39 || e == 92) { out += String.fromCharCode(e); i += 2; continue }
+            }
+            out += String.fromCharCode(c)
+            i++
+        }
+        return out
+    }
+
+    // ----- Length / indexing that understand arrays, strings and hashes -----
+    function rlen(v) {
+        if (isDict(v)) { return v.keys.length }
+        if (v === null || v === undefined) { fail("length of nil") }
+        return v.length
+    }
+    function rindex(o, i) {
+        if (isDict(o)) {
+            var di = dictFind(o, i)
+            return di < 0 ? null : o.vals[di]
+        }
+        if (typeof o == "string") {
+            if (i < 0) { i += o.length }
+            if (i < 0 || i >= o.length) { return null }
+            return o.charAt(i)
+        }
+        if (o === null || o === undefined) { fail("index of nil") }
+        if (i < 0) { i += o.length }
+        if (i < 0 || i >= o.length) { return null }
+        return o[i]
+    }
+
+    // ----- Method dispatch (js_mcall equivalent) -----
+    function mcall(target, name, args) {
+        if (typeof target == "string") {
+            if (name == "length" || name == "size") { return target.length }
+            if (name == "to_s") { return target }
+            if (name == "upcase") { return target.toUpperCase() }
+            if (name == "downcase") { return target.toLowerCase() }
+            if (name == "include?") { return target.indexOf(args[0]) >= 0 }
+            fail("unknown String method: " + name)
+        }
+        if (isDict(target)) {
+            if (name == "size" || name == "length") { return target.keys.length }
+            if (name == "keys") { return target.keys.slice(0) }
+            if (name == "values") { return target.vals.slice(0) }
+            if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
+            if (name == "each") {
+                for (var di = 0; di < target.keys.length; di++) { args[0](target.keys[di], target.vals[di]) }
+                return target
+            }
+            fail("unknown Hash method: " + name)
+        }
+        if (target === null || target === undefined) { fail("method ." + name + " on nil") }
+        if (Array.isArray(target)) { return arrayMethod(target, name, args) }
+        if (target.__class != undefined) {
+            if (name == "class") { return target.__class }
+            var m = target.__class[name]
+            if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
+            return m.apply(undefined, concat2impl([target], args))
+        }
+        if (target.__isclass === true) {
+            if (name == "new") {
+                var obj = {__class: target}
+                if (typeof target["initialize"] == "function") {
+                    target["initialize"].apply(undefined, concat2impl([obj], args))
+                }
+                return obj
+            }
+            if (name == "name") { return target.__name }
+            var sm = target[name]
+            if (typeof sm == "function") { return sm.apply(undefined, args) }
+            fail("unknown class method '" + name + "'")
+        }
+        fail("unknown method '" + name + "'")
+    }
+    function arrayMethod(t, name, args) {
+        var i
+        if (name == "size" || name == "length") { return t.length }
+        if (name == "push" || name == "append" || name == "add") { t.push(args[0]); return t }
+        if (name == "pop") { return t.length == 0 ? null : t.pop() }
+        if (name == "first") { return t.length == 0 ? null : t[0] }
+        if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
+        if (name == "include?" || name == "contains") { return t.indexOf(args[0]) >= 0 }
+        if (name == "to_a") { return t.slice(0) }
+        if (name == "each") { for (i = 0; i < t.length; i++) { args[0](t[i]) } return t }
+        if (name == "each_with_index") { for (i = 0; i < t.length; i++) { args[0](t[i], i) } return t }
+        var out
+        if (name == "map" || name == "collect") {
+            out = []
+            for (i = 0; i < t.length; i++) { out.push(args[0](t[i])) }
+            return out
+        }
+        if (name == "select" || name == "filter") {
+            out = []
+            for (i = 0; i < t.length; i++) { if (rtest(args[0](t[i]))) { out.push(t[i]) } }
+            return out
+        }
+        if (name == "reject") {
+            out = []
+            for (i = 0; i < t.length; i++) { if (!rtest(args[0](t[i]))) { out.push(t[i]) } }
+            return out
+        }
+        if (name == "sum") {
+            var s = 0
+            for (i = 0; i < t.length; i++) { s = (s + t[i]) | 0 }
+            return s
+        }
+        fail("unknown Array method: " + name)
+    }
+
+    // A member chain: primary followed by .method(args)/.field/[index] suffixes.
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = anytype   // a member chain hops between types
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
+                    cur = mcall(cur, s.name, argv)
+                } else if (s.kind == "field") {
+                    if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
+                    else if (s.name == "to_s") { cur = rstr(cur) }
+                    else { cur = mcall(cur, s.name, []) }
+                } else {
+                    cur = rindex(cur, s.idx())
+                }
+            }
+            return cur
+        }
+    }
+
+    // A block passed to a method: a real closure over the current scope.
+    function makeBlock(items) {
+        var params = []
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else { params = items[i].bparams }
+        }
+        return function() {
+            var captured = scopes.slice(0)
+            return function() {
+                var args = arguments
+                var saved = scopes
+                scopes = captured.slice(0)
+                scopes.push({})
+                for (var i = 0; i < params.length; i++) {
+                    declVar(params[i].param, i < args.length ? args[i] : null)
+                }
+                var r = body()
+                scopes = saved
+                if (isSig(r)) { return r.v }   // next/break value; non-local return not supported
+                return r
+            }
+        }
+    }
+
+    // ----- puts / print -----
+    function makePuts(items) {
+        var isPrint = items[0].cmd.indexOf("print") >= 0
+        var args = items.slice(1)
+        return function() {
+            if (isPrint) {
+                var out = ""
+                for (var i = 0; i < args.length; i++) { out += rstr(args[i]()) }
+                print(out)
+                return null
+            }
+            if (args.length == 0) { println("") ; return null }
+            for (var j = 0; j < args.length; j++) { putsVal(args[j]()) }
+            return null
+        }
+    }
+    function putsVal(v) {
+        if (Array.isArray(v)) {
+            if (v.length == 0) { println("") ; return }
+            for (var i = 0; i < v.length; i++) { putsVal(v[i]) }
+            return
+        }
+        println(rstr(v))
+    }
+
+    // ----- Assignment (locals, @ivars, index / field targets) -----
+    makeTargetRef = function(items) {
+        var head = items[0]
+        return {ivar: head.ivar, name: head.var, path: items.slice(1)}
+    }
+    function readTarget(ref) {
+        if (ref.ivar != undefined) {
+            var s = findSelf()
+            if (s === null || s === undefined) { fail("@" + ref.ivar + " outside of a method") }
+            return hasOwn(s, ref.ivar) ? s[ref.ivar] : null
+        }
+        return getVar(ref.name)
+    }
+    function writeTarget(ref, v) {
+        if (ref.ivar != undefined) {
+            var s = findSelf()
+            if (s === null || s === undefined) { fail("@" + ref.ivar + " outside of a method") }
+            s[ref.ivar] = v
+            return
+        }
+        rubySet(ref.name, v)
+    }
+    // Ruby has no declaration keyword: assignment updates an existing local (search
+    // the scope chain) or creates a new one in the innermost scope.
+    function rubySet(name, value) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        }
+        scopes[scopes.length - 1][name] = value
+    }
+    function resolveRefRuby(ref) {
+        var o = anytype
+        o = readTarget(ref)
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.key != undefined) { o = o[s.key] } else { o = rindex(o, s.idx()) }
+        }
+        var last = ref.path[ref.path.length - 1]
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+    }
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function() {
+            var v = anytype
+            v = valT()
+            if (ref.path.length == 0) {
+                if (op != "=") { v = applyRuby(op, readTarget(ref), v) }
+                writeTarget(ref, v)
+            } else {
+                var p = resolveRefRuby(ref)
+                if (isDict(p.obj)) {
+                    if (op != "=") { var di = dictFind(p.obj, p.key); v = applyRuby(op, di < 0 ? null : p.obj.vals[di], v) }
+                    dictSet(p.obj, p.key, v)
+                } else {
+                    if (op != "=") { v = applyRuby(op, p.obj[p.key], v) }
+                    p.obj[p.key] = v
+                }
+            }
+            return v
+        }
+    }
+    function applyRuby(op, a, b) {
+        if (op == "+=") { return radd(a, b) }
+        if (op == "-=") { return (a - b) | 0 }
+        if (op == "*=") { return (a * b) | 0 }
+        if (op == "/=") { return (a / b) | 0 }
+        if (op == "%=") { return (a % b) | 0 }
+    }
+
+    // ----- Calls, defs and classes -----
+    function makeCall(items) {
+        var name = items[0]
+        var args = items.slice(1)
+        return function() {
+            var argv = []
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var f = getVar(name)
+            if (f != undefined && f != null && f.__isclass === true) {
+                return mcall(f, "new", argv)
+            }
+            if (typeof f != "function") { fail("call of a non function: " + name) }
+            return f.apply(undefined, argv)
+        }
+    }
+    function makeFun(items) {
+        var name = items[0]
+        var params = []
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else { params.push(items[i].param) }
+        }
+        return {name: name, params: params, body: body != null ? body : makeBody([])}
+    }
+    function runProgram(items) {
+        for (var i = 0; i < items.length; i++) { items[i]() }
+    }
+
+    function invokeRuby(fn, self, args) {
+        var saved = scopes
+        scopes = [globalScope, {}]
+        if (self !== undefined && self !== null) { declVar("self", self) }
+        for (var i = 0; i < fn.params.length; i++) {
+            declVar(fn.params[i], i < args.length ? args[i] : null)
+        }
+        var r = fn.body()
+        scopes = saved
+        if (isSig(r)) { return r.v }
+        return r
+    }
+    function makeFunClosure(fn) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return invokeRuby(fn, null, args)
+        }
+    }
+    function makeMethodClosure(fn) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            return invokeRuby(fn, self, args)
+        }
+    }
+    function makeDefStmt(fn) {
+        return function() { declVar(fn.name, makeFunClosure(fn)); return null }
+    }
+    function makeClassStmt(items) {
+        var name = items[0]
+        var methods = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].method != undefined) { methods.push(items[i].method) }
+        }
+        return function() {
+            var cls = {__isclass: true, __name: name}
+            for (var m2 = 0; m2 < methods.length; m2++) {
+                cls[methods[m2].name] = makeMethodClosure(methods[m2])
+            }
+            declVar(name, cls)
+            return null
+        }
+    }
+
+    // ----- Builtins -----
+    hostGlobals["puts"] = function() {}   // never reached: puts is a statement form
+    hostGlobals["exit"] = function(code) { exit(code === undefined ? 0 : code | 0) }
+    hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
+    hostGlobals["rand"] = function() { return 0 }
+
+    // ----- Core config -----
+    core.lang = "ruby"
+    core.add = radd
+    core.test = rtest
+
+    c.compile(c.asg)
+
+    println("ruby interpreter: program finished")
+    exit(0)
+
+~~) ;

@@ -1,0 +1,728 @@
+:title("JavaScript to LLVM IR compiler") ;
+:description("Compiles normal, dynamically typed JavaScript to an LLVM IR module and runs it
+with the built-in IR interpreter.
+
+The language is exactly the one of js-interpreter.abnf; see there for a description
+(including the bitwise operators and assignment targets that reach through calls). Unlike
+MetaJS, variables are NOT type pinned: declarations and assignments go through the
+UNPINNED scope externals js_scope_decl / js_scope_set / js_scope_get, so a variable can
+hold values of any type over its lifetime.
+
+The emitted IR is handle threaded code: every dynamic value is an i64 handle into the
+value table of the Go side JS runtime (abnf/jsrt.go), and every operation with real
+JS semantics is a call to one of its js_* externals (js_add, js_get, js_call, ...).
+Only the control flow is real IR: if/while/for/&&/||/?: compile to basic blocks,
+branches and phis, driven by js_truthy. The handles 0..3 are the constants undefined,
+null, false and true. Variables live in scope chain objects on the host side
+(js_scope_new, js_scope_get, and the declaring/assigning js_scope_decl/js_scope_set),
+and the scope chain is what gives closures their captured
+environment: a function expression becomes an own IR function jsf_N(env, args) plus a
+js_closure(N, currentScope) at the site of its creation. String and number literals
+enter through module globals (js_str_mem) and js_num_i/js_num_str.
+
+Every tag composes a small code generator function (a 'thunk') out of the thunks of its
+children. Expression thunks get the current basic block and return {b: endBlock,
+v: handle value}; statement thunks get the current block and return the block that the
+following code has to continue in (short circuit operators and loops branch, so both
+can move the insertion point). The top level becomes the function jsmain(env, args),
+which runs the program statements and then calls main().
+
+The exit code of the metacompiler run is the value that main() returns, so the test
+programs are self checking: they return 0 on success.
+The same language with the same semantics is interpreted directly by js-interpreter.abnf.
+
+Note: js_scope_set aborts when assigning to a name that was never declared, so the
+implicit global (assigning to an undeclared name) that js-interpreter.abnf supports is
+not modelled here; declare with var/let/const first.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/cstyle-comments.abnf") ;
+:include("lib/ident-dollar.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// The merged statement thunks of the top level become jsmain(env, args) in the module.
+Program     <~~ buildMain(takeAll()) ~~>
+            = { Statement } ;
+
+// Every statement production pushes exactly one thunk: function() -> undefined | signal.
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
+            | Throw | FuncDecl | Empty | ExprStmt ;
+
+// The JS switch: === comparison, fallthrough until break, stacked labels, default
+// anywhere. The body is a flat list - the labels must be tried before Statement,
+// because 'case 1:' would otherwise parse as two expression statements (semicolons
+// are optional).
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { CaseLabel | DefaultLabel | Statement } "}" ;
+CaseLabel   <~~ push({casev: pop()}) ~~>
+            = KwCase AssignExpr ":" ;
+DefaultLabel <~~ push({isdflt: true}) ~~>
+            = KwDefault ":" ;
+
+Block       <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "{" { Statement } "}" ;
+
+// var, let and const all declare a block scoped variable in the current scope.
+VarDecl     = VarDeclCore [ ";" ] ;
+VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
+            = KwVar Declarator { "," Declarator } ;
+Declarator  <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+
+// [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile "(" Expression ")" Statement ;
+
+Do          <~~ push(makeDo(pop(), pop())) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
+
+// The three optional parts are wrapped with a kind marker, otherwise e.g.
+// 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
+ForVar      = VarDeclCore ;
+ForExpr     <~~ push(exprToClause(pop())) ~~> = Expression ;
+ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t:exprToClause(pop())}) ~~> = Expression ;
+
+// [] or [exprThunk].
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ Expression ] [ ";" ] ;
+
+Break       <~~ push(makeBreak()) ~~>
+            = KwBreak [ ";" ] ;
+
+Continue    <~~ push(makeContinue()) ~~>
+            = KwContinue [ ";" ] ;
+
+Throw       <~~ push(makeThrow(pop())) ~~>
+            = KwThrow Expression [ ";" ] ;
+
+// A function declaration binds the closure in the current scope when it executes.
+FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
+            = KwFunction Id <~~ push(up.in) ~~> ParamList Block ;
+
+ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
+            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+
+Empty       <~~ push(function(b) { return b }) ~~>
+            = ";" ;
+
+ExprStmt    <~~ push(exprToStmt(pop())) ~~>
+            = Expression [ ";" ] ;
+
+// Every expression production pushes exactly one thunk: function(block) -> {b, v}.
+Expression  = AssignExpr ;
+
+// Assignment is an expression and associates to the right: a = b = c.
+// If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
+AssignExpr  = Assignment | CondExpr ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+
+// An assignable place: a variable, or a member path that may reach through calls
+// but must end in a member: findScope(name)[name] = value.
+// The local stack holds [name, suffix marker, suffix marker, ...].
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { CallSuffix | DotSuffix | IndexSuffix } ;
+
+CondExpr    <~~ push(makeCond(takeAll())) ~~>
+            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { "||" AndExpr } ;
+
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = BitOrExpr { "&&" BitOrExpr } ;
+
+// The bitwise levels sit between && and equality, like in JS. A single "|" that
+// actually starts a "||" fails its right side, the iteration rolls back, and the
+// enclosing || level picks it up.
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { "|" <~~ push("|") ~~> BitXorExpr } ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push("^") ~~> BitAndExpr } ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
+
+// The longer operators must be tried before their prefixes ("===" before "==").
+EqExpr      <~~ push(foldBinary(takeAll())) ~~>
+            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+
+RelExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
+
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = PreIncDec | Neg | Not | BitNot | Typeof | PostfixExpr ;
+// Prefix ++/--: the expression value is the new one.
+PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+Neg         <~~ push(makeUnary(pop(), "js_neg")) ~~>
+            = "-" UnaryExpr ;
+Not         <~~ push(makeUnary(pop(), "js_not")) ~~>
+            = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
+Typeof      <~~ push(makeUnary(pop(), "js_typeof")) ~~>
+            = KwTypeof UnaryExpr ;
+
+// The postfix forms: i++ evaluates to the old value.
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+
+// A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
+// A call after a member access is a method call: the object becomes 'this' of the callee.
+CallMember  <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { CallSuffix | DotSuffix | IndexSuffix } ;
+CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+DotSuffix   = "." Id <~~ push({kind:"member", key: makeConst(up.in)}) ~~> ;
+IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | FunctionExpr | ObjectLit | ArrayLit | StringLit | NumberLit
+            | True | False | Null | Undefined | VarRef ;
+
+// The optional name of a function expression is accepted but not bound.
+FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
+            = KwFunction [ Id ] ParamList Block ;
+
+ObjectLit   <~~ push(makeObject(takeAll())) ~~>
+            = "{" [ PropDef { "," PropDef } ] "}" ;
+PropDef     <~~ push(makeProp(pop(), pop())) ~~>
+            = PropKey ":" AssignExpr ;
+PropKey     = Id <~~ push(up.in) ~~> | StringLit ;
+
+ArrayLit    <~~ push(makeArray(takeAll())) ~~>
+            = "[" [ AssignExpr { "," AssignExpr } ] "]" ;
+
+Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
+Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
+
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+StringLit   = DqString | SqString ;
+NumberLit   = HexLit | DecLit ;
+
+// Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
+HexLit      <~~ push(makeConst(hexAt(up.in, 2, up.in.length - 2))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+
+// The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
+KwVar       = ( "var" | "let" | "const" ) KwEnd ;
+KwFunction  = "function" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwContinue  = "continue" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwTypeof    = "typeof" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared emitter machinery (module, handle constants, externs, loopStack
+    // protocol, expression/statement builders); see the `core` knobs below.
+    include("lib/compile-core.js")
+
+    // takeAll empties the local stack of the current tag and returns its items in push
+    // order as a plain JS array.
+    // Resolves the JS string escapes (\n \t \r \0 \xNN \uNNNN, and \c for the char itself).
+    // ----- The emitter state -----
+
+    var i8 = llvm.types.I8
+
+
+    // The handle constants: 0 undefined, 1 null, 2 false, 3 true.
+
+    // All js_* externals get declared on first use. Every parameter and result is i64,
+    // except the string pool pointer of js_str_mem.
+    // One module global per distinct string literal / name.
+    // The function being built, the current scope chain handle (an SSA value), and the
+    // enclosing loops (for break/continue).
+
+    // An i1 for conditional branches: js_truthy(v) != 0.
+    // ----- Expression thunks: function(block) -> {b: endBlock, v: i64 handle} -----
+
+    function makeHandleConst(n) {
+        var c = handle(n)
+        return function(b) { return {b: b, v: c} }
+    }
+    function makeUnary(t, extName) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, extName, [r.v])}
+        }
+    }
+    // ~v is v ^ -1 on the ToInt32 value, so it reuses the xor external.
+    function makeBitNot(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            return {b: b, v: callExt(b, "js_bxor", [r.v, callExt(b, "js_num_i", [handle(-1)])])}
+        }
+    }
+
+    binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
+                  "==": "js_eq", "!=": "js_ne", "===": "js_seq", "!==": "js_sne",
+                  "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge",
+                  "|": "js_bor", "^": "js_bxor", "&": "js_band",
+                  "<<": "js_shl", ">>": "js_shr", ">>>": "js_ushr",
+                  "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div", "%=": "js_mod"}
+    wraps = {} // MetaJS numbers are not wrapped to 32 bit.
+
+    // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
+    // || and && evaluate lazily and keep the deciding operand, exactly like in JS.
+    // Each step branches: on a decided value the right side is skipped, a phi merges.
+    // items = [thunk] or [condThunk, thenThunk, elseThunk].
+    function makeCond(items) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            var thenB = curF.NewBlock("")
+            var elseB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            r.b.NewCondBr(truthy(r.b, r.v), thenB, elseB)
+            var rt = items[1](thenB)
+            rt.b.NewBr(mergeB)
+            var re = items[2](elseB)
+            re.b.NewBr(mergeB)
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
+            return {b: mergeB, v: phi}
+        }
+    }
+
+    function makeArray(items) {
+        return function(b) {
+            var arr = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [arr, r.v])
+            }
+            return {b: b, v: arr}
+        }
+    }
+    // PropDef pops [valueThunk, key]; the key is an Id string or a constant string thunk.
+    function makeProp(valT, key) {
+        return {kt: (typeof key == "string") ? makeConst(key) : key, t: valT}
+    }
+    function makeObject(props) {
+        return function(b) {
+            var obj = callExt(b, "js_obj_new", [])
+            for (var i = 0; i < props.length; i++) {
+                var kr = props[i].kt(b)
+                b = kr.b
+                var vr = props[i].t(b)
+                b = vr.b
+                callExt(b, "js_set", [obj, kr.v, vr.v])
+            }
+            return {b: b, v: obj}
+        }
+    }
+
+    // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
+    // its object handle, so that a directly following call uses it as 'this'.
+    foldCallMember = function(items) {
+        if (items.length == 1) return items[0]
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function(b) {
+            var r = primary(b)
+            b = r.b
+            var cur = r.v
+            var curThis = hUndef
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "member") {
+                    curThis = cur
+                    var kr = s.key(b)
+                    b = kr.b
+                    cur = callExt(b, "js_get", [cur, kr.v])
+                } else {
+                    var argsV = callExt(b, "js_arr_new", [])
+                    for (var j = 0; j < s.args.length; j++) {
+                        var ar = s.args[j](b)
+                        b = ar.b
+                        callExt(b, "js_arr_push", [argsV, ar.v])
+                    }
+                    cur = callExt(b, "js_call", [cur, curThis, argsV])
+                    curThis = hUndef
+                }
+            }
+            return {b: b, v: cur}
+        }
+    }
+
+    // Target items = [nameString, suffix marker...] -> reference descriptor.
+    // Walks a target path (members and calls) up to the last element, which must
+    // be a member. Returns {b, obj, key} with the object and the last key evaluated.
+    function emitRefPath(b, ref) {
+        var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var curThis = hUndef
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var s = ref.path[i]
+            if (s.kind == "member") {
+                curThis = cur
+                var kr = s.key(b)
+                b = kr.b
+                cur = callExt(b, "js_get", [cur, kr.v])
+            } else {
+                var argsV = callExt(b, "js_arr_new", [])
+                for (var j = 0; j < s.args.length; j++) {
+                    var ar = s.args[j](b)
+                    b = ar.b
+                    callExt(b, "js_arr_push", [argsV, ar.v])
+                }
+                cur = callExt(b, "js_call", [cur, curThis, argsV])
+                curThis = hUndef
+            }
+        }
+        var last = ref.path[ref.path.length - 1].key(b)
+        return {b: last.b, obj: cur, key: last.v}
+    }
+    // items = [ref, opString, valueThunk]. The value of an assignment is the assigned value.
+    function makeAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            if (ref.path.length == 0) {
+                var nameV = emitStr(b, ref.name)
+                if (op != "=") {
+                    var old = callExt(b, "js_scope_get", [curScopeV, nameV])
+                    v = callExt(b, binExt[op], [old, v])
+                }
+                callExt(b, "js_scope_set", [curScopeV, nameV, v])
+            } else {
+                var p = emitRefPath(b, ref)
+                b = p.b
+                if (op != "=") {
+                    var oldM = callExt(b, "js_get", [p.obj, p.key])
+                    v = callExt(b, binExt[op], [oldM, v])
+                }
+                callExt(b, "js_set", [p.obj, p.key, v])
+            }
+            return {b: b, v: v}
+        }
+    }
+    // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
+    function makeIncDec(items) {
+        var ref = items[0]
+        var extName = (items[1] == "++") ? "js_add" : "js_sub"
+        return function(b) {
+            var oneV = callExt(b, "js_num_i", [handle(1)])
+            if (ref.path.length == 0) {
+                var nameV = emitStr(b, ref.name)
+                var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, extName, [oldV, oneV])])
+                return {b: b, v: oldV}
+            }
+            var p = emitRefPath(b, ref)
+            b = p.b
+            var oldM = callExt(b, "js_tonum", [callExt(b, "js_get", [p.obj, p.key])])
+            callExt(b, "js_set", [p.obj, p.key, callExt(b, extName, [oldM, oneV])])
+            return {b: b, v: oldM}
+        }
+    }
+    // Prefix ++/--: like makeIncDec, but the expression value is the new one.
+    function makePreIncDec(ref, op) {
+        var extName = (op == "++") ? "js_add" : "js_sub"
+        return function(b) {
+            var oneV = callExt(b, "js_num_i", [handle(1)])
+            if (ref.path.length == 0) {
+                var nameV = emitStr(b, ref.name)
+                var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+                var newV = callExt(b, extName, [oldV, oneV])
+                callExt(b, "js_scope_set", [curScopeV, nameV, newV])
+                return {b: b, v: newV}
+            }
+            var p = emitRefPath(b, ref)
+            b = p.b
+            var oldM = callExt(b, "js_tonum", [callExt(b, "js_get", [p.obj, p.key])])
+            var newM = callExt(b, extName, [oldM, oneV])
+            callExt(b, "js_set", [p.obj, p.key, newM])
+            return {b: b, v: newM}
+        }
+    }
+
+    // A function body: an own IR function jsf_N(env, args) whose entry opens a scope on
+    // the passed environment, binds the parameters and 'arguments', and runs the body.
+    function emitFunction(paramNames, bodyT) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        curF = f
+        loopStack = []
+
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        for (var i = 0; i < paramNames.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, paramNames[i]),
+                                    callExt(b, "js_arg", [f.Params[1], handle(i)])])
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
+        var endB = bodyT(b)
+        endB.NewRet(hUndef) // A function without return returns undefined.
+
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        return idx
+    }
+    function makeFunctionExpr(bodyT, paramNames) {
+        return function(b) {
+            var idx = emitFunction(paramNames, bodyT)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+
+    // ----- Statement thunks: function(block) -> block to continue in -----
+
+    // An expression in statement position: evaluate the value and record it as the
+    // program completion value (what a goja Run() would return; js_getret reads it).
+    exprToStmt = function(t) {
+        return function(b) {
+            var r = t(b)
+            callExt(r.b, "js_setret", [r.v])
+            return r.b
+        }
+    }
+    // For loop init/post clauses: evaluate and drop (they are no statements, so
+    // they must not touch the completion value).
+    function exprToClause(t) {
+        return function(b) { return t(b).b }
+    }
+    // items = [name] or [name, initThunk].
+    function makeDecl(items) {
+        var name = items[0]
+        return function(b) {
+            var v = hUndef
+            if (items.length > 1) {
+                var r = items[1](b)
+                b = r.b
+                v = r.v
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
+            return b
+        }
+    }
+    // items = [cond, then] or [cond, then, else].
+    // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
+    function makeDo(condT, bodyT) {
+        return function(b) {
+            var bodyB = curF.NewBlock("")
+            var condB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(bodyB)
+            loopStack.push({cont: condB, brk: exitB})
+            bodyT(bodyB).NewBr(condB)
+            loopStack.pop()
+            var r = condT(condB)
+            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            return exitB
+        }
+    }
+    // items = [{k:"init"|"cond"|"post", t:thunk}..., bodyThunk].
+    function makeFor(items) {
+        var bodyT = items.pop()
+        var init = null, cond = null, post = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].k == "init") init = items[i].t
+            if (items[i].k == "cond") cond = items[i].t
+            if (items[i].k == "post") post = items[i].t
+        }
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV]) // The for header is its own scope.
+            if (init != null) b = init(b)
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            if (cond != null) {
+                var r = cond(headB)
+                r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            } else {
+                headB.NewBr(bodyB)
+            }
+            loopStack.push({cont: postB, brk: exitB})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var pb = postB
+            if (post != null) pb = post(postB)
+            pb.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    // items = [] or [exprThunk].
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function(b) {
+            var v = hUndef
+            if (t != null) {
+                var r = t(b)
+                b = r.b
+                v = r.v
+            }
+            b.NewRet(v)
+            // Code behind a return is unreachable but must still land in a valid block.
+            return deadBlock()
+        }
+    }
+    function makeThrow(t) {
+        return function(b) {
+            var r = t(b)
+            callExt(r.b, "js_throw", [r.v])
+            r.b.NewRet(hUndef) // Never reached: js_throw aborts on the host side.
+            return deadBlock()
+        }
+    }
+    // items = [subjThunk, ({casev}|{isdflt}|stmtThunk)...]. The flat label/statement
+    // list is grouped at build time. The dispatch chain compares with js_seq (===);
+    // the case bodies fall through into each other, break jumps to the exit, and
+    // continue still targets the enclosing loop.
+    function makeSwitch(items) {
+        var subj = items[0]
+        var cases = []
+        var cur = null
+        for (var i = 1; i < items.length; i++) {
+            var p = items[i]
+            if (p != undefined && (p.casev != undefined || p.isdflt != undefined)) {
+                cur = {isDefault: p.isdflt != undefined, v: p.casev, body: []}
+                cases.push(cur)
+            } else {
+                if (cur == null) {
+                    println("js compiler error: switch: a statement before the first case label")
+                    exit(1)
+                }
+                cur.body.push(p)
+            }
+        }
+        return function(b) {
+            var r = subj(b)
+            b = r.b
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dfltB = exitB
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDefault && dfltB === exitB) { dfltB = bodyBs[i] }
+            }
+            for (var i = 0; i < cases.length; i++) {
+                if (cases[i].isDefault) { continue }
+                var rc = cases[i].v(b)
+                b = rc.b
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [r.v, rc.v])), bodyBs[i], nextB)
+                b = nextB
+            }
+            b.NewBr(dfltB)
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB})
+            for (var i = 0; i < cases.length; i++) {
+                var bb = bodyBs[i]
+                var body = cases[i].body
+                for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
+                bb.NewBr(i + 1 < cases.length ? bodyBs[i + 1] : exitB)
+            }
+            loopStack.pop()
+            return exitB
+        }
+    }
+    // Local stack = [name, [paramNames...], bodyThunk] -- declares the closure when executed.
+    function makeFuncDecl(bodyT, paramNames, name) {
+        return function(b) {
+            var idx = emitFunction(paramNames, bodyT)
+            var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), cl])
+            return b
+        }
+    }
+
+    // The top level statements become jsrun(scope, args): the caller provides the scope
+    // that the top level declarations land in (the frozen tag executor passes the shared
+    // scope of the compile run, so scripts see each others globals). The return value is
+    // the completion value: what the last executed expression statement produced.
+    // jsmain(env, args) is the standalone entry on top of it: it makes a fresh scope,
+    // runs the program, and then calls main() - the self checking test convention.
+    function buildMain(items) {
+        var f = m.NewFunc("jsrun", i64, [llvm.ir.NewParam("scope", i64), llvm.ir.NewParam("args", i64)])
+        curF = f
+        var b = f.NewBlock("entry")
+        curScopeV = f.Params[0]
+        callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
+        b = makeSeq(items)(b)
+        b.NewRet(callExt(b, "js_getret", []))
+
+        var fm = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = fm
+        var bm = fm.NewBlock("entry")
+        var sc = callExt(bm, "js_scope_new", [fm.Params[0]])
+        bm.NewCall(f, [sc, fm.Params[1]])
+        var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, "main")])
+        var argsV = callExt(bm, "js_arr_new", [])
+        bm.NewRet(callExt(bm, "js_call", [mainV, hUndef, argsV]))
+    }
+
+    // ===== goja driver =====
+    // Everything below this marker is the driver for the normal (goja) run of this
+    // grammar. The freezer (-freeze) cuts the start script here: only the library above
+    // goes into the bootstrap snapshot; in frozen mode the Go core replaces the driver.
+
+    // Build the module out of the parsed program.
+    c.compile(c.asg)
+
+    // Show the compiler output (the LLVM IR module).
+    println(m)
+
+    // Run jsmain() with the built-in IR interpreter and the MetaJS handle runtime.
+    // The exit code of this metacompiler run is what main() returned, so test
+    // programs are self checking.
+    var res = llvm.RunJS(m, "jsmain")
+    println("js compiler: main() returned " + res.Ret)
+    exit(res.Ret)
+
+~~) ;

@@ -293,6 +293,42 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-fail-test-import.py", "-q", "-warn-imports"]
         },
         {
+            "name": "JavaScript interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-interpreter.abnf", "tests/js-test-1.js", "-q"]
+        },
+        {
+            "name": "JavaScript to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-1.js", "-q"]
+        },
+        {
+            "name": "Lua interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-interpreter.abnf", "tests/lua-test-1.lua", "-q"]
+        },
+        {
+            "name": "Lua to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-1.lua", "-q"]
+        },
+        {
+            "name": "Ruby interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-1.rb", "-q"]
+        },
+        {
+            "name": "Ruby to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-1.rb", "-q"]
+        },
+        {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",

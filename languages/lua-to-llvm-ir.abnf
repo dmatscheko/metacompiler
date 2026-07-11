@@ -1,0 +1,624 @@
+:title("Lua (subset) to LLVM IR compiler") ;
+:description("Compiles a Lua subset to an LLVM IR module and runs it with the built-in IR
+interpreter and the MetaJS handle runtime (llvm.RunJS).
+
+The language is the one of lua-interpreter.abnf; see there for the description. This
+grammar shares its rules and only swaps the tree walking start script for an emitter.
+
+The emitted IR is handle threaded: every dynamic value is an i64 handle into the value
+table of the Go side MetaJS runtime (abnf/jsrt.go), and every operation with real
+semantics is a call to one of its js_* externals. Only the control flow is real IR:
+if/elseif/while/numeric-for/and/or compile to basic blocks, branches and phis, driven by
+a Lua truthiness test (only false and nil are falsy) built from js_seq. The handles 0..3
+are nil, null, false and true. Locals live in scope chain objects (js_scope_new /
+js_scope_decl / js_scope_get / js_scope_set); a bare assignment goes through
+js_pyset_var (assign up the chain, else create). Tables are host objects (js_obj_new,
+js_get, js_set) with 1 based numeric keys stringified like the interpreter; #t probes
+t[1], t[2], ... for the sequence border. Concatenation stringifies both sides with
+js_pystr and joins them with js_add; the arithmetic and comparison operators map to
+js_add/js_sub/js_mul/js_div/js_fdiv/js_fmod and js_seq/js_sne/js_lt/js_gt/js_le/js_ge.
+Functions become IR functions jsf_N(env, args) plus a js_closure at the creation site;
+print is a small IR function over js_pyprint. The whole file becomes jsmain(env, args)
+and runs top to bottom. Self checking programs count their failures and end with
+exit(fails). The same language with the same semantics is interpreted directly by
+lua-interpreter.abnf.") ;
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/ident.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Chunk) ;
+:whitespace(Whitespace) ;
+
+// The whole file is one block; buildChunk runs it (interpreter) or wraps it into
+// jsmain (compiler). Block collects the statement thunks of exactly its own subtree.
+Chunk       <~~ buildChunk(takeAll()) ~~>
+            = Block ;
+Block       <~~ push(makeSeq(takeAll())) ~~>
+            = { NotEnders Statement } ;
+
+// NotEnders stops a block at the keywords that terminate it (end / else / elseif),
+// which the plain identifier statements would otherwise swallow. It consumes nothing
+// and only fails (via the impossible-token trick) when one of those words - as a whole
+// word, not merely a prefix like 'ending' - is next.
+NotEnders = :script(~~
+    (function() {
+        // Skip leading whitespace and -- line comments (a :script sees the raw input).
+        var off = 0
+        var scanning = true
+        while (scanning) {
+            var cc = c.peek(off)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { off++ }
+            else if (cc === 45 && c.peek(off + 1) === 45) {
+                off += 2
+                while (c.peek(off) !== 10 && c.peek(off) !== -1) { off++ }
+            } else { scanning = false }
+        }
+        var p0 = c.peek(off)
+        if (p0 !== 101) { return undefined }
+        var p1 = c.peek(off + 1)
+        var p2 = c.peek(off + 2)
+        var p3 = c.peek(off + 3)
+        var after = -1
+        var hit = false
+        if (p1 === 110 && p2 === 100) {
+            after = c.peek(off + 3)
+            hit = true
+        } else if (p1 === 108 && p2 === 115 && p3 === 101) {
+            after = c.peek(off + 4)
+            if (after === 105 && c.peek(off + 5) === 102) { after = c.peek(off + 6) }
+            hit = true
+        }
+        if (!hit) { return undefined }
+        if ((after >= 48 && after <= 57) || (after >= 65 && after <= 90) || after === 95 || (after >= 97 && after <= 122)) {
+            return undefined
+        }
+        return abnf.newToken("\x01block-terminator", 0)
+    })()
+~~) ;
+
+// Every statement production pushes exactly one thunk. The keyword led statements come
+// first (they commit on their unique keyword); an assignment is tried before a bare
+// call statement, because its targets look like the start of a call until the '='.
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = If | While | NumFor | DoBlock | LocalFunc | Local | Func | Return | Break
+            | AssignStat | CallStat ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
+ElseIf      <~~ push(makeElseIf(pop(), pop())) ~~>
+            = KwElseif Expression KwThen Block ;
+Else        <~~ push(makeElse(pop())) ~~>
+            = KwElse Block ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile Expression KwDo Block KwEndKw ;
+
+// for i = start, limit [, step] do ... end. The loop variable is local to the loop.
+NumFor      <~~ push(makeNumFor(takeAll())) ~~>
+            = KwFor ForName "=" Expression "," Expression [ "," Expression ] KwDo Block KwEndKw ;
+ForName     <~~ push({fname: up.in}) ~~>
+            = Id ;
+
+DoBlock     <~~ push(makeDoBlock(pop())) ~~>
+            = KwDo Block KwEndKw ;
+
+LocalFunc   <~~ push(makeLocalFunc(pop(), pop(), pop())) ~~>
+            = KwLocal KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
+
+Local       <~~ push(makeLocal(takeAll())) ~~>
+            = KwLocal LocalName { "," LocalName } [ "=" ExprList ] ;
+LocalName   <~~ push({lname: up.in}) ~~>
+            = Id ;
+
+Func        <~~ push(makeFunc(pop(), pop(), pop())) ~~>
+            = KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
+
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ ExprList ] ;
+Break       <~~ push(makeBreak()) ~~>
+            = KwBreak ;
+
+// varlist '=' exprlist. The targets and the values sit interleaved on the stack;
+// makeAssign tells them apart (a target is an object, a value thunk a function).
+AssignStat  <~~ push(makeAssign(takeAll())) ~~>
+            = Target { "," Target } "=" ExprList ;
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { DotSfx | IndexSfx } ;
+
+CallStat    <~~ push(exprToStmt(pop())) ~~>
+            = SuffixedExpr ;
+
+ExprList    = Expression { "," Expression } ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = OrExpr ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { KwOr AndExpr } ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = CmpExpr { KwAnd CmpExpr } ;
+
+CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = ConcatExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ConcatExpr } ;
+
+// Concatenation is right associative, so it recurses on its own right hand side.
+ConcatExpr  <~~ push(makeConcat(takeAll())) ~~>
+            = AddExpr [ ".." ConcatExpr ] ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+// The floor division // must be tried before the true division /.
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = NotExpr | LenExpr | NegExpr | SuffixedExpr ;
+NotExpr     <~~ push(makeNot(pop())) ~~>
+            = KwNot UnaryExpr ;
+LenExpr     <~~ push(makeLen(pop())) ~~>
+            = "#" UnaryExpr ;
+NegExpr     <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+
+// f(a), t.x, t[k] in any mix.
+SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { CallSfx | DotSfx | IndexSfx } ;
+CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" [ Expression { "," Expression } ] ")" ;
+DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | FuncExpr | TableLit | DqString | SqString | Number
+            | True | False | Nil | VarRef ;
+
+FuncExpr    <~~ push(makeFuncExpr(pop(), pop())) ~~>
+            = KwFunction ParamList Block KwEndKw ;
+
+// { }, { 1, 2, 3 }, { x = 1 }, { [k] = v }, mixed; ',' or ';' separate the fields.
+TableLit    <~~ push(makeTable(takeAll())) ~~>
+            = "{" [ Field { FieldSep Field } [ FieldSep ] ] "}" ;
+FieldSep    = "," | ";" ;
+Field       = KeyField | NameField | PosField ;
+KeyField    <~~ var kv = pop(); push({fkind:"key", k: pop(), v: kv}) ~~>
+            = "[" Expression "]" "=" Expression ;
+NameField   <~~ var nv = pop(); push({fkind:"name", name: pop(), v: nv}) ~~>
+            = Id <~~ push(up.in) ~~> "=" Expression ;
+PosField    <~~ push({fkind:"pos", v: pop()}) ~~>
+            = Expression ;
+
+Number      = DecLit ;
+Nil         <~~ push(makeConst(undefined)) ~~>
+            = "nil" KwEnd ;
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+// Keywords, each closed by KwEnd so that 'ending' or 'ifx' stay identifiers.
+KwLocal     = "local" KwEnd ;
+KwFunction  = "function" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwThen      = "then" KwEnd ;
+KwElseif    = "elseif" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwEndKw     = "end" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwAnd       = "and" KwEnd ;
+KwOr        = "or" KwEnd ;
+KwNot       = "not" KwEnd ;
+
+// Lua whitespace: blanks and newlines plus -- line comments.
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = "--" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+// ---
+
+
+
+:startScript(~~
+
+    // Shared emitter machinery (module, handle constants, externs, loopStack
+    // protocol, expression/statement builders); Lua specifics are set below.
+    include("lib/compile-core.js")
+
+    // resolveImport / notImpl (lib/compile-core.js) call fail; define it.
+    function fail(msg) { println("lua compiler error: " + msg); exit(1) }
+
+    var hidCount = 0
+
+    // Lua truthiness for branches: an i1 that is 1 unless v is nil (hUndef) or false.
+    truthy = function(b, v) {
+        var isNil = b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [callExt(b, "js_seq", [v, hUndef])]), handle(0))
+        var isFalse = b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [callExt(b, "js_seq", [v, hFalse])]), handle(0))
+        var truthH = b.NewSelect(isNil, hFalse, b.NewSelect(isFalse, hFalse, hTrue))
+        return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [truthH]), handle(0))
+    }
+
+    // ----- Expression thunks: function(block) -> {b, v} -----
+
+    // Lua numbers are floats: unary minus does not truncate to 32 bit.
+    makeNeg = function(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_neg", [r.v])}
+        }
+    }
+    // not v: true exactly when v is falsy.
+    makeNot = function(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            return {b: b, v: b.NewSelect(truthy(b, r.v), hFalse, hTrue)}
+        }
+    }
+    // #t: probe t[1], t[2], ... for the first nil; the border is that index minus one.
+    function makeLen(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var tv = r.v
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            hidCount++
+            var iName = "$li" + hidCount
+            var tName = "$lt" + hidCount
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), tv])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 1)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
+            var elem = callExt(headB, "js_get", [tV, iV])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_sne", [elem, hUndef])), bodyB, exitB)
+            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName), callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            var iFin = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, iName)])
+            var lenV = callExt(exitB, "js_sub", [iFin, emitNum(exitB, 1)])
+            curScopeV = saved
+            return {b: exitB, v: lenV}
+        }
+    }
+    // Concatenation: right associative, so at most two operands per node. Both sides are
+    // rendered to strings (js_pystr) and joined (js_add on two strings concatenates).
+    function makeConcat(items) {
+        if (items.length == 1) { return items[0] }
+        var l = items[0]
+        var r = items[1]
+        return function(b) {
+            var rl = l(b)
+            b = rl.b
+            var rr = r(b)
+            b = rr.b
+            var ls = callExt(b, "js_pystr", [rl.v])
+            var rs = callExt(b, "js_pystr", [rr.v])
+            return {b: b, v: callExt(b, "js_add", [ls, rs])}
+        }
+    }
+
+    // Lua operators: no 32 bit wrapping, floor division //, floor modulo %, ~= not equal.
+    binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div",
+              "//": "js_fdiv", "%": "js_fmod",
+              "==": "js_seq", "~=": "js_sne",
+              "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge"}
+    wraps = {}
+
+    // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...].
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function(b) {
+            var r = primary(b)
+            b = r.b
+            var cur = r.v
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "call") {
+                    var ea = emitArgs(b, s.args)
+                    b = ea.b
+                    cur = callExt(b, "js_call", [cur, hUndef, ea.v])
+                } else if (s.kind == "field") {
+                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                } else {
+                    var ir = s.idx(b)
+                    b = ir.b
+                    cur = callExt(b, "js_get", [cur, ir.v])
+                }
+            }
+            return {b: b, v: cur}
+        }
+    }
+
+    // { ... } fields, in source order: positional fields fill numeric keys 1, 2, 3, ...
+    function makeTable(items) {
+        return function(b) {
+            var t = callExt(b, "js_obj_new", [])
+            var pos = 1
+            for (var i = 0; i < items.length; i++) {
+                var f = items[i]
+                if (f.fkind == "pos") {
+                    var rv = f.v(b)
+                    b = rv.b
+                    callExt(b, "js_set", [t, emitNum(b, pos), rv.v])
+                    pos++
+                } else if (f.fkind == "name") {
+                    var rv2 = f.v(b)
+                    b = rv2.b
+                    callExt(b, "js_set", [t, emitStr(b, f.name), rv2.v])
+                } else {
+                    var rk = f.k(b)
+                    b = rk.b
+                    var rv3 = f.v(b)
+                    b = rv3.b
+                    callExt(b, "js_set", [t, rk.v, rv3.v])
+                }
+            }
+            return {b: b, v: t}
+        }
+    }
+
+    // ----- Assignment -----
+    function pathKeyV(b, p) {
+        if (p.kind == "field") { return {b: b, v: emitStr(b, p.name)} }
+        return p.idx(b)
+    }
+    function emitTargetWrite(b, ref, v) {
+        if (ref.path.length == 0) {
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+            return b
+        }
+        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        for (var i = 0; i < ref.path.length - 1; i++) {
+            var pk = pathKeyV(b, ref.path[i])
+            b = pk.b
+            o = callExt(b, "js_get", [o, pk.v])
+        }
+        var lk = pathKeyV(b, ref.path[ref.path.length - 1])
+        b = lk.b
+        callExt(b, "js_set", [o, lk.v, v])
+        return b
+    }
+    // items interleave targets (objects) and value thunks (functions); all right hand
+    // sides are evaluated first, then assigned positionally (missing values are nil).
+    function makeAssign(items) {
+        var targets = []
+        var vals = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { vals.push(items[i]) }
+            else { targets.push(items[i]) }
+        }
+        return function(b) {
+            var vvals = []
+            for (var i = 0; i < vals.length; i++) {
+                var r = vals[i](b)
+                b = r.b
+                vvals.push(r.v)
+            }
+            for (var t = 0; t < targets.length; t++) {
+                b = emitTargetWrite(b, targets[t], t < vvals.length ? vvals[t] : hUndef)
+            }
+            return b
+        }
+    }
+    function makeLocal(items) {
+        var names = []
+        var vals = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { vals.push(items[i]) }
+            else { names.push(items[i].lname) }
+        }
+        return function(b) {
+            var vvals = []
+            for (var i = 0; i < vals.length; i++) {
+                var r = vals[i](b)
+                b = r.b
+                vvals.push(r.v)
+            }
+            for (var n = 0; n < names.length; n++) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), n < vvals.length ? vvals[n] : hUndef])
+            }
+            return b
+        }
+    }
+
+    // ----- Functions -----
+    function emitFunction(params, bodyT) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        curF = f
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        for (var i = 0; i < params.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), callExt(b, "js_arg", [f.Params[1], handle(i)])])
+        }
+        var endB = bodyT(b)
+        endB.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        return idx
+    }
+    function makeFuncExpr(bodyT, plist) {
+        return function(b) {
+            var idx = emitFunction(plist.params, bodyT)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
+    }
+    function makeFunc(bodyT, plist, name) {
+        return function(b) {
+            var idx = emitFunction(plist.params, bodyT)
+            var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), cl])
+            return b
+        }
+    }
+    function makeLocalFunc(bodyT, plist, name) {
+        return function(b) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            var idx = emitFunction(plist.params, bodyT)
+            var cl = callExt(b, "js_closure", [handle(idx), curScopeV])
+            callExt(b, "js_scope_set", [curScopeV, emitStr(b, name), cl])
+            return b
+        }
+    }
+
+    // ----- Statement thunks: function(block) -> block -----
+    function makeElseIf(suite, cond) { return {elifCond: cond, suite: suite} }
+    function makeElse(suite) { return {elseSuite: suite} }
+    makeIf = function(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elifs = []
+        var elseT = null
+        for (var i = 2; i < items.length; i++) {
+            if (items[i].elifCond != undefined) { elifs.push(items[i]) }
+            if (items[i].elseSuite != undefined) { elseT = items[i].elseSuite }
+        }
+        return function(b) {
+            var mergeB = curF.NewBlock("")
+            var r = cond(b)
+            b = r.b
+            var thenB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, r.v), thenB, nextB)
+            thenT(thenB).NewBr(mergeB)
+            b = nextB
+            for (var k = 0; k < elifs.length; k++) {
+                var r2 = elifs[k].elifCond(b)
+                b = r2.b
+                var armB = curF.NewBlock("")
+                var next2 = curF.NewBlock("")
+                b.NewCondBr(truthy(b, r2.v), armB, next2)
+                elifs[k].suite(armB).NewBr(mergeB)
+                b = next2
+            }
+            if (elseT != null) { elseT(b).NewBr(mergeB) }
+            else { b.NewBr(mergeB) }
+            return mergeB
+        }
+    }
+    function makeNumFor(items) {
+        var name = items[0].fname
+        var startT = items[1]
+        var limitT = items[2]
+        var block = items[items.length - 1]
+        var stepT = (items.length == 5) ? items[3] : null
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            hidCount++
+            var iName = "$fi" + hidCount
+            var limName = "$fl" + hidCount
+            var stepName = "$fs" + hidCount
+            var rs = startT(b)
+            b = rs.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), rs.v])
+            var rl = limitT(b)
+            b = rl.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, limName), rl.v])
+            var stepV = emitNum(b, 1)
+            if (stepT != null) {
+                var rst = stepT(b)
+                b = rst.b
+                stepV = rst.v
+            }
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stepName), stepV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var limV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, limName)])
+            var stpV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, stepName)])
+            var stepPos = truthy(headB, callExt(headB, "js_gt", [stpV, emitNum(headB, 0)]))
+            var leCond = callExt(headB, "js_le", [iV, limV])
+            var geCond = callExt(headB, "js_ge", [iV, limV])
+            var condH = headB.NewSelect(stepPos, leCond, geCond)
+            headB.NewCondBr(truthy(headB, condH), bodyB, exitB)
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])])
+            loopStack.push({cont: postB, brk: exitB})
+            block(bodyB).NewBr(postB)
+            loopStack.pop()
+            var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+            var stpV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, stepName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV2, stpV2])])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    function makeDoBlock(block) {
+        return function(b) {
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            b = block(b)
+            curScopeV = saved
+            return b
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function(b) {
+            var v = hUndef
+            if (t != null) {
+                var r = t(b)
+                b = r.b
+                v = r.v
+            }
+            b.NewRet(v)
+            return deadBlock()
+        }
+    }
+
+    // jsmain: declare print, then run the file top to bottom.
+    function buildMain(items) {
+        var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = f
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        funcCount++
+        var prIdx = funcCount
+        var pf = m.NewFunc("jsf_" + prIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var pb = pf.NewBlock("entry")
+        pb.NewCall(getExtern("js_pyprint", 1), [pf.Params[1]])
+        pb.NewRet(hUndef)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
+        b = makeSeq(items)(b)
+        b.NewRet(hUndef)
+    }
+    function buildChunk(items) { buildMain(items) }
+
+    // ----- Core library config (see lib/compile-core.js) -----
+    // Lua stdlib prefixes the runtime already provides (none are needed for the subset).
+    core.stdlibImports = []
+
+    c.compile(c.asg)
+
+    println(m)
+
+    var res = llvm.RunJS(m, "jsmain")
+    println("lua compiler: program ran to completion")
+    exit(res.Ret)
+
+~~) ;

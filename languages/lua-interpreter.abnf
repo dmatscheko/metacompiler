@@ -1,0 +1,529 @@
+:title("Lua (subset) interpreter") ;
+:description("Parses a Lua subset and executes it directly, tree walking, without
+generating code.
+
+The language: local variables (local x, local a, b = 1, 2) and auto-global assignment
+(a bare 'x = e' assigns an existing variable up the scope chain, else creates a global),
+numbers, strings, booleans and nil, string concatenation with .. , arithmetic + - * /
+(true division) // (floor division) % (floor modulo), comparisons == ~= < > <= >= ,
+and / or / not with Lua truthiness (only false and nil are falsy; 0 and '' are true) and
+operand values, if cond then ... elseif ... else ... end, while cond do ... end, numeric
+for i = a, b [, step] do ... end, functions (function f(a, b) ... end, local function,
+function(...) ... end expressions, closures over their defining scope) with return,
+break, tables as arrays and maps ({} , {1, 2, 3} , {x = 1} , t.x , t[k] , 1 based array
+indexing), the length operator #t (the sequence border of a table), multiple assignment
+(a, b = 1, 2), and print.
+
+Not in the subset: the ^ power operator, bitwise operators, goto, repeat/until, generic
+for (pairs/ipairs), metatables, coroutines, the string/table/math libraries, method
+calls with the colon syntax, varargs, and true multiple return values (a call yields its
+first value only).
+
+There is no main(): the file simply runs top to bottom. Self checking programs count
+their failures and end with exit(fails). The same language with the same semantics is
+compiled to LLVM IR by lua-to-llvm-ir.abnf.") ;
+
+
+// --- main rules
+
+// Shared token productions (languages/lib).
+:include("lib/ident.abnf") ;
+:include("lib/dq-strings.abnf") ;
+:include("lib/numbers.abnf") ;
+:include("lib/bools.abnf") ;
+
+:startRule(Chunk) ;
+:whitespace(Whitespace) ;
+
+// The whole file is one block; buildChunk runs it (interpreter) or wraps it into
+// jsmain (compiler). Block collects the statement thunks of exactly its own subtree.
+Chunk       <~~ buildChunk(takeAll()) ~~>
+            = Block ;
+Block       <~~ push(makeSeq(takeAll())) ~~>
+            = { NotEnders Statement } ;
+
+// NotEnders stops a block at the keywords that terminate it (end / else / elseif),
+// which the plain identifier statements would otherwise swallow. It consumes nothing
+// and only fails (via the impossible-token trick) when one of those words - as a whole
+// word, not merely a prefix like 'ending' - is next.
+NotEnders = :script(~~
+    (function() {
+        // Skip leading whitespace and -- line comments (a :script sees the raw input).
+        var off = 0
+        var scanning = true
+        while (scanning) {
+            var cc = c.peek(off)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { off++ }
+            else if (cc === 45 && c.peek(off + 1) === 45) {
+                off += 2
+                while (c.peek(off) !== 10 && c.peek(off) !== -1) { off++ }
+            } else { scanning = false }
+        }
+        var p0 = c.peek(off)
+        if (p0 !== 101) { return undefined }
+        var p1 = c.peek(off + 1)
+        var p2 = c.peek(off + 2)
+        var p3 = c.peek(off + 3)
+        var after = -1
+        var hit = false
+        if (p1 === 110 && p2 === 100) {
+            after = c.peek(off + 3)
+            hit = true
+        } else if (p1 === 108 && p2 === 115 && p3 === 101) {
+            after = c.peek(off + 4)
+            if (after === 105 && c.peek(off + 5) === 102) { after = c.peek(off + 6) }
+            hit = true
+        }
+        if (!hit) { return undefined }
+        if ((after >= 48 && after <= 57) || (after >= 65 && after <= 90) || after === 95 || (after >= 97 && after <= 122)) {
+            return undefined
+        }
+        return abnf.newToken("\x01block-terminator", 0)
+    })()
+~~) ;
+
+// Every statement production pushes exactly one thunk. The keyword led statements come
+// first (they commit on their unique keyword); an assignment is tried before a bare
+// call statement, because its targets look like the start of a call until the '='.
+Statement   <~~ push(stmtPos(pop())) ~~>
+            = If | While | NumFor | DoBlock | LocalFunc | Local | Func | Return | Break
+            | AssignStat | CallStat ;
+
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
+ElseIf      <~~ push(makeElseIf(pop(), pop())) ~~>
+            = KwElseif Expression KwThen Block ;
+Else        <~~ push(makeElse(pop())) ~~>
+            = KwElse Block ;
+
+While       <~~ push(makeWhile(pop(), pop())) ~~>
+            = KwWhile Expression KwDo Block KwEndKw ;
+
+// for i = start, limit [, step] do ... end. The loop variable is local to the loop.
+NumFor      <~~ push(makeNumFor(takeAll())) ~~>
+            = KwFor ForName "=" Expression "," Expression [ "," Expression ] KwDo Block KwEndKw ;
+ForName     <~~ push({fname: up.in}) ~~>
+            = Id ;
+
+DoBlock     <~~ push(makeDoBlock(pop())) ~~>
+            = KwDo Block KwEndKw ;
+
+LocalFunc   <~~ push(makeLocalFunc(pop(), pop(), pop())) ~~>
+            = KwLocal KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
+
+Local       <~~ push(makeLocal(takeAll())) ~~>
+            = KwLocal LocalName { "," LocalName } [ "=" ExprList ] ;
+LocalName   <~~ push({lname: up.in}) ~~>
+            = Id ;
+
+Func        <~~ push(makeFunc(pop(), pop(), pop())) ~~>
+            = KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
+
+ParamList   <~~ push({params: takeAll()}) ~~>
+            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+
+Return      <~~ push(makeReturn(takeAll())) ~~>
+            = KwReturn [ ExprList ] ;
+Break       <~~ push(makeBreak()) ~~>
+            = KwBreak ;
+
+// varlist '=' exprlist. The targets and the values sit interleaved on the stack;
+// makeAssign tells them apart (a target is an object, a value thunk a function).
+AssignStat  <~~ push(makeAssign(takeAll())) ~~>
+            = Target { "," Target } "=" ExprList ;
+Target      <~~ push(makeTargetRef(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { DotSfx | IndexSfx } ;
+
+CallStat    <~~ push(exprToStmt(pop())) ~~>
+            = SuffixedExpr ;
+
+ExprList    = Expression { "," Expression } ;
+
+// Every expression production pushes exactly one thunk: function() -> value.
+Expression  = OrExpr ;
+
+OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
+            = AndExpr { KwOr AndExpr } ;
+AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
+            = CmpExpr { KwAnd CmpExpr } ;
+
+CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = ConcatExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ConcatExpr } ;
+
+// Concatenation is right associative, so it recurses on its own right hand side.
+ConcatExpr  <~~ push(makeConcat(takeAll())) ~~>
+            = AddExpr [ ".." ConcatExpr ] ;
+
+AddExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+// The floor division // must be tried before the true division /.
+MulExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = UnaryExpr { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+
+UnaryExpr   = NotExpr | LenExpr | NegExpr | SuffixedExpr ;
+NotExpr     <~~ push(makeNot(pop())) ~~>
+            = KwNot UnaryExpr ;
+LenExpr     <~~ push(makeLen(pop())) ~~>
+            = "#" UnaryExpr ;
+NegExpr     <~~ push(makeNeg(pop())) ~~>
+            = "-" UnaryExpr ;
+
+// f(a), t.x, t[k] in any mix.
+SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
+            = Primary { CallSfx | DotSfx | IndexSfx } ;
+CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" [ Expression { "," Expression } ] ")" ;
+DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
+            = "[" Expression "]" ;
+
+Primary     = "(" Expression ")" | FuncExpr | TableLit | DqString | SqString | Number
+            | True | False | Nil | VarRef ;
+
+FuncExpr    <~~ push(makeFuncExpr(pop(), pop())) ~~>
+            = KwFunction ParamList Block KwEndKw ;
+
+// { }, { 1, 2, 3 }, { x = 1 }, { [k] = v }, mixed; ',' or ';' separate the fields.
+TableLit    <~~ push(makeTable(takeAll())) ~~>
+            = "{" [ Field { FieldSep Field } [ FieldSep ] ] "}" ;
+FieldSep    = "," | ";" ;
+Field       = KeyField | NameField | PosField ;
+KeyField    <~~ var kv = pop(); push({fkind:"key", k: pop(), v: kv}) ~~>
+            = "[" Expression "]" "=" Expression ;
+NameField   <~~ var nv = pop(); push({fkind:"name", name: pop(), v: nv}) ~~>
+            = Id <~~ push(up.in) ~~> "=" Expression ;
+PosField    <~~ push({fkind:"pos", v: pop()}) ~~>
+            = Expression ;
+
+Number      = DecLit ;
+Nil         <~~ push(makeConst(undefined)) ~~>
+            = "nil" KwEnd ;
+VarRef      <~~ push(makeVarRef(up.in)) ~~>
+            = Id ;
+
+// Keywords, each closed by KwEnd so that 'ending' or 'ifx' stay identifiers.
+KwLocal     = "local" KwEnd ;
+KwFunction  = "function" KwEnd ;
+KwIf        = "if" KwEnd ;
+KwThen      = "then" KwEnd ;
+KwElseif    = "elseif" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwEndKw     = "end" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwReturn    = "return" KwEnd ;
+KwBreak     = "break" KwEnd ;
+KwAnd       = "and" KwEnd ;
+KwOr        = "or" KwEnd ;
+KwNot       = "not" KwEnd ;
+
+// Lua whitespace: blanks and newlines plus -- line comments.
+Whitespace  = { @+" \t\r\n" | Comment } ;
+Comment     = "--" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+// ---
+
+
+:startScript(~~
+
+    // Shared interpreter machinery (scopes, BRK/CONT protocol, constant/variable
+    // thunk builders, string unescaping). Lua specific behavior is configured on the
+    // `core` object and by overriding some builders below.
+    include("lib/interp-core.js")
+
+    // The compiler wraps each statement with a source-position marker; the interpreter
+    // does not need one, so stmtPos is the identity here (keeps the grammar identical).
+    function stmtPos(t) { return t }
+
+    // ----- Lua value helpers -----
+    // nil is the JS undefined; booleans, numbers and strings are native; a table is a
+    // plain JS object used as a map with string keys (numeric keys stringify, so the
+    // array part lives under "1", "2", ...); a function is a native closure.
+    function luaType(v) {
+        if (v === undefined || v === null) { return "nil" }
+        if (v === true || v === false) { return "boolean" }
+        if (typeof v == "number") { return "number" }
+        if (typeof v == "string") { return "string" }
+        if (typeof v == "function") { return "function" }
+        return "table"
+    }
+    // Only false and nil are falsy in Lua (0 and "" are true).
+    function luatruthy(v) { return v !== undefined && v !== null && v !== false }
+    // A table key: numbers and strings both address the map by their string form.
+    function luaKey(k) { return "" + k }
+    function luaToStr(v) {
+        if (v === undefined || v === null) { return "nil" }
+        if (v === true) { return "true" }
+        if (v === false) { return "false" }
+        if (typeof v == "object") { return "table" }
+        if (typeof v == "function") { return "function" }
+        return "" + v
+    }
+    function luaIndex(o, k) {
+        if (o === undefined || o === null) { fail("attempt to index a nil value") }
+        if (typeof o != "object") { fail("attempt to index a " + luaType(o) + " value") }
+        var kk = luaKey(k)
+        return hasOwn(o, kk) ? o[kk] : undefined
+    }
+    function luaSetIndex(o, k, v) {
+        if (o === undefined || o === null) { fail("attempt to index a nil value") }
+        if (typeof o != "object") { fail("attempt to index a " + luaType(o) + " value") }
+        o[luaKey(k)] = v
+    }
+    // #t: the sequence border - the largest n with t[1..n] all non nil (strings by length).
+    function luaLen(v) {
+        if (typeof v == "string") { return v.length }
+        if (typeof v == "object" && v !== null) {
+            var n = 0
+            while (hasOwn(v, "" + (n + 1)) && v["" + (n + 1)] !== undefined) { n++ }
+            return n
+        }
+        fail("attempt to get length of a " + luaType(v) + " value")
+    }
+    function luaMod(a, b) { return a - Math.floor(a / b) * b }
+
+    // ----- Overridden operator / expression builders -----
+
+    binOp = function(op, l, r) {
+        if (op == "+")  { return l + r }
+        if (op == "-")  { return l - r }
+        if (op == "*")  { return l * r }
+        if (op == "/")  { return l / r }
+        if (op == "//") { return Math.floor(l / r) }
+        if (op == "%")  { return luaMod(l, r) }
+        if (op == "==") { return l === r }
+        if (op == "~=") { return l !== r }
+        if (op == "<")  { return l < r }
+        if (op == ">")  { return l > r }
+        if (op == "<=") { return l <= r }
+        if (op == ">=") { return l >= r }
+    }
+    makeNeg = function(t) { return function() { return -t() } }
+    makeNot = function(t) { return function() { return !luatruthy(t()) } }
+    function makeLen(t) { return function() { return luaLen(t()) } }
+    // Concatenation: right associative, so at most two operands per node.
+    function makeConcat(items) {
+        if (items.length == 1) { return items[0] }
+        var l = items[0]
+        var r = items[1]
+        return function() { return luaToStr(l()) + luaToStr(r()) }
+    }
+    // and / or keep the deciding operand, with Lua truthiness.
+    makeOrAnd = function(items, isOr) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = anytype // The operands may be of mixed types.
+            v = items[0]()
+            for (var i = 1; i < items.length; i++) {
+                if (isOr) { if (luatruthy(v)) { return v } }
+                else      { if (!luatruthy(v)) { return v } }
+                v = items[i]()
+            }
+            return v
+        }
+    }
+
+    // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...].
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = anytype // A member chain hops between types.
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "call") {
+                    var argv = []
+                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
+                    if (typeof cur != "function") { fail("attempt to call a " + luaType(cur) + " value") }
+                    cur = cur.apply(undefined, argv)
+                } else if (s.kind == "field") {
+                    cur = luaIndex(cur, s.name)
+                } else {
+                    cur = luaIndex(cur, s.idx())
+                }
+            }
+            return cur
+        }
+    }
+
+    // { ... } fields, in source order: positional fields fill 1, 2, 3, ...
+    function makeTable(items) {
+        return function() {
+            var t = {}
+            var pos = 1
+            for (var i = 0; i < items.length; i++) {
+                var f = items[i]
+                if (f.fkind == "pos") { t["" + pos] = f.v(); pos++ }
+                else if (f.fkind == "name") { t[f.name] = f.v() }
+                else { t[luaKey(f.k())] = f.v() }
+            }
+            return t
+        }
+    }
+
+    // ----- Assignment -----
+    function pathKey(p) {
+        if (p.kind == "field") { return p.name }
+        return p.idx()
+    }
+    function assignTarget(ref, v) {
+        if (ref.path.length == 0) { setVar(ref.name, v); return }
+        var o = anytype // The containers along the path may be of mixed types.
+        o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) { o = luaIndex(o, pathKey(ref.path[i])) }
+        luaSetIndex(o, pathKey(ref.path[ref.path.length - 1]), v)
+    }
+    // items interleave targets (objects) and value thunks (functions); all right hand
+    // sides are evaluated first, then assigned positionally (missing values are nil).
+    function makeAssign(items) {
+        var targets = []
+        var vals = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { vals.push(items[i]) }
+            else { targets.push(items[i]) }
+        }
+        return function() {
+            var vs = []
+            for (var i = 0; i < vals.length; i++) { vs.push(vals[i]()) }
+            for (var t = 0; t < targets.length; t++) {
+                assignTarget(targets[t], t < vs.length ? vs[t] : undefined)
+            }
+        }
+    }
+    function makeLocal(items) {
+        var names = []
+        var vals = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { vals.push(items[i]) }
+            else { names.push(items[i].lname) }
+        }
+        return function() {
+            var vs = []
+            for (var i = 0; i < vals.length; i++) { vs.push(vals[i]()) }
+            for (var n = 0; n < names.length; n++) {
+                declVar(names[n], n < vs.length ? vs[n] : undefined)
+            }
+        }
+    }
+
+    // ----- Functions -----
+    // A Lua closure captures its defining scope chain and gets a fresh frame per call.
+    function makeClosure(params, bodyT) {
+        var env = scopes.slice()
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            var saved = scopes
+            scopes = env.slice()
+            var frame = {}
+            for (var p = 0; p < params.length; p++) {
+                frame[params[p]] = p < args.length ? args[p] : undefined
+            }
+            scopes.push(frame)
+            var r = bodyT()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+    function makeFuncExpr(bodyT, plist) {
+        return function() { return makeClosure(plist.params, bodyT) }
+    }
+    function makeFunc(bodyT, plist, name) {
+        return function() { setVar(name, makeClosure(plist.params, bodyT)) }
+    }
+    function makeLocalFunc(bodyT, plist, name) {
+        return function() {
+            declVar(name, undefined)
+            setVar(name, makeClosure(plist.params, bodyT))
+        }
+    }
+
+    // ----- Statement thunks -----
+    function makeElseIf(suite, cond) { return {elifCond: cond, suite: suite} }
+    function makeElse(suite) { return {elseSuite: suite} }
+    makeIf = function(items) {
+        var cond = items[0]
+        var thenT = items[1]
+        var elifs = []
+        var elseT = null
+        for (var i = 2; i < items.length; i++) {
+            if (items[i].elifCond != undefined) { elifs.push(items[i]) }
+            if (items[i].elseSuite != undefined) { elseT = items[i].elseSuite }
+        }
+        return function() {
+            if (luatruthy(cond())) { return thenT() }
+            for (var k = 0; k < elifs.length; k++) {
+                if (luatruthy(elifs[k].elifCond())) { return elifs[k].suite() }
+            }
+            if (elseT != null) { return elseT() }
+        }
+    }
+    function makeNumFor(items) {
+        var name = items[0].fname
+        var startT = items[1]
+        var limitT = items[2]
+        var block = items[items.length - 1]
+        var stepT = (items.length == 5) ? items[3] : null
+        return function() {
+            var i = startT()
+            var limit = limitT()
+            var step = stepT != null ? stepT() : 1
+            scopes.push({})
+            var res = undefined
+            while (step > 0 ? i <= limit : i >= limit) {
+                scopes[scopes.length - 1][name] = i
+                var r = block()
+                if (r != undefined) {
+                    if (r === BRK) { break }
+                    if (r !== CONT) { res = r; break }
+                }
+                i = i + step
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    function makeDoBlock(block) {
+        return function() {
+            scopes.push({})
+            var r = block()
+            scopes.pop()
+            return r
+        }
+    }
+    function makeReturn(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function() { return {isRet: true, v: t != null ? t() : undefined} }
+    }
+
+    // buildChunk runs the whole program (one seq thunk). The test calls exit(fails)
+    // itself; if it does not, the run falls through to the exit(0) below.
+    function buildChunk(items) { items[0]() }
+
+    // ----- Core library config (see lib/interp-core.js) -----
+    core.lang = "lua"
+    core.test = luatruthy
+    // A bare assignment to a name that is nowhere in scope creates a global.
+    core.setMiss = function(name, value) { globalScope[name] = value; return true }
+
+    // The host names a program can see.
+    globalScope["print"] = function() {
+        var out = ""
+        for (var i = 0; i < arguments.length; i++) {
+            if (i > 0) { out += "\t" }
+            out += luaToStr(arguments[i])
+        }
+        println(out)
+    }
+    globalScope["exit"] = function(code) { exit(code | 0) }
+
+    c.compile(c.asg)
+
+    println("lua interpreter: program ran to completion")
+    exit(0)
+
+~~) ;
