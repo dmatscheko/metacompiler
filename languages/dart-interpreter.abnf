@@ -37,29 +37,88 @@ subset is compiled to LLVM IR by dart-to-llvm-ir.abnf.") ;
 :whitespace(Whitespace) ;
 
 // The merged pushes of all top level declarations become one program thunk on the global stack.
+// Leading directives (import / export / part / library) are accepted and not implemented.
 Program     <~~ pushg(makeSeq(takeAll())) ~~>
-            = { Statement } ;
+            = { Directive } { Statement } ;
+
+// Library directives: accepted, not implemented (there is no module system). Each pushes
+// nothing, so only the statement thunks reach makeSeq.
+Directive   = ImportD | ExportD | PartD | LibraryD ;
+ImportD     <~~ notImpl("import directive", up.pos) ~~>
+            = KwImport UriStr [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
+ExportD     <~~ notImpl("export directive", up.pos) ~~>
+            = KwExport UriStr { Combinator } ";" ;
+PartD       <~~ notImpl("part directive", up.pos) ~~>
+            = KwPart [ KwOf ] ( UriStr | QualName ) ";" ;
+LibraryD    <~~ notImpl("library directive", up.pos) ~~>
+            = KwLibrary [ QualName ] ";" ;
+Combinator  = ( KwShow | KwHide ) Id { "," Id } ;
+UriStr      = SkipSqStr | SkipDqStr ;
+QualName    = Id { "." Id } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // The keyword-led statements come first: otherwise 'return x;' would parse as a variable
 // declaration of a variable x with the (identifier-shaped) type 'return'.
-Statement   = Block | ClassDecl | If | While | For | Return | Break | Continue
-            | FuncDecl | VarDecl | Empty | ExprStmt ;
+Statement   = [ Annotations ] StatementBody ;
+StatementBody = Block | ClassDecl | EnumDecl | MixinDecl | ExtensionDecl | TypedefDecl
+            | If | Switch | While | DoWhile | For | TryStmt | Return
+            | Break | Continue | Rethrow | Assert | FuncDecl | VarDecl | LabeledStmt
+            | Empty | ExprStmt ;
+
+// Metadata annotations (@Foo, @Foo.bar, @Foo(args)) are parsed and erased, like in Java.
+Annotations = Annotation { Annotation } ;
+Annotation  = "@" Id { "." Id } [ SkipParen ] ;
+
+// Top-level declarations accepted structurally and reported as not implemented; their
+// bodies are matched with SkipBlock so a full file parses.
+EnumDecl    <~~ push(notImplStmt("enum declaration", up.pos)) ~~>
+            = KwEnum Id [ SkipAngle ] [ KwWith Type { "," Type } ] [ KwImplements Type { "," Type } ] SkipBlock ;
+MixinDecl   <~~ push(notImplStmt("mixin declaration", up.pos)) ~~>
+            = KwMixin [ KwClass ] Id [ SkipAngle ] [ KwOn Type { "," Type } ] [ KwImplements Type { "," Type } ] SkipBlock ;
+ExtensionDecl <~~ push(notImplStmt("extension declaration", up.pos)) ~~>
+            = KwExtension [ KwType ] [ Id ] [ SkipAngle ] KwOn Type SkipBlock ;
+TypedefDecl <~~ push(notImplStmt("typedef declaration", up.pos)) ~~>
+            = KwTypedef ( TypedefNew | TypedefOld ) ;
+TypedefNew  = Id [ SkipAngle ] "=" Type [ KwFunction [ SkipAngle ] SkipParen ] [ "?" ] ";" ;
+TypedefOld  = Type Id [ SkipAngle ] SkipParen ";" ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
-// class Name { fields; constructors; methods }. Inheritance/mixins are not implemented.
+// class Name { fields; constructors; methods }. Class modifiers (abstract, base, final,
+// interface, sealed, mixin) are parsed and erased so the class still compiles.
+// Inheritance/mixins are not implemented.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Id <~~ push({cname: up.in}); curClassName = up.in ~~>
+            = [ ClassMods ] KwClass Id <~~ push({cname: up.in}); curClassName = up.in ~~>
               [ SkipAngle ] [ SuperClause ] "{" { Member } "}" ;
+ClassMods   = { ClassMod } ;
+ClassMod    = ( "abstract" | "base" | "final" | "interface" | "sealed" | "mixin" ) KwEnd ;
 SuperClause <~~ notImpl("inheritance/mixins", up.pos) ~~>
             = SuperPart { SuperPart } ;
 SuperPart   = ( KwExtends | KwWith | KwImplements ) Type { "," Type } ;
 
 // A member is a field, a method (Type? name(params) body) or a constructor (name == the
 // class name). NamedCtorMember is a named constructor - accepted, not implemented.
-Member      = NamedCtorMember | PlainFnMember | TypedFnMember | FieldMember ;
+// Metadata annotations and member modifiers (static/covariant/external/abstract) are
+// parsed and erased; getters, setters, operators and factory constructors are accepted
+// and not implemented.
+Member      = [ Annotations ] [ MemberMods ] MemberCore ;
+MemberCore  = GetterMember | SetterMember | OperatorMember | FactoryMember
+            | NamedCtorMember | PlainFnMember | TypedFnMember | FieldMember ;
+MemberMods  = { MemberMod } ;
+MemberMod   = ( "static" | "covariant" | "external" | "abstract" ) KwEnd ;
+// The bare (no return type) form is tried first: an optional leading Type would greedily
+// consume the get/set/operator keyword itself (it is a valid identifier) and then commit.
+GetterMember   <~~ takeAll(); push({skip: notImpl("getter", up.pos)}) ~~>
+            = KwGet Id MemberBody | Type KwGet Id MemberBody ;
+SetterMember   <~~ takeAll(); push({skip: notImpl("setter", up.pos)}) ~~>
+            = KwSet Id ParamList MemberBody | Type KwSet Id ParamList MemberBody ;
+OperatorMember <~~ takeAll(); push({skip: notImpl("operator overload", up.pos)}) ~~>
+            = KwOperator OverloadableOp ParamList MemberBody | Type KwOperator OverloadableOp ParamList MemberBody ;
+FactoryMember  <~~ takeAll(); push({skip: notImpl("factory constructor", up.pos)}) ~~>
+            = [ KwConst ] KwFactory Id [ "." Id ] ParamList ( MemberBody | "=" Type [ "." Id ] ";" ) ;
+OverloadableOp = "[]=" | "[]" | "==" | "<=" | ">=" | ">>>" | "<<" | ">>" | "~/"
+            | "+" | "-" | "*" | "/" | "%" | "<" | ">" | "&" | "|" | "^" | "~" ;
 NamedCtorMember <~~ takeAll(); push({skip: notImpl("named constructor", up.pos)}) ~~>
             = Id "." Id ParamList [ CtorInit ] MemberBody ;
 PlainFnMember <~~ push(makeMember(false, takeAll())) ~~>
@@ -85,10 +144,13 @@ AsyncMod    <~~ notImpl("async function", up.pos) ~~> = ( "async" | "sync" ) KwE
 
 // Fields: (Type | var | final [Type]) name [= init] { , name [= init] } ; - separate
 // complete alternatives so the leading-type / no-type cases never get stuck in an optional.
-FieldMember = FieldVar | FieldFinalTyped | FieldFinal | FieldTyped ;
+FieldMember = FieldVar | FieldFinalTyped | FieldFinal | FieldConstTyped | FieldConst | FieldLate | FieldTyped ;
 FieldVar        = KwVar        FieldList ";" ;
 FieldFinalTyped = KwFinal Type FieldList ";" ;
 FieldFinal      = KwFinal      FieldList ";" ;
+FieldConstTyped = KwConst Type FieldList ";" ;
+FieldConst      = KwConst      FieldList ";" ;
+FieldLate       = KwLate ( KwFinal Type | KwFinal | KwVar | Type ) FieldList ";" ;
 FieldTyped      = Type         FieldList ";" ;
 FieldList   = FieldDecl { "," FieldDecl } ;
 FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
@@ -174,18 +236,46 @@ ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
-Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
-Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+// break / continue accept an optional target label (the labeled loop is not implemented,
+// so the label warns and the break/continue still targets the innermost loop).
+Break       <~~ push(makeBreak()) ~~>    = KwBreak [ LoopLabel ] ";" ;
+Continue    <~~ push(makeContinue()) ~~> = KwContinue [ LoopLabel ] ";" ;
+LoopLabel   <~~ notImpl("labeled break/continue", up.pos) ~~> = Id ;
 Empty       <~~ push(function() {}) ~~>  = ";" ;
+
+// switch, do-while, try/catch/finally, rethrow and assert: accepted, not implemented.
+// Their bodies are matched with the balanced skips (SkipParen / SkipBlock) so the whole
+// construct parses; do-while and assert evaluate nothing (takeAll drops the child thunks).
+Switch      <~~ push(notImplStmt("switch statement", up.pos)) ~~>
+            = KwSwitch SkipParen SkipBlock ;
+DoWhile     <~~ takeAll(); push(notImplStmt("do-while loop", up.pos)) ~~>
+            = KwDo Statement KwWhile "(" Expression ")" ";" ;
+TryStmt     <~~ push(notImplStmt("try/catch", up.pos)) ~~>
+            = KwTry SkipBlock { CatchClause } [ KwFinally SkipBlock ] ;
+CatchClause = OnClause | CatchClauseOnly ;
+OnClause    = KwOn Type [ KwCatch "(" Id [ "," Id ] ")" ] SkipBlock ;
+CatchClauseOnly = KwCatch "(" Id [ "," Id ] ")" SkipBlock ;
+Rethrow     <~~ push(notImplStmt("rethrow", up.pos)) ~~>
+            = KwRethrow ";" ;
+Assert      <~~ takeAll(); push(notImplStmt("assert statement", up.pos)) ~~>
+            = KwAssert "(" Expression [ "," Expression ] [ "," ] ")" ";" ;
+// A labeled statement (label: stmt). The label targeting is not implemented, but the
+// labeled statement still runs.
+LabeledStmt <~~ notImpl("statement label", up.pos) ~~>
+            = Id ":" Statement ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression ";" ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = AssignExpr ;
-AssignExpr  = Assignment | Cascade ;
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+AssignExpr  = ThrowExpr | Assignment | Cascade ;
+// throw is an expression in Dart (=> throw e, cond ? a : throw e). Accepted, not
+// implemented; the operand is still evaluated so its calls stay visible.
+ThrowExpr   <~~ push(makeThrow(pop(), up.pos)) ~~>
+            = KwThrow AssignExpr ;
+Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "??=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
 // Cascade: target..m(args)..field = v . Every section acts on the one target and the
 // whole expression evaluates to that target. With no sections it is just the CondExpr,
@@ -203,7 +293,11 @@ DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
 IndexTarget <~~ push({idx: pop()}) ~~> = "[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
-            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+            = IfNullExpr [ "?" AssignExpr ":" AssignExpr ] ;
+// a ?? b : if-null. Accepted, not implemented; both operands are evaluated (calls
+// stay visible) and the first is returned. With no "??" it passes the operand through.
+IfNullExpr  <~~ push(makeIfNull(takeAll())) ~~>
+            = OrExpr { "??" <~~ push({ifnull: true, pos: up.pos}) ~~> OrExpr } ;
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
@@ -211,16 +305,35 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+            = TypeTestExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeTestExpr } ;
+// is / is! / as type tests, at relational precedence. 'as' is an identity cast (operand
+// evaluated, type erased); 'is' / 'is!' are accepted and not implemented.
+TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
+            = BitOrExpr [ TypeTestOp Type ] ;
+TypeTestOp  = IsOp | AsOp ;
+IsOp        <~~ push({tt: "is", pos: up.pos}) ~~> = KwIs [ "!" ] ;
+AsOp        <~~ push({tt: "as", pos: up.pos}) ~~> = KwAs ;
+// Bitwise and shift levels sit between the relational and additive levels, as in Dart.
+// A lone "|" that begins "||" fails its right operand and the iteration rolls back
+// (likewise "&" below "&&"), so the logical levels above keep working.
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { "|" <~~ push("|") ~~> BitXorExpr } ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push("^") ~~> BitAndExpr } ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { "&" <~~ push("&") ~~> ShiftExpr } ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "~/" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Await | Neg | Not | PostfixExpr ;
+UnaryExpr   = Await | Neg | Not | BitNot | PostfixExpr ;
 Await       <~~ notImpl("await", up.pos) ~~> = "await" KwEnd UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~> = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~> = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~> = "~" UnaryExpr ;
 
 PostfixExpr = IncDec | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
@@ -229,16 +342,33 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // A primary followed by any mix of method calls, field reads, index reads and the (not
 // implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx | BangSfx } ;
+            = Primary { MethodSfx | FieldSfx | IndexSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
 BangSfx     <~~ notImpl("null-assertion", up.pos); push({kind:"bang"}) ~~> = "!" !"=" ;
+// Null-aware access (?., ?.(), ?[]): accepted, not implemented; behaves like the plain
+// access under -warn-unsupported. Pushes the same markers foldCallMember already knows.
+NullMethodSfx <~~ notImpl("null-aware method call", up.pos); push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "?." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+NullFieldSfx <~~ notImpl("null-aware field access", up.pos) ~~>
+            = "?." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+NullIndexSfx <~~ notImpl("null-aware index", up.pos); push({kind:"index", idx: pop()}) ~~>
+            = "?" "[" Expression "]" ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = ArrowFn | "(" Expression ")" | ListLit | MapLit | StrLit | IntLit
+Primary     = ArrowFn | "(" Expression ")" | TypedColl | ListLit | MapLit | SetLit | StrLit | IntLit
             | True | False | Null | NewExpr | Call | VarRef ;
+
+// A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
+// argument is erased and the list/map/set is built as usual.
+TypedColl   = SkipAngle ( ListLit | MapLit | SetLit ) ;
+
+// A set literal { e, e, ... } (a non-map { } with no key:value pairs). Accepted and not
+// implemented; every element is still evaluated so its calls stay visible.
+SetLit      <~~ push(makeSet(takeAll(), up.pos)) ~~>
+            = "{" AssignExpr { "," AssignExpr } [ "," ] "}" ;
 
 // A closure: (params) => expr or (params) { statements }.
 ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
@@ -300,6 +430,22 @@ DqPlain     = "\x00"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\U0010ffff"
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
+// A balanced { ... } run (switch / try / enum / member bodies) accepted without being
+// understood. Dart string literals (single and double quoted, with $name / ${expr}
+// interpolation) are matched first so braces inside them are never miscounted.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipSqStr | SkipDqStr | SkipBlock | SkipBOther ;
+SkipSqStr   = "'" :whitespace() { SkipTpl | SkipSqCh } "'" :whitespace(Whitespace) ;
+SkipDqStr   = '"' :whitespace() { SkipTpl | SkipDqCh } '"' :whitespace(Whitespace) ;
+SkipTpl     = "${" :whitespace(Whitespace) { SkipItem } "}" ;
+SkipSqCh    = TplEsc | "$" | SqPlain ;
+SkipDqCh    = TplEsc | "$" | DqPlain ;
+SkipBOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// A balanced ( ... ) run (switch / annotation / try headers), parsed and ignored.
+SkipParen   = "(" { SkipSqStr | SkipDqStr | SkipParen | SkipPOther } ")" ;
+SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
+
 // Keywords end with a negative lookahead so 'ify' or 'classy' stay identifiers.
 KwClass     = "class" KwEnd ;
 KwNew       = "new" KwEnd ;
@@ -318,6 +464,34 @@ KwExtends   = "extends" KwEnd ;
 KwWith      = "with" KwEnd ;
 KwImplements = "implements" KwEnd ;
 KwLate      = "late" KwEnd ;
+KwIs        = "is" KwEnd ;
+KwAs        = "as" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwSwitch    = "switch" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwOn        = "on" KwEnd ;
+KwRethrow   = "rethrow" KwEnd ;
+KwAssert    = "assert" KwEnd ;
+KwImport    = "import" KwEnd ;
+KwExport    = "export" KwEnd ;
+KwPart      = "part" KwEnd ;
+KwLibrary   = "library" KwEnd ;
+KwOf        = "of" KwEnd ;
+KwShow      = "show" KwEnd ;
+KwHide      = "hide" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwMixin     = "mixin" KwEnd ;
+KwExtension = "extension" KwEnd ;
+KwType      = "type" KwEnd ;
+KwTypedef   = "typedef" KwEnd ;
+KwFunction  = "Function" KwEnd ;
+KwGet       = "get" KwEnd ;
+KwSet       = "set" KwEnd ;
+KwOperator  = "operator" KwEnd ;
+KwFactory   = "factory" KwEnd ;
 
 // ---
 
@@ -345,11 +519,61 @@ KwLate      = "late" KwEnd ;
         return "" + v
     }
 
-    // ----- integer ~/ division on top of the shared binOp -----
+    // ----- integer ~/ division and bitwise/shift ops on top of the shared binOp -----
     var baseBinOp = binOp
     binOp = function(op, l, r) {
         if (op == "~/") { return (l / r) | 0 }
+        if (op == "&") { return l & r }
+        if (op == "|") { return l | r }
+        if (op == "^") { return l ^ r }
+        if (op == "<<") { return l << r }
+        if (op == ">>") { return l >> r }
+        if (op == ">>>") { return l >>> r }
         return baseBinOp(op, l, r)
+    }
+
+    // ~v flips the bits of the ToInt32 value (agrees with the compiler's js_bxor -1).
+    function makeBitNot(t) { return function() { return ~t() } }
+
+    // A type test: items = [operand] or [operand, {tt, pos}]. 'as' erases to an identity
+    // cast; 'is' / 'is!' warn as not implemented but still evaluate the operand.
+    function makeTypeTest(items) {
+        if (items.length == 1) { return items[0] }
+        var operand = items[0]
+        var mk = items[1]
+        if (mk.tt == "as") { return operand }
+        notImpl(mk.tt + " type test", mk.pos)
+        return function() { operand(); return undefined }
+    }
+
+    // throw e : accepted, not implemented. The operand is evaluated (its calls stay
+    // visible) and the expression yields undefined.
+    function makeThrow(t, pos) {
+        notImpl("throw expression", pos)
+        return function() { t(); return undefined }
+    }
+    // a ?? b ?? c : items = [op, marker, op, marker, ...]. Not implemented; evaluate
+    // every operand (calls stay visible) and yield the first. Single operand: pass-through.
+    function makeIfNull(items) {
+        if (items.length == 1) { return items[0] }
+        notImpl("?? operator", items[1].pos)
+        var ops = []
+        for (var i = 0; i < items.length; i += 2) { ops.push(items[i]) }
+        return function() {
+            var first = anytype
+            first = undefined
+            for (var j = 0; j < ops.length; j++) { var v = ops[j](); if (j == 0) { first = v } }
+            return first
+        }
+    }
+    // A set literal: accepted, not implemented. Every element is evaluated; the value is
+    // an undefined placeholder.
+    function makeSet(items, pos) {
+        notImpl("set literal", pos)
+        return function() {
+            for (var i = 0; i < items.length; i++) { items[i]() }
+            return undefined
+        }
     }
 
     // ----- Maps (dicts): insertion-ordered {keys, vals} boxes -----
@@ -507,8 +731,12 @@ KwLate      = "late" KwEnd ;
     // ----- functions, closures, classes -----
     function bodyToStmt(bd) {
         if (bd.body != undefined) { return bd.body }
-        var et = bd.ebody
-        return function() { return {isRet: true, v: et()} }
+        if (bd.ebody != undefined) {
+            var et = bd.ebody
+            return function() { return {isRet: true, v: et()} }
+        }
+        // No body (abstract / external / ;-only member): an empty body.
+        return function() { return undefined }
     }
     // ----- parameters (positional + named-with-defaults) and argument evaluation -----
     // A named-param descriptor from a curly group is {pname|thisf, named:true, def:thunk|null}.
@@ -756,10 +984,12 @@ KwLate      = "late" KwEnd ;
         if (last.key != undefined) { return {obj: o, key: last.key, field: true} }
         return {obj: o, key: last.idx(), field: false}
     }
-    function makeAssign(items) {
+    function makeAssign(items, pos) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // ??= is accepted, not implemented; it lowers to a plain assignment.
+        if (op == "??=") { notImpl("??= operator", pos); op = "=" }
         return function() {
             var v = anytype
             v = valT()

@@ -30,7 +30,7 @@ The same language with the same semantics is interpreted directly by c-interpret
 :whitespace(Whitespace) ;
 
 Program     = { Include | PPLine | EnumDef | UnionDef | TypedefDecl | GFloatDecl
-              | StructDef | StructGDecl | FuncDef | Proto | GlobalDecl } ;
+              | StructDef | StructGDecl | FuncDef | Proto | GAggDecl | GlobalDecl } ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
 // #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
@@ -82,6 +82,16 @@ SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
 SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
+// A balanced ( ... ) run, parsed and ignored (used to skip __attribute__ argument
+// lists). Same shape as SkipBlock but for parentheses; strings and char literals are
+// matched first so parens inside them are never miscounted.
+SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
+SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
+
+// __attribute__((...)) GCC attribute specifiers are accepted and ignored wherever a
+// type specifier or a prototype tail may appear; the balanced (( )) body is skipped.
+Attr        = ( "__attribute__" | "__attribute" ) SkipParen ;
+
 // #include <stdio.h> or #include "local.h": the header is routed through the
 // shared resolveImport (lib/compile-core.js). System <...> headers listed in
 // core.stdlibImports resolve; a quoted "local.h" or an unknown header aborts,
@@ -110,19 +120,20 @@ FDecl       = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
 // A function prototype (int putchar(int c);) is accepted and ignored: the callees
 // are resolved by name anyway. It keeps the test programs valid for a real C compiler.
 Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
-            = TypeInt [ "*" ] Id <~~ push(up.in) ~~> ParamList ";" ;
+            = TypeInt [ "*" ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
 
 // The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
 FuncDef     <~~ buildFunction() ~~>
-            = TypeInt Id <~~ push(up.in) ~~> ParamList Block ;
+            = TypeInt Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
 // Param is tried before the empty (void): 'void' as a base type only makes a
 // parameter with '*' (void *p); a bare '(void)' has no declarator, so Param fails
-// on the missing name and the '(void)' fallback matches.
+// on the missing name and the '(void)' fallback matches. A trailing '...' (a
+// variadic function) is accepted and ignored: only its named parameters are tracked.
 ParamList   <~~ push(takeAll()) ~~>
-            = "(" [ ( Param { "," Param } | "void" KwEnd ) ] ")" ;
+            = "(" [ ( Param { "," Param } [ "," "..." ] | "void" KwEnd | "..." ) ] ")" ;
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = ParamType [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
+            = ParamType [ Stars ] Id <~~ push(up.in) ~~> ;
 ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~> ;
 
 // Globals are registered at build time.
@@ -140,9 +151,34 @@ StructGDecl <~~ defineStructGlobals(takeAll()) ~~>
 SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
             = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> [ ArraySize ] ;
 
+// Aggregate '= { ... }' initializers and multi-dimensional arrays are accepted and
+// reported as not implemented (the packed layout has no aggregate init and no nested
+// array type). AggForm matches only the unsupported shapes - a brace body, an empty
+// '[]', or two or more dimensions - so a plain 'int a[3];' still falls through to the
+// genuine declarators. The declarator, dimensions and '{ ... }' body are all skipped;
+// takeAll() drops whatever the dimension sizes pushed. GAggDecl is the top-level form.
+GAggDecl    <~~ takeAll(); notImpl("aggregate initializer", up.pos) ~~>
+            = AggBase { "*" } Id AggForm ";" ;
+AggBase     = BaseInt | KwStruct Id ;
+AggForm     = EmptyArr [ "=" SkipBlock ]
+            | ArraySize ArraySize { ArraySize } [ "=" SkipBlock ]
+            | ArraySize "=" SkipBlock
+            | "=" SkipBlock ;
+EmptyArr    = "[" "]" ;
+
+// A run of one or more '*' collapses to a single pointer level (the machine has no
+// multi level pointers); two or more is reported as not implemented but still parses.
+Stars       <~~ push(makeStars(up.in, up.pos)) ~~> = "*" { "*" } ;
+
 // Every statement production pushes exactly one thunk: function(block) -> nextBlock.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
-            | StructDecl | Decl | LFloatDecl | Goto | PPStmt | Label | Empty | ExprStmt ;
+            | AggDecl | StructDecl | Decl | LFloatDecl | Goto | PPStmt | Label | Empty | ExprStmt ;
+
+// Local aggregate / multi-dimensional / brace-initialized declarations: the statement
+// form of GAggDecl (see there). Placed before StructDecl and Decl so it claims only
+// the unsupported shapes and leaves genuine 'int a[3];' / 'struct P p;' to them.
+AggDecl     <~~ takeAll(); push(notImplStmt("aggregate initializer", up.pos)) ~~>
+            = AggBase { "*" } Id AggForm ";" ;
 
 // goto is accepted and reported as not implemented (the structured lowering has no
 // arbitrary jumps); a plain label passes its statement straight through, so labelled
@@ -227,7 +263,7 @@ Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeSeq(takeAll())) ~~>
             = BaseInt InitDecl { "," InitDecl } ;
 InitDecl    <~~ push(makeDecl(takeAll())) ~~>
-            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~>
               [ ArraySize | "=" AssignExpr ] ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
@@ -243,7 +279,7 @@ Expression  <~~ push(makeComma(takeAll())) ~~>
 
 AssignExpr  = Assignment | CondExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Lvalue ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+            = Lvalue ( "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "^=" | "|=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
 // An lvalue thunk evaluates to an address value. A place is a variable followed by
 // any mix of indexing and struct member steps: a[i], p.x, r.min.y, head->next->value.
@@ -296,7 +332,15 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | Cast | PostfixExpr ;
+
+// A cast '(Type)expr' is accepted and reported as not implemented (the integer
+// machine models one numeric type and uniform pointers, so a cast cannot change a
+// value). CastType requires a real type keyword, so '(expr)' still parses as a
+// parenthesized expression and only '(int)x' / '(struct P *)p' are taken as casts.
+Cast        <~~ pop(); push(cNIExpr("cast expression", up.pos)) ~~>
+            = "(" CastType ")" UnaryExpr ;
+CastType    = ( TypeInt | KwStruct Id | EnumRef ) { "*" } ;
 
 // sizeof(type): a compile-time constant. Scalars are 4 bytes, any pointer 8; a
 // struct value or a sizeof over an expression is reported as not implemented.
@@ -331,7 +375,11 @@ Call        <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
 // A place path as an expression (a[i], p.x, head->next) loads the resolved cell.
-Primary     = "(" Expression ")" | NumberLit | CharLit | PlaceRef | VarRef ;
+// A string literal (with adjacent-literal concatenation) has no char* backing on the
+// integer machine, so it is accepted and reported as not implemented.
+Primary     = "(" Expression ")" | StrLit | NumberLit | CharLit | PlaceRef | VarRef ;
+StrLit      <~~ push(cNIExpr("string literal", up.pos)) ~~>
+            = SkipStr { SkipStr } ;
 PlaceRef    <~~ push(makeLoadOf(makeVarPlace(takeAll()))) ~~>
             = Id <~~ push(up.in) ~~> PlaceSfx { PlaceSfx } ;
 NumberLit   <~~ push(makeInt(pop())) ~~>
@@ -341,17 +389,30 @@ CChar       = "\\" "\x20"..b"\x7e" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d".
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
+// A hexadecimal (0x...) or decimal integer literal with optional C integer suffixes
+// (u/U/l/L in any combination). parseInt reads the 0x prefix and stops at the suffix
+// letters, so hex and suffixed literals both yield the right 32-bit value.
 Number      <~~ push(parseInt(up.in)) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+            = ( "0x" | "0X" ) :whitespace() HexDig { HexDig } { IntSfx } :whitespace(Whitespace)
+            | ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } { IntSfx } :whitespace(Whitespace) ;
+HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
+IntSfx      = "u" | "U" | "l" | "L" ;
 
 // The scalar integer type: any run of int-family keywords and qualifiers, all of
 // which collapse to the one 32-bit int model (unsigned/signed/short/long widths and
 // const/volatile qualifiers are parsed and ignored; char is a full int-sized word;
-// void is accepted here so that void and void* parse). Pushes nothing.
-TypeInt     = TypeTok { TypeTok } ;
+// void is accepted here so that void and void* parse). Storage-class and function
+// specifiers (static/extern/register/auto/inline/_Noreturn/_Thread_local) and the
+// _Atomic/restrict qualifiers are likewise parsed and ignored; _Bool and _Complex
+// collapse to int; __attribute__((...)) specifiers are skipped. Pushes nothing.
+TypeInt     = TypeElem { TypeElem } ;
+TypeElem    = TypeTok | Attr ;
 TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
             | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
-            | "const" KwEnd | "volatile" KwEnd ;
+            | "const" KwEnd | "volatile" KwEnd
+            | "static" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
+            | "inline" KwEnd | "restrict" KwEnd | "_Bool" KwEnd | "_Complex" KwEnd
+            | "_Noreturn" KwEnd | "_Atomic" KwEnd | "_Thread_local" KwEnd ;
 // A declaration base type: a scalar, or an enum tag used as an int. Pushes nothing.
 BaseInt     = TypeInt | EnumRef ;
 EnumRef     = KwEnum Id ;
@@ -457,6 +518,15 @@ KwDefault   = "default" KwEnd ;
     // A C-appropriate placeholder for an unlowered expression: yields the i32 constant
     // 0 (the shared notImplExpr returns the i64 handle hUndef, wrong for this IR).
     function cNIExpr(construct, pos) { notImpl(construct, pos); return function(b) { return {b: b, v: zero} } }
+    // A run of '*' collapses to one pointer level; two or more is a multi-level
+    // pointer, which the single-word pointer model cannot represent - reported as not
+    // implemented but still parsed (the declarator keeps a single pointer level).
+    function makeStars(s, pos) {
+        var n = 0
+        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 42) n++ }
+        if (n > 1) notImpl("multi-level pointer", pos)
+        return "*"
+    }
     // enum: sequential values from 0, or continuing after an explicit '= n'.
     function makeEnumVal(items) { return items.length > 1 ? -items[1] : items[0] }
     function makeEnumerator(items) {
@@ -728,6 +798,11 @@ KwDefault   = "default" KwEnd ;
         if (op == "*=") return b.NewMul(a, v)
         if (op == "/=") return b.NewSDiv(a, v)
         if (op == "%=") return b.NewSRem(a, v)
+        if (op == "&=") return b.NewAnd(a, v)
+        if (op == "^=") return b.NewXor(a, v)
+        if (op == "|=") return b.NewOr(a, v)
+        if (op == "<<=") return b.NewShl(a, v)
+        if (op == ">>=") return b.NewAShr(a, v)
     }
     // storeTo writes v to the given address. Every stored pointer is normalized to
     // i32* first (struct pointers are typed by their getelementptrs, but the cells

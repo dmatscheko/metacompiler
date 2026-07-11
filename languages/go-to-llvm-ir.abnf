@@ -69,7 +69,7 @@ The same language with the same semantics is interpreted directly by go-interpre
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = PackageClause { Import } { TypeDecl | FuncDecl | TopVar } ;
+            = PackageClause { Import } { TypeDecl | TypeGroup | ConstGroup | ConstSingle | FuncDecl | TopVar } ;
 
 PackageClause = "package" KwEnd Id ;
 Import      = "import" KwEnd ( ImportStr | "(" { ImportStr } ")" ) ;
@@ -85,20 +85,40 @@ StructBody  = "struct" KwEnd "{" { Id <~~ push(up.in) ~~> Type [ ";" ] } "}" ;
 IfaceBody   <~~ push({iface: true}) ~~>
             = "interface" KwEnd SkipBlock ;
 
+// A grouped type declaration (type ( A struct {...}; B int )). The whole body is
+// balanced-skipped and reported not implemented: unlike a single struct decl, its
+// members are not lowered. Tried after TypeDecl (which needs an Id, not '(').
+TypeGroup   <~~ push(notImplStmt("grouped type declaration", up.pos)) ~~>
+            = "type" KwEnd SkipGroup [ ";" ] ;
+
+// const Name [Type] = expr is GENUINELY bound as if it were a var (its value is
+// reused via the var-decl thunk). A grouped const block (const ( A = iota ... )) is
+// balanced-skipped and reported not implemented (iota, implicit repetition and
+// bit-shift expressions are not modeled), so its names are not bound.
+ConstGroup  <~~ push(notImplStmt("grouped const declaration", up.pos)) ~~>
+            = "const" KwEnd SkipGroup [ ";" ] ;
+ConstSingle <~~ push(makeVarDecl(takeAll())) ~~>
+            = "const" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
+
 // func name(params) rets { } and func (r Type) name(params) rets { }
 FuncDecl    <~~ push(makeFuncStmt(takeAll())) ~~>
             = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> ParamList [ RetTypes ] Block ;
 Receiver    <~~ push({recv: takeAll()}) ~~>
             = "(" Id <~~ push(up.in) ~~> [ "*" ] Id <~~ push(up.in) ~~> ")" ;
 ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Id <~~ push(up.in) ~~> Type { "," Id <~~ push(up.in) ~~> Type } ] ")" ;
+            = "(" [ Id <~~ push(up.in) ~~> [ "..." ] Type { "," Id <~~ push(up.in) ~~> [ "..." ] Type } ] ")" ;
 RetTypes    = Type | "(" Type { "," Type } ")" ;
 
 // A package level var: its declaration thunk becomes a top level statement.
-TopVar      = VarDecl ;
+// Grouped form (var ( a int; b = 2 )) is GENUINELY bound one spec at a time.
+TopVar      = VarGroup | VarDecl ;
 
-Type        = "[" "]" Type | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
+Type        = "*" Type | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
             | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
+// A pointer type (*T) and a fixed size array ([N]T / [...]T) are parsed in every type
+// position; the pointer is transparent (structs already behave like references) and an
+// array declares like a slice. The size expression is parsed and ignored.
+ArrayTypeT  = "[" ( "..." | Expression <~~ pop() ~~> ) "]" Type ;
 MapTypeT    = "map" KwEnd "[" Type "]" Type ;
 FuncTypeT   = "func" KwEnd "(" [ Type { "," Type } ] ")" [ Type | "(" Type { "," Type } ")" ] ;
 // Channel and (anonymous) interface types are parsed so declarations mentioning
@@ -109,8 +129,12 @@ IfaceTypeT  = "interface" KwEnd SkipBlock ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | If | For | Switch | Return | Break | Continue | Defer | GoStmt | Select | VarDecl
-            | SimpleStmt | Empty ;
+            = Block | If | For | Switch | Return | Break | Continue | Defer | GoStmt | Select | Fallthrough
+            | ConstSingle | VarGroup | VarDecl | SimpleStmt | Empty ;
+
+// fallthrough: accepted, reported not implemented (our switch has no fallthrough model).
+Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
+            = "fallthrough" KwEnd [ ";" ] ;
 
 // go f(args) / go pkg.Fn(args): a goroutine. True concurrency is not modeled, so
 // it is reported not implemented; under -warn-unsupported the call still evaluates
@@ -134,6 +158,13 @@ VarDecl     <~~ push(makeVarDecl(takeAll())) ~~>
             = "var" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
 VType       <~~ push({ty: up.in}) ~~>
             = Type ;
+
+// var ( a int = 1; b = 2 ): each spec (one name) becomes its own var-decl thunk and
+// the group runs them in source order. Tried before VarDecl (needs '(' after var).
+VarGroup    <~~ push(makeVarGroup(takeAll())) ~~>
+            = "var" KwEnd "(" { VarSpec } ")" [ ";" ] ;
+VarSpec     <~~ push(makeVarDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
 
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
@@ -203,8 +234,13 @@ Switch      = TypeSwitch | ValueSwitch ;
 TypeSwitch  <~~ push(notImplStmt("type switch", up.pos)) ~~>
             = "switch" KwEnd [ Id ":=" ] TSSubject "." "(" "type" KwEnd ")" SkipBlock ;
 TSSubject   = Id { "." Id } ;
+// The subjectless body is tried before the subject so a bare 'switch {' never enters
+// SwitchSubj: that would push the composite-literal gate marker (CondOn) and then fail
+// its Expression on the '{', leaking the marker (pushes are not rolled back) and
+// blocking every later composite literal.
 ValueSwitch <~~ push(makeSwitch(takeAll())) ~~>
-            = "switch" KwEnd [ SwitchSubj ] "{" { CaseLabel | Statement } "}" ;
+            = "switch" KwEnd ( "{" { CaseLabel | Statement } "}"
+                             | SwitchSubj "{" { CaseLabel | Statement } "}" ) ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = CondOn Expression CondOff ;
 // The body is parsed flat: the labels must be tried before Statement (a bare 'case'
@@ -241,7 +277,7 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Recv | Neg | Not | PostfixExpr ;
+UnaryExpr   = Recv | Neg | Not | AddrOf | Deref | PostfixExpr ;
 // <-ch: a channel receive as a value. Accepted, reported not implemented; the
 // operand still evaluates under -warn-unsupported. Tried before Neg so '<-' wins
 // over '<' (a compare's '<' is followed by whitespace or a different next token).
@@ -251,13 +287,25 @@ Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
+// &x (address of) and *p (pointer dereference) are the identity on the value: structs
+// already behave like references, so taking a pointer and following one are no-ops.
+// No tag: the inner UnaryExpr thunk is the whole value. Binary * (multiply) is matched
+// at MulExpr, so unary * only appears in an operand position (a * *p, x := *p).
+AddrOf      = "&" UnaryExpr ;
+Deref       = "*" UnaryExpr ;
 
-// p.manhattan(), fmt.Println(...), p.x, s[i].
-PostfixExpr = CallMember ;
+// p.manhattan(), fmt.Println(...), p.x, s[i], and slice expressions s[lo:hi:max].
+// A slice expression is accepted and reported not implemented; its base and every
+// bound still evaluate under -warn-unsupported so nested calls stay visible. It is
+// tried before the plain postfix chain so the ':' inside the brackets is reached
+// (a chain's IndexSfx would fail at the ':' and fall through to the slice form).
+PostfixExpr = SliceExpr | CallMember ;
+SliceExpr   <~~ push(makeSliceNI(takeAll(), up.pos)) ~~>
+            = CallMember "[" [ Expression ] ":" [ Expression ] [ ":" Expression ] "]" ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx | TypeAssertSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ "..." ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -267,8 +315,46 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 // Only the single-result form is supported (not the comma-ok v, ok := x.(T)).
 TypeAssertSfx = "." "(" Type ")" ;
 
-Primary     = "(" Expression ")" | DqString | IntLit | True | False | FuncLit | SliceLit
-            | MapLit | MakeMap | MakeChan | StructLit | Call | VarRef ;
+Primary     = "(" Expression ")" | FloatLit | HexLit | OctLit | BinLit | DecULit | DqString | RawString | RuneLit
+            | IntLit | True | False | Nil | FuncLit | SliceLit
+            | MapLit | MakeMap | MakeChan | StructLit | CompLitNI | Call | VarRef ;
+
+// nil is the null value (structs, slices, maps and pointers share one). Tried before
+// VarRef so it is not read as an undefined identifier.
+Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
+
+// Go literal forms the shared token library does not carry. A float literal needs a
+// fraction or an exponent (a plain integer keeps going through IntLit); hex/octal/binary
+// literals and digit-group underscores parse to their integer value; a raw string keeps
+// its bytes verbatim; a rune literal is its first code point (an int).
+FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" }
+              ( "." { "0"..."9" } [ ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ]
+              | ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ) :whitespace(Whitespace) ;
+HexLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() HexDigits :whitespace(Whitespace) ;
+HexDigits   = HexDigit { HexDigit | "_" } ;
+HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+OctLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
+            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+BinLit      <~~ push(makeConst(parseRadix(up.in))) ~~>
+            = "0" ( "b" | "B" ) :whitespace() BinDigits :whitespace(Whitespace) ;
+BinDigits   = BinDigit { BinDigit | "_" } ;
+BinDigit    = "0" | "1" ;
+DecULit     <~~ push(makeConst(parseRadix(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "_" { "0"..."9" | "_" } :whitespace(Whitespace) ;
+RawString   = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } <~~ push(makeConst(up.in)) ~~> "`" :whitespace(Whitespace) ;
+RuneLit     = "'" :whitespace() { StrEsc | SqPlain } <~~ push(makeConst(runeVal(up.in))) ~~> "'" :whitespace(Whitespace) ;
+
+// A composite literal the positional forms above do not cover: keyed (Point{X: 1}),
+// empty (Config{}), nested (\[\]P{{1, 2}}) or with an unmodeled element type. Accepted
+// with a balanced-skipped body and reported not implemented. Gated off inside if/for
+// headers exactly like the positional struct literal.
+CompLitNI   <~~ push(notImplExpr("composite literal", up.pos)) ~~>
+            = StructGate CompHead SkipBlock ;
+CompHead    = [ "[" [ "..." | Expression <~~ pop() ~~> ] "]" ] [ "*" ]
+              ( "map" KwEnd "[" Type "]" [ "*" ] CompName | CompName ) ;
+CompName    = "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id { "." Id } ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
 FuncLit     <~~ push(makeFuncLit(pop(), pop())) ~~>
@@ -299,9 +385,10 @@ ZType       <~~ push({mzero: up.in}) ~~>
 StructLit   <~~ push(makeStructLit(takeAll())) ~~>
             = StructGate Id <~~ push(up.in) ~~> "{" Expression { "," Expression } "}" ;
 
-// f(a, b): a function or a builtin.
+// f(a, b): a function or a builtin. A trailing '...' (spread of a slice into a
+// variadic parameter) is accepted and ignored (the last argument passes through).
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ "..." ] ] ")" ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -339,6 +426,13 @@ SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(White
 SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
 SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5f" | "\x61"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// A balanced ( ... ) run that may contain nested braces (a grouped const/type/var body,
+// e.g. type ( A struct { x int }; B int )), consumed without interpreting it. Nested
+// braces are handled by SkipBlock; string/raw/char literals keep their delimiters. Like
+// SkipOther but with '(' and ')' excluded so they stay structural.
+SkipGroup   = "(" { SkipStr | SkipRaw | SkipChar | SkipBlock | SkipGroup | SkipGOther } ")" ;
+SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 // ---
 
@@ -824,6 +918,41 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5f" | "\x61"..."\x
     function makeRecv(chT, pos) {
         notImpl("channel receive", pos)
         return function(b) { var r = chT(b); return {b: r.b, v: hUndef} }
+    }
+    // s[lo:hi] / s[lo:hi:max]: accepted, reported not implemented. The base and every
+    // bound still emit (nested calls stay visible); the value is undefined.
+    function makeSliceNI(items, pos) {
+        notImpl("slice expression", pos)
+        return function(b) {
+            for (var i = 0; i < items.length; i++) { var r = items[i](b); b = r.b }
+            return {b: b, v: hUndef}
+        }
+    }
+    // var ( ... ) / a single var spec per name: run each spec's var-decl thunk in order.
+    function makeVarGroup(items) { return makeSeq(items) }
+    // A rune literal is its first code point (Go runes are int32); empty is 0.
+    function runeVal(s) { var u = unescapeJs(s); return u.length > 0 ? u.charCodeAt(0) : 0 }
+    // The integer value of a 0x / 0o / 0b literal, ignoring '_' digit separators.
+    function parseRadix(s) {
+        var radix = 10
+        var start = 0
+        if (s.length >= 2 && s.charAt(0) == "0") {
+            var p = s.charAt(1)
+            if (p == "x" || p == "X") { radix = 16; start = 2 }
+            else if (p == "o" || p == "O") { radix = 8; start = 2 }
+            else if (p == "b" || p == "B") { radix = 2; start = 2 }
+        }
+        var v = 0
+        for (var i = start; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc == 95) { continue }
+            var d = 0
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            v = v * radix + d
+        }
+        return v
     }
     // type Name struct {...} lowers to a descriptor; type Name interface {...} is
     // accepted (marked with {iface}) and reported not implemented.

@@ -109,7 +109,7 @@ PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short"
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
-            | Try | Throw | CtorCall | Decl | Empty | ExprStmt ;
+            | Try | Throw | Assert | Synchronized | CtorCall | Labeled | Decl | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -148,8 +148,44 @@ ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
 
-Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
-Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+// break / continue accept an optional target label; a labeled form is recognized but
+// not implemented (labels are dropped) and falls back to the plain innermost jump.
+Break       <~~ push(makeBreakL(takeAll(), up.pos)) ~~>    = KwBreak [ LabelRef ] ";" ;
+Continue    <~~ push(makeContinueL(takeAll(), up.pos)) ~~> = KwContinue [ LabelRef ] ";" ;
+LabelRef    <~~ push({label: up.in}) ~~> = Id ;
+
+// assert cond [: message];  recognized, not implemented (no assertion model); the
+// condition and the optional message are still evaluated so their calls stay visible.
+Assert      <~~ push(makeAssert(takeAll(), up.pos)) ~~>
+            = KwAssert Expression [ ":" Expression ] ";" ;
+// synchronized (lock) { }: recognized, not implemented (no locks); the lock expression
+// is evaluated and the block still runs.
+Synchronized <~~ push(makeSync(takeAll(), up.pos)) ~~>
+            = KwSync "(" Expression ")" Block ;
+// label: stmt  recognized, not implemented (the label is dropped); the statement runs.
+// NotSwitchKw keeps a switch's 'default:' / 'case ...:' from being misread as a label
+// (Id matches keywords in this grammar), the same guard C's Label uses.
+Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
+            = NotSwitchKw LabelName ":" Statement ;
+LabelName   <~~ push({lbl: up.in}) ~~> = Id ;
+NotSwitchKw = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var kws = ["case", "default"]
+        var hit = false
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(s + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01switch-label", 0) : undefined
+    })()
+~~) ;
 
 // try/catch/finally and throw parse fully but are not implemented (no exception
 // model). Under -warn-unsupported the try block runs and the thrown expression is
@@ -179,8 +215,14 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = Assignment | CondExpr ;
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
+Assignment  = KnownAssign | UnsupAssign ;
+KnownAssign <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+// Compound bitwise / shift assignment (&= |= ^= <<= >>= >>>=): recognized, not
+// implemented (no integer-bit semantics); the right side is still evaluated and stored,
+// the operator is dropped. Tried after the known set, so plain '=' etc. are unaffected.
+UnsupAssign <~~ push(makeUnsupAssign(takeAll(), up.pos)) ~~>
+            = Target ( "<<=" | ">>>=" | ">>=" | "&=" | "^=" | "|=" ) <~~ push(up.in) ~~> Expression ;
 
 // An assignable place: a variable (this and class names are variables too),
 // or a member/index path: this.x, p.x, Main.fails, arr[i].
@@ -196,13 +238,34 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
 
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = EqExpr { "&&" EqExpr } ;
+            = BitOrExpr { "&&" BitOrExpr } ;
+
+// The bitwise (| ^ &) and shift (<< >> >>>) levels are recognized but not implemented
+// (no integer-bit semantics); both operands are still evaluated and one warning fires
+// per operator run. A lone "|" that actually begins "||" fails its right side, the
+// iteration rolls back, and the enclosing || level picks it up (same for "&" and "&&").
+BitOrExpr   <~~ push(makeUnsupBin(takeAll(), up.pos, "bitwise operator")) ~~>
+            = BitXorExpr { "|" BitXorExpr } ;
+BitXorExpr  <~~ push(makeUnsupBin(takeAll(), up.pos, "bitwise operator")) ~~>
+            = BitAndExpr { "^" BitAndExpr } ;
+BitAndExpr  <~~ push(makeUnsupBin(takeAll(), up.pos, "bitwise operator")) ~~>
+            = EqExpr { "&" EqExpr } ;
 
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+            = InstOf { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> InstOf } ;
+
+// x instanceof Type [pattern]: recognized, not implemented (no type model); the operand
+// is still evaluated and the optional pattern variable is parsed and dropped.
+InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
+            = ShiftExpr [ InstTail ] ;
+InstTail    <~~ push({iof: 1}) ~~>
+            = KwInstanceof Type [ Id ] ;
+
+ShiftExpr   <~~ push(makeUnsupBin(takeAll(), up.pos, "shift operator")) ~~>
+            = AddExpr { ( "<<" | ">>>" | ">>" ) AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -210,11 +273,19 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Cast | Neg | Not | PostfixExpr ;
+UnaryExpr   = Cast | PreIncDec | Neg | Not | BitNot | UPlus | PostfixExpr ;
+// Prefix ++/-- yields the new value (genuine; must be tried before Neg so "--x" is not
+// parsed as "-(-x)"). Unary + is identity. ~x is recognized but not implemented.
+PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop(), up.pos)) ~~>
+            = "~" UnaryExpr ;
+UPlus       <~~ push(makeUPlus(pop())) ~~>
+            = "+" UnaryExpr ;
 
 // A cast is compiled as identity ((Type) expr yields expr). A primitive cast accepts
 // any unary operand; a reference cast excludes a leading '-'/'+' so `(a) - b` stays
@@ -259,7 +330,8 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = Lambda | MethodRef | "(" Expression ")" | DqString | IntLit | True | False | Null | VarRef ;
+Primary     = Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
+            | HexLit | BinLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null | VarRef ;
 
 // Lambdas and method references are real closures on the runtime. A lambda captures
 // the defining scope; a functional-interface call site (any method call on the
@@ -286,6 +358,37 @@ Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 // 'this' and class names resolve like variables.
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
+
+// ----- Widened literals: char, text block, hex / binary / floating-point / underscored /
+// suffixed numbers. Recognized, not implemented (the value model is 32-bit int + String,
+// so char has no numeric value and the others no distinct type). Each matches a form that
+// plain IntLit cannot, so ordinary decimal integers still reach IntLit untouched. -----
+
+// A char literal 'c' (escapes included). Reuses the balanced SkipChar shape.
+CharLit     <~~ push(notImplExpr("char literal", up.pos)) ~~> = SkipChar ;
+// A text block """ ... """ ; the !'"""' lookahead lets single and double quotes appear
+// inside without ending the block. Whitespace is disabled inside so newlines are content.
+TextBlock   <~~ push(notImplExpr("text block", up.pos)) ~~>
+            = '"""' :whitespace() { !'"""' TBItem } '"""' :whitespace(Whitespace) ;
+TBItem      = "\\" "\x00"..."\U0010ffff" | "\x00"..."\U0010ffff" ;
+// Hex / binary: the 0x / 0b prefix is distinctive, so these never shadow a decimal int.
+HexLit      <~~ push(notImplExpr("hex literal", up.pos)) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexDig { HexDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
+BinLit      <~~ push(notImplExpr("binary literal", up.pos)) ~~>
+            = ( "0b" | "0B" ) :whitespace() BinDig { BinDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
+// A fractional literal has a '.', so it is distinct from an integer (and from x.y access).
+FloatLit    <~~ push(notImplExpr("floating-point literal", up.pos)) ~~>
+            = Dig :whitespace() { Dig | "_" } "." { Dig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
+// A decimal digit run containing an underscore (a digit-grouping literal like 1_000_000).
+UscoreInt   <~~ push(notImplExpr("underscored integer literal", up.pos)) ~~>
+            = Dig :whitespace() { Dig } "_" { Dig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
+// A decimal digit run with an L / F / D suffix (like 100L, 2F, 5D).
+SuffInt     <~~ push(notImplExpr("suffixed integer literal", up.pos)) ~~>
+            = Dig :whitespace() { Dig } NumSfx :whitespace(Whitespace) ;
+HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
+BinDig      = "0" | "1" ;
+Dig         = "0"..."9" ;
+NumSfx      = "L" | "l" | "F" | "f" | "D" | "d" ;
 
 // ----- Widened surface: generics, annotations, exceptions, casts (see :description) -----
 
@@ -364,6 +467,9 @@ KwSuper     = "super" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
 KwDefault   = "default" KwEnd ;
+KwInstanceof = "instanceof" KwEnd ;
+KwAssert    = "assert" KwEnd ;
+KwSync      = "synchronized" KwEnd ;
 
 // ---
 
@@ -478,6 +584,59 @@ KwDefault   = "default" KwEnd ;
             var m = p.obj[p.key]
             p.obj[p.key] = (m + d) | 0
             return m
+        }
+    }
+    // Prefix ++/-- : like makeIncDec but yields the NEW value (genuine).
+    function makePreIncDec(ref, op) {
+        var d = (op == "++") ? 1 : -1
+        return function() {
+            if (ref.path.length == 0) {
+                var n = (getVar(ref.name) + d) | 0
+                setVar(ref.name, n)
+                return n
+            }
+            var p = resolveRef(ref)
+            var m = (p.obj[p.key] + d) | 0
+            p.obj[p.key] = m
+            return m
+        }
+    }
+    // Unary + is identity. ~x is recognized, not implemented; its operand is still
+    // evaluated so its calls stay visible.
+    function makeUPlus(inner) { return inner }
+    function makeBitNot(inner, pos) {
+        notImpl("bitwise not", pos)
+        return function() { inner(); return undefined }
+    }
+    // A bitwise / shift operator run: recognized, not implemented. A single operand (no
+    // operator) is a transparent pass-through; otherwise every operand is still evaluated.
+    function makeUnsupBin(items, pos, label) {
+        if (items.length == 1) return items[0]
+        notImpl(label, pos)
+        return function() {
+            for (var i = 0; i < items.length; i++) { items[i]() }
+            return undefined
+        }
+    }
+    // x instanceof Type [pattern]: recognized, not implemented; the operand is still
+    // evaluated. A single item (no instanceof tail) is a transparent pass-through.
+    function makeInstOf(items, pos) {
+        if (items.length == 1) return items[0]
+        notImpl("instanceof", pos)
+        var operand = items[0]
+        return function() { operand(); return undefined }
+    }
+    // Compound bitwise / shift assignment (a &= b): recognized, not implemented; the right
+    // side is evaluated and stored, the operator is dropped.
+    function makeUnsupAssign(items, pos) {
+        notImpl("compound bitwise/shift assignment", pos)
+        var ref = items[0]
+        var valT = items[2]
+        return function() {
+            var v = valT()
+            if (ref.path.length == 0) { setVar(ref.name, v) }
+            else { var p = resolveRef(ref); p.obj[p.key] = v }
+            return v
         }
     }
 
@@ -618,6 +777,33 @@ KwDefault   = "default" KwEnd ;
     function makeCtorCall(args, pos) {
         notImpl("explicit constructor invocation", pos)
         return function() { for (var i = 0; i < args.length; i++) { args[i]() } }
+    }
+    // assert cond [: msg]; -- not implemented; the condition and message still evaluate.
+    function makeAssert(items, pos) {
+        notImpl("assert", pos)
+        return function() { for (var i = 0; i < items.length; i++) { items[i]() } }
+    }
+    // synchronized (lock) block -- not implemented; the lock evaluates and the block runs.
+    function makeSync(items, pos) {
+        notImpl("synchronized statement", pos)
+        var lockT = items[0]
+        var bodyT = items[1]
+        return function() { lockT(); return bodyT() }
+    }
+    // label: stmt -- not implemented; the label is dropped and the statement still runs.
+    function makeLabeled(items, pos) {
+        notImpl("labeled statement", pos)
+        return items[1]
+    }
+    // break / continue with a target label: recognized, not implemented; fall back to the
+    // plain innermost jump. Without a label they stay the genuine break / continue.
+    function makeBreakL(items, pos) {
+        if (items.length > 0) { notImpl("labeled break", pos) }
+        return makeBreak()
+    }
+    function makeContinueL(items, pos) {
+        if (items.length > 0) { notImpl("labeled continue", pos) }
+        return makeContinue()
     }
 
     function makeDecl(items) {

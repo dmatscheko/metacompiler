@@ -55,8 +55,8 @@ Program     <~~ buildMain(takeAll()) ~~>
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | ClassDecl | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
-            | Throw | FuncDecl | Empty | ExprStmt ;
+            = Block | ImportStmt | ExportStmt | ClassDecl | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
+            | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncDecl | Empty | ExprStmt ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
 // anywhere. The body is a flat list - the labels must be tried before Statement,
@@ -117,7 +117,17 @@ FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
             = KwFunction Id <~~ push(up.in) ~~> ParamList Block ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
-            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+
+// A parameter: a plain name (genuine), or a default/rest parameter, which are ACCEPTED
+// (the bare name is still bound) but fire notImplemented for the dropped default/rest.
+Param       = RestParam | DefaultParam | PlainParam ;
+PlainParam  <~~ push(up.in) ~~>
+            = Id ;
+DefaultParam <~~ pop(); notImpl("default parameter", up.pos) ~~>
+            = Id <~~ push(up.in) ~~> "=" AssignExpr ;
+RestParam   <~~ notImpl("rest parameter", up.pos) ~~>
+            = "..." Id <~~ push(up.in) ~~> ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -130,9 +140,16 @@ Expression  = AssignExpr ;
 
 // Assignment is an expression and associates to the right: a = b = c.
 // If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
-AssignExpr  = Assignment | CondExpr ;
+AssignExpr  = Assignment | AssignExtended | Yield | CondExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+
+// The extended compound assignments (** <<  >> >>> & ^ | && || ?? forms) and yield are
+// accepted but not lowered; the longer operators are tried before their prefixes.
+AssignExtended <~~ takeAll(); push(notImplExpr("compound assignment", up.pos)) ~~>
+            = Target ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|=" ) AssignExpr ;
+Yield       <~~ takeAll(); push(notImplExpr("yield expression", up.pos)) ~~>
+            = KwYield [ "*" ] [ AssignExpr ] ;
 
 // An assignable place: a variable, or a member path that may reach through calls
 // but must end in a member: findScope(name)[name] = value.
@@ -141,7 +158,12 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { CallSuffix | DotSuffix | IndexSuffix } ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
-            = OrExpr [ "?" AssignExpr ":" AssignExpr ] ;
+            = NullishExpr [ "?" AssignExpr ":" AssignExpr ] ;
+
+// Nullish coalescing sits just under the ternary; it is accepted but not lowered.
+// With no "??" it is a transparent pass-through of its single operand.
+NullishExpr <~~ push(makeNullish(takeAll(), up.pos)) ~~>
+            = OrExpr { "??" OrExpr } ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
@@ -161,7 +183,13 @@ BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
 
 // The longer operators must be tried before their prefixes ("===" before "==").
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = InExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> InExpr } ;
+
+// The 'instanceof' and 'in' relational operators are accepted but not lowered
+// (no prototype chain / key-membership model in the subset). With neither operator
+// present this level is a transparent pass-through.
+InExpr      <~~ push(makeInInstanceof(takeAll(), up.pos)) ~~>
+            = RelExpr { ( KwInstanceof | KwIn ) <~~ push("op") ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
@@ -173,9 +201,21 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = ExpExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ExpExpr } ;
 
-UnaryExpr   = PreIncDec | Neg | Not | BitNot | Typeof | PostfixExpr ;
+// Exponentiation binds tighter than the multiplicatives; accepted but not lowered.
+// With no "**" it is a transparent pass-through of its single operand.
+ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
+            = UnaryExpr { "**" UnaryExpr } ;
+
+UnaryExpr   = PreIncDec | Neg | Not | BitNot | Typeof | Delete | Void | Await | PostfixExpr ;
+// delete, void and await are accepted but not lowered.
+Delete      <~~ pop(); push(notImplExpr("delete operator", up.pos)) ~~>
+            = KwDelete UnaryExpr ;
+Void        <~~ pop(); push(notImplExpr("void operator", up.pos)) ~~>
+            = KwVoid UnaryExpr ;
+Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
+            = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
@@ -196,38 +236,75 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
 SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
-            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
 // A call after a member access is a method call: the object becomes 'this' of the callee.
+// An optional-chaining suffix (?. ?.[ ?.( ) is accepted but routes the whole chain to
+// notImplemented (no short-circuit-on-nullish model in the subset).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSuffix | DotSuffix | IndexSuffix } ;
+            = Primary { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix } ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
-            = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+            = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 DotSuffix   = "." Id <~~ push({kind:"member", key: makeConst(up.in)}) ~~> ;
 IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
             = "[" Expression "]" ;
+OptChainSuffix <~~ takeAll(); push({kind:"optchain", pos: up.pos}) ~~>
+            = "?." ( CallSuffix | IndexSuffix | Id ) ;
 
-Primary     = ArrowFn | NewExpr | "(" Expression ")" | FunctionExpr | TemplateLit | ObjectLit | ArrayLit | StringLit | NumberLit
+// A call/array/new argument; the spread form (...expr) is accepted but not lowered.
+Arg         = SpreadElem | AssignExpr ;
+SpreadElem  <~~ pop(); push(notImplExpr("spread element", up.pos)) ~~>
+            = "..." AssignExpr ;
+
+Primary     = AsyncArrow | ArrowFn | NewTarget | NewExpr | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
+            | TemplateLit | RegexLit | ObjectLit | ArrayLit | StringLit | NumberLit
             | True | False | Null | Undefined | VarRef ;
 
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push({cls: up.in}) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+            = KwNew Id <~~ push({cls: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+
+// new.target, async arrows, async/generator function expressions and class expressions
+// are all accepted but not lowered.
+NewTarget   <~~ push(notImplExpr("new.target", up.pos)) ~~>
+            = KwNew "." "target" KwEnd ;
+AsyncArrow  <~~ takeAll(); push(notImplExpr("async arrow function", up.pos)) ~~>
+            = KwAsync ArrowParams "=>" ArrowBody ;
+AsyncFuncExpr <~~ takeAll(); push(notImplExpr("async function expression", up.pos)) ~~>
+            = KwAsync KwFunction [ "*" ] [ Id ] ParamList Block ;
+GenFuncExpr <~~ takeAll(); push(notImplExpr("generator function expression", up.pos)) ~~>
+            = KwFunction "*" [ Id ] ParamList Block ;
+ClassExpr   <~~ takeAll(); push(notImplExpr("class expression", up.pos)) ~~>
+            = KwClass [ KwExtends Id | Id [ KwExtends Id ] ] "{" { ClassMember } "}" ;
 
 // The optional name of a function expression is accepted but not bound.
 FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
             = KwFunction [ Id ] ParamList Block ;
 
+// The object literal accepts, besides the genuine `key: value` form, the modern
+// property forms - spread, computed keys, getters/setters, shorthand methods (incl.
+// async/generator) and shorthand names - each ACCEPTED and routed to notImplemented.
 ObjectLit   <~~ push(makeObject(takeAll())) ~~>
-            = "{" [ PropDef { "," PropDef } ] "}" ;
+            = "{" [ ObjMember { "," ObjMember } [ "," ] ] "}" ;
+ObjMember   = SpreadProp | ComputedProp | GetSetProp | MethodProp | PropDef | ShorthandProp ;
 PropDef     <~~ push(makeProp(pop(), pop())) ~~>
             = PropKey ":" AssignExpr ;
 PropKey     = Id <~~ push(up.in) ~~> | StringLit ;
+SpreadProp  <~~ takeAll(); push(notImplProp("object spread", up.pos)) ~~>
+            = "..." AssignExpr ;
+ComputedProp <~~ takeAll(); push(notImplProp("computed property", up.pos)) ~~>
+            = "[" Expression "]" ( ":" AssignExpr | ParamList Block ) ;
+GetSetProp  <~~ takeAll(); push(notImplProp("accessor property", up.pos)) ~~>
+            = ( "get" | "set" ) KwEnd PropKey ParamList Block ;
+MethodProp  <~~ takeAll(); push(notImplProp("method property", up.pos)) ~~>
+            = [ "async" KwEnd ] [ "*" ] PropKey ParamList Block ;
+ShorthandProp <~~ push(notImplProp("shorthand property", up.pos)) ~~>
+            = Id ;
 
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
-            = "[" [ AssignExpr { "," AssignExpr } ] "]" ;
+            = "[" [ Arg { "," Arg } [ "," ] ] "]" ;
 
 // Arrow functions: x => x+1, (a, b) => a+b, () => { ... }. They reuse the same
 // closure machinery (emitFunction/js_closure) as function expressions; an expression
@@ -235,7 +312,7 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
 ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
             = ArrowParams "=>" ArrowBody ;
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
-            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")"
+            = "(" [ Param { "," Param } [ "," ] ] ")"
             | Id <~~ push(up.in) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
 ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
@@ -296,15 +373,27 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 
 // The members: a constructor, methods and fields (tried in that order so 'constructor'
 // and a method's '(' are recognized before the field form). A stray ';' is skipped.
-ClassMember = ClassSemi | CtorDef | MethodDef | FieldDef ;
+// The modern member forms (static block, accessors, async/generator/computed/private
+// methods and fields) are ACCEPTED and routed to notImplemented (they push a skip
+// marker so makeClassStmt ignores them).
+ClassMember = ClassSemi | ClassStaticBlock | CtorDef | ClassGetSet | ClassSpecialMethod | ClassPrivate | ClassComputed | MethodDef | FieldDef ;
 ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
+ClassStaticBlock <~~ takeAll(); push(notImplMember("static block", up.pos)) ~~>
+            = "static" KwEnd Block ;
+ClassGetSet <~~ takeAll(); push(notImplMember("accessor member", up.pos)) ~~>
+            = MemberMods ( "get" | "set" ) KwEnd PropKey ParamList Block ;
+ClassSpecialMethod <~~ takeAll(); push(notImplMember("async/generator method", up.pos)) ~~>
+            = MemberMods ( "async" KwEnd [ "*" ] | "*" ) PropKey ParamList Block ;
+ClassPrivate <~~ takeAll(); push(notImplMember("private member", up.pos)) ~~>
+            = MemberMods "#" Id ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+ClassComputed <~~ takeAll(); push(notImplMember("computed member", up.pos)) ~~>
+            = MemberMods "[" Expression "]" ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
 
 // A constructor.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
             = KwConstructor CtorParams Block ;
 CtorParams  <~~ push(takeAll()) ~~>
-            = "(" [ CtorParam { "," CtorParam } ] ")" ;
-CtorParam   = Id <~~ push(up.in) ~~> ;
+            = "(" [ Param { "," Param } [ "," ] ] ")" ;
 
 // A method (instance unless 'static').
 MethodDef   <~~ push(makeMethod(takeAll())) ~~>
@@ -318,6 +407,36 @@ MemberMods  <~~ push({mods: takeAll()}) ~~>
             = { MemberMod <~~ push(up.in) ~~> } ;
 MemberMod   = "static" KwEnd ;
 
+// ----- Widened statement surface (ACCEPTED, routed to notImplemented) -----
+
+// ES module import/export. The clause shapes are parsed structurally and dropped;
+// there is no module loader in the subset (imports for the other languages resolve
+// against a stdlib set; this dynamic dialect has none).
+ImportStmt  <~~ takeAll(); push(notImplStmt("import statement", up.pos)) ~~>
+            = KwImport ( ImportClause KwFrom StringLit | StringLit ) [ ";" ] ;
+ImportClause = ImportBinding [ "," ImportTail ] | ImportTail ;
+ImportBinding = Id ;
+ImportTail  = ImportNs | ImportNamed ;
+ImportNs    = "*" KwAs Id ;
+ImportNamed = "{" [ ImportSpec { "," ImportSpec } [ "," ] ] "}" ;
+ImportSpec  = ( Id | StringLit ) [ KwAs Id ] ;
+
+ExportStmt  <~~ takeAll(); push(notImplStmt("export statement", up.pos)) ~~>
+            = KwExport ( ExportAll | ExportNamed [ KwFrom StringLit ] | KwDefault AssignExpr | Statement ) [ ";" ] ;
+ExportAll   = "*" [ KwAs Id ] KwFrom StringLit ;
+ExportNamed = "{" [ ExportSpec { "," ExportSpec } [ "," ] ] "}" ;
+ExportSpec  = ( Id | StringLit ) [ KwAs ( Id | StringLit ) ] ;
+
+// with, debugger, and async/generator function declarations: accepted, not lowered.
+With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
+            = KwWith "(" Expression ")" Statement ;
+Debugger    <~~ push(notImplStmt("debugger statement", up.pos)) ~~>
+            = KwDebugger [ ";" ] ;
+AsyncFuncDecl <~~ takeAll(); push(notImplStmt("async function", up.pos)) ~~>
+            = KwAsync KwFunction [ "*" ] Id ParamList Block ;
+GenFuncDecl <~~ takeAll(); push(notImplStmt("generator function", up.pos)) ~~>
+            = KwFunction "*" Id ParamList Block ;
+
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
@@ -325,12 +444,43 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
 StringLit   = DqString | SqString ;
-NumberLit   = HexLit | DecLit ;
+
+// The genuine numeric literals (hex tried before decimal) plus the widened forms -
+// binary, octal, BigInt and numeric separators - which are ACCEPTED but not lowered.
+NumberLit   = HexLit | BinLit | OctLit | BigIntLit | SepNumLit | DecLit ;
 
 // Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
 HexLit      <~~ push(makeConst(hexAt(up.in, 2, up.in.length - 2))) ~~>
             = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+BinLit      <~~ push(notImplExpr("binary literal", up.pos)) ~~>
+            = ( "0b" | "0B" ) :whitespace() BinDigit { BinDigit | "_" } :whitespace(Whitespace) ;
+BinDigit    = "0"..."1" ;
+OctLit      <~~ push(notImplExpr("octal literal", up.pos)) ~~>
+            = ( "0o" | "0O" ) :whitespace() OctDigit { OctDigit | "_" } :whitespace(Whitespace) ;
+OctDigit    = "0"..."7" ;
+// A decimal BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is
+// not orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit).
+BigIntLit   <~~ push(notImplExpr("BigInt literal", up.pos)) ~~>
+            = Digit { Digit | "_" } "n" :whitespace(Whitespace) ;
+// A decimal with numeric separators (1_000, 3.141_59); requires at least one '_'.
+SepNumLit   <~~ push(notImplExpr("numeric separator", up.pos)) ~~>
+            = Digit { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] :whitespace(Whitespace) ;
+Digit       = "0"..."9" ;
+
+// A regular-expression literal in a primary position: /pattern/flags. A leading '/' at
+// an operand position is division (handled at MulExpr), so this is only ever reached
+// where a regex is genuinely valid. Accepted but not lowered (no regex engine).
+RegexLit    <~~ push(notImplExpr("regular expression literal", up.pos)) ~~>
+            = "/" :whitespace() RegexFirst { RegexPart } "/" { RegexFlag } :whitespace(Whitespace) ;
+RegexFirst  = RegexEsc | RegexClass | RegexFirstChar ;
+RegexPart   = RegexEsc | RegexClass | RegexBodyChar ;
+RegexClass  = "[" { RegexEsc | RegexClassChar } "]" ;
+RegexEsc    = "\\" ( "\x00"..."\x09" | "\x0b"..."\U0010ffff" ) ;
+RegexFirstChar = "\x00"..."\x09" | "\x0b"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\x5a" | "\x5d"..."\U0010ffff" ;
+RegexBodyChar  = "\x00"..."\x09" | "\x0b"..."\x2e" | "\x30"..."\x5a" | "\x5d"..."\U0010ffff" ;
+RegexClassChar = "\x00"..."\x09" | "\x0b"..."\x5b" | "\x5e"..."\U0010ffff" ;
+RegexFlag   = "a"..."z" ;
 
 // The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
 KwVar       = ( "var" | "let" | "const" ) KwEnd ;
@@ -358,6 +508,18 @@ KwExtends   = "extends" KwEnd ;
 KwNew       = "new" KwEnd ;
 KwSuper     = "super" KwEnd ;
 KwConstructor = "constructor" KwEnd ;
+KwImport    = "import" KwEnd ;
+KwExport    = "export" KwEnd ;
+KwFrom      = "from" KwEnd ;
+KwAs        = "as" KwEnd ;
+KwWith      = "with" KwEnd ;
+KwDebugger  = "debugger" KwEnd ;
+KwAsync     = "async" KwEnd ;
+KwAwait     = "await" KwEnd ;
+KwYield     = "yield" KwEnd ;
+KwDelete    = "delete" KwEnd ;
+KwVoid      = "void" KwEnd ;
+KwInstanceof = "instanceof" KwEnd ;
 
 // ---
 
@@ -410,6 +572,18 @@ KwConstructor = "constructor" KwEnd ;
             return {b: b, v: callExt(b, "js_bxor", [r.v, callExt(b, "js_num_i", [handle(-1)])])}
         }
     }
+
+    // ----- Widened-surface helpers: transparent pass-through with one operand, else
+    // ACCEPTED-but-not-lowered (notImplExpr). The single-operand fast path keeps the
+    // emitted IR byte-identical to the pre-widening grammar for ordinary expressions. -----
+    function makeNullish(items, pos) { if (items.length == 1) return items[0]; return notImplExpr("nullish coalescing (??)", pos) }
+    function makeExp(items, pos)     { if (items.length == 1) return items[0]; return notImplExpr("exponentiation (**)", pos) }
+    function makeInInstanceof(items, pos) { if (items.length == 1) return items[0]; return notImplExpr("instanceof / in operator", pos) }
+    // A not-lowered object property: a deterministic placeholder descriptor whose value
+    // thunk is a notImplExpr (both engines emit the same placeholder key/value).
+    function notImplProp(name, pos) { return makeProp(notImplExpr(name, pos), "0notImpl") }
+    // A not-lowered class member: warn and push a skip marker makeClassStmt ignores.
+    function notImplMember(name, pos) { notImpl(name, pos); return {skip: true} }
 
     binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
                   "==": "js_eq", "!=": "js_ne", "===": "js_seq", "!==": "js_sne",
@@ -481,6 +655,11 @@ KwConstructor = "constructor" KwEnd ;
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
+        // Any optional-chaining suffix (?. ?.[ ?.( ) routes the whole chain to
+        // notImplemented: there is no short-circuit-on-nullish model in the subset.
+        for (var oi = 0; oi < suffixes.length; oi++) {
+            if (suffixes[oi].kind == "optchain") return notImplExpr("optional chaining (?.)", suffixes[oi].pos)
+        }
         return function(b) {
             var r = primary(b)
             b = r.b

@@ -57,10 +57,18 @@ Program     = { Using } { TopDecl } ;
 // aborts, unless -warn-imports downgrades it to a warning (see resolveImport). It leaves
 // no value on the stack.
 Using       <~~ resolveImport(pop(), up.pos) ~~>
-            = KwUsing [ "static" KwEnd ] [ Id "=" ] QualName ";" ;
+            = [ "global" KwEnd ] KwUsing [ "static" KwEnd ] [ Id "=" ] QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
-TopDecl     = Namespace | UnsupType | ClassDecl ;
+TopDecl     = TopAttr | Namespace | FileNs | UnsupType | ClassDecl ;
+
+// A standalone attribute section at file scope ('[assembly: ...]' / '[module: ...]'):
+// accepted and ignored (it pushes no declaration).
+TopAttr     = AttrSection ;
+// A file scoped namespace ('namespace X.Y;'): a no-op marker; the declarations that
+// follow it register themselves at top level (like a block namespace, which is unwrapped).
+// The name QualName pushes is discarded so it never lands in a later declaration.
+FileNs      <~~ pop() ~~> = KwNamespace QualName ";" ;
 
 // namespace X.Y { ... }: unwrapped. The inner declarations register themselves
 // (their tags run during the match); the namespace tag just clears its own name.
@@ -69,18 +77,21 @@ Namespace   <~~ takeAll() ~~>
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
             = [ LeadMods ] KwClass Id <~~ push(up.in); curClassName = up.in ~~> [ SkipAngle ]
-              [ ":" Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] { "," Type } ] "{" { Member } "}" ;
+              [ ":" Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] { "," Type } ] { WhereClause } "{" { Member } "}" ;
 
 Member      = NestedType | Ctor | Method | Property | Field ;
 
 // A constructor: name matches the class; an optional ': base(...)' / ': this(...)'
-// header is parsed and skipped (the implicit base constructor already ran).
+// header is parsed and skipped (the implicit base constructor already ran). The body is
+// a block or an expression bodied '=> e;' form.
 Ctor        <~~ push(makeCtor(takeAll())) ~~>
-            = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] Block ;
+            = [ LeadMods ] Id <~~ push(up.in) ~~> ParamList [ CtorInit ] CtorBody ;
 CtorInit    = ":" ( KwBase | KwThis ) SkipParen ;
+CtorBody    = Block | CtorArrow ;
+CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 
 Method      <~~ push(makeMethod(takeAll())) ~~>
-            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
+            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList { WhereClause } MethodBody ;
 MethodBody  = Block | ArrowBody ;
 ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
             = "=>" Expression ";" ;
@@ -92,9 +103,10 @@ Property    <~~ notImpl("property", up.pos) ~~>
 Field       <~~ push(makeField(takeAll())) ~~>
             = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
 
-// Modifiers before a member; ModWord keeps the text so 'static' stays detectable.
+// Modifiers before a member; ModWord keeps the text so 'static' stays detectable. An
+// attribute section here (e.g. '[Obsolete] static int F') is accepted and dropped.
 Mods        <~~ push({mods: takeAll()}) ~~>
-            = { ModWord } ;
+            = { ModWord | AttrSection } ;
 ModWord     <~~ push(up.in) ~~>
             = ModKw ;
 FType       <~~ push({ty: up.in}) ~~>
@@ -102,7 +114,7 @@ FType       <~~ push({ty: up.in}) ~~>
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Param { "," Param } ] ")" ;
-Param       = { ParamMod } Type [ "..." ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
+Param       = { AttrSection } { ParamMod } Type [ "..." ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
 ParamMod    = ( "ref" | "out" | "in" | "params" | "this" | "readonly" ) KwEnd ;
 
 // Types are parsed and (apart from field defaults) ignored: generic arguments (<...>),
@@ -116,7 +128,27 @@ UserType    = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
-            | Try | Throw | Decl | Empty | ExprStmt ;
+            | Try | Throw | UsingStmt | Lock | Checked | Decl | Empty | ExprStmt ;
+
+// 'checked { ... }' / 'unchecked { ... }': the block runs (overflow checking is not
+// modelled); the keyword is dropped and the inner block thunk stands in for it.
+Checked     = ( "checked" KwEnd | "unchecked" KwEnd ) Block ;
+
+// 'lock (e) stmt': the monitor is not modelled; the guard expression still runs (so its
+// calls stay visible) and the guarded statement executes.
+Lock        <~~ push(makeLock(pop(), pop())) ~~>
+            = "lock" KwEnd "(" Expression ")" Statement ;
+
+// 'using (init) stmt' and the 'using var r = e;' declaration form: disposal is not
+// modelled; the initializer runs, then the body (or the enclosing statements) execute.
+UsingStmt   = KwUsing ( UsingParen | UsingBare ) ;
+UsingParen  <~~ push(makeUsing(pop(), pop())) ~~>
+            = "(" UsingInit ")" Statement ;
+UsingBare   <~~ push(makeUsingDecl(pop())) ~~>
+            = DeclCore ";" ;
+UsingInit   = UsingDecl | UsingExpr ;
+UsingDecl   = DeclCore ;
+UsingExpr   <~~ push(exprToStmt(pop())) ~~> = Expression ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -178,8 +210,12 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = Assignment | CondExpr ;
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ) <~~ push(stripWs(up.in)) ~~> Expression ;
+// The compound bitwise/shift forms apply like their arithmetic siblings; '??=' is
+// accepted but reported as not implemented (it needs a null test). Longer operators are
+// listed before their prefixes.
+Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
+            = Target ( "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%="
+                     | "&=" | "|=" | "^=" | ( "=" !"=" ) ) <~~ push(stripWs(up.in)) ~~> Expression ;
 
 // An assignable place: a variable (this and class names are variables too), or a
 // member/index path: this.x, p.X, Program.Fails, arr[i], dict[k].
@@ -189,19 +225,44 @@ TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
-            = OrExpr [ "?" Expression ":" Expression ] ;
+            = NullCoal [ "?" Expression ":" Expression ] ;
+
+// Null-coalescing 'a ?? b': accepted, reported as not implemented (it needs a null test).
+NullCoal    <~~ push(makeNullCoal(takeAll(), up.pos)) ~~>
+            = OrExpr { "??" OrExpr } ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
 
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = EqExpr { "&&" EqExpr } ;
+            = BitOr { "&&" BitOr } ;
+
+// The bitwise levels sit between && and equality (as in C#). A lone '|' that actually
+// begins '||' fails its right side, the iteration rolls back, and the '||' level above
+// picks it up (likewise '&' vs '&&').
+BitOr       <~~ push(foldBinary(takeAll())) ~~>
+            = BitXor { "|" <~~ push("|") ~~> BitXor } ;
+BitXor      <~~ push(foldBinary(takeAll())) ~~>
+            = BitAnd { "^" <~~ push("^") ~~> BitAnd } ;
+BitAnd      <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
 
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+            = TypeTest { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeTest } ;
+
+// 'e is Pattern' / 'e as Type': accepted (common declaration/type/null patterns),
+// reported as not implemented (there is no runtime type model).
+TypeTest    <~~ push(makeTypeTest(takeAll(), up.pos)) ~~>
+            = Shift [ IsAs ] ;
+IsAs        <~~ push({typetest: true}) ~~>
+            = KwAs Type | KwIs IsPat ;
+IsPat       = [ "not" KwEnd ] ( "null" KwEnd | "true" KwEnd | "false" KwEnd | Type [ Id ] ) ;
+
+Shift       <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -209,11 +270,13 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Cast | Neg | Not | PostfixExpr ;
+UnaryExpr   = Cast | Neg | Not | BitNot | PostfixExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
 
 // A cast is identity ((Type) expr yields expr). A primitive cast accepts any unary
 // operand; a reference cast excludes a leading '-'/'+' so '(a) - b' stays subtraction.
@@ -259,7 +322,8 @@ BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
 // A primary followed by method calls, delegate calls, field reads and indexing. A bare
 // '(args)' suffix invokes a delegate / lambda value (a closure call).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | CallSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | CallSfx | FieldSfx | IndexSfx
+                      | NCMethodSfx | NCFieldSfx | NCIndexSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
@@ -268,8 +332,59 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = Lambda | LinqQuery | "(" Expression ")" | InterpStr | DqString
-            | IntLit | True | False | Null | VarRef ;
+// Null-conditional access ('a?.b', 'a?.m(...)', 'a?[i]'): accepted, but a chain that
+// contains one is reported as not implemented (there is no null short-circuit model).
+// The '?' must be followed by '.' or '[' so the ternary '?' is never captured here.
+NCMethodSfx <~~ push({nullcond: true, pos: up.pos}) ~~>
+            = "?" "." Id "(" [ Expression { "," Expression } ] ")" ;
+NCFieldSfx  <~~ push({nullcond: true, pos: up.pos}) ~~>
+            = "?" "." Id ;
+NCIndexSfx  <~~ push({nullcond: true, pos: up.pos}) ~~>
+            = "?" "[" Expression "]" ;
+
+Primary     = Lambda | LinqQuery | "(" Expression ")"
+            | TypeofExpr | NameofExpr | SizeofExpr | DefaultExpr
+            | VerbatimStr | InterpStr | DqString | CharLit
+            | CsNum | IntLit | True | False | Null | VarRef ;
+
+// typeof(T) / nameof(x) / sizeof(T) / default(T) / default: accepted, reported as not
+// implemented (there is no type/reflection model).
+TypeofExpr  <~~ push(notImplExpr("typeof", up.pos)) ~~>
+            = "typeof" KwEnd "(" Type ")" ;
+NameofExpr  <~~ push(notImplExpr("nameof", up.pos)) ~~>
+            = "nameof" KwEnd "(" Type ")" ;
+SizeofExpr  <~~ push(notImplExpr("sizeof", up.pos)) ~~>
+            = "sizeof" KwEnd "(" Type ")" ;
+DefaultExpr <~~ push(notImplExpr("default expression", up.pos)) ~~>
+            = "default" KwEnd [ "(" Type ")" ] ;
+
+// A char literal 'x' is a one character string constant (SqString, from the shared lib).
+CharLit     = SqString ;
+
+// Verbatim '@"..."' and verbatim/interpolated '$@"..." / @$"..."' strings: accepted,
+// reported as not implemented (verbatim escaping and the $@ interpolation differ from the
+// plain forms). '""' is the escaped quote; every other byte (including newlines) is literal.
+VerbatimStr <~~ push(notImplExpr("verbatim string", up.pos)) ~~>
+            = ( "$@" | "@$" | "@" ) '"' :whitespace() { VbDQuote | VbChar } '"' :whitespace(Whitespace) ;
+VbDQuote    = '"' '"' ;
+VbChar      = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
+
+// C# numeric literals beyond the plain decimal integer that IntLit already handles: hex
+// (0x), binary (0b), reals (a '.' fraction, an exponent or an f/d/m suffix), and decimals
+// with '_' digit groups or an integer u/l suffix. The value is computed by csNum.
+CsNum       <~~ push(makeConst(csNum(up.in))) ~~>
+            = CsHex | CsBin | CsReal | CsDecU | CsDecS ;
+CsHex       = ( "0x" | "0X" ) :whitespace() CsHexD { CsHexD | "_" } [ CsISfx ] :whitespace(Whitespace) ;
+CsBin       = ( "0b" | "0B" ) :whitespace() CsBit { CsBit | "_" } [ CsISfx ] :whitespace(Whitespace) ;
+CsReal      = "0"..."9" :whitespace() { "0"..."9" | "_" } CsRealT :whitespace(Whitespace) ;
+CsDecU      = "0"..."9" :whitespace() { "0"..."9" } "_" { "0"..."9" | "_" } [ CsISfx ] :whitespace(Whitespace) ;
+CsDecS      = "0"..."9" :whitespace() { "0"..."9" } CsISfx :whitespace(Whitespace) ;
+CsRealT     = "." "0"..."9" { "0"..."9" | "_" } [ CsExp ] [ CsRSfx ] | CsExp [ CsRSfx ] | CsRSfx ;
+CsExp       = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
+CsHexD      = "0"..."9" | "a"..."f" | "A"..."F" ;
+CsBit       = "0" | "1" ;
+CsISfx      = ( "u" | "U" | "l" | "L" ) [ "u" | "U" | "l" | "L" ] ;
+CsRSfx      = "f" | "F" | "d" | "D" | "m" | "M" ;
 
 // A lambda ('x => e', '(a, b) => { ... }') is a real closure value (a Func / Action
 // delegate): it captures the current scope chain and is invoked at a call site (CallSfx).
@@ -335,10 +450,22 @@ SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
 SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 
+// A balanced [ ... ] run: an attribute section (also '[assembly: ...]'), parsed and
+// ignored. Strings and chars are matched first so brackets inside them are not miscounted.
+AttrSection = "[" { SkipStr | SkipChar | AttrSection | AttrOther } "]" ;
+AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
+
+// A generic constraint clause ('where T : class, IFoo, new()'): accepted and ignored.
+WhereClause = "where" KwEnd Id ":" WhereCon { "," WhereCon } ;
+WhereCon    = "new" KwEnd "(" ")" | Type ;
+
+KwIs        = "is" KwEnd ;
+KwAs        = "as" KwEnd ;
+
 ModKw       = ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
               | "sealed" | "virtual" | "override" | "readonly" | "const" | "partial"
               | "unsafe" | "async" | "extern" | "volatile" ) KwEnd ;
-LeadMods    = { ModKw } ;
+LeadMods    = { ModKw | AttrSection } ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a whole
 // C# file parses; -warn-unsupported lets the rest run). Bodies are skipped.
@@ -502,6 +629,10 @@ KwLet       = "let" KwEnd ;
     // delegate / lambda closure value, '.field' reads a field and '[i]' indexes. Overrides
     // the shared foldCallMember (assignment form, after the include) to add the call case.
     foldCallMember = function(items) {
+        // A chain that carries a null-conditional step ('a?.b', 'a?[i]') is not implemented.
+        for (var q = 0; q < items.length; q++) {
+            if (items[q] != undefined && items[q].nullcond == true) { return notImplExpr("null-conditional access", items[q].pos) }
+        }
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
@@ -549,10 +680,12 @@ KwLet       = "let" KwEnd ;
         var last = ref.path[ref.path.length - 1]
         return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
     }
-    function makeAssign(items) {
+    function makeAssign(items, pos) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // '??=' needs a null test we do not model: warn, then behave like a plain '='.
+        if (op == "??=") { notImpl("??= assignment", pos); op = "=" }
         return function() {
             var v = anytype
             v = valT()
@@ -659,6 +792,50 @@ KwLet       = "let" KwEnd ;
     }
     // A cast is identity: (Type) expr evaluates to expr.
     function makeCast(inner) { return inner }
+    // ~v flips the 32-bit representation (JS ~).
+    function makeBitNot(t) { return function() { return ~t() } }
+    // A '??' chain / 'is'-'as' test / null-conditional chain: parsed, not implemented.
+    function makeNullCoal(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("null-coalescing operator", pos)
+    }
+    function makeTypeTest(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("is/as operator", pos)
+    }
+
+    // Extended numeric literal text (whitespace and '_' removed) to a number: hex (0x),
+    // binary (0b), then real (parseFloat) or integer (parseInt); type suffixes are ignored
+    // by parseInt/parseFloat, which stop at the first non-digit.
+    function csNum(s) {
+        s = stripWs(s)
+        var t = ""
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) != "_") { t = t + s.charAt(i) } }
+        if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) { return parseInt(t.substring(2), 16) }
+        if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "b" || t.charAt(1) == "B")) { return parseInt(t.substring(2), 2) }
+        if (t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0) { return parseFloat(t) }
+        return parseInt(t, 10)
+    }
+
+    // 'lock (e) s': run the guard (keeping its calls), then the guarded statement.
+    function makeLock(stmtT, exprT) {
+        return function() {
+            exprT()
+            return stmtT()
+        }
+    }
+    // 'using (init) s': the initializer and body run in a fresh frame; disposal is skipped.
+    function makeUsing(bodyT, initT) {
+        return function() {
+            scopes.push({})
+            initT()
+            var r = bodyT()
+            scopes.pop()
+            return r
+        }
+    }
+    // 'using var r = e;': the declaration runs; disposal is skipped.
+    function makeUsingDecl(t) { return t }
     // A lambda is a real closure value. It captures the scope chain live at the point it is
     // evaluated (a copy of the array, so the scope objects stay shared and later mutations
     // of a captured local stay visible). LINQ stays unimplemented.
@@ -915,6 +1092,40 @@ KwLet       = "let" KwEnd ;
         return o[name]
     }
     core.getIndex = csGetIndex
+
+    // The binary/compound operators, extended with the bitwise and shift forms (32-bit,
+    // matching the compiled js_band/js_bor/... externals). The existing arithmetic and
+    // comparison cases are preserved exactly; only the bitwise cases are new.
+    binOp = function(op, l, r) {
+        if (op == "+") return core.add(l, r)
+        if (op == "-") return (l - r) | 0
+        if (op == "*") return (l * r) | 0
+        if (op == "/") return (l / r) | 0
+        if (op == "%") return (l % r) | 0
+        if (op == "==") return l === r
+        if (op == "!=") return l !== r
+        if (op == "<")  return l < r
+        if (op == ">")  return l > r
+        if (op == "<=") return l <= r
+        if (op == ">=") return l >= r
+        if (op == "|")  return l | r
+        if (op == "^")  return l ^ r
+        if (op == "&")  return l & r
+        if (op == "<<") return l << r
+        if (op == ">>") return l >> r
+    }
+    applyOp = function(op, a, b) {
+        if (op == "+=") return core.add(a, b)
+        if (op == "-=") return (a - b) | 0
+        if (op == "*=") return (a * b) | 0
+        if (op == "/=") return (a / b) | 0
+        if (op == "%=") return (a % b) | 0
+        if (op == "&=") return a & b
+        if (op == "|=") return a | b
+        if (op == "^=") return a ^ b
+        if (op == "<<=") return a << b
+        if (op == ">>=") return a >> b
+    }
 
     // Import roots the runtime already provides (Console, collections, ...); importing
     // them is a no-op. Anything else is a library we cannot resolve.

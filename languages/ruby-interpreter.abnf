@@ -45,20 +45,49 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // The whole program is a sequence of definitions and statements executed in order.
 Program     <~~ runProgram(takeAll()) ~~>
-            = { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | Statement } ;
+            = { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement } ;
 
-// A def: implicit return of the last expression, or an explicit return.
+// module M ... end: accepted but not implemented (no namespacing). Its body is a
+// program of the same items; under -warn-unsupported they run in the current scope
+// so any defs/classes/calls stay visible. A nested module recurses.
+ModuleDecl  <~~ push(makeModule(takeAll(), up.pos)) ~~>
+            = KwModule ScopedName { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement } End ;
+// A constant path Foo::Bar::Baz (module / class name or a scoped reference).
+ScopedName  = Name { "::" Name } ;
+
+// A def: implicit return of the last expression, or an explicit return. A singleton
+// receiver (def self.m / def obj.m) is accepted but not implemented (routed as a
+// plain method of that name). The parameter list accepts default / splat / double-
+// splat / block / keyword parameters; the fancy forms are notImplemented (the method
+// is still built with the parameter names, so its body stays runnable).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = KwDef MethodName <~~ push(up.in) ~~> [ ParamList ] Body End ;
+            = KwDef [ SelfRecv ] MethodName <~~ push(up.in) ~~> [ ParamList ] Body End ;
+SelfRecv    <~~ notImpl("singleton method (def self.m / def obj.m)", up.pos) ~~>
+            = ( KwSelf | Name ) "." ;
 ParamList   = "(" [ Param { "," Param } ] ")" ;
-Param       = Name <~~ push({param: up.in}) ~~> ;
+Param       = ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault | ParamSimple ;
+ParamDSplat <~~ var n = takeAll(); notImpl("double-splat parameter (**kw)", up.pos); push({param: n.length > 0 ? n[0] : "$kwrest"}) ~~>
+            = "**" [ Name <~~ push(up.in) ~~> ] ;
+ParamSplat  <~~ var n = takeAll(); notImpl("splat parameter (*args)", up.pos); push({param: n.length > 0 ? n[0] : "$rest"}) ~~>
+            = "*" [ Name <~~ push(up.in) ~~> ] ;
+ParamBlock  <~~ notImpl("block parameter (&blk)", up.pos); push({param: pop()}) ~~>
+            = "&" Name <~~ push(up.in) ~~> ;
+ParamKw     <~~ var n = takeAll(); notImpl("keyword parameter (name:)", up.pos); push({param: n[0]}) ~~>
+            = Name <~~ push(up.in) ~~> ":" [ Expression ] ;
+ParamDefault <~~ var n = takeAll(); notImpl("default parameter value", up.pos); push({param: n[0]}) ~~>
+            = Name <~~ push(up.in) ~~> "=" !"=" Expression ;
+ParamSimple = Name <~~ push({param: up.in}) ~~> ;
 // Method / call names may end with ? or ! (empty?, include?); Name may not.
 MethodName  = Id [ "?" | "!" ] ;
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
+// A superclass (class D < Base) is accepted but not implemented (no inheritance);
+// the class body still runs as its own methods.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Name <~~ push(up.in) ~~> { Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
+            = KwClass Name <~~ push(up.in) ~~> [ Superclass ] { Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
+Superclass  <~~ notImpl("class superclass (< Base)", up.pos) ~~>
+            = "<" ScopedName ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
             = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
 AttrKind    = ( "attr_accessor" | "attr_reader" | "attr_writer" ) KwEnd ;
@@ -106,9 +135,11 @@ Expression  = Assignment | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
+Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
             = Target AssignOp <~~ push(up.in) ~~> Expression ;
-AssignOp    = "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ;
+// ||= and &&= (conditional assignment) are accepted but not implemented (no short
+// circuit); makeAssign warns and falls back to a plain assignment.
+AssignOp    = "||=" | "&&=" | "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TargetHead  = "@" Id <~~ push({ivar: up.in}) ~~> | Name <~~ push({var: up.in}) ~~> ;
@@ -159,7 +190,19 @@ SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-MArgs       = "(" [ Expression { "," Expression } ] ")" [ Block ] | Block ;
+MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
+
+// A call argument: an ordinary expression, or one of the forms accepted for
+// recognition but not implemented - keyword argument (name: v), splat / double-splat
+// (*a, **h) and block pass (&blk, &:sym). The unsupported forms warn and become a
+// placeholder argument, so the call still runs.
+Arg         = KwArg | SplatArg | BlockArg | Expression ;
+KwArg       <~~ takeAll(); push(notImplExpr("keyword argument (name:)", up.pos)) ~~>
+            = SymName ":" Expression ;
+SplatArg    <~~ takeAll(); push(notImplExpr("splat argument (* / **)", up.pos)) ~~>
+            = ( "**" | "*" ) Expression ;
+BlockArg    <~~ takeAll(); push(notImplExpr("block argument (&)", up.pos)) ~~>
+            = "&" Expression ;
 
 // A block passed to a method call: a real closure over the current scope.
 Block       <~~ push(makeBlock(takeAll())) ~~>
@@ -169,12 +212,43 @@ BlockParams <~~ push({bparams: takeAll()}) ~~>
             = "|" [ Param { "," Param } ] "|" ;
 
 Primary     = "(" Expression ")"
-            | IfExpr | UnlessExpr | WhileExpr | UntilExpr | CaseExpr | BeginExpr
-            | ReturnExpr | BreakExpr | NextExpr | RaiseExpr
-            | DqStr | SqStr | IntLit | SymLit
+            | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
+            | ReturnExpr | BreakExpr | NextExpr | RaiseExpr | YieldExpr
+            | DqStr | SqStr | PercentLit | FloatLit | IntLit | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
-            | IvarRef | Call | VarRef ;
+            | IvarRef | ScopedConst | Call | VarRef ;
+
+// for VAR in COLL ... end: accepted but not implemented (needs loop-variable
+// binding we do not model); parses the collection and body, warns, and is inert.
+ForExpr     <~~ takeAll(); push(notImplExpr("for-in loop", up.pos)) ~~>
+            = KwFor ForVars KwIn Expression [ KwDo ] Body End ;
+ForVars     = Name { "," Name } ;
+
+// yield / yield(args) / yield args: accepted but not implemented (no block passing);
+// warns and yields a placeholder value.
+YieldExpr   <~~ takeAll(); push(notImplExpr("yield", up.pos)) ~~>
+            = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
+
+// A floating point literal 3.14 / 1.0e9: accepted but not implemented (the runtime
+// is 32-bit integer only); warns and yields a placeholder value.
+FloatLit    <~~ push(notImplExpr("float literal", up.pos)) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "." "0"..."9" { "0"..."9" } [ FloatExp ] :whitespace(Whitespace) ;
+FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+
+// A scoped constant Foo::Bar: accepted but not implemented (no namespaces); warns
+// and yields a placeholder value.
+ScopedConst <~~ push(notImplExpr("scoped constant (::)", up.pos)) ~~>
+            = Name "::" Name { "::" Name } ;
+
+// A percent literal %w[..] %i[..] %q(..) %Q(..) %r[..] ...: accepted but not
+// implemented; the body is read (bracket or parenthesis delimited) and warns.
+PercentLit  <~~ push(notImplExpr("percent literal (%w / %i / %q / ...)", up.pos)) ~~>
+            = PctTag :whitespace() PctBody :whitespace(Whitespace) ;
+PctTag      = "%w" | "%i" | "%W" | "%I" | "%q" | "%Q" | "%r" | "%s" ;
+PctBody     = "[" { PctBrk } "]" | "(" { PctPar } ")" ;
+PctBrk      = "\x00"..."\x5c" | "\x5e"..."\U0010ffff" ;
+PctPar      = "\x00"..."\x28" | "\x2a"..."\U0010ffff" ;
 
 // if / unless usable as a statement and as an expression (yields the branch value).
 IfExpr      <~~ push(makeIf(takeAll())) ~~>
@@ -228,7 +302,7 @@ RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
 
 // f(args): a top level method or a class (for C.new the .new is a method suffix).
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Name <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = Name <~~ push(up.in) ~~> "(" [ Arg { "," Arg } ] ")" ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Name ;
@@ -240,8 +314,15 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
 HashLit     <~~ push(makeHash(takeAll())) ~~>
             = "{" [ HashEntry { "," HashEntry } ] "}" ;
-HashEntry   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
+// { k => v } (arrow) and { name: v } (symbol key, genuinely lowered - name: is the
+// symbol :name, which the runtime already represents as the string "name").
+HashEntry   = HashColon | HashArrow ;
+HashArrow   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
+HashColon   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
+            = SymKey ":" Expression ;
+SymKey      <~~ push(makeConst(up.in)) ~~>
+            = SymName ;
 
 SymLit      = ":" SymName <~~ push(makeConst(up.in)) ~~> :whitespace(Whitespace) ;
 SymName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
@@ -284,9 +365,9 @@ NotKw       = :script(~~
             cc = c.peek(i)
         }
         var kws = ["def", "end", "if", "elsif", "else", "unless", "while", "until",
-                   "do", "then", "return", "break", "next", "class", "self", "nil",
-                   "true", "false", "and", "or", "not", "case", "when", "in", "yield",
-                   "begin", "rescue", "ensure", "raise", "puts", "print"]
+                   "do", "then", "return", "break", "next", "class", "module", "for",
+                   "self", "nil", "true", "false", "and", "or", "not", "case", "when",
+                   "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -316,6 +397,10 @@ SameLine    = :script(~~
 
 KwDef       = "def" KwEnd ;
 KwClass     = "class" KwEnd ;
+KwModule    = "module" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwIn        = "in" KwEnd ;
+KwYield     = "yield" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElsif     = "elsif" KwEnd ;
 KwElse      = "else" KwEnd ;
@@ -803,10 +888,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var last = ref.path[ref.path.length - 1]
         return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
     }
-    function makeAssign(items) {
+    function makeAssign(items, pos) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
+        // ||= / &&= are not implemented (no short circuit): warn and fall back to a
+        // plain assignment so the target is still written and the rest runs.
+        if (op == "||=" || op == "&&=") { notImpl("conditional assignment (" + op + ")", pos); op = "=" }
         return function() {
             var v = anytype
             v = valT()
@@ -861,6 +949,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function runProgram(items) {
         for (var i = 0; i < items.length; i++) { items[i]() }
+    }
+    // module M ... end: not implemented (no namespacing). Run the body items in
+    // sequence in the current scope so any defs / classes / calls stay visible.
+    function makeModule(items, pos) {
+        notImpl("module", pos)
+        return function() {
+            for (var i = 0; i < items.length; i++) { items[i]() }
+            return null
+        }
     }
 
     function invokeRuby(fn, self, args) {

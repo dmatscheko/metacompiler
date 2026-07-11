@@ -84,7 +84,7 @@ KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = If | While | For | TryStmt | With | Decorated | AsyncDef | Def | SmallLine ;
+            = If | While | For | TryStmt | With | Class | Decorated | AsyncDef | Def | SmallLine ;
 
 SmallLine   = ( Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
               | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ) NL ;
@@ -104,8 +104,15 @@ Else        <~~ push(makeElse(pop())) ~~>
 While       <~~ push(makeWhile(pop(), pop())) ~~>
             = "while" KwEnd Expression Suite ;
 
-For         <~~ push(makeFor(pop(), pop(), pop())) ~~>
+// for x in ITER: a single name (genuinely compiled). A tuple target
+// (for a, b in ...  /  for (a, b) in ...) is accepted and reported as not
+// implemented (the subset has no tuple unpacking in the loop head).
+For         = ForOne | ForTup ;
+ForOne      <~~ push(makeFor(pop(), pop(), pop())) ~~>
             = "for" KwEnd Id <~~ push(up.in) ~~> "in" KwEnd Expression Suite ;
+ForTup      <~~ takeAll(); push(notImplStmt("for-loop tuple unpacking", up.pos)) ~~>
+            = "for" KwEnd ForTargets "in" KwEnd Expression Suite ;
+ForTargets  = "(" Id { "," Id } [ "," ] ")" | Id "," Id { "," Id } [ "," ] ;
 
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
             = "def" KwEnd Id <~~ push(up.in) ~~> ParamList [ "->" DiscardType ] Suite ;
@@ -124,10 +131,17 @@ NamedParam  <~~ push(makeNamedParam(takeAll())) ~~>
 ParamDefault <~~ pop(); push({pdefault: true}) ~~>
             = "=" Expression ;
 
-// A decorated def / async-def: the decorators parse (their call expressions are
-// dropped) and the function is defined under its own name, unwrapped.
-Decorated   = Decorator { SameLevel Decorator } SameLevel ( Def | AsyncDef ) ;
+// A decorated def / async-def / class: the decorators parse (their call
+// expressions are dropped) and the function/class is defined unwrapped.
+Decorated   = Decorator { SameLevel Decorator } SameLevel ( Def | AsyncDef | Class ) ;
 Decorator   = "@" DiscardExpr NL ;
+
+// class Name[(bases, metaclass=..., ...)]: SUITE - accepted structurally and
+// reported as not implemented (the subset has no user-defined classes). The base
+// list reuses the call-argument surface (positional bases, keyword and *unpacked
+// arguments); the whole body is parsed and dropped.
+Class       <~~ takeAll(); push(notImplStmt("class definition", up.pos)) ~~>
+            = "class" KwEnd Id [ "(" [ CallArg { "," CallArg } [ "," ] ] ")" ] Suite ;
 
 // async def / await: accepted structurally, reported as not implemented.
 AsyncDef    <~~ takeAll(); push(notImplStmt("async def", up.pos)) ~~>
@@ -209,9 +223,14 @@ AugAssign   <~~ push(makeAugAssign(takeAll())) ~~>
 Assign      <~~ push(makeAssign(pop(), pop())) ~~>
             = Target "=" Expression ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { TIndex } ;
+            = Id <~~ push(up.in) ~~> { TIndex | TAttr } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
+// obj.attr = ... : an attribute target (common in class methods: self.x = ...).
+// Accepted so the surrounding code parses; the write is reported as not
+// implemented (the subset has no user objects to store an attribute on).
+TAttr       <~~ push({tattr: true, pos: up.pos}) ~~>
+            = "." Id ;
 
 ExprSmall   <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
@@ -235,10 +254,20 @@ NotExpr     = Not | Comparison ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "not" KwEnd NotExpr ;
 
+// 'is' / 'is not' are identity comparisons; in this subset (== already compares
+// lists and dicts by identity) they lower to the same == / != externs.
 Comparison  <~~ push(foldBinary(takeAll())) ~~>
-            = Arith [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Arith
-                    | ( "not" KwEnd "in" KwEnd ) <~~ push("not in") ~~> Arith
-                    | ( "in" KwEnd ) <~~ push("in") ~~> Arith ] ;
+            = BitExpr [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr
+                    | ( "not" KwEnd "in" KwEnd ) <~~ push("not in") ~~> BitExpr
+                    | ( "is" KwEnd "not" KwEnd ) <~~ push("!=") ~~> BitExpr
+                    | ( "is" KwEnd ) <~~ push("==") ~~> BitExpr
+                    | ( "in" KwEnd ) <~~ push("in") ~~> BitExpr ] ;
+
+// Bitwise / shift operators ( | ^ & << >> ) sit just above comparison; they are
+// accepted and reported as not implemented (no integer-bit externs in the subset).
+// With no such operator the layer is transparent (returns the single operand).
+BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
+            = Arith { ( "|" | "^" | "&" | "<<" | ">>" ) <~~ push(up.in) ~~> Arith } ;
 
 Arith       <~~ push(foldBinary(takeAll())) ~~>
             = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
@@ -247,21 +276,40 @@ Arith       <~~ push(foldBinary(takeAll())) ~~>
 Term        <~~ push(foldBinary(takeAll())) ~~>
             = Factor { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> Factor } ;
 
-Factor      = Neg | Await | PostfixExpr ;
+Factor      = Neg | Invert | Await | Power ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
+// ~x bitwise-not: accepted, reported as not implemented.
+Invert      <~~ takeAll(); push(notImplExpr("~ operator", up.pos)) ~~>
+            = "~" Factor ;
 // await EXPR: accepted, reported as not implemented (no coroutines).
 Await       <~~ takeAll(); push(notImplExpr("await", up.pos)) ~~>
             = "await" KwEnd Factor ;
 
-// f(a), s[i], lst.append(x).
+// a ** b exponentiation: accepted, reported as not implemented (no pow extern).
+// With no '**' the layer is transparent (returns the single operand).
+Power       <~~ push(makePower(takeAll(), up.pos)) ~~>
+            = PostfixExpr [ "**" Factor ] ;
+
+// f(a), s[i], lst.append(x), obj.attr (attribute access is not implemented).
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx } ;
-CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
-            = "(" [ Expression { "," Expression } ] ")" ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx | AttrSfx } ;
+CallSfx     <~~ push(makeCallSfx(takeAll(), up.pos)) ~~>
+            = "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
+MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.pos)) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
+// obj.attr with no call: accepted, reported as not implemented (no user objects).
+AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
+            = "." Id <~~ push({aname: up.in}) ~~> ;
+// A call argument: keyword (name=value) and *seq / **map unpacking are accepted
+// as markers (the call becomes not implemented); a plain positional is compiled.
+CallArg     = CallKw | CallStar | CallPos ;
+CallKw      <~~ pop(); push({ckw: true}) ~~>
+            = Id "=" Expression ;
+CallStar    <~~ pop(); push({ckw: true}) ~~>
+            = ( "**" | "*" ) Expression ;
+CallPos     = Expression ;
 // A slice s[lo:hi] with both ends optional; tried before plain indexing (the
 // missing ':' makes it fail fast there).
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
@@ -271,8 +319,23 @@ SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FString | StringLit | DecLit | True | False | None
-            | ListComp | ListLit | DictComp | DictLit | VarRef ;
+Primary     = EmptyTuple | Grouped | FString | StringLit | DecLit | True | False | None
+            | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
+
+// ( ) empty tuple and ( a, b, ... ) / ( a, ) tuples are accepted and reported as
+// not implemented; a single parenthesized expression ( a ) is plain grouping.
+EmptyTuple  <~~ push(notImplExpr("tuple", up.pos)) ~~>
+            = "(" ")" ;
+Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
+            = "(" Expression { "," <~~ push({tcomma: true}) ~~> [ Expression ] } ")" ;
+
+// { e for x in it [if c] } set comprehension and { a, b, ... } set literal: both
+// accepted and reported as not implemented (the subset has no set type). Tried
+// after the dict forms so { k: v } and { k: v for ... } still parse as dicts.
+SetComp     <~~ takeAll(); push(notImplExpr("set comprehension", up.pos)) ~~>
+            = "{" Expression "for" KwEnd Id "in" KwEnd Expression [ "if" KwEnd Expression ] "}" ;
+SetLit      <~~ takeAll(); push(notImplExpr("set literal", up.pos)) ~~>
+            = "{" Expression { "," Expression } [ "," ] "}" ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
@@ -306,7 +369,21 @@ FPlain      = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "|" | "\x7e"
 ListLit     <~~ push(makeList(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
 
-StringLit   = DqString | SqString ;
+// Triple-quoted strings (docstrings, multi-line text) are genuinely compiled as
+// ordinary string constants; they are tried before the single-quoted forms so
+// """...""" is not misread as an empty "" string. The body may span newlines and
+// contain lone or doubled quotes; only three quotes in a row close it.
+StringLit   = TripleDqStr | TripleSqStr | DqString | SqString ;
+TripleDqStr = '"""' :whitespace() { TStrEsc | TdqChar | TdqQ1 | TdqQ2 } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"""' :whitespace(Whitespace) ;
+TripleSqStr = "'''" :whitespace() { TStrEsc | TsqChar | TsqQ1 | TsqQ2 } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'''" :whitespace(Whitespace) ;
+TStrEsc     = "\\" "\x20"..b"\x7e" ;
+// A non-quote, non-backslash char (newlines and spaces included: the body is raw).
+TdqChar     = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+TdqQ1       = '"' ( TStrEsc | TdqChar ) ;
+TdqQ2       = '""' ( TStrEsc | TdqChar ) ;
+TsqChar     = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+TsqQ1       = "'" ( TStrEsc | TsqChar ) ;
+TsqQ2       = "''" ( TStrEsc | TsqChar ) ;
 True        <~~ push(makeConst(true)) ~~>      = "True" KwEnd ;
 False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
 None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
@@ -447,11 +524,36 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: v}
         }
     }
+    // Detect the newly recognized-but-unsupported suffixes (attribute access, and
+    // keyword / *starred call arguments) at build time: the whole postfix chain
+    // becomes not implemented and yields undefined, matching the other notImpl expr.
+    function complexSuffix(suffixes) {
+        for (var i = 0; i < suffixes.length; i++) {
+            if (suffixes[i].kind == "attr") { return {what: "attribute access", pos: suffixes[i].pos} }
+            if (suffixes[i].complex == true) { return {what: "keyword/starred call arguments", pos: suffixes[i].pos} }
+        }
+        return null
+    }
+    // A call suffix: complex (keyword/starred) args mark it not implemented.
+    function makeCallSfx(items, pos) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ckw == true) { return {kind: "call", complex: true, pos: pos} }
+        }
+        return {kind: "call", args: items}
+    }
+    function makeMethodSfx(name, items, pos) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ckw == true) { return {kind: "mcall", name: name, complex: true, pos: pos} }
+        }
+        return {kind: "mcall", name: name, args: items}
+    }
     // and/or keep the deciding operand, with Python truthiness.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
+        var bad = complexSuffix(suffixes)
+        if (bad != null) { return notImplExpr(bad.what, bad.pos) }
         return function(b) {
             var r = primary(b)
             b = r.b
@@ -676,7 +778,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: exitB, v: outV}
     }
 
+    // The source position of a .attr step in a target, or null if it has none.
+    // An attribute target (obj.attr = ... / obj.attr += ...) is not implemented.
+    function attrTargetPos(ref) {
+        for (var i = 0; i < ref.path.length; i++) {
+            if (ref.path[i].tattr == true) { return ref.path[i].pos }
+        }
+        return null
+    }
     function emitRefRead(b, ref) {
+        if (attrTargetPos(ref) != null) { return {b: b, v: hUndef} }
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length; i++) {
             var r = ref.path[i].idx(b)
@@ -686,6 +797,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: b, v: o}
     }
     function emitRefWrite(b, ref, v) {
+        var ap = attrTargetPos(ref)
+        if (ap != null) { notImpl("attribute assignment", ap); return b }
         if (ref.path.length == 0) {
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
             return b
@@ -807,6 +920,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     // ----- Widened surface: newly accepted constructs -----
 
+    // a ** b: reported as not implemented; with no '**' the single operand passes
+    // through unchanged (keeping the expression layer transparent).
+    function makePower(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("** power operator", pos)
+    }
+    // a | b, a & b, a << b, ...: reported as not implemented; with no bit operator
+    // the single operand passes through unchanged.
+    function makeBit(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("bitwise/shift operator", pos)
+    }
+    // ( a ): plain grouping. ( a, b, ... ) / ( a, ): a tuple, reported as not
+    // implemented (a comma pushed a {tcomma} marker, so items has more than one).
+    function makeParen(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("tuple", pos)
+    }
     // a if c else b: genuinely lowered; the two arms meet in a phi (only the taken
     // arm's side effects run).
     function makeTernary(items) {

@@ -1553,6 +1553,162 @@
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-big-4.ts", "-q"]
         },
         {
+            "name": "C recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-recognize.c", "-q"]
+        },
+        {
+            "name": "C recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-recognize.c", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Java recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-recognize.java", "-q"]
+        },
+        {
+            "name": "Java recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-recognize.java", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Kotlin recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-recognize.kt", "-q"]
+        },
+        {
+            "name": "Kotlin recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-recognize.kt", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Go recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-recognize.go", "-q"]
+        },
+        {
+            "name": "Go recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-recognize.go", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Python recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-recognize.py", "-q"]
+        },
+        {
+            "name": "Python recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-recognize.py", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "JavaScript recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-recognize.js", "-q"]
+        },
+        {
+            "name": "JavaScript recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/js-to-llvm-ir.abnf", "tests/js-test-recognize.js", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "TypeScript recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-recognize.ts", "-q"]
+        },
+        {
+            "name": "TypeScript recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-recognize.ts", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "C# recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-recognize.cs", "-q"]
+        },
+        {
+            "name": "C# recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-recognize.cs", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "PHP recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-recognize.php", "-q"]
+        },
+        {
+            "name": "PHP recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/php-to-llvm-ir.abnf", "tests/php-test-recognize.php", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Dart recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-recognize.dart", "-q"]
+        },
+        {
+            "name": "Dart recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/dart-to-llvm-ir.abnf", "tests/dart-test-recognize.dart", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Swift recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-recognize.swift", "-q"]
+        },
+        {
+            "name": "Swift recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/swift-to-llvm-ir.abnf", "tests/swift-test-recognize.swift", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Ruby recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-recognize.rb", "-q"]
+        },
+        {
+            "name": "Ruby recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-recognize.rb", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Lua recognition SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-recognize.lua", "-q"]
+        },
+        {
+            "name": "Lua recognition warned+ignored",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-recognize.lua", "-q", "-warn-unsupported"]
+        },
+        {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",

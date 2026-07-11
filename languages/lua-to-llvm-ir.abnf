@@ -96,7 +96,7 @@ NotEnders = :script(~~
 // call statement, because its targets look like the start of a call until the '='.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = If | While | Repeat | NumFor | GenFor | DoBlock | LocalFunc | Local | Func
-            | Return | Break | AssignStat | CallStat ;
+            | Return | Break | Goto | Label | EmptyStat | AssignStat | CallStat ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
@@ -141,9 +141,12 @@ LocalFunc   <~~ push(makeLocalFunc(pop(), pop(), pop())) ~~>
             = KwLocal KwFunction Id <~~ push(up.in) ~~> ParamList Block KwEndKw ;
 
 Local       <~~ push(makeLocal(takeAll())) ~~>
-            = KwLocal LocalName { "," LocalName } [ "=" ExprList ] ;
+            = KwLocal LocalName [ Attrib ] { "," LocalName [ Attrib ] } [ "=" ExprList ] ;
 LocalName   <~~ push({lname: up.in}) ~~>
             = Id ;
+// Lua 5.4 local attribute: local x <const> = 1 / local h <close> = r. Accepted and
+// ignored (the subset enforces neither const-ness nor to-be-closed semantics).
+Attrib      = "<" Id ">" ;
 
 // function name(...) end, function tbl.field(...) end, and the method-definition sugar
 // function tbl:method(...) end (which binds an implicit first parameter 'self').
@@ -153,12 +156,27 @@ FuncName    <~~ push(makeFuncName(takeAll())) ~~>
             = Id <~~ push({fnbase: up.in}) ~~> { "." Id <~~ push({fnstep: up.in}) ~~> } [ ":" Id <~~ push({fnstep: up.in, fnself: true}) ~~> ] ;
 
 ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+            = "(" [ ( Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ "," VarargPar ] | VarargPar ) ] ")" ;
+// A trailing '...' makes the function variadic. Accepted and ignored (extra arguments
+// are dropped); a use of '...' inside the body is separately not implemented.
+VarargPar   = "..." ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
             = KwBreak ;
+
+// goto Name jumps to a matching ::Name:: label (Lua 5.2+); both are accepted
+// structurally and reported as not implemented (the tree walker / CFG builder has no
+// cross-statement jump). -warn-unsupported keeps the surrounding code.
+Goto        <~~ push(notImplStmt("goto", up.pos)) ~~>
+            = KwGoto Id ;
+Label       <~~ push(notImplStmt("label", up.pos)) ~~>
+            = "::" Id "::" ;
+// A lone ';' or one terminating the previous statement (Lua allows ';' between and
+// after statements): a no-op.
+EmptyStat   <~~ push(makeEmpty()) ~~>
+            = ";" ;
 
 // varlist '=' exprlist. The targets and the values sit interleaved on the stack;
 // makeAssign tells them apart (a target is an object, a value thunk a function).
@@ -181,7 +199,13 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = CmpExpr { KwAnd CmpExpr } ;
 
 CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = ConcatExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ConcatExpr } ;
+            = BitExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr } ;
+
+// Bitwise & | ~ << >> (Lua 5.3+): accepted, reported as not implemented (the handle
+// runtime has no integer bit operations). Binary '~' is guarded with !"=" so a '~='
+// comparison is left for CmpExpr above.
+BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
+            = ConcatExpr { ( "&" | "|" | "<<" | ">>" | ( "~" !"=" ) ) ConcatExpr } ;
 
 // Concatenation is right associative, so it recurses on its own right hand side.
 ConcatExpr  <~~ push(makeConcat(takeAll())) ~~>
@@ -193,13 +217,20 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = NotExpr | LenExpr | NegExpr | SuffixedExpr ;
+UnaryExpr   = NotExpr | LenExpr | NegExpr | BNotExpr | PowExpr ;
 NotExpr     <~~ push(makeNot(pop())) ~~>
             = KwNot UnaryExpr ;
 LenExpr     <~~ push(makeLen(pop())) ~~>
             = "#" UnaryExpr ;
 NegExpr     <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
+// Unary bitwise not ~x (Lua 5.3+): accepted, not implemented (guarded against '~=').
+BNotExpr    <~~ pop(); push(notImplExpr("unary ~ (bitwise not)", up.pos)) ~~>
+            = ( "~" !"=" ) UnaryExpr ;
+// Exponentiation a ^ b, right associative and binding tighter than the unary operators
+// (Lua float pow): accepted, not implemented (no js_pow extern in the handle runtime).
+PowExpr     <~~ push(makePow(takeAll(), up.pos)) ~~>
+            = SuffixedExpr [ "^" PowExpr ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
@@ -215,8 +246,21 @@ DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FuncExpr | TableLit | DqString | SqString | Number
-            | True | False | Nil | VarRef ;
+Primary     = "(" Expression ")" | FuncExpr | TableLit | LongString | VarargExpr
+            | DqString | SqString | Number | True | False | Nil | VarRef ;
+
+// [[ ... ]] long-bracket string literals (also [=[ ]=] and [==[ ]==] for content that
+// contains a closing bracket). The body is verbatim (no escapes) and a single leading
+// newline is dropped, matching Lua. Longer '=' levels are still unrecognized.
+LongString  = LongStr2 | LongStr1 | LongStr0 ;
+LongStr0    = "[[" :whitespace() { !"]]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]]" :whitespace(Whitespace) ;
+LongStr1    = "[=[" :whitespace() { !"]=]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]=]" :whitespace(Whitespace) ;
+LongStr2    = "[==[" :whitespace() { !"]==]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]==]" :whitespace(Whitespace) ;
+// '...' in expression position (varargs): accepted, not implemented (the subset passes
+// only the named parameters).
+VarargExpr  <~~ push(notImplExpr("varargs ...", up.pos)) ~~>
+            = "..." ;
+AnyByte     = "\x00"..."\U0010ffff" ;
 
 FuncExpr    <~~ push(makeFuncExpr(pop(), pop())) ~~>
             = KwFunction ParamList Block KwEndKw ;
@@ -233,7 +277,15 @@ NameField   <~~ var nv = pop(); push({fkind:"name", name: pop(), v: nv}) ~~>
 PosField    <~~ push({fkind:"pos", v: pop()}) ~~>
             = Expression ;
 
-Number      = DecLit ;
+// Numbers: hexadecimal (0x1F), a decimal with an exponent (1e3, 2.5e-4), or a plain
+// decimal (DecLit from lib/numbers.abnf). Hex/exponent are tried before DecLit, which
+// has neither.
+Number      = HexLit | FloatLit | DecLit ;
+HexLit      <~~ push(makeConst(luaHexVal(up.in))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
+FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." { "0"..."9" } ] ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 Nil         <~~ push(makeConst(undefined)) ~~>
             = "nil" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
@@ -255,13 +307,20 @@ KwFor       = "for" KwEnd ;
 KwIn        = "in" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
+KwGoto      = "goto" KwEnd ;
 KwAnd       = "and" KwEnd ;
 KwOr        = "or" KwEnd ;
 KwNot       = "not" KwEnd ;
 
-// Lua whitespace: blanks and newlines plus -- line comments.
+// Lua whitespace: blanks and newlines plus comments. Block comments --[[ ... ]] (and
+// --[=[ ]=] / --[==[ ]==]) are tried before the line comment, since '--[[' extends
+// '--'. A line comment runs to the end of the line.
 Whitespace  = { @+" \t\r\n" | Comment } ;
-Comment     = "--" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+Comment     = LongCmt2 | LongCmt1 | LongCmt0 | LineComment ;
+LongCmt0    = "--[[" :whitespace() { !"]]" AnyByte } "]]" :whitespace(Whitespace) ;
+LongCmt1    = "--[=[" :whitespace() { !"]=]" AnyByte } "]=]" :whitespace(Whitespace) ;
+LongCmt2    = "--[==[" :whitespace() { !"]==]" AnyByte } "]==]" :whitespace(Whitespace) ;
+LineComment = "--" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // ---
@@ -278,6 +337,39 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function fail(msg) { println("lua compiler error: " + msg); exit(1) }
 
     var hidCount = 0
+
+    // ----- Widening helpers -----
+    // A no-op statement thunk for an empty ';' statement.
+    function makeEmpty() { return function(b) { return b } }
+    // A bitwise/exponentiation node: pass through when the operator is absent (a single
+    // operand collected), otherwise accept-and-notImplemented. makeBit is applied to
+    // every BitExpr and makePow to every PowExpr, so the pass-through keeps the emitted
+    // IR of operator-free programs exactly as before.
+    function makeBit(items, pos) { if (items.length == 1) { return items[0] } return notImplExpr("bitwise operator", pos) }
+    function makePow(items, pos) { if (items.length == 1) { return items[0] } return notImplExpr("^ (exponentiation) operator", pos) }
+    // A long-bracket string body: a single leading newline is dropped (the Lua rule).
+    function luaLong(s) {
+        if (s.length > 0 && s.charCodeAt(0) === 10) { return s.slice(1) }
+        if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return s.slice(2) }
+        return s
+    }
+    // Parse a hex integer literal (0x....) to a number, stopping at the first non-hex
+    // char (so trailing whitespace captured in up.in is ignored).
+    function luaHexVal(s) {
+        var v = 0
+        var i = 2
+        var going = true
+        while (going && i < s.length) {
+            var cc = s.charCodeAt(i)
+            var d = -1
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            if (d < 0) { going = false }
+            else { v = v * 16 + d; i = i + 1 }
+        }
+        return v
+    }
 
     // The standard-library tables (math/string/table) and the global next() are emitted
     // into jsmain's scope only when the program actually references them, so a program

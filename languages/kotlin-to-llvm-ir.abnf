@@ -85,7 +85,9 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Param { "," Param } ] ")" ;
-Param       = Id <~~ push(up.in) ~~> ":" Type ;
+// Parameter modifiers (vararg/noinline/crossinline) and a default value are parsed
+// and dropped - the default is not supplied at call sites, but the header parses.
+Param       = [ Modifiers ] Id <~~ push(up.in) ~~> ":" Type [ "=" DiscardExpr ] ;
 
 // class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -104,8 +106,12 @@ PropDecl    <~~ push(makeProp(takeAll())) ~~>
 Type        = ( "(" [ Type { "," Type } ] ")" "->" Type | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
+// A statement may carry a label (loop@ ...); the label is parsed and ignored, so the
+// labelled statement still lowers. Labelled jumps (break@l / continue@l / return@l)
+// route to notImpl (the target label cannot be resolved in the subset).
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | Destructure | Decl | If | While | Do | For | TryStmt | Throw | Return | Break | Continue | Empty | ExprStmt ;
+            = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
+            | [ LabelDef ] ( Block | Destructure | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ;
 
 // try/catch/finally and throw parse fully; without an exception model they are
 // not implemented (see makeTry/makeThrow). Under -warn-unsupported the try block
@@ -197,8 +203,12 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = EqExpr { "&&" EqExpr } ;
 
+// Referential equality === / !== is lowered like structural == / != (in the untyped
+// handle world both are identity for objects), so the operands still run and fold.
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { EqOp RelExpr } ;
+EqOp        = "===" <~~ push("==") ~~> | "!==" <~~ push("!=") ~~>
+            | "==" <~~ push("==") ~~> | "!=" <~~ push("!=") ~~> ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = TypeOp { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeOp } ;
@@ -235,8 +245,10 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // p.x is a property read, list[i] an indexed read. The ?. variants yield null
 // (instead of failing) when their receiver is null. A method call may take a
 // trailing lambda - list.map { it * 2 } - which becomes the last argument.
+// A trailing "!!" (non-null assertion) is consumed and dropped: in the untyped handle
+// world it is the identity, so x!! lowers exactly like x (and x!!.m() still chains).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
 SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}) ~~>
@@ -247,7 +259,10 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
 
-Primary     = "(" Expression ")" | Template | IntLit | True | False | Null | Lambda | Call | VarRef ;
+// RawStr before Template (both open with "), FloatLit before IntLit (a plain integer
+// falls through), AnonFun/CallableRef before Call/VarRef (they would otherwise eat the
+// leading identifier). RawStr/FloatLit/CallableRef/AnonFun are recognised, not lowered.
+Primary     = "(" Expression ")" | RawStr | Template | FloatLit | IntLit | True | False | Null | Lambda | AnonFun | CallableRef | Call | VarRef ;
 
 // A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
 // one expression; without parameters the single argument is bound to 'it'.
@@ -259,7 +274,8 @@ Lambda      <~~ push(makeLambda(takeAll())) ~~>
 // their value); then a bare if/when statement; then an empty statement.
 LamStmt     = LamCtrl | LamExpr | LamIf | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
-            = Decl | While | Do | For | TryStmt | Throw | Return | Break | Continue ;
+            = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
+            | [ LabelDef ] ( Decl | While | Do | For | TryStmt | Throw ) ;
 LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 LamIf       <~~ push({stmt: pop()}) ~~>
@@ -310,6 +326,49 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x
 // A balanced < ... > run (generic parameters / arguments), parsed and ignored.
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+// A balanced ( ... ) run (used to skip an anonymous function's parameter list, which
+// may hold nested parens from function types). No tags: nothing is pushed.
+SkipParen   = "(" { SkipParen | SkipParenItem } ")" ;
+SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
+
+// A statement label (loop@, outer@): parsed and ignored so the labelled statement
+// still lowers. Labelled jumps carry a target we cannot resolve, so they notImpl.
+LabelDef    = Id "@" ;
+BreakAt     <~~ push(notImplStmt("labelled break", up.pos)) ~~>
+            = KwBreak "@" Id [ ";" ] ;
+ContinueAt  <~~ push(notImplStmt("labelled continue", up.pos)) ~~>
+            = KwContinue "@" Id [ ";" ] ;
+ReturnAt    <~~ push(notImplStmt("labelled return", up.pos)) ~~>
+            = KwReturn "@" Id [ DiscardExpr ] [ ";" ] ;
+
+// A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores). The
+// value model is 32-bit Int, so a float is recognised and reported as not implemented.
+FloatLit    <~~ push(notImplExpr("floating-point literal", up.pos)) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ]
+              | FloatExp [ FloatSfx ]
+              | FloatSfx ) :whitespace(Whitespace) ;
+FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
+FloatSfx    = "f" | "F" ;
+
+// A triple-quoted raw string: any content up to the closing """ (internal runs of one
+// or two quotes are allowed). Recognised and reported as not implemented.
+RawStr      <~~ push(notImplExpr("raw string literal", up.pos)) ~~>
+            = '"""' :whitespace() { RawTwoQ | RawOneQ | RawPlain } '"""' :whitespace(Whitespace) ;
+RawPlain    = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
+RawOneQ     = '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
+RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
+
+// A callable reference (::fn, Type::member, pkg.Type::member). No first-class function
+// values for methods here, so it is recognised and reported as not implemented.
+CallableRef <~~ push(notImplExpr("callable reference", up.pos)) ~~>
+            = [ Id { "." Id } ] "::" Id ;
+
+// An anonymous function expression: fun(params): T { ... } or fun(params) = expr. The
+// parameter list and body are skipped; recognised and reported as not implemented.
+AnonFun     <~~ push(notImplExpr("anonymous function", up.pos)) ~~>
+            = KwFun SkipParen [ ":" Type ] ( SkipBlock | "=" DiscardExpr ) ;
 
 // A tag-less primary-constructor parameter list for headers we only skip.
 CtorParamsSkip = "(" [ CParamSkip { "," CParamSkip } ] ")" ;

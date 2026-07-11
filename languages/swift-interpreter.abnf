@@ -51,8 +51,10 @@ TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | EnumDecl ) ;
 UnsupTop    = [ Modifiers ] UnsupDecl ;
 TopStmt     <~~ var t = pop(); t() ~~> = Statement ;
 
-// Declaration modifiers are parsed and ignored.
-Modifiers   = { Modifier } ;
+// Declaration modifiers and attributes (@objc, @available(...), @escaping) are
+// parsed and ignored.
+Modifiers   = { Modifier | Attribute } ;
+Attribute   = "@" Id { "." Id } [ SkipParen ] ;
 Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
               | "final" | "static" | "mutating" | "nonmutating"
               | "override" | "lazy" | "weak" | "unowned" | "convenience"
@@ -60,15 +62,21 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
 
 // func name(label param: Type, ...) -> Ret { ... }
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFunc [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ FnEffects ] [ "->" Type ] Block ;
+            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" Type ] [ GenWhere ] Block ;
 FnEffects   = { ( "throws" | "rethrows" | "async" ) KwEnd } ;
+// A generic constraint clause on a function/type: where T: P, U == V (ignored).
+GenWhere    = KwWhere GenConstraint { "," GenConstraint } ;
+GenConstraint = Type ( ":" TypeList | "==" Type | "=" Type ) ;
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Param { "," Param } ] ")" ;
 // A parameter is [externalLabel] internalName : Type; the last identifier is
 // the bound name (Swift's _ label is just an identifier here).
 Param       <~~ push(paramName(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ Id <~~ push(up.in) ~~> ] ":" [ "inout" KwEnd ] Type [ "..." ] [ "=" DiscardExpr ] ;
+            = Id <~~ push(up.in) ~~> [ Id <~~ push(up.in) ~~> ] ":" [ "inout" KwEnd ] { ParamAttr } Type [ "..." ] [ "=" DiscardExpr ] ;
+// Parameter/type attributes (@escaping, @autoclosure) take no argument list here,
+// so no SkipParen: the ( ... ) that follows belongs to a function type.
+ParamAttr   = "@" Id { "." Id } ;
 
 // class / struct with stored properties, methods and an explicit init.
 StructDecl  <~~ buildClass(takeAll()) ~~>
@@ -77,15 +85,21 @@ ClassDecl   <~~ buildClass(takeAll()) ~~>
             = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
 TypeList    = Type { "," Type } ;
 
-Member      = [ Modifiers ] ( InitDecl | MethodDecl | ComputedProp | PropDecl ) ;
+Member      = [ Modifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
-            = KwInit [ "?" ] [ SkipAngle ] ParamList [ FnEffects ] Block ;
+            = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] Block ;
+// deinit and subscript are accepted structurally, not implemented.
+DeinitDecl  <~~ notImpl("deinitializer", up.pos) ~~>
+            = KwDeinit SkipBlock ;
+SubscriptDecl <~~ notImpl("subscript", up.pos) ~~>
+            = KwSubscript [ SkipAngle ] SkipParen [ "->" Type ] SkipBlock ;
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = KwFunc [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ FnEffects ] [ "->" Type ] Block ;
+            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" Type ] [ GenWhere ] Block ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] [ ";" ] ;
-ComputedProp <~~ notImpl("computed property", up.pos) ~~>
-            = ( "let" | "var" ) KwEnd Id [ ":" Type ] SkipBlock ;
+// Computed properties and stored properties with willSet/didSet observers.
+ComputedProp <~~ notImpl("computed property or property observer", up.pos) ~~>
+            = ( "let" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] SkipBlock ;
 
 // A plain enum of bare cases becomes named constants (Direction.north = "north").
 EnumDecl    = PlainEnum | ComplexEnum ;
@@ -95,8 +109,12 @@ SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: u
 ComplexEnum <~~ notImpl("enum with raw or associated values", up.pos) ~~>
             = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
 
-// protocol / extension / typealias: accepted structurally, not implemented.
-UnsupDecl   = ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
+// import / protocol / extension / typealias: accepted structurally, not implemented.
+UnsupDecl   = ImportDecl | ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
+ImportDecl  <~~ notImpl("import", up.pos) ~~>
+            = KwImport [ ImportKind ] Id { "." ( Id | "*" ) } [ ";" ] ;
+ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
+              | "func" | "let" | "var" | "inout" ) KwEnd ;
 ProtocolDecl <~~ notImpl("protocol", up.pos) ~~>
             = KwProtocol Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
 ExtensionDecl <~~ notImpl("extension", up.pos) ~~>
@@ -112,7 +130,54 @@ TypeCore    = "[" Type [ ":" Type ] "]"
             | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Decl | If | Guard | While | Repeat | For | Switch | Return | Break | Continue | Empty | ExprStmt ;
+// The Cplx* / Local* / do / defer / throw / fallthrough forms are recognized but
+// not executed; they route to notImplStmt (a warning under -warn-unsupported).
+Statement   = Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
+            | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
+            | Continue | Fallthrough | Do | Defer | Empty | ExprStmt ;
+
+// A nested function or nested type declaration inside a body.
+LocalFunc   <~~ push(notImplStmt("nested function", up.pos)) ~~>
+            = KwFunc Id [ SkipAngle ] SkipParen [ FnEffects ] [ "->" Type ] [ GenWhere ] SkipBlock ;
+LocalType   <~~ push(notImplStmt("nested type declaration", up.pos)) ~~>
+            = ( KwStruct | KwClass | KwEnum ) Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
+
+// do { ... } catch [pattern] { ... }, defer { ... }, throw EXPR, fallthrough.
+Do          <~~ push(notImplStmt("do/catch", up.pos)) ~~>
+            = KwDo SkipBlock { KwCatch { CatchTok } SkipBlock } ;
+CatchTok    = SkipStr | SkipChar | SkipOther ;
+Defer       <~~ push(notImplStmt("defer", up.pos)) ~~>
+            = KwDefer SkipBlock ;
+Throw       <~~ push(notImplStmt("throw", up.pos)) ~~>
+            = KwThrow DiscardExpr [ ";" ] ;
+Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
+            = KwFallthrough [ ";" ] ;
+
+// if / guard / while whose condition uses optional binding (if let x = ...),
+// pattern matching (if case ...) or a compound comma condition: recognized and
+// routed to notImplStmt. Plain boolean conditions fall through to If/Guard/While.
+// The body SkipBlock is optional: when the last binding initializer ends in a
+// method call (let x = it.next()), the trailing { body } is grabbed as a trailing
+// closure by the expression, so no separate body block remains to consume.
+CplxIf      <~~ push(notImplStmt("if with binding or compound condition", up.pos)) ~~>
+            = KwIf CplxCondClause [ SkipBlock ] [ KwElse ElseTail ] ;
+ElseTail    = KwIf AnyCondClause [ SkipBlock ] [ KwElse ElseTail ] | SkipBlock ;
+CplxGuard   <~~ push(notImplStmt("guard with binding or compound condition", up.pos)) ~~>
+            = KwGuard CplxCondClause KwElse SkipBlock ;
+CplxWhile   <~~ push(notImplStmt("while with binding or compound condition", up.pos)) ~~>
+            = KwWhile CplxCondClause [ SkipBlock ] ;
+// A complex clause requires either a comma (2+ conditions) or a leading binding.
+CplxCondClause = CondItem "," CondItem { "," CondItem } | BindCond { "," CondItem } ;
+AnyCondClause  = CondItem { "," CondItem } ;
+CondItem    = BindCond | DiscardExpr ;
+BindCond    = OptBind | CaseCond ;
+OptBind     = ( "let" | "var" ) KwEnd BindPat [ ":" Type ] [ "=" DiscardExpr ] [ PatWhere ] ;
+CaseCond    = KwCase Pattern "=" DiscardExpr [ PatWhere ] ;
+PatWhere    = KwWhere DiscardExpr ;
+BindPat     = "(" BindPat { "," BindPat } ")" | Wildcard | Id ;
+Pattern     = "(" Pattern { "," Pattern } ")" | ( "let" | "var" ) KwEnd Pattern
+            | Wildcard | [ "." ] Id { "." Id } [ SkipParen ] ;
+Wildcard    = "_" KwEnd ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -188,7 +253,14 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = Coalesce { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Coalesce } ;
+            = Cast { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Cast } ;
+// e as T / e as? T / e as! T / e is T: recognized, routed to notImplExpr. With no
+// cast operator it is a pure pass-through (a single item), so behavior is
+// unchanged for programs that do not cast.
+Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
+            = Coalesce { CastOp Type } ;
+CastOp      <~~ push({cast: 1}) ~~>
+            = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 // a ?? b yields a unless it is nil (short circuit; the nil-coalescing operator).
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = AddExpr { "??" AddExpr } ;
@@ -197,9 +269,12 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | CallMember ;
+UnaryExpr   = Neg | Not | TryAwait | CallMember ;
 Neg         <~~ push(makeNeg(pop())) ~~>   = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
+// try / try? / try! / await: recognized as a prefix, routed to notImplExpr.
+TryAwait    <~~ pop(); push(notImplExpr("try/await expression", up.pos)) ~~>
+            = ( KwTry [ "?" | "!" ] | KwAwait ) UnaryExpr ;
 
 // obj.m(args), obj.field, arr[i] - and a trailing closure becomes the last arg.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
@@ -215,8 +290,22 @@ MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ Closure ] | Closure ;
 CallArg     = [ ArgLabel ] Expression ;
 ArgLabel    = Id ":" ;
 
-Primary     = "(" Expression ")" | Template | IntLit | True | False | Nil
-            | Closure | DictLit | ArrayLit | Call | VarRef ;
+Primary     = Paren | Template | FloatLit | IntLit | True | False | Nil
+            | Closure | DictLit | ArrayLit | Shorthand | Call | VarRef ;
+
+// ( e ) is a pass-through; ( e, e, ... ) is a tuple, recognized and routed to
+// notImplExpr. Element labels (x: e) are accepted and dropped.
+Paren       <~~ push(makeParen(takeAll(), up.pos)) ~~>
+            = "(" TupleElem { "," TupleElem } ")" ;
+TupleElem   = [ Id ":" ] Expression ;
+// Floating-point literals (3.14): recognized, routed to notImplExpr (the runtime
+// is 32-bit integer only). Tried before IntLit; a plain integer or a range (1...5)
+// still parses as IntLit because a fractional digit is required.
+FloatLit    <~~ push(notImplExpr("floating-point literal", up.pos)) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "." "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
+// Closure shorthand arguments ($0, $1, ...): recognized, routed to notImplExpr.
+Shorthand   <~~ push(notImplExpr("closure shorthand argument", up.pos)) ~~>
+            = "$" :whitespace() "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 
 // A closure: { x in x * 2 } or { (a: Int, b: Int) -> Int in a + b } or, with no
 // signature, { doThing() }. Its value is the last expression; a real closure
@@ -273,9 +362,24 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x
 SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
+// A balanced ( ... ) run consumed but ignored (attribute args, subscript params).
+SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
+SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
+
 DiscardExpr <~~ pop() ~~> = Expression ;
 
 KwFunc      = "func" KwEnd ;
+KwImport    = "import" KwEnd ;
+KwWhere     = "where" KwEnd ;
+KwDeinit    = "deinit" KwEnd ;
+KwSubscript = "subscript" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwDefer     = "defer" KwEnd ;
+KwThrow     = "throw" KwEnd ;
+KwFallthrough = "fallthrough" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwAwait     = "await" KwEnd ;
 KwStruct    = "struct" KwEnd ;
 KwClass     = "class" KwEnd ;
 KwEnum      = "enum" KwEnd ;
@@ -430,6 +534,20 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // ----- Expression thunks -----
+
+    // e as/as?/as! T and e is T carry a {cast:1} marker per operator. With no
+    // marker the single operand thunk passes through unchanged; a cast is not
+    // implemented (the runtime has no dynamic types), so it becomes a placeholder.
+    function makeCast(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("type cast (as / is)", pos)
+    }
+
+    // ( e ) passes the single operand through; a tuple ( e, e, ... ) is not implemented.
+    function makeParen(items, pos) {
+        if (items.length == 1) { return items[0] }
+        return notImplExpr("tuple", pos)
+    }
 
     // items = [cond] or [cond, then, else] -> the ternary conditional.
     function makeTernary(items) {
