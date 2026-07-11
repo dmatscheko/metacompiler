@@ -86,7 +86,7 @@ Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport QualName [ KwAs Id ]
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 // A top level val/var: its declaration thunk becomes a top level statement.
-TopProp     = Decl ;
+TopProp     = DelegateDecl | Decl ;
 
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
             = KwFun [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
@@ -106,11 +106,17 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 CtorParams  <~~ push({cparams: takeAll()}) ~~>
             = "(" [ CtorParam { "," CtorParam } ] ")" ;
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
-            = [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
+            = [ Modifiers ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
 
-Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDecl | FunDecl <~~ push({method: pop()}) ~~> ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> ) ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+// A delegated property (val/var x [: T] by <expr>, e.g. `by lazy { ... }` or the
+// Koin/DI `by inject()`): reading it dispatches through the delegate's getValue/
+// setValue protocol, which is outside the subset. It parses and is reported as not
+// implemented; the member contributes no field (like a property accessor).
+PropDelegate <~~ notImpl("delegated property", up.pos) ~~>
+            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
 
 // Type is parsed and (apart from steering as/is) ignored. Generics (<...>) and the
 // nullable ? are accepted and dropped; dotted names and simple function types too.
@@ -122,7 +128,7 @@ Type        = ( "(" [ Type { "," Type } ] ")" "->" Type | Id [ SkipAngle ] { "."
 // route to notImpl (the target label cannot be resolved in the subset).
 Statement   <~~ push(stmtPos(pop())) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
-            | [ LabelDef ] ( Block | Destructure | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ;
+            | [ LabelDef ] ( Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ;
 
 // try/catch/finally and throw parse fully; without an exception model they are
 // not implemented (see makeTry/makeThrow). Under -warn-unsupported the try block
@@ -138,6 +144,11 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 
 Decl        <~~ push(makeDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+// A local or top-level delegated property (val x by lazy { ... }): same delegate
+// protocol gap as PropDelegate; parsed and reported as not implemented, with a
+// placeholder statement so the surrounding code still lowers under -warn-unsupported.
+DelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
+            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
@@ -388,7 +399,10 @@ CParamSkip  = [ Modifiers ] [ ( "val" | "var" ) KwEnd ] Id ":" Type [ "=" Discar
 // A supertype list (types with optional constructor-call args). No inheritance in
 // the subset, so it is parsed and ignored; DiscardExpr drops the arg thunks.
 SuperList   = SuperItem { "," SuperItem } ;
-SuperItem   = Type [ "(" [ DiscardExpr { "," DiscardExpr } ] ")" ] ;
+// A supertype is a class (optional constructor-call args), an interface, or an
+// interface implemented by delegation (`: I by impl`). No inheritance in the
+// subset, so all three parse and are ignored; the delegate expression is discarded.
+SuperItem   = Type [ "(" [ DiscardExpr { "," DiscardExpr } ] ")" | KwBy DiscardExpr ] ;
 DiscardExpr <~~ pop() ~~> = Expression ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a
@@ -466,6 +480,7 @@ KwWhile     = "while" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwFor       = "for" KwEnd ;
 KwIn        = "in" KwEnd ;
+KwBy        = "by" KwEnd ;
 KwWhen      = "when" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;

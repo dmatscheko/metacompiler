@@ -1589,6 +1589,30 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-recognize.kt", "-q", "-warn-unsupported"]
         },
         {
+            "name": "Kotlin delegation SHOULD FAIL (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-delegation.kt", "-q"]
+        },
+        {
+            "name": "Kotlin delegation SHOULD FAIL (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-delegation.kt", "-q"]
+        },
+        {
+            "name": "Kotlin delegation warned+ignored (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-delegation.kt", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Kotlin delegation warned+ignored (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-delegation.kt", "-q", "-warn-unsupported"]
+        },
+        {
             "name": "Go recognition SHOULD FAIL",
             "type": "go",
             "request": "launch",
