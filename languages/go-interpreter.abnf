@@ -20,13 +20,23 @@ implicit break ends every case), Go style if/else without parentheses (else if w
 continue, i++ and i-- as statements, assignment operators += -= *= /= %=, fmt.Println
 and fmt.Print, os.Exit, and string concatenation. int arithmetic is 32 bit, / truncates.
 
+Widened surface (parsed so a real Go file gets through; -warn-unsupported downgrades
+the abort to a warning and keeps the rest running, enough for call graphs/CFGs/traces):
+a single-result type assertion x.(T) is GENUINELY handled as the identity on the value
+(the target type is parsed and ignored), and channel/interface/chan types are parsed in
+type positions. Accepted but reported not implemented (no concurrency, channel, or
+interface model): interface type declarations, goroutines (go f()), channel make
+(make(chan T)), channel send (ch <- v) and receive (<-ch), select, and type switches
+(switch x.(type)). Where operands exist (the goroutine callee, the send/receive channel
+and value) they still evaluate under -warn-unsupported so their calls stay visible.
+
 Deviations and limits: structs behave like references (as if every value were a *T),
 append mutates in place (write s = append(s, v) as usual), composite literals must not
 appear in if/for/switch headers, map iteration and printing follow the insertion order
 (real Go randomizes resp. sorts), 'var m map[K]V' is not a usable map (create maps with
 a literal or make), defer cannot take struct methods, there are no pointers,
-interfaces,
-goroutines, fallthrough, or method values, and s[i] on strings is not supported.
+fallthrough, method values, generics, or the comma-ok type assertion, and s[i] on
+strings is not supported.
 
 The entry point is func main(); self checking programs end with os.Exit(failures).") ;
 
@@ -50,10 +60,14 @@ Import      = "import" KwEnd ( ImportStr | "(" { ImportStr } ")" ) ;
 ImportStr   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
             = '"' :whitespace() { "\x20"..."\x21" | "\x23"..."\x7e" } '"' :whitespace(Whitespace) ;
 
-// type Point struct { x int; y int }
-TypeDecl    <~~ buildStruct(takeAll()) ~~>
-            = "type" KwEnd Id <~~ push(up.in) ~~> "struct" KwEnd
-              "{" { Id <~~ push(up.in) ~~> Type [ ";" ] } "}" ;
+// type Point struct { x int; y int } and type Shape interface { Area() int }.
+// The name is pushed first; the body decides between a struct (built) and an
+// interface (accepted, then reported not implemented - no interface semantics).
+TypeDecl    <~~ buildTypeDecl(takeAll(), up.pos) ~~>
+            = "type" KwEnd Id <~~ push(up.in) ~~> ( StructBody | IfaceBody ) ;
+StructBody  = "struct" KwEnd "{" { Id <~~ push(up.in) ~~> Type [ ";" ] } "}" ;
+IfaceBody   <~~ push({iface: true}) ~~>
+            = "interface" KwEnd SkipBlock ;
 
 // func name(params) rets { } and func (r Type) name(params) rets { }
 FuncDecl    <~~ buildFunc(takeAll()) ~~>
@@ -68,14 +82,27 @@ RetTypes    = Type | "(" Type { "," Type } ")" ;
 TopVar      <~~ var t = pop(); t() ~~>
             = VarDecl ;
 
-Type        = "[" "]" Type | MapTypeT | FuncTypeT
+Type        = "[" "]" Type | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
             | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) ;
 MapTypeT    = "map" KwEnd "[" Type "]" Type ;
 FuncTypeT   = "func" KwEnd "(" [ Type { "," Type } ] ")" [ Type | "(" Type { "," Type } ")" ] ;
+// Channel and (anonymous) interface types are parsed so declarations mentioning
+// them type-check syntactically; their values are only produced/consumed through
+// constructs that are themselves reported as not implemented.
+ChanTypeT   = ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) Type ;
+IfaceTypeT  = "interface" KwEnd SkipBlock ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | For | Switch | Return | Break | Continue | Defer | VarDecl
+Statement   = Block | If | For | Switch | Return | Break | Continue | Defer | GoStmt | Select | VarDecl
             | SimpleStmt | Empty ;
+
+// go f(args) / go pkg.Fn(args): a goroutine. True concurrency is not modeled, so
+// it is reported not implemented; under -warn-unsupported the call still evaluates
+// (its callee stays visible in call graphs). select likewise has no channel runtime.
+GoStmt      <~~ push(makeGoStmt(pop(), up.pos)) ~~>
+            = "go" KwEnd PostfixExpr [ ";" ] ;
+Select      <~~ push(notImplStmt("select statement", up.pos)) ~~>
+            = "select" KwEnd SkipBlock ;
 
 // defer f(args) / defer pkg.fn(args): the function value and the arguments are
 // evaluated now, the call runs when the surrounding function returns (LIFO).
@@ -95,7 +122,14 @@ VType       <~~ push({ty: up.in}) ~~>
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
 // MapOk (v, ok := m[k]) must come first: as a ShortDecl it would miss the flag.
-SimpleStmt  = ( MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ) [ ";" ] ;
+SimpleStmt  = ( MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) [ ";" ] ;
+
+// ch <- v: a channel send. The left side is a postfix expression (so the leading
+// '<' of a relational compare is never mistaken for the '<-' send token: a compare
+// is written 'a < -b' with a space). Accepted, then reported not implemented; both
+// operands still evaluate under -warn-unsupported so their calls stay visible.
+ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
+            = PostfixExpr "<-" Expression ;
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
 MapOk       <~~ push(makeMapOk(takeAll())) ~~>
@@ -145,7 +179,15 @@ ForCond     <~~ push(makeWhile(pop(), pop())) ~~>
 
 // Go switch: no fallthrough (an implicit break ends every case), several values per
 // case, with a subject (compared ==) or without one (the first true condition wins).
-Switch      <~~ push(makeSwitch(takeAll())) ~~>
+Switch      = TypeSwitch | ValueSwitch ;
+// A type switch (switch x.(type) / switch v := x.(type)) needs interface and type-set
+// semantics we do not model: the subject (an identifier chain) is accepted and the
+// body skipped, then it is reported not implemented. Tried before the value switch so
+// its subject's '.(type)' is not mistaken for a value plus a type assertion.
+TypeSwitch  <~~ push(notImplStmt("type switch", up.pos)) ~~>
+            = "switch" KwEnd [ Id ":=" ] TSSubject "." "(" "type" KwEnd ")" SkipBlock ;
+TSSubject   = Id { "." Id } ;
+ValueSwitch <~~ push(makeSwitch(takeAll())) ~~>
             = "switch" KwEnd [ SwitchSubj ] "{" { CaseLabel | Statement } "}" ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = CondOn Expression CondOff ;
@@ -183,7 +225,12 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | PostfixExpr ;
+UnaryExpr   = Recv | Neg | Not | PostfixExpr ;
+// <-ch: a channel receive as a value. Accepted, reported not implemented; the
+// operand still evaluates under -warn-unsupported. Tried before Neg so '<-' wins
+// over '<' (a compare's '<' is followed by whitespace or a different next token).
+Recv        <~~ push(makeRecv(pop(), up.pos)) ~~>
+            = "<-" UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
@@ -192,15 +239,20 @@ Not         <~~ push(makeNot(pop())) ~~>
 // p.manhattan(), fmt.Println(...), p.x, s[i].
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | FieldSfx | IndexSfx | TypeAssertSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
+// x.(T): a type assertion, GENUINELY handled as the identity on the value (a
+// successful assertion yields the same underlying value; the target type is parsed
+// and ignored). It pushes no suffix, so foldCallMember passes the value through.
+// Only the single-result form is supported (not the comma-ok v, ok := x.(T)).
+TypeAssertSfx = "." "(" Type ")" ;
 
 Primary     = "(" Expression ")" | DqString | IntLit | True | False | FuncLit | SliceLit
-            | MapLit | MakeMap | StructLit | Call | VarRef ;
+            | MapLit | MakeMap | MakeChan | StructLit | Call | VarRef ;
 
 // func(x int) int { ... }: a function literal; a real closure over its scope.
 FuncLit     <~~ push(makeFuncLit(pop(), pop())) ~~>
@@ -218,6 +270,11 @@ MapEntry    <~~ var mv = pop(); push({mk: pop(), mv: mv}) ~~>
             = Expression ":" Expression ;
 MakeMap     <~~ push(makeMakeMap(pop())) ~~>
             = "make" KwEnd "(" MapTypeZ ")" ;
+
+// make(chan T) / make(chan T, n): a channel. Accepted, reported not implemented; an
+// optional buffer size is parsed and discarded.
+MakeChan    <~~ push(notImplExpr("channel make", up.pos)) ~~>
+            = "make" KwEnd "(" ChanTypeT [ "," Expression <~~ pop() ~~> ] ")" ;
 MapTypeZ    = "map" KwEnd "[" Type "]" ZType ;
 ZType       <~~ push({mzero: up.in}) ~~>
             = Type ;
@@ -250,6 +307,22 @@ StructGate = :script(~~
         return (t == "$nostruct") ? abnf.newToken("\x01no-composite-literal-in-header", 0) : undefined
     })()
 ~~) ;
+
+// A balanced { ... } body consumed without interpreting it, so a construct (an
+// interface body, a select/type-switch body) can be ACCEPTED without being
+// understood. Full string/raw-string/rune literals are matched first, so braces
+// inside them are never miscounted. No tags: nothing is pushed, so the consuming
+// production is free to push its own placeholder.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipStr | SkipRaw | SkipChar | SkipBlock | SkipOther ;
+SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipStrChar = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipRaw     = "`" :whitespace() { "\x00"..."\x5f" | "\x61"..."\U0010ffff" } "`" :whitespace(Whitespace) ;
+SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(Whitespace) ;
+SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
+SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5f" | "\x61"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 // ---
 
@@ -674,6 +747,35 @@ StructGate = :script(~~
             if (deferFrames.length == 0) fail("defer outside a function")
             deferFrames[deferFrames.length - 1].push({f: f, args: argv})
         }
+    }
+
+    // ----- Widened surface: constructs accepted structurally but not lowered -----
+    // Each reports "not implemented" (aborts by default, warns under -warn-unsupported)
+    // and still evaluates its operands so their calls stay visible in call graphs.
+
+    // go f(...): the callee is evaluated, the concurrency is not modeled.
+    function makeGoStmt(callT, pos) {
+        notImpl("goroutine", pos)
+        return function() { callT(); return undefined }
+    }
+    // ch <- v: both operands are evaluated, the send is not modeled.
+    function makeChanSend(items, pos) {
+        var chT = items[0]
+        var valT = items[1]
+        notImpl("channel send", pos)
+        return function() { chT(); valT(); return undefined }
+    }
+    // <-ch: the operand is evaluated, the receive yields nothing.
+    function makeRecv(chT, pos) {
+        notImpl("channel receive", pos)
+        return function() { chT(); return undefined }
+    }
+    // type Name struct {...} builds a descriptor; type Name interface {...} is
+    // accepted (marked with {iface}) and reported not implemented.
+    function buildTypeDecl(items, pos) {
+        var last = items[items.length - 1]
+        if (typeof last == "object" && last != null && last.iface == true) { notImpl("interface", pos); return }
+        buildStruct(items)
     }
 
     // ----- Functions, methods and structs -----

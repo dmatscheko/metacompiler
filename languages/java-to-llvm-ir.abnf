@@ -19,9 +19,20 @@ if/else, while, do-while, both for forms, the classic colon switch on int or Str
 == != < > <= >= (== compares objects by identity, use equals() for strings), + - * / %
 (int arithmetic is 32 bit, / truncates) and unary - !.
 
-Not in the subset: interfaces, generics, packages/imports, exceptions, casts,
-the arrow switch, char/long/double, overloading, and implicit field access (fields are
-reached via this.x or ClassName.x - like the explicit style many code bases enforce).
+Widened surface (parsed so a whole Java file is accepted): generics (<...>) and the
+extra primitive keywords are parsed and dropped; casts ((Type) expr) are identity;
+annotations (with or without arguments), implements/throws clauses and varargs (...)
+are parsed and ignored. try/catch/finally + throw are accepted and, under
+-warn-unsupported, the try block is still compiled and a throw still lowers its
+expression (no exception model, so no unwinding). Interfaces, enums, annotation types,
+nested/inner types, lambdas, method references and anonymous classes are accepted and
+reported as not implemented; -warn-unsupported downgrades that to a warning so call
+graphs / CFGs / traces still work on partly understood files.
+
+Not genuinely modelled: the arrow switch, char/long/double literals, overloading,
+implicit field access (fields are reached via this.x or ClassName.x - like the
+explicit style many code bases enforce), real exception unwinding, functional
+interfaces (so lambdas/method references are inert) and reflection.
 
 Fields live directly on the instance object (js_get/js_set), methods become own IR
 functions jsf_N(env, args) with the instance prepended to the arguments, stored on the
@@ -45,7 +56,7 @@ The same language with the same semantics is interpreted directly by java-interp
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ Package ] { Import } { ClassDecl | RecordDecl } ;
+            = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl } ;
 
 // An optional package header (parsed and ignored) then repeated imports. Each
 // import path is resolved against the runtime builtins (core.stdlibImports); one
@@ -58,41 +69,53 @@ Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] Q
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ "public" KwEnd ] KwClass Id <~~ push(up.in); curClassName = up.in ~~>
-              [ KwExtends Id <~~ push({ext: up.in}) ~~> ] "{" { Member } "}" ;
+            = [ LeadMods ] KwClass Id <~~ push(up.in); curClassName = up.in ~~> [ SkipAngle ]
+              [ KwExtends Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] ]
+              [ ImplementsSkip ] "{" { Member } "}" ;
 
 // record Pair(int a, int b) { } -- generates fields, a constructor and accessors.
 RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
-            = [ "public" KwEnd ] KwRecord Id <~~ push(up.in) ~~> RParams "{" { Member } "}" ;
+            = [ LeadMods ] KwRecord Id <~~ push(up.in) ~~> [ SkipAngle ] RParams
+              [ ImplementsSkip ] "{" { Member } "}" ;
 RParams     <~~ push({rparams: takeAll()}) ~~>
             = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
 
-Member      = Ctor | Method | Field ;
+Member      = NestedType | Ctor | Method | Field ;
 
 Ctor        <~~ push(makeCtor(takeAll())) ~~>
-            = [ "public" KwEnd ] Id <~~ push(up.in) ~~> ParamList Block ;
+            = [ LeadMods ] [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ Throws ] Block ;
 
 Method      <~~ push(makeMethod(takeAll())) ~~>
-            = Mods Type Id <~~ push(up.in) ~~> ParamList Block ;
+            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ Throws ] Block ;
 
 Field       <~~ push(makeField(takeAll())) ~~>
             = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
 
+// Modifiers before a member: annotations (with or without arguments) are parsed and
+// ignored; ModWord keeps the modifier text so `static` is still detectable.
 Mods        <~~ push({mods: takeAll()}) ~~>
-            = { ( "public" | "static" ) <~~ push(up.in) ~~> KwEnd } ;
+            = { Annotation | ModWord } ;
+ModWord     <~~ push(up.in) ~~>
+            = ModKw ;
 FType       <~~ push({ty: up.in}) ~~>
             = Type ;
 
+// A parameter may carry annotations, `final` and varargs (`...`); all ignored.
 ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
+            = "(" [ Param { "," Param } ] ")" ;
+Param       = { Annotation | "final" KwEnd } Type [ "..." ] Id <~~ push(up.in) ~~> ;
 
-Type        = ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd | Id )
-              [ "[" "]" ] ;
+// Types are parsed and (apart from field defaults) ignored. Generic arguments
+// (<...>), dotted names, extra array dimensions and the extra primitive keywords are
+// accepted and dropped. Semantics stay dynamic.
+Type        = ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd
+              | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
+PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short" | "byte" ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
-            | Decl | Empty | ExprStmt ;
+            | Try | Throw | CtorCall | Decl | Empty | ExprStmt ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -133,6 +156,20 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 
 Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
 Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
+
+// try/catch/finally and throw parse fully; without an exception model they are not
+// implemented (see makeTry/makeThrow). Under -warn-unsupported the try block is still
+// compiled and the thrown expression is still lowered, so their calls stay visible.
+Try         <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = KwTry [ SkipParen ] Block { KwCatch "(" CatchType Id ")" Block } [ KwFinally Block ] ;
+Throw       <~~ push(makeThrow(pop(), up.pos)) ~~>
+            = KwThrow Expression ";" ;
+
+// An explicit constructor invocation (super(args) or this(args)): accepted and
+// reported as not implemented (the implicit no-argument super already ran). The
+// arguments are still lowered so their calls stay visible.
+CtorCall    <~~ push(makeCtorCall(takeAll(), up.pos)) ~~>
+            = ( KwSuper | "this" KwEnd ) "(" [ Expression { "," Expression } ] ")" ";" ;
 
 Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeSeq(takeAll())) ~~>
@@ -179,20 +216,35 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | PostfixExpr ;
+UnaryExpr   = Cast | Neg | Not | PostfixExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 
+// A cast is lowered as identity ((Type) expr yields expr). A primitive cast accepts
+// any unary operand; a reference cast excludes a leading '-'/'+' so `(a) - b` stays
+// subtraction (Java's cast/subtraction disambiguation).
+Cast        = PrimCast | RefCast ;
+PrimCast    <~~ push(makeCast(pop())) ~~>
+            = "(" PrimName KwEnd { "[" "]" } ")" UnaryExpr ;
+RefCast     <~~ push(makeCast(pop())) ~~>
+            = "(" RefType ")" UnaryNoPM ;
+UnaryNoPM   = Not | PostfixExpr ;
+RefType     = ( "String" KwEnd | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
+
 PostfixExpr = IncDec | NewExpr | SuperCall | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
-// new Point(1, 2) | new int[]{1, 2, 3} | new int[n]
-NewExpr     = NewObject | NewArrLit | NewArrSize ;
+// new Point(1, 2) | new int[]{1, 2, 3} | new int[n] | new Foo() { ... } (anonymous)
+NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
 NewObject   <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" ;
+// An anonymous class: accepted, reported as not implemented; the constructor
+// arguments still run so their calls stay visible under -warn-unsupported.
+NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" SkipBlock ;
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
 NewArrSize  <~~ push(makeNewArray(pop())) ~~>
@@ -213,7 +265,19 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | DqString | IntLit | True | False | Null | VarRef ;
+Primary     = Lambda | MethodRef | "(" Expression ")" | DqString | IntLit | True | False | Null | VarRef ;
+
+// Lambdas and method references parse fully but are not implemented (no functional
+// interfaces). A lambda body (block or expression) is accepted and discarded.
+Lambda      <~~ push(makeLambdaExpr(takeAll(), up.pos)) ~~>
+            = LambdaHead "->" LambdaBody ;
+LambdaHead  = "(" [ LamParam { "," LamParam } ] ")" | Id ;
+LamParam    = [ "final" KwEnd ] [ Type ] Id ;
+LambdaBody  = Block | DiscardExpr ;
+MethodRef   <~~ push(makeMethodRef(up.pos)) ~~>
+            = Id { "." Id } "::" ( Id | KwNew ) ;
+DiscardExpr <~~ pop() ~~>
+            = Expression ;
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
@@ -221,8 +285,68 @@ Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
+// ----- Widened surface: generics, annotations, exceptions, casts (see :description) -----
+
+// Balanced skips let a construct be ACCEPTED without being understood. String and char
+// literals are matched first so braces/brackets inside them are never miscounted. No
+// tags: nothing is pushed, so the consuming production places its own placeholder.
+SkipBlock   = "{" { SkipItem } "}" ;
+SkipItem    = SkipStr | SkipChar | SkipBlock | SkipOther ;
+SkipStr     = '"' :whitespace() { SkipStrEsc | SkipStrChar } '"' :whitespace(Whitespace) ;
+SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
+SkipStrChar = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipChar    = "'" :whitespace() { SkipChEsc | SkipChChar } "'" :whitespace(Whitespace) ;
+SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
+SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// A balanced < ... > run (generic parameters / arguments), parsed and ignored.
+SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
+
+// A balanced ( ... ) run (annotation arguments), parsed and ignored.
+SkipParen   = "(" { SkipStr | SkipChar | SkipParen | SkipPOther } ")" ;
+SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
+
+// Annotations (with or without arguments), modifier keywords, and the implements /
+// throws clauses are parsed and ignored. LeadMods drops everything (headers with no
+// static to track). ModWord (used by Mods) keeps the modifier text.
+Annotation  = "@" Id { "." Id } [ SkipParen ] ;
+ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstract"
+              | "synchronized" | "native" | "transient" | "volatile" | "strictfp" ) KwEnd ;
+LeadMods    = { Annotation | ModKw } ;
+ImplementsSkip = KwImplements Type { "," Type } ;
+Throws      = KwThrows Type { "," Type } ;
+CatchType   = Type { "|" Type } ;
+
+// Type declarations accepted structurally, then reported as not implemented (so a
+// whole Java file parses; -warn-unsupported lets the rest compile). Bodies are skipped.
+UnsupType   = AnnotationDecl | Interface | EnumDecl ;
+AnnotationDecl <~~ push(notImplStmt("annotation type", up.pos)) ~~>
+            = { ModKw } "@" KwInterface Id SkipBlock ;
+Interface   <~~ push(notImplStmt("interface", up.pos)) ~~>
+            = LeadMods KwInterface Id [ SkipAngle ] [ KwExtends Type { "," Type } ] SkipBlock ;
+EnumDecl    <~~ push(notImplStmt("enum", up.pos)) ~~>
+            = LeadMods KwEnum Id [ ImplementsSkip ] SkipBlock ;
+
+// A type declared inside a class body (nested/inner): accepted, reported as not
+// implemented; its members are not lowered. It fires notImpl and pushes nothing, so
+// makeClassStmt simply skips it.
+NestedType  <~~ notImpl("nested type", up.pos) ~~>
+            = LeadMods NestedKw Id [ SkipAngle ] [ SkipParen ]
+              [ KwExtends Type { "," Type } ] [ ImplementsSkip ] SkipBlock ;
+NestedKw    = ( "class" | "interface" | "enum" | "record" ) KwEnd ;
+
 KwClass     = "class" KwEnd ;
 KwRecord    = "record" KwEnd ;
+KwImplements = "implements" KwEnd ;
+KwInterface = "interface" KwEnd ;
+KwEnum      = "enum" KwEnd ;
+KwThrows    = "throws" KwEnd ;
+KwTry       = "try" KwEnd ;
+KwCatch     = "catch" KwEnd ;
+KwFinally   = "finally" KwEnd ;
+KwThrow     = "throw" KwEnd ;
 KwPackage   = "package" KwEnd ;
 KwImport    = "import" KwEnd ;
 KwIf        = "if" KwEnd ;
@@ -397,8 +521,36 @@ KwDefault   = "default" KwEnd ;
             return {b: b, v: callExt(b, "js_arr_new_n", [r.v, emitNum(b, 0)])}
         }
     }
+    // An anonymous class is not lowered; evaluate the constructor arguments (so their
+    // calls stay visible) and yield undefined.
+    function makeNewAnon(items, pos) {
+        notImpl("anonymous class", pos)
+        var args = items.slice(1)
+        return function(b) {
+            for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b }
+            return {b: b, v: hUndef}
+        }
+    }
+    // A cast is identity: (Type) expr lowers to expr.
+    function makeCast(inner) { return inner }
+    // A lambda / method reference: no functional-interface model, so not implemented.
+    function makeLambdaExpr(items, pos) { return notImplExpr("lambda expression", pos) }
+    function makeMethodRef(pos) { return notImplExpr("method reference", pos) }
 
     // ----- Statement thunks: function(block) -> block -----
+
+    // try/catch/finally has no exception model; the try block is still compiled. throw
+    // lowers its expression (keeping calls visible) but does not unwind.
+    function makeTry(items, pos) { notImpl("try/catch/finally", pos); return items[0] }
+    function makeThrow(e, pos) { notImpl("throw", pos); return exprToStmt(e) }
+    // super(args) / this(args): not implemented; lower the arguments and continue.
+    function makeCtorCall(args, pos) {
+        notImpl("explicit constructor invocation", pos)
+        return function(b) {
+            for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b }
+            return b
+        }
+    }
 
     function makeDecl(items) {
         var name = items[0]

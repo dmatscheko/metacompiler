@@ -84,9 +84,10 @@ KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = If | While | For | Def | SmallLine ;
+            = If | While | For | TryStmt | With | Decorated | AsyncDef | Def | SmallLine ;
 
-SmallLine   = ( Return | Break | Continue | Pass | AugAssign | Assign | ExprSmall ) NL ;
+SmallLine   = ( Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
+              | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ) NL ;
 
 // A suite: ':' NEWLINE INDENT statements DEDENT. Every further statement of the
 // suite starts at the same level; the first one defined the level via Indent.
@@ -106,10 +107,96 @@ While       <~~ push(makeWhile(pop(), pop())) ~~>
 For         <~~ push(makeFor(pop(), pop(), pop())) ~~>
             = "for" KwEnd Id <~~ push(up.in) ~~> "in" KwEnd Expression Suite ;
 
-Def         <~~ push(makeDef(pop(), pop(), pop())) ~~>
-            = "def" KwEnd Id <~~ push(up.in) ~~> ParamList Suite ;
-ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ] ")" ;
+Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
+            = "def" KwEnd Id <~~ push(up.in) ~~> ParamList [ "->" DiscardType ] Suite ;
+// Parameter lists accept annotations, default values and *args/**kwargs; a def
+// whose signature uses any of those beyond plain positional names is reported as
+// not implemented (only the plain names bind). The bare '*' and '/' markers too.
+ParamList   <~~ push(makeParamList(takeAll())) ~~>
+            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+Param       = StarParam | SlashParam | NamedParam ;
+StarParam   <~~ push({pcomplex: true}) ~~>
+            = ( "**" | "*" ) [ Id [ ":" DiscardType ] ] ;
+SlashParam  <~~ push({pcomplex: true}) ~~>
+            = "/" ;
+NamedParam  <~~ push(makeNamedParam(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ ":" DiscardType ] [ ParamDefault ] ;
+ParamDefault <~~ pop(); push({pdefault: true}) ~~>
+            = "=" Expression ;
+
+// A decorated def / async-def: the decorators parse (their call expressions are
+// dropped) and the function is defined under its own name, unwrapped.
+Decorated   = Decorator { SameLevel Decorator } SameLevel ( Def | AsyncDef ) ;
+Decorator   = "@" DiscardExpr NL ;
+
+// async def / await: accepted structurally, reported as not implemented.
+AsyncDef    <~~ takeAll(); push(notImplStmt("async def", up.pos)) ~~>
+            = "async" KwEnd "def" KwEnd Id ParamList [ "->" DiscardType ] Suite ;
+
+// try/except/else/finally: accepted; under -warn-unsupported the try body (and a
+// finally body) run, so calls inside them stay visible. There is no exception
+// model, so the except/else handlers are parsed and dropped.
+TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
+            = "try" KwEnd TryBody ( ExceptClause { ExceptClause } [ TryElse ] [ TryFinally ] | TryFinally ) ;
+TryBody     <~~ push({trybody: pop()}) ~~>
+            = Suite ;
+ExceptClause <~~ push({handler: pop()}) ~~>
+            = SameLevel "except" KwEnd [ DiscardExpr [ KwAs Id ] ] Suite ;
+TryElse     <~~ push({elsebody: pop()}) ~~>
+            = SameLevel "else" KwEnd Suite ;
+TryFinally  <~~ push({finalbody: pop()}) ~~>
+            = SameLevel "finally" KwEnd Suite ;
+
+// raise: accepted, reported as not implemented; the raised expression still runs.
+Raise       <~~ push(makeRaise(takeAll(), up.pos)) ~~>
+            = "raise" KwEnd [ Expression [ KwFrom Expression ] ] ;
+
+// with EXPR [as TARGET]: a simple form - the context expression runs, the target
+// is bound to its value and the body runs (no __enter__/__exit__ protocol), so it
+// is reported as not implemented but stays visible under -warn-unsupported.
+With        <~~ push(makeWith(takeAll(), up.pos)) ~~>
+            = "with" KwEnd WithItem { "," WithItem } WithBody ;
+WithItem    <~~ push(makeWithItem(takeAll())) ~~>
+            = Expression [ KwAs Target ] ;
+WithBody    <~~ push({withbody: pop()}) ~~>
+            = Suite ;
+
+// assert COND [, MSG]: genuinely implemented - a false condition aborts the run.
+Assert      <~~ push(makeAssert(takeAll())) ~~>
+            = "assert" KwEnd Expression [ "," Expression ] ;
+
+// global / nonlocal / del: accepted, reported as not implemented (no such scoping
+// or deletion in the subset).
+Global      <~~ push(notImplStmt("global declaration", up.pos)) ~~>
+            = "global" KwEnd Id { "," Id } ;
+Nonlocal    <~~ push(notImplStmt("nonlocal declaration", up.pos)) ~~>
+            = "nonlocal" KwEnd Id { "," Id } ;
+Del         <~~ takeAll(); push(notImplStmt("del statement", up.pos)) ~~>
+            = "del" KwEnd Expression { "," Expression } ;
+
+// yield: accepted as a statement, reported as not implemented (no generators).
+YieldStmt   <~~ takeAll(); push(notImplStmt("yield", up.pos)) ~~>
+            = "yield" KwEnd [ KwFrom ] [ Expression ] ;
+
+// a, b = x, y (and a, b = b, a): all right-hand values are evaluated before any
+// target is written; a single right-hand iterable is unpacked positionally.
+ParallelAssign <~~ push(makeParallelAssign(takeAll())) ~~>
+            = Target "," Target { "," Target } "=" Expression { "," Expression } ;
+
+// name: Type [= value]: the annotation is parsed and ignored; with a value it is a
+// plain assignment, without one it is a no-op declaration.
+AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
+            = Target ":" DiscardType [ "=" Expression ] ;
+
+// A type annotation, parsed and ignored: dotted names, [..]-subscripts (commas
+// allowed) and | unions.
+DiscardType = TypeAtom { "|" TypeAtom } ;
+TypeAtom    = Id { "." Id } [ TypeSub ] | TypeSub ;
+TypeSub     = "[" [ TypeItem { "," TypeItem } ] "]" ;
+TypeItem    = DiscardType ;
+// An expression whose value is dropped (decorator calls, except types, defaults).
+DiscardExpr <~~ pop() ~~>
+            = Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = "return" KwEnd [ Expression ] ;
@@ -130,7 +217,15 @@ ExprSmall   <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
-Expression  = OrExpr ;
+// A lambda (accepted, not implemented) binds loosest; then the a-if-c-else-b
+// conditional expression (genuinely implemented); then the boolean/arith layers.
+Expression  = Lambda | Ternary ;
+Ternary     <~~ push(makeTernary(takeAll())) ~~>
+            = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
+Lambda      <~~ takeAll(); push(notImplExpr("lambda", up.pos)) ~~>
+            = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
+// Lambda parameters take no annotation (the ':' ends the header), only defaults.
+LamParam    = ( "**" | "*" ) [ Id ] | Id [ "=" DiscardExpr ] ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "or" KwEnd AndExpr } ;
@@ -152,9 +247,12 @@ Arith       <~~ push(foldBinary(takeAll())) ~~>
 Term        <~~ push(foldBinary(takeAll())) ~~>
             = Factor { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> Factor } ;
 
-Factor      = Neg | PostfixExpr ;
+Factor      = Neg | Await | PostfixExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
+// await EXPR: accepted, reported as not implemented (no coroutines).
+Await       <~~ takeAll(); push(notImplExpr("await", up.pos)) ~~>
+            = "await" KwEnd Factor ;
 
 // f(a), s[i], lst.append(x).
 PostfixExpr = CallMember ;
@@ -597,8 +695,157 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return deadBlock()
         }
     }
+    // ----- Widened surface: newly accepted constructs -----
+
+    // a if c else b: genuinely lowered; the two arms meet in a phi (only the taken
+    // arm's side effects run).
+    function makeTernary(items) {
+        if (items.length == 1) { return items[0] }
+        var thenT = items[0]
+        var condT = items[1]
+        var elseT = items[2]
+        return function(b) {
+            var rc = condT(b)
+            b = rc.b
+            var thenB = curF.NewBlock("")
+            var elseB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, rc.v), thenB, elseB)
+            var rt = thenT(thenB)
+            rt.b.NewBr(mergeB)
+            var re = elseT(elseB)
+            re.b.NewBr(mergeB)
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
+            return {b: mergeB, v: phi}
+        }
+    }
+    // a, b = x, y: evaluate every right-hand value first, then write each target;
+    // a single right-hand iterable is unpacked positionally (js_pyget by index).
+    function makeParallelAssign(items) {
+        var targets = []
+        var values = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { values.push(items[i]) }
+            else { targets.push(items[i]) }
+        }
+        return function(b) {
+            var vals = []
+            if (values.length == 1 && targets.length > 1) {
+                var rr = values[0](b)
+                b = rr.b
+                var arr = callExt(b, "js_pyiter", [rr.v])
+                for (var j = 0; j < targets.length; j++) {
+                    vals.push(callExt(b, "js_pyget", [arr, emitNum(b, j)]))
+                }
+            } else {
+                for (var k = 0; k < values.length; k++) {
+                    var rv = values[k](b)
+                    b = rv.b
+                    vals.push(rv.v)
+                }
+            }
+            for (var m = 0; m < targets.length; m++) { b = emitRefWrite(b, targets[m], vals[m]) }
+            return b
+        }
+    }
+    // name: Type [= value]: the annotation is ignored; assign when a value is given.
+    function makeAnnAssign(items) {
+        var ref = items[0]
+        if (items.length < 2) { return function(b) { return b } }
+        var valT = items[1]
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            return emitRefWrite(b, ref, r.v)
+        }
+    }
+    // assert COND [, MSG]: a false condition calls exit(1) at runtime.
+    function makeAssert(items) {
+        var condT = items[0]
+        return function(b) {
+            var r = condT(b)
+            b = r.b
+            var okB = curF.NewBlock("")
+            var failB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, r.v), okB, failB)
+            var exitV = callExt(failB, "js_scope_get", [curScopeV, emitStr(failB, "exit")])
+            var av = callExt(failB, "js_arr_new", [])
+            callExt(failB, "js_arr_push", [av, emitNum(failB, 1)])
+            callExt(failB, "js_call", [exitV, hUndef, av])
+            failB.NewBr(okB)
+            return okB
+        }
+    }
+    // try/except/else/finally: not implemented (no exception model). Under
+    // -warn-unsupported the try body and any finally body emit in sequence; the
+    // except/else handlers are dropped.
+    function makeTry(items, pos) {
+        notImpl("try/except", pos)
+        var tryBody = null
+        var finalBody = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryBody = items[i].trybody }
+            if (items[i].finalbody != undefined) { finalBody = items[i].finalbody }
+        }
+        return function(b) {
+            if (tryBody != null) { b = tryBody(b) }
+            if (finalBody != null) { b = finalBody(b) }
+            return b
+        }
+    }
+    // raise: not implemented (no unwinding). The raised expression still emits.
+    function makeRaise(items, pos) {
+        notImpl("raise", pos)
+        return function(b) {
+            for (var i = 0; i < items.length; i++) { b = items[i](b).b }
+            return b
+        }
+    }
+    // with EXPR [as T]: a simple form (no context-manager protocol) - run each
+    // context expression, bind the target to its value, then run the body.
+    function makeWithItem(items) {
+        var target = items.length > 1 ? items[1] : null
+        return {ctxitem: items[0], target: target}
+    }
+    function makeWith(items, pos) {
+        notImpl("with statement", pos)
+        var body = null
+        var mgrs = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].withbody != undefined) { body = items[i].withbody }
+            else if (items[i].ctxitem != undefined) { mgrs.push(items[i]) }
+        }
+        return function(b) {
+            for (var j = 0; j < mgrs.length; j++) {
+                var r = mgrs[j].ctxitem(b)
+                b = r.b
+                if (mgrs[j].target != null) { b = emitRefWrite(b, mgrs[j].target, r.v) }
+            }
+            if (body != null) { b = body(b) }
+            return b
+        }
+    }
+    // A parameter list: collect the plain positional names; flag *args/**kwargs,
+    // annotations-with-defaults and the '*'/'/' markers as unsupported.
+    function makeParamList(items) {
+        var names = []
+        var complex = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].pcomplex == true) { complex = true }
+            if (items[i].pname != undefined) { names.push(items[i].pname) }
+        }
+        return {params: names, complex: complex}
+    }
+    function makeNamedParam(items) {
+        if (items.length > 1) { return {pname: items[0], pcomplex: true} }
+        return {pname: items[0]}
+    }
+
     // def: an own IR function; the body shares one function scope (no block scopes).
-    function makeDef(bodyT, plist, name) {
+    // A signature using *args/**kwargs/defaults is reported as not implemented (the
+    // plain names still bind).
+    function makeDef(bodyT, plist, name, pos) {
+        if (plist.complex) { notImpl("*args/keyword/default parameters", pos) }
         var params = plist.params
         return function(b) {
             funcCount++

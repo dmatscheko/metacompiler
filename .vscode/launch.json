@@ -329,6 +329,60 @@
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-1.rb", "-q"]
         },
         {
+            "name": "Java widened surface +warn (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-interpreter.abnf", "tests/java-test-widen.java", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Java widened surface +warn (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-widen.java", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Java widened surface SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-widen.java", "-q"]
+        },
+        {
+            "name": "Go widened surface +warn (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-interpreter.abnf", "tests/go-test-widen.go", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Go widened surface +warn (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-widen.go", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Go widened surface SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-widen.go", "-q"]
+        },
+        {
+            "name": "Python widened surface +warn (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-widen.py", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Python widened surface +warn (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-widen.py", "-q", "-warn-unsupported"]
+        },
+        {
+            "name": "Python widened surface SHOULD FAIL",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-widen.py", "-q"]
+        },
+        {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",
