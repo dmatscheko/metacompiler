@@ -479,6 +479,18 @@
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-3-warn.rb", "-q", "-warn-unsupported"]
         },
         {
+            "name": "Ruby method parity (str/arr/hash) interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-interpreter.abnf", "tests/ruby-test-4.rb", "-q"]
+        },
+        {
+            "name": "Ruby method parity (str/arr/hash) compiler",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-4.rb", "-q"]
+        },
+        {
             "name": "TinyC to LLVM IR (FROZEN, goja free)",
             "type": "go",
             "request": "launch",

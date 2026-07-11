@@ -1392,6 +1392,147 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 	return nil
 }
 
+// rubyTruthy is Ruby truthiness: only nil and false are falsy (0, "" and empty
+// collections are all truthy). It backs the select/reject predicates below so
+// js_rmcall agrees with the rtest of ruby-interpreter.abnf - unlike the JS
+// truthiness that the shared memberCall/filter uses, where 0 would be falsy.
+func rubyTruthy(v interface{}) bool {
+	if isUndefOrNull(v) {
+		return false
+	}
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return true
+}
+
+// rubyMethod is js_rmcall: the direct method dispatch of the Ruby compiler
+// (ruby-to-llvm-ir.abnf). It mirrors the mcall of ruby-interpreter.abnf exactly
+// for strings, arrays and hashes (Ruby nil-on-empty, Ruby truthiness, .each over
+// key/value pairs) and delegates class instances - and everything else - to the
+// shared memberCall. It is deliberately separate from memberCall so that Ruby's
+// semantics never perturb the Kotlin/Java/Go/Python languages that also use
+// js_mcall.
+func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) interface{} {
+	switch o := target.(type) {
+	case string:
+		switch name {
+		case "length", "size":
+			return float64(len(o))
+		case "to_s":
+			return o
+		case "upcase":
+			return strings.ToUpper(o)
+		case "downcase":
+			return strings.ToLower(o)
+		case "include?":
+			return strings.Contains(o, rt.toString(argAt(args, 0)))
+		}
+		rt.fail("unknown String method: %s", name)
+	case *jsArray:
+		return rt.rubyArrayMethod(o, name, args)
+	case *jsObject:
+		if keys, vals, isDict := dictParts(o); isDict {
+			switch name {
+			case "size", "length":
+				return float64(len(keys.elems))
+			case "keys":
+				return &jsArray{elems: append([]interface{}{}, keys.elems...)}
+			case "values":
+				return &jsArray{elems: append([]interface{}{}, vals.elems...)}
+			case "include?", "has_key?", "key?":
+				return rt.dictFind(keys, argAt(args, 0)) >= 0
+			case "each":
+				for i := range keys.elems {
+					rt.call(argAt(args, 0), jsUndef, []interface{}{keys.elems[i], vals.elems[i]})
+				}
+				return o
+			}
+			rt.fail("unknown Hash method: %s", name)
+		}
+		// A class instance or class object: the generic dispatch handles it.
+		return rt.memberCall(target, name, args)
+	}
+	if isUndefOrNull(target) {
+		rt.fail("method .%s on nil", name)
+	}
+	return rt.memberCall(target, name, args)
+}
+
+// rubyArrayMethod mirrors the arrayMethod of ruby-interpreter.abnf. select and
+// reject use rubyTruthy (Ruby semantics), and pop/first/last return nil (not an
+// error) on an empty array.
+func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) interface{} {
+	switch name {
+	case "size", "length":
+		return float64(len(t.elems))
+	case "push", "append", "add":
+		t.elems = append(t.elems, argAt(args, 0))
+		return t
+	case "pop":
+		if len(t.elems) == 0 {
+			return jsNull
+		}
+		v := t.elems[len(t.elems)-1]
+		t.elems = t.elems[:len(t.elems)-1]
+		return v
+	case "first":
+		if len(t.elems) == 0 {
+			return jsNull
+		}
+		return t.elems[0]
+	case "last":
+		if len(t.elems) == 0 {
+			return jsNull
+		}
+		return t.elems[len(t.elems)-1]
+	case "include?", "contains":
+		return rt.dictFind(t, argAt(args, 0)) >= 0
+	case "to_a":
+		return &jsArray{elems: append([]interface{}{}, t.elems...)}
+	case "each":
+		for _, e := range t.elems {
+			rt.call(argAt(args, 0), jsUndef, []interface{}{e})
+		}
+		return t
+	case "each_with_index":
+		for i, e := range t.elems {
+			rt.call(argAt(args, 0), jsUndef, []interface{}{e, float64(i)})
+		}
+		return t
+	case "map", "collect":
+		out := &jsArray{}
+		for _, e := range t.elems {
+			out.elems = append(out.elems, rt.call(argAt(args, 0), jsUndef, []interface{}{e}))
+		}
+		return out
+	case "select", "filter":
+		out := &jsArray{}
+		for _, e := range t.elems {
+			if rubyTruthy(rt.call(argAt(args, 0), jsUndef, []interface{}{e})) {
+				out.elems = append(out.elems, e)
+			}
+		}
+		return out
+	case "reject":
+		out := &jsArray{}
+		for _, e := range t.elems {
+			if !rubyTruthy(rt.call(argAt(args, 0), jsUndef, []interface{}{e})) {
+				out.elems = append(out.elems, e)
+			}
+		}
+		return out
+	case "sum":
+		var s int32 = 0
+		for _, e := range t.elems {
+			s = rt.toInt32(float64(s) + rt.toNumber(e))
+		}
+		return float64(s)
+	}
+	rt.fail("unknown Array method: %s", name)
+	return nil
+}
+
 // builtinMethod implements the string and array methods of the subset, plus
 // apply/call on function values.
 func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
@@ -1780,6 +1921,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("js_mcall args must be an array")
 			}
 			return w(rt.memberCall(u(a[0]), rt.toString(u(a[1])), args.elems))
+		},
+		"js_rmcall": func(a []uint64) uint64 { // Ruby method dispatch: (target, method name, args array)
+			args, ok := u(a[2]).(*jsArray)
+			if !ok {
+				rt.fail("js_rmcall args must be an array")
+			}
+			return w(rt.rubyMethod(u(a[0]), rt.toString(u(a[1])), args.elems))
 		},
 		"js_supercall": func(a []uint64) uint64 { // (super class, this, method name, args array)
 			args, ok := u(a[3]).(*jsArray)

@@ -15,7 +15,8 @@ and unless (also as expressions), while/until with break/next, ranges 1..5 / 1..
 Locals, functions, @ivars, methods and blocks lower to the MetaJS handle runtime:
 scopes via js_scope_new / js_pyset_var (Ruby create-on-assign) / js_scope_get, closures
 via js_closure + js_call, objects/@ivars via js_obj_new / js_get / js_set, method
-dispatch via js_mcall (instances carry a __class descriptor, C.new runs initialize),
+dispatch via js_rmcall (the Ruby builtin methods on strings/arrays/hashes with Ruby
+truthiness and nil-on-empty; instances carry a __class descriptor, C.new runs initialize),
 arrays via js_arr_new / js_arr_push, indexing via js_pyget / js_pyset, hashes via
 js_dict_new. Ruby truthiness (only nil and false are falsy) is a single handle compare
 (a value handle >= the 'true' singleton). The whole program becomes jsmain(env, args);
@@ -307,16 +308,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // single unsigned compare handle >= 3. -----
     truthy = function(b, v) {
         return b.NewICmp(llvm.enum.IPredUGE, v, handle(3))
-    }
-
-    // ----- Ruby string helpers reused for method-name translation -----
-    function rubyMethod(name) {
-        if (name == "each") { return "forEach" }
-        if (name == "select" || name == "filter") { return "filter" }
-        if (name == "map" || name == "collect") { return "map" }
-        if (name == "push" || name == "append") { return "add" }
-        if (name == "include?" || name == "contains") { return "contains" }
-        return name
     }
 
     // ----- Control flow: a body threads blocks and yields its last value (Ruby
@@ -617,7 +608,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     } else {
                         var ea = emitArgs(b, s.args)
                         b = ea.b
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, rubyMethod(s.name)), ea.v])
+                        cur = callExt(b, "js_rmcall", [cur, emitStr(b, s.name), ea.v])
                     }
                 } else if (s.kind == "field") {
                     if (s.name == "length" || s.name == "size") {
@@ -633,8 +624,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         cur = rn2.v
                     } else {
                         // A bare .name is a zero argument method call (Ruby getters,
-                        // pop, keys, ...); routed through js_mcall like the interpreter.
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, rubyMethod(s.name)), callExt(b, "js_arr_new", [])])
+                        // pop, keys, ...); routed through js_rmcall like the interpreter.
+                        cur = callExt(b, "js_rmcall", [cur, emitStr(b, s.name), callExt(b, "js_arr_new", [])])
                     }
                 } else {
                     var ir = s.idx(b)
