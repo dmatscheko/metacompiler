@@ -169,9 +169,15 @@ TypeAnno    = "@" Id { "." Id } [ SkipParen NotArrow ] ;
 // route to notImpl (the target label cannot be resolved in the subset).
 Statement   = { Annotation } ( ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | Labeled | PlainStmt ) ;
-PlainStmt   = Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
+PlainStmt   = Block | LocalFun | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
             = LabelDef PlainStmt ;
+// A local function declaration (fun name(...) { ... } inside a block): genuine. It
+// binds a closure over the enclosing scope under its name in the CURRENT scope, so
+// it sees the enclosing locals and can recurse. Comes before ExprStmt, which would
+// otherwise read the `fun` keyword as an identifier. FunDecl pushes {name,params,body}.
+LocalFun    <~~ push(makeLocalFunStmt(pop())) ~~>
+            = FunDecl ;
 
 // try/catch/finally and throw are implemented (excThrow/excTry, languages/lib):
 // throw raises the value, catch binds it (the first catch clause wins - exception
@@ -1327,6 +1333,30 @@ KwStep      = "step" KwEnd ;
     }
     function registerFun(f) {
         globalScope[f.name] = makeFunClosure(f)
+    }
+    // A local function statement: bind a closure over the enclosing scope under the
+    // function's name in the CURRENT scope. Unlike a top-level function (invokeBody
+    // resets to the global scope), a local function captures its defining scope like
+    // a lambda, so it sees the enclosing locals; the name is declared before the body
+    // captures it, so it can recurse. `this` stays whatever the enclosing scope holds.
+    function makeLocalFunStmt(f) {
+        return function() {
+            var captured = scopes.slice(0)
+            declVar(f.name, function() {
+                var args = arguments
+                var saved = scopes
+                scopes = captured.slice(0)
+                scopes.push({})
+                for (var i = 0; i < f.params.length; i++) {
+                    declVar(f.params[i], i < args.length ? args[i] : undefined)
+                }
+                if (core.framePush != null) core.framePush()
+                var r = f.body()
+                if (core.framePop != null) core.framePop()
+                scopes = saved
+                return (r != undefined && r.isRet) ? r.v : undefined
+            })
+        }
     }
     function makeFunClosure(f) {
         return function() {

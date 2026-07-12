@@ -187,9 +187,15 @@ TypeAnno    = "@" Id { "." Id } [ SkipParen NotArrow ] ;
 Statement   <~~ push(stmtPos(pop())) ~~>
             = { Annotation } ( ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | Labeled | PlainStmt ) ;
-PlainStmt   = Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
+PlainStmt   = Block | LocalFun | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
             = LabelDef PlainStmt ;
+// A local function declaration (fun name(...) { ... } inside a block): genuine. It
+// reuses makeFunStmt, which declares an own IR function's closure (over the current
+// scope, so it captures enclosing locals and can recurse) under the name in the
+// CURRENT scope. Comes before ExprStmt, which would read `fun` as an identifier.
+LocalFun    <~~ push(makeFunStmt(pop())) ~~>
+            = FunDecl ;
 
 // try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
 // runtime unwinds), and each try/catch/finally body is compiled to its own closure

@@ -472,6 +472,19 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     val spec = Spec("view", 3, "act")
     check("ctor-default-header", spec.describe() == "view:act" && spec.flags == 3)
 
+    // ----- local functions (close over enclosing scope; recurse) -----
+    val lfBase = 100
+    fun addBase(x: Int): Int = lfBase + x          // captures an enclosing local
+    check("localfun-capture", addBase(5) == 105)
+    fun fact(n: Int): Int = if (n <= 1) 1 else n * fact(n - 1)   // recursion
+    check("localfun-recursion", fact(5) == 120)
+    var lfTotal = 0
+    fun bump(n: Int) { lfTotal = lfTotal + n }      // mutates an enclosing var
+    bump(3); bump(4)
+    check("localfun-mutate", lfTotal == 7)
+    fun tripleLocal(x: Int): Int = x * 3
+    check("localfun-as-ref", listOf(1, 2).map(::tripleLocal).sumOf { it } == 9)
+
     // ----- extension functions -----
     check("ext-int", 21.doubled() == 42)
     check("ext-string", "hi".shout() == "hi!")
