@@ -78,14 +78,15 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
 
 // A function declaration outside the executable subset: an extension function
-// (fun Receiver.name(...), receiver dispatch unsupported) or an abstract / bodiless
-// declaration (abstract fun name(): R). The header - a possibly dotted, possibly
-// generic name, a parameter list, an optional return type, and an optional body - is
-// recognised and reported as not implemented; a present body is skipped. It follows
-// FunDecl in every choice, so a normal `fun name(...) body` is matched there first.
+// (fun Receiver.name(...), dotted name - receiver dispatch unsupported) or an
+// abstract / bodiless declaration (abstract fun name(): R). A NON-dotted fun WITH
+// a body is deliberately NOT matched here: its body must parse in FunDecl, so a
+// syntax gap inside the body surfaces at its true position instead of degrading
+// the whole function into this notImpl.
 UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
-            = KwFun [ SkipAngle ] FunName SkipParen [ ":" Type ] [ SkipBlock | "=" DiscardExpr ] ;
-FunName     = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+            = KwFun [ SkipAngle ] ( ExtFunName SkipParen [ ":" Type ] [ SkipBlock | "=" DiscardExpr ]
+                                  | Id [ SkipAngle ] SkipParen [ ":" Type ] ) ;
+ExtFunName  = Id [ SkipAngle ] "." Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Param { "," Param } ] ")" ;
