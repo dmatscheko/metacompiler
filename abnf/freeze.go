@@ -52,7 +52,7 @@ func Freeze(grammarPath string, outDir string) error {
 	// name without a directory - so the freezer inlines the fragments here,
 	// which also makes the serialized grammar self contained.
 	src, err = inlineDirectives(src, filepath.Dir(grammarPath),
-		regexp.MustCompile(`(?m)^[ \t]*:include\("([^"]*)"\)[ \t]*;[ \t]*$`), ":include")
+		regexp.MustCompile(`(?m)^[ \t]*:include\(["']([^"']*)["']\)[ \t]*;[ \t]*(?://[^\r\n]*)?\r?$`), ":include")
 	if err != nil {
 		return err
 	}
@@ -91,6 +91,12 @@ func Freeze(grammarPath string, outDir string) error {
 	lib, err = inlineIncludes(lib, filepath.Dir(grammarPath))
 	if err != nil {
 		return err
+	}
+	// A leftover include() would compile INTO the snapshot and kill every
+	// -frozen run at bootstrap ("variable not defined: include"), far from the
+	// cause - fail here, at freeze time, instead.
+	if m := regexp.MustCompile(`(?m)^[ \t]*include\(`).FindString(lib); m != "" {
+		return fmt.Errorf("%s: an include() call survived inlining (unsupported form? it must be a whole line)", grammarPath)
 	}
 
 	// Collect every distinct script source of the grammar: the tag scripts
@@ -183,23 +189,26 @@ func Freeze(grammarPath string, outDir string) error {
 
 // inlineIncludes textually replaces whole line include("file") calls with the
 // file's content, paths relative to dir (the grammar file's directory, the
-// same base that the runtime include() uses).
+// same base that the runtime include() uses). The legal MetaJS decorations are
+// tolerated: an optional trailing semicolon, a trailing // comment, and CRLF.
 func inlineIncludes(src string, dir string) (string, error) {
 	return inlineDirectives(src, dir,
-		regexp.MustCompile(`(?m)^[ \t]*include\("([^"]*)"\)[ \t]*$`), "include")
+		regexp.MustCompile(`(?m)^[ \t]*include\(["']([^"']*)["']\)[ \t]*;?[ \t]*(?://[^\r\n]*)?\r?$`), "include")
 }
 
 // inlineDirectives replaces every whole line matched by re (group 1 = the file
 // name, resolved relative to dir) with that file's content, repeatedly, so
-// nested includes expand too.
+// nested includes expand too. The brake counts total replacements (a cycle
+// grows without bound); it used to count each replacement as a nesting level,
+// so more than 16 FLAT includes aborted with a bogus cycle error.
 func inlineDirectives(src string, dir string, re *regexp.Regexp, what string) (string, error) {
-	for depth := 0; ; depth++ {
+	for count := 0; ; count++ {
 		m := re.FindStringSubmatchIndex(src)
 		if m == nil {
 			return src, nil
 		}
-		if depth > 16 {
-			return "", fmt.Errorf("%s() nesting deeper than 16 levels (cycle?)", what)
+		if count > 1000 {
+			return "", fmt.Errorf("more than 1000 inlined %s() calls (cycle?)", what)
 		}
 		name := src[m[2]:m[3]]
 		dat, err := ioutil.ReadFile(dir + string(os.PathSeparator) + filepath.Clean(name))
