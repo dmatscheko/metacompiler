@@ -384,16 +384,21 @@ Lambda      <~~ push(makeLambda(takeAll())) ~~>
             = "{" [ LambdaParams ] { LamStmt } "}" ;
 // A lambda body is a sequence of statements whose value is its last expression
 // (a single expression is the common case). Genuinely lowered, not notImpl.
-// Keyword-led statements first; then any expression (if/when as an expression keep
-// their value); then a bare if/when statement; then an empty statement.
-LamStmt     = LamCtrl | LamExpr | LamIf | ";" ;
+// Keyword-led statements first; then an if/else whose arms are expressions (an
+// IfExpr keeps its value); then any REMAINING if statement - a bare `if (c) s`
+// must be consumed here, BEFORE LamExpr, which would otherwise read the keyword
+// `if` as an identifier (`if (c)` parses as the call if(c)) and only fail at run
+// time; then any expression; then an empty statement.
+LamStmt     = LamCtrl | LamIfValue | LamIf | LamExpr | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | Labeled | Decl | While | Do | For | TryStmt | Throw ;
-LamExpr     <~~ push({expr: pop()}) ~~>
-            = Expression [ ";" ] ;
+LamIfValue  <~~ push({expr: pop()}) ~~>
+            = IfExpr ;
 LamIf       <~~ push({stmt: pop()}) ~~>
             = If ;
+LamExpr     <~~ push({expr: pop()}) ~~>
+            = Expression [ ";" ] ;
 LambdaParams <~~ push({lparams: takeAll()}) ~~>
             = LParam { "," LParam } "->" ;
 LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
