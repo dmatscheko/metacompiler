@@ -229,6 +229,21 @@ func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 	}
 }
 
+// padBytes zero-extends b to size bytes: in front for big endian values, behind
+// for little endian ones. b is already at most size long (the :number() cases).
+func padBytes(b []byte, size int, front bool) []byte {
+	if len(b) == size {
+		return b
+	}
+	out := make([]byte, size)
+	if front {
+		copy(out[size-len(b):], b)
+	} else {
+		copy(out, b)
+	}
+	return out
+}
+
 // applyCommand executes the global commands (the LineCommands on Production level).
 // It runs once for every Command rule of the a-grammar before the parsing starts.
 // TODO: Maybe remove used commands.
@@ -722,9 +737,12 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				case 2:
 					n = int(binary.LittleEndian.Uint16(bytes))
 				case 3, 4:
-					n = int(binary.LittleEndian.Uint32(bytes))
+					// Odd sizes are padded up: for little endian the high zero
+					// bytes go behind the data (Uint32/Uint64 need full width;
+					// the bare slice panicked for 3 and 5...7 bytes).
+					n = int(binary.LittleEndian.Uint32(padBytes(bytes, 4, false)))
 				case 5, 6, 7, 8:
-					n = int(binary.LittleEndian.Uint64(bytes))
+					n = int(binary.LittleEndian.Uint64(padBytes(bytes, 8, false)))
 				default:
 					panic(":number() needs byte count of 1 ... 8. ( e.g. :number(4) )")
 				}
@@ -735,9 +753,10 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				case 2:
 					n = int(binary.BigEndian.Uint16(bytes))
 				case 3, 4:
-					n = int(binary.BigEndian.Uint32(bytes))
+					// For big endian the high zero bytes go in front of the data.
+					n = int(binary.BigEndian.Uint32(padBytes(bytes, 4, true)))
 				case 5, 6, 7, 8:
-					n = int(binary.BigEndian.Uint64(bytes))
+					n = int(binary.BigEndian.Uint64(padBytes(bytes, 8, true)))
 				default:
 					panic(":number() needs byte count of 1 ... 8. ( e.g. :number(4) )")
 				}
