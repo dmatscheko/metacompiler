@@ -205,6 +205,15 @@ fun transform(list: List<Int>): String {
 fun main() {
     // ----- numbers, arithmetic, precedence -----
     check("arith-precedence", 2 + 3 * 4 == 14)
+    check("lit-hex-bin", 0xFF == 255 && 0b1010 == 10)
+    check("lit-underscore", 1_000_000 == 1000000)
+    check("lit-long", 3_000_000_000L > 2_999_999_999L)
+    check("lit-double", 1.5 > 1.4 && 2.5e-2 < 0.03 && 1.5f < 1.6f)
+    check("lit-char", 'A' + 1 == 'B' && 'z' > 'a' && '\n' < 'a')
+    check("is-check", (5 is Int) && (5 !is String) && ("x" is String))
+    check("as-safe", ("t" as? Int) == null && (7 as? Int) == 7)
+    check("raw-string", """a"b
+c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("arith-paren", (2 + 3) * 4 == 20)
     check("arith-unary-minus", -3 + 5 == 2)
     check("arith-div-trunc", 7 / 2 == 3)
