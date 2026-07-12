@@ -155,6 +155,11 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         return items
     }
 
+    // Own-property test for the user-keyed name tables below: a bare [name] read
+    // resolved inherited Object.prototype members (toString, valueOf, ...) under a
+    // host JS engine, while the frozen engine's objects have no prototype chain.
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
     // All user defined functions by name: {params: [names...], body: thunk}.
     var funcs = {}
 
@@ -165,7 +170,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
     function findScope(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (scopes[i][name] != undefined) return scopes[i]
+            if (hasOwn(scopes[i], name)) return scopes[i]
         }
         println("Error: Variable not defined: " + name)
         exit(1)
@@ -178,7 +183,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
             printf("%c", argValues[0])
             return argValues[0]
         }
-        var f = funcs[name]
+        var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f == undefined) {
             println("Error: Function not defined: " + name)
             exit(1)

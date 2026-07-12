@@ -59,6 +59,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         exit(1)
     }
 
+    // Own-property test for the user-keyed name tables below: a bare [name] read
+    // resolved inherited Object.prototype members (toString, valueOf, ...) under a
+    // host JS engine, while the frozen engine's objects have no prototype chain.
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
     // All user defined functions by name: {params: [names...], body: [forms...]}.
     var functions = {}
     // The global variables ((define x e) at the top level).
@@ -66,7 +71,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     function lookup(env, name) {
         for (var e = env; e != null; e = e.parent) {
-            if (e.vars[name] != undefined) return e.vars[name]
+            if (hasOwn(e.vars, name)) return e.vars[name]
         }
         fail("Variable not defined: " + name)
     }
@@ -155,7 +160,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
         // A user defined function. The body sees only its parameters and the globals
         // (lexical scoping with top level functions).
-        var f = functions[s]
+        var f = hasOwn(functions, s) ? functions[s] : undefined
         if (f == undefined) fail("Function not defined: " + s)
         var env2 = {vars: {}, parent: globalEnv}
         for (var i = 0; i < f.params.length; i++) {

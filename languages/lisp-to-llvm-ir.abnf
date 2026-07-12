@@ -63,11 +63,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     var m = llvm.ir.NewModule()
 
+    // Own-property test for the user-keyed name tables below: a bare [name] read
+    // resolved inherited Object.prototype members (toString, valueOf, ...) under a
+    // host JS engine, while the frozen engine's objects have no prototype chain.
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
     // All known functions by name. A call to a not yet defined function creates the
     // declaration; when its definition arrives later, blocks are added to the same object.
     var funcs = {}
     function getFunc(name, paramCount) {
-        var f = funcs[name]
+        var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f != undefined) return f
         if (name == "putchar") { // The only builtin function: int putchar(int).
             f = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
@@ -85,7 +90,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // are defined further down (they read 0 until the define has run in main).
     var globals = {}
     function getGlobal(name) {
-        if (globals[name] == undefined) globals[name] = m.NewGlobalDef(name, zero)
+        if (!hasOwn(globals, name)) globals[name] = m.NewGlobalDef(name, zero)
         return globals[name]
     }
 
@@ -94,7 +99,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     function lookup(env, name) {
         for (var e = env; e != null; e = e.parent) {
-            if (e.vars[name] != undefined) return e.vars[name]
+            if (hasOwn(e.vars, name)) return e.vars[name]
         }
         return null
     }
@@ -165,7 +170,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (s == "/") { var v = args[0]; for (var i = 1; i < args.length; i++) v = b.NewSDiv(v, args[i]); return {b: b, v: v} }
         var preds = { "=": llvm.enum.IPredEQ, "<": llvm.enum.IPredSLT, ">": llvm.enum.IPredSGT,
                       "<=": llvm.enum.IPredSLE, ">=": llvm.enum.IPredSGE }
-        if (preds[s] != undefined) {
+        if (hasOwn(preds, s)) {
             return {b: b, v: b.NewZExt(b.NewICmp(preds[s], args[0], args[1]), i32)}
         }
         if (s == "not") return {b: b, v: b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, args[0], zero), i32)}

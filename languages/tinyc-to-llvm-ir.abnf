@@ -170,11 +170,16 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
     var m = llvm.ir.NewModule()
 
+    // Own-property test for the user-keyed name tables below: a bare [name] read
+    // resolved inherited Object.prototype members (toString, valueOf, ...) under a
+    // host JS engine, while the frozen engine's objects have no prototype chain.
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
     // All known functions by name. A call to a not yet defined function creates the
     // declaration; when its definition arrives later, blocks are added to the same object.
     var funcs = {}
     function getFunc(name, paramCount) {
-        var f = funcs[name]
+        var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f != undefined) return f
         if (name == "putchar") { // The only builtin: int putchar(int).
             f = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
@@ -200,7 +205,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     }
     function getVar(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (scopes[i][name] != undefined) return scopes[i][name]
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
         }
         println("Error: Variable not defined: " + name)
         exit(1)

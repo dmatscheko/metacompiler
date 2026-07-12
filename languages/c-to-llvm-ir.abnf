@@ -445,6 +445,11 @@ KwDefault   = "default" KwEnd ;
     // protocol, expression/statement builders); see the `core` knobs below.
     include("lib/compile-core.js")
 
+    // Own-property test for the user-keyed name tables below: a bare [name] read
+    // resolved inherited Object.prototype members (toString, valueOf, ...) under a
+    // host JS engine, while the frozen engine's objects have no prototype chain.
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
     function fail(msg) {
         println("c compiler error: " + msg)
         exit(1)
@@ -469,7 +474,7 @@ KwDefault   = "default" KwEnd ;
 
     var funcs = {}
     function getFunc(name, paramSpecs) {
-        var f = funcs[name]
+        var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f != undefined) return f
         if (name == "putchar" || name == "getchar") {
             var ps = []
@@ -487,7 +492,7 @@ KwDefault   = "default" KwEnd ;
     }
     // Parameter counts of not yet defined callees: collect the arity from the call site.
     function getFuncByArity(name, arity) {
-        var f = funcs[name]
+        var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f != undefined) return f
         var specs = []
         for (var i = 0; i < arity; i++) specs.push({ptr: false})
@@ -503,7 +508,7 @@ KwDefault   = "default" KwEnd ;
     }
     function lookupVar(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (scopes[i][name] != undefined) return scopes[i][name]
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
         }
         return undefined
     }
@@ -573,12 +578,13 @@ KwDefault   = "default" KwEnd ;
     var ctInt = {k: "int"}
     var structs = {}
     function structOf(sname) {
-        var st = structs[sname]
+        var st = hasOwn(structs, sname) ? structs[sname] : undefined
         if (st == undefined) fail("struct not defined: " + sname)
         return st
     }
     function fieldOf(sname, fname) {
-        var f = structOf(sname).fields[fname]
+        var fs = structOf(sname).fields
+        var f = hasOwn(fs, fname) ? fs[fname] : undefined
         if (f == undefined) fail("struct " + sname + " has no field " + fname)
         return f
     }
@@ -604,7 +610,7 @@ KwDefault   = "default" KwEnd ;
     // (already defined) struct; pointer fields may point at any (even later) struct.
     function defineStruct(items) {
         var name = items[0]
-        if (structs[name] != undefined) fail("struct defined twice: " + name)
+        if (hasOwn(structs, name)) fail("struct defined twice: " + name)
         var fields = {}
         var ltys = []
         var n = 0
@@ -616,7 +622,7 @@ KwDefault   = "default" KwEnd ;
                 if (f.star) { ct = {k: "ptr", to: f.bty} }
                 else if (f.bty == "int") { ct = ctInt }
                 else { structOf(f.bty); ct = {k: "struct", s: f.bty} }
-                if (fields[f.name] != undefined) fail("duplicate field " + f.name + " in struct " + name)
+                if (hasOwn(fields, f.name)) fail("duplicate field " + f.name + " in struct " + name)
                 fields[f.name] = {idx: n, ct: ct}
                 ltys.push(ctLTy(ct))
                 n++
@@ -639,7 +645,7 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var e = lookupVar(name)
             if (e == undefined) {
-                if (enumConsts[name] != undefined) return {b: b, v: llvm.constant.NewInt(i32, enumConsts[name] | 0)}
+                if (hasOwn(enumConsts, name)) return {b: b, v: llvm.constant.NewInt(i32, enumConsts[name] | 0)}
                 fail("variable not defined: " + name)
             }
             if (e.arr) return {b: b, v: b.NewGetElementPtr(e.ty, e.val, [zero, zero])}

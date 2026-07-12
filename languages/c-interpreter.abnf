@@ -496,7 +496,9 @@ KwDefault   = "default" KwEnd ;
     }
     function lookupVar(name) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (scopes[i][name] != undefined) return scopes[i][name]
+            // Own-property test: a bare [name] read resolved inherited Object.prototype
+            // members (toString, valueOf, ...) under a host JS engine.
+            if (hasOwn(scopes[i], name)) return scopes[i][name]
         }
         return undefined
     }
@@ -560,15 +562,16 @@ KwDefault   = "default" KwEnd ;
     // back, ints and pointers take one word each (matching the compiled layout).
     var ctInt = {k: "int"}
     var structs = {}
-    function ctSize(ct) { return ct.k == "struct" ? structs[ct.s].size : 1 }
+    function ctSize(ct) { return ct.k == "struct" ? structOf(ct.s).size : 1 }
     function pointeeCt(ct) { return ct.to == "int" ? ctInt : {k: "struct", s: ct.to} }
     function structOf(sname) {
-        var st = structs[sname]
+        var st = hasOwn(structs, sname) ? structs[sname] : undefined
         if (st == undefined) fail("struct not defined: " + sname)
         return st
     }
     function fieldOf(sname, fname) {
-        var f = structOf(sname).fields[fname]
+        var fs = structOf(sname).fields
+        var f = hasOwn(fs, fname) ? fs[fname] : undefined
         if (f == undefined) fail("struct " + sname + " has no field " + fname)
         return f
     }
@@ -588,7 +591,7 @@ KwDefault   = "default" KwEnd ;
     // (already defined) struct; pointer fields may point at the struct itself.
     function defineStruct(items) {
         var name = items[0]
-        if (structs[name] != undefined) fail("struct defined twice: " + name)
+        if (hasOwn(structs, name)) fail("struct defined twice: " + name)
         var st = {size: 0, fields: {}}
         for (var i = 1; i < items.length; i++) {
             var fl = items[i].fields
@@ -598,7 +601,7 @@ KwDefault   = "default" KwEnd ;
                 if (f.star) { ct = {k: "ptr", to: f.bty} }           // May point at any (even later) struct.
                 else if (f.bty == "int") { ct = ctInt }
                 else { structOf(f.bty); ct = {k: "struct", s: f.bty} }
-                if (st.fields[f.name] != undefined) fail("duplicate field " + f.name + " in struct " + name)
+                if (hasOwn(st.fields, f.name)) fail("duplicate field " + f.name + " in struct " + name)
                 st.fields[f.name] = {off: st.size, ct: ct}
                 st.size += ctSize(ct)
             }
@@ -617,7 +620,7 @@ KwDefault   = "default" KwEnd ;
         if (name == "getchar") {
             return -1 // No stdin in the interpreter run (matches llvm.Run without input).
         }
-        var f = funcs[name]
+        var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f == undefined) fail("function not defined: " + name)
         var callerScopes = scopes
         scopes = [globalScope, {}]
@@ -638,7 +641,7 @@ KwDefault   = "default" KwEnd ;
         return function() {
             var v = lookupVar(name)
             if (v != undefined) return v.arr ? v.addr : load(v.addr) // An array name decays to its address.
-            if (enumConsts[name] != undefined) return enumConsts[name] | 0
+            if (hasOwn(enumConsts, name)) return enumConsts[name] | 0
             fail("variable not defined: " + name)
         }
     }
