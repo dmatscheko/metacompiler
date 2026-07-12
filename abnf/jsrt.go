@@ -2202,6 +2202,23 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			t, _ := u(a[1]).(string)
 			return boolH(rt.isTypeName(u(a[0]), t))
 		},
+		// A builtin exception instance for the Python pair: ExcName(args...) yields
+		// {__class: {__name: ExcName}, args: [...]}, the shape js_is_type/rtIsType
+		// discriminate and e.args[N] reads.
+		"js_pyexc": func(a []uint64) uint64 {
+			name, _ := u(a[0]).(string)
+			args, _ := u(a[1]).(*jsArray)
+			cls := newJSObject()
+			cls.set("__name", name)
+			inst := newJSObject()
+			inst.set("__class", cls)
+			arr := &jsArray{}
+			if args != nil {
+				arr.elems = append(arr.elems, args.elems...)
+			}
+			inst.set("args", arr)
+			return w(inst)
+		},
 		"js_tonum":  func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
 		"js_throw": func(a []uint64) uint64 {
 			// Raise the thrown value as a Go panic; the nearest js_try recovers it.

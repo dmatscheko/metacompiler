@@ -324,6 +324,22 @@ dodd = {v: v for v in range(4) if v % 2 == 1}
 check_true("dict-comp-if", 1 in dodd and 2 not in dodd and len(dodd) == 2)
 
 # ----- exceptions: raise / except / else / finally / control flow -----
+exc_log = [""]
+exc_num = 0
+try:
+    raise Exception("boom", 7)
+except Exception as exc_e:
+    exc_log[0] += "c" + exc_e.args[0]
+    exc_num = exc_e.args[1]
+finally:
+    exc_log[0] += "f"
+check("exception-object-args", exc_log[0], "cboomf")
+check("exception-args-index", exc_num, 7)
+
+verr = ValueError("nope")
+verr.note = "extra"
+check("attr-read-write", verr.note + verr.args[0], "extranope")
+
 def risky(n):
     if n > 3:
         raise n

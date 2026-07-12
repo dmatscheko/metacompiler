@@ -5,7 +5,7 @@ is / is not identity tests, plain calls and arithmetic) runs and self-checks
 under both a default run and -warn-unsupported.
 
 Every ACCEPT-AND-NOT-IMPLEMENTED construct (class definitions - plain, based and
-decorated; attribute access obj.attr; keyword and *starred / **mapping call
+decorated; keyword and *starred / **mapping call
 arguments; tuples; set literals and set comprehensions; the ** power operator and
 the | & ^ << >> ~ bit operators; for-loop tuple unpacking) aborts a plain run at
 the first such construct with a clean file:line message; under -warn-unsupported
@@ -74,10 +74,6 @@ def register(cls):
 class Plugin:
     version = 1
 
-
-# attribute access (obj.attr with no call)
-label = Shape.kind
-width = nothing.bit_length
 
 # keyword and *starred / **mapping call arguments
 opts = dict(a=1, b=2)

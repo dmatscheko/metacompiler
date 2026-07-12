@@ -214,10 +214,8 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 // obj.attr = ... : an attribute target (common in class methods: self.x = ...).
-// Accepted so the surrounding code parses; the write is reported as not
-// implemented (the subset has no user objects to store an attribute on).
-TAttr       <~~ push({tattr: true, pos: up.pos}) ~~>
-            = "." Id ;
+TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
+            = "." Id <~~ push({taname: up.in}) ~~> ;
 
 ExprSmall   <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
@@ -286,7 +284,7 @@ CallSfx     <~~ push(makeCallSfx(takeAll(), up.pos)) ~~>
             = "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.pos)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
-// obj.attr with no call: accepted, reported as not implemented (no user objects).
+// obj.attr with no call: a genuine attribute read (pyattr).
 AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
             = "." Id <~~ push({aname: up.in}) ~~> ;
 // A call argument: keyword (name=value) and *seq / **map unpacking are accepted
@@ -445,6 +443,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     include("lib/interp-core.js")
 
     // The host names a program can see.
+    // The builtin exception types: callables producing an instance that carries
+    // the constructor arguments as .args (enough for raise/except as/e.args[N]).
+    // The __class shape matches rtIsType, so type tests can discriminate later.
+    function pyExcType(n) {
+        return function() {
+            var inst = {__class: {__name: n}, args: []}
+            for (var i = 0; i < arguments.length; i++) inst.args.push(arguments[i])
+            return inst
+        }
+    }
+    hostGlobals["Exception"] = pyExcType("Exception")
+    hostGlobals["ValueError"] = pyExcType("ValueError")
+    hostGlobals["TypeError"] = pyExcType("TypeError")
+    hostGlobals["KeyError"] = pyExcType("KeyError")
+    hostGlobals["IndexError"] = pyExcType("IndexError")
+    hostGlobals["RuntimeError"] = pyExcType("RuntimeError")
+    hostGlobals["ZeroDivisionError"] = pyExcType("ZeroDivisionError")
+
     hostGlobals["print"] = function() {
         var out = ""
         for (var i = 0; i < arguments.length; i++) {
@@ -661,10 +677,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // becomes not implemented and yields undefined, matching the other notImpl expr.
     function complexSuffix(suffixes) {
         for (var i = 0; i < suffixes.length; i++) {
-            if (suffixes[i].kind == "attr") { return {what: "attribute access", pos: suffixes[i].pos} }
             if (suffixes[i].complex == true) { return {what: "keyword/starred call arguments", pos: suffixes[i].pos} }
         }
         return null
+    }
+    // obj.attr: a read on any object-like value (instances, exception values).
+    // A missing attribute fails like Python's AttributeError; the compiled twin
+    // reads through js_get (a missing attribute yields undefined there - only
+    // invalid programs diverge).
+    function pyattr(o, name) {
+        if (o !== null && o !== undefined && typeof o == "object" && hasOwn(o, name)) { return o[name] }
+        fail("AttributeError: '" + name + "'")
     }
     // A call suffix: complex (keyword/starred) args mark it not implemented.
     function makeCallSfx(items, pos) {
@@ -699,6 +722,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var argv2 = []
                     for (var j2 = 0; j2 < s.args.length; j2++) argv2.push(s.args[j2]())
                     cur = mcall(cur, s.name, argv2)
+                } else if (s.kind == "attr") {
+                    cur = pyattr(cur, s.name)
                 } else if (s.kind == "slice") {
                     cur = pySlice(cur, s.lo != null ? s.lo() : undefined, s.hi != null ? s.hi() : undefined)
                 } else {
@@ -774,33 +799,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // The source position of a .attr step in a target, or null if it has none.
-    // An attribute target (obj.attr = ... / obj.attr += ...) is not implemented.
-    function attrTargetPos(ref) {
-        for (var i = 0; i < ref.path.length; i++) {
-            if (ref.path[i].tattr == true) { return ref.path[i].pos }
-        }
-        return null
+    // One step along a target path: an index ([i]) or an attribute (.name).
+    function pathStep(o, step) {
+        if (step.tattr == true) { return pyattr(o, step.name) }
+        return pyget(o, step.idx())
     }
     function assignRef(ref, v) {
-        var ap = attrTargetPos(ref)
-        if (ap != null) { notImpl("attribute assignment", ap); return }
         if (ref.path.length == 0) { setVar(ref.name, v); return }
         var o = anytype // The containers along the path may be of mixed types.
         o = getVar(ref.name)
-        for (var i = 0; i < ref.path.length - 1; i++) o = pyget(o, ref.path[i].idx())
-        var idx = ref.path[ref.path.length - 1].idx()
+        for (var i = 0; i < ref.path.length - 1; i++) o = pathStep(o, ref.path[i])
+        var last = ref.path[ref.path.length - 1]
+        if (last.tattr == true) {
+            if (o === null || o === undefined || typeof o != "object") fail("AttributeError: '" + last.name + "'")
+            o[last.name] = v
+            return
+        }
+        var idx = last.idx()
         if (isDict(o)) { dictSet(o, idx, v); return }
         if (idx < 0) idx += o.length
         if (idx < 0 || idx >= o.length) fail("list assignment index out of range")
         o[idx] = v
     }
     function readRef(ref) {
-        if (attrTargetPos(ref) != null) { return undefined }
         if (ref.path.length == 0) return getVar(ref.name)
         var o = anytype // The last step lands on the element itself.
         o = getVar(ref.name)
-        for (var i = 0; i < ref.path.length; i++) o = pyget(o, ref.path[i].idx())
+        for (var i = 0; i < ref.path.length; i++) o = pathStep(o, ref.path[i])
         return o
     }
     function makeAssign(valT, ref) {

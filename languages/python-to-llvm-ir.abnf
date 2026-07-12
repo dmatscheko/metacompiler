@@ -229,8 +229,8 @@ TIndex      <~~ push({idx: pop()}) ~~>
 // obj.attr = ... : an attribute target (common in class methods: self.x = ...).
 // Accepted so the surrounding code parses; the write is reported as not
 // implemented (the subset has no user objects to store an attribute on).
-TAttr       <~~ push({tattr: true, pos: up.pos}) ~~>
-            = "." Id ;
+TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
+            = "." Id <~~ push({taname: up.in}) ~~> ;
 
 ExprSmall   <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
@@ -524,12 +524,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: v}
         }
     }
-    // Detect the newly recognized-but-unsupported suffixes (attribute access, and
-    // keyword / *starred call arguments) at build time: the whole postfix chain
-    // becomes not implemented and yields undefined, matching the other notImpl expr.
+    // Detect the still-unsupported suffixes (keyword / *starred call arguments)
+    // at build time: the whole postfix chain becomes not implemented and yields
+    // undefined, matching the other notImpl expr.
     function complexSuffix(suffixes) {
         for (var i = 0; i < suffixes.length; i++) {
-            if (suffixes[i].kind == "attr") { return {what: "attribute access", pos: suffixes[i].pos} }
             if (suffixes[i].complex == true) { return {what: "keyword/starred call arguments", pos: suffixes[i].pos} }
         }
         return null
@@ -576,6 +575,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         b = ea2.b
                         cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea2.v])
                     }
+                } else if (s.kind == "attr") {
+                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
                 } else if (s.kind == "slice") {
                     var loV = hUndef
                     var hiV = hUndef
@@ -778,38 +779,39 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: exitB, v: outV}
     }
 
-    // The source position of a .attr step in a target, or null if it has none.
-    // An attribute target (obj.attr = ... / obj.attr += ...) is not implemented.
-    function attrTargetPos(ref) {
-        for (var i = 0; i < ref.path.length; i++) {
-            if (ref.path[i].tattr == true) { return ref.path[i].pos }
-        }
-        return null
+    // One step along a target path: an index ([i], js_pyget) or an attribute
+    // (.name, js_get - matching the pyattr read of the interpreter).
+    function emitPathStep(b, o, step) {
+        if (step.tattr == true) { return {b: b, v: callExt(b, "js_get", [o, emitStr(b, step.name)])} }
+        var r = step.idx(b)
+        return {b: r.b, v: callExt(r.b, "js_pyget", [o, r.v])}
     }
     function emitRefRead(b, ref) {
-        if (attrTargetPos(ref) != null) { return {b: b, v: hUndef} }
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length; i++) {
-            var r = ref.path[i].idx(b)
+            var r = emitPathStep(b, o, ref.path[i])
             b = r.b
-            o = callExt(b, "js_pyget", [o, r.v])
+            o = r.v
         }
         return {b: b, v: o}
     }
     function emitRefWrite(b, ref, v) {
-        var ap = attrTargetPos(ref)
-        if (ap != null) { notImpl("attribute assignment", ap); return b }
         if (ref.path.length == 0) {
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
             return b
         }
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
-            var r = ref.path[i].idx(b)
+            var r = emitPathStep(b, o, ref.path[i])
             b = r.b
-            o = callExt(b, "js_pyget", [o, r.v])
+            o = r.v
         }
-        var kr = ref.path[ref.path.length - 1].idx(b)
+        var last = ref.path[ref.path.length - 1]
+        if (last.tattr == true) {
+            callExt(b, "js_set", [o, emitStr(b, last.name), v])
+            return b
+        }
+        var kr = last.idx(b)
         b = kr.b
         callExt(b, "js_pyset", [o, kr.v, v])
         return b
@@ -1198,6 +1200,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // abs from Math.
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
+        // The builtin exception types: ExcName(args...) -> {__class, args} via js_pyexc.
+        var excNames = ["Exception", "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError", "ZeroDivisionError"]
+        for (var e0 = 0; e0 < excNames.length; e0++) {
+            funcCount++
+            var exIdx = funcCount
+            var xf = m.NewFunc("jsf_" + exIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+            var xb = xf.NewBlock("entry")
+            xb.NewRet(xb.NewCall(getExtern("js_pyexc", 2), [emitStr(xb, excNames[e0]), xf.Params[1]]))
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), callExt(b, "js_closure", [handle(exIdx), curScopeV])])
+        }
         b = makeSeq(items)(b)
         b.NewRet(hUndef)
     }
