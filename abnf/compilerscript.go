@@ -2,6 +2,7 @@ package abnf
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -30,10 +31,10 @@ type compilerscript struct {
 	co *compiler
 }
 
-// sprintStack formats the global stack for the trace output, one element per line.
-func (cs *compilerscript) sprintStack(space string) string {
+// sprintTraceStack formats the global stack for the tag trace, one element per line.
+func sprintTraceStack(stack []r.Object, space string) string {
 	res := ""
-	for _, elem := range cs.Stack {
+	for _, elem := range stack {
 		if s, ok := elem.(*string); ok {
 			res += space + fmt.Sprintf("%v", *s) + "\n"
 		} else {
@@ -43,34 +44,37 @@ func (cs *compilerscript) sprintStack(space string) string {
 	return res
 }
 
-func (cs *compilerscript) traceTop(tag *r.Rule, slot int, depth int, upStream map[string]r.Object) {
-	cs.traceCount++
+// traceTagTop/traceTagBottom print the tag trace (the -vvN / c.compile(..., true)
+// debug aid) around one tag execution. Both engines share them, and they write
+// to STDERR: printing to stdout corrupted the -q byte identity and would leak
+// into the next -pipe segment's input.
+func traceTagTop(traceCount int, tag *r.Rule, slot int, depth int, stack []r.Object, ltr map[string]r.Object, upStream map[string]r.Object) {
 	space := "  "
 
 	code := (*tag.CodeChilds)[slot].String
 
-	fmt.Print(">>>>>>>>>> Code block. Depth:", depth, "  Run # (", cs.traceCount, "), ", tag.ToString(), "\n")
+	fmt.Fprint(os.Stderr, ">>>>>>>>>> Code block. Depth:", depth, "  Run # (", traceCount, "), ", tag.ToString(), "\n")
 	removeSpace1 := regexp.MustCompile(`[ \t]+`)
 	code = removeSpace1.ReplaceAllString(code, " ")
 	removeSpace2 := regexp.MustCompile(`[\n\r]\s+`)
 	code = removeSpace2.ReplaceAllString(code, "\n")
 	code = strings.ReplaceAll(code, "\n", "\n"+space)
 
-	fmt.Print(space, "--\n", space, code, "\n")
+	fmt.Fprint(os.Stderr, space, "--\n", space, code, "\n")
 
-	fmt.Print(space, "---\n", space, ">>>>Before call:\n")
-	fmt.Print(space, ">>stack:\n", cs.sprintStack(space), space, "--\n")
-	fmt.Print(space, ">>ltr: ", fmt.Sprintf("%v", cs.LtrStream), "\n", space, "--\n")
-	fmt.Print(space, ">>up: ", fmt.Sprintf("%v", upStream), "\n")
-	fmt.Print(space, "---\n", space, ">>>>Code output:\n")
+	fmt.Fprint(os.Stderr, space, "---\n", space, ">>>>Before call:\n")
+	fmt.Fprint(os.Stderr, space, ">>stack:\n", sprintTraceStack(stack, space), space, "--\n")
+	fmt.Fprint(os.Stderr, space, ">>ltr: ", fmt.Sprintf("%v", ltr), "\n", space, "--\n")
+	fmt.Fprint(os.Stderr, space, ">>up: ", fmt.Sprintf("%v", upStream), "\n")
+	fmt.Fprint(os.Stderr, space, "---\n", space, ">>>>Code output:\n")
 }
 
-func (cs *compilerscript) traceBottom(upStream map[string]r.Object) {
+func traceTagBottom(stack []r.Object, ltr map[string]r.Object, upStream map[string]r.Object) {
 	space := "  "
-	fmt.Print(space, "---\n", space, ">>>>After call:\n")
-	fmt.Print(space, ">>stack:\n", cs.sprintStack(space), space, "--\n")
-	fmt.Print(space, ">>ltr: ", fmt.Sprintf("%v", cs.LtrStream), "\n", space, "--\n")
-	fmt.Print(space, ">>up: ", fmt.Sprintf("%v", upStream), "\n", space, "--\n\n\n")
+	fmt.Fprint(os.Stderr, space, "---\n", space, ">>>>After call:\n")
+	fmt.Fprint(os.Stderr, space, ">>stack:\n", sprintTraceStack(stack, space), space, "--\n")
+	fmt.Fprint(os.Stderr, space, ">>ltr: ", fmt.Sprintf("%v", ltr), "\n", space, "--\n")
+	fmt.Fprint(os.Stderr, space, ">>up: ", fmt.Sprintf("%v", upStream), "\n", space, "--\n\n\n")
 }
 
 // HandleTagCode executes the JS code of the given slot of a Tag (the ASG carries multiple
@@ -123,7 +127,8 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 	})
 
 	if cs.traceEnabled {
-		cs.traceTop(tag, slot, depth, upStream)
+		cs.traceCount++
+		traceTagTop(cs.traceCount, tag, slot, depth, cs.Stack, cs.LtrStream, upStream)
 	}
 
 	code := (*tag.CodeChilds)[slot].String
@@ -134,7 +139,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 	}
 
 	if cs.traceEnabled {
-		cs.traceBottom(upStream)
+		traceTagBottom(cs.Stack, cs.LtrStream, upStream)
 	}
 
 	return v

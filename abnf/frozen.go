@@ -240,6 +240,8 @@ type frozenEngine struct {
 
 	fileName             string
 	preventDefaultOutput bool
+	traceEnabled         bool // The tag trace (-vvN / c.compile(..., true)), same debug aid as the goja engine's.
+	traceCount           int
 	references           *references
 }
 
@@ -248,6 +250,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		co:                   co,
 		machines:             map[*ir.Module]*machine{},
 		preventDefaultOutput: preventDefaultOutput,
+		traceEnabled:         traceEnabled,
 	}
 	// Scripts belong to the GRAMMAR: resolve include/load/store relative to
 	// its :origin() stamp (like the goja engine's module names). Grammars
@@ -262,6 +265,11 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"agrammar":     aGrammar,
 		"ABNFagrammar": AbnfAgrammar,
 		"compile": func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
+			// Like the goja engine: the JS parameter can only turn the tag
+			// trace on, never override the command line flags off (it used to
+			// be ignored here, so c.compile(asg, 0, true) traced under goja
+			// but not under -frozen).
+			eng.traceEnabled = eng.traceEnabled || traceEnabled
 			return eng.co.compile(asg, slot, 0)
 		},
 		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules {
@@ -425,7 +433,16 @@ func (eng *frozenEngine) RunTagCode(tag *r.Rule, name string, upStream map[strin
 	eng.curUp = upStream
 	eng.rt.setRootVar("up", upStream)
 
+	if eng.traceEnabled {
+		eng.traceCount++
+		traceTagTop(eng.traceCount, tag, slot, depth, eng.stack, eng.ltrStream, upStream)
+	}
+
 	res := runScriptModule(eng.rt, ma, eng.sharedScope)
+
+	if eng.traceEnabled {
+		traceTagBottom(eng.stack, eng.ltrStream, upStream)
+	}
 
 	eng.curUp = savedUp
 	eng.rt.setRootVar("up", savedUp)
