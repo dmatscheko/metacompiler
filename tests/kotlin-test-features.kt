@@ -449,6 +449,22 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("ext-safe-skip", extNull?.doubled() == null)
     check("ext-recursion", 6.fold0() == 6)
 
+    // ----- object expressions (anonymous instances; supertypes ignored) -----
+    val oeBase = 30
+    val oe = object : Comparable<Int> {
+        var hits = 0
+        fun tick(): Int {
+            hits = hits + 1
+            return hits
+        }
+        fun plus(x: Int): Int = oeBase + x   // captures the enclosing local
+    }
+    oe.tick()
+    check("objexpr-state", oe.tick() == 2 && oe.hits == 2)
+    check("objexpr-capture", oe.plus(12) == 42)
+    val oe2 = object { val seed = oeBase + 1; fun read(): Int = seed }
+    check("objexpr-prop-init", oe2.read() == 31)
+
     // ----- lists -----
     val ro = listOf(10, 20, 30)
     check("list-literal", ro.size == 3 && ro[0] == 10 && ro[2] == 30)

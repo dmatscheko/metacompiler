@@ -1169,28 +1169,16 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-delegation.kt", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Kotlin object expression SHOULD FAIL (interpreter)",
+            "name": "Kotlin object expression (interpreter)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-object-expr.kt", "-q"]
         },
         {
-            "name": "Kotlin object expression SHOULD FAIL (compiler)",
+            "name": "Kotlin object expression (compiler)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-object-expr.kt", "-q"]
-        },
-        {
-            "name": "Kotlin object expression warned+ignored (interpreter)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-object-expr.kt", "-q", "-warn-unsupported"]
-        },
-        {
-            "name": "Kotlin object expression warned+ignored (compiler)",
-            "type": "go",
-            "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-object-expr.kt", "-q", "-warn-unsupported"]
         },
         {
             "name": "Kotlin try/catch (interpreter)",

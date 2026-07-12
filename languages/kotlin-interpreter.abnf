@@ -358,10 +358,18 @@ Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | Float
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
 // position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).
-// Anonymous-class method dispatch is outside the subset, so the body is skipped and
-// the expression is reported as not implemented (it yields undefined); it must come
-// before Call/VarRef, which would otherwise read `object` as an identifier.
-ObjectExpr  <~~ push(notImplExpr("object expression", up.pos)) ~~>
+// GENUINE: each evaluation builds a fresh instance whose descriptor holds the
+// methods and whose fields are the initialized properties. Methods and property
+// initializers see the expression site's scope chain (a real closure, like a
+// lambda) plus the new object as `this`. Supertypes are parsed and ignored (no
+// inheritance; passing the object where an interface is expected still works
+// because method calls dispatch by name). A body outside the member subset falls
+// back to ObjectExprSkip (notImplemented). Must precede Call/VarRef, which would
+// otherwise read `object` as an identifier.
+ObjectExpr  = ObjectExprReal | ObjectExprSkip ;
+ObjectExprReal <~~ push(makeObjectExpr(takeAll())) ~~>
+            = KwObject [ ":" SuperList ] "{" { Member } "}" ;
+ObjectExprSkip <~~ push(notImplExpr("object expression", up.pos)) ~~>
             = KwObject [ ":" SuperList ] SkipBlock ;
 
 // A labelled receiver - this@Label (this@TriangleApplication). The subset has a single
@@ -997,6 +1005,57 @@ KwStep      = "step" KwEnd ;
     function makeDestructure(init, pos) {
         notImpl("destructuring declaration", pos)
         return function() { init(); return undefined }
+    }
+
+    // An object-expression method: like makeMethodClosure, but over the scope chain
+    // CAPTURED when the object expression evaluated (the compiled twin's js_closure
+    // env is that same scope), with the instance and parameters in a child scope.
+    function makeCapturedMethod(f, captured) {
+        return function() {
+            var self = arguments[0]
+            var args = arguments
+            var saved = scopes
+            scopes = captured.slice(0)
+            scopes.push({})
+            declVar("this", self)
+            for (var i = 0; i < f.params.length; i++) {
+                declVar(f.params[i], i + 1 < args.length ? args[i + 1] : undefined)
+            }
+            if (core.framePush != null) core.framePush()
+            var r = f.body()
+            if (core.framePop != null) core.framePop()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+    // items = members ({prop} | {method}): an anonymous class instance per
+    // evaluation. The descriptor is rebuilt each time so its methods close over
+    // that evaluation's scopes; property initializers run with the same chain plus
+    // the fresh object as `this`. Method names register in classMethodNames (an
+    // extension function never shadows a member).
+    function makeObjectExpr(items) {
+        var props = []
+        var methods = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]) }
+            else if (items[i].method != undefined) { methods.push(items[i].method) }
+        }
+        for (var m2 = 0; m2 < methods.length; m2++) { classMethodNames["$" + methods[m2].name] = true }
+        return function() {
+            var captured = scopes.slice(0)
+            var cls = {__isclass: true, __name: "<object>"}
+            for (var k = 0; k < methods.length; k++) {
+                cls[methods[k].name] = makeCapturedMethod(methods[k], captured)
+            }
+            var obj = {__class: cls}
+            scopes.push({})
+            declVar("this", obj)
+            for (var p = 0; p < props.length; p++) {
+                obj[props[p].prop] = props[p].init()
+            }
+            scopes.pop()
+            return obj
+        }
     }
 
     // f(args): a global function, a builtin, or a class constructor.

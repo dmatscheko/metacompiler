@@ -379,10 +379,19 @@ Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | Float
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
 // position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).
-// Anonymous-class method dispatch is outside the subset, so the body is skipped and
-// the expression is reported as not implemented (it yields undefined); it must come
-// before Call/VarRef, which would otherwise read `object` as an identifier.
-ObjectExpr  <~~ push(notImplExpr("object expression", up.pos)) ~~>
+// GENUINE: each evaluation builds a fresh instance whose descriptor holds the
+// methods and whose fields are the initialized properties. The method closures
+// close over the expression site's scope (js_closure env, like a lambda; the
+// interpreter twin captures the same chain), and property initializers run in a
+// child scope holding the new object as `this`. Supertypes are parsed and ignored
+// (no inheritance; passing the object where an interface is expected still works
+// because js_mcall dispatches by name). A body outside the member subset falls
+// back to ObjectExprSkip (notImplemented). Must precede Call/VarRef, which would
+// otherwise read `object` as an identifier.
+ObjectExpr  = ObjectExprReal | ObjectExprSkip ;
+ObjectExprReal <~~ push(makeObjectExpr(takeAll())) ~~>
+            = KwObject [ ":" SuperList ] "{" { Member } "}" ;
+ObjectExprSkip <~~ push(notImplExpr("object expression", up.pos)) ~~>
             = KwObject [ ":" SuperList ] SkipBlock ;
 
 // A labelled receiver - this@Label (this@TriangleApplication). The subset has a single
@@ -1050,6 +1059,43 @@ KwStep      = "step" KwEnd ;
     function makeDestructure(init, pos) {
         notImpl("destructuring declaration", pos)
         return function(b) { var r = init(b); return r.b }
+    }
+
+    // items = members ({prop} | {method}): an anonymous class instance built where
+    // the expression evaluates - a fresh descriptor holding the method closures
+    // (closed over the CURRENT scope, so members can capture enclosing locals like
+    // a lambda), a fresh instance, then the property initializers in a child scope
+    // holding the instance as `this`. Method names register in classMethodNames at
+    // walk time (an extension function never shadows a member).
+    function makeObjectExpr(items) {
+        var props = []
+        var methods = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
+            else if (items[i].method != undefined) methods.push(items[i].method)
+        }
+        for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "<object>")])
+            for (var k = 0; k < methods.length; k++) {
+                var idx = emitFunc(methods[k].params, methods[k].body, true)
+                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+            var objV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), objV])
+            for (var p = 0; p < props.length; p++) {
+                var r = props[p].init(b)
+                b = r.b
+                callExt(b, "js_set", [objV, emitStr(b, props[p].prop), r.v])
+            }
+            curScopeV = saved
+            return {b: b, v: objV}
+        }
     }
 
     // f(args): a class constructor (known at compile time) or a function value.
