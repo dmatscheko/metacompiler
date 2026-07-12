@@ -83,6 +83,12 @@ class Counter(val start: Int, var step: Int) {
     fun reset() { value = start }
 }
 
+// A class whose primary-constructor parameters carry default values (parsed and
+// dropped, like function-parameter defaults - callers pass every argument).
+class Spec(val action: String = "none", var flags: Int = 0, val tag: String = "t") {
+    fun describe(): String = action + ":" + tag
+}
+
 // ----- lazy delegated properties (member level) -----
 class Lazies(val n: Int) {
     val quad: Int by lazy { n * n }        // initializer reads a constructor param
@@ -455,6 +461,10 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         return@filter false
     }
     check("lret-filter-paths", lrPicked.size == 2)
+
+    // ----- constructor-parameter defaults (parsed and dropped; all args passed) -----
+    val spec = Spec("view", 3, "act")
+    check("ctor-default-header", spec.describe() == "view:act" && spec.flags == 3)
 
     // ----- extension functions -----
     check("ext-int", 21.doubled() == 42)

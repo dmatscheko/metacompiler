@@ -122,8 +122,11 @@ ClassDecl   <~~ buildClass(takeAll()) ~~>
             = [ "data" KwEnd ] KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" SuperList ] [ "{" { Member } "}" ] ;
 CtorParams  <~~ push({cparams: takeAll()}) ~~>
             = "(" [ CtorParam { "," CtorParam } [ "," ] ] ")" ;
+// A default value (= expr) is parsed and dropped, exactly like a function Param's:
+// the default is not supplied at call sites, but the header parses (common in data
+// classes - data class Spec(val action: String = "", val flags: Int = 0)).
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
-            = [ Modifiers ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
+            = [ Modifiers ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type [ "=" DiscardExpr ] ;
 
 Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | UnsupFun ) ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
