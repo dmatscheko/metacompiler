@@ -48,6 +48,8 @@ type parser struct {
 
 	fileName string // Where Src came from. Used for messages and to resolve relative paths.
 
+	includedFiles map[string]bool // The :include() files already added (each file is included once; also ends include cycles).
+
 	rangeCache      [256]*r.Rule // Reusable single-char Token rules, see the comment in case r.CharOf of apply().
 	referencesCache *references  // Resolves production names and assigns the tag code UIDs.
 }
@@ -285,6 +287,18 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		if rule.Int != 1 {
 			fullFileName = filepath.Dir(pa.fileName) + string(os.PathSeparator) + paramFileName
 		}
+		// Include every file only once: with nested includes enabled, two
+		// fragments sharing a common helper fragment would otherwise define
+		// its productions twice (a hard error), and a cyclic include would
+		// never terminate.
+		fullFileName = filepath.Clean(fullFileName)
+		if pa.includedFiles == nil {
+			pa.includedFiles = map[string]bool{}
+		}
+		if pa.includedFiles[fullFileName] {
+			return
+		}
+		pa.includedFiles[fullFileName] = true
 		dat, err := ioutil.ReadFile(fullFileName)
 		if err != nil {
 			panic(err)
@@ -996,8 +1010,12 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 		pa.ps = NewParserScript(&pa, options.PreventDefaultOutput)
 	}
 
-	for _, rule := range *pa.agrammar {
-		if rule.Operator == r.Command {
+	// An index loop, not a range: an :include() appends the included grammar's
+	// rules (with THEIR :include() commands) to *pa.agrammar, and a range over
+	// the initial slice header would never visit them - nested includes were
+	// silently ignored, leaving their productions undefined.
+	for i := 0; i < len(*pa.agrammar); i++ {
+		if rule := (*pa.agrammar)[i]; rule.Operator == r.Command {
 			pa.applyCommand(rule)
 		}
 	}
