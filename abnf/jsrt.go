@@ -993,7 +993,20 @@ func (rt *jsrt) call(callee interface{}, this interface{}, args []interface{}) i
 	traceEmit(&TraceEvent{Ev: "call", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Name: rt.calleeName(callee)})
 	rt.traceDepth++
 	savedPos := rt.curPos
+	completed := false
+	// A js_throw panic unwinding through a traced call must still restore the
+	// depth and curPos and balance the call event, otherwise every event after
+	// a caught exception carries an inflated depth and the throw-site line.
+	defer func() {
+		if completed {
+			return
+		}
+		rt.curPos = savedPos
+		rt.traceDepth--
+		traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Val: "throw!"})
+	}()
 	ret := rt.callInner(callee, this, args)
+	completed = true
 	rt.curPos = savedPos // The caller's statement continues after the call.
 	rt.traceDepth--
 	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Val: rt.traceVal(ret)})
