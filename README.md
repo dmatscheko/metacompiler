@@ -488,6 +488,20 @@ Each stage feeds its compiled `grammar[i]` (which must be an a-grammar, except a
 
 Per-stage diagnostics: `-v` shows the ASG and compiled result of every stage, `-v<n>` of stage `n` alone (1-indexed); `-vv` / `-vv<n>` add the parser+compiler trace. `-slot<n> <v>` compiles stage `n` with tag slot `<v>` (default 0), for grammars whose tags carry more than one code slot.
 
+### Multi-file programs: project imports (`-i`)
+
+An import that names neither a builtin (`kotlin.math`, `java.util`, Python's `math`, ...) nor an external library can name a **project file**. `-i DIR` adds an include root (repeatable, searched in order); the directory of the program itself is always searched first:
+
+```
+./mec -i tests/imports languages/kotlin-interpreter.abnf tests/kotlin-test-multifile.kt
+./mec -i tests/imports languages/java-to-llvm-ir.abnf   tests/java-test-multifile.java
+./mec -i tests/imports languages/python-interpreter.abnf tests/python-test-multifile.py
+```
+
+The dotted import path maps to a relative file path per language: Kotlin `import geo.Vec` tries `geo/Vec.kt`, then `geo.kt`; Java `import util.Pair;` tries `util/Pair.java`, then `util.java`; Python `from mypkg.helper import fn` tries `mypkg/helper.py`, then `mypkg.py`. The found file is parsed **with the same grammar** and walked with the same tag scripts, so its declarations register exactly like the main file's (Python module top level executes at import time, like real Python). Each file is imported once - repeats and cycles are no-ops - and warnings inside an imported file carry its own name and line numbers. Deviations: names bind flat (no module objects/namespaces, so Python's `from x import y` style is the natural fit), and a nearer stdlib prefix still wins over a project file of the same name.
+
+Resolution order per import: builtin prefix (no-op) → project file (parsed and merged) → `-warn-imports` warning or a clean abort.
+
 ### Piping one language's output into another (`-pipe`)
 
 The stages above chain *a-grammars*: each grammar compiles the next file. `-pipe` chains along a second, orthogonal axis - *text*. It splits the command line into independent segments; the text a segment prints becomes the program input of the next segment. So one language can transform the source that another language then consumes:
