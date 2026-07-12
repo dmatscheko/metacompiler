@@ -35,9 +35,9 @@ type parser struct {
 	agrammar *r.Rules // The a-grammar that describes the target text.
 
 	opts         *Parseropts
-	blockList    map[int]bool     // Marks the (rule, position) pairs that are currently being applied (-lb). Used to stop left recursions.
-	foundList    map[int]*r.Rules // Caches the results of successfully applied (rule, position) pairs (-lf).
-	foundSdxList map[int]int      // The parse position right behind each cached foundList result.
+	blockList    map[applyKey]bool     // Marks the applications that are currently running (-lb). Used to stop left recursions.
+	foundList    map[applyKey]*r.Rules // Caches the results of successful applications (-lf).
+	foundSdxList map[applyKey]int      // The parse position right behind each cached foundList result.
 	traceCount   int
 
 	initialSpaces *r.Rule // The rule that describes skippable whitespace (nil skips nothing). Set via :whitespace(), see applyCommand().
@@ -60,7 +60,7 @@ type Parseropts struct {
 }
 
 // getRulePosId maps the pair (rule, position in the target text) to one unique int,
-// used as key for the block and found lists.
+// used as part of the key for the block and found lists.
 func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
 	// Cantor pairing function.
 	a := rule.Int
@@ -68,25 +68,36 @@ func (pa *parser) getRulePosId(rule *r.Rule, pos int) int {
 	return ((ab * (ab + 1)) >> 1) + a
 }
 
-func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (bool, *r.Rules, int) { // => (isBlocked, foundRule, foundSdx)
+// applyKey identifies one rule application for the block and found lists. The
+// whitespace context is part of the key: the same production at the same
+// position parses differently as a whitespace-skip probe (no productions) or
+// under another :whitespace() rule, so a bare (rule, position) key let a skip
+// probe poison the cache and -lf changed what the grammar accepted.
+type applyKey struct {
+	id       int     // The (rule, position) pair id from getRulePosId.
+	ws       *r.Rule // The whitespace rule in effect.
+	skipping bool    // True while parsing AS the whitespace rule.
+}
+
+func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) (bool, *r.Rules, int) { // => (isBlocked, foundRule, foundSdx)
 	var isBlocked bool = false
 	var foundRule *r.Rules = nil
 	var foundSdx int = -1
 	pa.traceCount++
 
 	if rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
-		id := pa.getRulePosId(rule, pa.Sdx)
+		key := applyKey{id: pa.getRulePosId(rule, pa.Sdx), ws: skipSpaceRule, skipping: skippingSpaces}
 
 		if pa.opts.UseFoundList {
-			foundRule = pa.foundList[id]
+			foundRule = pa.foundList[key]
 			if foundRule != nil { // Is really only useful on massive backtracking...
-				foundSdx = pa.foundSdxList[id]
+				foundSdx = pa.foundSdxList[key]
 				isBlocked = true // If the result is there already, block the apply() from trying it again.
 			}
 		}
 		if !isBlocked && pa.opts.UseBlockList {
-			isBlocked = pa.blockList[id] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
-			pa.blockList[id] = true      // Enter the current rule in the block list (a no-op if it was already blocked).
+			isBlocked = pa.blockList[key] // True if loop, because in this case, the current rule on the current position in the text to parse is its own parent (= loop).
+			pa.blockList[key] = true      // Enter the current rule in the block list (a no-op if it was already blocked).
 		}
 	}
 
@@ -116,15 +127,15 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, depth int) (boo
 // The parameter wasBlocked must be true if the corresponding ruleEnter() returned isBlocked == true.
 // Such an early exit must not touch the block and found lists: The list entries belong to the still
 // running outer invocation of the same rule at the same position, not to this blocked one.
-func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, depth int, found *r.Rules, wasSdx int, wasBlocked bool) {
+func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int, found *r.Rules, wasSdx int, wasBlocked bool) {
 	if !wasBlocked && rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
-		id := pa.getRulePosId(rule, wasSdx)
+		key := applyKey{id: pa.getRulePosId(rule, wasSdx), ws: skipSpaceRule, skipping: skippingSpaces}
 		if pa.opts.UseBlockList {
-			pa.blockList[id] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
+			pa.blockList[key] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
 		}
 		if pa.opts.UseFoundList && found != nil {
-			pa.foundList[id] = found
-			pa.foundSdxList[id] = pa.Sdx
+			pa.foundList[key] = found
+			pa.foundSdxList[key] = pa.Sdx
 		}
 	}
 
@@ -358,14 +369,14 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	wasSdx := pa.Sdx // Start position of the rule. Return, if the rule does not match.
 	localProductions := &r.Rules{}
 
-	isBlocked, foundRule, foundSdx := pa.ruleEnter(rule, skipSpaceRule, depth)
+	isBlocked, foundRule, foundSdx := pa.ruleEnter(rule, skipSpaceRule, skippingSpaces, depth)
 	if isBlocked {
 		if foundRule != nil { // Reuse the cached result and continue behind it.
 			pa.Sdx = foundSdx
-			pa.ruleExit(rule, skipSpaceRule, depth, foundRule, wasSdx, true)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, foundRule, wasSdx, true)
 			return foundRule
 		}
-		pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, true)
+		pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, true)
 		return nil
 	}
 
@@ -374,7 +385,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		for i := range *rule.Childs {
 			newProductions := pa.apply((*rule.Childs)[i], skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -409,7 +420,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		size := len(rule.String)
 		if pa.Sdx+size > len(pa.Src) || rule.String != pa.Src[pa.Sdx:pa.Sdx+size] {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -424,7 +435,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 		if pa.Sdx+1 > len(pa.Src) {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -434,7 +445,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		if rule.Int&r.CharTypeByte != 0 {
 			ch := pa.Src[pa.Sdx]
 			if (strings.IndexByte(rule.String, ch) >= 0) == negated {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -450,12 +461,12 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		} else {
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 			if ch == utf8.RuneError && size == 1 { // An invalid encoding never matches (like in case r.Range).
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
 			if strings.ContainsRune(rule.String, ch) == negated {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -505,7 +516,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		size := pa.Sdx - startPos
 		if size == 0 {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -522,7 +533,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		probe := pa.apply((*rule.Childs)[0], skipSpaceRule, skippingSpaces, depth+1)
 		pa.Sdx = wasSdx
 		if probe != nil { // The child matched: the lookahead fails.
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			return nil
 		}
 		if skippingSpaces {
@@ -534,14 +545,14 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
 		}
 		if pa.Sdx >= len(pa.Src) {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
 		if rule.Int == r.RangeTypeRune { // Rune range for unicode. JS-Mapping: abnf.rangeType.Rune
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 			if ch == utf8.RuneError && size == 1 { // An invalid encoding never matches (like in case r.CharOf); a real 3-byte U+FFFD does.
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -549,7 +560,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			to, _ := utf8.DecodeRuneInString((*rule.CodeChilds)[1].String)
 			// A multi-rune bound would silently use only its first rune here; -verify (abnf/verifier.go) reports such malformed ranges.
 			if !(ch >= from && ch <= to) {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -571,7 +582,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			to := (*rule.CodeChilds)[1].String[0]
 			// A multi-byte bound would silently use only its first byte here; -verify (abnf/verifier.go) reports such malformed ranges.
 			if !(ch >= from && ch <= to) {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -599,7 +610,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			// pa.Sdx = wasSdx // Should not be necessary, because each apply returns to wasSdx if the rule could not be fully applied.
 		}
 		if !found {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -670,7 +681,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		for i := 0; i < from; i++ { // Repeat as often as possible.
 			newProductions := pa.apply(newRule, skipSpaceRule, skippingSpaces, depth+1)
 			if newProductions == nil {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -697,7 +708,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		newProductions := pa.applyAsSequence((*pa.agrammar)[rule.Int].Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -705,7 +716,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	case r.Tag:
 		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
 		if newProductions == nil {
-			pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
 			return nil
 		}
@@ -738,7 +749,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				}
 			}
 			if pa.Sdx+byteCount > len(pa.Src) {
-				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+				pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
 			}
@@ -812,7 +823,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			if resRule != nil {
 				scriptProductions := pa.apply(resRule, skipSpaceRule, skippingSpaces, depth+1)
 				if scriptProductions == nil {
-					pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
+					pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 					pa.Sdx = wasSdx
 					return nil
 				}
@@ -849,7 +860,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 	}
 
-	pa.ruleExit(rule, skipSpaceRule, depth, localProductions, wasSdx, false)
+	pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, localProductions, wasSdx, false)
 	return localProductions
 }
 
@@ -999,9 +1010,9 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	pa.Sdx = 0
 	pa.opts = options
 	pa.traceCount = 0
-	pa.blockList = make(map[int]bool)
-	pa.foundList = make(map[int]*r.Rules)
-	pa.foundSdxList = make(map[int]int)
+	pa.blockList = make(map[applyKey]bool)
+	pa.foundList = make(map[applyKey]*r.Rules)
+	pa.foundSdxList = make(map[applyKey]int)
 	pa.lastParsePosition = 0
 	pa.fileName = filepath.Clean(fileName)
 	pa.referencesCache = NewReferences()
