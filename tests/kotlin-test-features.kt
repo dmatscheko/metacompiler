@@ -99,6 +99,17 @@ class Spec(val action: String = "none", var flags: Int = 0, val tag: String = "t
     fun describe(): String = action + ":" + tag
 }
 
+// A class with a visibility-only setter (private set): parsed and ignored, the
+// property still binds and updates normally within the class.
+class Meter {
+    var reading: Int = 0
+        private set
+    fun advance(): Int {
+        reading = reading + 1
+        return reading
+    }
+}
+
 // ----- lazy delegated properties (member level) -----
 class Lazies(val n: Int) {
     val quad: Int by lazy { n * n }        // initializer reads a constructor param
@@ -527,6 +538,11 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("lazy-moded", lazyModed == 10)
     val lz = Lazies(4)
     check("lazy-member", lz.quad == 16 && lz.sum == 10)
+
+    // ----- visibility-only accessor (private set): parsed and ignored -----
+    val meter = Meter()
+    meter.advance()
+    check("private-set", meter.advance() == 2 && meter.reading == 2)
 
     // ----- lists -----
     val ro = listOf(10, 20, 30)

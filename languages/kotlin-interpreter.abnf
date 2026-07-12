@@ -137,8 +137,13 @@ NestedType  <~~ notImpl("nested type declaration", up.pos) ~~>
             = [ KwEnum | KwAnnotation ] KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ SkipBlock ]
             | KwInterface Id [ SkipAngle ] [ ":" SuperList ] SkipBlock
             | KwObject Id [ ":" SuperList ] SkipBlock ;
+// A trailing visibility-only accessor (var x = 0; private set) is parsed and ignored:
+// the subset does not enforce visibility, so the property still binds its initializer.
+// A body-carrying accessor (get() = ..., set(v) { ... }) has a `(` after get/set and is
+// left to PropAccessor (not implemented); PropVis's NotParen guard declines it.
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression { PropVis } [ ";" ] ;
+PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
 // is GENUINE (see LazyProp): the initializer is run once and its value becomes a
 // plain field, so reads use the ordinary member machinery. Every OTHER delegate -
@@ -148,9 +153,9 @@ PropDecl    <~~ push(makeProp(takeAll())) ~~>
 // accessor). LazyProp is tried first; a non-lazy delegate backtracks to UnsupDelegate.
 PropDelegate = LazyProp | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
-            = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
+            = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
 UnsupDelegate <~~ notImpl("delegated property", up.pos) ~~>
-            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
+            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] { PropVis } [ ";" ] ;
 // The lazy initializer lambda, wrapped so it runs once and yields its value: the
 // property's init thunk. EAGER - the value is computed at the declaration, not on
 // first access (single-threaded, deterministic). Deviation: a lazy initializer that
@@ -361,6 +366,17 @@ SameLine    = :script(~~
         return (cc === 10 || cc === 13 || (cc === 47 && c.peek(i + 1) === 47))
             ? abnf.newToken("\x01newline-follows", 0)
             : undefined
+    })()
+~~) ;
+
+// A zero-width guard that fails when the next non-whitespace token is `(` - used to
+// tell a visibility-only accessor (private set) from a body accessor (set(v) { ... }).
+NotParen    = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        return (cc === 40) ? abnf.newToken("\x01paren-follows", 0) : undefined
     })()
 ~~) ;
 
