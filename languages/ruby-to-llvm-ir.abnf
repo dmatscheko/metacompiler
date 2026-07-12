@@ -287,12 +287,16 @@ RescueClause <~~ push(makeExcept(takeAll())) ~~>
             = KwRescue [ ErrList ] [ "=>" Name <~~ push(up.in) ~~> ] [ KwThen ] Body <~~ push(pop().body) ~~> ;
 ErrList     = Name { "," Name } ;
 
+// The optional argument of return/break/next must not start at a statement-modifier
+// keyword: in `break if C` the `if` belongs to the enclosing ModStmt - without the
+// NoModKw guard it parses as a block-if argument expression and swallows the loop's
+// `end`.
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ Expression ] ;
+            = KwReturn [ NoModKw Expression ] ;
 BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
-            = KwBreak [ Expression ] ;
+            = KwBreak [ NoModKw Expression ] ;
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
-            = KwNext [ Expression ] ;
+            = KwNext [ NoModKw Expression ] ;
 
 // raise [EXPR[, EXPR]]: raise the first expression's value with js_throw (a bare raise
 // re-raise is approximated by throwing nil); a trailing message argument is ignored.
@@ -369,6 +373,31 @@ NotKw       = :script(~~
                    "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
+        }
+        return undefined
+    })()
+~~) ;
+
+// NoModKw succeeds (matching empty) only when the next word is NOT a statement-
+// modifier keyword, so the optional argument of return/break/next leaves a trailing
+// `if`/`unless`/`while`/`until` to the enclosing ModStmt. Self contained like NotKw.
+NoModKw     = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (true) {
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        var s = ""
+        while ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            s = s + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (s === "if" || s === "unless" || s === "while" || s === "until") {
+            return abnf.newToken("\x01modkw", 0)
         }
         return undefined
     })()

@@ -653,6 +653,31 @@ def ensure_return_cancels_raise
 end
 check("ensure-return-cancels-raise", ensure_return_cancels_raise(), "cancelled")
 
+mi = 0
+while true
+  mi = mi + 1
+  break if mi >= 3
+end
+check("break-if-modifier-in-while", mi, 3)
+
+mj = 0
+mk = 0
+while mj < 5
+  mj = mj + 1
+  next if mj == 2
+  mk = mk + 1
+end
+check("next-if-modifier-in-while", mk, 4)
+
+def ret_if_in_while(n)
+  while true
+    n = n + 1
+    return "hit" if n >= 3
+  end
+  "unreached"
+end
+check("return-if-modifier-in-while", ret_if_in_while(0), "hit")
+
 def loop_break_in_begin
   btotal = 0
   bx = 0
