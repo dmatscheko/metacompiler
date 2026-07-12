@@ -29,9 +29,12 @@ chaining),
 (-7//2 == -4), % as floor modulo (-7%2 == 1), unary -, int and float literals, and
 single or double quoted strings with escapes.
 
-Not in the subset: classes, tuples, nested def/lambdas/closures, the global
+Lambdas, nested defs and lexical closures are supported (js_closure captures the
+defining scope as the emitted function's env).
+
+Not in the subset: classes, tuples, the global
 keyword, comparison chaining, slice assignment and slice steps, dict comprehensions,
-for-else, imports, exceptions, and
+for-else, imports, and
 list/dict equality by value (== compares them by identity).
 
 Functions become IR functions jsf_N(env, args); Python scoping (assignment creates a
@@ -236,15 +239,20 @@ ExprSmall   <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
-// A lambda (accepted, not implemented) binds loosest; then the a-if-c-else-b
-// conditional expression (genuinely implemented); then the boolean/arith layers.
+// A lambda binds loosest; then the a-if-c-else-b conditional expression; then
+// the boolean/arith layers.
 Expression  = Lambda | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
-Lambda      <~~ takeAll(); push(notImplExpr("lambda", up.pos)) ~~>
+Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
             = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
-// Lambda parameters take no annotation (the ':' ends the header), only defaults.
-LamParam    = ( "**" | "*" ) [ Id ] | Id [ "=" DiscardExpr ] ;
+// Lambda parameters take no annotation (the ':' ends the header), only defaults;
+// like def, anything beyond plain positional names is reported as not implemented.
+LamParam    = LamStar | LamNamed ;
+LamStar     <~~ push({pcomplex: true}) ~~>
+            = ( "**" | "*" ) [ Id ] ;
+LamNamed    <~~ push(makeNamedParam(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ ParamDefault ] ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "or" KwEnd AndExpr } ;
@@ -1155,6 +1163,20 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name),
                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b
+        }
+    }
+
+    // lambda: an own IR function like def, but the body is a single expression
+    // whose value is returned; the lambda expression's value is the closure.
+    function makeLambda(exprT, plist, pos) {
+        if (plist.complex) { notImpl("*args/keyword/default lambda parameters", pos) }
+        var params = plist.params
+        return function(b) {
+            var idx = emitClosure(params, function(fb) {
+                var r = exprT(fb)
+                return retStmt(r.b, r.v)
+            }, false)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
 

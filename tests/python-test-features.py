@@ -452,6 +452,19 @@ def rethrow():
 
 check("rethrow", rethrow(), "deeper")
 
+# ----- lambdas and lexical closures -----
+double = lambda k: k * 2
+check("lambda-direct", double(7), 14)
+check("lambda-arg", (lambda a, b: a + b)(3, 4), 7)
+
+def make_counter(start):
+    def bump(step):
+        return start + step
+    return bump
+
+check("closure-nested-def", make_counter(10)(5), 15)
+check("closure-lambda", (lambda n: lambda k: k + n)(3)(4), 7)
+
 # ----- dynamic typing: a variable may change its type -----
 dyn = 1
 dyn = "now a string"

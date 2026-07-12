@@ -28,9 +28,12 @@ chaining),
 (-7//2 == -4), % as floor modulo (-7%2 == 1), unary -, int and float literals, and
 single or double quoted strings with escapes.
 
-Not in the subset: classes, tuples, nested def/lambdas/closures, the global
+Lambdas, nested defs and lexical closures are supported (a function captures the
+scope chain live at its definition, like compiled closures capture their env).
+
+Not in the subset: classes, tuples, the global
 keyword, comparison chaining, slice assignment and slice steps, dict comprehensions,
-for-else, imports, exceptions, and
+for-else, imports, and
 list/dict equality by value (== compares them by identity).
 
 There is no main(): the file simply runs top to bottom. Self checking programs end
@@ -221,15 +224,20 @@ ExprSmall   <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
-// A lambda (accepted, not implemented) binds loosest; then the a-if-c-else-b
-// conditional expression (genuinely implemented); then the boolean/arith layers.
+// A lambda binds loosest; then the a-if-c-else-b conditional expression; then
+// the boolean/arith layers.
 Expression  = Lambda | Ternary ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
-Lambda      <~~ takeAll(); push(notImplExpr("lambda", up.pos)) ~~>
+Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
             = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
-// Lambda parameters take no annotation (the ':' ends the header), only defaults.
-LamParam    = ( "**" | "*" ) [ Id ] | Id [ "=" DiscardExpr ] ;
+// Lambda parameters take no annotation (the ':' ends the header), only defaults;
+// like def, anything beyond plain positional names is reported as not implemented.
+LamParam    = LamStar | LamNamed ;
+LamStar     <~~ push({pcomplex: true}) ~~>
+            = ( "**" | "*" ) [ Id ] ;
+LamNamed    <~~ push(makeNamedParam(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ ParamDefault ] ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "or" KwEnd AndExpr } ;
@@ -1057,24 +1065,53 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {pname: items[0]}
     }
 
-    // def: bind the closure; calls get a fresh function scope. A signature using
-    // *args/**kwargs/defaults is reported as not implemented (plain names bind).
+    // def: bind the closure; calls get a fresh function scope chained onto the
+    // scopes live at the definition, so nested defs close over their enclosing
+    // function's locals - the same lexical capture compiled closures get from
+    // js_closure's env. A signature using *args/**kwargs/defaults is reported
+    // as not implemented (plain names bind).
+    function callScopes(defScopes, params, args) {
+        var fscope = {}
+        for (var p = 0; p < params.length; p++) {
+            fscope[params[p]] = p < args.length ? args[p] : undefined
+        }
+        var chain = defScopes.slice()
+        chain.push(fscope)
+        return chain
+    }
     function makeDef(bodyT, plist, name, pos) {
         if (plist.complex) { notImpl("*args/keyword/default parameters", pos) }
         var params = plist.params
         return function() {
+            var defScopes = scopes.slice()
             setVar(name, function() {
                 var args = []
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
                 var saved = scopes
-                scopes = [globalScope, {}]
-                for (var p = 0; p < params.length; p++) {
-                    scopes[1][params[p]] = p < args.length ? args[p] : undefined
-                }
+                scopes = callScopes(defScopes, params, args)
                 var r = bodyT()
                 scopes = saved
                 return (r != undefined && r.isRet) ? r.v : undefined
             })
+        }
+    }
+
+    // lambda: a real single-expression function value, with the same lexical
+    // capture and call scoping as def.
+    function makeLambda(exprT, plist, pos) {
+        if (plist.complex) { notImpl("*args/keyword/default lambda parameters", pos) }
+        var params = plist.params
+        return function() {
+            var defScopes = scopes.slice()
+            return function() {
+                var args = []
+                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+                var saved = scopes
+                scopes = callScopes(defScopes, params, args)
+                var r = exprT()
+                scopes = saved
+                return r
+            }
         }
     }
 
