@@ -31,8 +31,8 @@ single or double quoted strings with escapes.
 Lambdas, nested defs and lexical closures are supported (a function captures the
 scope chain live at its definition, like compiled closures capture their env).
 
-Not in the subset: classes, tuples, the global
-keyword, comparison chaining, slice assignment and slice steps, dict comprehensions,
+Not in the subset: classes, tuples,
+comparison chaining, slice assignment and slice steps, dict comprehensions,
 for-else, imports, and
 list/dict equality by value (== compares them by identity).
 
@@ -169,12 +169,15 @@ WithBody    <~~ push({withbody: pop()}) ~~>
 Assert      <~~ push(makeAssert(takeAll())) ~~>
             = "assert" KwEnd Expression [ "," Expression ] ;
 
-// global / nonlocal / del: accepted, reported as not implemented (no such scoping
-// or deletion in the subset).
-Global      <~~ push(notImplStmt("global declaration", up.pos)) ~~>
-            = "global" KwEnd Id { "," Id } ;
-Nonlocal    <~~ push(notImplStmt("nonlocal declaration", up.pos)) ~~>
-            = "nonlocal" KwEnd Id { "," Id } ;
+// global / nonlocal: the declaration guarantees a binding in the right scope,
+// then plain assignment (update where the chain resolves the name) lands there.
+// Deviation: a nearer binding of the same name still wins over the declared
+// scope (real Python forces it); nonlocal is checked when the call reaches it,
+// not at compile time. del stays unsupported.
+Global      <~~ push(makeGlobal(takeAll(), up.pos)) ~~>
+            = "global" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
+Nonlocal    <~~ push(makeNonlocal(takeAll(), up.pos)) ~~>
+            = "nonlocal" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
 Del         <~~ takeAll(); push(notImplStmt("del statement", up.pos)) ~~>
             = "del" KwEnd Expression { "," Expression } ;
 
@@ -1093,6 +1096,32 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 scopes = saved
                 return (r != undefined && r.isRet) ? r.v : undefined
             })
+        }
+    }
+
+    // global NAME: make sure NAME is bound in the module scope (unless a host
+    // built-in already answers for it), so a later assignment lands there.
+    function makeGlobal(names, pos) {
+        return function() {
+            for (var i = 0; i < names.length; i++) {
+                var n = names[i]
+                if (!hasOwn(globalScope, n) && !hasOwn(hostGlobals, n)) {
+                    scopePut(globalScope, n, undefined)
+                }
+            }
+        }
+    }
+    // nonlocal NAME: NAME must already be bound in an enclosing function scope
+    // (neither the innermost scope nor the module scope count, like real Python).
+    function makeNonlocal(names, pos) {
+        return function() {
+            for (var i = 0; i < names.length; i++) {
+                var found = false
+                for (var s = scopes.length - 2; s >= 1; s--) {
+                    if (hasOwn(scopes[s], names[i])) { found = true; break }
+                }
+                if (!found) { fail("no binding for nonlocal " + names[i]) }
+            }
         }
     }
 

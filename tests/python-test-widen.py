@@ -4,11 +4,11 @@
 # annotated assignment, assert) run and self-check under both the default run and
 # -warn-unsupported.
 #
-# The ACCEPT-AND-NOT-IMPLEMENTED constructs (with, yield, global/nonlocal,
+# The ACCEPT-AND-NOT-IMPLEMENTED constructs (with, yield,
 # del, decorators, async/await, *args/defaults) abort a plain run at the first such
 # construct with a clean file:line message; under -warn-unsupported they warn and the
-# file runs to exit(fails[0]). (try/except/finally, raise and lambda are now
-# implemented and run genuinely here - see python-test-try.py.)
+# file runs to exit(fails[0]). (try/except/finally, raise, lambda and
+# global/nonlocal are now implemented and run genuinely here.)
 
 fails = [0]
 
@@ -72,6 +72,35 @@ def make_adder(n):
 
 check("lambda closure", make_adder(3)(4), 7)
 
+# global / nonlocal
+tally = 0
+
+
+def note():
+    global tally
+    tally = tally + 1
+
+
+note()
+note()
+check("global mutate", tally, 2)
+
+
+def make_step():
+    at = 0
+
+    def step():
+        nonlocal at
+        at = at + 1
+        return at
+
+    return step
+
+
+stepper = make_step()
+stepper()
+check("nonlocal mutate", stepper(), 2)
+
 
 # ----- accepted, not implemented (abort by default; warn + run under -warn) -----
 
@@ -101,15 +130,6 @@ check("raise path skipped", guard(9), 9)
 def gen():
     yield 1
     yield 2
-
-
-# global / nonlocal (accepted)
-tally = 0
-
-
-def note():
-    global tally
-    tally = tally + 1
 
 
 # del (accepted)

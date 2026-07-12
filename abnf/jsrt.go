@@ -2527,6 +2527,29 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return 0
 		},
+		"js_pyglobal": func(a []uint64) uint64 { // global NAME: ensure NAME is bound in the root scope.
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			root := sc
+			for root.parent != nil {
+				root = root.parent
+			}
+			if _, ok := root.vars[name]; !ok {
+				root.vars[name] = jsUndef
+			}
+			return 0
+		},
+		"js_pynonlocal": func(a []uint64) uint64 { // nonlocal NAME: an enclosing non-root scope must bind NAME.
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			for s := sc.parent; s != nil && s.parent != nil; s = s.parent {
+				if _, ok := s.vars[name]; ok {
+					return 0
+				}
+			}
+			rt.fail("no binding for nonlocal %s", name)
+			return 0
+		},
 		"js_pyrange": func(a []uint64) uint64 { // range(a) or range(a, b) as a materialized list.
 			from := int(rt.toNumber(u(a[0])))
 			to := from

@@ -465,6 +465,29 @@ def make_counter(start):
 check("closure-nested-def", make_counter(10)(5), 15)
 check("closure-lambda", (lambda n: lambda k: k + n)(3)(4), 7)
 
+# ----- global and nonlocal declarations -----
+hits = 0
+
+def record():
+    global hits
+    hits = hits + 1
+
+record()
+record()
+check("global-decl", hits, 2)
+
+def accumulator():
+    total = 0
+    def add(n):
+        nonlocal total
+        total = total + n
+        return total
+    return add
+
+acc = accumulator()
+acc(5)
+check("nonlocal-decl", acc(7), 12)
+
 # ----- dynamic typing: a variable may change its type -----
 dyn = 1
 dyn = "now a string"
