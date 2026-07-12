@@ -100,6 +100,17 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
     // A macro maps its name to an array of body tokens; expandIdent splices them in,
     // recursively, guarding against cycles with the `active` set. See the title for scope.
 
+    // Own-property test for the user-keyed macro tables: a bare [name] read resolved
+    // inherited Object.prototype members (toString, valueOf, ...) under a host JS
+    // engine, while the frozen engine's objects have no prototype chain.
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+    // Own-property write: a plain assignment to "__proto__" invokes the
+    // Object.prototype accessor under a host JS engine; rawSet (a host global on
+    // both engines) defines the own property directly.
+    function putOwn(o, name, v) {
+        if (name == "__proto__") { rawSet(o, name, v) } else { o[name] = v }
+    }
+
     function skipHws(tokens, p) {
         while (p < tokens.length && tokens[p].kind == "hws") { p = p + 1 }
         return p
@@ -169,10 +180,13 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
     }
 
     // Expand an identifier through the macro table, recursively, cycle-guarded.
+    // The not-a-macro test is own-property only; an #undef leaves an own entry whose
+    // value is undefined, which counts as not defined too.
     function expandIdent(name, macros, active) {
-        if (macros[name] == undefined || active[name] == true) { return name }
+        if (!hasOwn(macros, name) || macros[name] == undefined) { return name }
+        if (hasOwn(active, name) && active[name] == true) { return name }
         var body = macros[name]
-        active[name] = true
+        putOwn(active, name, true)
         var s = ""
         var k = 0
         while (k < body.length) {
@@ -181,7 +195,7 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
             else { s = s + bt.text }
             k = k + 1
         }
-        active[name] = undefined
+        putOwn(active, name, undefined)
         return s
     }
 
@@ -212,12 +226,12 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
                 // Function-like macro: not supported, passed through verbatim.
                 return {text: rawText(tokens, i, afterLine), next: afterLine}
             }
-            macros[name] = collectBody(tokens, q, end)
+            putOwn(macros, name, collectBody(tokens, q, end))
             return {text: newlinesText(tokens, i, end), next: afterLine}
         }
         if (word == "undef") {
             var p2 = skipHws(tokens, kw.at + 1)
-            if (p2 < end && tokens[p2].kind == "ident") { macros[tokens[p2].text] = undefined }
+            if (p2 < end && tokens[p2].kind == "ident") { putOwn(macros, tokens[p2].text, undefined) }
             return {text: newlinesText(tokens, i, end), next: afterLine}
         }
         // Every other directive passes through for the downstream language to handle.
