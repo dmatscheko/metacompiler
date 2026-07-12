@@ -1312,7 +1312,32 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 	block := f.Blocks[0]
 	var prevBlock *ir.Block // The block we came from. Only needed by phi.
 	for {
-		for _, inst := range block.Insts {
+		// The phis at the top of a block resolve SIMULTANEOUSLY: read every
+		// incoming value against the predecessor's frame first, then assign.
+		// Resolving them one after another let a phi that reads an earlier phi
+		// of the same block see the NEW value, silently miscompiling
+		// loop-carried swaps ("%a = phi ...,%b" next to "%b = phi ...,%a").
+		numPhis := 0
+		for numPhis < len(block.Insts) {
+			if _, ok := block.Insts[numPhis].(*ir.InstPhi); !ok {
+				break
+			}
+			numPhis++
+		}
+		if numPhis > 0 {
+			phiVals := make([]uint64, numPhis)
+			for i := 0; i < numPhis; i++ {
+				ma.steps++
+				if ma.steps > machineMaxSteps {
+					panic("IR interpreter: step limit exceeded (endless loop?)")
+				}
+				phiVals[i] = ma.phiValue(fr, block.Insts[i].(*ir.InstPhi), prevBlock)
+			}
+			for i := 0; i < numPhis; i++ {
+				fr.vals[block.Insts[i].(*ir.InstPhi)] = phiVals[i]
+			}
+		}
+		for _, inst := range block.Insts[numPhis:] {
 			ma.steps++
 			if ma.steps > machineMaxSteps {
 				panic("IR interpreter: step limit exceeded (endless loop?)")
@@ -1339,6 +1364,16 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 			panic(fmt.Sprintf("IR interpreter: unsupported terminator %T in %s", term, f.Ident()))
 		}
 	}
+}
+
+// phiValue picks a phi's incoming value for the block we came from.
+func (ma *machine) phiValue(fr *frame, phi *ir.InstPhi, prevBlock *ir.Block) uint64 {
+	for _, inc := range phi.Incs {
+		if inc.Pred == prevBlock {
+			return ma.valueOf(fr, inc.X)
+		}
+	}
+	panic("IR interpreter: phi has no incoming value for the previous block")
 }
 
 // exec executes one instruction inside the given frame.
@@ -1425,15 +1460,10 @@ func (ma *machine) exec(fr *frame, inst ir.Instruction, prevBlock *ir.Block) {
 			fr.vals[inst] = ma.valueOf(fr, inst.ValueFalse)
 		}
 	case *ir.InstPhi:
-		// Note: Phis are evaluated one after another, not simultaneously. That is enough
-		// for the code that the compiler grammars generate.
-		for _, inc := range inst.Incs {
-			if inc.Pred == prevBlock {
-				fr.vals[inst] = ma.valueOf(fr, inc.X)
-				return
-			}
-		}
-		panic("IR interpreter: phi has no incoming value for the previous block")
+		// Leading phis are resolved simultaneously by the block loop in call();
+		// this fallback only runs for a phi behind a non-phi instruction
+		// (invalid LLVM, kept sequential for compatibility).
+		fr.vals[inst] = ma.phiValue(fr, inst, prevBlock)
 	case *ir.InstCall:
 		callee, ok := inst.Callee.(*ir.Func)
 		if !ok {
