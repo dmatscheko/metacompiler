@@ -5,10 +5,10 @@
 # -warn-unsupported.
 #
 # The ACCEPT-AND-NOT-IMPLEMENTED constructs (with, yield,
-# del, decorators, async/await, *args/defaults) abort a plain run at the first such
+# del, decorators, async/await, **kwargs) abort a plain run at the first such
 # construct with a clean file:line message; under -warn-unsupported they warn and the
-# file runs to exit(fails[0]). (try/except/finally, raise, lambda and
-# global/nonlocal are now implemented and run genuinely here.)
+# file runs to exit(fails[0]). (try/except/finally, raise, lambda, global/nonlocal
+# and *args/default parameters are now implemented and run genuinely here.)
 
 fails = [0]
 
@@ -101,6 +101,21 @@ stepper = make_step()
 stepper()
 check("nonlocal mutate", stepper(), 2)
 
+# *args and default arguments
+def variadic(*args):
+    return len(args)
+
+
+check("varargs", variadic(1, 2, 3), 3)
+
+
+def defaulted(msg, prefix="> "):
+    return prefix + msg
+
+
+check("default used", defaulted("hi"), "> hi")
+check("default overridden", defaulted("hi", "* "), "* hi")
+
 
 # ----- accepted, not implemented (abort by default; warn + run under -warn) -----
 
@@ -155,13 +170,9 @@ async def afetch(u):
     return await u
 
 
-# *args and default arguments (accepted; only the plain names bind)
-def variadic(*args):
+# **kwargs (accepted; the dict does not bind)
+def keyworded(**kws):
     return 0
-
-
-def defaulted(msg, prefix="> "):
-    return prefix + msg
 
 
 if fails[0] == 0:

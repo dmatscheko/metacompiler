@@ -119,19 +119,22 @@ ForTargets  = "(" Id { "," Id } [ "," ] ")" | Id "," Id { "," Id } [ "," ] ;
 
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
             = "def" KwEnd Id <~~ push(up.in) ~~> ParamList [ "->" DiscardType ] Suite ;
-// Parameter lists accept annotations, default values and *args/**kwargs; a def
-// whose signature uses any of those beyond plain positional names is reported as
-// not implemented (only the plain names bind). The bare '*' and '/' markers too.
+// Parameter lists: plain names, default values (evaluated once, when the def
+// statement runs - like real Python) and a *args rest parameter all work;
+// **kwargs, the bare '*' and '/' markers and keyword-only parameters after
+// *args are reported as not implemented. Annotations parse and are ignored.
 ParamList   <~~ push(makeParamList(takeAll())) ~~>
             = "(" [ Param { "," Param } [ "," ] ] ")" ;
-Param       = StarParam | SlashParam | NamedParam ;
-StarParam   <~~ push({pcomplex: true}) ~~>
-            = ( "**" | "*" ) [ Id [ ":" DiscardType ] ] ;
+Param       = DblStarParam | StarParam | SlashParam | NamedParam ;
+DblStarParam <~~ push({pcomplex: true}) ~~>
+            = "**" [ Id [ ":" DiscardType ] ] ;
+StarParam   <~~ push(makeRestParam(takeAll())) ~~>
+            = "*" [ Id <~~ push(up.in) ~~> [ ":" DiscardType ] ] ;
 SlashParam  <~~ push({pcomplex: true}) ~~>
             = "/" ;
 NamedParam  <~~ push(makeNamedParam(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" DiscardType ] [ ParamDefault ] ;
-ParamDefault <~~ pop(); push({pdefault: true}) ~~>
+ParamDefault <~~ push({pdefault: pop()}) ~~>
             = "=" Expression ;
 
 // A decorated def / async-def / class: the decorators parse (their call
@@ -249,11 +252,13 @@ Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
             = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
-// Lambda parameters take no annotation (the ':' ends the header), only defaults;
-// like def, anything beyond plain positional names is reported as not implemented.
-LamParam    = LamStar | LamNamed ;
-LamStar     <~~ push({pcomplex: true}) ~~>
-            = ( "**" | "*" ) [ Id ] ;
+// Lambda parameters take no annotation (the ':' ends the header); defaults
+// and *args work like in def, **kwargs is reported as not implemented.
+LamParam    = LamDblStar | LamStar | LamNamed ;
+LamDblStar  <~~ push({pcomplex: true}) ~~>
+            = "**" [ Id ] ;
+LamStar     <~~ push(makeRestParam(takeAll())) ~~>
+            = "*" [ Id <~~ push(up.in) ~~> ] ;
 LamNamed    <~~ push(makeNamedParam(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ParamDefault ] ;
 
@@ -1113,25 +1118,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // annotations-with-defaults and the '*'/'/' markers as unsupported.
     function makeParamList(items) {
         var names = []
+        var dflts = []
+        var rest = null
         var complex = false
         for (var i = 0; i < items.length; i++) {
-            if (items[i].pcomplex == true) { complex = true }
-            if (items[i].pname != undefined) { names.push(items[i].pname) }
+            var it = items[i]
+            if (it.pcomplex == true) { complex = true }
+            else if (it.prest == true) {
+                if (rest != null) { complex = true }
+                rest = it.pname
+            } else if (it.pname != undefined) {
+                if (rest != null) { complex = true }
+                names.push(it.pname)
+                dflts.push(it.pdflt != undefined ? it.pdflt : null)
+            }
         }
-        return {params: names, complex: complex}
+        return {params: names, dflts: dflts, rest: rest, complex: complex}
     }
     function makeNamedParam(items) {
-        if (items.length > 1) { return {pname: items[0], pcomplex: true} }
+        if (items.length > 1) { return {pname: items[0], pdflt: items[1].pdefault} }
         return {pname: items[0]}
+    }
+    function makeRestParam(items) {
+        if (items.length == 0) { return {pcomplex: true} }
+        return {pname: items[0], prest: true}
     }
 
     // def: an own IR function; the body shares one function scope (no block scopes).
-    // A signature using *args/**kwargs/defaults is reported as not implemented (the
-    // plain names still bind).
-    // Emits an own IR function jsf_N(env, args) binding params, running bodyT; returns
-    // its index. isCtl marks a try/catch body closure (a return/break/continue leaving
-    // it emits a control signal - see compile-core inCtlBody / excDispatch).
-    function emitClosure(params, bodyT, isCtl) {
+    // Emits an own IR function jsf_N(env, args) binding the parameters, running
+    // bodyT; returns its index. Accepts a plain name array (the try/catch closures)
+    // or a makeParamList result: a defaulted parameter falls back to the def-time
+    // value stored as "dflt*NAME" in the closure's env (see emitDefaultsEnv), a
+    // *args rest parameter binds the remaining arguments via js_pyrest. isCtl marks
+    // a try/catch body closure (a return/break/continue leaving it emits a control
+    // signal - see compile-core inCtlBody / excDispatch).
+    function emitClosure(plist, bodyT, isCtl) {
+        var params = plist.params != undefined ? plist.params : plist
+        var dflts = plist.dflts != undefined ? plist.dflts : []
+        var rest = plist.rest != undefined ? plist.rest : null
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1146,8 +1170,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var fb = f.NewBlock("entry")
         curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
         for (var i = 0; i < params.length; i++) {
-            callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, params[i]),
-                                          callExt(fb, "js_arg", [f.Params[1], handle(i)])])
+            var argV = callExt(fb, "js_arg", [f.Params[1], handle(i)])
+            if (i < dflts.length && dflts[i] != null) {
+                var dfltV = callExt(fb, "js_scope_get", [curScopeV, emitStr(fb, "dflt*" + params[i])])
+                argV = fb.NewSelect(truthy(fb, callExt(fb, "js_seq", [argV, hUndef])), dfltV, argV)
+            }
+            callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, params[i]), argV])
+        }
+        if (rest != null) {
+            callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, rest),
+                                          callExt(fb, "js_pyrest", [f.Params[1], handle(params.length)])])
         }
         var endB = bodyT(fb)
         endB.NewRet(hUndef)
@@ -1158,13 +1190,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curFTag = savedTag
         return idx
     }
+    // Default values are evaluated once, where the def statement (or lambda
+    // expression) runs - real Python semantics. They live as "dflt*NAME" in a
+    // hidden scope the closure captures as env; the '*' keeps them out of any
+    // identifier's way.
+    function emitDefaultsEnv(b, plist) {
+        var has = false
+        for (var i = 0; i < plist.dflts.length; i++) {
+            if (plist.dflts[i] != null) { has = true }
+        }
+        if (!has) { return {b: b, env: curScopeV} }
+        var env = callExt(b, "js_scope_new", [curScopeV])
+        for (var i = 0; i < plist.dflts.length; i++) {
+            if (plist.dflts[i] == null) { continue }
+            var r = plist.dflts[i](b)
+            b = r.b
+            callExt(b, "js_scope_decl", [env, emitStr(b, "dflt*" + plist.params[i]), r.v])
+        }
+        return {b: b, env: env}
+    }
     function makeDef(bodyT, plist, name, pos) {
-        if (plist.complex) { notImpl("*args/keyword/default parameters", pos) }
-        var params = plist.params
+        if (plist.complex) { notImpl("**kwargs/keyword-only parameters", pos) }
         return function(b) {
-            var idx = emitClosure(params, bodyT, false)
+            var idx = emitClosure(plist, bodyT, false)
+            var er = emitDefaultsEnv(b, plist)
+            b = er.b
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name),
-                                        callExt(b, "js_closure", [handle(idx), curScopeV])])
+                                        callExt(b, "js_closure", [handle(idx), er.env])])
             return b
         }
     }
@@ -1192,14 +1244,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lambda: an own IR function like def, but the body is a single expression
     // whose value is returned; the lambda expression's value is the closure.
     function makeLambda(exprT, plist, pos) {
-        if (plist.complex) { notImpl("*args/keyword/default lambda parameters", pos) }
-        var params = plist.params
+        if (plist.complex) { notImpl("**kwargs/keyword-only lambda parameters", pos) }
         return function(b) {
-            var idx = emitClosure(params, function(fb) {
+            var idx = emitClosure(plist, function(fb) {
                 var r = exprT(fb)
                 return retStmt(r.b, r.v)
             }, false)
-            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+            var er = emitDefaultsEnv(b, plist)
+            return {b: er.b, v: callExt(er.b, "js_closure", [handle(idx), er.env])}
         }
     }
 

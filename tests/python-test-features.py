@@ -488,6 +488,32 @@ acc = accumulator()
 acc(5)
 check("nonlocal-decl", acc(7), 12)
 
+# ----- default parameters and *args -----
+def greet(who, greeting="hi"):
+    return greeting + " " + who
+
+check("param-default", greet("x"), "hi x")
+check("param-override", greet("x", "yo"), "yo x")
+
+snap = 5
+capture = lambda v=snap: v
+snap = 6
+check("default-def-time", capture(), 5)
+
+def total(*nums):
+    t = 0
+    for n in nums:
+        t = t + n
+    return t
+
+check("varargs", total(1, 2, 3, 4), 10)
+check("varargs-empty", total(), 0)
+
+def mixed(base, *extra):
+    return base + len(extra)
+
+check("varargs-mixed", mixed(10, "a", "b"), 12)
+
 # ----- dynamic typing: a variable may change its type -----
 dyn = 1
 dyn = "now a string"

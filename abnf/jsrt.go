@@ -2527,6 +2527,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return 0
 		},
+		"js_pyrest": func(a []uint64) uint64 { // *args: the call arguments from index N on, as a list.
+			arr := u(a[0]).(*jsArray)
+			from := int(a[1])
+			rest := &jsArray{}
+			for i := from; i < len(arr.elems); i++ {
+				rest.elems = append(rest.elems, arr.elems[i])
+			}
+			return w(rest)
+		},
 		"js_pyglobal": func(a []uint64) uint64 { // global NAME: ensure NAME is bound in the root scope.
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))

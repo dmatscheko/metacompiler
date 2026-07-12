@@ -106,19 +106,22 @@ ForTargets  = "(" Id { "," Id } [ "," ] ")" | Id "," Id { "," Id } [ "," ] ;
 
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
             = "def" KwEnd Id <~~ push(up.in) ~~> ParamList [ "->" DiscardType ] Suite ;
-// Parameter lists accept annotations, default values and *args/**kwargs; a def
-// whose signature uses any of those beyond plain positional names is reported as
-// not implemented (only the plain names bind). The bare '*' and '/' markers too.
+// Parameter lists: plain names, default values (evaluated once, when the def
+// statement runs - like real Python) and a *args rest parameter all work;
+// **kwargs, the bare '*' and '/' markers and keyword-only parameters after
+// *args are reported as not implemented. Annotations parse and are ignored.
 ParamList   <~~ push(makeParamList(takeAll())) ~~>
             = "(" [ Param { "," Param } [ "," ] ] ")" ;
-Param       = StarParam | SlashParam | NamedParam ;
-StarParam   <~~ push({pcomplex: true}) ~~>
-            = ( "**" | "*" ) [ Id [ ":" DiscardType ] ] ;
+Param       = DblStarParam | StarParam | SlashParam | NamedParam ;
+DblStarParam <~~ push({pcomplex: true}) ~~>
+            = "**" [ Id [ ":" DiscardType ] ] ;
+StarParam   <~~ push(makeRestParam(takeAll())) ~~>
+            = "*" [ Id <~~ push(up.in) ~~> [ ":" DiscardType ] ] ;
 SlashParam  <~~ push({pcomplex: true}) ~~>
             = "/" ;
 NamedParam  <~~ push(makeNamedParam(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" DiscardType ] [ ParamDefault ] ;
-ParamDefault <~~ pop(); push({pdefault: true}) ~~>
+ParamDefault <~~ push({pdefault: pop()}) ~~>
             = "=" Expression ;
 
 // A decorated def / async-def / class: the decorators parse (their call
@@ -234,11 +237,13 @@ Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
             = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
-// Lambda parameters take no annotation (the ':' ends the header), only defaults;
-// like def, anything beyond plain positional names is reported as not implemented.
-LamParam    = LamStar | LamNamed ;
-LamStar     <~~ push({pcomplex: true}) ~~>
-            = ( "**" | "*" ) [ Id ] ;
+// Lambda parameters take no annotation (the ':' ends the header); defaults
+// and *args work like in def, **kwargs is reported as not implemented.
+LamParam    = LamDblStar | LamStar | LamNamed ;
+LamDblStar  <~~ push({pcomplex: true}) ~~>
+            = "**" [ Id ] ;
+LamStar     <~~ push(makeRestParam(takeAll())) ~~>
+            = "*" [ Id <~~ push(up.in) ~~> ] ;
 LamNamed    <~~ push(makeNamedParam(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ParamDefault ] ;
 
@@ -1052,46 +1057,73 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return undefined
         }
     }
-    // A parameter list: collect the plain positional names; flag *args/**kwargs,
-    // annotations-with-defaults and the '*'/'/' markers as unsupported.
+    // A parameter list: positional names with optional default thunks, plus an
+    // optional *args rest name; **kwargs, bare '*'/'/' markers and keyword-only
+    // names after *args flag the list as unsupported.
     function makeParamList(items) {
         var names = []
+        var dflts = []
+        var rest = null
         var complex = false
         for (var i = 0; i < items.length; i++) {
-            if (items[i].pcomplex == true) { complex = true }
-            if (items[i].pname != undefined) { names.push(items[i].pname) }
+            var it = items[i]
+            if (it.pcomplex == true) { complex = true }
+            else if (it.prest == true) {
+                if (rest != null) { complex = true }
+                rest = it.pname
+            } else if (it.pname != undefined) {
+                if (rest != null) { complex = true }
+                names.push(it.pname)
+                dflts.push(it.pdflt != undefined ? it.pdflt : null)
+            }
         }
-        return {params: names, complex: complex}
+        return {params: names, dflts: dflts, rest: rest, complex: complex}
     }
     function makeNamedParam(items) {
-        if (items.length > 1) { return {pname: items[0], pcomplex: true} }
+        if (items.length > 1) { return {pname: items[0], pdflt: items[1].pdefault} }
         return {pname: items[0]}
+    }
+    function makeRestParam(items) {
+        if (items.length == 0) { return {pcomplex: true} }
+        return {pname: items[0], prest: true}
     }
 
     // def: bind the closure; calls get a fresh function scope chained onto the
     // scopes live at the definition, so nested defs close over their enclosing
     // function's locals - the same lexical capture compiled closures get from
-    // js_closure's env. A signature using *args/**kwargs/defaults is reported
-    // as not implemented (plain names bind).
-    function callScopes(defScopes, params, args) {
+    // js_closure's env. Defaults are evaluated once, when the def statement
+    // runs (real Python semantics); *args collects the extra arguments.
+    function evalDefaults(plist) {
+        var vals = []
+        for (var i = 0; i < plist.dflts.length; i++) {
+            vals.push(plist.dflts[i] != null ? plist.dflts[i]() : undefined)
+        }
+        return vals
+    }
+    function callScopes(defScopes, plist, dflts, args) {
         var fscope = {}
-        for (var p = 0; p < params.length; p++) {
-            fscope[params[p]] = p < args.length ? args[p] : undefined
+        for (var p = 0; p < plist.params.length; p++) {
+            fscope[plist.params[p]] = p < args.length ? args[p] : dflts[p]
+        }
+        if (plist.rest != null) {
+            var rest = []
+            for (var k = plist.params.length; k < args.length; k++) { rest.push(args[k]) }
+            fscope[plist.rest] = rest
         }
         var chain = defScopes.slice()
         chain.push(fscope)
         return chain
     }
     function makeDef(bodyT, plist, name, pos) {
-        if (plist.complex) { notImpl("*args/keyword/default parameters", pos) }
-        var params = plist.params
+        if (plist.complex) { notImpl("**kwargs/keyword-only parameters", pos) }
         return function() {
             var defScopes = scopes.slice()
+            var dflts = evalDefaults(plist)
             setVar(name, function() {
                 var args = []
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
                 var saved = scopes
-                scopes = callScopes(defScopes, params, args)
+                scopes = callScopes(defScopes, plist, dflts, args)
                 var r = bodyT()
                 scopes = saved
                 return (r != undefined && r.isRet) ? r.v : undefined
@@ -1126,17 +1158,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // lambda: a real single-expression function value, with the same lexical
-    // capture and call scoping as def.
+    // capture, defaults and call scoping as def.
     function makeLambda(exprT, plist, pos) {
-        if (plist.complex) { notImpl("*args/keyword/default lambda parameters", pos) }
-        var params = plist.params
+        if (plist.complex) { notImpl("**kwargs/keyword-only lambda parameters", pos) }
         return function() {
             var defScopes = scopes.slice()
+            var dflts = evalDefaults(plist)
             return function() {
                 var args = []
                 for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
                 var saved = scopes
-                scopes = callScopes(defScopes, params, args)
+                scopes = callScopes(defScopes, plist, dflts, args)
                 var r = exprT()
                 scopes = saved
                 return r
