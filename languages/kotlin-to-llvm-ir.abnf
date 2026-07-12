@@ -239,7 +239,7 @@ WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
 // A branch condition: an inclusive range test (in / !in), a type test (is T / !is T,
 // undecidable so it never matches and warns), or a value to compare with.
 WhenCond    = WhenIn | WhenNotIn | WhenIs | WhenVal ;
-WhenIs      <~~ push({isType: true, pos: up.pos}) ~~> = ( KwIs | KwNotIs ) Type ;
+WhenIs      <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = IsKw TypeName ;
 WhenIn      <~~ var h = pop(); push({lo: pop(), hi: h, neg: false}) ~~>
             = KwIn Expression ".." Expression ;
 WhenNotIn   <~~ var h = pop(); push({lo: pop(), hi: h, neg: true}) ~~>
@@ -271,8 +271,11 @@ TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = Elvis [ IsSfx | AsSfx ] ;
 // A postfix `is T` must not fire when `->` immediately follows: there the `is T` leads
 // the next `when` arm (is CellInfoGsm -> ...), and slurping it as a postfix would strand
 // the arrow. `is T ->` occurs only at a when-arm boundary, so the guard is safe globally.
-IsSfx       <~~ push({isType: true, pos: up.pos}) ~~> = ( KwIs | KwNotIs ) Type NotArrow ;
-AsSfx       <~~ push({asType: true}) ~~> = ( KwAsSafe | KwAs ) Type ;
+IsSfx       <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = IsKw TypeName NotArrow ;
+AsSfx       <~~ var t = pop(); push({asType: true, safe: pop(), tname: t}) ~~> = AsKw TypeName ;
+IsKw        = KwIs <~~ push(false) ~~> | KwNotIs <~~ push(true) ~~> ;
+AsKw        = KwAsSafe <~~ push(true) ~~> | KwAs <~~ push(false) ~~> ;
+TypeName    <~~ push(stripWs(up.in)) ~~> = Type ;
 // A zero-width guard that fails when the next non-whitespace token is `->`.
 NotArrow    = :script(~~
     (function() {
@@ -660,7 +663,15 @@ KwStep      = "step" KwEnd ;
         }
         return t.charCodeAt(1)
     }
-    function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function(b) { var r = operand(b); return {b: r.b, v: hUndef} } }
+    // x is T / x !is T: emits the shared dynamic type test (extern js_is_type).
+    function makeIsCheck(operand, m) {
+        return function(b) {
+            var r = operand(b)
+            var v = callExt(r.b, "js_is_type", [r.v, emitStr(r.b, m.tname)])
+            if (m.neg) { v = callExt(r.b, "js_not", [v]) }
+            return {b: r.b, v: v}
+        }
+    }
     // A curated stdlib infix call (a to b, a and b, ...). Recognised, not lowered: the
     // operands are emitted (side effects, nested warnings) and the value is undefined.
     // items holds only operand thunks (InfixOp pushes nothing).
@@ -675,8 +686,15 @@ KwStep      = "step" KwEnd ;
         if (items.length == 1) { return items[0] }
         var operand = items[0]
         var m = items[1]
-        if (m.asType) { return operand }
-        return makeIsCheck(operand, m.pos)
+        if (m.asType) {
+            if (!m.safe) { return operand } // x as T: identity (untyped values)
+            return function(b) { // x as? T: the value when it matches, else null
+                var r = operand(b)
+                var isV = callExt(r.b, "js_is_type", [r.v, emitStr(r.b, m.tname)])
+                return {b: r.b, v: r.b.NewSelect(truthy(r.b, isV), r.v, hNull)}
+            }
+        }
+        return makeIsCheck(operand, m)
     }
 
     // ----- Expression thunks: function(block) -> {b, v} -----
@@ -738,13 +756,6 @@ KwStep      = "step" KwEnd ;
             else if (items[i].els != undefined) els = items[i].els
             else arms.push(items[i])
         }
-        // An `is T` / `!is T` arm is undecidable (no runtime types): warn once now; it
-        // never matches at run time, so a following else arm handles it.
-        for (var a1 = 0; a1 < arms.length; a1++) {
-            for (var c1 = 0; c1 < arms[a1].conds.length; c1++) {
-                if (arms[a1].conds[c1].isType) notImpl("is type check", arms[a1].conds[c1].pos)
-            }
-        }
         return function(b) {
             hidCount++
             var wName = "$w" + hidCount
@@ -766,10 +777,10 @@ KwStep      = "step" KwEnd ;
                     var cond = arms[a].conds[v2]
                     var nextB = curF.NewBlock("")
                     if (cond.isType) {
-                        // undecidable type test: an always-false branch, so it never
-                        // matches yet matchB keeps a predecessor (an orphan block with no
-                        // predecessor is malformed IR and panics when the module prints).
-                        b.NewCondBr(truthy(b, hFalse), matchB, nextB)
+                        var subjV0 = callExt(b, "js_scope_get", [curScopeV, emitStr(b, wName)])
+                        var isV = callExt(b, "js_is_type", [subjV0, emitStr(b, cond.tname)])
+                        if (cond.neg) { isV = callExt(b, "js_not", [isV]) }
+                        b.NewCondBr(truthy(b, isV), matchB, nextB)
                     } else if (cond.v != undefined) {
                         var rv = cond.v(b)
                         b = rv.b

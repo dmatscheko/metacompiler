@@ -2195,6 +2195,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_neg":    func(a []uint64) uint64 { return rt.wrapNum(-rt.toNumber(u(a[0]))) },
 		"js_not":    func(a []uint64) uint64 { return boolH(!rt.truthy(u(a[0]))) },
 		"js_typeof": func(a []uint64) uint64 { return rt.wrapStr(rt.typeOf(u(a[0]))) },
+		// The shared dynamic type test behind `is`/`instanceof`-style checks of the
+		// typed languages. The interpreter grammars carry a JS twin (rtIsType in
+		// lib/interp-core.js) that must match this logic exactly.
+		"js_is_type": func(a []uint64) uint64 {
+			t, _ := u(a[1]).(string)
+			return boolH(rt.isTypeName(u(a[0]), t))
+		},
 		"js_tonum":  func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
 		"js_throw": func(a []uint64) uint64 {
 			// Raise the thrown value as a Go panic; the nearest js_try recovers it.
@@ -2837,6 +2844,59 @@ func (rt *jsrt) callEntry(ma *machine, name string, env uint64) uint64 {
 // the same test the interpreter grammars express as (v | 0) == v.
 func isInt32Value(f float64) bool {
 	return f == math.Trunc(f) && f >= math.MinInt32 && f <= math.MaxInt32
+}
+
+// isTypeName is the dynamic type test behind the typed languages' `is` /
+// `instanceof` checks (extern js_is_type): a value-model test by type NAME.
+// Generic arguments are ignored (List<Int> tests as List), a trailing ? lets
+// null match, and user classes match on the __class descriptor's __name (the
+// __super chain is walked when present). Integral numbers count as Int AND as
+// Double - the value model has one number type, so `3.0 is Int` is true here
+// although real Kotlin would say false for a Double-typed 3.0. The interpreter
+// grammars carry a JS twin (rtIsType in lib/interp-core.js) - keep in sync.
+func (rt *jsrt) isTypeName(v interface{}, t string) bool {
+	if i := strings.IndexByte(t, '<'); i >= 0 {
+		t = t[:i]
+	}
+	opt := false
+	if strings.HasSuffix(t, "?") {
+		t = t[:len(t)-1]
+		opt = true
+	}
+	switch v.(type) {
+	case nil, jsUndefT, jsNullT:
+		return opt
+	}
+	switch t {
+	case "Any", "Object":
+		return true
+	case "Int", "Long", "Short", "Byte", "Char":
+		f, ok := v.(float64)
+		return ok && f == math.Trunc(f)
+	case "Double", "Float", "Number":
+		_, ok := v.(float64)
+		return ok
+	case "String", "CharSequence":
+		_, ok := v.(string)
+		return ok
+	case "Boolean":
+		_, ok := v.(bool)
+		return ok
+	case "List", "MutableList", "Collection", "Array":
+		_, ok := v.(*jsArray)
+		return ok
+	}
+	if o, ok := v.(*jsObject); ok {
+		cls, _ := o.props["__class"].(*jsObject)
+		for cls != nil {
+			if n, _ := cls.props["__name"].(string); n == t {
+				return true
+			}
+			sup, _ := cls.props["__super"].(*jsObject)
+			cls = sup
+		}
+	}
+	return false
 }
 
 // jsToInt converts a JS number to a Go int for host-side argument positions:

@@ -38,11 +38,12 @@ class Box(val side: Int) {
     fun <T> area(): Int = this@Box.side * side
 }
 
-// A `when` whose subject binds a name read in the arms; the is-arms never match, so the
-// else wins. The two `is ... ->` on consecutive lines exercise the arrow guard.
+// A `when` whose subject binds a name read in the arms; the is-arms are genuine type
+// tests now (an Int subject hits `is Number`, never `is CharSequence`). The two
+// `is ... ->` on consecutive lines exercise the arrow guard.
 fun grade(n: Int): Int = when (val doubled = n + n) {
     0 -> -1
-    is CharSequence -> doubled
+    is CharSequence -> doubled - 1
     is Number -> doubled
     else -> doubled + 1
 }
@@ -62,8 +63,8 @@ fun main() {
     // a trailing lambda closing over a local
     val base = 10
     if (once { base } != 10) { fails = fails + 1 }
-    // when subject binding: is-arms fall through to else; value arm still matches
-    if (grade(5) != 11) { fails = fails + 1 }
+    // when subject binding: the Int subject matches `is Number`; value arm still wins first
+    if (grade(5) != 10) { fails = fails + 1 }
     if (grade(0) != -1) { fails = fails + 1 }
 
     // a statement-level annotation: the val is declared, the annotation ignored
