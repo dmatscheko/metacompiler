@@ -534,6 +534,14 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     grid[0][0] = 7
     check("list-nested-write", grid[0][0] == 7)
 
+    // ----- in / !in membership operators (lower to contains) -----
+    val members = listOf(2, 4, 6)
+    check("in-op", 4 in members && !(3 in members))
+    check("notin-op", 3 !in members && !(2 !in members))
+    check("in-op-in-bool", (2 in members && 5 !in members))
+    val word = "b"
+    check("in-op-guard", if (word !in listOf("x", "y")) true else false)
+
     // ----- trailing commas (arg lists, params, lambda params, when, listOf) -----
     check("trailing-fn-params", sum3(1, 2, 3,) == 6)
     val tcList = listOf(10, 20, 30,)

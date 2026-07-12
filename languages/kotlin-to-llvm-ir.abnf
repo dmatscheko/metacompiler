@@ -321,7 +321,14 @@ EqOp        = "===" <~~ push("==") ~~> | "!==" <~~ push("!=") ~~>
             | "==" <~~ push("==") ~~> | "!=" <~~ push("!=") ~~> ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = TypeOp { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeOp } ;
+            = InExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> InExpr } ;
+
+// x in coll / x !in coll (membership): binds tighter than comparison, as in Kotlin.
+// Lowered to coll.contains(x) via js_mcall (the same call the interpreter makes), so
+// both engines agree; !in negates. The receiver is a list here.
+InExpr      <~~ push(makeInExpr(takeAll())) ~~>
+            = TypeOp { InOp TypeOp } ;
+InOp        = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
 
 // Type operators: x as T / x as? T lower to x (an unchecked identity cast in the
 // untyped handle world); x is T / x !is T cannot be decided, so they are not
@@ -859,6 +866,27 @@ KwStep      = "step" KwEnd ;
                 else if (op == "shl") { v = callExt(b, "js_shl", [v, r2.v]) }
                 else if (op == "shr") { v = callExt(b, "js_shr", [v, r2.v]) }
                 else { v = intWrap(b, callExt(b, "js_ushr", [v, r2.v])) }
+            }
+            return {b: b, v: v}
+        }
+    }
+    // x in coll / x !in coll -> coll.contains(x) via js_mcall (the same call the
+    // interpreter makes), so the engines agree; !in negates. items alternates
+    // operand thunks and {inop} markers.
+    function makeInExpr(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i += 2) {
+                var rc = items[i + 1](b)
+                b = rc.b
+                var argsV = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [argsV, v])
+                var hit = callExt(b, "js_mcall", [rc.v, emitStr(b, "contains"), argsV])
+                if (items[i].inop == "!in") { hit = callExt(b, "js_not", [hit]) }
+                v = hit
             }
             return {b: b, v: v}
         }

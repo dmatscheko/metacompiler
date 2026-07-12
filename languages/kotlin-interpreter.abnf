@@ -301,7 +301,14 @@ EqOp        = "===" <~~ push("==") ~~> | "!==" <~~ push("!=") ~~>
             | "==" <~~ push("==") ~~> | "!=" <~~ push("!=") ~~> ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = TypeOp { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeOp } ;
+            = InExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> InExpr } ;
+
+// x in coll / x !in coll (membership): binds tighter than comparison, as in Kotlin.
+// Lowered to coll.contains(x) (the same mcall the compiler emits), so both engines
+// agree; !in negates. The receiver is a list here (contains checks membership).
+InExpr      <~~ push(makeInExpr(takeAll())) ~~>
+            = TypeOp { InOp TypeOp } ;
+InOp        = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
 
 // x as T / x as? T = identity (untyped values); x is T / x !is T undecidable, so
 // not implemented. The suffix is optional, so plain expressions are unaffected.
@@ -750,6 +757,21 @@ KwStep      = "step" KwEnd ;
             v = items[0]()
             for (var i = 1; i < items.length; i += 2) {
                 v = applyInfix(items[i].iop, v, items[i + 1]())
+            }
+            return v
+        }
+    }
+    // x in coll / x !in coll -> coll.contains(x) (via the same mcall the compiler
+    // emits, so the engines agree); !in negates. items alternates operands and {inop}.
+    function makeInExpr(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = anytype // The fold turns the operand value into a boolean.
+            v = items[0]()
+            for (var i = 1; i < items.length; i += 2) {
+                var coll = items[i + 1]()
+                var hit = mcall(coll, "contains", [v])
+                v = items[i].inop == "!in" ? !hit : hit
             }
             return v
         }
