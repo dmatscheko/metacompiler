@@ -48,11 +48,14 @@ type parser struct {
 
 	fileName string // Where Src came from. Used for messages and to resolve relative paths.
 
-	includedFiles map[string]bool // The :include() files already added (each file is included once; also ends include cycles).
-
 	rangeCache      [256]*r.Rule // Reusable single-char Token rules, see the comment in case r.CharOf of apply().
 	referencesCache *references  // Resolves production names and assigns the tag code UIDs.
 }
+
+// includedByGrammar tracks, per a-grammar, which :include() files were already
+// appended (see applyCommand). Package-level because several parser instances
+// may walk the same a-grammar (project-file imports re-enter the parser).
+var includedByGrammar = map[*r.Rules]map[string]bool{}
 
 // Parseropts are the command line options that influence the parser.
 type Parseropts struct {
@@ -302,18 +305,22 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		if rule.Int != 1 {
 			fullFileName = filepath.Dir(pa.fileName) + string(os.PathSeparator) + paramFileName
 		}
-		// Include every file only once: with nested includes enabled, two
-		// fragments sharing a common helper fragment would otherwise define
-		// its productions twice (a hard error), and a cyclic include would
-		// never terminate.
+		// Include every file only once PER A-GRAMMAR: with nested includes
+		// enabled, two fragments sharing a common helper fragment would
+		// otherwise define its productions twice (a hard error), and a cyclic
+		// include would never terminate. The set is keyed by the a-grammar,
+		// not the parser: re-parsing with the same grammar (c.parse of a
+		// project-file import) must not re-append the included rules.
 		fullFileName = filepath.Clean(fullFileName)
-		if pa.includedFiles == nil {
-			pa.includedFiles = map[string]bool{}
+		included := includedByGrammar[pa.agrammar]
+		if included == nil {
+			included = map[string]bool{}
+			includedByGrammar[pa.agrammar] = included
 		}
-		if pa.includedFiles[fullFileName] {
+		if included[fullFileName] {
 			return
 		}
-		pa.includedFiles[fullFileName] = true
+		included[fullFileName] = true
 		dat, err := ioutil.ReadFile(fullFileName)
 		if err != nil {
 			panic(err)

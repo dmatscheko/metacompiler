@@ -209,6 +209,18 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-imports.kt", "-q"]
         },
         {
+            "name": "Kotlin multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/kotlin-interpreter.abnf", "tests/kotlin-test-multifile.kt", "-q"]
+        },
+        {
+            "name": "Kotlin multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-multifile.kt", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

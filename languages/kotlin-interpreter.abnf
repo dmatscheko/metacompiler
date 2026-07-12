@@ -575,6 +575,35 @@ KwStep      = "step" KwEnd ;
     // Prefixes the runtime already provides as builtins; importing them is a no-op.
     core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences"]
 
+    // Project-file imports: 'import a.b.C' looks for a/b/C.kt, then a/b.kt
+    // under the program's directory and the -i roots (c.findImport). The file
+    // is parsed with this grammar and walked with the same tags, so its
+    // classes and functions register exactly like the main file's; the entry
+    // point only runs for the main file (the start script calls it once).
+    // A file is imported once; repeats and cycles are no-ops.
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        if (path.length > 2 && path.substring(path.length - 2) == ".*") { return false }
+        var rel = path.split(".").join("/")
+        var cands = [rel + ".kt"]
+        var cut = -1
+        for (var k = 0; k < rel.length; k++) { if (rel.charAt(k) == "/") { cut = k } }
+        if (cut > 0) { cands.push(rel.substring(0, cut) + ".kt") }
+        for (var i = 0; i < cands.length; i++) {
+            var file = c.findImport(cands[i])
+            if (file == "") { continue }
+            if (importedFiles["$" + file] == true) { return true }
+            importedFiles["$" + file] = true
+            var text = c.readFile(file)
+            var asg = c.parse(c.agrammar, text, null)
+            c.pushSource(file, text)
+            c.compile(asg)
+            c.popSource()
+            return true
+        }
+        return false
+    }
+
     // stripWs, importResolvable, resolveImport and the notImpl / notImplStmt /
     // notImplExpr family now live in lib/interp-core.js (shared). This grammar sets
     // core.stdlibImports (above) and keeps the Kotlin-specific builders below.

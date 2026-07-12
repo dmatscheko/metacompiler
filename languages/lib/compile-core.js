@@ -65,7 +65,11 @@ function importResolvable(path) {
 function resolveImport(path, pos) {
     path = stripWs(path)
     if (importResolvable(path)) { return }
-    var where = c.file + ":" + c.lineOf(pos)
+    // A grammar may map imports to project files (searched under the program's
+    // directory and the -i roots): core.importFile parses and walks the file
+    // with this grammar and returns true when it took the import.
+    if (core.importFile != null && core.importFile(path, pos)) { return }
+    var where = c.curFile() + ":" + c.lineOf(pos)
     if (c.warnImports) { println("warning: " + where + ": unresolved import '" + path + "' (ignored)"); return }
     fail("unresolved import '" + path + "' (" + where + "); use -warn-imports to ignore")
 }

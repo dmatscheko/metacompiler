@@ -36,6 +36,9 @@ import (
 //  -frozen       run the annotation scripts goja-free (see abnf/frozen.go)
 //  -verify       lint the first file's grammar and exit
 //  -pretty       print the first file's serialized a-grammar and exit
+//  -i DIR        add an include root for project-file imports (repeatable; an import
+//                like 'a.b.C' is searched as a/b/C.<ext> under the program's own
+//                directory first, then under each -i root in order)
 //  -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
 //  -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
 //                lets call graphs / CFGs / traces be built from partially understood languages
@@ -64,7 +67,8 @@ type options struct {
 
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
-	warnImports                           bool // -warn-imports: warn+skip unresolved imports instead of aborting.
+	warnImports                           bool     // -warn-imports: warn+skip unresolved imports instead of aborting.
+	importRoots                           []string // -i include roots for project-file imports, in order.
 	warnUnsupported                       bool // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
 	speedTest, useBlockList, useFoundList bool
 	speedCount                            int   // Timed cycle count for -speed (>0 when set).
@@ -113,6 +117,11 @@ func parseArgs(args []string) (*options, error) {
 			o.verify = true
 		case "-pretty":
 			o.pretty = true
+		case "-i":
+			var dir string
+			if dir, err = takeVal(); err == nil {
+				o.importRoots = append(o.importRoots, dir)
+			}
 		case "-warn-imports":
 			o.warnImports = true
 		case "-warn-unsupported":
@@ -215,6 +224,7 @@ func main() {
 
 	abnf.UseFrozenScripts = o.frozen
 	abnf.WarnUnresolvedImports = o.warnImports
+	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
@@ -479,6 +489,8 @@ anywhere among the files.
   -frozen       run the annotation scripts without goja
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit
+  -i DIR        add an include root for project-file imports (repeatable); an import
+                names a file relative to the program's directory or a root
   -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
   -warn-unsupported  warn+placeholder parsed-but-unimplemented syntax instead of aborting;
                 lets call graphs / CFGs / traces be built from partially understood languages

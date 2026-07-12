@@ -241,6 +241,16 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		"warnUnsupported": WarnUnsupported,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
+		// Project-file imports (the -i include roots): findImport locates a
+		// grammar-mapped relative path ("a/b/C.kt"), readFile loads it, and
+		// pushSource/popSource swap the file/line attribution around the
+		// imported file's nested c.parse + c.compile walk. curFile is the
+		// dynamic variant of "file" (which is snapshotted at map creation).
+		"curFile":    func() string { return traceSrcName },
+		"findImport": func(relPath string) string { return findImportFile(relPath) },
+		"readFile":   func(path string) string { return readImportFile(path) },
+		"pushSource": func(name, text string) { pushTraceSource(name, text) },
+		"popSource":  func() { popTraceSource() },
 	}
 	vm.Set("c", compilerFuncMap)
 	vm.Set("abnf", r.AbnfFuncMap)

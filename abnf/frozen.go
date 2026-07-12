@@ -344,6 +344,12 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"warnUnsupported": WarnUnsupported,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
+		// Project-file imports (the -i include roots); see commonscript.go.
+		"curFile":    func() string { return traceSrcName },
+		"findImport": func(relPath string) string { return findImportFile(relPath) },
+		"readFile":   func(path string) string { return readImportFile(path) },
+		"pushSource": func(name, text string) { pushTraceSource(name, text) },
+		"popSource":  func() { popTraceSource() },
 	}
 
 	bindings := frozenBaseBindings(preventDefaultOutput)
