@@ -1045,7 +1045,8 @@ type machine struct {
 	input   []byte                // The stdin content for getchar().
 	inPos   int
 	out     strings.Builder // The stdout content written by putchar() / puts().
-	steps   int
+	steps   int             // The instruction budget of the CURRENT top-level call (reset at depth 0).
+	depth   int             // The call nesting inside this machine, for the steps reset.
 
 	// externs resolves calls to declared functions before the built-in ones
 	// (putchar etc.) are tried. The JS runtime (jsrt.go) plugs its js_* host
@@ -1308,6 +1309,17 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 	for i, p := range f.Params {
 		fr.vals[p] = args[i]
 	}
+
+	// The step budget is per top-level call, not per machine lifetime:
+	// machines are cached per (engine, module) for a whole compile run, so a
+	// cumulative count tripped the emergency brake on big legitimate compiles
+	// (thousands of runs of one hot tag script's module). The defer keeps the
+	// depth right when a js_throw panic unwinds through this frame.
+	ma.depth++
+	if ma.depth == 1 {
+		ma.steps = 0
+	}
+	defer func() { ma.depth-- }()
 
 	block := f.Blocks[0]
 	var prevBlock *ir.Block // The block we came from. Only needed by phi.
