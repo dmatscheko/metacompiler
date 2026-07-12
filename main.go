@@ -235,21 +235,26 @@ func main() {
 			}
 		}
 	}
+	// The real stage numbering (runPipeline) goes beyond the file count: every
+	// -pipe segment behind the first adds a "(piped)" input stage, and the last
+	// segment may add a trailing run stage for a startScript-only grammar - a
+	// cap at len(o.files) rejected -vN/-vvN/-slotN for stages the run printed.
+	maxStage := len(o.files) + len(o.pipeBounds) + 1
 	for stage := range o.verboseStage {
-		if stage > len(o.files) {
-			fmt.Fprintf(os.Stderr, "Error: -v%d, but there are only %d stage(s)\n", stage, len(o.files))
+		if stage > maxStage {
+			fmt.Fprintf(os.Stderr, "Error: -v%d, but there are at most %d stage(s)\n", stage, maxStage)
 			os.Exit(2)
 		}
 	}
 	for stage := range o.traceStage {
-		if stage > len(o.files) {
-			fmt.Fprintf(os.Stderr, "Error: -vv%d, but there are only %d stage(s)\n", stage, len(o.files))
+		if stage > maxStage {
+			fmt.Fprintf(os.Stderr, "Error: -vv%d, but there are at most %d stage(s)\n", stage, maxStage)
 			os.Exit(2)
 		}
 	}
 	for stage := range o.slotStage {
-		if stage > len(o.files) {
-			fmt.Fprintf(os.Stderr, "Error: -slot%d, but there are only %d stage(s)\n", stage, len(o.files))
+		if stage > maxStage {
+			fmt.Fprintf(os.Stderr, "Error: -slot%d, but there are at most %d stage(s)\n", stage, maxStage)
 			os.Exit(2)
 		}
 	}
