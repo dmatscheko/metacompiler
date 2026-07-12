@@ -2,13 +2,10 @@
  * Exercises constructs the grammar RECOGNIZES but does not implement: the assert
  * statement, labeled statements with labeled break/continue, the synchronized
  * statement, char literals and a text block. Prefix ++/-- and unary + are genuinely
- * lowered, and the bitwise/shift operators, compound bitwise/shift assignment and
- * instanceof (with a pattern binding) graduated to genuine implementations - they
- * run and are checked here.
- *
- * The hex/binary/floating-point/underscored/suffixed number literals are still
- * recognized-only: they parse but stay inert (undefined), so mixBits' result is
- * not asserted yet.
+ * lowered, and the bitwise/shift operators, compound bitwise/shift assignment,
+ * instanceof (with a pattern binding) and the hex/binary/floating-point/underscored/
+ * suffixed number literals graduated to genuine implementations - they run and are
+ * checked here.
  *
  * Under a DEFAULT run this ABORTS at the first not-implemented construct with a clean
  * file:line message. Under -warn-unsupported every not-implemented construct warns and
@@ -30,10 +27,8 @@ public class Main {
         }
     }
 
-    // Bit twiddling: every operator here is genuinely implemented with Java's
-    // 32-bit int semantics, but the hex/binary literals are still inert
-    // (undefined), so the result is not asserted until the literal forms
-    // graduate too.
+    // Bit twiddling: the operators and the hex/binary literals are genuinely
+    // implemented with Java's 32-bit int semantics; main checks the result.
     static int mixBits(int seed) {
         int mask = 0xFF;                 // hex literal
         int flags = 0b1010;              // binary literal
@@ -96,9 +91,11 @@ public class Main {
 
         // A synchronized statement (recognized, not implemented; the block still runs).
         Object lock = "lock";
+        int mixed = 0;
         synchronized (lock) {
-            int inert = Main.mixBits(5);
+            mixed = Main.mixBits(5);
         }
+        Main.check("bit twiddling", mixed, 1073741814);
 
         if (Main.fails == 0) {
             System.out.println("Java recognition test passed");

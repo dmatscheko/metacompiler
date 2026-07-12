@@ -550,6 +550,15 @@ public class Main {
         bu >>>= 28;
         Main.check("bit-compound-ushr", bu == 15);
 
+        // ----- numeric literal forms -----
+        Main.check("lit-hex-bin-oct", 0xFF == 255 && 0b1010 == 10 && 017 == 15);
+        Main.check("lit-underscore", 1_000_000 == 1000000 && 0xFF_FF == 65535);
+        long litBig = 4_000_000_000L;
+        Main.check("lit-long", litBig / 2L == 2000000000L && 7l == 7L);
+        Main.check("lit-float-forms", 1e3 == 1000.0 && 2.5e-2 == 0.025 && .5 == 0.5 && 5. == 5.0);
+        Main.check("lit-suffix", 1.5f + 1.5F == 3.0f && 2.5d * 2 == 5.0D);
+        Main.check("lit-hex-float", 0x1p4 == 16.0);
+
         // ----- instanceof with pattern binding -----
         Object iofObj = "abcd";
         Main.check("iof-type-test", iofObj instanceof String && !(iofObj instanceof Boolean));

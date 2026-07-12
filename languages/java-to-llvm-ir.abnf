@@ -31,7 +31,7 @@ nested/inner types, lambdas, method references and anonymous classes are accepte
 reported as not implemented; -warn-unsupported downgrades that to a warning so call
 graphs / CFGs / traces still work on partly understood files.
 
-Not genuinely modelled: the arrow switch, char/long/double literals, overloading,
+Not genuinely modelled: the arrow switch, char literals, overloading,
 implicit field access (fields are reached via this.x or ClassName.x - like the
 explicit style many code bases enforce), real exception unwinding, functional
 interfaces (so lambdas/method references are inert) and reflection.
@@ -353,7 +353,7 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
 Primary     = Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
-            | HexLit | BinLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null | VarRef ;
+            | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null | VarRef ;
 
 // Lambdas and method references are real closures on the handle runtime. A lambda
 // captures the defining scope (js_closure); a functional-interface call site (any
@@ -382,10 +382,12 @@ Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
-// ----- Widened literals: char, text block, hex / binary / floating-point / underscored /
-// suffixed numbers. Recognized, not implemented (the value model is 32-bit int + String,
-// so char has no numeric value and the others no distinct type). Each matches a form that
-// plain IntLit cannot, so ordinary decimal integers still reach IntLit untouched. -----
+// ----- Widened literals. The numeric forms are genuine now: hex / binary /
+// octal / underscored / suffixed integers and fractional / exponent / hex-float
+// doubles all evaluate to their value (one number type; an L/f/D suffix only
+// selects the parse - see numLit). Char literals and text blocks stay
+// recognized-but-not-implemented. Each form matches something plain IntLit
+// cannot, so ordinary decimal integers still reach IntLit untouched. -----
 
 // A char literal 'c' (escapes included). Reuses the balanced SkipChar shape.
 CharLit     <~~ push(notImplExpr("char literal", up.pos)) ~~> = SkipChar ;
@@ -395,21 +397,32 @@ TextBlock   <~~ push(notImplExpr("text block", up.pos)) ~~>
             = '"""' :whitespace() { !'"""' TBItem } '"""' :whitespace(Whitespace) ;
 TBItem      = "\\" "\x00"..."\U0010ffff" | "\x00"..."\U0010ffff" ;
 // Hex / binary: the 0x / 0b prefix is distinctive, so these never shadow a decimal int.
-HexLit      <~~ push(notImplExpr("hex literal", up.pos)) ~~>
-            = ( "0x" | "0X" ) :whitespace() HexDig { HexDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
-BinLit      <~~ push(notImplExpr("binary literal", up.pos)) ~~>
+// A hex literal may carry a p-exponent (0x1p4 == 16.0, a hexadecimal double).
+HexLit      <~~ push(makeConst(numLit(up.in, 16))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexDig { HexDig | "_" } [ HexPTail ] [ NumSfx ] :whitespace(Whitespace) ;
+HexPTail    = ( "p" | "P" ) [ "+" | "-" ] Dig { Dig } ;
+BinLit      <~~ push(makeConst(numLit(up.in, 2))) ~~>
             = ( "0b" | "0B" ) :whitespace() BinDig { BinDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
-// A fractional literal has a '.', so it is distinct from an integer (and from x.y access).
-FloatLit    <~~ push(notImplExpr("floating-point literal", up.pos)) ~~>
-            = Dig :whitespace() { Dig | "_" } "." { Dig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
+// The classic leading-zero octal (017); it needs at least one octal digit after
+// the 0, so plain 0, 0.5 and 0x... are untouched.
+OctLit      <~~ push(makeConst(numLit(up.in, 8))) ~~>
+            = "0" :whitespace() OctDig { OctDig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
+// A fractional or exponent literal: 1.5, 5., .5, 1e3, 2.5e-2 (underscores and
+// an f/F/d/D/L suffix allowed). Distinct from an integer and from x.y access.
+FloatLit    <~~ push(makeConst(numLit(up.in, 10))) ~~>
+            = FloatBody [ NumSfx ] :whitespace(Whitespace) ;
+FloatBody   = "." :whitespace() Dig { Dig | "_" } [ ExpPart ]
+            | Dig :whitespace() { Dig | "_" } ( "." { Dig | "_" } [ ExpPart ] | ExpPart ) ;
+ExpPart     = ( "e" | "E" ) [ "+" | "-" ] Dig { Dig } ;
 // A decimal digit run containing an underscore (a digit-grouping literal like 1_000_000).
-UscoreInt   <~~ push(notImplExpr("underscored integer literal", up.pos)) ~~>
+UscoreInt   <~~ push(makeConst(numLit(up.in, 10))) ~~>
             = Dig :whitespace() { Dig } "_" { Dig | "_" } [ NumSfx ] :whitespace(Whitespace) ;
 // A decimal digit run with an L / F / D suffix (like 100L, 2F, 5D).
-SuffInt     <~~ push(notImplExpr("suffixed integer literal", up.pos)) ~~>
+SuffInt     <~~ push(makeConst(numLit(up.in, 10))) ~~>
             = Dig :whitespace() { Dig } NumSfx :whitespace(Whitespace) ;
 HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
 BinDig      = "0" | "1" ;
+OctDig      = "0"..."7" ;
 Dig         = "0"..."9" ;
 NumSfx      = "L" | "l" | "F" | "f" | "D" | "d" ;
 
@@ -615,6 +628,41 @@ KwSync      = "synchronized" KwEnd ;
             return {b: b, v: nv2}
         }
     }
+    // Numeric literal decoding: strip digit-group underscores and a trailing
+    // L/l/F/f/D/d suffix, then parse in the base. Hex may carry a p-exponent
+    // (0x1p4 = 1 * 2^4); decimal fractional/exponent forms go through
+    // parseFloat. One number type - a suffix only selects the parse.
+    function numLit(text, base) {
+        var s = stripWs(text).split("_").join("")
+        var last = s.charAt(s.length - 1)
+        // Only L marks a long on hex/binary/octal (f/F/d/D are hex digits or
+        // invalid there); decimal also takes the float suffixes.
+        var isSfx = last == "L" || last == "l"
+        if (base == 10 && (last == "F" || last == "f" || last == "D" || last == "d")) { isSfx = true }
+        if (isSfx) {
+            s = s.substring(0, s.length - 1)
+        }
+        if (base == 16) {
+            var pAt = -1
+            for (var i = 2; i < s.length; i++) {
+                var c = s.charAt(i)
+                if (c == "p" || c == "P") { pAt = i }
+            }
+            if (pAt < 0) { return parseInt(s.substring(2), 16) }
+            var mant = parseInt(s.substring(2, pAt), 16)
+            var et = s.substring(pAt + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            var exp = parseInt(et, 10)
+            var k = exp < 0 ? 0 - exp : exp
+            var scale = 1
+            while (k > 0) { scale = scale * 2; k = k - 1 }
+            return exp < 0 ? mant / scale : mant * scale
+        }
+        if (base == 2) { return parseInt(s.substring(2), 2) }
+        if (base == 8) { return parseInt(s.substring(1), 8) }
+        return parseFloat(s)
+    }
+
     // Unary + is identity; ~x is the int32 complement (x ^ -1).
     function makeUPlus(inner) { return inner }
     function makeBitNot(inner, pos) {
