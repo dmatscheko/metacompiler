@@ -183,6 +183,27 @@ Each entry is run twice - once with the default goja tag engine and once goja fr
 compiler) and a POSIX shell; `timeout`/`gtimeout`/`perl`, if present, guard each run
 against hangs.
 
+#### The second test group: full-syntax ratchets (`--full`)
+
+The goal is to support the **full** languages, and `tests/<lang>-test-full.<ext>` is the
+measure: one hand-written file per language that walks the whole practical syntax of the
+modern language (organized after its official spec, in self-contained `SECTION` chunks —
+see the anatomy notes in [tests/js-test-full.js](tests/js-test-full.js)). These files are
+**not** part of the default matrix; today the grammars abort on them by design.
+
+```
+./test.sh --full             # per grammar: every language area that does not work yet
+./test.sh --full --filter js # probe a single language
+```
+
+The probe runs each grammar over its file and, whenever the grammar chokes, removes the
+section around the error and retries — so the report lists *every* unsupported area, and
+distinguishes "does not parse" from "parses, but not implemented: X". A file that runs
+green untouched is reported `FULL` and cross-checked goja vs `-frozen`: that language is
+ready to graduate into the default matrix. The self-defined languages (metajs, tinyc,
+lisp, calculator, brainfuck) have no `-full` file — their feature tests already cover
+their entire spec.
+
 #### The example languages in languages/
 
 Every language in `languages/` has at least one interpreter and one compiler (the test

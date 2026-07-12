@@ -27,6 +27,12 @@
 #   ./test.sh -j, --jobs N    run N entries in parallel (default: CPU count;
 #                             1 = sequential)
 #   ./test.sh -t, --timeout N per-run timeout in seconds (default 120)
+#   ./test.sh --full          run the SECOND test group: the full-syntax ratchet
+#                             files (tests/*-test-full.*). For every grammar it
+#                             reports the language areas that do not work yet -
+#                             the goal is full language support, and this is the
+#                             progress report. Informational: always exits 0.
+#                             Combine with --filter to probe one language.
 #   ./test.sh -h, --help      show this header
 #
 # Requires: go (to build the compiler). awk and, if present, timeout/gtimeout/perl
@@ -36,7 +42,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 2
 
-FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120
+FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120; FULL=0
 JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -48,7 +54,8 @@ while [ $# -gt 0 ]; do
         --jobs=*)     JOBS="${1#*=}" ;;
         -t|--timeout) TIMEOUT="${2:-120}"; shift ;;
         --timeout=*)  TIMEOUT="${1#*=}" ;;
-        -h|--help)    sed -n '2,42p' "$0"; exit 0 ;;
+        --full)       FULL=1 ;;
+        -h|--help)    sed -n '2,39p' "$0"; exit 0 ;;
         *) echo "test.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -73,6 +80,168 @@ trap 'rm -rf "$BIN" "$ENTRIES" "$RESDIR"' EXIT
 if [ "$LIST" -eq 0 ]; then
     echo "building compiler..."
     go build -o "$BIN" . || { echo "test.sh: build failed" >&2; exit 2; }
+fi
+
+# ----------------------------------------------------------------------------
+# The second test group: the full-syntax ratchet (./test.sh --full).
+#
+# Every tests/<lang>-test-full.<ext> walks the WHOLE syntax of its language in
+# self-contained SECTION chunks (see tests/js-test-full.js for the anatomy).
+# For each grammar of the language the probe runs the file and, whenever the
+# grammar chokes, deletes the section around the reported line (plus its
+# SECTION-CALL line in main) and retries - so one probe lists EVERY unsupported
+# language area, not just the first. When an error carries no usable position,
+# each remaining section is run in isolation (everything else deleted) to
+# classify it. A file that runs green untouched is reported FULL and cross-
+# checked goja vs -frozen; that language is ready to join the default matrix.
+
+# full_error_msg extracts the most telling line of a failed run's output.
+full_error_msg() {
+    printf '%s\n' "$1" | grep -i 'error\|not implemented' | grep -v '^  ==> Fail' | head -1 | cut -c1-160 | grep . \
+        || printf '%s\n' "$1" | grep -v '^  ==> Fail' | grep . | head -1 | cut -c1-160
+}
+
+# full_isolate classifies each remaining section of $2 by running it alone
+# (prologue + that section + main with only its call). Prints one line per
+# still-failing section.
+full_isolate() {
+    local G="$1" work="$2" iso="$2.iso"
+    local id ids name rc out
+    ids="$(awk '/===== SECTION [0-9]+:/ { line = $0; sub(/.*SECTION /, "", line); sub(/:.*/, "", line); print line }' "$work")"
+    for id in $ids; do
+        awk -v keep="$id" '
+            /===== SECTION [0-9]+:/ { line = $0; sub(/.*SECTION /, "", line); cur = line; sub(/:.*/, "", cur); insec = 1 }
+            /===== END SECTIONS/ { insec = 0 }
+            {
+                if (insec && cur != keep) next
+                if ($0 ~ /SECTION-CALL/ && $0 !~ ("SECTION-CALL " keep)) next
+                print
+            }
+        ' "$work" > "$iso"
+        out="$(RUN "$BIN" "$G" "$iso" -q 2>&1)"; rc=$?
+        if [ "$rc" -ne 0 ]; then
+            name="$(awk -v want="$id" '/===== SECTION [0-9]+:/ {
+                line = $0; sub(/.*SECTION /, "", line); id = line; sub(/:.*/, "", id)
+                if (id == want) { nm = line; sub(/^[0-9]*: */, "", nm); sub(/ =====.*/, "", nm); print nm; exit }
+            }' "$work")"
+            printf '    - %s %s: %s\n' "$id" "$name" "$(full_error_msg "$out")"
+        fi
+    done
+    rm -f "$iso"
+}
+
+# full_probe writes the gap report for one grammar/test-file pair to $3.
+full_probe() {
+    local G="$1" F="$2" R="$3"
+    local work="$R.work"
+    cp "$F" "$work"
+    local gaps=0 iter=0 rc out ln reason impl info id name start end
+    {
+        printf '%s:\n' "$(basename "$G" .abnf)"
+        while :; do
+            iter=$((iter + 1))
+            if [ "$iter" -gt 60 ]; then printf '    (stopped after 60 rounds)\n'; break; fi
+            out="$(RUN "$BIN" "$G" "$work" -q 2>&1)"; rc=$?
+            if [ "$rc" -eq 0 ]; then
+                if [ "$gaps" -eq 0 ]; then
+                    RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>/dev/null
+                    RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>/dev/null
+                    if cmp -s "$work.g" "$work.f"; then
+                        printf '    FULL - every section parses and passes, goja and -frozen byte-identical\n'
+                    else
+                        printf '    FULL under goja, BUT -frozen fails or differs - inspect before celebrating\n'
+                    fi
+                else
+                    printf '    (the remaining sections pass)\n'
+                fi
+                break
+            fi
+            # Where did it choke? Parse failures, "not implemented" aborts and
+            # generic "line N" messages carry a position; everything else goes
+            # through the per-section isolation fallback.
+            ln="$(printf '%s\n' "$out" | sed -n 's/.*Last good parse position was ln \([0-9][0-9]*\),.*/\1/p' | head -1)"
+            reason="does not parse"
+            if [ -z "$ln" ]; then
+                impl="$(printf '%s\n' "$out" | grep 'not implemented' | head -1)"
+                if [ -n "$impl" ]; then
+                    ln="$(printf '%s\n' "$impl" | sed -n 's/.*:\([0-9][0-9]*\)).*/\1/p')"
+                    reason="$(printf '%s\n' "$impl" | sed -n 's/.*error: \(.*\) not implemented.*/not implemented: \1/p')"
+                    [ -z "$reason" ] && reason="not implemented"
+                fi
+            fi
+            if [ -z "$ln" ]; then
+                ln="$(printf '%s\n' "$out" | sed -n 's/.* line \([0-9][0-9]*\).*/\1/p' | head -1)"
+                [ -n "$ln" ] && reason="error"
+            fi
+            if [ -z "$ln" ]; then
+                printf '    error without a usable position: %s\n' "$(full_error_msg "$out")"
+                full_isolate "$G" "$work"
+                break
+            fi
+            info="$(awk -v L="$ln" '
+                /===== SECTION [0-9]+:/ {
+                    if (insec && L >= start && L < NR) { printf "%s\t%s\t%d\t%d\n", id, name, start, NR - 1; exit }
+                    line = $0
+                    sub(/.*SECTION /, "", line); id = line; sub(/:.*/, "", id)
+                    name = line; sub(/^[0-9]*: */, "", name); sub(/ =====.*/, "", name)
+                    start = NR; insec = 1
+                    next
+                }
+                /===== END SECTIONS/ {
+                    if (insec && L >= start && L < NR) { printf "%s\t%s\t%d\t%d\n", id, name, start, NR - 1 }
+                    exit
+                }
+            ' "$work")"
+            if [ -z "$info" ]; then
+                printf '    error at line %s outside the sections (prologue/main must stay minimal): %s\n' "$ln" "$(full_error_msg "$out")"
+                break
+            fi
+            id="$(printf '%s' "$info" | cut -f1)"
+            name="$(printf '%s' "$info" | cut -f2)"
+            start="$(printf '%s' "$info" | cut -f3)"
+            end="$(printf '%s' "$info" | cut -f4)"
+            printf '    - %s %s: %s\n' "$id" "$name" "$reason"
+            gaps=$((gaps + 1))
+            sed "${start},${end}d" "$work" > "$work.n" && mv "$work.n" "$work"
+            grep -v "SECTION-CALL $id" "$work" > "$work.n" && mv "$work.n" "$work"
+        done
+    } > "$R"
+    rm -f "$work" "$work.n" "$work.iso" "$work.g" "$work.f"
+}
+
+if [ "$FULL" -eq 1 ]; then
+    FILES="$(ls tests/*-test-full.* 2>/dev/null)"
+    if [ -z "$FILES" ]; then echo "test.sh --full: no tests/*-test-full.* files found" >&2; exit 2; fi
+    if [ "$LIST" -eq 1 ]; then printf '%s\n' $FILES; exit 0; fi
+
+    SEM="$RESDIR/fsem"
+    mkfifo "$SEM"; exec 4<>"$SEM"; rm -f "$SEM"
+    i=0; while [ "$i" -lt "$JOBS" ]; do printf '.' >&4; i=$((i + 1)); done
+
+    n=0; REPORTS=""
+    for f in $FILES; do
+        base="$(basename "$f")"; lang="${base%%-test-full.*}"
+        for G in "languages/$lang-interpreter.abnf" "languages/$lang-to-llvm-ir.abnf"; do
+            hay="$lang $G $f"
+            if [ -n "$FILTER" ] && ! printf '%s' "$hay" | grep -qiF -- "$FILTER"; then continue; fi
+            n=$((n + 1))
+            r="$RESDIR/full.$(printf '%03d' "$n")"
+            REPORTS="$REPORTS $r"
+            if [ ! -f "$G" ]; then
+                printf '%s:\n    (grammar not found, skipped)\n' "$(basename "$G" .abnf)" > "$r"
+                continue
+            fi
+            IFS= read -r -n 1 -u 4 _t
+            { full_probe "$G" "$f" "$r"; printf '.' >&4; } &
+        done
+    done
+    wait
+    echo "full-syntax ratchet - unsupported language areas per grammar"
+    echo "(the second test group: run on demand to see what full language support"
+    echo " still needs; the default matrix is unaffected by these files)"
+    if [ -z "$REPORTS" ]; then echo; echo "nothing matched the filter"; exit 0; fi
+    for r in $REPORTS; do echo; cat "$r"; done
+    exit 0
 fi
 
 # Extract the matrix from the JSONC launch.json. Every entry is a "name": line
