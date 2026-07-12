@@ -95,8 +95,8 @@ QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 // A top level val/var: its declaration thunk becomes a top level statement.
 TopProp     = DelegateDecl | Decl ;
 
-FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFun [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
+FunDecl     <~~ push(makeFun(takeAll())); retLblPop() ~~>
+            = KwFun [ SkipAngle ] Id <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] FunBody ;
 FunBody     = Block | "=" ExprBody ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
@@ -107,8 +107,8 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // recv.name(args) to it (see extResolves). The receiver type (dotted, generic,
 // nullable) is parsed and DROPPED: dispatch is by NAME, so an extension must not
 // reuse a builtin or class method name (those always win). RecvSeg pushes nothing.
-ExtFun      <~~ push(makeExtFunStmt(makeFun(takeAll()))) ~~>
-            = KwFun [ SkipAngle ] RecvSeg { RecvSeg } Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
+ExtFun      <~~ push(makeExtFunStmt(makeFun(takeAll()))); retLblPop() ~~>
+            = KwFun [ SkipAngle ] RecvSeg { RecvSeg } Id <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] FunBody ;
 RecvSeg     = Id [ SkipAngle ] [ "?" ] "." ;
 
 // A function declaration outside the executable subset: a BODILESS extension or
@@ -308,6 +308,21 @@ NotArrow    = :script(~~
     })()
 ~~) ;
 
+// A zero-width guard that fails at end of line (a newline or a // comment before
+// the next token): the value of a labelled return must start on the SAME line,
+// otherwise `return@lbl` followed by another statement would swallow that
+// statement as its return value (newlines are insignificant everywhere else).
+SameLine    = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        return (cc === 10 || cc === 13 || (cc === 47 && c.peek(i + 1) === 47))
+            ? abnf.newToken("\x01newline-follows", 0)
+            : undefined
+    })()
+~~) ;
+
 // a ?: b yields a unless it is null (the elvis operator; the right side only runs then).
 Elvis       <~~ push(makeElvis(takeAll())) ~~>
             = InfixExpr { "?:" InfixExpr } ;
@@ -346,10 +361,10 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // world it is the identity, so x!! lowers exactly like x (and x!!.m() still chains).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] MArgs ;
-SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}) ~~>
-            = "?." Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] MArgs ;
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); retLblPop() ~~>
+            = "." Id <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
+SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}); retLblPop() ~~>
+            = "?." Id <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 SafeFieldSfx = "?." Id <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
@@ -408,8 +423,8 @@ LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 // its own - f { ... } (the sole argument, e.g. module { single { ... } }). Either form
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
-Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ SkipAngle ] ( "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ) ;
+Call        <~~ push(makeCall(takeAll())); retLblPop() ~~>
+            = Id <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ SkipAngle ] ( "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ) ;
 
 // String templates: "x=$x sum=${a + b}".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
@@ -457,16 +472,21 @@ SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 
 // A statement label (loop@, outer@): the Labeled wrapper offers the name to
 // the labelled loop's loopStack entry and gives labelled BLOCKS a break target
-// (see makeLabeled). break@l / continue@l branch to the loop labelled l;
-// return@l (a labelled return targets its enclosing lambda) stays not
-// implemented, as does a labelled jump out of a try body closure.
+// (see makeLabeled). break@l / continue@l branch to the loop labelled l. return@l
+// is genuine when l names the INNERMOST enclosing lambda's implicit label (the
+// callee name: forEach in list.forEach { return@forEach v }) or the directly
+// enclosing function - both compile to a plain return, because the innermost
+// lambda IS the current IR function (makeReturn's retStmt stays try-aware). The
+// walk-time retLabels stack decides (see makeReturnAt); a NON-LOCAL labelled
+// return (an outer lambda's label) stays not implemented, as does a labelled
+// break/continue out of a try body closure.
 LabelDef    = Id <~~ push({lbl: up.in}) ~~> "@" ;
 BreakAt     <~~ push(makeBreakTo(pop().lbl, up.pos)) ~~>
             = KwBreak "@" Id <~~ push({lbl: up.in}) ~~> [ ";" ] ;
 ContinueAt  <~~ push(makeContinueTo(pop().lbl, up.pos)) ~~>
             = KwContinue "@" Id <~~ push({lbl: up.in}) ~~> [ ";" ] ;
-ReturnAt    <~~ push(notImplStmt("labelled return", up.pos)) ~~>
-            = KwReturn "@" Id [ DiscardExpr ] [ ";" ] ;
+ReturnAt    <~~ push(makeReturnAt(takeAll(), up.pos)) ~~>
+            = KwReturn "@" Id <~~ push({rlbl: up.in}) ~~> [ SameLine Expression ] [ ";" ] ;
 
 // A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores):
 // a genuine double value (parseFloat stops before the f/F suffix). Comparisons
@@ -1183,6 +1203,28 @@ KwStep      = "step" KwEnd ;
         }
         return null
     }
+    // ----- Labelled returns: a WALK-time lexical stack of return targets -----
+    // Function declarations push {kind:"fun"} (their own name); a call pushes its
+    // callee name as {kind:"lam"} while its arguments walk, so a lambda argument's
+    // implicit label is on top when the lambda's body (and any return@l inside)
+    // walks. return@l is genuine only for the TOP entry, and both genuine cases
+    // compile to a plain return: the innermost lambda (like the function itself)
+    // is the CURRENT IR function, and makeReturn's retStmt stays try-closure-aware.
+    // Anything else is non-local: recognised, not implemented.
+    var retLabels = []
+    function retLblPush(name, kind) { retLabels.push({lbl: name, kind: kind}) }
+    function retLblPop() { retLabels.pop() }
+    function retLblTop() { return retLabels.length > 0 ? retLabels[retLabels.length - 1] : null }
+    // items = [{rlbl}, valueThunk?]
+    function makeReturnAt(items, pos) {
+        var lbl = items[0].rlbl
+        var top = retLblTop()
+        if (top != null && top.lbl == lbl) {
+            return makeReturn(items.slice(1))
+        }
+        return notImplStmt("non-local labelled return", pos)
+    }
+
     function makeBreakTo(lbl, pos) {
         return function(b) {
             var e = findLabeled(lbl)

@@ -421,6 +421,24 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("callable-ref-as-arg", nums.map(::sign).sumOf { it } == 3)
     check("callable-ref-mixed", applyTwice(::sign, -9) == -1)   // sign(sign(-9)) = sign(-1)
 
+    // ----- labelled returns (innermost lambda / enclosing function) -----
+    var lrSum = 0
+    nums.forEach {
+        if (it == 3) return@forEach          // continue-like skip
+        lrSum += it
+    }
+    check("lret-foreach-skip", lrSum == 5)   // 3 + 1 + 4 minus the skipped 3
+    val lrMapped = nums.map {
+        if (it % 2 == 0) return@map it * 10  // early value
+        it
+    }
+    check("lret-map-value", lrMapped[0] == 3 && lrMapped[1] == 1 && lrMapped[2] == 40)
+    val lrPicked = nums.filter {
+        if (it > 2) return@filter true
+        return@filter false
+    }
+    check("lret-filter-paths", lrPicked.size == 2)
+
     // ----- extension functions -----
     check("ext-int", 21.doubled() == 42)
     check("ext-string", "hi".shout() == "hi!")

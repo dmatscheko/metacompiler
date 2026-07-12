@@ -1,10 +1,10 @@
 /* Kotlin widened RECOGNITION surface: constructs a real-world Kotlin file uses that the
  * grammar now PARSES. Some are genuinely lowered (the non-null assertion x!!, referential
  * equality === / !==, default parameter values and vararg parameters, loop labels with
- * break@l / continue@l, bare callable references ::fn), others are
- * recognised-but-not-implemented and routed through notImpl (qualified callable
- * references Type::member, anonymous functions fun(...) {...}, and the labelled return
- * return@l). Because the notImpl constructs abort at the FIRST one hit, a
+ * break@l / continue@l, bare callable references ::fn, labelled returns targeting the
+ * innermost lambda), others are recognised-but-not-implemented and routed through
+ * notImpl (qualified callable references Type::member and anonymous functions
+ * fun(...) {...}). Because the notImpl constructs abort at the FIRST one hit, a
  * plain run stops with a clean file:line message (this file SHOULD fail by default). With
  * -warn-unsupported each is warned and replaced by a placeholder, the genuinely lowered
  * features drive the self-check, and main() ends with exitProcess(fails) so that run
@@ -77,12 +77,15 @@ fun main() {
     }
     if (visits != 5) { fails = fails + 1 }
 
-    // labelled return inside a lambda: recognised, no-op under -warn-unsupported
+    // labelled return inside a lambda is genuine: it skips the rest of the body
     val nums = listOf(1, 2, 3, 4)
+    var lrSum = 0
     nums.forEach { n ->
         println(n)
-        return@forEach
+        if (n == 2) return@forEach
+        lrSum = lrSum + n
     }
+    if (lrSum != 8) { fails = fails + 1 }
 
     exitProcess(fails)
 }
