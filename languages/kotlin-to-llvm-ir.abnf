@@ -139,7 +139,10 @@ Type        = ( "(" [ Type { "," Type } ] ")" "->" Type | Id [ SkipAngle ] { "."
 // route to notImpl (the target label cannot be resolved in the subset).
 Statement   <~~ push(stmtPos(pop())) ~~>
             = { Annotation } ( ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
-            | [ LabelDef ] ( Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ) ) ;
+            | Labeled | PlainStmt ) ;
+PlainStmt   = Block | Destructure | DelegateDecl | Decl | If | While | Do | For | TryStmt | Throw | Empty | ExprStmt ;
+Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
+            = LabelDef PlainStmt ;
 
 // try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
 // runtime unwinds), and each try/catch/finally body is compiled to its own closure
@@ -367,7 +370,7 @@ Lambda      <~~ push(makeLambda(takeAll())) ~~>
 LamStmt     = LamCtrl | LamExpr | LamIf | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
-            | [ LabelDef ] ( Decl | While | Do | For | TryStmt | Throw ) ;
+            | Labeled | Decl | While | Do | For | TryStmt | Throw ;
 LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 LamIf       <~~ push({stmt: pop()}) ~~>
@@ -428,13 +431,16 @@ SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 SkipParen   = "(" { SkipParen | SkipParenItem } ")" ;
 SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 
-// A statement label (loop@, outer@): parsed and ignored so the labelled statement
-// still lowers. Labelled jumps carry a target we cannot resolve, so they notImpl.
-LabelDef    = Id "@" ;
-BreakAt     <~~ push(notImplStmt("labelled break", up.pos)) ~~>
-            = KwBreak "@" Id [ ";" ] ;
-ContinueAt  <~~ push(notImplStmt("labelled continue", up.pos)) ~~>
-            = KwContinue "@" Id [ ";" ] ;
+// A statement label (loop@, outer@): the Labeled wrapper offers the name to
+// the labelled loop's loopStack entry and gives labelled BLOCKS a break target
+// (see makeLabeled). break@l / continue@l branch to the loop labelled l;
+// return@l (a labelled return targets its enclosing lambda) stays not
+// implemented, as does a labelled jump out of a try body closure.
+LabelDef    = Id <~~ push({lbl: up.in}) ~~> "@" ;
+BreakAt     <~~ push(makeBreakTo(pop().lbl, up.pos)) ~~>
+            = KwBreak "@" Id <~~ push({lbl: up.in}) ~~> [ ";" ] ;
+ContinueAt  <~~ push(makeContinueTo(pop().lbl, up.pos)) ~~>
+            = KwContinue "@" Id <~~ push({lbl: up.in}) ~~> [ ";" ] ;
 ReturnAt    <~~ push(notImplStmt("labelled return", up.pos)) ~~>
             = KwReturn "@" Id [ DiscardExpr ] [ ";" ] ;
 
@@ -1062,13 +1068,81 @@ KwStep      = "step" KwEnd ;
             return b
         }
     }
+    // A labelled statement: the wrapper offers its name via pendingLabel right
+    // before emitting the inner statement - a loop emitter consumes it into its
+    // loopStack entry, so only the directly labelled loop takes the name. The
+    // wrapper also pushes its own labelled entry with an exit block, which
+    // makes a labelled BLOCK breakable; its cont falls back to the enclosing
+    // loop like a switch does.
+    var pendingLabel = null
+    function makeLabeled(items, pos) {
+        var name = items[0].lbl
+        var innerT = items[1]
+        return function(b) {
+            var exitB = curF.NewBlock("")
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB, label: name})
+            pendingLabel = name
+            var endB = innerT(b)
+            pendingLabel = null
+            loopStack.pop()
+            endB.NewBr(exitB)
+            return exitB
+        }
+    }
+    // break@l / continue@l branch to the labelled loopStack entry. A label
+    // inside a try/catch closure cannot see the outer loop (the closure resets
+    // loopStack) - that stays reported as not implemented.
+    function findLabeled(lbl) {
+        for (var i = loopStack.length - 1; i >= 0; i--) {
+            if (loopStack[i].label == lbl) { return loopStack[i] }
+        }
+        return null
+    }
+    function makeBreakTo(lbl, pos) {
+        return function(b) {
+            var e = findLabeled(lbl)
+            if (e == null) { notImpl("break across a try boundary or to an unknown label", pos); return b }
+            b.NewBr(e.brk)
+            return deadBlock()
+        }
+    }
+    function makeContinueTo(lbl, pos) {
+        return function(b) {
+            var e = findLabeled(lbl)
+            if (e == null || e.cont == null) { notImpl("continue across a try boundary or to an unknown label", pos); return b }
+            b.NewBr(e.cont)
+            return deadBlock()
+        }
+    }
+    // Kotlin's loop emitters consume pendingLabel into their loopStack entry;
+    // the shared core makeWhile is reassigned to do the same.
+    makeWhile = function(bodyT, condT) {
+        return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var r = condT(headB)
+            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            loopStack.push({cont: headB, brk: exitB, label: lbl})
+            bodyT(bodyB).NewBr(headB)
+            loopStack.pop()
+            return exitB
+        }
+    }
+
     function makeDo(condT, bodyT) {
         return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
             var bodyB = curF.NewBlock("")
             var condB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(bodyB)
-            loopStack.push({cont: condB, brk: exitB})
+            loopStack.push({cont: condB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(condB)
             loopStack.pop()
             var r = condT(condB)
@@ -1087,6 +1161,8 @@ KwStep      = "step" KwEnd ;
         var stepT = items.length > 5 ? items[4].step : null
         var bodyT = items[items.length - 1]
         return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
             hidCount++
             var tName = "$to" + hidCount
             var sName = "$st" + hidCount
@@ -1116,7 +1192,7 @@ KwStep      = "step" KwEnd ;
             var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
             var condExt = (rop == "downTo") ? "js_ge" : "js_le"
             headB.NewCondBr(truthy(headB, callExt(headB, condExt, [iV, tV])), bodyB, exitB)
-            loopStack.push({cont: postB, brk: exitB})
+            loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, name)])
@@ -1130,6 +1206,8 @@ KwStep      = "step" KwEnd ;
     }
     function makeForList(bodyT, listT, name) {
         return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
             hidCount++
             var iName = "$i" + hidCount
             var aName = "$a" + hidCount
@@ -1152,7 +1230,7 @@ KwStep      = "step" KwEnd ;
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
-            loopStack.push({cont: postB, brk: exitB})
+            loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])

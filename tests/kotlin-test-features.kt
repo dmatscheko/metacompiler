@@ -481,6 +481,25 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("loop-break-out-of-try", loopBreakOutOfTry() == 3)
     check("loop-continue-out-of-try", loopContinueOutOfTry() == 4)
 
+    // ----- labeled loops -----
+    var labHits = 0
+    outer@ for (i in 0..2) {
+        for (j in 0..2) {
+            if (j == 1) continue@outer
+            if (i == 2) break@outer
+            labHits = labHits + 1
+        }
+    }
+    check("labeled-loop", labHits == 2)
+    var labN = 0
+    var labSeen = 0
+    cw@ while (labN < 4) {
+        labN = labN + 1
+        if (labN == 2) continue@cw
+        labSeen = labSeen + 1
+    }
+    check("labeled-while", labN == 4 && labSeen == 3)
+
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 

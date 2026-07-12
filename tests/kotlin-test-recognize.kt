@@ -1,10 +1,10 @@
 /* Kotlin widened RECOGNITION surface: constructs a real-world Kotlin file uses that the
  * grammar now PARSES. Some are genuinely lowered (the non-null assertion x!!, referential
- * equality === / !==, default parameter values and vararg parameters, and the ignored
- * loop label prefix loop@), others are recognised-but-not-implemented and routed through
- * notImpl (floating-point literals, triple-quoted raw strings, callable references ::fn
- * and Type::member, anonymous functions fun(...) {...}, and the labelled jumps break@l /
- * continue@l / return@l). Because the notImpl constructs abort at the FIRST one hit, a
+ * equality === / !==, default parameter values and vararg parameters, loop labels with
+ * break@l / continue@l), others are recognised-but-not-implemented and routed through
+ * notImpl (callable references ::fn
+ * and Type::member, anonymous functions fun(...) {...}, and the labelled return
+ * return@l). Because the notImpl constructs abort at the FIRST one hit, a
  * plain run stops with a clean file:line message (this file SHOULD fail by default). With
  * -warn-unsupported each is warned and replaced by a placeholder, the genuinely lowered
  * features drive the self-check, and main() ends with exitProcess(fails) so that run
@@ -41,7 +41,7 @@ fun main() {
     // default parameter value is parsed; the call passes factor explicitly
     if (weightedSum(10, 2) != 20) { fails = fails + 1 }
 
-    // a loop label prefix is ignored, so the labelled loop still runs
+    // a label on a loop without labelled jumps changes nothing
     var product = 1
     outer@ for (i in 1..3) {
         product = product * i
@@ -63,13 +63,17 @@ fun main() {
         return x + 100
     }
 
-    // labelled break / continue in bounded loops: recognised, no-op under -warn-unsupported
+    // labelled break / continue are genuine: continue@grid resumes the outer
+    // loop, break@grid leaves it (2 visits for i=1,2, then one before the break)
+    var visits = 0
     grid@ for (i in 1..3) {
         for (j in 1..3) {
+            visits = visits + 1
             if (j == 2) continue@grid
             if (i == 3) break@grid
         }
     }
+    if (visits != 5) { fails = fails + 1 }
 
     // labelled return inside a lambda: recognised, no-op under -warn-unsupported
     val nums = listOf(1, 2, 3, 4)
