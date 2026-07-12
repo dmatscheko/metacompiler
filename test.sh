@@ -17,13 +17,15 @@
 # It exits 0 iff the whole matrix is green.
 #
 # Usage:
-#   ./test.sh                 run the full matrix (a few minutes; most entries are
-#                             fast feature-matrix tests)
+#   ./test.sh                 run the full matrix (most entries are fast
+#                             feature-matrix tests)
 #   ./test.sh -f, --filter S  run only entries whose name or args contain S
 #                             (case-insensitive), e.g. --filter kotlin
 #   ./test.sh -l, --list      list the matrix entries and exit
 #   ./test.sh -v, --verbose   print every entry as it runs (default: only failures
-#                             and a progress counter)
+#                             and a progress dot per entry)
+#   ./test.sh -j, --jobs N    run N entries in parallel (default: CPU count;
+#                             1 = sequential)
 #   ./test.sh -t, --timeout N per-run timeout in seconds (default 120)
 #   ./test.sh -h, --help      show this header
 #
@@ -35,19 +37,23 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 2
 
 FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120
+JOBS="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 while [ $# -gt 0 ]; do
     case "$1" in
         -f|--filter)  FILTER="${2:-}"; shift ;;
         --filter=*)   FILTER="${1#*=}" ;;
         -v|--verbose) VERBOSE=1 ;;
         -l|--list)    LIST=1 ;;
+        -j|--jobs)    JOBS="${2:-1}"; shift ;;
+        --jobs=*)     JOBS="${1#*=}" ;;
         -t|--timeout) TIMEOUT="${2:-120}"; shift ;;
         --timeout=*)  TIMEOUT="${1#*=}" ;;
-        -h|--help)    sed -n '2,40p' "$0"; exit 0 ;;
+        -h|--help)    sed -n '2,42p' "$0"; exit 0 ;;
         *) echo "test.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
 done
+case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
 
 command -v go >/dev/null 2>&1 || { echo "test.sh: 'go' not found on PATH" >&2; exit 2; }
 
@@ -61,9 +67,8 @@ fi
 
 BIN="$(mktemp -t mec-test.XXXXXX)"
 ENTRIES="$(mktemp -t mec-entries.XXXXXX)"
-OG="$(mktemp -t mec-og.XXXXXX)"; OF="$(mktemp -t mec-of.XXXXXX)"
-EG="$(mktemp -t mec-eg.XXXXXX)"; EF="$(mktemp -t mec-ef.XXXXXX)"
-trap 'rm -f "$BIN" "$ENTRIES" "$OG" "$OF" "$EG" "$EF"' EXIT
+RESDIR="$(mktemp -d -t mec-results.XXXXXX)"
+trap 'rm -rf "$BIN" "$ENTRIES" "$RESDIR"' EXIT
 
 if [ "$LIST" -eq 0 ]; then
     echo "building compiler..."
@@ -92,10 +97,69 @@ if [ "$LIST" -eq 1 ]; then
     exit 0
 fi
 
-pass=0; fail=0; skipped=0; total=0; idx=0
 n_entries=$(wc -l < "$ENTRIES" | tr -d ' ')
-declare -a FAILURES=()
 
+# run_entry runs one matrix entry (both engines), compares, and leaves its
+# verdict in $RESDIR: "<idx>.ok" (empty) or "<idx>.fail" (the printable failure
+# block). Entries are independent, so any number of them may run in parallel;
+# each uses its own output files under $RESDIR.
+run_entry() {
+    local idx="$1" name="$2"; shift 2
+    local args=("$@")
+    local og="$RESDIR/$idx.og" of="$RESDIR/$idx.of" eg="$RESDIR/$idx.eg" ef="$RESDIR/$idx.ef"
+
+    local has_q=0 a
+    for a in "${args[@]}"; do [ "$a" = "-q" ] && has_q=1; done
+    # Expected-to-fail: author-declared (name mentions FAIL) or the two grammar
+    # guards that fail by design (their names do not carry FAIL).
+    local should_fail=0
+    case "$name" in *[Ff][Aa][Ii][Ll]*) should_fail=1 ;; esac
+    case " ${args[*]} " in *smaller-match-first*|*infinite-loop*) should_fail=1 ;; esac
+
+    local rc_g rc_f
+    RUN "$BIN" "${args[@]}"          >"$og" 2>"$eg"; rc_g=$?
+    RUN "$BIN" "${args[@]}" -frozen  >"$of" 2>"$ef"; rc_f=$?
+
+    local problems=()
+    if [ "$should_fail" -eq 1 ]; then
+        [ "$rc_g" -eq 0 ] && problems+=("goja exited 0 but should fail")
+        [ "$rc_f" -eq 0 ] && problems+=("frozen exited 0 but should fail")
+    else
+        [ "$rc_g" -ne 0 ] && problems+=("goja exit $rc_g")
+        [ "$rc_f" -ne 0 ] && problems+=("frozen exit $rc_f")
+    fi
+    if [ "$has_q" -eq 1 ] && ! cmp -s "$og" "$of"; then
+        problems+=("goja vs frozen -q output differ")
+    fi
+
+    if [ "${#problems[@]}" -eq 0 ]; then
+        : > "$RESDIR/$idx.ok"
+        [ "$VERBOSE" -eq 1 ] && printf '  ok   [%d/%d] %s\n' "$idx" "$n_entries" "$name"
+    else
+        # Compose the whole failure block first and print it with one write, so
+        # parallel workers cannot interleave mid-block.
+        local block p
+        block="$(printf 'FAIL   %s\n' "$name"
+                 for p in "${problems[@]}"; do printf '         - %s\n' "$p"; done
+                 head -3 "$eg" | sed 's/^/         goja: /')"
+        printf '%s\n' "$block" > "$RESDIR/$idx.fail"
+        printf '%s\n' "$block"
+    fi
+    rm -f "$og" "$of" "$eg" "$ef"
+    [ "$VERBOSE" -eq 0 ] && printf '.' >&2
+    return 0
+}
+
+# A FIFO token semaphore caps the pool at $JOBS parallel entries (works on the
+# stock macOS bash 3.2: no wait -n). Each worker takes a token before it starts
+# and puts one back when done.
+SEM="$RESDIR/sem"
+mkfifo "$SEM"
+exec 3<>"$SEM"
+rm -f "$SEM"
+i=0; while [ "$i" -lt "$JOBS" ]; do printf '.' >&3; i=$((i + 1)); done
+
+total=0; idx=0
 while IFS=$'\t' read -r name rest; do
     [ -z "${name:-}" ] && continue
     IFS=$'\t' read -r -a args <<< "$rest"
@@ -107,55 +171,23 @@ while IFS=$'\t' read -r name rest; do
     fi
     total=$((total + 1))
 
-    has_q=0; for a in "${args[@]}"; do [ "$a" = "-q" ] && has_q=1; done
-    # Expected-to-fail: author-declared (name mentions FAIL) or the two grammar
-    # guards that fail by design (their names do not carry FAIL).
-    should_fail=0
-    case "$name" in *[Ff][Aa][Ii][Ll]*) should_fail=1 ;; esac
-    case " ${args[*]} " in *smaller-match-first*|*infinite-loop*) should_fail=1 ;; esac
-
-    RUN "$BIN" "${args[@]}"          >"$OG" 2>"$EG"; rc_g=$?
-    RUN "$BIN" "${args[@]}" -frozen  >"$OF" 2>"$EF"; rc_f=$?
-
-    problems=()
-    if [ "$should_fail" -eq 1 ]; then
-        [ "$rc_g" -eq 0 ] && problems+=("goja exited 0 but should fail")
-        [ "$rc_f" -eq 0 ] && problems+=("frozen exited 0 but should fail")
-    else
-        [ "$rc_g" -ne 0 ] && problems+=("goja exit $rc_g")
-        [ "$rc_f" -ne 0 ] && problems+=("frozen exit $rc_f")
-    fi
-    if [ "$has_q" -eq 1 ] && ! cmp -s "$OG" "$OF"; then
-        problems+=("goja vs frozen -q output differ")
-    fi
-
-    if [ "${#problems[@]}" -eq 0 ]; then
-        pass=$((pass + 1))
-        [ "$VERBOSE" -eq 1 ] && printf '  ok   [%d/%d] %s\n' "$idx" "$n_entries" "$name"
-    else
-        fail=$((fail + 1))
-        printf 'FAIL   %s\n' "$name"
-        for p in "${problems[@]}"; do printf '         - %s\n' "$p"; done
-        # Show a little context from stderr to aid debugging.
-        err="$(head -3 "$EG" | sed 's/^/         goja: /')"
-        [ -n "$err" ] && printf '%s\n' "$err"
-        FAILURES+=("$name")
-    fi
-
-    if [ "$VERBOSE" -eq 0 ] && [ $((total % 20)) -eq 0 ]; then
-        printf '  ... %d run, %d passed, %d failed\n' "$total" "$pass" "$fail"
-    fi
+    IFS= read -r -n 1 -u 3 _token
+    { run_entry "$idx" "$name" "${args[@]}"; printf '.' >&3; } &
 done < "$ENTRIES"
+wait
+
+pass=$(ls "$RESDIR" | grep -c '\.ok$')
+fail=$(ls "$RESDIR" | grep -c '\.fail$')
 
 echo
 echo "----------------------------------------------------------------"
-printf 'matrix: %d entries run' "$total"
-[ "$skipped" -gt 0 ] && printf ' (%d slow entries skipped)' "$skipped"
-printf ' - %d passed, %d failed\n' "$pass" "$fail"
+printf 'matrix: %d entries run - %d passed, %d failed\n' "$total" "$pass" "$fail"
 
 if [ "$fail" -ne 0 ]; then
     echo "FAILURES:"
-    for f in "${FAILURES[@]}"; do echo "  - $f"; done
+    for f in $(ls "$RESDIR" | grep '\.fail$' | sort -n); do
+        head -1 "$RESDIR/$f" | sed 's/^FAIL   /  - /'
+    done
     exit 1
 fi
 echo "all green"

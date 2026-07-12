@@ -162,7 +162,8 @@ grammar/input run. `test.sh` runs the whole matrix and checks the two invariants
 project guarantees:
 
 ```
-./test.sh                # run everything (a few minutes; the tests are fast feature matrices)
+./test.sh                # run everything (parallel, about a minute with a warm script cache)
+./test.sh -j 1           # any worker count; default is one worker per CPU, 1 = sequential
 ./test.sh --filter kotlin # run only entries whose name or args contain "kotlin"
 ./test.sh --list         # list the matrix entries without running them
 ./test.sh --help         # full option list
