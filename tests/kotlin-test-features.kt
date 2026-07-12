@@ -43,6 +43,13 @@ fun fib(n: Int): Int = if (n < 2) n else fib(n - 1) + fib(n - 2)
 fun isEven(n: Int): Boolean = if (n == 0) true else isOdd(n - 1)
 fun isOdd(n: Int): Boolean = if (n == 0) false else isEven(n - 1)
 
+// A function whose parameter list carries a trailing comma (Kotlin allows it).
+fun sum3(
+    a: Int,
+    b: Int,
+    c: Int,
+): Int = a + b + c
+
 // ----- closures and higher-order functions -----
 fun makeCounter(): (Int) -> Int {
     var c = 0
@@ -497,6 +504,20 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("list-nested", grid[0][1] == 2 && grid[1][0] == 3)
     grid[0][0] = 7
     check("list-nested-write", grid[0][0] == 7)
+
+    // ----- trailing commas (arg lists, params, lambda params, when, listOf) -----
+    check("trailing-fn-params", sum3(1, 2, 3,) == 6)
+    val tcList = listOf(10, 20, 30,)
+    check("trailing-arg-list", tcList.size == 3 && tcList[2] == 30)
+    val tcAdd = add(4, 5,)
+    check("trailing-call", tcAdd == 9)
+    val tcLam = tcList.map { n, -> n + 1 }   // trailing comma after a lambda param
+    check("trailing-lambda-param", tcLam[0] == 11)
+    val tcWhen = when (2) {
+        1, 2, -> "low"
+        else -> "high"
+    }
+    check("trailing-when-cond", tcWhen == "low")
 
     // ----- nullability: elvis and safe calls -----
     var maybe: Int? = null

@@ -112,7 +112,7 @@ UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
 ExtFunName  = Id [ SkipAngle ] "." Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 ParamList   <~~ push({params: takeAll()}) ~~>
-            = "(" [ Param { "," Param } ] ")" ;
+            = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // Parameter modifiers (vararg/noinline/crossinline) and a default value are parsed
 // and dropped - the default is not supplied at call sites, but the header parses.
 Param       = [ Modifiers ] Id <~~ push(up.in) ~~> ":" Type [ "=" DiscardExpr ] ;
@@ -121,7 +121,7 @@ Param       = [ Modifiers ] Id <~~ push(up.in) ~~> ":" Type [ "=" DiscardExpr ] 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
             = [ "data" KwEnd ] KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" SuperList ] [ "{" { Member } "}" ] ;
 CtorParams  <~~ push({cparams: takeAll()}) ~~>
-            = "(" [ CtorParam { "," CtorParam } ] ")" ;
+            = "(" [ CtorParam { "," CtorParam } [ "," ] ] ")" ;
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type ;
 
@@ -150,7 +150,7 @@ LazyInit    <~~ push(makeLazyInit(pop())) ~~>
 
 // Type is parsed and (apart from steering as/is) ignored. Generics (<...>) and the
 // nullable ? are accepted and dropped; dotted names and simple function types too.
-Type        = ( "(" [ Type { "," Type } ] ")" "->" Type | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
+Type        = ( "(" [ Type { "," Type } [ "," ] ] ")" "->" Type | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // A statement may carry a label (loop@ ...); the label is parsed and ignored, so the
@@ -258,7 +258,7 @@ WhenExprSubj <~~ push({subj: pop()}) ~~>
 // (and only fail at run time, when no other arm matches).
 WhenElse    = KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ;
 WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
-            = WhenCond { "," WhenCond } "->" Expression [ ";" ] ;
+            = WhenCond { "," WhenCond } [ "," ] "->" Expression [ ";" ] ;
 // A branch condition: an inclusive range test (in / !in), a type test (is T / !is T,
 // undecidable so it never matches and warns), or a value to compare with.
 WhenCond    = WhenIn | WhenNotIn | WhenIs | WhenVal ;
@@ -370,7 +370,7 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 SafeFieldSfx = "?." Id <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
+MArgs       = "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lambda ;
 
 // RawStr before Template (both open with "), KHexLit/KBinLit before FloatLit/KIntLit
 // (0x/0b prefixes), FloatLit before KIntLit (a plain integer falls through),
@@ -424,7 +424,7 @@ LamIf       <~~ push({stmt: pop()}) ~~>
 LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 LambdaParams <~~ push({lparams: takeAll()}) ~~>
-            = LParam { "," LParam } "->" ;
+            = LParam { "," LParam } [ "," ] "->" ;
 LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
@@ -433,7 +433,7 @@ LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
 Call        <~~ push(makeCall(takeAll())); retLblPop() ~~>
-            = Id <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ SkipAngle ] ( "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ) ;
+            = Id <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ SkipAngle ] ( "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lambda ) ;
 
 // String templates: "x=$x sum=${a + b}".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
@@ -550,7 +550,7 @@ AnonFun     <~~ push(notImplExpr("anonymous function", up.pos)) ~~>
             = KwFun SkipParen [ ":" Type ] ( SkipBlock | "=" DiscardExpr ) ;
 
 // A tag-less primary-constructor parameter list for headers we only skip.
-CtorParamsSkip = "(" [ CParamSkip { "," CParamSkip } ] ")" ;
+CtorParamsSkip = "(" [ CParamSkip { "," CParamSkip } [ "," ] ] ")" ;
 CParamSkip  = [ Modifiers ] [ ( "val" | "var" ) KwEnd ] Id ":" Type [ "=" DiscardExpr ] ;
 
 // A supertype list (types with optional constructor-call args). No inheritance in
@@ -559,7 +559,7 @@ SuperList   = SuperItem { "," SuperItem } ;
 // A supertype is a class (optional constructor-call args), an interface, or an
 // interface implemented by delegation (`: I by impl`). No inheritance in the
 // subset, so all three parse and are ignored; the delegate expression is discarded.
-SuperItem   = Type [ "(" [ DiscardExpr { "," DiscardExpr } ] ")" | KwBy DiscardExpr ] ;
+SuperItem   = Type [ "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" | KwBy DiscardExpr ] ;
 DiscardExpr <~~ pop() ~~> = Expression ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a
@@ -595,7 +595,7 @@ CompanionReal <~~ push({companion: takeAll()}) ~~>
 CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
             = KwCompanion KwObject [ Id ] [ ":" SuperList ] SkipBlock ;
 SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
-            = KwConstructor "(" [ SParam { "," SParam } ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } ] ")" ] SkipBlock ;
+            = KwConstructor "(" [ SParam { "," SParam } [ "," ] ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" ] SkipBlock ;
 SParam      = [ Modifiers ] Id ":" Type [ "=" DiscardExpr ] ;
 PropAccessor <~~ notImpl("property accessor", up.pos) ~~>
             = ( "val" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
@@ -604,7 +604,7 @@ Accessor    = ( KwGet | KwSet ) "(" [ Id [ ":" Type ] ] ")" [ ":" Type ] [ SkipB
 // A destructuring declaration: accepted, reported as not implemented; the
 // initializer still runs so its calls stay visible under -warn-unsupported.
 Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd "(" Id { "," Id } ")" [ ":" Type ] "=" Expression [ ";" ] ;
+            = ( "val" | "var" ) KwEnd "(" Id { "," Id } [ "," ] ")" [ ":" Type ] "=" Expression [ ";" ] ;
 
 KwLazy      = "lazy" KwEnd ;
 KwInterface = "interface" KwEnd ;
