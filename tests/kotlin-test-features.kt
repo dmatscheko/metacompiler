@@ -65,6 +65,8 @@ fun compose(f: (Int) -> Int, g: (Int) -> Int): (Int) -> Int = { x -> f(g(x)) }
 // function type - both parsed, the type otherwise ignored.
 fun runOpt(cb: ((Int) -> Int)?, x: Int): Int = if (cb != null) cb(x) else -1
 fun themed(content: @Composable () -> Int): Int = content()
+// Named parameters inside a function type (Kotlin allows them; names are ignored).
+fun withNamed(op: (root: Boolean, count: Int) -> Int): Int = op(true, 3)
 
 // ----- extension functions (top-level, with a body; dispatch by name) -----
 fun Int.doubled(): Int = this * 2
@@ -429,6 +431,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("fn-compose", dblThenInc(4) == 9)
     check("fn-nullable-type", runOpt({ n -> n + 1 }, 9) == 10 && runOpt(null, 9) == -1)
     check("fn-annotated-type", themed { 7 } == 7)
+    check("fn-named-params-type", withNamed { r, c -> if (r) c else 0 } == 3)
 
     // ----- list higher-order methods (trailing lambdas, `it`) -----
     val nums = listOf(3, 1, 4)

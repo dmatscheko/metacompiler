@@ -156,8 +156,12 @@ LazyInit    <~~ push(makeLazyInit(pop())) ~~>
 // type annotation (@Composable () -> Unit) is accepted. A parenthesized group without
 // a trailing -> is a grouped type, so a nullable function type ((Intent) -> Unit)?
 // parses: the inner function type is the group, then ? applies to the whole.
-Type        = { TypeAnno } ( "(" [ Type { "," Type } [ "," ] ] ")" [ "->" Type ]
+Type        = { TypeAnno } ( "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" [ "->" Type ]
             | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
+// A function-type parameter: an optional name (Kotlin allows named function-type
+// parameters, onRun: (root: Boolean) -> Unit) then the type. Also serves the
+// grouped-type case (a bare type with no name, in parentheses without a following ->).
+FnTypeParam = [ Id ":" ] Type ;
 // A type annotation: an argument list is consumed only when a `->` does NOT follow,
 // so `@Composable () -> Unit` leaves the `()` for the function type (NotArrow rolls
 // the parens back), while `@Tag("x") Foo` keeps them as the annotation's arguments.
