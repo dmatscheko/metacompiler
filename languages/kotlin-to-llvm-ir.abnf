@@ -169,8 +169,16 @@ LazyInit    <~~ push(makeLazyInit(pop())) ~~>
             = Lambda ;
 
 // Type is parsed and (apart from steering as/is) ignored. Generics (<...>) and the
-// nullable ? are accepted and dropped; dotted names and simple function types too.
-Type        = ( "(" [ Type { "," Type } [ "," ] ] ")" "->" Type | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
+// nullable ? are accepted and dropped; dotted names and function types too. A leading
+// type annotation (@Composable () -> Unit) is accepted. A parenthesized group without
+// a trailing -> is a grouped type, so a nullable function type ((Intent) -> Unit)?
+// parses: the inner function type is the group, then ? applies to the whole.
+Type        = { TypeAnno } ( "(" [ Type { "," Type } [ "," ] ] ")" [ "->" Type ]
+            | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
+// A type annotation: an argument list is consumed only when a `->` does NOT follow,
+// so `@Composable () -> Unit` leaves the `()` for the function type (NotArrow rolls
+// the parens back), while `@Tag("x") Foo` keeps them as the annotation's arguments.
+TypeAnno    = "@" Id { "." Id } [ SkipParen NotArrow ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // A statement may carry a label (loop@ ...); the label is parsed and ignored, so the

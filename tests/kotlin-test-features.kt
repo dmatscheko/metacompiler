@@ -61,6 +61,10 @@ fun makeCounter(): (Int) -> Int {
 fun applyTwice(f: (Int) -> Int, x: Int): Int = f(f(x))
 fun adder(base: Int): (Int) -> Int = { x -> base + x }
 fun compose(f: (Int) -> Int, g: (Int) -> Int): (Int) -> Int = { x -> f(g(x)) }
+// A nullable (parenthesized) function-type parameter, and a type annotation on a
+// function type - both parsed, the type otherwise ignored.
+fun runOpt(cb: ((Int) -> Int)?, x: Int): Int = if (cb != null) cb(x) else -1
+fun themed(content: @Composable () -> Int): Int = content()
 
 // ----- extension functions (top-level, with a body; dispatch by name) -----
 fun Int.doubled(): Int = this * 2
@@ -423,6 +427,8 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     val incF = { x: Int -> x + 1 }
     val dblThenInc = compose(incF, twice)  // incF(twice(x))
     check("fn-compose", dblThenInc(4) == 9)
+    check("fn-nullable-type", runOpt({ n -> n + 1 }, 9) == 10 && runOpt(null, 9) == -1)
+    check("fn-annotated-type", themed { 7 } == 7)
 
     // ----- list higher-order methods (trailing lambdas, `it`) -----
     val nums = listOf(3, 1, 4)
