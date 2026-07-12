@@ -1,9 +1,9 @@
 /* Kotlin widened RECOGNITION surface: constructs a real-world Kotlin file uses that the
  * grammar now PARSES. Some are genuinely lowered (the non-null assertion x!!, referential
  * equality === / !==, default parameter values and vararg parameters, loop labels with
- * break@l / continue@l), others are recognised-but-not-implemented and routed through
- * notImpl (callable references ::fn
- * and Type::member, anonymous functions fun(...) {...}, and the labelled return
+ * break@l / continue@l, bare callable references ::fn), others are
+ * recognised-but-not-implemented and routed through notImpl (qualified callable
+ * references Type::member, anonymous functions fun(...) {...}, and the labelled return
  * return@l). Because the notImpl constructs abort at the FIRST one hit, a
  * plain run stops with a clean file:line message (this file SHOULD fail by default). With
  * -warn-unsupported each is warned and replaced by a placeholder, the genuinely lowered
@@ -57,8 +57,10 @@ fun main() {
         Raw "triple-quoted" string
         spanning multiple lines.
     """                                    // triple-quoted raw string literal
-    val ref = ::helper                     // callable reference to a top-level function
-    val kref = String::length              // type-qualified callable reference
+    // a bare callable reference is genuine: the function value, stored and called
+    val ref = ::helper
+    if (ref(2) != 6) { fails = fails + 1 }
+    val kref = String::length              // type-qualified callable reference: notImpl
     val adder = fun(x: Int): Int {         // anonymous function expression
         return x + 100
     }

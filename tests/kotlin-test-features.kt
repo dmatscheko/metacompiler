@@ -415,6 +415,12 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     nums.forEach { feSum += it }
     check("hof-foreach", feSum == 8)
 
+    // ----- callable references (bare ::fn; qualified refs stay unsupported) -----
+    val addRef = ::add
+    check("callable-ref-call", addRef(2, 3) == 5)
+    check("callable-ref-as-arg", nums.map(::sign).sumOf { it } == 3)
+    check("callable-ref-mixed", applyTwice(::sign, -9) == -1)   // sign(sign(-9)) = sign(-1)
+
     // ----- extension functions -----
     check("ext-int", 21.doubled() == 42)
     check("ext-string", "hi".shout() == "hi!")

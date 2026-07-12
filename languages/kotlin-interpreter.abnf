@@ -338,7 +338,7 @@ MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
 // RawStr before Template (both open with "), KHexLit/KBinLit before FloatLit/KIntLit
 // (0x/0b prefixes), FloatLit before KIntLit (a plain integer falls through),
 // AnonFun/CallableRef before Call/VarRef (they would otherwise eat the leading
-// identifier). RawStr/CallableRef/AnonFun are recognised, not run.
+// identifier). AnonFun and qualified callable references are recognised, not run.
 Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | ThisExpr | Call | VarRef ;
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
@@ -480,10 +480,16 @@ RawPlain    = "\x00"..."\x21" | "\x23"..."\x23" | "\x25"..."\U0010ffff" ;
 RawOneQ     = '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 
-// A callable reference (::fn, Type::member, pkg.Type::member). No first-class function
-// values for methods here, so it is recognised and reported as not implemented.
-CallableRef <~~ push(notImplExpr("callable reference", up.pos)) ~~>
-            = [ Id { "." Id } ] "::" Id ;
+// A callable reference. A bare ::fn is genuine: top-level functions and builtins are
+// already first-class closures, so ::fn evaluates like the name itself (stored, passed
+// as a lambda, called later). A constructor reference ::Cls yields the class
+// descriptor, which is not callable - out of the subset. A QUALIFIED reference
+// (Type::member, pkg.Type::member, recv::method) needs a bound-method value the
+// subset does not model: recognised, not implemented.
+CallableRef = BareRef | QualRef ;
+BareRef     = "::" Id <~~ push(makeVarRef(up.in)) ~~> ;
+QualRef     <~~ push(notImplExpr("callable reference", up.pos)) ~~>
+            = Id { "." Id } "::" Id ;
 
 // An anonymous function expression: fun(params): T { ... } or fun(params) = expr. The
 // parameter list and body are skipped; recognised and reported as not implemented.
