@@ -69,8 +69,10 @@ local skipRun = true or bump()
 check("short-circuit", sideFx, 1)
 check("short-circuit-values", (noRun == false) and (oneRun == true) and (skipRun == true), true)
 
--- ----- strings library (the # operator is for tables; strings use string.len) -----
+-- ----- strings library -----
 check("str-len", string.len("hello"), 5)
+check("str-len-op", #"hello", 5)
+check("str-len-op-var", (function() local s = "abc" return #s end)(), 3)
 check("str-len-empty", string.len(""), 0)
 check("str-len-unicode", string.len("héllo"), 5)
 check("str-escapes", string.len("a\tb") + string.len("x\ny"), 6)

@@ -410,7 +410,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: b.NewSelect(truthy(b, r.v), hFalse, hTrue)}
         }
     }
-    // #t: probe t[1], t[2], ... for the first nil; the border is that index minus one.
+    // #v: a string yields its length (like the interpreter's luaLen); a table is
+    // probed at t[1], t[2], ... for the first nil - the border is that index minus one.
     function makeLen(t) {
         return function(b) {
             var r = t(b)
@@ -421,12 +422,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             hidCount++
             var iName = "$li" + hidCount
             var tName = "$lt" + hidCount
+            var rName = "$lr" + hidCount
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), tv])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 1)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rName), emitNum(b, 0)])
+            var strB = curF.NewBlock("")
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
-            b.NewBr(headB)
+            var joinB = curF.NewBlock("")
+            var isStr = callExt(b, "js_seq", [callExt(b, "js_typeof", [tv]), emitStr(b, "string")])
+            b.NewCondBr(truthy(b, isStr), strB, headB)
+            callExt(strB, "js_scope_set", [curScopeV, emitStr(strB, rName), callExt(strB, "js_get", [tv, emitStr(strB, "length")])])
+            strB.NewBr(joinB)
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
             var elem = callExt(headB, "js_get", [tV, iV])
@@ -435,9 +443,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName), callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
             bodyB.NewBr(headB)
             var iFin = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, iName)])
-            var lenV = callExt(exitB, "js_sub", [iFin, emitNum(exitB, 1)])
+            callExt(exitB, "js_scope_set", [curScopeV, emitStr(exitB, rName), callExt(exitB, "js_sub", [iFin, emitNum(exitB, 1)])])
+            exitB.NewBr(joinB)
+            var lenV = callExt(joinB, "js_scope_get", [curScopeV, emitStr(joinB, rName)])
             curScopeV = saved
-            return {b: exitB, v: lenV}
+            return {b: joinB, v: lenV}
         }
     }
     // Concatenation: right associative, so at most two operands per node. Both sides are
