@@ -631,6 +631,28 @@ end
 check("return-across-ensure", ret_across_ensure(), "from-begin")
 check("ensure-ran-on-return", marks, 1)
 
+def ret_in_ensure_overrides
+  begin
+    return "from-begin"
+  ensure
+    return "from-ensure"
+  end
+end
+check("return-in-ensure-overrides", ret_in_ensure_overrides(), "from-ensure")
+
+def ensure_return_cancels_raise
+  begin
+    begin
+      raise "boom"
+    ensure
+      return "cancelled"
+    end
+  rescue
+    return "rescued"
+  end
+end
+check("ensure-return-cancels-raise", ensure_return_cancels_raise(), "cancelled")
+
 def loop_break_in_begin
   btotal = 0
   bx = 0

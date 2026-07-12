@@ -1241,7 +1241,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 if (finallyT != undefined) {
                     var fr = finallyT()
-                    if (isSig(fr)) { box.v = fr }
+                    // A return/break/next signal out of ensure must override the
+                    // begin/rescue completion AND cancel a pending re-raise - only a
+                    // return from the host finally block does both (box.v = fr cannot
+                    // stop a rethrow that is already in flight).
+                    if (isSig(fr)) { return fr }
                 }
             }
             return box.v
