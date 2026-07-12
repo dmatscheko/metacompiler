@@ -15,9 +15,11 @@ charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one ch
 String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
 (fallthrough, stacked labels, default), break/continue, return, assignment (also
-+= -= *= /= %=), postfix ++/--, the ternary operator, || && with short circuit,
-== != < > <= >= (== compares objects by identity, use equals() for strings), + - * / %
-(int arithmetic is 32 bit, / truncates) and unary - !.
++= -= *= /= %= and the bitwise/shift compounds &= |= ^= <<= >>= >>>=), postfix ++/--,
+the ternary operator, || && with short circuit, & | ^ (non-short-circuit boolean
+operators on two booleans, int32 bit operations otherwise), << >> >>> (Java int
+semantics), == != < > <= >= (== compares objects by identity, use equals() for
+strings), + - * / % (int arithmetic is 32 bit, / truncates) and unary - ! ~.
 
 Widened surface (parsed so a whole Java file is accepted): generics (<...>) and the
 extra primitive keywords are parsed and dropped; casts ((Type) expr) are identity;
@@ -232,14 +234,8 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 
 // Every expression production pushes exactly one thunk: function() -> value.
 Expression  = Assignment | CondExpr ;
-Assignment  = KnownAssign | UnsupAssign ;
-KnownAssign <~~ push(makeAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
-// Compound bitwise / shift assignment (&= |= ^= <<= >>= >>>=): recognized, not
-// implemented (no integer-bit externs); the right side is still lowered and stored,
-// the operator is dropped. Tried after the known set, so plain '=' etc. are unaffected.
-UnsupAssign <~~ push(makeUnsupAssign(takeAll(), up.pos)) ~~>
-            = Target ( "<<=" | ">>>=" | ">>=" | "&=" | "^=" | "|=" ) <~~ push(up.in) ~~> Expression ;
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>>=" | ">>=" | "&=" | "^=" | "|=" | "=" ) <~~ push(up.in) ~~> Expression ;
 
 // An assignable place: a variable (this and class names are variables too),
 // or a member/index path: this.x, p.x, Main.fails, arr[i].
@@ -257,16 +253,18 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = BitOrExpr { "&&" BitOrExpr } ;
 
-// The bitwise (| ^ &) and shift (<< >> >>>) levels are recognized but not implemented
-// (there are no integer-bit externs); both operands are still lowered and one warning
-// fires per operator run. A lone "|" that actually begins "||" fails its right side, the
-// iteration rolls back, and the enclosing || level picks it up (same for "&" and "&&").
-BitOrExpr   <~~ push(makeUnsupBin(takeAll(), up.pos, "bitwise operator")) ~~>
-            = BitXorExpr { "|" BitXorExpr } ;
-BitXorExpr  <~~ push(makeUnsupBin(takeAll(), up.pos, "bitwise operator")) ~~>
-            = BitAndExpr { "^" BitAndExpr } ;
-BitAndExpr  <~~ push(makeUnsupBin(takeAll(), up.pos, "bitwise operator")) ~~>
-            = EqExpr { "&" EqExpr } ;
+// The bitwise (| ^ &) and shift (<< >> >>>) levels work on int operands with
+// Java's 32-bit semantics; & | ^ on two booleans are the non-short-circuit
+// boolean operators (js_jband/js_jbor/js_jbxor decide at runtime, see the
+// emitBin override below). A lone "|" that actually begins "||" fails its
+// right side, the iteration rolls back, and the enclosing || level picks it
+// up (same for "&" and "&&").
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { "|" <~~ push("|") ~~> BitXorExpr } ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push("^") ~~> BitAndExpr } ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
 
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
@@ -281,8 +279,8 @@ InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
 InstTail    <~~ push({iof: 1}) ~~>
             = KwInstanceof Type [ Id ] ;
 
-ShiftExpr   <~~ push(makeUnsupBin(takeAll(), up.pos, "shift operator")) ~~>
-            = AddExpr { ( "<<" | ">>>" | ">>" ) AddExpr } ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -611,23 +609,28 @@ KwSync      = "synchronized" KwEnd ;
             return {b: b, v: nv2}
         }
     }
-    // Unary + is identity. ~x is recognized, not implemented (no bit externs); its operand
-    // is still lowered so its calls stay visible.
+    // Unary + is identity; ~x is the int32 complement (x ^ -1).
     function makeUPlus(inner) { return inner }
     function makeBitNot(inner, pos) {
-        notImpl("bitwise not", pos)
-        return function(b) { var r = inner(b); return {b: r.b, v: hUndef} }
-    }
-    // A bitwise / shift operator run: recognized, not implemented. When no operator is
-    // present (a single operand) it is a transparent pass-through, so ordinary expressions
-    // lower byte-for-byte as before. Otherwise every operand is still lowered.
-    function makeUnsupBin(items, pos, label) {
-        if (items.length == 1) return items[0]
-        notImpl(label, pos)
         return function(b) {
-            for (var i = 0; i < items.length; i++) { var r = items[i](b); b = r.b }
-            return {b: b, v: hUndef}
+            var r = inner(b)
+            return {b: r.b, v: callExt(r.b, "js_bxor", [r.v, emitNum(r.b, -1)])}
         }
+    }
+    // Java's bitwise / shift operators on top of the core set: & | ^ go through
+    // the boolean-aware js_jb* externs (two booleans -> the non-short-circuit
+    // boolean operator, else the int32 op); >>> keeps Java's int semantics via
+    // the |0 wrap (JS >>> yields unsigned). The compound forms reuse the same
+    // externs (makeAssign hands the raw operator to emitBin).
+    var coreEmitBin = emitBin
+    emitBin = function(b, op, l, r) {
+        if (op == "&" || op == "&=") return callExt(b, "js_jband", [l, r])
+        if (op == "|" || op == "|=") return callExt(b, "js_jbor", [l, r])
+        if (op == "^" || op == "^=") return callExt(b, "js_jbxor", [l, r])
+        if (op == "<<" || op == "<<=") return callExt(b, "js_shl", [l, r])
+        if (op == ">>" || op == ">>=") return callExt(b, "js_shr", [l, r])
+        if (op == ">>>" || op == ">>>=") return intWrap(b, callExt(b, "js_ushr", [l, r]))
+        return coreEmitBin(b, op, l, r)
     }
     // x instanceof Type [pattern]: recognized, not implemented; the operand is still
     // lowered. A single item (no instanceof tail) is a transparent pass-through.
@@ -637,26 +640,6 @@ KwSync      = "synchronized" KwEnd ;
         var operand = items[0]
         return function(b) { var r = operand(b); return {b: r.b, v: hUndef} }
     }
-    // Compound bitwise / shift assignment (a &= b): recognized, not implemented; the right
-    // side is lowered and stored, the operator is dropped.
-    function makeUnsupAssign(items, pos) {
-        notImpl("compound bitwise/shift assignment", pos)
-        var ref = items[0]
-        var valT = items[2]
-        return function(b) {
-            var r = valT(b)
-            b = r.b
-            if (ref.path.length == 0) {
-                callExt(b, "js_scope_set", [curScopeV, emitStr(b, ref.name), r.v])
-            } else {
-                var p = emitRefPath(b, ref)
-                b = p.b
-                callExt(b, "js_set", [p.obj, p.key, r.v])
-            }
-            return {b: b, v: r.v}
-        }
-    }
-
     // new C(args): set __class, then run the constructor with [obj, args...].
     // super.m(args): resolved through js_supercall, starting at the superclass of the
     // class the call appears in (captured at build time).

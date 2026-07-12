@@ -2161,6 +2161,32 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapNum(ln + rn)
 		},
+		// Java & | ^: the non-short-circuit boolean operator when both sides are
+		// booleans, the int32 bit operation otherwise.
+		"js_jband": func(a []uint64) uint64 {
+			if lb, lok := u(a[0]).(bool); lok {
+				if rb, rok := u(a[1]).(bool); rok {
+					return boolH(lb && rb)
+				}
+			}
+			return rt.wrapNum(float64(rt.toInt32(u(a[0])) & rt.toInt32(u(a[1]))))
+		},
+		"js_jbor": func(a []uint64) uint64 {
+			if lb, lok := u(a[0]).(bool); lok {
+				if rb, rok := u(a[1]).(bool); rok {
+					return boolH(lb || rb)
+				}
+			}
+			return rt.wrapNum(float64(rt.toInt32(u(a[0])) | rt.toInt32(u(a[1]))))
+		},
+		"js_jbxor": func(a []uint64) uint64 {
+			if lb, lok := u(a[0]).(bool); lok {
+				if rb, rok := u(a[1]).(bool); rok {
+					return boolH(lb != rb)
+				}
+			}
+			return rt.wrapNum(float64(rt.toInt32(u(a[0])) ^ rt.toInt32(u(a[1]))))
+		},
 		"js_sub": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) - rt.toNumber(u(a[1]))) },
 		"js_mul": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) * rt.toNumber(u(a[1]))) },
 		"js_div": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) / rt.toNumber(u(a[1]))) },

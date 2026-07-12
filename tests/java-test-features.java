@@ -533,6 +533,23 @@ public class Main {
         Main.check("loop-break-out-of-try", Main.loopBreakOutOfTry() == 3);
         Main.check("loop-continue-out-of-try", Main.loopContinueOutOfTry() == 4);
 
+        // ----- bitwise and shift operators (Java int semantics) -----
+        Main.check("bit-and-or-xor", (5 & 3) == 1 && (5 | 3) == 7 && (5 ^ 3) == 6);
+        Main.check("bit-not", ~5 == -6);
+        Main.check("shifts", (1 << 4) == 16 && (-16 >> 2) == -4 && (-8 >>> 28) == 15);
+        Main.check("bit-precedence", (7 & 3 | 4 ^ 1) == (3 | 5));
+        Main.check("bool-non-short", (true & true) && (true ^ true) == false && (false | true));
+        int bm = 12;
+        bm &= 10;
+        bm |= 1;
+        bm ^= 3;
+        bm <<= 2;
+        bm >>= 1;
+        Main.check("bit-compound", bm == 20);
+        int bu = -1;
+        bu >>>= 28;
+        Main.check("bit-compound-ushr", bu == 15);
+
         // ----- everything combined -----
         Main.check("combined-pipeline", Main.transform(new int[]{1, 2, -3}).equals("o1e2x"));
 
