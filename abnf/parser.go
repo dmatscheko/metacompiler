@@ -150,7 +150,11 @@ func (pa *parser) applyAsSequence(rules *r.Rules, skipSpaceRule *r.Rule, skipSpa
 		return nil
 	}
 	var newProductions *r.Rules // = nil
-	if len(*rules) == 1 {
+	// A sole Command child (a production that is just ':whitespace()') still
+	// needs the Sequence wrapper: applied directly, the Command would escape
+	// into the CALLER's sequence and change the caller's whitespace skipping,
+	// while ':whitespace() X' stays scoped to this production.
+	if len(*rules) == 1 && (*rules)[0].Operator != r.Command {
 		newProductions = pa.apply((*rules)[0], skipSpaceRule, skipSpaces, depth)
 	} else {
 		newRule := &r.Rule{Operator: r.Sequence, Childs: rules, Pos: pos}
