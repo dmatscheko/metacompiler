@@ -465,11 +465,15 @@ CharBody    = "\\" ( "u" NumHexDig NumHexDig NumHexDig NumHexDig | CharEsc ) | C
 CharEsc     = "n" | "t" | "r" | "b" | "'" | '"' | "\\" | "$" | "0" ;
 CharPlain   = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
-// A triple-quoted raw string: any content up to the closing """ (internal runs of one
-// or two quotes are allowed). Recognised and reported as not implemented.
-RawStr      <~~ push(notImplExpr("raw string literal", up.pos)) ~~>
-            = '"""' :whitespace() { RawTwoQ | RawOneQ | RawPlain } '"""' :whitespace(Whitespace) ;
-RawPlain    = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
+// A triple-quoted raw string: content up to the closing """ (internal runs of one
+// or two quotes are allowed), kept verbatim - no escape processing - with genuine
+// $name / ${expr} interpolation (same maker as Template). A $ directly after an
+// internal quote is consumed as raw text (exotic corner, kept simple).
+RawStr      <~~ push(makeTemplate(takeAll())) ~~>
+            = '"""' :whitespace() { TplExpr | TplVar | RawChunk } '"""' :whitespace(Whitespace) ;
+RawChunk    <~~ push({s: up.in}) ~~>
+            = ( RawTwoQ | RawOneQ | RawPlain ) { RawTwoQ | RawOneQ | RawPlain } ;
+RawPlain    = "\x00"..."\x21" | "\x23"..."\x23" | "\x25"..."\U0010ffff" ;
 RawOneQ     = '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 
