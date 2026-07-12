@@ -1377,7 +1377,7 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		case "append": // Python: returns None.
 			o.elems = append(o.elems, argAt(args, 0))
 			return jsUndef
-		case "pop": // Python: removes and returns the last element.
+		case "pop", "removeLast": // Python / Dart: both remove and return the last element.
 			if len(o.elems) == 0 {
 				rt.fail("pop from empty list")
 			}

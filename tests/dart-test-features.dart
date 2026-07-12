@@ -415,6 +415,8 @@ int main() {
   check("list-write", nums[1] == 21);
   nums.add(40);
   check("list-add", nums.length == 4 && nums[3] == 40);
+  int taken = nums.removeLast();
+  check("list-removeLast", taken == 40 && nums.length == 3);
   check("list-contains", nums.contains(30) && !nums.contains(99));
   List<int> empty = [];
   check("list-empty", empty.length == 0 && empty.isEmpty && nums.isNotEmpty);
