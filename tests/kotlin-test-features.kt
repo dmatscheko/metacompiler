@@ -76,6 +76,16 @@ class Counter(val start: Int, var step: Int) {
     fun reset() { value = start }
 }
 
+// ----- lazy delegated properties (member level) -----
+class Lazies(val n: Int) {
+    val quad: Int by lazy { n * n }        // initializer reads a constructor param
+    val sum: Int by lazy {                 // multi-statement initializer body
+        var t = 0
+        for (i in 1..n) { t = t + i }
+        t
+    }
+}
+
 data class Point(val x: Int, val y: Int) {
     fun manhattan(): Int = abs(x) + abs(y)
     fun shifted(dx: Int): Point = Point(x + dx, y)   // returns a fresh instance
@@ -464,6 +474,15 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("objexpr-capture", oe.plus(12) == 42)
     val oe2 = object { val seed = oeBase + 1; fun read(): Int = seed }
     check("objexpr-prop-init", oe2.read() == 31)
+
+    // ----- lazy delegated properties (eager: initializer runs once, value cached) -----
+    val lazyK = 6
+    val lazyLocal: Int by lazy { lazyK * 7 }   // closes over the enclosing local
+    check("lazy-local", lazyLocal == 42)
+    val lazyModed: Int by lazy(LazyThreadSafetyMode.NONE) { 5 + 5 }
+    check("lazy-moded", lazyModed == 10)
+    val lz = Lazies(4)
+    check("lazy-member", lz.quad == 16 && lz.sum == 10)
 
     // ----- lists -----
     val ro = listOf(10, 20, 30)

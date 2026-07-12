@@ -28,11 +28,17 @@ extension functions with a body (fun Recv.name(...) { ... }) are genuine: recv.n
 binds the receiver to this - dispatch is by NAME (the receiver type is dropped), so an
 extension must not reuse a builtin or class method name (those win in both engines).
 
+Delegated properties: `val x by lazy { init }` is genuine (the initializer runs once
+and its value becomes a plain field; eager, so it is computed at the declaration, not
+on first access); every other delegate (by inject(), custom getValue/setValue) is not
+in the subset.
+
 Not in the subset: inheritance, interfaces, generics, nullable types (? is parsed and
 ignored), member-level and bodiless extension functions, named/default arguments,
 multi statement lambda bodies,
 data class methods
-(the data modifier is parsed), init blocks, secondary constructors, and bare method
+(the data modifier is parsed), init blocks, secondary constructors, non-lazy
+property delegates, and bare method
 calls (methods are called via this.m() or obj.m()).
 
 Functions, methods and lambdas become IR functions jsf_N(env, args) (methods get the
@@ -139,12 +145,25 @@ CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
 Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | UnsupFun ) ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
-// A delegated property (val/var x [: T] by <expr>, e.g. `by lazy { ... }` or the
-// Koin/DI `by inject()`): reading it dispatches through the delegate's getValue/
-// setValue protocol, which is outside the subset. It parses and is reported as not
-// implemented; the member contributes no field (like a property accessor).
-PropDelegate <~~ notImpl("delegated property", up.pos) ~~>
+// A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
+// is GENUINE (see LazyProp): the initializer is lowered once and its value becomes a
+// plain field, so reads use the ordinary member machinery. Every OTHER delegate -
+// the Koin/DI `by inject()`, a custom getValue/setValue, `by Delegates.observable`,
+// `var by` (Kotlin allows lazy only on val) - needs the delegate protocol, which is
+// outside the subset: parsed and reported as not implemented (no field, like an
+// accessor). LazyProp is tried first; a non-lazy delegate backtracks to UnsupDelegate.
+PropDelegate = LazyProp | UnsupDelegate ;
+LazyProp    <~~ push(makeProp(takeAll())) ~~>
+            = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
+UnsupDelegate <~~ notImpl("delegated property", up.pos) ~~>
             = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
+// The lazy initializer lambda, wrapped so it lowers to "build the closure, call it
+// once (no args)" - the property's init thunk. EAGER: the value is computed at the
+// declaration, not on first access (single-threaded, deterministic). Deviation: a
+// lazy initializer that forward-references a not-yet-initialized property sees it
+// unset (real Kotlin defers past that); write lazy inits over already-bound names.
+LazyInit    <~~ push(makeLazyInit(pop())) ~~>
+            = Lambda ;
 
 // Type is parsed and (apart from steering as/is) ignored. Generics (<...>) and the
 // nullable ? are accepted and dropped; dotted names and simple function types too.
@@ -183,10 +202,14 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 
 Decl        <~~ push(makeDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
-// A local or top-level delegated property (val x by lazy { ... }): same delegate
-// protocol gap as PropDelegate; parsed and reported as not implemented, with a
-// placeholder statement so the surrounding code still lowers under -warn-unsupported.
-DelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
+// A local or top-level delegated property (val x by <delegate>). Same split as
+// PropDelegate: `val x by lazy { init }` is GENUINE (LazyDecl - the initializer is
+// lowered once and x becomes an ordinary binding); every other delegate is not
+// implemented, with a placeholder so the rest still lowers under -warn-unsupported.
+DelegateDecl = LazyDecl | UnsupDelegateDecl ;
+LazyDecl    <~~ push(makeDecl(takeAll())) ~~>
+            = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
+UnsupDelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
             = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
@@ -611,6 +634,7 @@ Accessor    = ( KwGet | KwSet ) "(" [ Id [ ":" Type ] ] ")" [ ":" Type ] [ SkipB
 Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
             = ( "val" | "var" ) KwEnd "(" Id { "," Id } ")" [ ":" Type ] "=" Expression [ ";" ] ;
 
+KwLazy      = "lazy" KwEnd ;
 KwInterface = "interface" KwEnd ;
 KwObject    = "object" KwEnd ;
 KwEnum      = "enum" KwEnd ;
@@ -1059,6 +1083,18 @@ KwStep      = "step" KwEnd ;
     function makeDestructure(init, pos) {
         notImpl("destructuring declaration", pos)
         return function(b) { var r = init(b); return r.b }
+    }
+
+    // `by lazy { init }`: the init thunk emits the lambda closure and calls it once
+    // (no args), yielding the initializer's value. Used as a plain property/decl
+    // initializer, so the lazy value is computed eagerly at the declaration.
+    function makeLazyInit(lambdaThunk) {
+        return function(b) {
+            var r = lambdaThunk(b)
+            b = r.b
+            var argsV = callExt(b, "js_arr_new", [])
+            return {b: b, v: callExt(b, "js_call", [r.v, hUndef, argsV])}
+        }
     }
 
     // items = members ({prop} | {method}): an anonymous class instance built where
