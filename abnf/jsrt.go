@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/llir/llvm/ir"
 )
@@ -849,15 +851,17 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 		if ks, isStr := key.(string); isStr {
 			switch ks {
 			case "length":
-				return float64(len(o))
+				return float64(jsStrLen(o))
 			case "charCodeAt", "charAt", "indexOf", "replace", "slice", "substring", "split",
 				"toUpperCase", "toLowerCase", "trim":
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
 		idx := rt.toNumber(key)
-		if idx == math.Trunc(idx) && idx >= 0 && int(idx) < len(o) {
-			return string(o[int(idx)])
+		if idx == math.Trunc(idx) && idx >= 0 {
+			if ch := jsStrAt(o, int(idx)); ch != "" {
+				return ch
+			}
 		}
 		return jsUndef
 	default:
@@ -1308,20 +1312,21 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 	case string:
 		switch name {
 		case "length":
-			return float64(len(o))
+			return float64(jsStrLen(o))
 		case "charAt":
-			i := int(rt.toNumber(argAt(args, 0)))
-			if i < 0 || i >= len(o) {
+			i := jsToInt(rt.toNumber(argAt(args, 0)))
+			ch := jsStrAt(o, i)
+			if ch == "" {
 				rt.fail("charAt(%d) out of range for %q", i, o)
 			}
-			return string(o[i])
+			return ch
 		case "equals":
 			return rt.strictEq(o, argAt(args, 0))
 		case "substring":
-			begin, end := substringRange(len(o), args, rt)
-			return o[begin:end]
+			begin, end := substringRange(jsStrLen(o), args, rt)
+			return jsStrRange(o, begin, end)
 		case "indexOf":
-			return float64(strings.Index(o, rt.toString(argAt(args, 0))))
+			return float64(jsStrIndexOf(o, rt.toString(argAt(args, 0))))
 		case "isEmpty":
 			return len(o) == 0
 		}
@@ -1471,7 +1476,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case string:
 		switch name {
 		case "length", "size":
-			return float64(len(o))
+			return float64(jsStrLen(o))
 		case "to_s":
 			return o
 		case "upcase":
@@ -1679,33 +1684,23 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 	case string:
 		switch m.name {
 		case "charCodeAt":
-			i := int(argN(0))
-			if len(args) == 0 {
-				i = 0
+			i := jsToInt(argN(0)) // A missing or NaN index reads unit 0 like in JS.
+			if code := jsStrCodeAt(recv, i); code >= 0 {
+				return float64(code)
 			}
-			if i < 0 || i >= len(recv) {
-				return math.NaN()
-			}
-			return float64(recv[i])
+			return math.NaN()
 		case "charAt":
-			i := int(argN(0))
-			if len(args) == 0 {
-				i = 0
-			}
-			if i < 0 || i >= len(recv) {
-				return ""
-			}
-			return string(recv[i])
+			return jsStrAt(recv, jsToInt(argN(0)))
 		case "indexOf":
-			return float64(strings.Index(recv, argS(0)))
+			return float64(jsStrIndexOf(recv, argS(0)))
 		case "replace":
 			return strings.Replace(recv, argS(0), argS(1), 1)
 		case "slice":
-			begin, end := sliceRange(len(recv), args, rt)
-			return recv[begin:end]
+			begin, end := sliceRange(jsStrLen(recv), args, rt)
+			return jsStrRange(recv, begin, end)
 		case "substring":
-			begin, end := substringRange(len(recv), args, rt)
-			return recv[begin:end]
+			begin, end := substringRange(jsStrLen(recv), args, rt)
+			return jsStrRange(recv, begin, end)
 		case "split":
 			parts := strings.Split(recv, argS(0))
 			out := &jsArray{}
@@ -1745,6 +1740,89 @@ func derefSliceValue(v reflect.Value) reflect.Value {
 		return v
 	}
 	return reflect.Value{}
+}
+
+// ----------------------------------------------------------------------------
+// UTF-16 string semantics
+//
+// goja strings are UTF-16 code unit sequences, jsrt strings are Go (UTF-8)
+// strings. Every operation that measures or indexes a string must count UTF-16
+// code units, not bytes, or the engines diverge on any non-ASCII string
+// ("é".length was 1 under goja but the byte count under -frozen, and the
+// byte-based charCodeAt/fromCharCode round trip in unescapeJs double-encoded
+// every non-ASCII string literal). ASCII strings take the byte fast path.
+// Lone surrogate halves cannot round-trip through a Go string (they decode to
+// U+FFFD); BMP behavior is exact.
+
+func strASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// strUnits returns s as UTF-16 code units.
+func strUnits(s string) []uint16 { return utf16.Encode([]rune(s)) }
+
+// strFromUnits builds a string back from UTF-16 code units.
+func strFromUnits(u []uint16) string { return string(utf16.Decode(u)) }
+
+// jsStrLen is the JS length of s: its number of UTF-16 code units.
+func jsStrLen(s string) int {
+	if strASCII(s) {
+		return len(s)
+	}
+	return len(strUnits(s))
+}
+
+// jsStrIndexOf is the JS indexOf: the byte match position converted to a
+// code unit index (a UTF-8 substring match always lies on a rune boundary).
+func jsStrIndexOf(s, sub string) int {
+	p := strings.Index(s, sub)
+	if p <= 0 {
+		return p // -1 and 0 are the same in both worlds.
+	}
+	return jsStrLen(s[:p])
+}
+
+// jsStrAt returns the one-code-unit string at unit index i, or "" outside.
+func jsStrAt(s string, i int) string {
+	if strASCII(s) {
+		if i < 0 || i >= len(s) {
+			return ""
+		}
+		return string(s[i])
+	}
+	units := strUnits(s)
+	if i < 0 || i >= len(units) {
+		return ""
+	}
+	return strFromUnits(units[i : i+1])
+}
+
+// jsStrCodeAt returns the code unit at unit index i, or -1 outside.
+func jsStrCodeAt(s string, i int) int {
+	if strASCII(s) {
+		if i < 0 || i >= len(s) {
+			return -1
+		}
+		return int(s[i])
+	}
+	units := strUnits(s)
+	if i < 0 || i >= len(units) {
+		return -1
+	}
+	return int(units[i])
+}
+
+// jsStrRange slices s by code unit indexes (begin <= end, both in range).
+func jsStrRange(s string, begin, end int) string {
+	if strASCII(s) {
+		return s[begin:end]
+	}
+	return strFromUnits(strUnits(s)[begin:end])
 }
 
 // substringRange resolves JS substring(begin, end) arguments: NaN and negative
@@ -2214,13 +2292,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(o.elems[idx])
 			case string:
+				n := jsStrLen(o)
 				if idx < 0 {
-					idx += len(o)
+					idx += n
 				}
-				if idx < 0 || idx >= len(o) {
+				if idx < 0 || idx >= n {
 					rt.fail("string index out of range: %d", int(rt.toNumber(u(a[1]))))
 				}
-				return rt.wrapStr(string(o[idx]))
+				return rt.wrapStr(jsStrAt(o, idx))
 			}
 			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
 			return 0
@@ -2290,7 +2369,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case float64:
 				return rt.wrapNum(o)
 			case string:
-				return rt.wrapNum(float64(len(o)))
+				return rt.wrapNum(float64(jsStrLen(o)))
 			case *jsArray:
 				return rt.wrapNum(float64(len(o.elems)))
 			}
@@ -2336,7 +2415,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pylen": func(a []uint64) uint64 { // len() for strings, lists and dicts.
 			switch o := u(a[0]).(type) {
 			case string:
-				return rt.wrapNum(float64(len(o)))
+				return rt.wrapNum(float64(jsStrLen(o)))
 			case *jsArray:
 				return rt.wrapNum(float64(len(o.elems)))
 			}
@@ -2352,8 +2431,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(&jsArray{elems: append([]interface{}{}, o.elems...)})
 			case string:
 				out := &jsArray{}
-				for i := 0; i < len(o); i++ {
-					out.elems = append(out.elems, string(o[i]))
+				for i, n := 0, jsStrLen(o); i < n; i++ {
+					out.elems = append(out.elems, jsStrAt(o, i))
 				}
 				return w(out)
 			}
@@ -2369,8 +2448,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return a[0]
 			case string:
 				out := &jsArray{}
-				for i := 0; i < len(o); i++ {
-					out.elems = append(out.elems, string(o[i]))
+				for i, n := 0, jsStrLen(o); i < n; i++ {
+					out.elems = append(out.elems, jsStrAt(o, i))
 				}
 				return w(out)
 			}
@@ -2386,8 +2465,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				from, to := rt.pySliceRange(u(a[1]), u(a[2]), len(o.elems))
 				return w(&jsArray{elems: append([]interface{}{}, o.elems[from:to]...)})
 			case string:
-				from, to := rt.pySliceRange(u(a[1]), u(a[2]), len(o))
-				return rt.wrapStr(o[from:to])
+				from, to := rt.pySliceRange(u(a[1]), u(a[2]), jsStrLen(o))
+				return rt.wrapStr(jsStrRange(o, from, to))
 			}
 			rt.fail("slicing a %s", rt.typeOf(u(a[0])))
 			return 0
@@ -2565,7 +2644,7 @@ func standardJSBindings() map[string]interface{} {
 				return true
 			}
 			idx, err := strconv.Atoi(key)
-			return err == nil && idx >= 0 && idx < len(o)
+			return err == nil && idx >= 0 && idx < jsStrLen(o)
 		default:
 			rv := reflect.ValueOf(rt.unwrap(this))
 			if rv.Kind() == reflect.Map {
