@@ -250,6 +250,18 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     val ifB = if (5 < 3) "a" else "b"
     check("if-expr", ifA == "a" && ifB == "b")
 
+    // ----- stdlib infix operators: to / and / or / xor / shl / shr / ushr -----
+    val pair = 3 to "three"
+    check("infix-to", pair.first == 3 && pair.second == "three")
+    val nested = 1 to 2 to 3                 // left-assoc: (1 to 2) to 3
+    check("infix-to-chain", nested.first.second == 2 && nested.second == 3)
+    check("infix-bitwise", (12 and 10) == 8 && (12 or 3) == 15 && (12 xor 10) == 6)
+    check("infix-shift", (1 shl 5) == 32 && (-16 shr 2) == -4 && ((0 - 1) ushr 28) == 15)
+    check("infix-bool", (true and false) == false && (false or true) == true && (true xor true) == false)
+    check("infix-precedence", (1 shl 2 + 1) == 8)   // + binds tighter: 1 shl 3
+    val pairs = listOf(1 to 10, 2 to 20)
+    check("infix-to-in-list", pairs[1].first == 2 && pairs[1].second == 20)
+
     // ----- strings and templates -----
     check("str-concat", "foo" + "bar" == "foobar")
     check("str-int-concat", "n=" + 42 == "n=42" && 1 + 2 + "x" == "3x")

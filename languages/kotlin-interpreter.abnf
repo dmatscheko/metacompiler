@@ -17,7 +17,10 @@ map/filter/sumOf/forEach/count/any, classes with primary constructor properties
 (class Counter(val start: Int) { var value = start; fun next(): Int { ... } }) and
 implicit property access inside methods (value += step resolves against this), object
 creation without new (Counter(5)), string templates ('x=$x sum=${a+b}'), listOf() with
-.size, indexing, .add()/.get()/.contains(), the builtins println/print/abs/max/min and
+.size, indexing, .add()/.get()/.contains(), the stdlib infix operators (a to b builds
+a Pair read via .first/.second; and/or/xor are boolean logical on two booleans and
+int32 bitwise otherwise; shl/shr/ushr are the int32 shifts), the builtins
+println/print/abs/max/min and
 exitProcess. Int arithmetic is 32 bit and / truncates; + concatenates when one side is
 a String; == compares structurally for strings and by identity for objects.
 
@@ -274,14 +277,15 @@ NotArrow    = :script(~~
 Elvis       <~~ push(makeElvis(takeAll())) ~~>
             = InfixExpr { "?:" InfixExpr } ;
 
-// A stdlib infix call - a to b (Pair), a and b / a shl b (bitwise) - binds tighter than
-// elvis and looser than +/-, matching Kotlin. The operand types (Pair, bitwise Int) are
-// outside the value subset, so the operands run and the result is reported as not
-// implemented. Only these built-in infix names are recognised (not arbitrary user infix
-// funs); the InfixOp token pushes nothing, so makeInfix just sees the operand thunks.
-InfixExpr   <~~ push(makeInfix(takeAll(), up.pos)) ~~>
+// A stdlib infix call - a to b (Pair), a and b / a shl b - binds tighter than elvis
+// and looser than +/-, matching Kotlin. All seven are genuine: `to` builds a Pair
+// (read via .first/.second), and/or/xor are the non-short-circuit boolean operators
+// on two booleans and the int32 bit operations otherwise, shl/shr/ushr are the int32
+// shifts. Only these built-in infix names are recognised (not arbitrary user infix
+// funs); the names stay usable as identifiers (KwEnd word boundary).
+InfixExpr   <~~ push(makeInfix(takeAll())) ~~>
             = AddExpr { InfixOp AddExpr } ;
-InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) KwEnd ;
+InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) <~~ push({iop: up.in}) ~~> KwEnd ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -634,13 +638,30 @@ KwStep      = "step" KwEnd ;
             return m.neg ? !hit : hit
         }
     }
-    // A curated stdlib infix call (a to b, a and b, ...). Recognised, not lowered: the
-    // operands run (for their side effects and nested warnings) and the result is
-    // undefined. items holds only operand thunks (InfixOp pushes nothing).
-    function makeInfix(items, pos) {
+    // A curated stdlib infix call, folded left to right: a to b builds a Pair
+    // {first, second}; and/or/xor are the non-short-circuit boolean operators on two
+    // booleans and int32 bit operations otherwise; shl/shr/ushr are the int32 shifts
+    // (ushr wraps back to a signed int like Kotlin's Int.ushr).
+    // items alternates operand thunks and {iop} markers.
+    function applyInfix(op, l, r) {
+        if (op == "to") { return {first: l, second: r} }
+        if (op == "and") { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
+        if (op == "or") { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }
+        if (op == "xor") { if (typeof l == "boolean" && typeof r == "boolean") { return l != r } return l ^ r }
+        if (op == "shl") { return l << r }
+        if (op == "shr") { return l >> r }
+        return (l >>> r) | 0 // ushr
+    }
+    function makeInfix(items) {
         if (items.length == 1) { return items[0] }
-        notImpl("infix operator", pos)
-        return function() { for (var i = 0; i < items.length; i++) items[i](); return undefined }
+        return function() {
+            var v = anytype // A fold step can turn a number into a Pair or boolean.
+            v = items[0]()
+            for (var i = 1; i < items.length; i += 2) {
+                v = applyInfix(items[i].iop, v, items[i + 1]())
+            }
+            return v
+        }
     }
     function applyTypeOp(items) {
         if (items.length == 1) { return items[0] }

@@ -1,14 +1,15 @@
 /* Compact self-check for the Kotlin parse-surface widenings, in a small geometry theme
  * deliberately unlike any real application. The GENUINE constructs are asserted; the
- * recognised-but-not-lowered ones - the infix `to`, and extension / abstract functions -
- * are only present so they parse. Run with -warn-unsupported: those warn and main() runs
- * to exitProcess(fails), which is 0 when every check passes. SHOULD FAIL by default: it
+ * recognised-but-not-lowered ones - extension / abstract functions - are only present
+ * so they parse. Run with -warn-unsupported: those warn and main() runs to
+ * exitProcess(fails), which is 0 when every check passes. SHOULD FAIL by default: it
  * aborts at the first not-implemented construct.
  *
  * Covers: labelled receiver this@Box; calls with a trailing lambda, the no-paren form,
  * and explicit type arguments (top-level and method); `when` with a val-binding subject
  * and is-type arms (never match, else wins) on consecutive lines (a postfix `is` must
- * not swallow the following arrow); and a statement-level annotation. */
+ * not swallow the following arrow); a statement-level annotation; and the infix `to`
+ * (now genuine: a Pair read via .first/.second). */
 
 // Recognised, not lowered: an extension function and an abstract member; both only warn.
 fun Int.stepped(): Int = this + 1
@@ -72,8 +73,9 @@ fun main() {
     val flagged = 42
     if (flagged != 42) { fails = fails + 1 }
 
-    // recognised, not lowered: the infix `to` (a Pair) is parsed and warned; result unused
+    // the infix `to` is genuine now: a Pair with first/second
     val paired = 3 to 4
+    if (paired.first + paired.second != 7) { fails = fails + 1 }
 
     exitProcess(fails)
 }
