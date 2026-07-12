@@ -458,7 +458,13 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
-		if t == math.Trunc(t) && !math.IsInf(t, 0) && math.Abs(t) < 1e15 {
+		// goja normalizes every integral number that fits an int64 to its int
+		// representation (floatToValue), so its Export delivers int64 for them
+		// and fmt prints digits. Mirror that exactly: the old 1e15 cutoff made
+		// println(1000000000000000) print 1e+15 under -frozen only. -0 stays a
+		// float like in goja (fmt prints it as -0).
+		if t == math.Trunc(t) && !math.IsInf(t, 0) && t >= math.MinInt64 && t < math.MaxInt64 &&
+			!(t == 0 && math.Signbit(t)) {
 			return int64(t)
 		}
 		return t
