@@ -2494,7 +2494,9 @@ func standardJSBindings() map[string]interface{} {
 	stringObj.set("fromCharCode", jsHostFunc("fromCharCode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		var sb strings.Builder
 		for _, a := range args {
-			sb.WriteRune(rune(int64(rt.toNumber(a))))
+			// ECMA ToUint16: NaN becomes 0 (via jsToInt) and larger values
+			// wrap modulo 2^16 before the code unit becomes a rune.
+			sb.WriteRune(rune(uint16(jsToInt(rt.toNumber(a)))))
 		}
 		return sb.String()
 	}))
@@ -2570,13 +2572,17 @@ func standardJSBindings() map[string]interface{} {
 			return fmt.Sprintf(rt.toString(args[0]), rt.printArgs(args[1:])...)
 		}),
 		"parseInt": jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			return jsParseInt(rt.toString(argAt(args, 0)), int(rt.toNumber(argAt(args, 1))))
+			// A missing radix is NaN here; jsToInt turns it into 0, which
+			// jsParseInt treats as "auto" (10, or 16 for an 0x prefix). A raw
+			// int(NaN) is minInt64 on amd64, which made every one-argument
+			// parseInt return NaN there.
+			return jsParseInt(rt.toString(argAt(args, 0)), jsToInt(rt.toNumber(argAt(args, 1))))
 		}),
 		"parseFloat": jsHostFunc("parseFloat", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return jsParseFloat(rt.toString(argAt(args, 0)))
 		}),
 		"exit": jsHostFunc("exit", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-			os.Exit(int(int32(int64(rt.toNumber(argAt(args, 0))))))
+			os.Exit(int(int32(jsToInt(rt.toNumber(argAt(args, 0))))))
 			return jsUndef
 		}),
 		"Math":   mathObj,
@@ -2685,6 +2691,22 @@ func (rt *jsrt) callEntry(ma *machine, name string, env uint64) uint64 {
 	rt.traceDepth--
 	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Val: rt.traceVal(rt.unwrap(h))})
 	return h
+}
+
+// jsToInt converts a JS number to a Go int for host-side argument positions:
+// NaN becomes 0 (a plain int(f) of NaN is architecture specific in Go - 0 on
+// arm64 but minInt64 on amd64), and out-of-range values saturate.
+func jsToInt(f float64) int {
+	if f != f {
+		return 0
+	}
+	if f >= math.MaxInt64 {
+		return math.MaxInt64
+	}
+	if f <= math.MinInt64 {
+		return math.MinInt64
+	}
+	return int(f)
 }
 
 // toInt32 converts a JS value to an int32 like the JS ToInt32 operation.
