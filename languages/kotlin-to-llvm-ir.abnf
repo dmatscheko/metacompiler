@@ -23,10 +23,14 @@ a Pair read via .first/.second; and/or/xor are boolean logical on two booleans a
 int32 bitwise otherwise; shl/shr/ushr are the int32 shifts), the builtins
 println/print/abs/max/min and
 exitProcess. Int arithmetic is 32 bit and / truncates; + concatenates when one side is
-a String; == compares structurally for strings and by identity for objects.
+a String; == compares structurally for strings and by identity for objects. Top level
+extension functions with a body (fun Recv.name(...) { ... }) are genuine: recv.name()
+binds the receiver to this - dispatch is by NAME (the receiver type is dropped), so an
+extension must not reuse a builtin or class method name (those win in both engines).
 
 Not in the subset: inheritance, interfaces, generics, nullable types (? is parsed and
-ignored), extension functions, named/default arguments, multi statement lambda bodies,
+ignored), member-level and bodiless extension functions, named/default arguments,
+multi statement lambda bodies,
 data class methods
 (the data modifier is parsed), init blocks, secondary constructors, and bare method
 calls (methods are called via this.m() or obj.m()).
@@ -54,7 +58,7 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | UnsupFun | ClassDecl | TopProp ) } ;
+            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassDecl | TopProp ) } ;
 
 // Modifiers and annotations before a declaration are parsed and ignored (they do
 // not change what we lower). Annotations accept ALL forms: an argument list
@@ -97,12 +101,22 @@ FunBody     = Block | "=" ExprBody ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
 
-// A function declaration outside the executable subset: an extension function
-// (fun Receiver.name(...), dotted name - receiver dispatch unsupported) or an
-// abstract / bodiless declaration (abstract fun name(): R). A NON-dotted fun WITH
-// a body is deliberately NOT matched here: its body must parse in FunDecl, so a
-// syntax gap inside the body surfaces at its true position instead of degrading
-// the whole function into this notImpl.
+// A top-level extension function WITH a body - fun Receiver.name(params): T { ... } -
+// is genuine: it lowers to an IR function whose instance slot is the receiver (bound
+// to `this`), declared under "ext$name"; the mcall suffix emitter dispatches
+// recv.name(args) to it (see extResolves). The receiver type (dotted, generic,
+// nullable) is parsed and DROPPED: dispatch is by NAME, so an extension must not
+// reuse a builtin or class method name (those always win). RecvSeg pushes nothing.
+ExtFun      <~~ push(makeExtFunStmt(makeFun(takeAll()))) ~~>
+            = KwFun [ SkipAngle ] RecvSeg { RecvSeg } Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
+RecvSeg     = Id [ SkipAngle ] [ "?" ] "." ;
+
+// A function declaration outside the executable subset: a BODILESS extension or
+// abstract declaration (abstract fun name(): R / fun Recv.name(): R). A NON-dotted
+// fun WITH a body is deliberately NOT matched here: its body must parse in FunDecl,
+// so a syntax gap inside the body surfaces at its true position instead of degrading
+// the whole function into this notImpl. (Member-level extension functions also land
+// here: they carry two receivers, which the single-`this` subset cannot model.)
 UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
             = KwFun [ SkipAngle ] ( ExtFunName SkipParen [ ":" Type ] [ SkipBlock | "=" DiscardExpr ]
                                   | Id [ SkipAngle ] SkipParen [ ":" Type ] ) ;
@@ -606,6 +620,24 @@ KwStep      = "step" KwEnd ;
     var hidCount = 0     // Names hidden loop counters.
     var classNames = {}  // Known class names (constructor calls).
 
+    // ----- Extension functions: dispatch by name, the receiver becomes `this` -----
+    // Method names the runtime implements on strings/lists/dicts (the interpreter
+    // grammar uses the same list): an extension function never shadows them, so
+    // both engines make the same dispatch decision for every (receiver, name).
+    var extFunNames = {}
+    var classMethodNames = {}
+    var builtinMethodNames = {}
+    var bmn = ["length", "charAt", "equals", "substring", "indexOf", "isEmpty",
+               "keys", "values", "get", "add", "append", "pop", "removeLast", "size",
+               "contains", "map", "filter", "sumOf", "forEach", "count", "any"]
+    for (var bi = 0; bi < bmn.length; bi++) { builtinMethodNames["$" + bmn[bi]] = true }
+    function extResolves(name) {
+        if (extFunNames["$" + name] != true) { return false }
+        if (builtinMethodNames["$" + name] == true) { return false }
+        if (classMethodNames["$" + name] == true) { return false }
+        return true
+    }
+
     // ----- Imports & errors -----
     function fail(msg) { println("kotlin compiler error: " + msg); exit(1) }
 
@@ -897,6 +929,20 @@ KwStep      = "step" KwEnd ;
         var suffixes = items.slice(1)
         function emitSuffix(b, cur, s) {
             if (s.kind == "mcall") {
+                // An extension function wins only when no builtin or class method
+                // uses the name: call ext$name directly, receiver prepended (it may
+                // be null for a nullable-receiver extension; ?. still skips first).
+                if (extResolves(s.name)) {
+                    var efV = callExt(b, "js_kget", [curScopeV, emitStr(b, "ext$" + s.name)])
+                    var eargsV = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [eargsV, cur])
+                    for (var ej = 0; ej < s.args.length; ej++) {
+                        var er = s.args[ej](b)
+                        b = er.b
+                        callExt(b, "js_arr_push", [eargsV, er.v])
+                    }
+                    return {b: b, v: callExt(b, "js_call", [efV, hUndef, eargsV])}
+                }
                 var ea = emitArgs(b, s.args)
                 return {b: ea.b, v: callExt(ea.b, "js_mcall", [cur, emitStr(ea.b, s.name), ea.v])}
             }
@@ -1333,6 +1379,19 @@ KwStep      = "step" KwEnd ;
             return b
         }
     }
+    // A top-level extension function: an IR function with the receiver in the
+    // instance slot (isInstance binds args[0] to `this`), declared as "ext$name".
+    // The name registers at walk time, so every mcall suffix emitted later (all
+    // emission happens inside buildMain) sees the complete extension table.
+    function makeExtFunStmt(f) {
+        extFunNames["$" + f.name] = true
+        return function(b) {
+            var idx = emitFunc(f.params, f.body, true)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ext$" + f.name),
+                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            return b
+        }
+    }
     function makeCtorParam(items) {
         if (items.length > 1) return {name: items[1], prop: true}
         return {name: items[0], prop: false}
@@ -1391,6 +1450,12 @@ KwStep      = "step" KwEnd ;
             else if (items[i].method != undefined) methods.push(items[i].method)
         }
         classNames[name] = 1
+        for (var cm = 0; cm < methods.length; cm++) { classMethodNames["$" + methods[cm].name] = true }
+        if (comp != null) {
+            for (var cc = 0; cc < comp.length; cc++) {
+                if (comp[cc].method != undefined) { classMethodNames["$" + comp[cc].method.name] = true }
+            }
+        }
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
@@ -1451,6 +1516,7 @@ KwStep      = "step" KwEnd ;
             if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
             else if (items[i].method != undefined) methods.push(items[i].method)
         }
+        for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])

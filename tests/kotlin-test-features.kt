@@ -55,6 +55,17 @@ fun applyTwice(f: (Int) -> Int, x: Int): Int = f(f(x))
 fun adder(base: Int): (Int) -> Int = { x -> base + x }
 fun compose(f: (Int) -> Int, g: (Int) -> Int): (Int) -> Int = { x -> f(g(x)) }
 
+// ----- extension functions (top-level, with a body; dispatch by name) -----
+fun Int.doubled(): Int = this * 2
+fun String.shout(): String = this + "!"
+fun String.rep(n: Int): String {
+    var out = ""
+    for (i in 1..n) { out = out + this }
+    return out
+}
+fun Int?.orZero(): Int = this ?: 0         // nullable receiver: callable on null
+fun Int.fold0(): Int = if (this <= 0) 0 else (this - 1).fold0() + 1   // recursion
+
 // ----- classes -----
 class Counter(val start: Int, var step: Int) {
     var value = start                      // property initializer sees the ctor params
@@ -403,6 +414,16 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     var feSum = 0
     nums.forEach { feSum += it }
     check("hof-foreach", feSum == 8)
+
+    // ----- extension functions -----
+    check("ext-int", 21.doubled() == 42)
+    check("ext-string", "hi".shout() == "hi!")
+    check("ext-args", "ab".rep(2) == "abab")
+    check("ext-chain", 3.doubled().doubled() == 12)
+    val extNull: Int? = null
+    check("ext-nullable-recv", extNull.orZero() == 0 && 5.orZero() == 5)
+    check("ext-safe-skip", extNull?.doubled() == null)
+    check("ext-recursion", 6.fold0() == 6)
 
     // ----- lists -----
     val ro = listOf(10, 20, 30)

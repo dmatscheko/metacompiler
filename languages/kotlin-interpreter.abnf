@@ -22,10 +22,14 @@ a Pair read via .first/.second; and/or/xor are boolean logical on two booleans a
 int32 bitwise otherwise; shl/shr/ushr are the int32 shifts), the builtins
 println/print/abs/max/min and
 exitProcess. Int arithmetic is 32 bit and / truncates; + concatenates when one side is
-a String; == compares structurally for strings and by identity for objects.
+a String; == compares structurally for strings and by identity for objects. Top level
+extension functions with a body (fun Recv.name(...) { ... }) are genuine: recv.name()
+binds the receiver to this - dispatch is by NAME (the receiver type is dropped), so an
+extension must not reuse a builtin or class method name (those win in both engines).
 
 Not in the subset: inheritance, interfaces, generics, nullable types (? is parsed and
-ignored), extension functions, named/default arguments, multi statement lambda bodies,
+ignored), member-level and bodiless extension functions, named/default arguments,
+multi statement lambda bodies,
 data class methods
 (the data modifier is parsed), init blocks, secondary constructors, and bare method
 calls (methods are called via this.m() or obj.m()).
@@ -44,7 +48,7 @@ The entry point is fun main(); self checking programs end with exitProcess(failu
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ registerFun(pop()) ~~> | UnsupFun | ClassDecl | TopProp ) } ;
+Program     = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | UnsupFun | ClassDecl | TopProp ) } ;
 
 // Modifiers/annotations before a declaration are parsed and ignored. Annotations
 // accept ALL forms: an argument list @Suppress("Unused"), qualified names @a.b.C,
@@ -80,12 +84,22 @@ FunBody     = Block | "=" ExprBody ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
 
-// A function declaration outside the executable subset: an extension function
-// (fun Receiver.name(...), dotted name - receiver dispatch unsupported) or an
-// abstract / bodiless declaration (abstract fun name(): R). A NON-dotted fun WITH
-// a body is deliberately NOT matched here: its body must parse in FunDecl, so a
-// syntax gap inside the body surfaces at its true position instead of degrading
-// the whole function into this notImpl.
+// A top-level extension function WITH a body - fun Receiver.name(params): T { ... } -
+// is genuine: it registers under its bare name, and a method call recv.name(args)
+// dispatches to it with the receiver bound to `this` (a nullable-receiver extension
+// may see null). The receiver type (dotted, generic, nullable) is parsed and DROPPED:
+// dispatch is by NAME, so an extension must not reuse a builtin or class method name
+// (those always win; see extResolves). The tag-less RecvSeg pushes nothing.
+ExtFun      <~~ registerExtFun(takeAll()) ~~>
+            = KwFun [ SkipAngle ] RecvSeg { RecvSeg } Id <~~ push(up.in) ~~> ParamList [ ":" Type ] FunBody ;
+RecvSeg     = Id [ SkipAngle ] [ "?" ] "." ;
+
+// A function declaration outside the executable subset: a BODILESS extension or
+// abstract declaration (abstract fun name(): R / fun Recv.name(): R). A NON-dotted
+// fun WITH a body is deliberately NOT matched here: its body must parse in FunDecl,
+// so a syntax gap inside the body surfaces at its true position instead of degrading
+// the whole function into this notImpl. (Member-level extension functions also land
+// here: they carry two receivers, which the single-`this` subset cannot model.)
 UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
             = KwFun [ SkipAngle ] ( ExtFunName SkipParen [ ":" Type ] [ SkipBlock | "=" DiscardExpr ]
                                   | Id [ SkipAngle ] SkipParen [ ":" Type ] ) ;
@@ -700,7 +714,51 @@ KwStep      = "step" KwEnd ;
         return "" + v
     }
 
+    // ----- Extension functions: dispatch by name, the receiver becomes `this` -----
+    // Method names the runtime implements on strings/lists/dicts (the compiler
+    // grammar uses the same list): an extension function never shadows them, so
+    // both engines make the same dispatch decision for every (receiver, name).
+    var extFuns = {}
+    var classMethodNames = {}
+    var builtinMethodNames = {}
+    var bmn = ["length", "charAt", "equals", "substring", "indexOf", "isEmpty",
+               "keys", "values", "get", "add", "append", "pop", "removeLast", "size",
+               "contains", "map", "filter", "sumOf", "forEach", "count", "any"]
+    for (var bi = 0; bi < bmn.length; bi++) { builtinMethodNames["$" + bmn[bi]] = true }
+    // items = [name, {params}, body]: the receiver type was dropped by RecvSeg.
+    // Like makeMethodClosure/invokeBody, but `this` is declared UNCONDITIONALLY:
+    // a nullable-receiver extension runs with this = null (invokeBody would skip
+    // the null binding, and the compiled twin binds args[0] unconditionally).
+    function registerExtFun(items) {
+        var params = items[1].params
+        var body = items[2]
+        extFuns["$" + items[0]] = function() {
+            var recv = arguments[0]
+            var args = arguments
+            var saved = scopes
+            scopes = [globalScope, {}]
+            declVar("this", recv)
+            for (var i = 0; i < params.length; i++) {
+                declVar(params[i], i + 1 < args.length ? args[i + 1] : undefined)
+            }
+            if (core.framePush != null) core.framePush()
+            var r = body()
+            if (core.framePop != null) core.framePop()
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+    function extResolves(name) {
+        if (extFuns["$" + name] == undefined) { return false }
+        if (builtinMethodNames["$" + name] == true) { return false }
+        if (classMethodNames["$" + name] == true) { return false }
+        return true
+    }
+
     function mcall(target, name, args) {
+        // An extension function wins only when no builtin or class method uses the
+        // name; it runs with the receiver as `this` (null for a nullable receiver).
+        if (extResolves(name)) { return extFuns["$" + name].apply(undefined, concat2impl([target], args)) }
         if (typeof target == "string") {
             if (name == "length") return target.length
             fail("unknown String method: " + name)
@@ -1167,6 +1225,7 @@ KwStep      = "step" KwEnd ;
         }
         for (var m2 = 0; m2 < methods.length; m2++) {
             cls[methods[m2].name] = makeMethodClosure(methods[m2])
+            classMethodNames["$" + methods[m2].name] = true
         }
         attachCompanion(cls, comp)
         globalScope[name] = cls
@@ -1189,6 +1248,7 @@ KwStep      = "step" KwEnd ;
             var holder = {}
             for (var k = 0; k < cmethods.length; k++) {
                 holder[cmethods[k].name] = makeMethodClosure(cmethods[k])
+                classMethodNames["$" + cmethods[k].name] = true
             }
             cls.__class = holder
         }
@@ -1216,6 +1276,7 @@ KwStep      = "step" KwEnd ;
         var cls = {__isclass: true, __name: name}
         for (var m2 = 0; m2 < methods.length; m2++) {
             cls[methods[m2].name] = makeMethodClosure(methods[m2])
+            classMethodNames["$" + methods[m2].name] = true
         }
         var obj = {__class: cls}
         var saved = scopes
