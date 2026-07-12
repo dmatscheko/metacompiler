@@ -455,7 +455,11 @@ MArgs       = "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lam
 // falls through), AnonFun/CallableRef before Call/VarRef (they would otherwise eat the
 // leading identifier). AnonFun and qualified callable references are recognised, not
 // lowered.
-Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | ThisExpr | Call | VarRef ;
+// IfExpr/WhenExpr also appear here (before Call/VarRef, which would read the `if`/
+// `when` keyword as an identifier) so an if/when expression can be an operand -
+// a + if (c) x else y, "n=" + when (k) { ... }. At statement level the If/When
+// statement forms are matched first, so this only fires in operand position.
+Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | ThisExpr | Call | VarRef ;
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
 // position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).

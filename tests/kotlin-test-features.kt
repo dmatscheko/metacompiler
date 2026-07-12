@@ -304,6 +304,10 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     val ifA = if (5 > 3) "a" else "b"
     val ifB = if (5 < 3) "a" else "b"
     check("if-expr", ifA == "a" && ifB == "b")
+    // if / when as an operand (not just a whole right-hand side)
+    check("if-as-operand", "n=" + if (5 > 3) "big" else "small" == "n=big")
+    check("if-as-operand-arith", 10 + if (5 > 3) 5 else 0 == 15)
+    check("when-as-operand", "v=" + when (2) { 1 -> "a"; 2 -> "b"; else -> "c" } == "v=b")
 
     // ----- stdlib infix operators: to / and / or / xor / shl / shr / ushr -----
     val pair = 3 to "three"
