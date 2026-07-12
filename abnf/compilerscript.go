@@ -82,6 +82,20 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 		return nil
 	}
 
+	// A script can start a nested compile (c.compile inside a startScript or
+	// tag), whose tags rebind up/push/pop below. Restore the caller's bindings
+	// afterwards like the frozen engine does (walkEngine saves curUp), so the
+	// rest of the outer script does not keep operating on the LAST inner tag's
+	// upStream - that leaked, and goja and -frozen printed different up.in.
+	savedUp := cs.vm.Get("up")
+	savedPop := cs.vm.Get("pop")
+	savedPush := cs.vm.Get("push")
+	defer func() {
+		cs.vm.Set("up", savedUp)
+		cs.vm.Set("pop", savedPop)
+		cs.vm.Set("push", savedPush)
+	}()
+
 	cs.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
 	cs.compilerFuncMap["localAsg"] = localASG // The local part of the abstract semantic graph.
 	// The node's source position is exposed as up.pos (set in compiler.go), which
