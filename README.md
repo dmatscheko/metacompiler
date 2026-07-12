@@ -327,6 +327,13 @@ the Go core then executes every annotation script goja free:
    llvm.* builder objects with their methods) - including JS closures that scripts push onto
    the stacks, which survive as IR function handles.
 
+Because a script's compiled module depends only on its source and the snapshot, step 2 is
+cached on disk across runs (`<user cache dir>/mec/scripts`, about 1MB per grammar): later
+`-frozen` runs reload the emitted `.ll` text instead of recompiling every tag script, which
+roughly halves their startup cost. A refreeze changes the snapshot hash and with it every
+cache key, so entries never go stale; `MEC_SCRIPT_CACHE=off` disables the cache,
+`MEC_SCRIPT_CACHE=<dir>` relocates it.
+
 All grammars pass their self checking runs with identical output in both modes;
 frozen mode is roughly an order of magnitude slower (threaded IR on an interpreter instead
 of a JS VM). goja is only needed to (re)create the snapshot after changing metajs-to-llvm-ir.abnf.

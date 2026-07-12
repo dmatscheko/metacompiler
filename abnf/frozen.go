@@ -57,7 +57,7 @@ const frozenDriverMarker = "// ===== goja driver ====="
 // serves every engine.
 type fkernel struct {
 	jsG      *r.Rules
-	bootMod  *ir.Module
+	bootMod  *ir.Module            // Parsed lazily by boot().
 	compiled map[string]*ir.Module // script source -> emitted module
 }
 
@@ -70,16 +70,60 @@ func frozenKernel() *fkernel {
 	if jsAgrammar == nil || len(jsBootstrapLL) == 0 {
 		panic("frozen mode needs the bootstrap snapshot: run 'mec -freeze languages/metajs-to-llvm-ir.abnf' and rebuild")
 	}
-	mod, err := asm.ParseString("jsbootstrap.ll", jsBootstrapLL)
-	if err != nil {
-		panic("cannot parse the frozen bootstrap module: " + err.Error())
-	}
 	theKernel = &fkernel{
 		jsG:      jsAgrammar,
-		bootMod:  mod,
 		compiled: map[string]*ir.Module{},
 	}
 	return theKernel
+}
+
+// boot returns the parsed bootstrap module. It is parsed on first use only:
+// compiling a script needs it, but a run whose scripts all come from the disk
+// cache never pays for parsing the ~650K snapshot.
+func (k *fkernel) boot() *ir.Module {
+	if k.bootMod == nil {
+		mod, err := asm.ParseString("jsbootstrap.ll", jsBootstrapLL)
+		if err != nil {
+			panic("cannot parse the frozen bootstrap module: " + err.Error())
+		}
+		k.bootMod = mod
+	}
+	return k.bootMod
+}
+
+// isBootScript reports whether a script source has a precompiled closure in
+// the bootstrap snapshot: the tag scripts and :script() commands of the
+// frozen js grammar itself (the same collection -freeze embeds). It lets
+// HandleScriptRule decide without parsing the snapshot.
+var bootScriptSet map[string]bool
+
+func isBootScript(code string) bool {
+	if bootScriptSet == nil {
+		bootScriptSet = map[string]bool{}
+		var collect func(rules *r.Rules)
+		collect = func(rules *r.Rules) {
+			if rules == nil {
+				return
+			}
+			for _, rule := range *rules {
+				if rule.Operator == r.Tag || (rule.Operator == r.Command && rule.String == "script") {
+					if rule.CodeChilds != nil {
+						for _, c := range *rule.CodeChilds {
+							if c.Operator == r.Token {
+								bootScriptSet[c.String] = true
+							}
+						}
+					}
+				}
+				collect(rule.Childs)
+				if rule.Operator == r.Tag {
+					collect(rule.CodeChilds) // Tags can nest rules inside CodeChilds in theory.
+				}
+			}
+		}
+		collect(jsAgrammar)
+	}
+	return bootScriptSet[code]
 }
 
 // bootObject runs the bootstrap entry on the given runtime and returns the
@@ -170,9 +214,14 @@ func newWalkRuntime() (*jsrt, *walkEngine) {
 	return rt, we
 }
 
-// compileScript turns one annotation script into an IR module (cached by source).
+// compileScript turns one annotation script into an IR module (cached by
+// source, both in process and on disk - see scriptcache.go).
 func (k *fkernel) compileScript(code string, name string) *ir.Module {
 	if mod, ok := k.compiled[code]; ok {
+		return mod
+	}
+	if mod := loadCachedScript(code); mod != nil {
+		k.compiled[code] = mod
 		return mod
 	}
 
@@ -182,13 +231,14 @@ func (k *fkernel) compileScript(code string, name string) *ir.Module {
 	}
 
 	rt, we := newWalkRuntime()
-	maBoot := rt.attach(k.bootMod)
+	maBoot := rt.attach(k.boot())
 	mod, tags := bootObject(rt, maBoot)
 	we.tags = tags
 
 	co := &compiler{eng: we, fileName: name}
 	co.compile(asg, 0, 0)
 
+	storeCachedScript(code, mod)
 	k.compiled[code] = mod
 	return mod
 }
@@ -616,11 +666,18 @@ func (ps *frozenParserScript) init() {
 		}
 		return runScriptModule(rt, ma, ps.sharedScope)
 	}))
+}
 
-	// The grammar that parses the scripts has :script() rules itself (the
-	// keyword boundary check). Their compiled closures come precompiled with
-	// the bootstrap snapshot, which breaks the recursion.
-	maBoot := ps.rt.attach(frozenKernel().bootMod)
+// ensureBootTags attaches the bootstrap module on first need: the grammar
+// that parses the scripts has :script() rules itself (the keyword boundary
+// check), and their compiled closures come precompiled with the snapshot,
+// which breaks the recursion. Grammars whose scripts are all ordinary (or all
+// disk cached) never get here.
+func (ps *frozenParserScript) ensureBootTags() {
+	if ps.bootTags != nil {
+		return
+	}
+	maBoot := ps.rt.attach(frozenKernel().boot())
 	_, ps.bootTags = bootObject(ps.rt, maBoot)
 }
 
@@ -632,8 +689,13 @@ func (ps *frozenParserScript) HandleScriptRule(rule *r.Rule, localProductions *r
 	saved := ps.rt.retSlot
 	ps.rt.retSlot = jsUndef
 	var completion interface{}
-	if cl, ok := ps.bootTags.props[code]; ok {
+	if isBootScript(code) {
 		// A script of the frozen js grammar itself: run its precompiled closure.
+		ps.ensureBootTags()
+		cl, ok := ps.bootTags.props[code]
+		if !ok {
+			panic("frozen bootstrap snapshot is stale: unknown parser script:\n" + code)
+		}
 		ps.rt.call(cl, jsUndef, nil)
 		completion = ps.rt.retSlot
 	} else {
