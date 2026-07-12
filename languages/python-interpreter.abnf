@@ -1196,6 +1196,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so os.path resolves against "os").
     core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc"]
+    // Project-file imports: 'import mypkg.helper' / 'from mypkg.helper import x'
+    // look for mypkg/helper.py, then mypkg.py under the program's directory and
+    // the -i roots (c.findImport). The file is parsed with this grammar and
+    // walked with the same tags: its top level runs right there
+    // (real Python import-time execution) and its defs land in the global scope. A file is imported once; repeats and cycles
+    // are no-ops. Deviation from real Python: the module's top-level names bind
+    // directly (flat, no module object), so use the from-import style.
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        var rel = path.split(".").join("/")
+        var cands = [rel + ".py"]
+        var cut = -1
+        for (var k = 0; k < rel.length; k++) { if (rel.charAt(k) == "/") { cut = k } }
+        if (cut > 0) { cands.push(rel.substring(0, cut) + ".py") }
+        for (var i = 0; i < cands.length; i++) {
+            var file = c.findImport(cands[i])
+            if (file == "") { continue }
+            if (importedFiles["$" + file] == true) { return true }
+            importedFiles["$" + file] = true
+            var text = c.readFile(file)
+            var asg = c.parse(c.agrammar, text, null)
+            c.pushSource(file, text)
+            c.compile(asg)
+            c.popSource()
+            return true
+        }
+        return false
+    }
 
     c.compile(c.asg)
 
