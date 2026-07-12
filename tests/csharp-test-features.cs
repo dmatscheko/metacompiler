@@ -7,8 +7,7 @@
 // count; exit 0 and byte-identical output on all four legs (interpreter/compiler x
 // goja/-frozen) mean everything passed.
 // Note: the two-argument Substring(a, b) is slice(a, b) here - b is an exclusive END
-// index, not a length - and 'new int[n]' zero-fills but its .Length is only reliable
-// for array literals, so the checks below stick to those semantics.
+// index, not a length - so the checks below stick to those semantics.
 
 using System;
 using System.Collections.Generic;
@@ -486,6 +485,7 @@ namespace Demo
             // ----- arrays -----
             int[] arr = new int[3];
             Program.Check("arr-default", arr[0] == 0 && arr[2] == 0);
+            Program.Check("arr-new-length", arr.Length == 3);
             arr[0] = 10;
             arr[1] = 20;
             arr[2] = 30;

@@ -400,6 +400,7 @@ public class Main {
         // ----- arrays -----
         int[] arr = new int[3];
         Main.check("arr-default", arr[0] == 0 && arr[2] == 0);
+        Main.check("arr-new-length", arr.length == 3);
         arr[0] = 10;
         arr[1] = 20;
         arr[2] = 30;

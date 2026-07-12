@@ -2030,8 +2030,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Objects, arrays.
 		"js_obj_new": func(a []uint64) uint64 { return w(newJSObject()) },
 		"js_arr_new": func(a []uint64) uint64 { return w(&jsArray{}) },
-		"js_arr_new_n": func(a []uint64) uint64 { // (length, fill value) -> array handle
-			n := int(a[0])
+		"js_arr_new_n": func(a []uint64) uint64 { // (length handle, fill value) -> array handle
+			n := int(rt.toNumber(u(a[0])))
 			arr := &jsArray{elems: make([]interface{}, n)}
 			fill := u(a[1])
 			for i := 0; i < n; i++ {
