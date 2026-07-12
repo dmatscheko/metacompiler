@@ -43,7 +43,15 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 
 	code := (*rule.CodeChilds)[0].String // TODO: Handle slot!
 
-	v, err := ps.common.Run(ps.pa.fileName+":parserCommand:"+strconv.Itoa(rule.Pos), code, rule.Int)
+	// The :script() code lives in the GRAMMAR: run it under the grammar's
+	// module name (include/load/store resolve relative to it, like tag
+	// scripts), falling back to the parsed file for grammars without an
+	// :origin() stamp.
+	module := r.GetOrigin(ps.pa.agrammar)
+	if module == "" {
+		module = ps.pa.fileName
+	}
+	v, err := ps.common.Run(module+":parserCommand:"+strconv.Itoa(rule.Pos), code, rule.Int)
 	if err != nil {
 		panic(err.Error() + "\nError was in " + rule.ToString() + ", Code: '" + code + "'")
 	}

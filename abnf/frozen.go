@@ -327,11 +327,19 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		if fileName == "" {
 			return false
 		}
-		dat, err := ioutil.ReadFile(eng.resolvePath(fileName))
+		resolved := eng.resolvePath(fileName)
+		dat, err := ioutil.ReadFile(resolved)
 		if err != nil {
 			panic(err)
 		}
-		mod := frozenKernel().compileScript(string(dat), fileName)
+		mod := frozenKernel().compileScript(string(dat), resolved)
+		// The included file runs AS its own module (goja names each program
+		// after its file): a nested include(), load() or moduleName() inside
+		// it resolves relative to the included file, not to the includer -
+		// resolving everything against the grammar dir broke nested includes.
+		savedFile := eng.fileName
+		eng.fileName = resolved
+		defer func() { eng.fileName = savedFile }()
 		runScriptModule(rt, eng.machineFor(mod), eng.sharedScope)
 		return true
 	})
@@ -456,18 +464,31 @@ type frozenParserScript struct {
 	sharedScope uint64
 	stack       []r.Object // Survives between the :script() calls of one parse run.
 	cMap        map[string]r.Object
+	fileName    string      // The grammar's :origin() (fallback: the parsed file); include/load/store resolve relative to it.
+	references  *references // For the correctReferencesAndIDs binding.
 }
 
 func newFrozenParserScript(pa *parser) *frozenParserScript {
 	return &frozenParserScript{pa: pa}
 }
 
+func (ps *frozenParserScript) resolvePath(fileName string) string {
+	return filepath.Dir(ps.fileName) + string(os.PathSeparator) + filepath.Clean(fileName)
+}
+
 // init builds the runtime lazily: most grammars have no :script() rules.
+// The bindings mirror the goja side (NewCommonScript + the parser c entries):
+// a global that exists under goja but not here is a latent "variable not
+// defined" abort that only fires under -frozen.
 func (ps *frozenParserScript) init() {
 	if ps.rt != nil {
 		return
 	}
 	ps.machines = map[*ir.Module]*machine{}
+	ps.fileName = r.GetOrigin(ps.pa.agrammar)
+	if ps.fileName == "" {
+		ps.fileName = ps.pa.fileName
+	}
 	ps.cMap = map[string]r.Object{
 		"getSrc": func() string { return ps.pa.Src },
 		"setSrc": func(src string) { ps.pa.Src = src },
@@ -480,11 +501,79 @@ func (ps *frozenParserScript) init() {
 			}
 			return int(ps.pa.Src[pos])
 		},
+		// The common c entries of the goja side (commonscript.go).
+		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules {
+			if options == nil {
+				options = &Parseropts{}
+			}
+			productions, err := ParseWithAgrammar(agrammar, srcCode, ps.fileName, options)
+			if err != nil {
+				panic(err)
+			}
+			return productions
+		},
+		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
+			return compileASGInternal(asg, aGrammar, ps.fileName, slot, traceEnabled, false)
+		},
+		"ABNFagrammar":    AbnfAgrammar,
+		"tracing":         TraceMarkersWanted(),
+		"warnImports":     WarnUnresolvedImports,
+		"warnUnsupported": WarnUnsupported,
+		"file":            traceSrcName,
+		"lineOf":          func(pos int) int { return lineOfPos(pos) },
 	}
 	bindings := frozenBaseBindings(ps.pa.opts.PreventDefaultOutput)
 	bindings["llvm"] = llvmFuncMap
 	bindings["abnf"] = r.AbnfFuncMap
 	bindings["c"] = ps.cMap
+	bindings["append"] = func(t []interface{}, v ...interface{}) interface{} {
+		tmp := append(t, v...)
+		return &tmp
+	}
+	bindings["unescape"] = r.Unescape
+	bindings["unescapeTilde"] = UnescapeTilde
+	bindings["correctReferencesAndIDs"] = func(agrammar *r.Rules) {
+		if ps.references == nil {
+			ps.references = NewReferences()
+		}
+		ps.references.correctReferencesAndIDs(agrammar)
+	}
+	bindings["load"] = func(fileName string) string {
+		dat, err := ioutil.ReadFile(ps.resolvePath(fileName))
+		if err != nil {
+			panic(err)
+		}
+		return string(dat)
+	}
+	bindings["store"] = func(fileName, data string) {
+		if err := ioutil.WriteFile(ps.resolvePath(fileName), []byte(data), 0644); err != nil {
+			panic(err)
+		}
+	}
+	bindings["moduleName"] = func() string { return ps.fileName }
+	bindings["include"] = jsHostFunc("include", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		fileName := rt.toString(argAt(args, 0))
+		if fileName == "" {
+			return false
+		}
+		resolved := ps.resolvePath(fileName)
+		dat, err := ioutil.ReadFile(resolved)
+		if err != nil {
+			panic(err)
+		}
+		mod := frozenKernel().compileScript(string(dat), resolved)
+		ma, ok := ps.machines[mod]
+		if !ok {
+			ma = ps.rt.attach(mod)
+			ps.machines[mod] = ma
+		}
+		// The included file runs as its own module, like in the compiler engine.
+		savedFile := ps.fileName
+		ps.fileName = resolved
+		defer func() { ps.fileName = savedFile }()
+		runScriptModule(rt, ma, ps.sharedScope)
+		return true
+	})
 	bindings["pop"] = jsHostFunc("pop", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		if len(ps.stack) == 0 {
 			return jsNull

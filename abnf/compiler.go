@@ -38,8 +38,9 @@ type scriptEngine interface {
 }
 
 type compiler struct {
-	eng      scriptEngine
-	fileName string
+	eng        scriptEngine
+	fileName   string // The compile target (the parsed input file).
+	moduleName string // The grammar's :origin() (fallback: fileName). Tag scripts run under this module, so their include/load/store resolve grammar-relative.
 }
 
 //	 OUT
@@ -158,8 +159,11 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 		// The tag sees the source position of its node as up.pos (the builders
 		// capture it for traces and diagrams); it does not propagate upwards.
 		upStream["pos"] = rule.Pos
-		// Then run the script on it.
-		co.eng.RunTagCode(rule, fmt.Sprintf("%s:tag:pos:%d", co.fileName, rule.Pos), upStream, localASG, slot, depth)
+		// Then run the script on it. The module is the GRAMMAR (the tag code
+		// lives there), so a load()/include() in a tag resolves relative to the
+		// grammar under goja exactly like under -frozen; the position suffix
+		// still names the input node for error messages.
+		co.eng.RunTagCode(rule, fmt.Sprintf("%s:tag:pos:%d", co.moduleName, rule.Pos), upStream, localASG, slot, depth)
 		delete(upStream, "pos")
 		return upStream
 	default:
@@ -181,6 +185,14 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 		co.eng = NewCompilerScript(&co, asg, aGrammar, traceEnabled, preventDefaultOutput)
 	}
 	co.fileName = filepath.Clean(fileName)
+	// Scripts belong to the GRAMMAR: both the start script and the tags run
+	// under the grammar's module name (include/load/store resolve relative to
+	// it), falling back to the compile target for grammars without an
+	// :origin() stamp.
+	co.moduleName = r.GetOrigin(aGrammar)
+	if co.moduleName == "" {
+		co.moduleName = co.fileName
+	}
 
 	startScript := r.GetStartScript(aGrammar)
 
@@ -189,15 +201,8 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 		upStream := map[string]r.Object{ // Basically the local variables.
 			"in": "", // This is the parser input (the terminals).
 		}
-		// The start script belongs to the GRAMMAR: run it under the grammar's
-		// module name (include/load/store resolve relative to that), falling
-		// back to the compile target for grammars without an :origin() stamp.
-		module := r.GetOrigin(aGrammar)
-		if module == "" {
-			module = co.fileName
-		}
 		// The actual co.compile() of the ASG is called from inside the start script (via the JS function c.compile()).
-		v, ran := co.eng.RunTagCode(startScript, module+":startScript", upStream, asg, slot, 0)
+		v, ran := co.eng.RunTagCode(startScript, co.moduleName+":startScript", upStream, asg, slot, 0)
 		if ran { // False if the start script has no code for the requested slot.
 			res = v
 		}
