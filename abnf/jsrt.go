@@ -2945,7 +2945,7 @@ func (rt *jsrt) isTypeName(v interface{}, t string) bool {
 	switch t {
 	case "Any", "Object":
 		return true
-	case "Int", "Long", "Short", "Byte", "Char":
+	case "Int", "Integer", "Long", "Short", "Byte", "Char", "Character":
 		f, ok := v.(float64)
 		return ok && f == math.Trunc(f)
 	case "Double", "Float", "Number":

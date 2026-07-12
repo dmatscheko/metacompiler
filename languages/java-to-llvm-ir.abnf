@@ -272,12 +272,18 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = InstOf { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> InstOf } ;
 
-// x instanceof Type [pattern]: recognized, not implemented (no type model); the operand
-// is still lowered and the optional pattern variable is parsed and dropped.
+// x instanceof Type [binding]: a genuine dynamic type test (js_is_type:
+// numbers, strings, booleans, arrays, user classes via __class/__super). The
+// optional pattern variable binds the operand in the function scope - looser
+// than Java's flow scoping, which only admits it where the test held.
 InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
             = ShiftExpr [ InstTail ] ;
-InstTail    <~~ push({iof: 1}) ~~>
-            = KwInstanceof Type [ Id ] ;
+InstTail    <~~ push(makeInstTail(takeAll())) ~~>
+            = KwInstanceof IofType [ IofBind ] ;
+IofType     <~~ push(stripWs(up.in)) ~~>
+            = Type ;
+IofBind     <~~ push({bind: stripWs(up.in)}) ~~>
+            = Id ;
 
 ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
@@ -632,13 +638,27 @@ KwSync      = "synchronized" KwEnd ;
         if (op == ">>>" || op == ">>>=") return intWrap(b, callExt(b, "js_ushr", [l, r]))
         return coreEmitBin(b, op, l, r)
     }
-    // x instanceof Type [pattern]: recognized, not implemented; the operand is still
-    // lowered. A single item (no instanceof tail) is a transparent pass-through.
+    // x instanceof Type [binding]: js_is_type decides; a pattern variable binds
+    // the operand (whatever the outcome - Java's flow scoping is stricter, but
+    // code that compiles under javac only reads it where the test held).
+    // A single item (no instanceof tail) is a transparent pass-through.
+    function makeInstTail(items) {
+        var tail = {iof: true, tname: items[0]}
+        if (items.length > 1) { tail.bind = items[1].bind }
+        return tail
+    }
     function makeInstOf(items, pos) {
         if (items.length == 1) return items[0]
-        notImpl("instanceof", pos)
         var operand = items[0]
-        return function(b) { var r = operand(b); return {b: r.b, v: hUndef} }
+        var tail = items[1]
+        return function(b) {
+            var r = operand(b)
+            b = r.b
+            if (tail.bind != undefined) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tail.bind), r.v])
+            }
+            return {b: b, v: callExt(b, "js_is_type", [r.v, emitStr(b, tail.tname)])}
+        }
     }
     // new C(args): set __class, then run the constructor with [obj, args...].
     // super.m(args): resolved through js_supercall, starting at the superclass of the

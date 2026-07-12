@@ -264,12 +264,18 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = InstOf { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> InstOf } ;
 
-// x instanceof Type [pattern]: recognized, not implemented (no type model); the operand
-// is still evaluated and the optional pattern variable is parsed and dropped.
+// x instanceof Type [binding]: a genuine dynamic type test (rtIsType: numbers,
+// strings, booleans, arrays, user classes via __class/__super). The optional
+// pattern variable binds the operand in the enclosing scope - looser than
+// Java's flow scoping, which only admits it where the test held.
 InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
             = ShiftExpr [ InstTail ] ;
-InstTail    <~~ push({iof: 1}) ~~>
-            = KwInstanceof Type [ Id ] ;
+InstTail    <~~ push(makeInstTail(takeAll())) ~~>
+            = KwInstanceof IofType [ IofBind ] ;
+IofType     <~~ push(stripWs(up.in)) ~~>
+            = Type ;
+IofBind     <~~ push({bind: stripWs(up.in)}) ~~>
+            = Id ;
 
 ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>>" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
@@ -639,13 +645,24 @@ KwSync      = "synchronized" KwEnd ;
         if (op == ">>>=") return binOp(">>>", a, b)
         return coreApplyOp(op, a, b)
     }
-    // x instanceof Type [pattern]: recognized, not implemented; the operand is still
-    // evaluated. A single item (no instanceof tail) is a transparent pass-through.
+    // x instanceof Type [binding]: rtIsType decides; a pattern variable binds
+    // the operand (whatever the outcome - Java's flow scoping is stricter, but
+    // code that compiles under javac only reads it where the test held).
+    // A single item (no instanceof tail) is a transparent pass-through.
+    function makeInstTail(items) {
+        var tail = {iof: true, tname: items[0]}
+        if (items.length > 1) { tail.bind = items[1].bind }
+        return tail
+    }
     function makeInstOf(items, pos) {
         if (items.length == 1) return items[0]
-        notImpl("instanceof", pos)
         var operand = items[0]
-        return function() { operand(); return undefined }
+        var tail = items[1]
+        return function() {
+            var v = operand()
+            if (tail.bind != undefined) { declVar(tail.bind, v) }
+            return rtIsType(v, tail.tname)
+        }
     }
 
     // super.m(args): the search starts at the superclass of the DEFINING class

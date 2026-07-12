@@ -1,16 +1,20 @@
 /* Java recognition test.
- * Exercises constructs the grammar newly RECOGNIZES but does not implement: the
- * bitwise (& | ^ ~) and shift (<< >> >>>) operators, compound bitwise/shift
- * assignment (|= <<=), instanceof (with a pattern binding), the assert statement,
- * labeled statements with labeled break/continue, the synchronized statement, char
- * literals, hex/binary/floating-point/underscored/suffixed number literals and a
- * text block. Prefix ++/-- and unary + are genuinely lowered.
+ * Exercises constructs the grammar RECOGNIZES but does not implement: the assert
+ * statement, labeled statements with labeled break/continue, the synchronized
+ * statement, char literals and a text block. Prefix ++/-- and unary + are genuinely
+ * lowered, and the bitwise/shift operators, compound bitwise/shift assignment and
+ * instanceof (with a pattern binding) graduated to genuine implementations - they
+ * run and are checked here.
+ *
+ * The hex/binary/floating-point/underscored/suffixed number literals are still
+ * recognized-only: they parse but stay inert (undefined), so mixBits' result is
+ * not asserted yet.
  *
  * Under a DEFAULT run this ABORTS at the first not-implemented construct with a clean
  * file:line message. Under -warn-unsupported every not-implemented construct warns and
- * the genuinely lowered parts (the class, the loops, prefix ++, the arithmetic) run;
- * Main.main self-checks those and exits with the failure count (0 when all pass). The
- * not-implemented values are inert (they stay undefined) and are never asserted on. **/
+ * the genuinely lowered parts run; Main.main self-checks those and exits with the
+ * failure count (0 when all pass). The remaining not-implemented values are inert
+ * (they stay undefined) and are never asserted on. **/
 
 package com.example.util;
 
@@ -26,8 +30,10 @@ public class Main {
         }
     }
 
-    // Bit twiddling: every operator here is recognized but not implemented, so the
-    // result is inert. The point is that a real-world bit-manipulation method PARSES.
+    // Bit twiddling: every operator here is genuinely implemented with Java's
+    // 32-bit int semantics, but the hex/binary literals are still inert
+    // (undefined), so the result is not asserted until the literal forms
+    // graduate too.
     static int mixBits(int seed) {
         int mask = 0xFF;                 // hex literal
         int flags = 0b1010;              // binary literal
@@ -61,10 +67,12 @@ public class Main {
         int pos = +5;
         Main.check("unary plus identity", pos, 5);
 
-        // instanceof with a pattern binding (recognized, not implemented).
+        // instanceof with a pattern binding (genuine dynamic type test).
         Object o = "hello";
         if (o instanceof String s) {
-            System.out.println("string branch (not reached: instanceof is inert)");
+            Main.check("instanceof binds the operand", s.length(), 5);
+        } else {
+            Main.check("instanceof must match a string", 0, 1);
         }
 
         // assert with a message (recognized, not implemented).

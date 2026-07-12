@@ -550,6 +550,16 @@ public class Main {
         bu >>>= 28;
         Main.check("bit-compound-ushr", bu == 15);
 
+        // ----- instanceof with pattern binding -----
+        Object iofObj = "abcd";
+        Main.check("iof-type-test", iofObj instanceof String && !(iofObj instanceof Boolean));
+        if (iofObj instanceof String iofS) {
+            Main.check("iof-binding", iofS.length() == 4);
+        } else {
+            Main.check("iof-binding", false);
+        }
+        Main.check("iof-int", 7 instanceof Integer);
+
         // ----- everything combined -----
         Main.check("combined-pipeline", Main.transform(new int[]{1, 2, -3}).equals("o1e2x"));
 

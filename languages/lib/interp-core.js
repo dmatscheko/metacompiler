@@ -235,7 +235,7 @@ function rtIsType(v, tname) {
     if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1); opt = true }
     if (v === null || v === undefined) { return opt }
     if (t == "Any" || t == "Object") { return true }
-    if (t == "Int" || t == "Long" || t == "Short" || t == "Byte" || t == "Char") { return typeof v == "number" && Math.floor(v) == v }
+    if (t == "Int" || t == "Integer" || t == "Long" || t == "Short" || t == "Byte" || t == "Char" || t == "Character") { return typeof v == "number" && Math.floor(v) == v }
     if (t == "Double" || t == "Float" || t == "Number") { return typeof v == "number" }
     if (t == "String" || t == "CharSequence") { return typeof v == "string" }
     if (t == "Boolean") { return typeof v == "boolean" }
