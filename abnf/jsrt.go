@@ -2472,11 +2472,22 @@ func standardJSBindings() map[string]interface{} {
 	mathObj.set("abs", jsHostFunc("abs", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 		return math.Abs(rt.toNumber(argAt(args, 0)))
 	}))
+	// max/min are variadic like in JS: 0 arguments give -/+Infinity, and a NaN
+	// argument wins (math.Max/Min propagate NaN). The old two-argument versions
+	// silently ignored everything behind the second argument.
 	mathObj.set("max", jsHostFunc("max", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		return math.Max(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+		acc := math.Inf(-1)
+		for _, a := range args {
+			acc = math.Max(acc, rt.toNumber(a))
+		}
+		return acc
 	}))
 	mathObj.set("min", jsHostFunc("min", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		return math.Min(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+		acc := math.Inf(1)
+		for _, a := range args {
+			acc = math.Min(acc, rt.toNumber(a))
+		}
+		return acc
 	}))
 
 	stringObj := newJSObject()
