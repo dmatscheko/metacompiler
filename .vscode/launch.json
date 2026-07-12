@@ -209,6 +209,18 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-imports.kt", "-q"]
         },
         {
+            "name": "Java multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-interpreter.abnf", "tests/java-test-multifile.java", "-q"]
+        },
+        {
+            "name": "Java multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/java-to-llvm-ir.abnf", "tests/java-test-multifile.java", "-q"]
+        },
+        {
             "name": "Kotlin multifile (interpreter)",
             "type": "go",
             "request": "launch",
