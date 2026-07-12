@@ -411,7 +411,18 @@ func jsNumString(f float64) string {
 	if math.Abs(f) >= 1e-6 && math.Abs(f) < 1e21 {
 		return strconv.FormatFloat(f, 'f', -1, 64)
 	}
-	return strconv.FormatFloat(f, 'g', -1, 64)
+	// Go pads single-digit exponents to two digits ("1e-07"); JS does not
+	// ("1e-7"). Strip the leading exponent zeros (the sign stays).
+	s := strconv.FormatFloat(f, 'g', -1, 64)
+	if e := strings.IndexByte(s, 'e'); e >= 0 && e+2 < len(s) {
+		digits := e + 2 // Behind "e+"/"e-".
+		trimmed := digits
+		for trimmed < len(s)-1 && s[trimmed] == '0' {
+			trimmed++
+		}
+		s = s[:digits] + s[trimmed:]
+	}
+	return s
 }
 
 func (rt *jsrt) toString(v interface{}) string {
