@@ -550,6 +550,21 @@ public class Main {
         bu >>>= 28;
         Main.check("bit-compound-ushr", bu == 15);
 
+        // ----- arrow switch (multi-label, block arm, no fallthrough) -----
+        int arrowR = 0;
+        switch (2) {
+            case 1, 2 -> arrowR = 10;
+            case 3 -> { arrowR = 20; arrowR += 1; }
+            default -> arrowR = -1;
+        }
+        Main.check("arrow-switch", arrowR == 10);
+        String arrowKind;
+        switch ("sun") {
+            case "sat", "sun" -> arrowKind = "weekend";
+            default -> arrowKind = "workday";
+        }
+        Main.check("arrow-switch-string", arrowKind.equals("weekend"));
+
         // ----- numeric literal forms -----
         Main.check("lit-hex-bin-oct", 0xFF == 255 && 0b1010 == 10 && 017 == 15);
         Main.check("lit-underscore", 1_000_000 == 1000000 && 0xFF_FF == 65535);

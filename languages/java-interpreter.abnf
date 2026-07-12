@@ -13,7 +13,8 @@ the semantics are dynamic), String concatenation with +, the String methods leng
 charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one char
 String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
-(fallthrough, stacked labels, default), break/continue, return, assignment (also
+(fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
+expr/block, no fallthrough), break/continue, return, assignment (also
 += -= *= /= %= and the bitwise/shift compounds &= |= ^= <<= >>= >>>=), postfix ++/--,
 the ternary operator, || && with short circuit, & | ^ (non-short-circuit boolean
 operators on two booleans, int32 bit operations otherwise), << >> >>> (Java int
@@ -30,7 +31,8 @@ nested/inner types, lambdas, method references and anonymous classes are accepte
 reported as not implemented; -warn-unsupported downgrades that to a warning so call
 graphs / CFGs / traces still work on partly understood files.
 
-Not genuinely modelled: the arrow switch, char literals, overloading,
+Not genuinely modelled: switch expressions (switch as a value, yield), char
+literals, overloading,
 implicit field access (fields are reached via this.x or ClassName.x - like the
 explicit style many code bases enforce), real exception unwinding, functional
 interfaces (so lambdas/method references are inert) and reflection.
@@ -129,7 +131,17 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 // label and runs until a break or the end of the switch. Labels may stack.
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
-SwitchCase  = Case | Default ;
+// The arrow forms (case 1, 2 -> body) are sugar for stacked classic labels
+// whose shared body ends in an implicit break: no fallthrough, several labels
+// per arm. Tried first; they fail fast at ':' for the classic forms.
+SwitchCase  = ArrowCase | ArrowDefault | Case | Default ;
+ArrowCase   <~~ pushArrowCase(takeAll()) ~~>
+            = KwCase ALabel { "," ALabel } "->" ArrowBody ;
+ALabel      <~~ push({alab: pop()}) ~~>
+            = CondExpr ;
+ArrowBody   = Block | Throw | ExprStmt ;
+ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
+            = KwDefault "->" ArrowBody ;
 Case        <~~ push(makeCase(takeAll())) ~~>
             = KwCase CondExpr ":" { Statement } ;
 Default     <~~ push(makeDefault(takeAll())) ~~>
@@ -894,6 +906,24 @@ KwSync      = "synchronized" KwEnd ;
     }
     function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
     function makeDefault(items) { return {isDefault: true, body: items} }
+    // Arrow arms: one classic case object per label (empty bodies fall through
+    // to the last, which carries the arm body plus an implicit break).
+    function switchBreak() { return function() { return BRK } }
+    function pushArrowCase(items) {
+        var labels = []
+        var body = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].alab != undefined) { labels.push(items[i].alab) }
+            else { body.push(items[i]) }
+        }
+        for (var i = 0; i < labels.length - 1; i++) {
+            push({isDefault: false, v: labels[i], body: []})
+        }
+        push({isDefault: false, v: labels[labels.length - 1], body: body.concat([switchBreak()])})
+    }
+    function pushArrowDefault(items) {
+        push({isDefault: true, body: items.concat([switchBreak()])})
+    }
     // Java switch compares with === (identity for ints and value for Strings, matching
     // js_seq of the compiled world). Execution falls through until a break.
     function makeSwitch(items) {
