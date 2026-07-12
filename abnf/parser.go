@@ -507,7 +507,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		if rule.Int == r.RangeTypeRune { // Rune range for unicode. JS-Mapping: abnf.rangeType.Rune
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
-			if ch == utf8.RuneError {
+			if ch == utf8.RuneError && size == 1 { // An invalid encoding never matches (like in case r.CharOf); a real 3-byte U+FFFD does.
 				pa.ruleExit(rule, skipSpaceRule, depth, nil, wasSdx, false)
 				pa.Sdx = wasSdx
 				return nil
