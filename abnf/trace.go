@@ -103,6 +103,25 @@ var (
 	traceDead bool
 )
 
+// OpenTrace creates (and truncates) the -trace file up front. Without the
+// eager create, a run that emits no events (interpreter-engine grammars trace
+// nothing) silently left a STALE file from an earlier run in place, and a
+// later -render rendered the wrong program.
+func OpenTrace() {
+	traceMu.Lock()
+	defer traceMu.Unlock()
+	if traceFile != nil || traceDead || TraceOutPath == "" {
+		return
+	}
+	f, err := os.Create(TraceOutPath)
+	if err != nil {
+		traceDead = true
+		fmt.Fprintln(os.Stderr, "trace failed: ", err)
+		return
+	}
+	traceFile = f
+}
+
 func traceEmit(ev *TraceEvent) {
 	traceMu.Lock()
 	defer traceMu.Unlock()
@@ -124,7 +143,14 @@ func traceEmit(ev *TraceEvent) {
 	if err != nil {
 		return
 	}
-	traceFile.Write(append(line, '\n'))
+	// A failed write (full disk...) must not silently truncate the stream
+	// with exit 0: report it once and stop tracing.
+	if _, err := traceFile.Write(append(line, '\n')); err != nil {
+		fmt.Fprintln(os.Stderr, "trace write failed: ", err)
+		traceFile.Close()
+		traceFile = nil
+		traceDead = true
+	}
 }
 
 // CloseTrace closes the stream (writes are unbuffered, nothing to flush).

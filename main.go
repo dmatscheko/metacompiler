@@ -219,6 +219,7 @@ func main() {
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath
+	abnf.OpenTrace() // Truncate up front: a zero-event run must not leave a stale file.
 	defer abnf.CloseTrace()
 
 	if len(o.files) == 0 {

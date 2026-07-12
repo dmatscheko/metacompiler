@@ -87,13 +87,20 @@ func appendCallgraphRecords(defs []cgDef, calls []cgCall) {
 		return
 	}
 	defer f.Close()
+	// A failed write (full disk...) must not silently truncate the graph.
 	for _, d := range defs {
 		line, _ := json.Marshal(&TraceEvent{Ev: "sdef", Name: d.Name, Line: d.Line, Obj: d.File})
-		f.Write(append(line, '\n'))
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			fmt.Fprintln(os.Stderr, "callgraph write failed: ", err)
+			return
+		}
 	}
 	for _, c := range calls {
 		line, _ := json.Marshal(&TraceEvent{Ev: "scall", Name: c.From, Key: c.To, Obj: c.File})
-		f.Write(append(line, '\n'))
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			fmt.Fprintln(os.Stderr, "callgraph write failed: ", err)
+			return
+		}
 	}
 }
 
