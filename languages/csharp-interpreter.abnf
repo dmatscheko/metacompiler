@@ -559,10 +559,12 @@ KwLet       = "let" KwEnd ;
         if (typeof v == "string") return v
         return csStr(v)
     }
-    // The + operator and +=: string concat when either side is a string, else 32-bit add.
+    // The + operator and +=: string concat when either side is a string, 32-bit add for
+    // two int values, float add as soon as one side carries a fraction (doubles).
     function csAdd(l, r) {
         if (typeof l == "string" || typeof r == "string") return csStr2(l) + csStr2(r)
-        return (l + r) | 0
+        if ((l | 0) == l && (r | 0) == r) { return (l + r) | 0 }
+        return l + r
     }
 
     // ----- Dictionaries mirror the compiled runtime's js_dict handle -----

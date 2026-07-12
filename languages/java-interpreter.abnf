@@ -553,7 +553,8 @@ KwSync      = "synchronized" KwEnd ;
 
     function jadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return jstr2(l) + jstr2(r)
-        return (l + r) | 0
+        if ((l | 0) == l && (r | 0) == r) { return (l + r) | 0 }
+        return l + r
     }
     function jstr2(v) {
         if (typeof v == "string") return v

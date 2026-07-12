@@ -361,6 +361,7 @@ namespace Demo
         {
             // ----- numbers, arithmetic, precedence -----
             Program.Check("arith-precedence", 2 + 3 * 4 == 14);
+            Program.Check("dbl-add", 1.5 + 1.5 == 3.0 && 2.5 + 1.25 == 3.75);
             Program.Check("arith-paren", (2 + 3) * 4 == 20);
             Program.Check("arith-unary-minus", -3 + 5 == 2);
             Program.Check("arith-div-trunc", 7 / 2 == 3);

@@ -2148,14 +2148,18 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_add": func(a []uint64) uint64 { return w(rt.jsAdd(u(a[0]), u(a[1]))) },
-		"js_jadd": func(a []uint64) uint64 { // Java +: string concatenation or 32 bit int addition.
+		"js_jadd": func(a []uint64) uint64 { // Java/C# +: string concat, 32 bit add for two int values, float add otherwise.
 			l, r := u(a[0]), u(a[1])
 			_, ls := l.(string)
 			_, rs := r.(string)
 			if ls || rs {
 				return rt.wrapStr(rt.javaString(l) + rt.javaString(r))
 			}
-			return rt.wrapNum(float64(int32(int64(rt.toNumber(l)) + int64(rt.toNumber(r)))))
+			ln, rn := rt.toNumber(l), rt.toNumber(r)
+			if isInt32Value(ln) && isInt32Value(rn) {
+				return rt.wrapNum(float64(int32(int64(ln) + int64(rn))))
+			}
+			return rt.wrapNum(ln + rn)
 		},
 		"js_sub": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) - rt.toNumber(u(a[1]))) },
 		"js_mul": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) * rt.toNumber(u(a[1]))) },
@@ -2827,6 +2831,12 @@ func (rt *jsrt) callEntry(ma *machine, name string, env uint64) uint64 {
 	rt.traceDepth--
 	traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Val: rt.traceVal(rt.unwrap(h))})
 	return h
+}
+
+// isInt32Value reports whether f is an integral value inside the int32 range -
+// the same test the interpreter grammars express as (v | 0) == v.
+func isInt32Value(f float64) bool {
+	return f == math.Trunc(f) && f >= math.MinInt32 && f <= math.MaxInt32
 }
 
 // jsToInt converts a JS number to a Go int for host-side argument positions:
