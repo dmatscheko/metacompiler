@@ -334,7 +334,7 @@ MArgs       = "(" [ Expression { "," Expression } ] ")" [ Lambda ] | Lambda ;
 // RawStr before Template (both open with "), FloatLit before IntLit (a plain integer
 // falls through), AnonFun/CallableRef before Call/VarRef (they would otherwise eat the
 // leading identifier). RawStr/FloatLit/CallableRef/AnonFun are recognised, not lowered.
-Primary     = "(" Expression ")" | RawStr | Template | FloatLit | IntLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | ThisExpr | Call | VarRef ;
+Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | ThisExpr | Call | VarRef ;
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
 // position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).
@@ -434,15 +434,32 @@ ContinueAt  <~~ push(notImplStmt("labelled continue", up.pos)) ~~>
 ReturnAt    <~~ push(notImplStmt("labelled return", up.pos)) ~~>
             = KwReturn "@" Id [ DiscardExpr ] [ ";" ] ;
 
-// A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores). The
-// value model is 32-bit Int, so a float is recognised and reported as not implemented.
-FloatLit    <~~ push(notImplExpr("floating-point literal", up.pos)) ~~>
+// A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores):
+// a genuine double value (parseFloat stops before the f/F suffix). Comparisons
+// are exact; see the arithmetic note at the core config for the int-wrap caveat.
+FloatLit    <~~ push(makeConst(parseFloat(up.in.split("_").join("")))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
               ( "." "0"..."9" { "0"..."9" | "_" } [ FloatExp ] [ FloatSfx ]
               | FloatExp [ FloatSfx ]
               | FloatSfx ) :whitespace(Whitespace) ;
 FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 FloatSfx    = "f" | "F" ;
+
+// Integer literal forms beyond the plain decimal IntLit: hex, binary, digit-group
+// underscores, and the Long suffix (the value model is a JS number, so a Long is
+// simply a number beyond 32 bits; its arithmetic wraps like Int arithmetic).
+KHexLit     = NumHex [ IntSfx ] ;
+KBinLit     = NumBin [ IntSfx ] ;
+KIntLit     = NumInt [ IntSfx ] ;
+IntSfx      = "L" ;
+
+// A character literal: the value is the character code (a number), so char
+// comparisons and 'A' + 1 == 'B' arithmetic work; printing a Char shows the code.
+CharLit     <~~ push(makeConst(kCharCode(up.in))) ~~>
+            = "'" :whitespace() CharBody "'" :whitespace(Whitespace) ;
+CharBody    = "\\" ( "u" NumHexDig NumHexDig NumHexDig NumHexDig | CharEsc ) | CharPlain ;
+CharEsc     = "n" | "t" | "r" | "b" | "'" | '"' | "\\" | "$" | "0" ;
+CharPlain   = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
 // A triple-quoted raw string: any content up to the closing """ (internal runs of one
 // or two quotes are allowed). Recognised and reported as not implemented.
@@ -628,6 +645,20 @@ KwStep      = "step" KwEnd ;
         }
     }
     // x is T / x !is T: undecidable without runtime types; evaluate x, yield undefined.
+    // Decodes a character literal's source text ('A', '\n', '￿') to its code.
+    function kCharCode(t) {
+        if (t.charAt(1) == "\\") {
+            var e = t.charAt(2)
+            if (e == "n") { return 10 }
+            if (e == "t") { return 9 }
+            if (e == "r") { return 13 }
+            if (e == "b") { return 8 }
+            if (e == "0") { return 0 }
+            if (e == "u") { return parseInt(t.substring(3, 7), 16) }
+            return e.charCodeAt(0)
+        }
+        return t.charCodeAt(1)
+    }
     function makeIsCheck(operand, pos) { notImpl("is type check", pos); return function(b) { var r = operand(b); return {b: r.b, v: hUndef} } }
     // A curated stdlib infix call (a to b, a and b, ...). Recognised, not lowered: the
     // operands are emitted (side effects, nested warnings) and the value is undefined.
