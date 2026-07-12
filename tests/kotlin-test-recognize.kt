@@ -87,5 +87,10 @@ fun main() {
     }
     if (lrSum != 8) { fails = fails + 1 }
 
+    // a destructuring lambda parameter is recognised but not lowered: the names bind
+    // to undefined under -warn-unsupported, so the map still runs (returns a constant).
+    val destructured = nums.map { (a, b) -> 0 }
+    if (destructured.size != 4) { fails = fails + 1 }
+
     exitProcess(fails)
 }

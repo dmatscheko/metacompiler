@@ -480,7 +480,14 @@ LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 LambdaParams <~~ push({lparams: takeAll()}) ~~>
             = LParam { "," LParam } [ "," ] "->" ;
-LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
+// A lambda parameter is a plain name or a destructuring pattern - { (a, b) -> ... }
+// over a Pair/data-class/Triple argument. Destructuring is recognised but not lowered
+// (like a val destructuring declaration): the names bind to undefined and makeLambda
+// warns once, so the lambda still parses and lowers under -warn-unsupported.
+LParam      = DestructLParam | Id <~~ push(up.in) ~~> [ ":" Type ] ;
+DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
+            = "(" DName { "," DName } [ "," ] ")" [ ":" Type ] ;
+DName       = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
 // becomes the last argument (Kotlin): after a parenthesized list - f(a) { ... } - or on
@@ -1110,8 +1117,26 @@ KwStep      = "step" KwEnd ;
             params = items[0].lparams
             start = 1
         }
+        // A destructuring parameter ({ (a, b) -> ... }) is recognised but not lowered:
+        // warn at build time, give its arg slot a hidden name, and declare each
+        // component name as undefined in the body. argNames holds one name per arg slot.
+        var argNames = []
+        var destructs = []
+        for (var pi = 0; pi < params.length; pi++) {
+            var p = params[pi]
+            if (typeof p == "string") {
+                argNames.push(p)
+            } else {
+                notImpl("destructuring lambda parameter", p.pos)
+                argNames.push("$d" + pi)
+                for (var dd = 0; dd < p.destruct.length; dd++) { destructs.push(p.destruct[dd]) }
+            }
+        }
         var body = items.slice(start)
         var bodyStmt = function(b) {
+            for (var di = 0; di < destructs.length; di++) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, destructs[di]), hUndef])
+            }
             var v = hUndef
             for (var k = 0; k < body.length; k++) {
                 if (body[k].expr != undefined) {
@@ -1127,7 +1152,7 @@ KwStep      = "step" KwEnd ;
             return deadBlock()
         }
         return function(b) {
-            var idx = emitFunc(params, bodyStmt, false)
+            var idx = emitFunc(argNames, bodyStmt, false)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }

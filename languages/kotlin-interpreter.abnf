@@ -457,7 +457,14 @@ LamExpr     <~~ push({expr: pop()}) ~~>
             = Expression [ ";" ] ;
 LambdaParams <~~ push({lparams: takeAll()}) ~~>
             = LParam { "," LParam } [ "," ] "->" ;
-LParam      = Id <~~ push(up.in) ~~> [ ":" Type ] ;
+// A lambda parameter is a plain name or a destructuring pattern - { (a, b) -> ... }
+// over a Pair/data-class/Triple argument. Destructuring is recognised but not lowered
+// (like a val destructuring declaration): the names bind to undefined and makeLambda
+// warns once, so the lambda still parses and runs under -warn-unsupported.
+LParam      = DestructLParam | Id <~~ push(up.in) ~~> [ ":" Type ] ;
+DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
+            = "(" DName { "," DName } [ "," ] ")" [ ":" Type ] ;
+DName       = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
 // becomes the last argument (Kotlin): after a parenthesized list - f(a) { ... } - or on
@@ -1033,6 +1040,15 @@ KwStep      = "step" KwEnd ;
             params = items[0].lparams
             start = 1
         }
+        // A destructuring parameter ({ (a, b) -> ... }) is recognised but not lowered:
+        // warn at build time; the names bind to undefined when the lambda runs.
+        if (params != null) {
+            for (var pi = 0; pi < params.length; pi++) {
+                if (params[pi] != undefined && params[pi].destruct != undefined) {
+                    notImpl("destructuring lambda parameter", params[pi].pos)
+                }
+            }
+        }
         var body = items.slice(start)
         return function() {
             var captured = scopes.slice(0)
@@ -1045,7 +1061,13 @@ KwStep      = "step" KwEnd ;
                     declVar("it", args.length > 0 ? args[0] : undefined)
                 } else {
                     for (var i = 0; i < params.length; i++) {
-                        declVar(params[i], i < args.length ? args[i] : undefined)
+                        var p = params[i]
+                        if (typeof p == "string") {
+                            declVar(p, i < args.length ? args[i] : undefined)
+                        } else {
+                            // Destructuring: bind each component name to undefined.
+                            for (var d = 0; d < p.destruct.length; d++) { declVar(p.destruct[d], undefined) }
+                        }
                     }
                 }
                 var last = anytype // A block's value hops types across items.
