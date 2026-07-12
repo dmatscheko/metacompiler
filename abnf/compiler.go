@@ -89,7 +89,14 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 					str1, ok1 := upStreamMerged[k].(string)
 					str2, ok2 := v.(string)
 					if !ok1 {
-						panic(fmt.Sprintf("Left variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, upStreamMerged[k], rule.ToString()))
+						// A missing left side starts empty like in the arr*
+						// branch below (an up.str* set in one sibling branch
+						// used to panic here); a present non-string is still
+						// a real error.
+						if old, exists := upStreamMerged[k]; exists {
+							panic(fmt.Sprintf("Left variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, old, rule.ToString()))
+						}
+						str1 = ""
 					}
 					if !ok2 {
 						panic(fmt.Sprintf("Right variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, v, rule.ToString()))
