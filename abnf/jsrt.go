@@ -1283,7 +1283,7 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		case "equals":
 			return rt.strictEq(o, argAt(args, 0))
 		case "substring":
-			begin, end := sliceRange(len(o), args, rt)
+			begin, end := substringRange(len(o), args, rt)
 			return o[begin:end]
 		case "indexOf":
 			return float64(strings.Index(o, rt.toString(argAt(args, 0))))
@@ -1665,8 +1665,11 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			return float64(strings.Index(recv, argS(0)))
 		case "replace":
 			return strings.Replace(recv, argS(0), argS(1), 1)
-		case "slice", "substring":
+		case "slice":
 			begin, end := sliceRange(len(recv), args, rt)
+			return recv[begin:end]
+		case "substring":
+			begin, end := substringRange(len(recv), args, rt)
 			return recv[begin:end]
 		case "split":
 			parts := strings.Split(recv, argS(0))
@@ -1707,6 +1710,33 @@ func derefSliceValue(v reflect.Value) reflect.Value {
 		return v
 	}
 	return reflect.Value{}
+}
+
+// substringRange resolves JS substring(begin, end) arguments: NaN and negative
+// values clamp to 0, values beyond the length clamp to it, and begin > end swap
+// (unlike slice, which wraps negative indexes from the end).
+func substringRange(length int, args []interface{}, rt *jsrt) (int, int) {
+	begin := clampSubstringIndex(rt.toNumber(argAt(args, 0)), length)
+	end := length
+	if len(args) > 1 {
+		if _, u := args[1].(jsUndefT); !u {
+			end = clampSubstringIndex(rt.toNumber(args[1]), length)
+		}
+	}
+	if begin > end {
+		begin, end = end, begin
+	}
+	return begin, end
+}
+
+func clampSubstringIndex(f float64, length int) int {
+	if f != f || f < 0 { // NaN and negatives clamp to 0.
+		return 0
+	}
+	if f > float64(length) {
+		return length
+	}
+	return int(f)
 }
 
 // sliceRange resolves JS slice(begin, end) arguments including negative indexes.
