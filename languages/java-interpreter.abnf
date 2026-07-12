@@ -535,13 +535,15 @@ KwSync      = "synchronized" KwEnd ;
         }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
-            // The lookup follows the __super chain (inheritance).
+            // The lookup follows the __super chain (inheritance). Own-property reads
+            // only: a bare c[name] resolved inherited Object.prototype members
+            // (toString, valueOf, ...) under a host JS engine.
             var m = undefined
-            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) m = c[name]
+            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
             if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
             return m.apply(undefined, concat2impl([target], args))
         }
-        var f = target[name]
+        var f = hasOwn(target, name) ? target[name] : undefined
         if (typeof f != "function") fail("unknown method '" + name + "'")
         return f.apply(undefined, args)
     }
@@ -575,7 +577,7 @@ KwSync      = "synchronized" KwEnd ;
                 setVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
                 p.obj[p.key] = v
             }
             return v
@@ -591,7 +593,7 @@ KwSync      = "synchronized" KwEnd ;
                 return n
             }
             var p = resolveRef(ref)
-            var m = p.obj[p.key]
+            var m = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
             p.obj[p.key] = (m + d) | 0
             return m
         }
@@ -606,7 +608,7 @@ KwSync      = "synchronized" KwEnd ;
                 return n
             }
             var p = resolveRef(ref)
-            var m = (p.obj[p.key] + d) | 0
+            var m = ((hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined) + d) | 0
             p.obj[p.key] = m
             return m
         }
@@ -657,7 +659,7 @@ KwSync      = "synchronized" KwEnd ;
         return function() {
             var self = getVar("this")
             var m = undefined
-            for (var c = getVar(defName).__super; c != undefined && m == undefined; c = c.__super) m = c[name]
+            for (var c = getVar(defName).__super; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
             if (typeof m != "function") fail("unknown super method '" + name + "'")
             var argv = [self]
             for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
@@ -1034,7 +1036,8 @@ KwSync      = "synchronized" KwEnd ;
     core.add = jadd
     core.getField = function(o, name) {
         if (name == "length" && Array.isArray(o)) { return o.length }
-        return o[name]
+        if (hasOwn(o, name)) { return o[name] }
+        return undefined
     }
 
     // Import roots the runtime already provides (their symbols are builtins:

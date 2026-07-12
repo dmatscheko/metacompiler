@@ -641,11 +641,13 @@ KwStep      = "step" KwEnd ;
             fail("unknown list method: " + name)
         }
         if (target.__class != undefined) {
-            var m = target.__class[name]
+            // Own-property read: a bare [name] resolved inherited Object.prototype
+            // members (toString, valueOf, ...) under a host JS engine.
+            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
             if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
             return m.apply(undefined, concat2impl([target], args))
         }
-        if (typeof target[name] == "function") return target[name].apply(undefined, args)
+        if (hasOwn(target, name) && typeof target[name] == "function") return target[name].apply(undefined, args)
         fail("unknown method '" + name + "'")
     }
 
@@ -746,9 +748,10 @@ KwStep      = "step" KwEnd ;
                     if (cur === undefined || cur === null) fail("property ." + s.name + " of null")
                     if (s.name == "size" && Array.isArray(cur)) { cur = cur.length }
                     else if (s.name == "length" && typeof cur == "string") { cur = cur.length }
-                    else { cur = cur[s.name] }
+                    else { cur = hasOwn(cur, s.name) ? cur[s.name] : undefined }
                 } else {
-                    cur = cur[s.idx()]
+                    var ix = s.idx()
+                    cur = hasOwn(cur, ix) ? cur[ix] : undefined
                 }
             }
             return cur
@@ -834,7 +837,7 @@ KwStep      = "step" KwEnd ;
                 setVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
                 p.obj[p.key] = v
             }
             return v
@@ -850,7 +853,7 @@ KwStep      = "step" KwEnd ;
                 return n
             }
             var p = resolveRef(ref)
-            var mv = p.obj[p.key]
+            var mv = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
             p.obj[p.key] = (mv + d) | 0
             return mv
         }

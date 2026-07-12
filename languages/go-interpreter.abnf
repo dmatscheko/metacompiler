@@ -522,11 +522,13 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function mcall(target, name, args) {
         if (target === undefined || target === null) fail("method call ." + name + "() on nil")
         if (typeof target == "object" && target.__class != undefined) {
-            var m = target.__class[name]
+            // Own-property read: a bare [name] resolved inherited Object.prototype
+            // members (toString, valueOf, ...) under a host JS engine.
+            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
             if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
             return m.apply(undefined, concat2impl([target], args))
         }
-        var f = target[name]
+        var f = hasOwn(target, name) ? target[name] : undefined
         if (typeof f != "function") fail("unknown method '" + name + "'")
         return f.apply(undefined, args)
     }
@@ -633,7 +635,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     function readRef(ref) {
         if (ref.path.length == 0) return getVar(ref.name)
         var p = resolveRef(ref)
-        return isMap(p.obj) ? mapGet(p.obj, p.key) : p.obj[p.key]
+        if (isMap(p.obj)) return mapGet(p.obj, p.key)
+        return hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
     }
     // items = [ref..., {op}, exprThunks...]: parallel assignment, or unpacking of a
     // multi value call when there are more targets than expressions.
@@ -957,7 +960,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // exact-match paths, so sub-packages like "encoding/json" are listed in full).
     core.stdlibImports = ["fmt", "os", "strings", "strconv", "math", "sort", "errors", "bufio", "io", "time", "sync", "bytes", "unicode", "regexp", "path", "encoding/json", "context", "flag", "log", "reflect"]
     core.nullWord = "nil"
-    core.getIndex = function(o, i) { return isMap(o) ? mapGet(o, i) : o[i] }
+    core.getIndex = function(o, i) { return isMap(o) ? mapGet(o, i) : (hasOwn(o, i) ? o[i] : undefined) }
     core.framePush = function() { deferFrames.push([]) }
     core.framePop = function() { runDefers(deferFrames.pop()) }
 
@@ -969,7 +972,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var mm = methodTodo[mi]
         var recvVar = mm.recvName[0]
         var recvType = mm.recvName[1]
-        var cls = structs[recvType]
+        var cls = hasOwn(structs, recvType) ? structs[recvType] : undefined
         if (cls == undefined) fail("method receiver type not found: " + recvType)
         cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params, body: mm.body})
     }

@@ -620,18 +620,20 @@ KwLet       = "let" KwEnd ;
         }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
-            // The lookup follows the __super chain (inheritance).
+            // The lookup follows the __super chain (inheritance). Own-property reads
+            // only: a bare c[name] resolved inherited Object.prototype members
+            // (toString, valueOf, ...) under a host JS engine.
             var m = undefined
-            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) m = c[name]
+            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
             if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
             return m.apply(undefined, concat2impl([target], args))
         }
         if (target.__isclass === true) {
-            var sm = target[name]
+            var sm = hasOwn(target, name) ? target[name] : undefined
             if (typeof sm == "function") return sm.apply(undefined, args)
             fail("unknown static method '" + name + "' on " + target.__name)
         }
-        var f = target[name]
+        var f = hasOwn(target, name) ? target[name] : undefined
         if (typeof f != "function") fail("unknown method '" + name + "'")
         return f.apply(undefined, args)
     }
@@ -685,7 +687,7 @@ KwLet       = "let" KwEnd ;
         o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = o[s.key] } else { o = csGetIndex(o, s.idx()) }
+            if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = csGetIndex(o, s.idx()) }
             if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
         }
         var last = ref.path[ref.path.length - 1]
@@ -709,7 +711,7 @@ KwLet       = "let" KwEnd ;
                     if (op != "=") { var di = dictFind(p.obj, p.key); v = applyOp(op, di < 0 ? 0 : p.obj.vals[di], v) }
                     dictSet(p.obj, p.key, v)
                 } else {
-                    if (op != "=") v = applyOp(op, p.obj[p.key], v)
+                    if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
                     p.obj[p.key] = v
                 }
             }
@@ -732,7 +734,7 @@ KwLet       = "let" KwEnd ;
                 dictSet(p.obj, p.key, (m + d) | 0)
                 return m
             }
-            var m2 = p.obj[p.key]
+            var m2 = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
             p.obj[p.key] = (m2 + d) | 0
             return m2
         }
@@ -744,7 +746,7 @@ KwLet       = "let" KwEnd ;
         return function() {
             var self = getVar("this")
             var m = undefined
-            for (var c = getVar(defName).__super; c != undefined && m == undefined; c = c.__super) m = c[name]
+            for (var c = getVar(defName).__super; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
             if (typeof m != "function") fail("unknown base method '" + name + "'")
             var argv = [self]
             for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
@@ -1097,7 +1099,8 @@ KwLet       = "let" KwEnd ;
         if (name == "Count" || name == "Length") return csLen(o)
         if (name == "Keys") return mcall(o, "keys", [])
         if (name == "Values") return mcall(o, "values", [])
-        return o[name]
+        if (hasOwn(o, name)) { return o[name] }
+        return undefined
     }
     core.getIndex = csGetIndex
 

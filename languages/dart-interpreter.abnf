@@ -657,7 +657,10 @@ KwFactory   = "factory" KwEnd ;
     }
     function getFieldD(o, name) {
         if (o === null || o === undefined) { fail("field ." + name + " of null") }
-        return o[name]
+        // Own-property read: a bare o[name] resolved inherited Object.prototype
+        // members (toString, valueOf, ...) under a host JS engine.
+        if (hasOwn(o, name)) { return o[name] }
+        return undefined
     }
 
     // ----- member chains: .method(args), .field, [index] -----
@@ -714,7 +717,9 @@ KwFactory   = "factory" KwEnd ;
             fail("unknown List method: " + name)
         }
         if (target != null && target != undefined && target.__class != undefined) {
-            var m = target.__class[name]
+            // Own-property read: a bare [name] resolved inherited Object.prototype
+            // members (toString, valueOf, ...) under a host JS engine.
+            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
             if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
             return m.apply(undefined, concat2impl([target], args))
         }
@@ -1012,7 +1017,7 @@ KwFactory   = "factory" KwEnd ;
             } else {
                 var p = resolveRefDart(ref)
                 if (p.field) {
-                    if (op != "=") { v = applyOp(op, p.obj[p.key], v) }
+                    if (op != "=") { v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v) }
                     p.obj[p.key] = v
                 } else {
                     if (op != "=") { v = applyOp(op, dget(p.obj, p.key), v) }

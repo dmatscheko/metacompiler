@@ -570,15 +570,15 @@ KwInstanceof = "instanceof" KwEnd ;
         fail("variable not defined: " + name)
     }
     declVar = function(name, value) {
-        scopes[scopes.length - 1][name] = value
+        scopePut(scopes[scopes.length - 1], name, value)
     }
     // Assignment walks the chain; a name that is nowhere declared becomes an
     // implicit global (real, non strict JavaScript), never an error.
     setVar = function(name, value) {
         for (var i = scopes.length - 1; i >= 0; i--) {
-            if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+            if (hasOwn(scopes[i], name)) { scopePut(scopes[i], name, value); return }
         }
-        globalScope[name] = value
+        scopePut(globalScope, name, value)
     }
 
     // ----- Statement signals -----
@@ -596,7 +596,7 @@ KwInstanceof = "instanceof" KwEnd ;
             scopes = env.slice()
             var sc = {}
             for (var j = 0; j < params.length; j++) {
-                sc[params[j]] = args[j]
+                scopePut(sc, params[j], args[j])
             }
             sc["arguments"] = args
             scopes.push(sc)
@@ -608,6 +608,10 @@ KwInstanceof = "instanceof" KwEnd ;
 
     function getMember(o, k) {
         if (o == undefined) fail("member '" + k + "' of " + o) // Catches null and undefined.
+        // Plain objects (instances, literals) read own properties only: a bare o[k]
+        // resolved inherited Object.prototype members (toString, valueOf, ...) under a
+        // host JS engine, while the frozen engine's objects have no prototype chain.
+        if (typeof o == "object" && !Array.isArray(o) && !hasOwn(o, k)) return undefined
         return o[k]
     }
 
@@ -653,7 +657,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var o = {}
             var keys = []
             for (var i = 0; i < props.length; i++) {
-                o[props[i].k] = props[i].t()
+                scopePut(o, props[i].k, props[i].t())
                 if (!isInternalKey(props[i].k)) {
                     var found = false
                     for (var j = 0; j < keys.length; j++) { if (keys[j] === props[i].k) { found = true } }
@@ -813,7 +817,7 @@ KwInstanceof = "instanceof" KwEnd ;
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            for (var j = 0; j < params.length; j++) sc[params[j]] = args[j]
+            for (var j = 0; j < params.length; j++) scopePut(sc, params[j], args[j])
             sc["arguments"] = args
             scopes.push(sc)
             var r = bodyT()
@@ -834,7 +838,7 @@ KwInstanceof = "instanceof" KwEnd ;
             scopes = env.slice()
             var sc = {}
             sc["this"] = self
-            for (var j = 0; j < params.length; j++) sc[params[j]] = args[j]
+            for (var j = 0; j < params.length; j++) scopePut(sc, params[j], args[j])
             sc["arguments"] = args
             scopes.push(sc)
             if (isDefault && superName != null) {
@@ -843,7 +847,7 @@ KwInstanceof = "instanceof" KwEnd ;
             }
             for (var k = 0; k < fields.length; k++) {
                 var fv = (fields[k].init != null) ? fields[k].init() : undefined
-                self[fields[k].name] = fv
+                scopePut(self, fields[k].name, fv)
                 trackKey(self, fields[k].name)
             }
             if (bodyT != null) bodyT()
@@ -858,7 +862,7 @@ KwInstanceof = "instanceof" KwEnd ;
     function mcall(target, name, args) {
         if (target != undefined && target != null && target.__class != undefined) {
             var m = undefined
-            for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) m = cl[name]
+            for (var cl = target.__class; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
             if (typeof m != "function") fail("unknown method '" + name + "' on an instance")
             return m.apply(undefined, concat2impl([target], args))
         }
@@ -971,7 +975,7 @@ KwInstanceof = "instanceof" KwEnd ;
         return function() {
             var self = getVar("this")
             var m = undefined
-            for (var cl = getVar(defName).__super; cl != undefined && m == undefined; cl = cl.__super) m = cl[name]
+            for (var cl = getVar(defName).__super; cl != undefined && m == undefined; cl = cl.__super) { if (hasOwn(cl, name)) m = cl[name] }
             if (typeof m != "function") fail("unknown super method '" + name + "'")
             var argv = [self]
             for (var i = 0; i < argThunks.length; i++) argv.push(argThunks[i]())
@@ -1118,8 +1122,8 @@ KwInstanceof = "instanceof" KwEnd ;
                 setVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
-                if (op != "=") v = applyOp(op, p.obj[p.key], v)
-                p.obj[p.key] = v
+                if (op != "=") v = applyOp(op, getMember(p.obj, p.key), v)
+                scopePut(p.obj, p.key, v)
                 trackKey(p.obj, p.key) // Keep the object's for-in key list up to date.
             }
             return v
@@ -1136,8 +1140,8 @@ KwInstanceof = "instanceof" KwEnd ;
                 return n
             }
             var p = resolveRef(ref)
-            var m = p.obj[p.key] - 0
-            p.obj[p.key] = m + delta
+            var m = getMember(p.obj, p.key) - 0
+            scopePut(p.obj, p.key, m + delta)
             return m
         }
     }
@@ -1151,8 +1155,8 @@ KwInstanceof = "instanceof" KwEnd ;
                 return n
             }
             var p = resolveRef(ref)
-            var m = p.obj[p.key] - 0 + delta
-            p.obj[p.key] = m
+            var m = getMember(p.obj, p.key) - 0 + delta
+            scopePut(p.obj, p.key, m)
             return m
         }
     }

@@ -461,7 +461,8 @@ KwContinue  = "continue" KwEnd ;
     function swGetField(o, name) {
         if (name == "count") { return swlen(o) }
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
-        return o[name]
+        if (hasOwn(o, name)) { return o[name] }
+        return undefined
     }
     function swIndex(o, i) {
         if (isDict(o)) {
@@ -494,7 +495,7 @@ KwContinue  = "continue" KwEnd ;
     }
     function getElemP(o, k) {
         if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
-        return o[k]
+        return hasOwn(o, k) ? o[k] : undefined
     }
 
     // ----- Builtins available to the running program -----
@@ -523,7 +524,9 @@ KwContinue  = "continue" KwEnd ;
         if (target === null || target === undefined) { fail("method ." + name + " on nil") }
         if (Array.isArray(target)) { return arrayMethod(target, name, args) }
         if (target.__class != undefined) {
-            var m = target.__class[name]
+            // Own-property read: a bare [name] resolved inherited Object.prototype
+            // members (toString, valueOf, ...) under a host JS engine.
+            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
             if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
             return m.apply(undefined, concat2impl([target], args))
         }

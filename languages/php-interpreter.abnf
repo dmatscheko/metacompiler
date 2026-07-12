@@ -748,7 +748,9 @@ KwInstanceof = "instanceof" KwEnd ;
     function mcall(target, name, args) {
         if (target === null || target === undefined) { fail("method ->" + name + "() on null") }
         if (target.__class != undefined) {
-            var m = target.__class[name]
+            // Own-property read: a bare [name] resolved inherited Object.prototype
+            // members (toString, valueOf, ...) under a host JS engine.
+            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
             if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
             return m.apply(undefined, concat2impl([target], args))
         }
@@ -861,7 +863,7 @@ KwInstanceof = "instanceof" KwEnd ;
         o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = o[s.key] } else { o = phpIndex(o, s.idx()) }
+            if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined } else { o = phpIndex(o, s.idx()) }
         }
         var last = ref.path[ref.path.length - 1]
         return {obj: o, last: last}
