@@ -174,11 +174,15 @@ LazyInit    <~~ push(makeLazyInit(pop())) ~~>
 // a trailing -> is a grouped type, so a nullable function type ((Intent) -> Unit)?
 // parses: the inner function type is the group, then ? applies to the whole.
 Type        = { TypeAnno } ( "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" [ "->" Type ]
-            | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) [ "?" ] ;
+            | Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ RecvFnTail ] ) [ "?" ] ;
 // A function-type parameter: an optional name (Kotlin allows named function-type
 // parameters, onRun: (root: Boolean) -> Unit) then the type. Also serves the
 // grouped-type case (a bare type with no name, in parentheses without a following ->).
 FnTypeParam = [ Id ":" ] Type ;
+// A receiver function type tail: Recv.() -> R / Recv.(A) -> R (a lambda-with-receiver
+// type, e.g. @Composable RowScope.() -> Unit). The receiver type is the dotted name;
+// this consumes the `.(params) -> Ret`. Parsed and ignored like any type.
+RecvFnTail  = "." "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" "->" Type ;
 // A type annotation: an argument list is consumed only when a `->` does NOT follow,
 // so `@Composable () -> Unit` leaves the `()` for the function type (NotArrow rolls
 // the parens back), while `@Tag("x") Foo` keeps them as the annotation's arguments.
