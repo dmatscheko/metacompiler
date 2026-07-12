@@ -14,7 +14,8 @@ charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one ch
 String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
 (fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
-expr/block, no fallthrough), break/continue, return, assignment (also
+expr/block, no fallthrough), break/continue (labeled too: labeled loops, labeled
+blocks; a label inside a try body cannot jump out), return, assignment (also
 += -= *= /= %= and the bitwise/shift compounds &= |= ^= <<= >>= >>>=), postfix ++/--,
 the ternary operator, || && with short circuit, & | ^ (non-short-circuit boolean
 operators on two booleans, int32 bit operations otherwise), << >> >>> (Java int
@@ -166,7 +167,7 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 // not implemented (labels are dropped) and falls back to the plain innermost jump.
 Break       <~~ push(makeBreakL(takeAll(), up.pos)) ~~>    = KwBreak [ LabelRef ] ";" ;
 Continue    <~~ push(makeContinueL(takeAll(), up.pos)) ~~> = KwContinue [ LabelRef ] ";" ;
-LabelRef    <~~ push({label: up.in}) ~~> = Id ;
+LabelRef    <~~ push({label: stripWs(up.in)}) ~~> = Id ;
 
 // assert cond [: message];  recognized, not implemented (no assertion model); the
 // condition and the optional message are still evaluated so their calls stay visible.
@@ -181,7 +182,7 @@ Synchronized <~~ push(makeSync(takeAll(), up.pos)) ~~>
 // (Id matches keywords in this grammar), the same guard C's Label uses.
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
             = NotSwitchKw LabelName ":" Statement ;
-LabelName   <~~ push({lbl: up.in}) ~~> = Id ;
+LabelName   <~~ push({lbl: stripWs(up.in)}) ~~> = Id ;
 NotSwitchKw = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -873,19 +874,52 @@ KwSync      = "synchronized" KwEnd ;
         return function() { lockT(); return bodyT() }
     }
     // label: stmt -- not implemented; the label is dropped and the statement still runs.
+    // A labeled statement: the wrapper offers its name via pendingLabel right
+    // before running the inner thunk - the loop consumes it on entry, so only
+    // the directly labeled loop takes the name (an inner loop sees null). A
+    // labeled break that escapes to the wrapper (labeled block, or the labeled
+    // loop itself) is absorbed here.
+    var pendingLabel = null
     function makeLabeled(items, pos) {
-        notImpl("labeled statement", pos)
-        return items[1]
+        var name = items[0].lbl
+        var innerT = items[1]
+        return function() {
+            pendingLabel = name
+            var r = innerT()
+            pendingLabel = null
+            if (r != undefined && r.brkL === name) { return undefined }
+            return r
+        }
     }
-    // break / continue with a target label: recognized, not implemented; fall back to the
-    // plain innermost jump. Without a label they stay the genuine break / continue.
+    // break lbl / continue lbl travel as {brkL}/{contL} signals: a loop continues
+    // on its own contL and propagates everything else; the Labeled wrapper
+    // absorbs the matching brkL. Without a label they stay the plain signals.
     function makeBreakL(items, pos) {
-        if (items.length > 0) { notImpl("labeled break", pos) }
-        return makeBreak()
+        if (items.length == 0) { return makeBreak() }
+        var lbl = items[0].label
+        return function() { return {brkL: lbl} }
     }
     function makeContinueL(items, pos) {
-        if (items.length > 0) { notImpl("labeled continue", pos) }
-        return makeContinue()
+        if (items.length == 0) { return makeContinue() }
+        var lbl = items[0].label
+        return function() { return {contL: lbl} }
+    }
+    // Java's loops consume pendingLabel on entry and handle their own labeled
+    // continue; the shared core makeWhile is reassigned to do the same.
+    makeWhile = function(bodyT, condT) {
+        return function() {
+            var lbl = pendingLabel
+            pendingLabel = null
+            while (core.test(condT())) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r === CONT) continue
+                    if (lbl != null && r.contL === lbl) continue
+                    return r
+                }
+            }
+        }
     }
 
     function makeDecl(items) {
@@ -895,11 +929,15 @@ KwSync      = "synchronized" KwEnd ;
     }
     function makeDo(condT, bodyT) {
         return function() {
+            var lbl = pendingLabel
+            pendingLabel = null
             do {
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
-                    if (r !== CONT) return r
+                    if (r === CONT) continue
+                    if (lbl != null && r.contL === lbl) continue
+                    return r
                 }
             } while (condT())
         }
@@ -953,6 +991,8 @@ KwSync      = "synchronized" KwEnd ;
     // for (var x : arr) body -- pops reversed: body, expr, name.
     function makeForEach(bodyT, arrT, name) {
         return function() {
+            var lbl = pendingLabel
+            pendingLabel = null
             var arr = arrT()
             scopes.push({})
             declVar(name, undefined)
@@ -962,7 +1002,10 @@ KwSync      = "synchronized" KwEnd ;
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
-                    if (r !== CONT) { res = r; break }
+                    if (r === CONT) continue
+                    if (lbl != null && r.contL === lbl) continue
+                    res = r
+                    break
                 }
             }
             scopes.pop()
@@ -978,14 +1021,21 @@ KwSync      = "synchronized" KwEnd ;
             if (items[i].k == "post") post = items[i].t
         }
         return function() {
+            var lbl = pendingLabel
+            pendingLabel = null
             scopes.push({})
             var res = undefined
             if (init != null) init()
             while (cond == null || cond()) {
                 var r = bodyT()
                 if (r != undefined) {
+                    if (r !== BRK && (r === CONT || (lbl != null && r.contL === lbl))) {
+                        if (post != null) post()
+                        continue
+                    }
                     if (r === BRK) break
-                    if (r !== CONT) { res = r; break }
+                    res = r
+                    break
                 }
                 if (post != null) post()
             }

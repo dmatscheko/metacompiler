@@ -550,6 +550,21 @@ public class Main {
         bu >>>= 28;
         Main.check("bit-compound-ushr", bu == 15);
 
+        // ----- labeled statements -----
+        int labHits = 0;
+        outer:
+        for (int li = 0; li < 3; li++) {
+            for (int lj = 0; lj < 3; lj++) {
+                if (lj == 1) { continue outer; }
+                if (li == 2) { break outer; }
+                labHits = labHits + 1;
+            }
+        }
+        Main.check("labeled-loop", labHits == 2);
+        int labReached = 0;
+        lblock: { labReached = 1; if (labReached == 1) { break lblock; } labReached = 2; }
+        Main.check("labeled-block", labReached == 1);
+
         // ----- arrow switch (multi-label, block arm, no fallthrough) -----
         int arrowR = 0;
         switch (2) {

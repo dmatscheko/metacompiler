@@ -15,7 +15,8 @@ charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one ch
 String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
 (fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
-expr/block, no fallthrough), break/continue, return, assignment (also
+expr/block, no fallthrough), break/continue (labeled too: labeled loops, labeled
+blocks; a label inside a try body cannot jump out), return, assignment (also
 += -= *= /= %= and the bitwise/shift compounds &= |= ^= <<= >>= >>>=), postfix ++/--,
 the ternary operator, || && with short circuit, & | ^ (non-short-circuit boolean
 operators on two booleans, int32 bit operations otherwise), << >> >>> (Java int
@@ -172,7 +173,7 @@ Return      <~~ push(makeReturn(takeAll())) ~~>
 // not implemented (labels are dropped) and falls back to the plain innermost jump.
 Break       <~~ push(makeBreakL(takeAll(), up.pos)) ~~>    = KwBreak [ LabelRef ] ";" ;
 Continue    <~~ push(makeContinueL(takeAll(), up.pos)) ~~> = KwContinue [ LabelRef ] ";" ;
-LabelRef    <~~ push({label: up.in}) ~~> = Id ;
+LabelRef    <~~ push({label: stripWs(up.in)}) ~~> = Id ;
 
 // assert cond [: message];  recognized, not implemented (no assertion model); the
 // condition and the optional message are still lowered so their calls stay visible.
@@ -187,7 +188,7 @@ Synchronized <~~ push(makeSync(takeAll(), up.pos)) ~~>
 // (Id matches keywords in this grammar), the same guard C's Label uses.
 Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
             = NotSwitchKw LabelName ":" Statement ;
-LabelName   <~~ push({lbl: up.in}) ~~> = Id ;
+LabelName   <~~ push({lbl: stripWs(up.in)}) ~~> = Id ;
 NotSwitchKw = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -963,19 +964,74 @@ KwSync      = "synchronized" KwEnd ;
         }
     }
     // label: stmt -- not implemented; the label is dropped and the statement still runs.
+    // A labeled statement: the wrapper offers its name via pendingLabel right
+    // before emitting the inner statement - a loop emitter consumes it into its
+    // loopStack entry, so only the directly labeled loop takes the name (inner
+    // loops see null). The wrapper also pushes its own labeled entry with an
+    // exit block, which makes a labeled BLOCK breakable; its cont falls back to
+    // the enclosing loop like makeSwitch does.
+    var pendingLabel = null
     function makeLabeled(items, pos) {
-        notImpl("labeled statement", pos)
-        return items[1]
+        var name = items[0].lbl
+        var innerT = items[1]
+        return function(b) {
+            var exitB = curF.NewBlock("")
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: exitB, label: name})
+            pendingLabel = name
+            var endB = innerT(b)
+            pendingLabel = null
+            loopStack.pop()
+            endB.NewBr(exitB)
+            return exitB
+        }
     }
-    // break / continue with a target label: recognized, not implemented; fall back to the
-    // plain innermost jump. Without a label they stay the genuine break / continue.
+    // break lbl / continue lbl branch to the labeled loopStack entry. A label
+    // inside a try/catch closure cannot see the outer loop (the closure resets
+    // loopStack) - that stays reported as not implemented.
+    function findLabeled(lbl) {
+        for (var i = loopStack.length - 1; i >= 0; i--) {
+            if (loopStack[i].label == lbl) { return loopStack[i] }
+        }
+        return null
+    }
     function makeBreakL(items, pos) {
-        if (items.length > 0) { notImpl("labeled break", pos) }
-        return makeBreak()
+        if (items.length == 0) { return makeBreak() }
+        var lbl = items[0].label
+        return function(b) {
+            var e = findLabeled(lbl)
+            if (e == null) { notImpl("break across a try boundary or to an unknown label", pos); return b }
+            b.NewBr(e.brk)
+            return deadBlock()
+        }
     }
     function makeContinueL(items, pos) {
-        if (items.length > 0) { notImpl("labeled continue", pos) }
-        return makeContinue()
+        if (items.length == 0) { return makeContinue() }
+        var lbl = items[0].label
+        return function(b) {
+            var e = findLabeled(lbl)
+            if (e == null || e.cont == null) { notImpl("continue across a try boundary or to an unknown label", pos); return b }
+            b.NewBr(e.cont)
+            return deadBlock()
+        }
+    }
+    // Java's loop emitters consume pendingLabel into their loopStack entry; the
+    // shared core makeWhile is reassigned to do the same.
+    makeWhile = function(bodyT, condT) {
+        return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var r = condT(headB)
+            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            loopStack.push({cont: headB, brk: exitB, label: lbl})
+            bodyT(bodyB).NewBr(headB)
+            loopStack.pop()
+            return exitB
+        }
     }
 
     function makeDecl(items) {
@@ -990,11 +1046,13 @@ KwSync      = "synchronized" KwEnd ;
     }
     function makeDo(condT, bodyT) {
         return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
             var bodyB = curF.NewBlock("")
             var condB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(bodyB)
-            loopStack.push({cont: condB, brk: exitB})
+            loopStack.push({cont: condB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(condB)
             loopStack.pop()
             var r = condT(condB)
@@ -1062,6 +1120,8 @@ KwSync      = "synchronized" KwEnd ;
     // for (var x : arr): a hidden index variable in an own scope drives the loop.
     function makeForEach(bodyT, arrT, name) {
         return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
             feCount++
             var iName = "$fe" + feCount
             var aName = "$fa" + feCount
@@ -1085,7 +1145,7 @@ KwSync      = "synchronized" KwEnd ;
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
-            loopStack.push({cont: postB, brk: exitB})
+            loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
@@ -1104,6 +1164,8 @@ KwSync      = "synchronized" KwEnd ;
             if (items[i].k == "post") post = items[i].t
         }
         return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             if (init != null) b = init(b)
@@ -1118,7 +1180,7 @@ KwSync      = "synchronized" KwEnd ;
             } else {
                 headB.NewBr(bodyB)
             }
-            loopStack.push({cont: postB, brk: exitB})
+            loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var pb = postB

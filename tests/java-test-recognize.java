@@ -1,11 +1,11 @@
 /* Java recognition test.
  * Exercises constructs the grammar RECOGNIZES but does not implement: the assert
- * statement, labeled statements with labeled break/continue, the synchronized
- * statement, char literals and a text block. Prefix ++/-- and unary + are genuinely
- * lowered, and the bitwise/shift operators, compound bitwise/shift assignment,
- * instanceof (with a pattern binding) and the hex/binary/floating-point/underscored/
- * suffixed number literals graduated to genuine implementations - they run and are
- * checked here.
+ * statement, the synchronized statement, char literals and a text block. Prefix
+ * ++/-- and unary + are genuinely lowered, and the bitwise/shift operators,
+ * compound bitwise/shift assignment, instanceof (with a pattern binding), the
+ * hex/binary/floating-point/underscored/suffixed number literals and labeled
+ * statements with labeled break/continue graduated to genuine implementations -
+ * they run and are checked here.
  *
  * Under a DEFAULT run this ABORTS at the first not-implemented construct with a clean
  * file:line message. Under -warn-unsupported every not-implemented construct warns and
@@ -73,8 +73,8 @@ public class Main {
         // assert with a message (recognized, not implemented).
         assert counter >= 0 : "counter must not be negative";
 
-        // A labeled loop with labeled continue/break (recognized, not implemented; they
-        // fall back to the plain innermost jump, so the loops still run and terminate).
+        // A labeled loop with labeled continue/break (genuine: continue search
+        // resumes the outer loop, break search leaves it).
         int visits = 0;
         search:
         for (int i = 0; i < 3; i++) {
@@ -88,6 +88,7 @@ public class Main {
                 }
             }
         }
+        Main.check("labeled loop visits", visits, 5);
 
         // A synchronized statement (recognized, not implemented; the block still runs).
         Object lock = "lock";
