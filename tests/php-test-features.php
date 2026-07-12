@@ -310,7 +310,29 @@ class WhoB { public function who() { return "B"; } }
 function callWho($o) { return $o->who(); }
 check("class-dispatch", callWho(new WhoA()) . callWho(new WhoB()), "AB");
 
-// ----- exceptions: throw / catch / finally (finally bodies stay side-effect only) -----
+// ----- exceptions: throw / catch / finally (incl. jumps out of finally) -----
+function finOverridesReturn() {
+    try {
+        return "try";
+    } finally {
+        return "fin";
+    }
+}
+check("return-in-finally-overrides", finOverridesReturn(), "fin");
+
+function finBreaksLoop() {
+    $r = "";
+    for ($i = 0; $i < 3; $i++) {
+        try {
+            $r = $r . "a";
+        } finally {
+            if ($i == 1) { break; }
+        }
+    }
+    return $r;
+}
+check("break-in-finally", finBreaksLoop(), "aa");
+
 class Boom {
     public $code;
     public function __construct($c) {

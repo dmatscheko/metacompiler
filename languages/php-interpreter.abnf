@@ -141,9 +141,10 @@ DoWhile     <~~ takeAll(); push(notImplStmt("do-while", up.pos)) ~~>
 // clause wins - the exception type list, including multi-catch A | B, is parsed but not
 // discriminated, and the catch variable is optional); finally always runs; a
 // return/break/continue inside a try still propagates. A PHP Block is {body: thunk}, so
-// the marked sub-rules unwrap it (pop().body). finBody makes a normally-completing finally
-// yield undefined so it never clobbers the try/catch signal (finally control flow is
-// unsupported, matching the compiler's js_try, which discards the finally closure's value).
+// the marked sub-rules unwrap it (pop().body). finBody passes the finally body's signal
+// through: a normally-completing finally yields null (which excTry ignores), while a
+// return/break/continue OUT OF the finally overrides the try/catch completion and cancels
+// a pending rethrow - the same semantics js_try gives the compiler.
 Try         <~~ push(excTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop().body}) ~~>
@@ -503,7 +504,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // signal with the body's last statement value (PHP's makeBody returns null, not
     // undefined). Control flow inside a finally is unsupported, so this is byte-for-byte
     // what the compiler's js_try does (it discards the finally closure's return).
-    function finBody(t) { return function() { t() } }
+    function finBody(t) { return function() { return t() } }
 
     // ----- PHP truthiness: false, 0, "" and null are falsy (matches js_truthy for
     // the value kinds this subset uses). -----
