@@ -128,7 +128,15 @@ CtorParams  <~~ push({cparams: takeAll()}) ~~>
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
             = [ Modifiers ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type [ "=" DiscardExpr ] ;
 
-Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | UnsupFun ) ;
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | UnsupFun ) ;
+// A nested type declaration (a data/enum/annotation class, plain class, interface or
+// object inside another class or object). Recognised but not lowered - the subset has
+// a flat, non-nested class model - so it is reported as not implemented and its body
+// skipped; the `data` modifier was already consumed by the Member's Modifiers.
+NestedType  <~~ notImpl("nested type declaration", up.pos) ~~>
+            = [ KwEnum | KwAnnotation ] KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ SkipBlock ]
+            | KwInterface Id [ SkipAngle ] [ ":" SuperList ] SkipBlock
+            | KwObject Id [ ":" SuperList ] SkipBlock ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form

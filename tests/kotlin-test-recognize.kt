@@ -22,6 +22,15 @@ fun weightedSum(base: Int, factor: Int = 2, vararg extra: Int): Int {
 
 fun helper(x: Int): Int = x * 3
 
+// A class carrying a nested type declaration: recognised but not lowered (the subset
+// has a flat class model). Under -warn-unsupported the nested type is skipped and the
+// enclosing class's own members still work.
+class Holder(val tag: Int) {
+    data class Slot(val name: String, val on: Boolean = true)
+    enum class Kind { LEFT, RIGHT }
+    fun doubled(): Int = tag * 2
+}
+
 fun main() {
     var fails = 0
 
@@ -91,6 +100,9 @@ fun main() {
     // to undefined under -warn-unsupported, so the map still runs (returns a constant).
     val destructured = nums.map { (a, b) -> 0 }
     if (destructured.size != 4) { fails = fails + 1 }
+
+    // the enclosing class with a nested type still works (the nested type was skipped)
+    if (Holder(21).doubled() != 42) { fails = fails + 1 }
 
     exitProcess(fails)
 }
