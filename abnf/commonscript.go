@@ -137,6 +137,11 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	vm.Set("unescape", r.Unescape)
 	vm.Set("unescapeTilde", UnescapeTilde)
 
+	// The UTF-8 byte length of a string. JS .length counts UTF-16 code units,
+	// but the emitters need the byte count of the char arrays they emit
+	// (lib/compile-core.js emitStr). goja exports the string as UTF-8.
+	vm.Set("byteLen", func(s string) int { return len(s) })
+
 	// The MetaJS 'anytype' declaration marker (var v = anytype). Goja cannot pin
 	// types, so here it is plain undefined: the variable starts as undefined
 	// exactly like under the enforcing engines, and the name always resolves.

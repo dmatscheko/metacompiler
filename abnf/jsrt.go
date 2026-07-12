@@ -2680,6 +2680,12 @@ func standardJSBindings() map[string]interface{} {
 			}
 			return fmt.Sprintf(rt.toString(args[0]), rt.printArgs(args[1:])...)
 		}),
+		// The UTF-8 byte length of a string: .length counts UTF-16 code units,
+		// but the emitters need the byte count of the char arrays they emit
+		// (lib/compile-core.js emitStr).
+		"byteLen": jsHostFunc("byteLen", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return float64(len(rt.toString(argAt(args, 0))))
+		}),
 		"parseInt": jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			// A missing radix is NaN here; jsToInt turns it into 0, which
 			// jsParseInt treats as "auto" (10, or 16 for an 0x prefix). A raw

@@ -151,7 +151,10 @@ function emitStr(b, s) {
         strCount++
         g = {}
         g.glob = m.NewGlobalDef("str." + strCount, llvm.constant.NewCharArrayFromString(s))
-        g.len = handle(s.length)
+        // byteLen, not s.length: the char array holds UTF-8 bytes, but .length
+        // counts UTF-16 code units, so a non-ASCII constant was truncated to
+        // its first bytes ("é" arrived as the single byte 0xC3).
+        g.len = handle(byteLen(s))
         g.ptr = llvm.constant.NewGetElementPtr(g.glob.ContentType, g.glob, [handle(0), handle(0)])
         strGlobals[key] = g
     }
