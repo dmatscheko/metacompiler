@@ -2696,6 +2696,17 @@ func standardJSBindings() map[string]interface{} {
 		"byteLen": jsHostFunc("byteLen", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			return float64(len(rt.toString(argAt(args, 0))))
 		}),
+		// rawSet writes an own property; the goja side bypasses the
+		// Object.prototype "__proto__" accessor with it, here a plain
+		// property write is already exactly that.
+		"rawSet": jsHostFunc("rawSet", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			obj, ok := argAt(args, 0).(*jsObject)
+			if !ok {
+				rt.fail("rawSet needs an object")
+			}
+			obj.props[rt.toString(argAt(args, 1))] = argAt(args, 2)
+			return jsUndef
+		}),
 		"parseInt": jsHostFunc("parseInt", func(rt *jsrt, this uint64, args []interface{}) interface{} {
 			// A missing radix is NaN here; jsToInt turns it into 0, which
 			// jsParseInt treats as "auto" (10, or 16 for an 0x prefix). A raw

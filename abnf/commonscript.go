@@ -142,6 +142,18 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// (lib/compile-core.js emitStr). goja exports the string as UTF-8.
 	vm.Set("byteLen", func(s string) int { return len(s) })
 
+	// rawSet writes an OWN property, bypassing any Object.prototype accessor: a
+	// plain obj[name] = v with name "__proto__" invokes the prototype SETTER
+	// under a host JS engine (a TypeError for primitive values, a silent
+	// reparenting for objects). The frozen engine's objects have no prototype
+	// chain; the interpreter cores use rawSet for that name to keep the two
+	// engines aligned.
+	vm.Set("rawSet", func(obj *goja.Object, name string, v goja.Value) {
+		if err := obj.DefineDataProperty(name, v, goja.FLAG_TRUE, goja.FLAG_TRUE, goja.FLAG_TRUE); err != nil {
+			panic(err)
+		}
+	})
+
 	// The MetaJS 'anytype' declaration marker (var v = anytype). Goja cannot pin
 	// types, so here it is plain undefined: the variable starts as undefined
 	// exactly like under the enforcing engines, and the name always resolves.

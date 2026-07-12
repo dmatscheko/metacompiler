@@ -23,8 +23,11 @@ var core = {
         return (l + r) | 0
     },
     test: function(v) { return v },                  // Condition truthiness in if/while (Python: pytruthy).
-    getField: function(o, name) { return o[name] },  // .name reads (Java: array .length).
-    getIndex: function(o, i) { return o[i] },        // [i] reads (Go: map-aware).
+    // Both default readers are own-property reads: a bare o[name] resolved
+    // inherited Object.prototype members under a host JS engine, so a field
+    // named toString that was never written read back as a host function.
+    getField: function(o, name) { if (hasOwn(o, name)) { return o[name] }; return undefined },  // .name reads (Java: array .length).
+    getIndex: function(o, i) { if (hasOwn(o, i)) { return o[i] }; return undefined },           // [i] reads (Go: map-aware).
     framePush: null,    // Called on function entry (Go: open a defer frame).
     framePop: null,     // Called after the body, before locals are dropped (Go: run defers).
     varMiss: null,      // Name not in any scope: return {v: value} or null (Kotlin: this properties).
@@ -152,12 +155,21 @@ function excTry(items) {
     }
 }
 
-function declVar(name, value) { if (name != core.blank) scopes[scopes.length - 1][name] = value }
+// scopePut writes one own property. The single dangerous name is "__proto__":
+// a plain write invokes the Object.prototype accessor under a host JS engine
+// (a TypeError for primitive values, a silent reparenting of the scope object
+// otherwise), while the frozen engine's objects have no prototype chain.
+// rawSet (a host global on both engines) defines the own property directly.
+function scopePut(obj, name, value) {
+    if (name == "__proto__") { rawSet(obj, name, value) } else { obj[name] = value }
+}
+
+function declVar(name, value) { if (name != core.blank) scopePut(scopes[scopes.length - 1], name, value) }
 
 function setVar(name, value) {
     if (name == core.blank) { return }
     for (var i = scopes.length - 1; i >= 0; i--) {
-        if (hasOwn(scopes[i], name)) { scopes[i][name] = value; return }
+        if (hasOwn(scopes[i], name)) { scopePut(scopes[i], name, value); return }
     }
     if (core.setMiss != null && core.setMiss(name, value)) { return }
     fail("assignment to unknown variable: " + name)
@@ -366,7 +378,7 @@ function resolveRef(ref) {
     o = getVar(ref.name)
     for (var i = 0; i < ref.path.length - 1; i++) {
         var s = ref.path[i]
-        if (s.key != undefined) { o = o[s.key] }
+        if (s.key != undefined) { o = hasOwn(o, s.key) ? o[s.key] : undefined }
         else { o = core.getIndex(o, s.idx()) }
         if (o === undefined || o === null) fail(core.nullWord + " in assignment path of " + ref.name)
     }
