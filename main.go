@@ -433,7 +433,13 @@ func runVerify(o *options, grammar *r.Rules, srcs []string, parseropts *abnf.Par
 		if len(o.files) > 1 {
 			assemblySrc, assemblyName = srcs[1], o.files[1]
 		}
-		abnf.ParseWithAgrammar(grammar, assemblySrc, assemblyName, parseropts)
+		// A failed assembly (a missing or broken :include() file) is the real
+		// finding: swallowed, it surfaced only as an "undefined name" for every
+		// fragment production, hiding the cause.
+		if _, err := abnf.ParseWithAgrammar(grammar, assemblySrc, assemblyName, parseropts); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: error: cannot assemble the grammar's includes: %s\n", o.files[0], err)
+			os.Exit(1)
+		}
 	}
 	issues := abnf.Verify(grammar, srcs[0], ownNames)
 	errors := 0
