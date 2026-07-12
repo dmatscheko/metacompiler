@@ -5,3 +5,26 @@ IntLit      <~~ push(makeConst(parseInt(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 DecLit   <~~ push(makeConst(parseFloat(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." "0"..."9" { "0"..."9" } ] :whitespace(Whitespace) ;
+
+// Extended literal forms (OPT-IN; nothing references them unless a grammar
+// wires them into its own literal choice, BEFORE plain IntLit/DecLit - PEG
+// first-match needs the prefixed/longer forms first). All accept '_' digit
+// separators between digits (stripped), push makeConst thunks and expect
+// Whitespace, like IntLit. Type suffixes (L, f, U, ...) are language specific:
+// wrap these in a local production that consumes the suffix AFTER the value.
+NumHex      <~~ push(makeConst(parseInt(up.in.split("_").join("")))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() NumHexDig { NumHexDig | "_" } :whitespace(Whitespace) ;
+NumHexDig   = "0"..."9" | "a"..."f" | "A"..."F" ;
+// NumBinDig is a named production on purpose: a :command() directly followed by a
+// (group) parses as a Times repetition in the ABNF dialect - the Times trap.
+NumBin      <~~ push(makeConst(parseInt(up.in.split("_").join("").substring(2), 2))) ~~>
+            = "0" ( "b" | "B" ) :whitespace() NumBinDig { NumBinDig | "_" } :whitespace(Whitespace) ;
+NumBinDig   = "0" | "1" ;
+NumOct      <~~ push(makeConst(parseInt(up.in.split("_").join("").substring(2), 8))) ~~>
+            = "0" ( "o" | "O" ) :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+NumInt      <~~ push(makeConst(parseInt(up.in.split("_").join("")))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
+NumDec      <~~ push(makeConst(parseFloat(up.in.split("_").join("")))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ NumExp ] | NumExp ) :whitespace(Whitespace) ;
+NumExp      = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
