@@ -140,7 +140,7 @@ type jsrt struct {
 	table []interface{}
 
 	strIntern map[string]uint64
-	numIntern map[float64]uint64
+	numIntern map[uint64]uint64 // Keyed by the float bits, so -0 and +0 stay distinct handles.
 	objIntern map[interface{}]uint64 // Identity interning for pointer-like values.
 
 	root *jsScope
@@ -184,7 +184,7 @@ func newJSRT(bindings map[string]interface{}) *jsrt {
 	rt := &jsrt{
 		table:     []interface{}{jsUndef, jsNull, false, true},
 		strIntern: map[string]uint64{},
-		numIntern: map[float64]uint64{},
+		numIntern: map[uint64]uint64{},
 		objIntern: map[interface{}]uint64{},
 		retSlot:   jsUndef,
 		curPos:    -1,
@@ -309,15 +309,20 @@ func (rt *jsrt) wrapIdentityKey(key, v interface{}) uint64 {
 }
 
 func (rt *jsrt) wrapNum(f float64) uint64 {
-	if f == f { // Not NaN: NaN must not be a map key.
-		if h, ok := rt.numIntern[f]; ok {
+	// The intern key is the bit pattern, not the value: -0.0 == 0.0 as a float
+	// key, so a value-keyed map handed out one shared handle for both zeros
+	// (whichever was wrapped first supplied the other). NaN stays uninterned:
+	// its handles need not be stable.
+	bits := math.Float64bits(f)
+	if f == f {
+		if h, ok := rt.numIntern[bits]; ok {
 			return h
 		}
 	}
 	rt.table = append(rt.table, f)
 	h := uint64(len(rt.table) - 1)
 	if f == f {
-		rt.numIntern[f] = h
+		rt.numIntern[bits] = h
 	}
 	return h
 }
