@@ -1050,7 +1050,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitClosure([], finallyT, false)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitClosure([], finallyT, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)

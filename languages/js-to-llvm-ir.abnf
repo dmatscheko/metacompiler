@@ -1014,7 +1014,7 @@ KwInstanceof = "instanceof" KwEnd ;
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)

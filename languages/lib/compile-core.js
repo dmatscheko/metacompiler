@@ -206,12 +206,18 @@ function retStmt(b, v) {
 // loop, or a control signal when the jump leaves a try body with no loop of its own.
 // makeBreak/makeContinue and excDispatch (re-issuing a signal) all go through these.
 function emitBreak(b) {
-    if (inCtlBody() && loopStack.length == 0) { b.NewRet(callExt(b, "js_ctl_break", [])) }
-    else { b.NewBr(loopStack[loopStack.length - 1].brk) }
+    if (loopStack.length > 0) { b.NewBr(loopStack[loopStack.length - 1].brk); return }
+    if (inCtlBody()) { b.NewRet(callExt(b, "js_ctl_break", [])); return }
+    // Outside every loop and every try/finally closure: a plain grammar bug in
+    // the program; the bare loopStack read used to crash the compiler instead.
+    println("compile error: break outside of a loop")
+    exit(1)
 }
 function emitContinue(b) {
-    if (inCtlBody() && loopStack.length == 0) { b.NewRet(callExt(b, "js_ctl_continue", [])) }
-    else { b.NewBr(loopStack[loopStack.length - 1].cont) }
+    if (loopStack.length > 0) { b.NewBr(loopStack[loopStack.length - 1].cont); return }
+    if (inCtlBody()) { b.NewRet(callExt(b, "js_ctl_continue", [])); return }
+    println("compile error: continue outside of a loop")
+    exit(1)
 }
 
 // excDispatch is emitted right after a js_try call: ctl is its result. If ctl is a

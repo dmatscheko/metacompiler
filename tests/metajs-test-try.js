@@ -7,7 +7,7 @@
  *
  * A return/break/continue that leaves a try or catch body works in both engines - the
  * compiler turns it into a control signal re-issued in the enclosing function/loop
- * (see withReturn / loopBreak / loopContinue). (A jump out of finally is not supported.)
+ * (see withReturn / loopBreak / loopContinue), and a jump out of finally overrides.
  *
  * main() counts failed checks and returns the count, so the run exits 0 exactly when
  * every check passes; the interpreter and compiler must agree. **/

@@ -1178,7 +1178,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, false)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             // excDispatch re-issues any return/break/next signal; when none fired, ctl is

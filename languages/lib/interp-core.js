@@ -142,7 +142,10 @@ function excTry(items) {
             scopes = savedChain.slice()
             if (finallyT != undefined) {
                 var fr = finallyT()
-                if (fr != undefined) { box.sig = fr }
+                // Returning from the host finally overrides the try/catch
+                // completion AND cancels a rethrown exception, like in JS
+                // (box.sig assignment could not stop the host throw).
+                if (fr != undefined) { return fr }
             }
         }
         return box.sig

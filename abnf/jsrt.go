@@ -2202,28 +2202,38 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			tryC, catchC, finallyC := u(a[0]), u(a[1]), u(a[2])
 			hasCatch := isCallable(catchC)
 			hasFinally := isCallable(finallyC)
-			var result interface{} = jsUndef
-			// The finally defer is registered first so it runs LAST (after the catch
-			// handler); either normal completion, a handled throw, or a re-panic
-			// still runs it, and a throw from finally itself overrides.
-			func() {
-				if hasFinally {
-					defer rt.call(finallyC, jsUndef, nil)
+			// run executes one clause closure and catches ANY panic (a user
+			// throw or a runtime error), so the finally clause still runs and
+			// the panic can be re-raised afterwards.
+			run := func(c interface{}, args []interface{}) (res interface{}, caught interface{}) {
+				defer func() { caught = recover() }()
+				res = rt.call(c, jsUndef, args)
+				return
+			}
+			result, pending := run(tryC, nil)
+			if pending != nil {
+				if exc, isThrow := pending.(*jsThrown); isThrow && hasCatch {
+					result, pending = run(catchC, []interface{}{exc.value})
 				}
-				defer func() {
-					if r := recover(); r != nil {
-						exc, ok := r.(*jsThrown)
-						if !ok {
-							panic(r) // A runtime error, not a user throw: propagate.
-						}
-						if !hasCatch {
-							panic(r) // try/finally with no catch: re-throw after finally.
-						}
-						result = rt.call(catchC, jsUndef, []interface{}{exc.value})
-					}
-				}()
-				result = rt.call(tryC, jsUndef, nil)
-			}()
+			}
+			if hasFinally {
+				finRes, finPanic := run(finallyC, nil)
+				if finPanic != nil {
+					// A throw (or error) from finally itself replaces everything.
+					pending = finPanic
+				} else if ctl, isCtl := finRes.(*jsCtl); isCtl {
+					// The finally body is a ctl closure: a return/break/continue
+					// in it overrides the try/catch completion AND swallows a
+					// pending throw, like in JS. (It used to be discarded via a
+					// bare defer, so 'try { return 1 } finally { return 2 }'
+					// compiled to 1 while the interpreters returned 2.)
+					pending = nil
+					result = ctl
+				}
+			}
+			if pending != nil {
+				panic(pending)
+			}
 			return w(result)
 		},
 		// Control-flow signals for a return/break/continue that leaves a try body.

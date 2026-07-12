@@ -858,7 +858,7 @@ KwSync      = "synchronized" KwEnd ;
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, null, null, null, false)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, null, null, null, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)

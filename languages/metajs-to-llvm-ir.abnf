@@ -657,8 +657,9 @@ KwDefault   = "default" KwEnd ;
     // recover, hands a thrown value to the catch closure (a one-parameter function
     // bound to the catch name) and always runs the finally closure. The try and catch
     // bodies are ctl closures, so a return/break/continue leaving them becomes a control
-    // signal that excDispatch re-issues here. (A jump out of a finally is still lost -
-    // js_try discards the finally closure's result.)
+    // signal that excDispatch re-issues here. The finally body is a ctl closure too:
+    // its signal overrides the try/catch completion inside js_try (and cancels a
+    // pending rethrow), like in JS.
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {
@@ -675,7 +676,7 @@ KwDefault   = "default" KwEnd ;
             }
             var finClo = hUndef
             if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT)), curScopeV])
+                finClo = callExt(b, "js_closure", [handle(emitFunction([], finallyT, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
             return excDispatch(b, ctl)

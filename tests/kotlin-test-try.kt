@@ -8,7 +8,7 @@
  * A return/break/continue that LEAVES a try or catch body works in both engines: the
  * interpreter propagates the statement signal, and the compiler turns it into a control
  * signal that is re-issued in the enclosing function/loop (see relabelReturn / loopBreak
- * / loopContinue below). (A jump out of a finally block is still not supported.)
+ * / loopContinue below), and a jump out of a finally block overrides.
  *
  * main() counts failed checks and returns the count, so the run exits 0 exactly when
  * every check passes; the interpreter and compiler must agree byte-for-byte. **/

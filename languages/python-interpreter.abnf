@@ -979,7 +979,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
                 if (finallyT != undefined) {
                     var fr = finallyT()
-                    if (fr != undefined) { box.sig = fr }
+                    // An abrupt finally overrides the completion and cancels a
+                    // rethrown exception, like in JS (see lib/interp-core.js).
+                    if (fr != undefined) { return fr }
                 }
             }
             return box.sig
