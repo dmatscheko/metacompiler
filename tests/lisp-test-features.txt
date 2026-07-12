@@ -1,0 +1,164 @@
+; Fast feature-matrix test for the Lisp interpreter (lisp-interpreter.abnf) and the
+; LLVM-IR compiler (lisp-to-llvm-ir.abnf). It replaces the three algorithm-themed
+; lisp-test-big-* stress tests: instead of encoded-list marathons every special form
+; and builtin is exercised with the SMALLEST expression that can prove it works -
+; recursion stays below depth 6. A failed check prints "FAIL <id>" (so a diff
+; pinpoints it), and the value of the last top level form is the failure count and
+; becomes the exit code, so exit 0 and byte-identical output on all four legs
+; (interpreter/compiler x goja/-frozen) mean everything passed.
+
+; ----- self check helpers -----
+
+(define (print-num n)                   ; prints n in decimal (n >= 0)
+  (begin
+    (if (>= n 10) (print-num (/ n 10)) 0)
+    (putchar (+ 48 (mod n 10)))))
+
+(define (fail id)                       ; prints "FAIL <id>" and yields 1
+  (begin
+    (putchar 70) (putchar 65) (putchar 73) (putchar 76) (putchar 32)
+    (print-num id)
+    (putchar 10)
+    1))
+
+(define (check id got want)             ; 0 when equal, 1 when not
+  (if (= got want) 0 (fail id)))
+
+; ----- feature functions and globals -----
+
+(define seven 7)                        ; a global variable
+(define fourteen (* seven 2))           ; a global built from an earlier global
+
+(define (add2 a b) (+ a b))
+
+(define (get-seven) seven)              ; a function body sees the globals
+
+(define (shadowed seven) (+ seven 1))   ; a parameter shadows the global
+
+(define (two-forms) 1 2)               ; a body evaluates all forms, value is the last
+
+(define (fib n)                         ; recursion, fib(6) == 8
+  (if (< n 2)
+      n
+      (+ (fib (- n 1)) (fib (- n 2)))))
+
+(define (even? n)                       ; mutual recursion: odd? is only
+  (if (= n 0) 1 (odd? (- n 1))))        ; defined further down (forward reference)
+
+(define (odd? n)
+  (if (= n 0) 0 (even? (- n 1))))
+
+(define (sum-to n)                      ; symbols may contain a dash
+  (if (= n 0) 0 (+ n (sum-to (- n 1)))))
+
+(define (with-let n)                    ; let inside a function body
+  (let ((m (+ n 1))) (* m 2)))
+
+(define (classify n)                    ; cond chooses the first matching clause
+  (cond ((< n 0) -1)
+        ((= n 0) 0)
+        ((= (mod n 2) 0) 2)
+        (else 1)))
+
+; ----- arithmetic: n-ary operators, unary minus, truncation, 32 bit wrap -----
+
+(define f-arith
+  (+ (check 1 (+ 2 (* 3 4)) 14)
+     (check 2 (+ 1 2 3 4) 10)           ; + is n-ary
+     (check 3 (+ 5) 5)
+     (check 4 (+) 0)                    ; empty + yields 0
+     (check 5 (* 2 3 4) 24)             ; * is n-ary
+     (check 6 (*) 1)                    ; empty * yields 1
+     (check 7 (- 10 1 2) 7)             ; - folds left
+     (check 8 (- 5) -5)                 ; unary minus
+     (check 9 (- 3 10) -7)              ; negative result, negative literal
+     (check 10 (/ 7 2) 3)               ; integer division truncates
+     (check 11 (/ -7 2) -3)             ; ...toward zero
+     (check 12 (/ 7 -2) -3)
+     (check 13 (/ 100 5 2) 10)          ; / folds left
+     (check 14 (mod 7 3) 1)
+     (check 15 (mod -7 3) -1)           ; truncating like C
+     (check 16 (mod 17 12 4) 1)         ; mod folds left
+     (check 17 (+ 2147483647 1) -2147483648)    ; 32 bit wrap
+     (check 18 (* 100000 100000) 1410065408)))  ; 32 bit multiplication
+
+; ----- comparisons yield 1 or 0 (every operator, both outcomes) -----
+
+(define f-compare
+  (+ (check 19 (= 3 3) 1)
+     (check 20 (= 3 4) 0)
+     (check 21 (< 2 3) 1)
+     (check 22 (< 3 2) 0)
+     (check 23 (> 3 2) 1)
+     (check 24 (> 2 3) 0)
+     (check 25 (<= 3 3) 1)
+     (check 26 (<= 4 3) 0)
+     (check 27 (>= 3 3) 1)
+     (check 28 (>= 2 3) 0)
+     (check 29 (not 0) 1)
+     (check 30 (not 7) 0)))
+
+; ----- and / or short circuit and return the deciding value -----
+
+(define f-logic
+  (+ (check 31 (and 2 3) 3)             ; and yields the last value
+     (check 32 (and 1 0 (boom)) 0)      ; ...and short circuits (boom is not defined)
+     (check 33 (and) 1)                 ; empty and is true
+     (check 34 (or 0 5 (boom)) 5)       ; or yields the first non zero value
+     (check 35 (or 0 0) 0)
+     (check 36 (or) 0)))                ; empty or is false
+
+; ----- special forms: if, begin, let, cond -----
+
+(define f-forms
+  (+ (check 37 (if -3 1 2) 1)           ; everything non zero is true
+     (check 38 (if 0 1 2) 2)
+     (check 39 (if 0 1) 0)              ; a missing else arm yields 0
+     (check 40 (begin 1 2 3) 3)         ; begin yields the last value
+     (check 41 (begin) 0)               ; empty begin yields 0
+     (check 42 (let ((x_1 2) (y 3)) (+ x_1 y)) 5)
+     (check 43 (let ((x 2)) (let ((x 30) (y x)) (+ x y))) 32)   ; inits see the outer env
+     (check 44 (let () 5) 5)            ; empty binding list
+     (check 45 (let ((x 1)) 9 (+ x 1)) 2)       ; multi form body
+     (check 46 (cond ((< 1 2) 10) ((> 1 0) 20)) 10)     ; first match wins
+     (check 47 (cond ((= 1 2) 10) (else 20)) 20)
+     (check 48 (cond ((= 1 2) 10)) 0)   ; no clause matches: 0
+     (check 49 (cond ((= 1 1) 7 8)) 8)  ; clause bodies may hold several forms
+     (check 50 (cond ((= 1 1) 5) ((boom) 6)) 5)))       ; later tests stay unevaluated
+
+; ----- globals, functions, recursion, putchar -----
+
+(define f-funcs
+  (+ (check 51 seven 7)
+     (check 52 fourteen 14)
+     (check 53 (add2 2 3) 5)
+     (check 54 (get-seven) 7)
+     (check 55 (shadowed 10) 11)
+     (check 56 (two-forms) 2)
+     (check 57 (fib 6) 8)
+     (check 58 (even? 4) 1)             ; mutual recursion, depth <= 5
+     (check 59 (odd? 5) 1)
+     (check 60 (sum-to 4) 10)
+     (check 61 (with-let 3) 8)
+     (check 62 (+ (* 100 (classify -5)) (* 10 (classify 0)) (classify 8)) -98)  ; combined
+     (check 63 (putchar 10) 10)))       ; putchar returns its argument (prints the newline)
+
+(define failures (+ f-arith f-compare f-logic f-forms f-funcs))
+
+; ----- summary line: "features: N checks, M failures" -----
+
+(define (print-summary checks failed)
+  (begin
+    (putchar 102) (putchar 101) (putchar 97) (putchar 116) (putchar 117)
+    (putchar 114) (putchar 101) (putchar 115) (putchar 58) (putchar 32)
+    (print-num checks)
+    (putchar 32) (putchar 99) (putchar 104) (putchar 101) (putchar 99)
+    (putchar 107) (putchar 115) (putchar 44) (putchar 32)
+    (print-num failed)
+    (putchar 32) (putchar 102) (putchar 97) (putchar 105) (putchar 108)
+    (putchar 117) (putchar 114) (putchar 101) (putchar 115) (putchar 10)))
+
+; The value of this last form is the exit code of the run: 0 means all checks passed.
+(begin
+  (print-summary 63 failures)
+  failures)

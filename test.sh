@@ -17,9 +17,8 @@
 # It exits 0 iff the whole matrix is green.
 #
 # Usage:
-#   ./test.sh                 run the full matrix (several minutes: the brainfuck
-#                             big tests are 50k-172k opcodes)
-#   ./test.sh -k, --quick     skip the slow brainfuck-test-big-* entries
+#   ./test.sh                 run the full matrix (a few minutes; most entries are
+#                             fast feature-matrix tests)
 #   ./test.sh -f, --filter S  run only entries whose name or args contain S
 #                             (case-insensitive), e.g. --filter kotlin
 #   ./test.sh -l, --list      list the matrix entries and exit
@@ -35,10 +34,9 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT" || exit 2
 
-QUICK=0; FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120
+FILTER=""; VERBOSE=0; LIST=0; TIMEOUT=120
 while [ $# -gt 0 ]; do
     case "$1" in
-        -k|--quick)   QUICK=1 ;;
         -f|--filter)  FILTER="${2:-}"; shift ;;
         --filter=*)   FILTER="${1#*=}" ;;
         -v|--verbose) VERBOSE=1 ;;
@@ -106,9 +104,6 @@ while IFS=$'\t' read -r name rest; do
     hay="$name ${args[*]}"
     if [ -n "$FILTER" ] && ! printf '%s' "$hay" | grep -qiF -- "$FILTER"; then
         continue
-    fi
-    if [ "$QUICK" -eq 1 ] && printf '%s' "${args[*]}" | grep -q 'brainfuck-test-big'; then
-        skipped=$((skipped + 1)); continue
     fi
     total=$((total + 1))
 

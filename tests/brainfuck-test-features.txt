@@ -1,0 +1,38 @@
+Feature matrix test for the two Brainfuck grammars: the interpreter and the LLVM IR
+compiler   It replaces the three generated big tests (50k to 172k opcodes) with about
+150 opcodes that still prove every mechanic with the smallest possible loops
+Expected output: "BF8 OK" and a newline   Every broken opcode garbles that string
+The stdin opcodes are left out because no runnable test feeds input
+
+nested loops (3 outer and 3 inner iterations) build 3x3x7 = 63 in the third cell
+and three more increments make 66 which prints letter B
++++[>+++[>+++++++<-]<-]>>+++.
+
+four plain increments print letter F (70)
+++++.
+
+a run of 14 decrements prints digit 8 (56)
+--------------.
+
+a loop on a fresh zero cell runs zero iterations (a broken zero check would
+print 256 garbage bytes right here)
+>[.-]
+
+net zero runs: the compiler folds them into nothing and the interpreter walks them
++-><
+
+a single loop with four iterations builds 4x8 = 32 and prints the space
+++++[>++++++++<-]>.
+
+one nested seeding loop fills two cells at once: 4x4x4 = 64 and 4x4x5 = 80
+>++++[>++++[>++++>+++++<<-]<-]
+
+move right to the far cell and print letter O (80 less 1 is 79) then move back
+left where eleven increments turn 64 into 75 which prints letter K
+>>>-.
+<+++++++++++.
+
+a clear loop empties a cell holding 3 (three iterations) and the emptied cell
+then counts a 3x3 multiplication whose result plus 1 prints the final newline
+>>+++[-]
++++[>+++<-]>+.

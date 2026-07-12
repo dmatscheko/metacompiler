@@ -1,0 +1,207 @@
+/* Fast feature-matrix test for the TinyC interpreter (tinyc-interpreter.abnf) and
+ * the LLVM-IR compiler (tinyc-to-llvm-ir.abnf). It replaces the three algorithm-themed
+ * tinyc-test-big-* stress tests: instead of number-theory marathons every implemented
+ * construct is exercised with the SMALLEST program that can prove it works - loops run
+ * 0, 1, 3 or 4 times and recursion stays below depth 6. A failed check prints
+ * "FAIL <id>" (so a diff pinpoints it) and main() returns the failure count; exit 0
+ * and byte-identical output on all four legs (interpreter/compiler x goja/-frozen)
+ * mean everything passed. **/
+
+func printNum(int n) {                  // prints n in decimal (n >= 0)
+    if (n >= 10) { printNum(n / 10); }
+    putchar(48 + n % 10);
+    return 0;
+}
+
+func fail(int id) {                     // prints "FAIL <id>" and yields 1
+    putchar(70); putchar(65); putchar(73); putchar(76); putchar(32);
+    printNum(id);
+    putchar(10);
+    return 1;
+}
+
+func check(int id, int ok) {            // also covers the early return
+    if (ok) { return 0; }
+    return fail(id);
+}
+
+func printSummary(int checks, int failed) {   // "features: N checks, M failures"
+    putchar(102); putchar(101); putchar(97); putchar(116); putchar(117);
+    putchar(114); putchar(101); putchar(115); putchar(58); putchar(32);
+    printNum(checks);
+    putchar(32); putchar(99); putchar(104); putchar(101); putchar(99);
+    putchar(107); putchar(115); putchar(44); putchar(32);
+    printNum(failed);
+    putchar(32); putchar(102); putchar(97); putchar(105); putchar(108);
+    putchar(117); putchar(114); putchar(101); putchar(115); putchar(10);
+    return 0;
+}
+
+func add3(int a, int b, int c) {
+    return a + b + c;
+}
+
+func fib(int n) {                       // recursion, fib(6) == 8
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+func isEven(int n) {                    // mutual recursion: isOdd is only
+    if (n == 0) { return 1; }           // defined further down (forward reference)
+    return isOdd(n - 1);
+}
+
+func isOdd(int n) {
+    if (n == 0) { return 0; }
+    return isEven(n - 1);
+}
+
+func classify(int n) {                  // if / else if / else chain
+    if (n < 0) { return 0 - 1; }
+    else if (n == 0) { return 0; }
+    else if (n % 2 == 0) { return 2; }
+    else { return 1; }
+}
+
+func swapDiff(int a, int b) {           // parameters are ordinary assignable variables
+    int t = a;
+    a = b;
+    b = t;
+    return a - b;
+}
+
+func noReturn(int n) {                  // a function without return returns 0
+    n++;
+}
+
+func earlyReturn(int n) {               // a plain 'return;' returns 0 as well
+    if (n > 0) { return; }
+    putchar(63);                        // never reached
+}
+
+func shadow() {                         /* scoping: the inner x must not leak */
+    int x = 1;
+    {
+        int x = 2;
+        x = x + 10;                     // changes only the inner x
+    }
+    return x;                           // 1
+}
+
+func digitSum(int n) {                  // while + / and % (3 iterations for 407)
+    int s = 0;
+    while (n > 0) {
+        s = s + n % 10;
+        n = n / 10;
+    }
+    return s;
+}
+
+func encode3(int a, int b, int c) {     // combined: calls, arithmetic, chaining
+    int r = classify(a) + 1;
+    r = r * 10 + classify(b) + 1;
+    r = r * 10 + classify(c) + 1;
+    return r;
+}
+
+func main() {
+    int failures = 0;
+
+    // ----- numbers, arithmetic, precedence -----
+    failures = failures + check(1, 2 + 3 * 4 == 14);
+    failures = failures + check(2, (2 + 3) * 4 == 20);
+    failures = failures + check(3, 20 - 5 - 3 == 12);
+    failures = failures + check(4, 100 / 5 / 2 == 10 && 5 / 7 == 0);
+    failures = failures + check(5, 7 % 3 * 2 == 2 && 9 % 3 == 0);
+    failures = failures + check(6, -7 / 2 == -3 && 7 / -2 == -3);   // truncation toward zero
+    failures = failures + check(7, -7 % 3 == -1 && 7 % -3 == 1);
+    failures = failures + check(8, - -5 == 5);
+    failures = failures + check(9, 2147483647 + 1 == 0 - 2147483647 - 1);   // 32 bit wrap
+    failures = failures + check(10, 100000 * 100000 == 1410065408);
+    failures = failures + check(11, 65536 * 65536 == 0);
+
+    // ----- comparisons yield 0 or 1 (all six operators, both outcomes) -----
+    failures = failures + check(12, (3 == 3) + (3 != 4) + (2 < 3) + (3 > 2) + (3 <= 3) + (4 >= 3) == 6);
+    failures = failures + check(13, (3 == 4) + (3 != 3) + (3 < 2) + (2 > 3) + (4 <= 3) + (3 >= 4) == 0);
+
+    // ----- && and || normalize to 0/1 and short circuit -----
+    failures = failures + check(14, (2 && 3) == 1 && (0 && 9) == 0);
+    failures = failures + check(15, (0 || 5) == 1 && (0 || 0) == 0);
+    int sc = 0;
+    int r1 = 1 || sc++;                 // right side skipped
+    int r2 = 0 && sc++;                 // right side skipped
+    failures = failures + check(16, sc == 0 && r1 == 1 && r2 == 0);
+    int r3 = 0 || sc++;                 // runs: sc -> 1, old value 0 is falsy
+    int r4 = 1 && sc++;                 // runs: sc -> 2, old value 1 is truthy
+    failures = failures + check(17, sc == 2 && r3 == 0 && r4 == 1);
+    int r5 = 0 || 0 || sc++ || sc++;    // the chain stops at the first non-zero
+    failures = failures + check(18, sc == 3 && r5 == 1);
+
+    // ----- post increment / decrement yield the old value -----
+    int i = 5;
+    int old = i++;
+    failures = failures + check(19, old == 5 && i == 6);
+    int dd = i--;
+    failures = failures + check(20, dd == 6 && i == 5);
+
+    // ----- declarations and scoping -----
+    int da = 1, db, dc = da;            // list with init, default 0, dependent init
+    failures = failures + check(21, da == 1 && db == 0 && dc == 1);
+    failures = failures + check(22, shadow() == 1);
+    int fi = 7;
+    for (int fi = 0; fi < 3; fi++) { ; }        // the header variable shadows the outer fi
+    failures = failures + check(23, fi == 7);
+    int interned = 40, iffy = 1, elsewhere = 1; // identifiers may start with a keyword
+    failures = failures + check(24, interned + iffy + elsewhere == 42);
+
+    // ----- control flow -----
+    int w = 5;
+    while (w > 9) { w = 0; }            // runs zero times
+    failures = failures + check(25, w == 5);
+    int w3 = 0;
+    while (w3 < 3) { w3++; }            // runs three times
+    failures = failures + check(26, w3 == 3);
+    int dw = 0;
+    do { dw++; } while (0);             // body runs exactly once
+    failures = failures + check(27, dw == 1);
+    int dc3 = 3, dsteps = 0;
+    do { dc3--; dsteps++; } while (dc3 > 0);    // three times
+    failures = failures + check(28, dsteps == 3 && dc3 == 0);
+    int fsum = 0;
+    for (int k = 1; k <= 4; k++) { fsum = fsum + k; }
+    failures = failures + check(29, fsum == 10);
+    int fs2 = 0, k2 = 0;
+    for (; k2 < 3; k2++) { fs2 = fs2 + 2; }     // for without init
+    failures = failures + check(30, fs2 == 6);
+    int fs3 = 0;
+    for (int k3 = 0; k3 < 3; ) { k3++; fs3++; } // for without post
+    failures = failures + check(31, fs3 == 3);
+    int fm = 0;
+    for (int a = 0, b = 4; a < b; a++) { fm = fm + 10; }    // multi declaration init
+    failures = failures + check(32, fm == 40);
+    int acc = 0;                        // nested loops (2 x 3)
+    for (int oi = 0; oi < 2; oi++) {
+        for (int ii = 0; ii < 3; ii++) {
+            acc = acc * 10 + oi + ii;
+        }
+    }
+    failures = failures + check(33, acc == 12123);
+    failures = failures + check(34, classify(-5) == -1 && classify(0) == 0);
+    failures = failures + check(35, classify(8) == 2 && classify(7) == 1);
+
+    // ----- functions -----
+    failures = failures + check(36, add3(1, 2 * 2, fib(4)) == 8);   // expressions as arguments
+    failures = failures + check(37, fib(6) == 8);
+    failures = failures + check(38, isEven(4) == 1 && isOdd(5) == 1 && isEven(3) == 0);
+    failures = failures + check(39, swapDiff(9, 6) == -3);
+    failures = failures + check(40, noReturn(5) == 0);
+    failures = failures + check(41, earlyReturn(3) == 0);
+    failures = failures + check(42, digitSum(407) == 11);
+
+    // ----- everything combined, plus putchar's return value -----
+    failures = failures + check(43, encode3(-5, 0, 7) == 12);
+    failures = failures + check(44, putchar(10) == 10);     // prints the newline before the summary
+
+    printSummary(44, failures);
+    return failures;
+}
