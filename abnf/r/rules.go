@@ -192,120 +192,29 @@ func (rules *Rules) SerializePretty() string {
 	return prettyBraces(rules.Serialize())
 }
 
-// SerializeCompact renders rules as a short, ABNF-like pseudo grammar for error
-// messages. It is LOSSY (for humans, not for re-parsing - use Serialize for
-// that): runs of adjacent Tokens merge into one quoted string, groups and
-// alternatives use brackets ((a | b), [opt], {rep}), and tag code is trimmed.
-func (rules *Rules) SerializeCompact() string {
+// SerializeMinimal and SerializeCompact both render rules as the SAME nested tree as
+// Serialize but with the Go boilerplate stripped, so the parsed parts stay visible:
+// runs of adjacent tokens merge into one "text", a child list is {...}, structural
+// operators keep a one-word tag (or/opt/rep/not; a group or sequence is just its
+// braces), and the whole thing is rules{...}. A tag is code{...}. SerializeMinimal
+// leaves the tag CODE out (structure and tokens only - least noise); SerializeCompact
+// keeps a trimmed preview of it as code{<code>}{...}. Both are LOSSY and for humans -
+// Serialize round-trips, these do not.
+func (rules *Rules) SerializeMinimal() string { return rules.serializeTreeTop(false) }
+func (rules *Rules) SerializeCompact() string { return rules.serializeTreeTop(true) }
+func (rule *Rule) SerializeMinimal() string   { return rule.serializeTree(false) }
+func (rule *Rule) SerializeCompact() string   { return rule.serializeTree(true) }
+
+func (rules *Rules) serializeTreeTop(withCode bool) string {
 	if rules == nil {
 		return "<nil>"
 	}
-	var parts []string
-	var run strings.Builder
-	flush := func() {
-		if run.Len() > 0 {
-			parts = append(parts, fmt.Sprintf("%q", run.String()))
-			run.Reset()
-		}
-	}
-	for _, rule := range *rules {
-		if rule != nil && rule.Operator == Token {
-			run.WriteString(rule.String) // Merge a run of single-char tokens.
-			continue
-		}
-		flush()
-		parts = append(parts, rule.SerializeCompact())
-	}
-	flush()
-	return strings.Join(parts, " ")
+	return "rules" + rules.treeBody(withCode)
 }
 
-// SerializeCompact renders one rule; see (*Rules).SerializeCompact.
-func (rule *Rule) SerializeCompact() string {
-	if rule == nil {
-		return "<nil>"
-	}
-	switch rule.Operator {
-	case Token:
-		return fmt.Sprintf("%q", rule.String)
-	case Number:
-		return fmt.Sprintf("#%d", rule.Int)
-	case Identifier, Production:
-		if rule.Childs != nil && len(*rule.Childs) > 0 {
-			return rule.String + "(" + rule.Childs.SerializeCompact() + ")"
-		}
-		return rule.String
-	case Or:
-		parts := make([]string, 0, len(*rule.Childs))
-		for _, c := range *rule.Childs {
-			parts = append(parts, c.SerializeCompact())
-		}
-		return "(" + strings.Join(parts, " | ") + ")"
-	case Sequence:
-		return rule.Childs.SerializeCompact()
-	case Group:
-		return "(" + rule.Childs.SerializeCompact() + ")"
-	case Optional:
-		return "[" + rule.Childs.SerializeCompact() + "]"
-	case Repeat:
-		return "{" + rule.Childs.SerializeCompact() + "}"
-	case Not:
-		return "!" + rule.Childs.SerializeCompact()
-	case Times:
-		return "times(" + rule.Childs.SerializeCompact() + ")"
-	case Range:
-		return "range"
-	case CharOf:
-		return "@" + fmt.Sprintf("%q", rule.String)
-	case CharsOf:
-		return "@+" + fmt.Sprintf("%q", rule.String)
-	case Command:
-		return ":" + rule.String + "()"
-	case Tag:
-		code := compactTagCode(rule.CodeChilds)
-		if rule.Childs != nil && len(*rule.Childs) > 0 {
-			return rule.Childs.SerializeCompact() + " <~" + code + "~>"
-		}
-		return "<~" + code + "~>"
-	}
-	return "<" + rule.Operator.String() + ">"
-}
-
-// compactTagCode joins a tag's code tokens, collapses whitespace and trims the
-// result to a short preview.
-func compactTagCode(code *Rules) string {
-	if code == nil {
-		return ""
-	}
-	var b strings.Builder
-	for _, c := range *code {
-		if c != nil {
-			b.WriteString(c.String)
-		}
-	}
-	s := strings.Join(strings.Fields(b.String()), " ")
-	const max = 40
-	if len(s) > max {
-		s = s[:max] + "..."
-	}
-	return s
-}
-
-// SerializeMinimal renders rules as the SAME nested tree as Serialize but with the
-// Go boilerplate stripped, so the parsed parts stay visible: a tag is code{<code>},
-// a token/name is "text" (adjacent tokens merged), a child list is {...}, and the
-// whole thing is rules{...}. Groups and sequences are just their braces; or/opt/rep/
-// not keep a one-word tag. Lossy and for humans (Serialize round-trips, this does not).
-func (rules *Rules) SerializeMinimal() string {
-	if rules == nil {
-		return "<nil>"
-	}
-	return "rules" + rules.minimalBody()
-}
-
-// minimalBody renders a child list as { e1 e2 ... }, merging runs of adjacent tokens
+// treeBody renders a child list as { e1 e2 ... }, merging runs of adjacent tokens
 // into one quoted string.
-func (rules *Rules) minimalBody() string {
+func (rules *Rules) treeBody(withCode bool) string {
 	var b strings.Builder
 	b.WriteByte('{')
 	first := true
@@ -330,21 +239,21 @@ func (rules *Rules) minimalBody() string {
 		}
 		flush()
 		sep()
-		b.WriteString(rule.SerializeMinimal())
+		b.WriteString(rule.serializeTree(withCode))
 	}
 	flush()
 	b.WriteByte('}')
 	return b.String()
 }
 
-// SerializeMinimal renders one rule; see (*Rules).SerializeMinimal.
-func (rule *Rule) SerializeMinimal() string {
+// serializeTree renders one rule; see (*Rules).SerializeMinimal / SerializeCompact.
+func (rule *Rule) serializeTree(withCode bool) string {
 	if rule == nil {
 		return "<nil>"
 	}
 	body := ""
 	if rule.Childs != nil && len(*rule.Childs) > 0 {
-		body = rule.Childs.minimalBody()
+		body = rule.Childs.treeBody(withCode)
 	}
 	switch rule.Operator {
 	case Token:
@@ -354,7 +263,10 @@ func (rule *Rule) SerializeMinimal() string {
 	case Identifier, Production, CharOf, CharsOf, Command:
 		return fmt.Sprintf("%q", rule.String) + body
 	case Tag:
-		return "code{" + compactTagCode(rule.CodeChilds) + "}" + body
+		if withCode {
+			return "code{" + compactTagCode(rule.CodeChilds) + "}" + body
+		}
+		return "code" + body
 	case Or:
 		return "or" + body
 	case Optional:
@@ -368,6 +280,26 @@ func (rule *Rule) SerializeMinimal() string {
 	default:
 		return strings.ToLower(rule.Operator.String()) + body
 	}
+}
+
+// compactTagCode joins a tag's code tokens, collapses whitespace and trims the
+// result to a short preview.
+func compactTagCode(code *Rules) string {
+	if code == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range *code {
+		if c != nil {
+			b.WriteString(c.String)
+		}
+	}
+	s := strings.Join(strings.Fields(b.String()), " ")
+	const max = 40
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
 }
 
 // prettyBraces rewrites a compact Go-literal string so that each closing brace

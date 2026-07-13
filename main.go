@@ -33,8 +33,8 @@ import (
 //  -vv, -vvN     parser+compiler trace for all stages / for stage N
 //  -slotN V      compile stage N with tag slot V (default 0)
 //  -q, -qq       quiet (only program output+errors / only errors)
-//  -v-error      on a parse failure, dump the fuller parsed-so-far form (SerializeCompact)
-//                instead of the default minimal tree
+//  -v-error      on a parse failure, also show each tag's code in the parsed-so-far tree
+//                (the default keeps only the structure and the tokens)
 //  -frozen       run the annotation scripts goja-free (see abnf/frozen.go)
 //  -verify       lint the first file's grammar and exit
 //  -pretty       print the first file's serialized a-grammar and exit
@@ -74,13 +74,13 @@ type options struct {
 
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
-	verboseError                          bool // -v-error: dump the fuller SerializeCompact form on a parse failure.
+	verboseError                          bool     // -v-error: dump the fuller SerializeCompact form on a parse failure.
 	warnImports                           bool     // -warn-imports: warn+skip unresolved imports instead of aborting.
 	importRoots                           []string // -i include roots for project-file imports, in order.
-	warnUnsupported                       bool   // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
-	entryPoint                            string // -main: entry-point function name a compiled program calls (default "main").
-	code                                  string // -code VALUE: the final program's source, given inline instead of as a file.
-	codeSet, codeStdin                    bool   // -code / -code-stdin were passed (codeStdin reads the source from stdin).
+	warnUnsupported                       bool     // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
+	entryPoint                            string   // -main: entry-point function name a compiled program calls (default "main").
+	code                                  string   // -code VALUE: the final program's source, given inline instead of as a file.
+	codeSet, codeStdin                    bool     // -code / -code-stdin were passed (codeStdin reads the source from stdin).
 	speedTest, useBlockList, useFoundList bool
 	speedCount                            int   // Timed cycle count for -speed (>0 when set).
 	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
@@ -543,8 +543,8 @@ anywhere among the files.
   -vv, -vvN     parser+compiler trace for all stages / stage N
   -slotN V      compile stage N with tag slot V (default 0)
   -q, -qq       quiet (program output + errors / errors only)
-  -v-error      on a parse failure, dump the fuller parsed-so-far form (SerializeCompact)
-                instead of the default minimal tree
+  -v-error      on a parse failure, also show each tag's code in the parsed-so-far tree
+                (the default keeps only the structure and the tokens)
   -frozen       run the annotation scripts without goja
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit

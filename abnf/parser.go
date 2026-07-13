@@ -1080,8 +1080,8 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 		pa.apply(pa.initialSpaces, pa.initialSpaces, true, 0) // Skip spaces.
 	}
 	if pa.Sdx < len(pa.Src) {
-		// By default show the minimal tree (least noise); -v-error asks for the fuller,
-		// ABNF-like SerializeCompact dump.
+		// By default show the minimal tree (structure + tokens, least noise); -v-error
+		// asks for the fuller SerializeCompact tree that also shows each tag's code.
 		dump := newProductions.SerializeMinimal()
 		if VerboseParseErrors {
 			dump = newProductions.SerializeCompact()
