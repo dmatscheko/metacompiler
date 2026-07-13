@@ -221,7 +221,7 @@ func flattenToken(rules *r.Rules) *r.Rule {
 	length := 0
 	for _, rule := range *rules {
 		if rule.Operator != r.Token {
-			panic("Const must only contain Token. Contains: " + rule.ToString())
+			panic("Const must only contain Token. Contains: " + rule.SerializeCompact())
 		}
 		length += len(rule.String)
 	}
@@ -248,7 +248,7 @@ func (pa *parser) resolveParameterToToken(rules *r.Rules) {
 		}
 		resRule := flattenToken(pa.resolveRulesToToken(&r.Rules{(*rules)[i]}))
 		if resRule == nil {
-			panic("Parameter is empty. Rule: " + (*rules)[i].ToString())
+			panic("Parameter is empty. Rule: " + (*rules)[i].SerializeCompact())
 		}
 		(*rules)[i] = resRule
 	}
@@ -658,14 +658,14 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			// TODO: When command is something else as :number(), resolve without checking or forwarding in pa.Src. Those parameters should only exist in and be fetched from agrammar. Make a distinction between forward (pa.Src) looking parameter and backwards (agrammar) looking parameters.
 			if child.Operator != r.Command {
-				panic(fmt.Sprintf("Parameter can not be used for Times: %s", rule.ToString()))
+				panic(fmt.Sprintf("Parameter can not be used for Times: %s", rule.SerializeCompact()))
 			}
 			if child.String != "number" {
-				panic(fmt.Sprintf("Only Command :number() can be used for Times. Command is: %s", rule.ToString()))
+				panic(fmt.Sprintf("Only Command :number() can be used for Times. Command is: %s", rule.SerializeCompact()))
 			}
 			resRule := pa.apply(child, skipSpaceRule, skippingSpaces, depth+1)
 			if resRule == nil || len(*resRule) != 1 {
-				panic("Parameter needs to result in exactly one result. Rule: " + child.ToString())
+				panic("Parameter needs to result in exactly one result. Rule: " + child.SerializeCompact())
 			}
 			(*rule.CodeChilds)[i] = (*resRule)[0]
 		}
