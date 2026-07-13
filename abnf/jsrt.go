@@ -2694,6 +2694,69 @@ func standardJSBindings() map[string]interface{} {
 		}
 		return acc
 	}))
+	// Single-argument functions map straight to Go's math package. goja implements
+	// the same JS Math methods on top of the very same package, so the frozen VM
+	// and goja agree bit for bit (and therefore format identically for -q output).
+	addMath1 := func(name string, fn func(float64) float64) {
+		mathObj.set(name, jsHostFunc(name, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+			return fn(rt.toNumber(argAt(args, 0)))
+		}))
+	}
+	addMath1("sqrt", math.Sqrt)
+	addMath1("cbrt", math.Cbrt)
+	addMath1("sin", math.Sin)
+	addMath1("cos", math.Cos)
+	addMath1("tan", math.Tan)
+	addMath1("asin", math.Asin)
+	addMath1("acos", math.Acos)
+	addMath1("atan", math.Atan)
+	addMath1("sinh", math.Sinh)
+	addMath1("cosh", math.Cosh)
+	addMath1("tanh", math.Tanh)
+	addMath1("asinh", math.Asinh)
+	addMath1("acosh", math.Acosh)
+	addMath1("atanh", math.Atanh)
+	addMath1("exp", math.Exp)
+	addMath1("expm1", math.Expm1)
+	addMath1("log", math.Log)
+	addMath1("log2", math.Log2)
+	addMath1("log10", math.Log10)
+	addMath1("log1p", math.Log1p)
+	addMath1("ceil", math.Ceil)
+	addMath1("trunc", math.Trunc)
+	// JS rounds half toward +Infinity (floor(x+0.5)), not Go's round-half-away.
+	addMath1("round", func(x float64) float64 { return math.Floor(x + 0.5) })
+	addMath1("sign", func(x float64) float64 {
+		if math.IsNaN(x) || x == 0 {
+			return x // NaN stays NaN; +0 and -0 keep their sign.
+		}
+		if x < 0 {
+			return -1
+		}
+		return 1
+	})
+	mathObj.set("pow", jsHostFunc("pow", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return math.Pow(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+	}))
+	mathObj.set("atan2", jsHostFunc("atan2", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return math.Atan2(rt.toNumber(argAt(args, 0)), rt.toNumber(argAt(args, 1)))
+	}))
+	mathObj.set("hypot", jsHostFunc("hypot", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		sum := 0.0
+		for _, a := range args {
+			v := rt.toNumber(a)
+			sum += v * v
+		}
+		return math.Sqrt(sum)
+	}))
+	mathObj.set("PI", math.Pi)
+	mathObj.set("E", math.E)
+	mathObj.set("LN2", math.Ln2)
+	mathObj.set("LN10", math.Ln10)
+	mathObj.set("LOG2E", math.Log2E)
+	mathObj.set("LOG10E", math.Log10E)
+	mathObj.set("SQRT2", math.Sqrt2)
+	mathObj.set("SQRT1_2", 0.7071067811865476)
 
 	stringObj := newJSObject()
 	stringObj.set("fromCharCode", jsHostFunc("fromCharCode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
