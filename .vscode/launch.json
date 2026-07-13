@@ -281,6 +281,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-multifile.kt", "-q"]
         },
         {
+            "name": "C# multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/csharp-interpreter.abnf", "tests/csharp-test-multifile.cs", "-q"]
+        },
+        {
+            "name": "C# multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-multifile.cs", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

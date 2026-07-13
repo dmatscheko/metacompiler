@@ -550,6 +550,36 @@ KwLet       = "let" KwEnd ;
     // them is a no-op. Anything else is a library we cannot resolve.
     core.stdlibImports = ["System", "Microsoft"]
 
+    // Project-file imports: 'using A.B.C' looks for A/B/C.cs, then A/B.cs under the
+    // program's directory and the -i roots. The file is parsed with this grammar; its
+    // top-level declarations are stashed by buildMain (importDepth > 0) and prepended to
+    // jsmain. A file is imported once; repeats and cycles are no-ops.
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var rel = path.split(".").join("/")
+        var cands = [rel + ".cs"]
+        var cut = -1
+        for (var k = 0; k < rel.length; k++) { if (rel.charAt(k) == "/") { cut = k } }
+        if (cut > 0) { cands.push(rel.substring(0, cut) + ".cs") }
+        for (var i = 0; i < cands.length; i++) {
+            var file = c.findImport(cands[i])
+            if (file == "") { continue }
+            if (importedFiles["$" + file] == true) { return true }
+            importedFiles["$" + file] = true
+            var text = c.readFile(file)
+            var asg = c.parse(c.agrammar, text, null, file)
+            c.pushSource(file, text)
+            importDepth = importDepth + 1
+            c.compile(asg)
+            importDepth = importDepth - 1
+            c.popSource()
+            return true
+        }
+        return false
+    }
+
     // Index reads (arr[i], dict[k], s[i]) go through js_pyget (array/dict/string aware).
     core.indexExt = "js_pyget"
 
@@ -1248,6 +1278,12 @@ KwLet       = "let" KwEnd ;
 
     // The program: jsmain(env, args) builds Console, the classes, then calls Program.Main.
     function buildMain(items) {
+        // The walk of an imported file ends here too: stash its top-level declarations
+        // for the real jsmain instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
@@ -1257,7 +1293,7 @@ KwLet       = "let" KwEnd ;
         callExt(b, "js_set", [consoleV, emitStr(b, "WriteLine"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
         callExt(b, "js_set", [consoleV, emitStr(b, "Write"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
-        b = makeSeq(items)(b)
+        b = makeSeq(importedItems.concat(items))(b)
         // The entry defaults to Program.Main but -main (c.mainName) can name another
         // static method of Program.
         var entry = c.mainName
