@@ -11,6 +11,18 @@
             "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "tests/calculator-test-1.txt", "-q"]
         },
         {
+            "name": "Calculator -code inline source (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "-code", "9*(2+3)", "-q"]
+        },
+        {
+            "name": "Calculator -code inline source (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-to-llvm-ir.abnf", "-code", "9*(2+3)", "-q"]
+        },
+        {
             "name": "Calculator interpreter 1 (TRACE)",
             "type": "go",
             "request": "launch",

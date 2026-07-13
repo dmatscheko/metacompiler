@@ -443,6 +443,22 @@ the snippet in the program scope (Kotlin, Go, JS, TS, MetaJS, Dart, Java, C#), a
 C/TinyC run it in a fresh frame / a synthetic entry function. Both engines,
 byte-identical.
 
+#### Source from the command line or stdin (-code / -code-stdin)
+
+`-code SRC` takes the final program's source inline instead of from a file - the
+code becomes a synthetic last file the compiled grammar parses - so the whole system
+doubles as a one-liner runner for any language:
+
+```
+./mec languages/calculator-interpreter-1.abnf -code '9*(2+3)'     # RESULT: 45
+echo '9*(2+3)' | ./mec languages/calculator-interpreter-1.abnf -code-stdin
+```
+
+`-code-stdin` reads the source from stdin instead. A grammar file is still the first
+argument. It composes with `-main`: define a program inline and drive it with a
+snippet - `./mec languages/kotlin-to-llvm-ir.abnf -code 'fun greet(n: Int): Int = n'
+-main 'exitProcess(greet(7))'`.
+
 #### Grammar linting (-verify)
 
 `-verify` checks a grammar for name consistency without running it and exits

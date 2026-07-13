@@ -44,6 +44,9 @@ import (
 //                lets call graphs / CFGs / traces be built from partially understood languages
 //  -main NAME    call NAME as the program entry point instead of main (grammars that
 //                support it read it as c.mainName)
+//  -code SRC     take the final program's source from SRC (given inline) instead of a
+//                file, e.g. calculator-interpreter-1.abnf -code '9*(2+3)'
+//  -code-stdin   take the final program's source from stdin instead of a file
 //  -pipe         start a new pipeline segment: the text a language prints becomes the
 //                program input of the next segment, so one language (e.g. a preprocessor)
 //                can transform the source another language then consumes. Example:
@@ -73,6 +76,8 @@ type options struct {
 	importRoots                           []string // -i include roots for project-file imports, in order.
 	warnUnsupported                       bool   // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
 	entryPoint                            string // -main: entry-point function name a compiled program calls (default "main").
+	code                                  string // -code VALUE: the final program's source, given inline instead of as a file.
+	codeSet, codeStdin                    bool   // -code / -code-stdin were passed (codeStdin reads the source from stdin).
 	speedTest, useBlockList, useFoundList bool
 	speedCount                            int   // Timed cycle count for -speed (>0 when set).
 	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
@@ -131,6 +136,11 @@ func parseArgs(args []string) (*options, error) {
 			o.warnUnsupported = true
 		case "-main":
 			o.entryPoint, err = takeVal()
+		case "-code":
+			o.code, err = takeVal()
+			o.codeSet = true
+		case "-code-stdin":
+			o.codeStdin = true
 		case "-pipe":
 			// A pipeline segment boundary: the TEXT output of the segment so far
 			// becomes the program input of the next segment (see runPipeline).
@@ -227,6 +237,35 @@ func main() {
 		return
 	}
 
+	// -code / -code-stdin supply the final program's source inline (or from stdin) instead
+	// of reading it from a file: the code becomes a synthetic last file that the (compiled)
+	// grammar parses. A grammar file is still required as the first positional argument.
+	codeIdx := -1
+	var codeText string
+	if o.codeSet || o.codeStdin {
+		if o.codeSet && o.codeStdin {
+			fmt.Fprintln(os.Stderr, "Error: -code and -code-stdin are mutually exclusive")
+			os.Exit(2)
+		}
+		if len(o.files) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: -code / -code-stdin needs a grammar file")
+			os.Exit(2)
+		}
+		codeText = o.code
+		name := "(code)"
+		if o.codeStdin {
+			dat, e := ioutil.ReadAll(os.Stdin)
+			if e != nil {
+				fmt.Fprintln(os.Stderr, "Error reading stdin: ", e)
+				os.Exit(1)
+			}
+			codeText = string(dat)
+			name = "(stdin)"
+		}
+		o.files = append(o.files, name)
+		codeIdx = len(o.files) - 1
+	}
+
 	abnf.UseFrozenScripts = o.frozen
 	abnf.WarnUnresolvedImports = o.warnImports
 	abnf.ImportRoots = o.importRoots
@@ -280,6 +319,10 @@ func main() {
 
 	srcs := make([]string, len(o.files))
 	for i, f := range o.files {
+		if i == codeIdx { // The synthetic -code / -code-stdin file: its source is already in hand.
+			srcs[i] = codeText
+			continue
+		}
 		dat, e := ioutil.ReadFile(f)
 		if e != nil {
 			fmt.Fprintln(os.Stderr, "Error: ", e)
@@ -503,6 +546,9 @@ anywhere among the files.
   -warn-unsupported  warn+placeholder parsed-but-unimplemented syntax instead of aborting;
                 lets call graphs / CFGs / traces be built from partially understood languages
   -main NAME    call NAME as the program entry point instead of main (c.mainName)
+  -code SRC     take the final program's source from SRC (inline) instead of a file,
+                e.g. languages/calculator-interpreter-1.abnf -code '9*(2+3)'
+  -code-stdin   take the final program's source from stdin instead of a file
   -pipe         start a new pipeline segment fed by the previous segment's text output
                 (e.g. c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf)
   -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
