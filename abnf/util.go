@@ -16,11 +16,14 @@ func times(s string, n int) string {
 	return strings.Repeat(s, n)
 }
 
+// errMsgMaxLen bounds a very long (error) message: Shorten and ShortenColored both
+// cut out the middle once the message exceeds this many characters.
+const errMsgMaxLen = 2000
+
 // Shorten limits very long (error) messages to a readable size by cutting out the middle.
 func Shorten(s string) string {
-	const maxLen = 2000
-	if len(s) > maxLen {
-		midpos := maxLen/2 - 4
+	if len(s) > errMsgMaxLen {
+		midpos := errMsgMaxLen/2 - 4
 		s = s[:midpos] + "\n[...]\n" + s[len(s)-midpos:]
 	}
 	return s
@@ -30,7 +33,6 @@ func Shorten(s string) string {
 // only visible characters, never cuts inside an escape sequence, and resets the color
 // at the cut and before the tail so no color bleeds across the [...] gap or beyond.
 func ShortenColored(s string) string {
-	const maxVisible = 2000
 	// atoms: each is one whole ANSI escape (ESC '[' ... final byte) or a single byte.
 	var atoms []string
 	visible := 0
@@ -51,11 +53,11 @@ func ShortenColored(s string) string {
 		visible++
 		i++
 	}
-	if visible <= maxVisible {
+	if visible <= errMsgMaxLen {
 		return s
 	}
 	isEsc := func(a string) bool { return len(a) > 1 && a[0] == 0x1b }
-	budget := maxVisible/2 - 4
+	budget := errMsgMaxLen/2 - 4
 
 	var head strings.Builder
 	hv := 0
