@@ -729,6 +729,17 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     }
     check("value-block-return", vbReturn(1) == 99 && vbReturn(2) == 1)
 
+    // ----- if/when as a postfix receiver -----
+    // when (x) { ... }.field / .method { }: the whole when is a primary, so a postfix
+    // chain attaches to it (the shape of _state.map { ... when (s) { ... }.also { } }).
+    val wLen = when (2) { 1 -> "a"; 2 -> "bb"; else -> "ccc" }.length
+    check("when-postfix-field", wLen == 2)
+    val wMapped = when (1) {
+        1 -> listOf(1, 2, 3)
+        else -> listOf(4)
+    }.map { it * 10 }.sumOf { it }
+    check("when-postfix-method", wMapped == 60)
+
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 

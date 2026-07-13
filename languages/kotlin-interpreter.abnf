@@ -280,7 +280,7 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
-Expression  = Assignment | CallAssign | CondLevel ;
+Expression  = Assignment | CallAssign | OrExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 // An assignment whose left side is a postfix expression containing a call, not a plain
@@ -296,8 +296,6 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
-
-CondLevel   = IfExpr | WhenExpr | OrExpr ;
 
 // if as an expression needs both arms.
 IfExpr      <~~ push(makeIfExpr(pop(), pop(), pop())) ~~>
@@ -480,10 +478,13 @@ MArgs       = "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lam
 // (0x/0b prefixes), FloatLit before KIntLit (a plain integer falls through),
 // AnonFun/CallableRef before Call/VarRef (they would otherwise eat the leading
 // identifier). AnonFun and qualified callable references are recognised, not run.
-// IfExpr/WhenExpr also appear here (before Call/VarRef, which would read the `if`/
-// `when` keyword as an identifier) so an if/when expression can be an operand -
-// a + if (c) x else y, "n=" + when (k) { ... }. At statement level the If/When
-// statement forms are matched first, so this only fires in operand position.
+// IfExpr/WhenExpr/TryExpr live here (before Call/VarRef, which would read the `if`/
+// `when`/`try` keyword as an identifier) as their ONLY expression home, so each is a
+// primary: it can be an operand - a + if (c) x else y, "n=" + when (k) { ... } - AND
+// take a postfix chain - when (x) { ... }.also { ... }, try { ... }.getOrNull(). The
+// else/arm bodies are full Expressions, so `if (c) a else b + 1` still binds b + 1 as
+// the else. A leading `if` at statement level is the If statement (matched before
+// ExprStmt); a leading `when` is this expression form.
 Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThisExpr | Call | VarRef ;
 
 // try { ... } catch (e) { ... } used as an EXPRESSION (val x = try { ... } catch ...,
