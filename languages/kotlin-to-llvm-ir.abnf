@@ -163,8 +163,12 @@ NestedType  <~~ notImpl("nested type declaration", up.pos) ~~>
 // the subset does not enforce visibility, so the property still binds its initializer.
 // A body-carrying accessor (get() = ..., set(v) { ... }) has a `(` after get/set and is
 // left to PropAccessor (not implemented); PropVis's NotParen guard declines it.
+// The initializer is optional: a bodiless property (abstract var/val, lateinit var, or an
+// interface property) has no `= init`; makeProp then defaults it to null so the field
+// still exists - an implicit `name = ...` in a method resolves to this.name, and a read
+// before assignment yields null (the flat, dispatch-by-name model has no real subclass).
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] { PropVis } [ ";" ] ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
 // is GENUINE (see LazyProp): the initializer is lowered once and its value becomes a
@@ -1808,6 +1812,10 @@ KwStep      = "step" KwEnd ;
         return {name: items[0], prop: false}
     }
     function makeProp(items) {
+        // A bodiless property (abstract/lateinit/interface: no `= init`) still needs a
+        // backing field so an implicit `name = ...` in a method resolves to this.name and
+        // reads before assignment are defined. Default it to null (identical to `= null`).
+        if (items[1] == undefined) { return {prop: items[0], init: makeConst(null)} }
         return {prop: items[0], init: items[1]}
     }
 

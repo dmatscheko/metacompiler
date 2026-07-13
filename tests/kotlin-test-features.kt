@@ -114,6 +114,24 @@ class Meter {
     }
 }
 
+// Bodiless properties (no `= init`): an abstract var (a subclass would provide it) and a
+// lateinit var. Each defaults to a null backing field, so an implicit `this.x = ...` in a
+// method resolves and a later read sees the assigned value. The flat model ignores the
+// abstract modifier, so the class is instantiated directly. Mirrors the app's
+// `protected abstract var data: D` used by a sibling method.
+abstract class Vault {
+    var opened: Int = 0                 // ordinary property with an initializer
+    protected abstract var secret: Int  // bodiless: abstract
+    lateinit var tag: String            // bodiless: lateinit
+    fun stash(n: Int): Int {
+        secret = n                      // implicit this.secret write
+        opened += 1
+        return secret + opened
+    }
+    fun labelAs(t: String) { tag = t }
+    fun readTag(): String = tag
+}
+
 // ----- lazy delegated properties (member level) -----
 class Lazies(val n: Int) {
     val quad: Int by lazy { n * n }        // initializer reads a constructor param
@@ -580,6 +598,12 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     val meter = Meter()
     meter.advance()
     check("private-set", meter.advance() == 2 && meter.reading == 2)
+
+    // ----- bodiless properties (abstract / lateinit: no initializer) -----
+    val vault = Vault()
+    check("bodiless-abstract-prop", vault.stash(5) == 6)          // secret=5, opened=1
+    vault.labelAs("gold")
+    check("bodiless-lateinit-prop", vault.readTag() == "gold" && vault.opened == 1)
 
     // ----- lists -----
     val ro = listOf(10, 20, 30)
