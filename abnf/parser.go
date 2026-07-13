@@ -997,10 +997,15 @@ func mergeTerminals(productions *r.Rules) {
 	}
 }
 
-// VerboseParseErrors makes a "not everything could be parsed" failure dump the fuller
-// SerializeCompact form of what parsed so far instead of the minimal tree. Set from the
-// -v-error command-line flag (see main.go).
-var VerboseParseErrors = false
+// ParseErrorWithCode and ParseErrorUnabridged shape the "not everything could be parsed"
+// dump of what parsed so far. WithCode shows each tag's code (SerializeCompact) rather than
+// the structure-only tree (SerializeMinimal); Unabridged prints the whole thing instead of
+// cutting the middle with [...]. Set from the -error command-line flag (see main.go):
+// short (default), code, short-all, code-all.
+var (
+	ParseErrorWithCode   = false
+	ParseErrorUnabridged = false
+)
 
 // ParseWithAgrammar parses the target text srcCode with the given a-grammar and returns the
 // resulting ASG (abstract semantic graph). fileName is where srcCode came from; it is used
@@ -1080,17 +1085,21 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 		pa.apply(pa.initialSpaces, pa.initialSpaces, true, 0) // Skip spaces.
 	}
 	if pa.Sdx < len(pa.Src) {
-		// By default show the minimal tree (structure + tokens, least noise); -v-error
-		// asks for the fuller SerializeCompact tree that also shows each tag's code.
+		// Default is the structure-only tree (least noise); -error code/code-all also show
+		// each tag's code.
 		dump := newProductions.SerializeMinimal()
-		if VerboseParseErrors {
+		if ParseErrorWithCode {
 			dump = newProductions.SerializeCompact()
 		}
-		// The dump carries ANSI color escapes only when r.ColorErrorOutput is on; use the
-		// escape-aware truncator then so a cut never lands inside a color sequence.
-		short := Shorten(dump)
-		if r.ColorErrorOutput {
-			short = ShortenColored(dump)
+		// -error short-all/code-all print the whole object; otherwise cut the middle. The
+		// dump carries ANSI color escapes only when r.ColorErrorOutput is on, so use the
+		// escape-aware truncator then (a cut never lands inside a color sequence).
+		short := dump
+		if !ParseErrorUnabridged {
+			short = Shorten(dump)
+			if r.ColorErrorOutput {
+				short = ShortenColored(dump)
+			}
 		}
 		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), short))
 	}

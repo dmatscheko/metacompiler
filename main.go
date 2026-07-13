@@ -33,8 +33,8 @@ import (
 //  -vv, -vvN     parser+compiler trace for all stages / for stage N
 //  -slotN V      compile stage N with tag slot V (default 0)
 //  -q, -qq       quiet (only program output+errors / only errors)
-//  -v-error      on a parse failure, also show each tag's code in the parsed-so-far tree
-//                (the default keeps only the structure and the tokens)
+//  -error MODE   parse-failure dump detail: short (default; structure + tokens), code (also
+//                each tag's code), short-all / code-all (the whole tree, no [...] abridging)
 //  -frozen       run the annotation scripts goja-free (see abnf/frozen.go)
 //  -verify       lint the first file's grammar and exit
 //  -pretty       print the first file's serialized a-grammar and exit
@@ -74,7 +74,7 @@ type options struct {
 
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
-	verboseError                          bool     // -v-error: dump the fuller SerializeCompact form on a parse failure.
+	errorMode                             string   // -error short|code|short-all|code-all: parse-failure dump detail (default short).
 	warnImports                           bool     // -warn-imports: warn+skip unresolved imports instead of aborting.
 	importRoots                           []string // -i include roots for project-file imports, in order.
 	warnUnsupported                       bool     // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
@@ -166,8 +166,14 @@ func parseArgs(args []string) (*options, error) {
 			o.useFoundList = true
 		case "-v":
 			o.verboseAll = true
-		case "-v-error":
-			o.verboseError = true
+		case "-error":
+			if o.errorMode, err = takeVal(); err == nil {
+				switch o.errorMode {
+				case "short", "code", "short-all", "code-all":
+				default:
+					return nil, fmt.Errorf("flag -error wants short, code, short-all or code-all, got %q", o.errorMode)
+				}
+			}
 		case "-vv":
 			o.traceAll = true
 		case "-freeze":
@@ -272,7 +278,8 @@ func main() {
 	}
 
 	abnf.UseFrozenScripts = o.frozen
-	abnf.VerboseParseErrors = o.verboseError
+	abnf.ParseErrorWithCode = o.errorMode == "code" || o.errorMode == "code-all"
+	abnf.ParseErrorUnabridged = o.errorMode == "short-all" || o.errorMode == "code-all"
 	// Color the parse-error dump only when stderr is a real terminal (not a pipe or
 	// file), respecting the NO_COLOR convention and TERM=dumb.
 	r.ColorErrorOutput = stderrIsTerminal() && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
@@ -553,8 +560,8 @@ anywhere among the files.
   -vv, -vvN     parser+compiler trace for all stages / stage N
   -slotN V      compile stage N with tag slot V (default 0)
   -q, -qq       quiet (program output + errors / errors only)
-  -v-error      on a parse failure, also show each tag's code in the parsed-so-far tree
-                (the default keeps only the structure and the tokens)
+  -error MODE   parse-failure dump detail: short (default; structure + tokens), code (also
+                each tag's code), short-all / code-all (the whole tree, no [...] abridging)
   -frozen       run the annotation scripts without goja
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit
