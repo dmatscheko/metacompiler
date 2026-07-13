@@ -148,7 +148,7 @@ func parseArgs(args []string) (*options, error) {
 			// A pipeline segment boundary: the TEXT output of the segment so far
 			// becomes the program input of the next segment (see runPipeline).
 			if len(o.files) == 0 {
-				return nil, fmt.Errorf("-pipe needs a preceding segment (grammar + program)")
+				return nil, fmt.Errorf("flag %s needs a preceding segment (grammar + program)", name)
 			}
 			o.pipeBounds = append(o.pipeBounds, len(o.files))
 		case "-speed":
@@ -156,7 +156,7 @@ func parseArgs(args []string) (*options, error) {
 			if v, err = takeVal(); err == nil {
 				n, serr := strconv.Atoi(v)
 				if serr != nil || n < 1 {
-					return nil, fmt.Errorf("flag -speed needs a positive integer cycle count, got %q", v)
+					return nil, fmt.Errorf("flag %s needs a positive integer cycle count, got %q", name, v)
 				}
 				o.speedTest, o.speedCount = true, n
 			}
@@ -171,7 +171,7 @@ func parseArgs(args []string) (*options, error) {
 				switch o.errorMode {
 				case "short", "code", "short-all", "code-all":
 				default:
-					return nil, fmt.Errorf("flag -error wants short, code, short-all or code-all, got %q", o.errorMode)
+					return nil, fmt.Errorf("flag %s needs one of short, code, short-all or code-all, got %q", name, o.errorMode)
 				}
 			}
 		case "-vv":
