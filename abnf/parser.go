@@ -997,6 +997,11 @@ func mergeTerminals(productions *r.Rules) {
 	}
 }
 
+// VerboseParseErrors makes a "not everything could be parsed" failure dump the fuller
+// SerializeCompact form of what parsed so far instead of the minimal tree. Set from the
+// -v-error command-line flag (see main.go).
+var VerboseParseErrors = false
+
 // ParseWithAgrammar parses the target text srcCode with the given a-grammar and returns the
 // resulting ASG (abstract semantic graph). fileName is where srcCode came from; it is used
 // for messages and to resolve relative paths. If the a-grammar defines no :startRule(),
@@ -1075,7 +1080,13 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 		pa.apply(pa.initialSpaces, pa.initialSpaces, true, 0) // Skip spaces.
 	}
 	if pa.Sdx < len(pa.Src) {
-		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), Shorten(newProductions.SerializeCompact())))
+		// By default show the minimal tree (least noise); -v-error asks for the fuller,
+		// ABNF-like SerializeCompact dump.
+		dump := newProductions.SerializeMinimal()
+		if VerboseParseErrors {
+			dump = newProductions.SerializeCompact()
+		}
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), Shorten(dump)))
 	}
 
 	mergeTerminals(newProductions)

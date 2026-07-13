@@ -33,6 +33,8 @@ import (
 //  -vv, -vvN     parser+compiler trace for all stages / for stage N
 //  -slotN V      compile stage N with tag slot V (default 0)
 //  -q, -qq       quiet (only program output+errors / only errors)
+//  -v-error      on a parse failure, dump the fuller parsed-so-far form (SerializeCompact)
+//                instead of the default minimal tree
 //  -frozen       run the annotation scripts goja-free (see abnf/frozen.go)
 //  -verify       lint the first file's grammar and exit
 //  -pretty       print the first file's serialized a-grammar and exit
@@ -72,6 +74,7 @@ type options struct {
 
 	quietMost, quietFull                  bool
 	frozen, verify, pretty                bool
+	verboseError                          bool // -v-error: dump the fuller SerializeCompact form on a parse failure.
 	warnImports                           bool     // -warn-imports: warn+skip unresolved imports instead of aborting.
 	importRoots                           []string // -i include roots for project-file imports, in order.
 	warnUnsupported                       bool   // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
@@ -163,6 +166,8 @@ func parseArgs(args []string) (*options, error) {
 			o.useFoundList = true
 		case "-v":
 			o.verboseAll = true
+		case "-v-error":
+			o.verboseError = true
 		case "-vv":
 			o.traceAll = true
 		case "-freeze":
@@ -267,6 +272,7 @@ func main() {
 	}
 
 	abnf.UseFrozenScripts = o.frozen
+	abnf.VerboseParseErrors = o.verboseError
 	abnf.WarnUnresolvedImports = o.warnImports
 	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
@@ -537,6 +543,8 @@ anywhere among the files.
   -vv, -vvN     parser+compiler trace for all stages / stage N
   -slotN V      compile stage N with tag slot V (default 0)
   -q, -qq       quiet (program output + errors / errors only)
+  -v-error      on a parse failure, dump the fuller parsed-so-far form (SerializeCompact)
+                instead of the default minimal tree
   -frozen       run the annotation scripts without goja
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit

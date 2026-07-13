@@ -291,6 +291,85 @@ func compactTagCode(code *Rules) string {
 	return s
 }
 
+// SerializeMinimal renders rules as the SAME nested tree as Serialize but with the
+// Go boilerplate stripped, so the parsed parts stay visible: a tag is code{<code>},
+// a token/name is "text" (adjacent tokens merged), a child list is {...}, and the
+// whole thing is rules{...}. Groups and sequences are just their braces; or/opt/rep/
+// not keep a one-word tag. Lossy and for humans (Serialize round-trips, this does not).
+func (rules *Rules) SerializeMinimal() string {
+	if rules == nil {
+		return "<nil>"
+	}
+	return "rules" + rules.minimalBody()
+}
+
+// minimalBody renders a child list as { e1 e2 ... }, merging runs of adjacent tokens
+// into one quoted string.
+func (rules *Rules) minimalBody() string {
+	var b strings.Builder
+	b.WriteByte('{')
+	first := true
+	var tok strings.Builder
+	sep := func() {
+		if !first {
+			b.WriteByte(' ')
+		}
+		first = false
+	}
+	flush := func() {
+		if tok.Len() > 0 {
+			sep()
+			b.WriteString(fmt.Sprintf("%q", tok.String()))
+			tok.Reset()
+		}
+	}
+	for _, rule := range *rules {
+		if rule != nil && rule.Operator == Token {
+			tok.WriteString(rule.String) // Merge a run of single-char tokens.
+			continue
+		}
+		flush()
+		sep()
+		b.WriteString(rule.SerializeMinimal())
+	}
+	flush()
+	b.WriteByte('}')
+	return b.String()
+}
+
+// SerializeMinimal renders one rule; see (*Rules).SerializeMinimal.
+func (rule *Rule) SerializeMinimal() string {
+	if rule == nil {
+		return "<nil>"
+	}
+	body := ""
+	if rule.Childs != nil && len(*rule.Childs) > 0 {
+		body = rule.Childs.minimalBody()
+	}
+	switch rule.Operator {
+	case Token:
+		return fmt.Sprintf("%q", rule.String)
+	case Number:
+		return fmt.Sprintf("#%d", rule.Int)
+	case Identifier, Production, CharOf, CharsOf, Command:
+		return fmt.Sprintf("%q", rule.String) + body
+	case Tag:
+		return "code{" + compactTagCode(rule.CodeChilds) + "}" + body
+	case Or:
+		return "or" + body
+	case Optional:
+		return "opt" + body
+	case Repeat:
+		return "rep" + body
+	case Not:
+		return "not" + body
+	case Group, Sequence:
+		return body
+	default:
+		return strings.ToLower(rule.Operator.String()) + body
+	}
+}
+
 // prettyBraces rewrites a compact Go-literal string so that each closing brace
 // sits on its own line at (depth-1)*4 spaces, tracking string literals so a '}'
 // inside a quoted string is copied verbatim.
