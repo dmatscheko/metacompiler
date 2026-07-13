@@ -1,11 +1,12 @@
 :title("Calculator to LLVM IR compiler") ;
-:description("Compiles a formula with + - * /, unary minus and brackets into an LLVM IR module whose main()
-returns the result, runs that module with the built-in IR interpreter, and checks the
-machine result against a direct JS evaluation of the same formula.
+:description("Compiles a formula with + - * / % ^, unary minus and brackets into an LLVM IR module whose
+main() returns the result, runs that module with the built-in IR interpreter, and checks
+the machine result against a direct JS evaluation of the same formula.
 
 In contrast to the interpreting calculators (calculator-interpreter-1.abnf and
 calculator-interpreter-2.abnf) this variant works on integers, like C: '/' is a signed
-integer division that truncates.
+integer division that truncates, '%' is the signed remainder (srem), and '^' unrolls into
+repeated multiplication (the constant exponent must be a whole number >= 0).
 Every tag therefore pushes a pair {gen, val}: 'gen' emits the LLVM instructions for the
 subformula into a basic block, 'val' is the reference value computed directly in JS.
 
@@ -29,13 +30,35 @@ Expression  =
 
 Term        =
     (
-        Factor
+        Unary
         {
-            ( "*" | "/" )       <~~push(up.in)~~>
-            Factor
+            ( "*" | "/" | "%" ) <~~push(up.in)~~>
+            Unary
         }
     )                           <~~
                                 push(foldChain(takeAll()))
+                                ~~>
+    ;
+
+// Unary minus is looser than '^', so -3^2 = -(3^2) = -9, matching the scientific
+// interpreter. The right side of a power reaches back down here (so 2^-3 parses), but
+// this integer compiler then rejects a negative or fractional exponent (see makePow).
+Unary       =
+    ( "-" Unary )               <~~push(makeNeg(pop()))~~>
+    |
+    Power
+    ;
+
+// Right associative power. The exponent is a constant in this variable-free calculator,
+// so makePow unrolls it into that many multiplications instead of a runtime loop.
+Power       =
+    (
+        Factor
+        [ "^" Unary ]
+    )                           <~~
+                                var items = takeAll()
+                                if (items.length == 2) push(makePow(items[0], items[1]))
+                                else push(items[0])
                                 ~~>
     ;
 
@@ -46,13 +69,8 @@ Factor      =
         ")"
     )
     |
-    Neg
-    |
     Number                      <~~push(makeNumber(parseInt(up.in)))~~>
     ;
-
-// Unary minus negates the factor behind it (and '- -x' works through the recursion).
-Neg         = "-" Factor        <~~push(makeNeg(pop()))~~> ;
 
 // Only integers: This calculator computes like C.
 Number      = "0" | "1"..."9" { "0"..."9" } ;
@@ -83,6 +101,35 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
         }
     }
 
+    // base ^ exp. The exponent value is known at compile time (no variables), so the
+    // generator emits exp multiplications of the base. Like the other operators the
+    // reference value is a plain JS int, so an out-of-int32 result trips the final check.
+    function makePow(base, ex) {
+        var e = ex.val
+        if (e < 0 || e != Math.floor(e)) {
+            println("Error: this integer calculator needs a whole exponent >= 0, got " + e)
+            exit(1)
+        }
+        if (e > 10000) {
+            println("Error: exponent " + e + " is too large to unroll")
+            exit(1)
+        }
+        return {
+            gen: function(b) {
+                if (e == 0) { return llvm.constant.NewInt(i32, 1) }
+                var bv = base.gen(b) // Emit the base once and reuse the SSA value.
+                var acc = bv
+                for (var k = 1; k < e; k++) { acc = b.NewMul(acc, bv) }
+                return acc
+            },
+            val: (function() {
+                var v = 1
+                for (var k = 0; k < e; k++) { v = v * base.val }
+                return v
+            })()
+        }
+    }
+
     // items = [pair, op, pair, op, pair, ...] -> one left folded pair.
     function foldChain(items) {
         return {
@@ -94,6 +141,7 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
                     if (items[i] == "-") { v = b.NewSub(v, w) }
                     if (items[i] == "*") { v = b.NewMul(v, w) }
                     if (items[i] == "/") { v = b.NewSDiv(v, w) }
+                    if (items[i] == "%") { v = b.NewSRem(v, w) }
                 }
                 return v
             },
@@ -105,6 +153,7 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
                     if (items[i] == "-") { v = v - w }
                     if (items[i] == "*") { v = v * w }
                     if (items[i] == "/") { v = (v / w) | 0 } // Truncate like LLVM sdiv.
+                    if (items[i] == "%") { v = (v % w) | 0 } // Remainder like LLVM srem.
                 }
                 return v
             })()

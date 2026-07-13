@@ -953,6 +953,12 @@
             "program": "${workspaceFolder}","args": ["languages/calculator-to-llvm-ir.abnf", "tests/calculator-test-features.txt", "-q"]
         },
         {
+            "name": "Calculator power/mod features (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-to-llvm-ir.abnf", "tests/calculator-compiler-features.txt", "-q"]
+        },
+        {
             "name": "C# features (interpreter)",
             "type": "go",
             "request": "launch",
