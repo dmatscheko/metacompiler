@@ -535,7 +535,7 @@ Lambda      <~~ push(makeLambda(takeAll())) ~~>
 LamStmt     = { Annotation } ( LamCtrl | LamIfValue | LamIf | LamExpr ) | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
-            | Labeled | Decl | While | Do | For | TryStmt | Throw ;
+            | Labeled | LocalFun | Decl | While | Do | For | TryStmt | Throw ;
 LamIfValue  <~~ push({expr: pop()}) ~~>
             = IfExpr ;
 LamIf       <~~ push({stmt: pop()}) ~~>

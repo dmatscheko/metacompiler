@@ -696,6 +696,13 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     }
     check("labeled-while", labN == 4 && labSeen == 3)
 
+    // ----- local function declared inside a lambda body -----
+    val lamLocalFun = { n: Int ->
+        fun dbl(b: Int) = b * 2
+        dbl(n) + 1
+    }
+    check("localfun-in-lambda", lamLocalFun(5) == 11)
+
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 
