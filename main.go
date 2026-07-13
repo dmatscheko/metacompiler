@@ -47,7 +47,7 @@ import (
 //  -main NAME    call NAME as the program entry point instead of main (grammars that
 //                support it read it as c.mainName)
 //  -code SRC     take the final program's source from SRC (inline) instead of a file,
-//                e.g. languages/calculator-interpreter-1.abnf -code '9*(2+3)'
+//                e.g. languages/calculator-global-stack-interpreter.abnf -code '9*(2+3)'
 //  -code-stdin   take the final program's source from stdin instead of a file
 //  -pipe         start a new pipeline segment: the text a language prints becomes the
 //                program input of the next segment, so one language (e.g. a preprocessor)
@@ -572,7 +572,7 @@ anywhere among the files.
   -main NAME    call NAME as the program entry point instead of main (grammars that
                 support it read it as c.mainName)
   -code SRC     take the final program's source from SRC (inline) instead of a file,
-                e.g. languages/calculator-interpreter-1.abnf -code '9*(2+3)'
+                e.g. languages/calculator-global-stack-interpreter.abnf -code '9*(2+3)'
   -code-stdin   take the final program's source from stdin instead of a file
   -pipe         start a new pipeline segment: the text a language prints becomes the
                 program input of the next segment, so one language (e.g. a preprocessor)

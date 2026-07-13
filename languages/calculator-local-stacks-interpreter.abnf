@@ -1,5 +1,5 @@
 :title("Calculator interpreter (local stacks)") ;
-:description("Like calculator-interpreter-1.abnf, but built on the local stacks
+:description("Like calculator-global-stack-interpreter.abnf, but built on the local stacks
 (push/pop) instead of the global one (pushg/popg): The tag of a group sees the merged
 pushes of everything inside the group, so the whole chain 'Term op Term op Term ...'
 can be collected and folded left to right in one place.") ;
@@ -68,7 +68,7 @@ Number      = ( "0" | "1"..."9" { "0"..."9" } )
     function paren(n) { return n.atom ? n.s : "(" + n.s + ")" }
     function mkNeg(n) { return {v: -n.v, s: "-" + paren(n), atom: false} }
 
-    // combine applies a binary operator to two nodes (as in calculator-interpreter-1).
+    // combine applies a binary operator to two nodes (as in calculator-global-stack-interpreter).
     function combine(a, op, b) {
         var v = anytype
         if (op == "+") v = a.v + b.v

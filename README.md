@@ -168,13 +168,13 @@ with `-code`:
 Here a dot is the decimal point and a comma separates function arguments (`max(3, 7)`), the
 opposite of the two teaching calculators above, which read a comma as the decimal separator.
 
-`languages/latex-calculator-interpreter.abnf` goes further: its input is LaTeX math, it keeps
+`languages/calculator-latex-interpreter.abnf` goes further: its input is LaTeX math, it keeps
 single-letter **variables**, and it **solves equations** numerically. A program is one
 statement per line — an assignment, an equation to solve, or an expression to evaluate:
 
 ```
-./mec languages/latex-calculator-interpreter.abnf -code 'x^2 - x - 6 = 0'   # => x = -2 or 3
-./mec languages/latex-calculator-interpreter.abnf -code '\frac{9}{2} + \sqrt{16}'   # = 8.5
+./mec languages/calculator-latex-interpreter.abnf -code 'x^2 - x - 6 = 0'   # => x = -2 or 3
+./mec languages/calculator-latex-interpreter.abnf -code '\frac{9}{2} + \sqrt{16}'   # = 8.5
 ```
 
 It understands `\frac`, `\sqrt{}`/`\sqrt[n]{}`, powers `a^{b}`, `\cdot`/`\times`/`\div`,
@@ -259,9 +259,9 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 
 | Language     | Interpreter                                                  | Compiler (to LLVM IR)        | Test inputs                                       |
 | ------------ | ------------------------------------------------------------ | ---------------------------- | ------------------------------------------------- |
-| Calculator   | calculator-interpreter-1.abnf, calculator-interpreter-2.abnf | calculator-to-llvm-ir.abnf   | calculator-test-1.txt                             |
+| Calculator   | calculator-global-stack-interpreter.abnf, calculator-local-stacks-interpreter.abnf | calculator-to-llvm-ir.abnf   | calculator-test-1.txt                             |
 | Calc (sci)   | calculator-scientific-interpreter.abnf                       | -                            | calculator-scientific-test.txt                    |
-| LaTeX calc   | latex-calculator-interpreter.abnf                            | -                            | latex-calculator-test.txt                         |
+| LaTeX calc   | calculator-latex-interpreter.abnf                            | -                            | latex-calculator-test.txt                         |
 | Brainfuck    | brainfuck-interpreter.abnf                                   | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt        |
 | TinyC        | tinyc-interpreter.abnf                                       | tinyc-to-llvm-ir.abnf        | tinyc-test-1.txt, tinyc-test-2.txt                |
 | Lisp         | lisp-interpreter.abnf                                        | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                                   |
@@ -497,8 +497,8 @@ code becomes a synthetic last file the compiled grammar parses - so the whole sy
 doubles as a one-liner runner for any language:
 
 ```
-./mec languages/calculator-interpreter-1.abnf -code '9*(2+3)'     # RESULT: 45
-echo '9*(2+3)' | ./mec languages/calculator-interpreter-1.abnf -code-stdin
+./mec languages/calculator-global-stack-interpreter.abnf -code '9*(2+3)'     # RESULT: 45
+echo '9*(2+3)' | ./mec languages/calculator-global-stack-interpreter.abnf -code-stdin
 ```
 
 `-code-stdin` reads the source from stdin instead. A grammar file is still the first

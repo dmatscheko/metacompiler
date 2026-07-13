@@ -1,6 +1,6 @@
 :title("Scientific calculator interpreter") ;
 :description("A floating-point scientific calculator built on the local stacks (push/pop), the same
-tag data-flow idiom as calculator-interpreter-2.abnf but with a full operator and function
+tag data-flow idiom as calculator-local-stacks-interpreter.abnf but with a full operator and function
 set. It understands + - * / (with unary minus and brackets, so 9*(2+3) still gives 45),
 plus these extras:
 

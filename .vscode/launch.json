@@ -8,13 +8,13 @@
             "name": "Calculator interpreter 1",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "tests/calculator-test-1.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["languages/calculator-global-stack-interpreter.abnf", "tests/calculator-test-1.txt", "-q"]
         },
         {
             "name": "Calculator -code inline source (interpreter)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "-code", "9*(2+3)", "-q"]
+            "program": "${workspaceFolder}","args": ["languages/calculator-global-stack-interpreter.abnf", "-code", "9*(2+3)", "-q"]
         },
         {
             "name": "Calculator -code inline source (compiler)",
@@ -26,13 +26,13 @@
             "name": "Calculator interpreter 1 (TRACE)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "tests/calculator-test-1.txt", "-vv2"]
+            "program": "${workspaceFolder}","args": ["languages/calculator-global-stack-interpreter.abnf", "tests/calculator-test-1.txt", "-vv2"]
         },
         {
             "name": "Calculator interpreter 2",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-2.abnf", "tests/calculator-test-1.txt"]
+            "program": "${workspaceFolder}","args": ["languages/calculator-local-stacks-interpreter.abnf", "tests/calculator-test-1.txt"]
         },
         {
             "name": "Scientific calculator features (interpreter)",
@@ -50,13 +50,13 @@
             "name": "LaTeX calculator (interpreter, variables + solving)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/latex-calculator-interpreter.abnf", "tests/latex-calculator-test.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["languages/calculator-latex-interpreter.abnf", "tests/latex-calculator-test.txt", "-q"]
         },
         {
             "name": "LaTeX calculator -code solve equation",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/latex-calculator-interpreter.abnf", "-code", "x^2 - x - 6 = 0", "-q"]
+            "program": "${workspaceFolder}","args": ["languages/calculator-latex-interpreter.abnf", "-code", "x^2 - x - 6 = 0", "-q"]
         },
         {
             "name": "Tiny Self Parse",
@@ -956,7 +956,7 @@
             "name": "Calculator features (interpreter)",
             "type": "go",
             "request": "launch",
-            "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-1.abnf", "tests/calculator-test-features.txt", "-q"]
+            "program": "${workspaceFolder}","args": ["languages/calculator-global-stack-interpreter.abnf", "tests/calculator-test-features.txt", "-q"]
         },
         {
             "name": "Calculator features (compiler)",
