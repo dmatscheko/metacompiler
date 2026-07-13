@@ -1086,7 +1086,13 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 		if VerboseParseErrors {
 			dump = newProductions.SerializeCompact()
 		}
-		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), Shorten(dump)))
+		// The dump carries ANSI color escapes only when r.ColorErrorOutput is on; use the
+		// escape-aware truncator then so a cut never lands inside a color sequence.
+		short := Shorten(dump)
+		if r.ColorErrorOutput {
+			short = ShortenColored(dump)
+		}
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), short))
 	}
 
 	mergeTerminals(newProductions)

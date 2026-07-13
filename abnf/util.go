@@ -26,6 +26,63 @@ func Shorten(s string) string {
 	return s
 }
 
+// ShortenColored is Shorten for a string that carries ANSI color escapes: it counts
+// only visible characters, never cuts inside an escape sequence, and resets the color
+// at the cut and before the tail so no color bleeds across the [...] gap or beyond.
+func ShortenColored(s string) string {
+	const maxVisible = 2000
+	// atoms: each is one whole ANSI escape (ESC '[' ... final byte) or a single byte.
+	var atoms []string
+	visible := 0
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] < '@' || s[j] > '~') { // CSI ends on 0x40..0x7e.
+				j++
+			}
+			if j < len(s) {
+				j++ // Include the final byte (e.g. 'm').
+			}
+			atoms = append(atoms, s[i:j])
+			i = j
+			continue
+		}
+		atoms = append(atoms, s[i:i+1])
+		visible++
+		i++
+	}
+	if visible <= maxVisible {
+		return s
+	}
+	isEsc := func(a string) bool { return len(a) > 1 && a[0] == 0x1b }
+	budget := maxVisible/2 - 4
+
+	var head strings.Builder
+	hv := 0
+	k := 0
+	for ; k < len(atoms) && hv < budget; k++ {
+		head.WriteString(atoms[k])
+		if !isEsc(atoms[k]) {
+			hv++
+		}
+	}
+	head.WriteString("\x1b[0m") // Close any color left open by the cut.
+
+	tv := 0
+	t := len(atoms)
+	for ; t > 0 && tv < budget; t-- {
+		if !isEsc(atoms[t-1]) {
+			tv++
+		}
+	}
+	var tail strings.Builder
+	tail.WriteString("\x1b[0m") // Clear any color the tail would otherwise inherit.
+	for ; t < len(atoms); t++ {
+		tail.WriteString(atoms[t])
+	}
+	return head.String() + "\n[...]\n" + tail.String()
+}
+
 func SprintRule(rule *r.Rule) string {
 	return rule.ToString()
 }

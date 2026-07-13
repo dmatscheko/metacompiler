@@ -273,6 +273,9 @@ func main() {
 
 	abnf.UseFrozenScripts = o.frozen
 	abnf.VerboseParseErrors = o.verboseError
+	// Color the parse-error dump only when stderr is a real terminal (not a pipe or
+	// file), respecting the NO_COLOR convention and TERM=dumb.
+	r.ColorErrorOutput = stderrIsTerminal() && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
 	abnf.WarnUnresolvedImports = o.warnImports
 	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
@@ -530,6 +533,13 @@ func runVerify(o *options, grammar *r.Rules, srcs []string, parseropts *abnf.Par
 	if errors > 0 {
 		os.Exit(1)
 	}
+}
+
+// stderrIsTerminal reports whether stderr is a character device (an interactive
+// terminal) rather than a pipe or a regular file.
+func stderrIsTerminal() bool {
+	fi, err := os.Stderr.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 func printUsage() {

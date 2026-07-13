@@ -192,6 +192,24 @@ func (rules *Rules) SerializePretty() string {
 	return prettyBraces(rules.Serialize())
 }
 
+// ColorErrorOutput turns on ANSI colors in SerializeMinimal/SerializeCompact: parsed
+// strings (tokens) are yellow and tag code is magenta. main sets it only when the error
+// stream is a real terminal, so piped or redirected output stays plain.
+var ColorErrorOutput = false
+
+const (
+	ansiYellow  = "\x1b[33m"
+	ansiMagenta = "\x1b[35m"
+	ansiReset   = "\x1b[0m"
+)
+
+func colorize(s, color string) string {
+	if ColorErrorOutput {
+		return color + s + ansiReset
+	}
+	return s
+}
+
 // SerializeMinimal and SerializeCompact both render rules as the SAME nested tree as
 // Serialize but with the Go boilerplate stripped, so the parsed parts stay visible:
 // runs of adjacent tokens merge into one "text", a child list is {...}, structural
@@ -228,7 +246,7 @@ func (rules *Rules) treeBody(withCode bool) string {
 	flush := func() {
 		if tok.Len() > 0 {
 			sep()
-			b.WriteString(fmt.Sprintf("%q", tok.String()))
+			b.WriteString(colorize(fmt.Sprintf("%q", tok.String()), ansiYellow))
 			tok.Reset()
 		}
 	}
@@ -257,14 +275,14 @@ func (rule *Rule) serializeTree(withCode bool) string {
 	}
 	switch rule.Operator {
 	case Token:
-		return fmt.Sprintf("%q", rule.String)
+		return colorize(fmt.Sprintf("%q", rule.String), ansiYellow)
 	case Number:
 		return fmt.Sprintf("#%d", rule.Int)
 	case Identifier, Production, CharOf, CharsOf, Command:
-		return fmt.Sprintf("%q", rule.String) + body
+		return colorize(fmt.Sprintf("%q", rule.String), ansiYellow) + body
 	case Tag:
 		if withCode {
-			return "code{" + compactTagCode(rule.CodeChilds) + "}" + body
+			return "code{" + colorize(compactTagCode(rule.CodeChilds), ansiMagenta) + "}" + body
 		}
 		return "code" + body
 	case Or:
