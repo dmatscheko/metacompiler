@@ -106,7 +106,7 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // COND). A modifier only binds when its keyword sits on the SAME source line as
 // the statement (SameLine), so a block 'if'/'while' that opens the next line stays
 // a separate statement.
-Statement   = DoWhileStmt | ModStmt ;
+Statement   = Require | DoWhileStmt | ModStmt ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
@@ -115,6 +115,26 @@ ModStmt     <~~ push(applyMod(takeAll())) ~~>
 SimpleStmt  = PutsStmt | MultiAssign | ExprStmt ;
 ModKw       = KwIf <~~ push({mod: "if"}) ~~> | KwUnless <~~ push({mod: "unless"}) ~~>
             | KwWhile <~~ push({mod: "while"}) ~~> | KwUntil <~~ push({mod: "until"}) ~~> ;
+
+// require / require_relative <string>: Ruby has no import statement - require and
+// require_relative are ordinary method calls, intercepted here. The single argument is
+// a single- or double-quoted string literal (no interpolation); a leading './' and a
+// missing '.rb' are handled by core.importFile. Tried as the FIRST statement form so a
+// bareword 'require'/'require_relative' (both ordinary identifiers, not keywords) is not
+// swallowed by a plain VarRef; a 'require' not followed by a string rolls back to the
+// normal statement forms. resolveImport runs at PARSE time (like every other language's
+// import), so the required file's top-level def/class register before the code that uses
+// them runs. A require that resolves to no project file is a stdlib require: a no-op when
+// the name is in core.stdlibImports, otherwise it aborts (or warns under -warn-imports).
+// Require pushes no thunk (the work is done at parse time), so runProgram never sees it.
+Require     <~~ resolveImport(pop(), up.pos) ~~>
+            = KwRequire ReqPath ;
+KwRequire   = ( "require_relative" | "require" ) KwEnd ;
+ReqPath     = SqPath | DqPath ;
+SqPath      = "'" :whitespace() { SqEsc | SqPlain } <~~ push(unescapeSq(up.in)) ~~> "'" :whitespace(Whitespace) ;
+DqPath      = '"' :whitespace() { DqEsc | DqPathChar } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+DqEsc       = "\\" "\x20"..b"\x7e" ;
+DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
 
 // a, b = 1, 2 (and the swap a, b = b, a): every right-hand value is evaluated
 // before any target is written; a single right-hand array is unpacked positionally.
@@ -1297,6 +1317,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     core.lang = "ruby"
     core.add = radd
     core.test = rtest
+
+    // ----- Project-file imports (require / require_relative) -----
+    // A handful of stdlib names whose require is a no-op (the runtime provides them or
+    // they are simply not modelled); every other require is looked up as a project file.
+    core.stdlibImports = ["set", "json", "date", "time"]
+    // require_relative 'geomlib' looks for geomlib.rb under the program's directory and
+    // the -i roots (c.findImport), stripping a leading './' and adding a missing '.rb'.
+    // The file is parsed with this grammar and walked with the same tags: its Program tag
+    // (runProgram) runs its top level right there, so its def/class register in the global
+    // scope before the requiring file's body runs. A file is imported once; repeats and
+    // cycles are no-ops.
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        var rel = path
+        if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.slice(2) }
+        var cand = rel
+        if (!(rel.length >= 3 && rel.slice(rel.length - 3) == ".rb")) { cand = rel + ".rb" }
+        var file = c.findImport(cand)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        c.compile(asg)
+        c.popSource()
+        return true
+    }
 
     c.compile(c.asg)
 

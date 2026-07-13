@@ -365,6 +365,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/php-to-llvm-ir.abnf", "tests/php-test-multifile.php", "-q"]
         },
         {
+            "name": "Ruby multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/ruby-interpreter.abnf", "tests/ruby-test-multifile.rb", "-q"]
+        },
+        {
+            "name": "Ruby multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-multifile.rb", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

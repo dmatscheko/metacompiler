@@ -101,7 +101,7 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // COND). A modifier only binds when its keyword sits on the SAME source line as
 // the statement (SameLine), so a block 'if'/'while' that opens the next line stays
 // a separate statement.
-Statement   = DoWhileStmt | ModStmt ;
+Statement   = Require | DoWhileStmt | ModStmt ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
@@ -110,6 +110,27 @@ ModStmt     <~~ push(applyMod(takeAll())) ~~>
 SimpleStmt  = PutsStmt | MultiAssign | ExprStmt ;
 ModKw       = KwIf <~~ push({mod: "if"}) ~~> | KwUnless <~~ push({mod: "unless"}) ~~>
             | KwWhile <~~ push({mod: "while"}) ~~> | KwUntil <~~ push({mod: "until"}) ~~> ;
+
+// require / require_relative <string>: Ruby has no import statement - require and
+// require_relative are ordinary method calls, intercepted here. The single argument is
+// a single- or double-quoted string literal (no interpolation); a leading './' and a
+// missing '.rb' are handled by core.importFile. Tried as the FIRST statement form so a
+// bareword 'require'/'require_relative' (both ordinary identifiers, not keywords) is not
+// swallowed by a plain VarRef; a 'require' not followed by a string rolls back to the
+// normal statement forms. resolveImport runs at PARSE time (like every other language's
+// import): the required file is compiled with importDepth > 0, so its top-level thunks are
+// stashed (buildMain) and prepended to jsmain, existing before the requiring file's code.
+// A require that resolves to no project file is a stdlib require: a no-op when the name is
+// in core.stdlibImports, otherwise it aborts (or warns under -warn-imports). Require pushes
+// no thunk (the work is done at parse time), so buildMain never sees it.
+Require     <~~ resolveImport(pop(), up.pos) ~~>
+            = KwRequire ReqPath ;
+KwRequire   = ( "require_relative" | "require" ) KwEnd ;
+ReqPath     = SqPath | DqPath ;
+SqPath      = "'" :whitespace() { SqEsc | SqPlain } <~~ push(unescapeSq(up.in)) ~~> "'" :whitespace(Whitespace) ;
+DqPath      = '"' :whitespace() { DqEsc | DqPathChar } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+DqEsc       = "\\" "\x20"..b"\x7e" ;
+DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
 
 // a, b = 1, 2 (and the swap a, b = b, a): every right-hand value is evaluated
 // before any target is written; a single right-hand array is unpacked positionally.
@@ -1370,16 +1391,57 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
+    // ----- Project-file imports (require / require_relative) -----
+    // A handful of stdlib names whose require is a no-op (the runtime provides them or
+    // they are simply not modelled); every other require is looked up as a project file.
+    core.stdlibImports = ["set", "json", "date", "time"]
+    // require_relative 'geomlib' looks for geomlib.rb under the program's directory and the
+    // -i roots (c.findImport), stripping a leading './' and adding a missing '.rb'. The file
+    // is parsed with this grammar and compiled with importDepth > 0; its buildMain stashes
+    // the top-level def/class/statement thunks into importedItems instead of emitting a
+    // second jsmain. They are prepended to the real jsmain (below), so the imported
+    // definitions exist before the requiring file's code runs. A file is imported once;
+    // repeats and cycles are no-ops.
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var rel = path
+        if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.slice(2) }
+        var cand = rel
+        if (!(rel.length >= 3 && rel.slice(rel.length - 3) == ".rb")) { cand = rel + ".rb" }
+        var file = c.findImport(cand)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        return true
+    }
+
     // ----- program entry -----
     function buildMain(items) {
+        // The walk of an imported file ends here too (importDepth > 0): stash its top-level
+        // thunks for the real jsmain instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
-        for (var i = 0; i < items.length; i++) {
-            var r = items[i](b)
+        // Imported definitions first (prepended), then this file's own items.
+        var all = importedItems.concat(items)
+        for (var i = 0; i < all.length; i++) {
+            var r = all[i](b)
             b = r.b
         }
         b.NewRet(handle(0))
