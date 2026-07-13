@@ -112,10 +112,17 @@ SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: u
 ComplexEnum <~~ notImpl("enum with raw or associated values", up.pos) ~~>
             = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
 
-// import / protocol / extension / typealias: accepted structurally, not implemented.
+// protocol / extension / typealias: accepted structurally, not implemented.
 UnsupDecl   = ImportDecl | ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
-ImportDecl  <~~ notImpl("import", up.pos) ~~>
-            = KwImport [ ImportKind ] Id { "." ( Id | "*" ) } [ ";" ] ;
+// import Geom (or a submodule import 'import struct A.B'): the module name is resolved by
+// resolveImport - a builtin module (core.stdlibImports) is a no-op, otherwise it maps to a
+// project file (Geom -> Geom.swift, A.B -> A/B.swift) parsed and walked by core.importFile,
+// whose declarations register in the shared scope like the main file's. The submodule kind
+// (struct/class/...) is parsed and dropped; the dotted module path is what is resolved.
+ImportDecl  <~~ resolveImport(pop(), up.pos) ~~>
+            = KwImport [ ImportKind ] ImportPath [ ";" ] ;
+ImportPath  <~~ push(stripWs(up.in)) ~~>
+            = Id { "." ( Id | "*" ) } ;
 ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
               | "func" | "let" | "var" | "inout" ) KwEnd ;
 ProtocolDecl <~~ notImpl("protocol", up.pos) ~~>
@@ -919,6 +926,41 @@ KwContinue  = "continue" KwEnd ;
     core.setMiss = function(name, value) {
         var self = findThis()
         if (self != undefined && hasOwn(self, name)) { self[name] = value; return true }
+        return false
+    }
+
+    // System frameworks / modules the platform already provides (the standard library,
+    // Foundation and the common Apple frameworks, plus the platform C libraries);
+    // importing one is a no-op. Anything else is a project module we resolve to a file.
+    core.stdlibImports = ["Swift", "Foundation", "Dispatch", "Combine", "SwiftUI", "UIKit",
+                          "AppKit", "CoreGraphics", "CoreData", "CoreFoundation", "ObjectiveC",
+                          "Darwin", "Glibc"]
+
+    // Project-file imports: 'import Geom' looks for Geom.swift (a dotted 'import A.B'
+    // for A/B.swift, then A.swift) under the program's directory and the -i roots
+    // (c.findImport). The file is parsed with this grammar and walked with the same
+    // tags, so its funcs / structs / classes / enums register in the shared scope like
+    // the main file's; the top level entry runs only for the main file. A file is
+    // imported once; repeats and cycles are no-ops.
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        var rel = path.split(".").join("/")
+        var cands = [rel + ".swift"]
+        var cut = -1
+        for (var k = 0; k < rel.length; k++) { if (rel.charAt(k) == "/") { cut = k } }
+        if (cut > 0) { cands.push(rel.substring(0, cut) + ".swift") }
+        for (var i = 0; i < cands.length; i++) {
+            var file = c.findImport(cands[i])
+            if (file == "") { continue }
+            if (importedFiles["$" + file] == true) { return true }
+            importedFiles["$" + file] = true
+            var text = c.readFile(file)
+            var asg = c.parse(c.agrammar, text, null, file)
+            c.pushSource(file, text)
+            c.compile(asg)
+            c.popSource()
+            return true
+        }
         return false
     }
 

@@ -112,10 +112,17 @@ SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: u
 ComplexEnum <~~ push(notImplStmt("enum with raw or associated values", up.pos)) ~~>
             = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
 
-// import / protocol / extension / typealias: accepted structurally, not implemented.
+// protocol / extension / typealias: accepted structurally, not implemented.
 UnsupDecl   = ImportDecl | ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
-ImportDecl  <~~ push(notImplStmt("import", up.pos)) ~~>
-            = KwImport [ ImportKind ] Id { "." ( Id | "*" ) } [ ";" ] ;
+// import Geom (or a submodule import 'import struct A.B'): the module name is resolved by
+// resolveImport - a builtin module (core.stdlibImports) is a no-op, otherwise it maps to a
+// project file (Geom -> Geom.swift, A.B -> A/B.swift) whose top-level declarations are
+// stashed by buildMain (importDepth > 0) and prepended to jsmain. The submodule kind is
+// parsed and dropped. It pushes no statement, so buildMain never sees the import itself.
+ImportDecl  <~~ resolveImport(pop(), up.pos) ~~>
+            = KwImport [ ImportKind ] ImportPath [ ";" ] ;
+ImportPath  <~~ push(stripWs(up.in)) ~~>
+            = Id { "." ( Id | "*" ) } ;
 ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
               | "func" | "let" | "var" | "inout" ) KwEnd ;
 ProtocolDecl <~~ push(notImplStmt("protocol", up.pos)) ~~>
@@ -424,6 +431,45 @@ KwContinue  = "continue" KwEnd ;
     var classNames = {}  // Known struct/class names (constructor calls).
 
     function fail(msg) { println("swift compiler error: " + msg); exit(1) }
+
+    // ----- Imports -----
+    // System frameworks / modules the platform already provides (the standard library,
+    // Foundation and the common Apple frameworks, plus the platform C libraries);
+    // importing one is a no-op. Anything else is a project module we resolve to a file.
+    core.stdlibImports = ["Swift", "Foundation", "Dispatch", "Combine", "SwiftUI", "UIKit",
+                          "AppKit", "CoreGraphics", "CoreData", "CoreFoundation", "ObjectiveC",
+                          "Darwin", "Glibc"]
+
+    // Project-file imports: 'import Geom' looks for Geom.swift (a dotted 'import A.B'
+    // for A/B.swift, then A.swift) under the program's directory and the -i roots. The
+    // file is parsed with this grammar; its top-level declarations are stashed by
+    // buildMain (importDepth > 0) and prepended to jsmain. A file is imported once;
+    // repeats and cycles are no-ops.
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var rel = path.split(".").join("/")
+        var cands = [rel + ".swift"]
+        var cut = -1
+        for (var k = 0; k < rel.length; k++) { if (rel.charAt(k) == "/") { cut = k } }
+        if (cut > 0) { cands.push(rel.substring(0, cut) + ".swift") }
+        for (var i = 0; i < cands.length; i++) {
+            var file = c.findImport(cands[i])
+            if (file == "") { continue }
+            if (importedFiles["$" + file] == true) { return true }
+            importedFiles["$" + file] = true
+            var text = c.readFile(file)
+            var asg = c.parse(c.agrammar, text, null, file)
+            c.pushSource(file, text)
+            importDepth = importDepth + 1
+            c.compile(asg)
+            importDepth = importDepth - 1
+            c.popSource()
+            return true
+        }
+        return false
+    }
 
     // ----- try/catch and throw (Swift has no finally) -----
     // Each do/catch body compiles to its own IR closure handed to js_try (jsrt.go): it
@@ -1049,6 +1095,12 @@ KwContinue  = "continue" KwEnd ;
     // The program: jsmain(env, args) declares the builtins, then runs the top
     // level statements in order (they include the final exit(failures)).
     function buildMain(items) {
+        // The walk of an imported file ends here too: stash its top-level declaration
+        // statements for the real jsmain (prepended below) instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
@@ -1061,7 +1113,9 @@ KwContinue  = "continue" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
-        b = makeSeq(items)(b)
+        // Imported declarations first (so the main file's code can use them), then the
+        // main file's top level statements in source order.
+        b = makeSeq(importedItems.concat(items))(b)
         b.NewRet(handle(0))
     }
 
