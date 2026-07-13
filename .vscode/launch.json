@@ -305,6 +305,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/swift-to-llvm-ir.abnf", "tests/swift-test-multifile.swift", "-q"]
         },
         {
+            "name": "Go multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/go-interpreter.abnf", "tests/go-test-multifile.go", "-q"]
+        },
+        {
+            "name": "Go multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/go-to-llvm-ir.abnf", "tests/go-test-multifile.go", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

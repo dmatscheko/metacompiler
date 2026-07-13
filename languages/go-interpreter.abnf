@@ -425,6 +425,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
+    // ----- Project-file import state (see core.importFile near the core config) -----
+    var importedFiles = {}  // "$" + absolute file path -> already imported (once only)
+    var pkgExports = {}     // "$" + package base name -> its exported function names
+    var curPkgName = null   // the package being imported right now (null at top level)
+
     // ----- Maps: {__dict, keys, vals, zero} with two parallel arrays. The arrays keep
     // the insertion order; missing keys read as the zero value of the value type. -----
     function isMap(v) {
@@ -934,6 +939,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             methodTodo.push({recvName: recv, name: name, params: params, body: body})
         } else {
             globalScope[name] = makeFunClosure(params, body)
+            // In an imported package, an exported (capitalized) function is ALSO reached
+            // through the package object (pkg.Fn), the way fmt.Println is (see importFile).
+            if (curPkgName != null && isExported(name)) { pkgExports["$" + curPkgName].push(name) }
         }
     }
     var methodTodo = []
@@ -963,6 +971,55 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     core.getIndex = function(o, i) { return isMap(o) ? mapGet(o, i) : (hasOwn(o, i) ? o[i] : undefined) }
     core.framePush = function() { deferFrames.push([]) }
     core.framePop = function() { runDefers(deferFrames.pop()) }
+
+    // ----- Project-file imports: import "mathbox" -> mathbox.go -----
+    // A non-stdlib import maps to a single .go file (a slash path like "a/b" -> a/b.go),
+    // searched under the program's directory and the -i roots. The file is parsed with this
+    // grammar and walked with the same tags, so its funcs, structs and package-level vars
+    // register in globalScope exactly like the main file's - which is what lets the package
+    // call its OWN names unqualified, and cross-file value.Method() dispatch work (methods
+    // attach to their struct after the whole compile, via methodTodo). On top of that the
+    // file's exported (capitalized) functions are gathered onto a package object bound under
+    // the import's base name, so the main file reaches them as mathbox.Add(...) through the
+    // same member-call path fmt.Println takes. A file is imported once; repeats and cycles
+    // are no-ops.
+    // The import base name is the conventional package qualifier ("a/b" -> "b").
+    function pkgBaseName(path) {
+        var cut = -1
+        for (var k = 0; k < path.length; k++) { if (path.charAt(k) == "/") { cut = k } }
+        return cut >= 0 ? path.substring(cut + 1) : path
+    }
+    // Go visibility: an identifier is exported exactly when it starts with an upper-case
+    // letter.
+    function isExported(name) {
+        if (name.length == 0) { return false }
+        var c0 = name.charCodeAt(0)
+        return c0 >= 65 && c0 <= 90
+    }
+    core.importFile = function(path, pos) {
+        var file = c.findImport(path + ".go")
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var pname = pkgBaseName(path)
+        if (pkgExports["$" + pname] == undefined) { pkgExports["$" + pname] = [] }
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        var savedPkg = curPkgName
+        curPkgName = pname
+        c.pushSource(file, text)
+        c.compile(asg)
+        c.popSource()
+        curPkgName = savedPkg
+        // Assemble (or extend) the package object from the exported functions just added
+        // to globalScope, and bind it under the package name (like a stdlib object).
+        var names = pkgExports["$" + pname]
+        var existing = globalScope[pname]
+        var obj = (existing != undefined && existing != null && existing.__pkg == true) ? existing : {__pkg: true}
+        for (var i = 0; i < names.length; i++) { obj[names[i]] = globalScope[names[i]] }
+        globalScope[pname] = obj
+        return true
+    }
 
     c.compile(c.asg)
 
