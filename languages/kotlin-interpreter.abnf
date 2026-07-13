@@ -1220,7 +1220,10 @@ KwStep      = "step" KwEnd ;
     }
     // A { ... } block in value position (an if / when arm): run its statements in a fresh
     // nested scope; the value is the last expression (Unit if it ends in a statement). A
-    // return/break/continue inside propagates out as the usual {isRet}/BRK/CONT signal.
+    // return/break/continue inside is wrapped as {blockSignal: sig} so it can ride up
+    // through the enclosing if/when EXPRESSION (whose value would otherwise swallow it) to
+    // the nearest statement boundary, where blockSignalOf unwraps it (see makeDecl /
+    // makeReturn / makeExprBody / the exprToStmt override).
     function makeValueBlock(items) {
         return function() {
             scopes.push({})
@@ -1232,11 +1235,28 @@ KwStep      = "step" KwEnd ;
                 } else {
                     last = undefined
                     var r = items[k].stmt()
-                    if (r != undefined) { scopes.pop(); return r }
+                    if (r != undefined) { scopes.pop(); return {blockSignal: r} }
                 }
             }
             scopes.pop()
             return last
+        }
+    }
+    // If v is a value-block's wrapped control signal, return the raw {isRet}/BRK/CONT;
+    // else undefined. A plain value (including a user object) is never a blockSignal.
+    function blockSignalOf(v) {
+        return (v != undefined && v != null && typeof v == "object" && v.blockSignal != undefined) ? v.blockSignal : undefined
+    }
+    // A bare `when`/`if` STATEMENT whose arm block did a return/break/continue: that
+    // value-block signal rode up as {blockSignal}; unwrap it so the enclosing loop or
+    // function sees the real BRK/CONT/{isRet}. Overrides interp-core's exprToStmt (which
+    // just discards the value). A normal expression statement never yields a blockSignal.
+    exprToStmt = function(t) {
+        return function() {
+            var v = t()
+            var s = blockSignalOf(v)
+            if (s != undefined) return s
+            return undefined
         }
     }
     // A destructuring declaration is not lowered; evaluate the initializer (so its
@@ -1450,7 +1470,12 @@ KwStep      = "step" KwEnd ;
     function makeDecl(items) {
         var name = items[0]
         var init = items[1]
-        return function() { declVar(name, init()) }
+        return function() {
+            var v = init()
+            var s = blockSignalOf(v)
+            if (s != undefined) return s
+            declVar(name, v)
+        }
     }
     function makeDo(condT, bodyT) {
         return function() {
@@ -1558,10 +1583,20 @@ KwStep      = "step" KwEnd ;
     }
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : makeConst(undefined)
-        return function() { return {isRet: true, v: t()} }
+        return function() {
+            var v = t()
+            var s = blockSignalOf(v)
+            if (s != undefined) return s
+            return {isRet: true, v: v}
+        }
     }
     function makeExprBody(t) {
-        return function() { return {isRet: true, v: t()} }
+        return function() {
+            var v = t()
+            var s = blockSignalOf(v)
+            if (s != undefined) return s
+            return {isRet: true, v: v}
+        }
     }
 
     // ----- Functions and classes -----

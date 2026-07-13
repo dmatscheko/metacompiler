@@ -716,6 +716,19 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     }
     check("when-block-value", whenBlockVal == 15)
 
+    // ----- control flow (break / continue / return) inside a value block propagates -----
+    var vbSum = 0
+    for (i in 1..5) { when (i) { 3 -> { break } else -> { vbSum = vbSum + i } } }
+    check("value-block-break", vbSum == 3)
+    var vbSum2 = 0
+    for (j in 1..5) { when (j) { 3 -> { continue } else -> { vbSum2 = vbSum2 + j } } }
+    check("value-block-continue", vbSum2 == 12)
+    fun vbReturn(x: Int): Int {
+        val y = when (x) { 1 -> { if (x > 0) return 99; 5 } else -> 0 }
+        return y + 1
+    }
+    check("value-block-return", vbReturn(1) == 99 && vbReturn(2) == 1)
+
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 
