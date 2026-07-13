@@ -354,10 +354,14 @@ InOp        = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"})
 // x as T / x as? T = identity (untyped values); x is T / x !is T undecidable, so
 // not implemented. The suffix is optional, so plain expressions are unaffected.
 TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = Elvis [ IsSfx | AsSfx ] ;
-// A postfix `is T` must not fire when `->` immediately follows: there the `is T` leads
-// the next `when` arm (is CellInfoGsm -> ...), and slurping it as a postfix would strand
-// the arrow. `is T ->` occurs only at a when-arm boundary, so the guard is safe globally.
-IsSfx       <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = IsKw TypeName NotArrow ;
+// A postfix `is T` needs two guards, both defending the `when`-arm boundary where a
+// bare `is T` leads the NEXT arm. SameLine: the `is` must sit on the operand's line, so
+// an arm value never reaches across the newline to swallow the next arm's leading
+// `is T,` (a multi-condition arm) - otherwise `... -> v` then `is B,` on the next line
+// parses as `v is B` and strands the comma. NotArrow: on the SAME line, `is T ->` still
+// leads an arm (is CellInfoGsm -> ...), so the postfix must not fire there either.
+// Together they leave same-line `x is T` (not arrow-led) as the only postfix type test.
+IsSfx       <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = SameLine IsKw TypeName NotArrow ;
 AsSfx       <~~ var t = pop(); push({asType: true, safe: pop(), tname: t}) ~~> = AsKw TypeName ;
 IsKw        = KwIs <~~ push(false) ~~> | KwNotIs <~~ push(true) ~~> ;
 AsKw        = KwAsSafe <~~ push(true) ~~> | KwAs <~~ push(false) ~~> ;

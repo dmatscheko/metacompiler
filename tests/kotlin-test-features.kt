@@ -133,6 +133,21 @@ class Node(val value: Int) {
     var next: Node? = null
 }
 
+// A when that mixes a value-arm, a multi-line comma `is` arm and an else. The arm value
+// (is Dot -> "dot") must not reach across the newline to swallow the next arm's leading
+// `is Line` as a postfix test - the SameLine guard keeps the multi-condition arm intact.
+// Dispatch is by the runtime class of the subject.
+open class Shape
+class Dot : Shape
+class Line : Shape
+class Ray : Shape
+fun shapeTag(s: Shape): String = when (s) {
+    is Dot -> "dot"
+    is Line,
+    is Ray -> "linear"
+    else -> "other"
+}
+
 object Registry {                          // object singleton with mutable state
     val name = "reg"
     var count = 0
@@ -739,6 +754,9 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
         else -> listOf(4)
     }.map { it * 10 }.sumOf { it }
     check("when-postfix-method", wMapped == 60)
+    // A value-arm followed by a comma-separated `is` arm split across lines.
+    check("when-is-multiline-comma",
+        shapeTag(Dot()) == "dot" && shapeTag(Line()) == "linear" && shapeTag(Ray()) == "linear")
 
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
