@@ -421,11 +421,15 @@ default to off and change nothing when unused; interpreter-grammar runs and a
 stepper are the planned next layers.
 
 `-main NAME` names the entry-point function a compiled program calls instead of
-`main` (grammars that support it read it as `c.mainName`; the Kotlin pair does).
-It lets a program whose entry is not named `main` run, and lets a real-world file
-that has no `main()` be driven from a chosen function - handy for rooting a
-`-callgraph` / `-trace` at a specific function. It defaults to `main`, so runs
-without the flag are unchanged.
+its default. It lets a program whose entry is not named `main` run, and lets a
+real-world file that has no `main()` be driven from a chosen function - handy for
+rooting a `-callgraph` / `-trace` at a specific function. Grammars read it as
+`c.mainName`; it is wired into Kotlin, Go, JavaScript, TypeScript, MetaJS, Dart,
+C, TinyC (a top-level function), and Java and C# (a static method of `Main` /
+`Program`). Each falls back to its own default entry when the flag is absent
+(`main` for most, `Main` for C#), so runs without the flag are unchanged.
+Languages that just run their top level (Python, Ruby, Lua, PHP, Swift, Lisp) have
+no distinct entry to name.
 
 #### Grammar linting (-verify)
 

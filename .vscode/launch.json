@@ -1157,6 +1157,30 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-main.kt", "-q", "-main", "checkAll"]
         },
         {
+            "name": "C -main entry point (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-main.c", "-q", "-main", "checkAll"]
+        },
+        {
+            "name": "C -main entry point (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-main.c", "-q", "-main", "checkAll"]
+        },
+        {
+            "name": "C# -main entry point (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-interpreter.abnf", "tests/csharp-test-main.cs", "-q", "-main", "CheckAll"]
+        },
+        {
+            "name": "C# -main entry point (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-main.cs", "-q", "-main", "CheckAll"]
+        },
+        {
             "name": "Kotlin delegation SHOULD FAIL (interpreter)",
             "type": "go",
             "request": "launch",
