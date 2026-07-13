@@ -299,10 +299,18 @@ Primary     = "(" Expression ")"
             | True | False | Null
             | VarRef | StaticExpr | Call | ConstRef ;
 
-// include / require (and _once): a file-inclusion expression, recognized and routed
-// to notImplemented (the included path expression is parsed then dropped).
-IncludeExpr <~~ takeAll(); push(notImplExpr("include/require", up.pos)) ~~>
-            = ( "include_once" | "include" | "require_once" | "require" ) KwEnd Expression ;
+// include / require (and _once): a file-inclusion expression. A single-quoted string
+// literal operand ('geomlib.php') names a project file: its path is resolved and the
+// file's top-level function / class declarations are prepended to phpmain (resolveImport
+// / core.importFile, lib/compile-core.js). Any other operand - a dynamic expression, or a
+// double-quoted string - is parsed and routed to notImplemented, exactly as before.
+IncludeExpr <~~ push(makeInclude(takeAll(), up.pos)) ~~>
+            = ( "include_once" | "include" | "require_once" | "require" ) KwEnd ( IncPath | IncDyn ) ;
+// A single-quoted literal path, captured raw like SqStr but kept as the import path
+// string (via up.in) rather than lowered to a runtime value.
+IncPath     = "'" :whitespace() { SqEsc | SqPlain } <~~ push({incpath: unescapeSq(up.in)}) ~~> "'" :whitespace(Whitespace) ;
+IncDyn      <~~ push({incdyn: pop()}) ~~>
+            = Expression ;
 // A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
 // M_PI, __DIR__, __LINE__, ...). No constant model here, so it is routed to
 // notImplemented. Placed last so calls, statics and keywords are matched first.
@@ -867,6 +875,20 @@ KwInstanceof = "instanceof" KwEnd ;
         return {kind: "static", run: function(b) { return {b: b, v: hNull} }}
     }
 
+    // include / require: a single-quoted literal path is resolved to a project file
+    // (resolveImport -> core.importFile below, whose thunks are stashed for phpmain); a
+    // dynamic / double-quoted operand stays notImplemented. The expression yields a
+    // harmless true so the enclosing statement still lowers.
+    function makeInclude(items, pos) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].incpath != undefined) {
+                resolveImport(items[i].incpath, pos)
+                return makeConst(true)
+            }
+        }
+        return notImplExpr("include/require", pos)
+    }
+
     // ----- closures (IR function closed over the defining scope via js_closure) -----
     function makeClosure(items) {
         var params = []
@@ -1116,8 +1138,42 @@ KwInstanceof = "instanceof" KwEnd ;
         }
     }
 
-    // ----- program entry -----
+    // ----- program entry & project-file imports -----
+    // PHP has no importable builtins (count/strlen/... are always in scope), so every
+    // include/require path is a project file. `require 'geomlib.php'` looks for geomlib.php
+    // (a leading ./ dropped, a missing .php extension added) under the program's directory
+    // and the -i roots (c.findImport). The file is parsed with this grammar and walked with
+    // the same tags; its top-level thunks are stashed by buildMain (importDepth > 0) and
+    // prepended to phpmain, so the included function / class declarations run before the
+    // main file's code. A file is imported once; repeats and cycles are no-ops. The imported
+    // names bind flat (global), like PHP require.
+    core.stdlibImports = []
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        if (path.length >= 2 && path.charAt(0) == "." && path.charAt(1) == "/") { path = path.substring(2) }
+        if (!(path.length >= 4 && path.substring(path.length - 4) == ".php")) { path = path + ".php" }
+        var file = c.findImport(path)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        return true
+    }
     function buildMain(items) {
+        // The walk of an imported file ends here too: stash its top-level thunks for the
+        // real phpmain instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var s = 0; s < items.length; s++) { importedItems.push(items[s]) }
+            return
+        }
         var f = m.NewFunc("phpmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
@@ -1126,7 +1182,8 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
-        for (var i = 0; i < items.length; i++) { b = items[i](b) }
+        var all = importedItems.concat(items)
+        for (var i = 0; i < all.length; i++) { b = all[i](b) }
         b.NewRet(handle(0))
     }
 

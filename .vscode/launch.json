@@ -353,6 +353,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-multifile.ts", "-q"]
         },
         {
+            "name": "PHP multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/php-interpreter.abnf", "tests/php-test-multifile.php", "-q"]
+        },
+        {
+            "name": "PHP multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/php-to-llvm-ir.abnf", "tests/php-test-multifile.php", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
