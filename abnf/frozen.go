@@ -322,11 +322,14 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 			eng.traceEnabled = eng.traceEnabled || traceEnabled
 			return eng.co.compile(asg, slot, 0)
 		},
-		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules {
+		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts, fileName string) *r.Rules {
 			if options == nil {
 				options = &Parseropts{}
 			}
-			productions, err := ParseWithAgrammar(agrammar, srcCode, eng.fileName, options)
+			if fileName == "" || fileName == "undefined" {
+				fileName = eng.fileName
+			}
+			productions, err := ParseWithAgrammar(agrammar, srcCode, fileName, options)
 			if err != nil {
 				panic(err)
 			}
@@ -585,11 +588,14 @@ func (ps *frozenParserScript) init() {
 			return int(ps.pa.Src[pos])
 		},
 		// The common c entries of the goja side (commonscript.go).
-		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules {
+		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts, fileName string) *r.Rules {
 			if options == nil {
 				options = &Parseropts{}
 			}
-			productions, err := ParseWithAgrammar(agrammar, srcCode, ps.fileName, options)
+			if fileName == "" || fileName == "undefined" {
+				fileName = ps.fileName
+			}
+			productions, err := ParseWithAgrammar(agrammar, srcCode, fileName, options)
 			if err != nil {
 				panic(err)
 			}

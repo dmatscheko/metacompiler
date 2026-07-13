@@ -860,7 +860,7 @@ KwStep      = "step" KwEnd ;
             if (importedFiles["$" + file] == true) { return true }
             importedFiles["$" + file] = true
             var text = c.readFile(file)
-            var asg = c.parse(c.agrammar, text, null)
+            var asg = c.parse(c.agrammar, text, null, file)
             c.pushSource(file, text)
             importDepth = importDepth + 1
             c.compile(asg)

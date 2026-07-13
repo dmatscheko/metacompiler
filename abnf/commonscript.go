@@ -217,11 +217,17 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// })
 
 	*compilerFuncMap = map[string]r.Object{
-		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules {
+		// The optional fileName names the source in parse errors (and fixes relative
+		// paths); an imported file passes its own path so an error points at it, not
+		// at the grammar. Empty/undefined falls back to the executing module's name.
+		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts, fileName string) *r.Rules {
 			if options == nil {
 				options = &Parseropts{}
 			}
-			productions, err := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), options)
+			if fileName == "" || fileName == "undefined" {
+				fileName = common.getCurrentModuleFileName()
+			}
+			productions, err := ParseWithAgrammar(agrammar, srcCode, fileName, options)
 			if err != nil {
 				panic(err)
 			}
