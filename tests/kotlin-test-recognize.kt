@@ -123,5 +123,10 @@ fun main() {
     val inRange = when (3) { in 0..5 -> 1; else -> 0 }   // when-in range: still genuine
     if (inRange != 1) { fails = fails + 1 }
 
+    // try/catch used as an expression value is recognised but its value is not modelled:
+    // the try/catch bodies still run (helper(4) is called under exception handling), the
+    // value itself is a placeholder (left unused here). The try/catch STATEMENT is unaffected.
+    val fromTry = try { helper(4) } catch (e: Exception) { -1 }
+
     exitProcess(fails)
 }

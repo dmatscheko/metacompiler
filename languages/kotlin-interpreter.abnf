@@ -474,7 +474,17 @@ MArgs       = "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lam
 // `when` keyword as an identifier) so an if/when expression can be an operand -
 // a + if (c) x else y, "n=" + when (k) { ... }. At statement level the If/When
 // statement forms are matched first, so this only fires in operand position.
-Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | ThisExpr | Call | VarRef ;
+Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThisExpr | Call | VarRef ;
+
+// try { ... } catch (e) { ... } used as an EXPRESSION (val x = try { ... } catch ...,
+// or an expression-body function fun f() = try { ... } catch ...). The try/catch/finally
+// bodies genuinely run with exception handling (the same excTry the statement form uses),
+// so their calls stay visible, but the VALUE of the try-expression is not modelled (a
+// statement block yields a control signal, not its last-expression value): it is reported
+// as not implemented and evaluates to a placeholder. Must precede Call/VarRef so `try`
+// is not read as an identifier.
+TryExpr     <~~ push(makeTryExpr(excTry(takeAll()), up.pos)) ~~>
+            = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
 // position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).
@@ -853,6 +863,14 @@ KwStep      = "step" KwEnd ;
             for (var i = 0; i < items.length; i += 2) { items[i]() }
             return undefined
         }
+    }
+    // A try/catch used as an expression value. The statement thunk (excTry) runs the
+    // try/catch/finally with real exception handling, so every call inside stays visible;
+    // the resulting value is not modelled (the block yields a signal, not a value), so the
+    // expression is not implemented and evaluates to a placeholder.
+    function makeTryExpr(stmtThunk, pos) {
+        notImpl("try expression", pos)
+        return function() { stmtThunk(); return undefined }
     }
     // x in coll / x !in coll -> coll.contains(x) (via the same mcall the compiler
     // emits, so the engines agree); !in negates. items alternates operands and {inop}.
