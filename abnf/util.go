@@ -30,6 +30,25 @@ func SprintRule(rule *r.Rule) string {
 	return rule.ToString()
 }
 
+// lineCol returns the 1-based line and column of byte position pos in data, and
+// whether pos sits at the very end (EOF). Columns count runes; a '\r' does not
+// advance the column.
+func lineCol(data string, pos int) (line, column int, eof bool) {
+	line, column = 1, 1
+	for i, ch := range data {
+		if i >= pos {
+			return line, column, false
+		}
+		if ch == '\n' {
+			line++
+			column = 1
+		} else if ch != '\r' {
+			column++
+		}
+	}
+	return line, column, true
+}
+
 // LinePosFromStrPos converts a byte position inside data into a human readable
 // line and column description (both 1-based). A position at the very end of the
 // data is reported as EOF, everything outside of the data is reported as invalid.
@@ -37,18 +56,23 @@ func LinePosFromStrPos(data string, pos int) string {
 	if pos < 0 || pos > len(data) {
 		return "position outside of the input (char pos " + strconv.Itoa(pos) + ")"
 	}
-	line := 1
-	column := 1
-	for i, ch := range data {
-		if i >= pos {
-			return fmt.Sprintf("ln %d, col %d", line, column)
-		}
-		if ch == '\n' {
-			line++
-			column = 1
-		} else if ch != '\r' { // A carriage return does not move the column.
-			column++
-		}
+	line, column, eof := lineCol(data, pos)
+	if eof {
+		return fmt.Sprintf("ln %d, col %d (EOF)", line, column)
 	}
-	return fmt.Sprintf("ln %d, col %d (EOF)", line, column)
+	return fmt.Sprintf("ln %d, col %d", line, column)
+}
+
+// FileLinePos formats a source position as a clickable "file:line:col" (with a
+// trailing " (EOF)" when pos is at the end of data). An out-of-range position
+// falls back to the file name plus the raw byte offset.
+func FileLinePos(fileName, data string, pos int) string {
+	if pos < 0 || pos > len(data) {
+		return fmt.Sprintf("%s (char pos %d, outside the input)", fileName, pos)
+	}
+	line, column, eof := lineCol(data, pos)
+	if eof {
+		return fmt.Sprintf("%s:%d:%d (EOF)", fileName, line, column)
+	}
+	return fmt.Sprintf("%s:%d:%d", fileName, line, column)
 }

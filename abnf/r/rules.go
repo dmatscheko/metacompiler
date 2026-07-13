@@ -192,6 +192,105 @@ func (rules *Rules) SerializePretty() string {
 	return prettyBraces(rules.Serialize())
 }
 
+// SerializeCompact renders rules as a short, ABNF-like pseudo grammar for error
+// messages. It is LOSSY (for humans, not for re-parsing - use Serialize for
+// that): runs of adjacent Tokens merge into one quoted string, groups and
+// alternatives use brackets ((a | b), [opt], {rep}), and tag code is trimmed.
+func (rules *Rules) SerializeCompact() string {
+	if rules == nil {
+		return "<nil>"
+	}
+	var parts []string
+	var run strings.Builder
+	flush := func() {
+		if run.Len() > 0 {
+			parts = append(parts, fmt.Sprintf("%q", run.String()))
+			run.Reset()
+		}
+	}
+	for _, rule := range *rules {
+		if rule != nil && rule.Operator == Token {
+			run.WriteString(rule.String) // Merge a run of single-char tokens.
+			continue
+		}
+		flush()
+		parts = append(parts, rule.SerializeCompact())
+	}
+	flush()
+	return strings.Join(parts, " ")
+}
+
+// SerializeCompact renders one rule; see (*Rules).SerializeCompact.
+func (rule *Rule) SerializeCompact() string {
+	if rule == nil {
+		return "<nil>"
+	}
+	switch rule.Operator {
+	case Token:
+		return fmt.Sprintf("%q", rule.String)
+	case Number:
+		return fmt.Sprintf("#%d", rule.Int)
+	case Identifier, Production:
+		if rule.Childs != nil && len(*rule.Childs) > 0 {
+			return rule.String + "(" + rule.Childs.SerializeCompact() + ")"
+		}
+		return rule.String
+	case Or:
+		parts := make([]string, 0, len(*rule.Childs))
+		for _, c := range *rule.Childs {
+			parts = append(parts, c.SerializeCompact())
+		}
+		return "(" + strings.Join(parts, " | ") + ")"
+	case Sequence:
+		return rule.Childs.SerializeCompact()
+	case Group:
+		return "(" + rule.Childs.SerializeCompact() + ")"
+	case Optional:
+		return "[" + rule.Childs.SerializeCompact() + "]"
+	case Repeat:
+		return "{" + rule.Childs.SerializeCompact() + "}"
+	case Not:
+		return "!" + rule.Childs.SerializeCompact()
+	case Times:
+		return "times(" + rule.Childs.SerializeCompact() + ")"
+	case Range:
+		return "range"
+	case CharOf:
+		return "@" + fmt.Sprintf("%q", rule.String)
+	case CharsOf:
+		return "@+" + fmt.Sprintf("%q", rule.String)
+	case Command:
+		return ":" + rule.String + "()"
+	case Tag:
+		code := compactTagCode(rule.CodeChilds)
+		if rule.Childs != nil && len(*rule.Childs) > 0 {
+			return rule.Childs.SerializeCompact() + " <~" + code + "~>"
+		}
+		return "<~" + code + "~>"
+	}
+	return "<" + rule.Operator.String() + ">"
+}
+
+// compactTagCode joins a tag's code tokens, collapses whitespace and trims the
+// result to a short preview.
+func compactTagCode(code *Rules) string {
+	if code == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range *code {
+		if c != nil {
+			b.WriteString(c.String)
+		}
+	}
+	s := strings.Join(strings.Fields(b.String()), " ")
+	const max = 40
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return s
+}
+
 // prettyBraces rewrites a compact Go-literal string so that each closing brace
 // sits on its own line at (depth-1)*4 spaces, tracking string literals so a '}'
 // inside a quoted string is copied verbatim.

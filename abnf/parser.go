@@ -203,7 +203,7 @@ func (pa *parser) resolveRulesToToken(rules *r.Rules) *r.Rules {
 				newProductions = r.AppendArrayOfPossibleSequences(newProductions, pa.resolveRulesToToken(rule.Childs))
 				continue
 			}
-			panic("Only Token and Identifier of Token (also as Sequence) are allowed as parameter. Found " + rule.Serialize())
+			panic("Only Token and Identifier of Token (also as Sequence) are allowed as parameter. Found " + rule.SerializeCompact())
 		}
 	}
 
@@ -1075,7 +1075,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 		pa.apply(pa.initialSpaces, pa.initialSpaces, true, 0) // Skip spaces.
 	}
 	if pa.Sdx < len(pa.Src) {
-		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position was %s\nCreated productions: %s", LinePosFromStrPos(string(pa.Src), pa.lastParsePosition), Shorten(newProductions.Serialize())))
+		panic(fmt.Sprintf("Not everything could be parsed. Last good parse position: %s\nParsed so far: %s", FileLinePos(pa.fileName, string(pa.Src), pa.lastParsePosition), Shorten(newProductions.SerializeCompact())))
 	}
 
 	mergeTerminals(newProductions)
