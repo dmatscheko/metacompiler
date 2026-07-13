@@ -619,6 +619,14 @@ func (ps *frozenParserScript) init() {
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
 		"mainName":        EntryPoint,
+		// Project-file imports (the -i include roots); mirrors the goja c map in
+		// commonscript.go and the frozen compiler engine, so a parser :script that
+		// resolves an import does not become a latent abort only under -frozen.
+		"curFile":    func() string { return traceSrcName },
+		"findImport": func(relPath string) string { return findImportFile(relPath) },
+		"readFile":   func(path string) string { return readImportFile(path) },
+		"pushSource": func(name, text string) { pushTraceSource(name, text) },
+		"popSource":  func() { popTraceSource() },
 	}
 	bindings := frozenBaseBindings(ps.pa.opts.PreventDefaultOutput)
 	bindings["llvm"] = llvmFuncMap
