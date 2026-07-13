@@ -516,12 +516,13 @@ Lambda      <~~ push(makeLambda(takeAll())) ~~>
             = "{" [ LambdaParams ] { LamStmt } "}" ;
 // A lambda body is a sequence of statements whose value is its last expression
 // (a single expression is the common case). Genuinely lowered, not notImpl.
-// Keyword-led statements first; then an if/else whose arms are expressions (an
-// IfExpr keeps its value); then any REMAINING if statement - a bare `if (c) s`
-// must be consumed here, BEFORE LamExpr, which would otherwise read the keyword
-// `if` as an identifier (`if (c)` parses as the call if(c)) and only fail at run
-// time; then any expression; then an empty statement.
-LamStmt     = LamCtrl | LamIfValue | LamIf | LamExpr | ";" ;
+// A leading annotation (runCatching { @Suppress("DEPRECATION") val x = ... }) is
+// parsed and ignored, exactly as at the top statement level; keyword-led statements
+// first; then an if/else whose arms are expressions (an IfExpr keeps its value); then
+// any REMAINING if statement - a bare `if (c) s` must be consumed here, BEFORE LamExpr,
+// which would otherwise read the keyword `if` as an identifier (`if (c)` parses as the
+// call if(c)) and only fail at run time; then any expression; then an empty statement.
+LamStmt     = { Annotation } ( LamCtrl | LamIfValue | LamIf | LamExpr ) | ";" ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = ReturnAt | Return | BreakAt | Break | ContinueAt | Continue
             | Labeled | Decl | While | Do | For | TryStmt | Throw ;

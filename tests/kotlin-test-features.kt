@@ -471,6 +471,14 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     var feSum = 0
     nums.forEach { feSum += it }
     check("hof-foreach", feSum == 8)
+    // an annotation on a statement inside a lambda body is parsed and ignored
+    var annSum = 0
+    nums.forEach { n ->
+        @Suppress("UNUSED_EXPRESSION")
+        val trebled = n * 3
+        annSum += trebled
+    }
+    check("lambda-stmt-annotation", annSum == 24)
 
     // ----- callable references (bare ::fn; qualified refs stay unsupported) -----
     val addRef = ::add
