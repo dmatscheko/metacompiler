@@ -374,7 +374,7 @@ func (rule *Rule) ToString() string {
 	if op == Token || op == Identifier || op == Production || op == Command || op == CharOf || op == CharsOf {
 		res += fmt.Sprintf(", String:%q", rule.String)
 	}
-	if op == Identifier || op == Number || op == Range || ((op == CharOf || op == CharsOf) && rule.Int != 0) {
+	if op == Number || op == Range || ((op == CharOf || op == CharsOf) && rule.Int != 0) {
 		res += fmt.Sprintf(", Int:%d", rule.Int)
 	}
 	if rule.CodeChilds != nil && (op == Tag || op == Command || op == Range || op == Times) {
