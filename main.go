@@ -29,10 +29,10 @@ import (
 //
 // Flags may appear anywhere among the files:
 //
-//  -v, -vN       verbose for all stages / for stage N (parse ASG + compiled result)
-//  -vv, -vvN     parser+compiler trace for all stages / for stage N
+//  -v, -vN       verbose for all stages / stage N (ASG + compiled result)
+//  -vv, -vvN     parser+compiler trace for all stages / stage N
 //  -slotN V      compile stage N with tag slot V (default 0)
-//  -q, -qq       quiet (only program output+errors / only errors)
+//  -q, -qq       quiet (program output + errors / errors only)
 //  -error MODE   parse-failure dump detail: short (default; structure + tokens), code (also
 //                each tag's code), short-all / code-all (the whole tree, no [...] abridging)
 //  -frozen       run the annotation scripts goja-free (see abnf/frozen.go)
@@ -46,18 +46,18 @@ import (
 //                lets call graphs / CFGs / traces be built from partially understood languages
 //  -main NAME    call NAME as the program entry point instead of main (grammars that
 //                support it read it as c.mainName)
-//  -code SRC     take the final program's source from SRC (given inline) instead of a
-//                file, e.g. calculator-interpreter-1.abnf -code '9*(2+3)'
+//  -code SRC     take the final program's source from SRC (inline) instead of a file,
+//                e.g. languages/calculator-interpreter-1.abnf -code '9*(2+3)'
 //  -code-stdin   take the final program's source from stdin instead of a file
 //  -pipe         start a new pipeline segment: the text a language prints becomes the
 //                program input of the next segment, so one language (e.g. a preprocessor)
-//                can transform the source another language then consumes. Example:
-//                mec c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
+//                can transform the source another language then consumes, e.g.
+//                c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
 //  -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
 //  -trace F      stream runtime events to file F as JSON lines; also the -render input
 //  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
 //  -render K     standalone (no pipeline): read the JSON-lines file named by -trace F
-//                and write graph K to stdout as Graphviz DOT, then exit. K is calls or vars
+//                and write graph K to stdout as Graphviz DOT, then exit. K = calls | vars
 //                (from a -trace run) or static (from a -callgraph run)
 //  -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
 //  -lb, -lf      parser block-list / found-list (debugging aids)
@@ -560,28 +560,32 @@ anywhere among the files.
   -q, -qq       quiet (program output + errors / errors only)
   -error MODE   parse-failure dump detail: short (default; structure + tokens), code (also
                 each tag's code), short-all / code-all (the whole tree, no [...] abridging)
-  -frozen       run the annotation scripts without goja
+  -frozen       run the annotation scripts goja-free (see abnf/frozen.go)
   -verify       lint the first file's grammar and exit
   -pretty       print the first file's serialized a-grammar and exit
-  -i DIR        add an include root for project-file imports (repeatable); an import
-                names a file relative to the program's directory or a root
+  -i DIR        add an include root for project-file imports (repeatable; an import
+                like 'a.b.C' is searched as a/b/C.<ext> under the program's own
+                directory first, then under each -i root in order)
   -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
-  -warn-unsupported  warn+placeholder parsed-but-unimplemented syntax instead of aborting;
+  -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
                 lets call graphs / CFGs / traces be built from partially understood languages
-  -main NAME    call NAME as the program entry point instead of main (c.mainName)
+  -main NAME    call NAME as the program entry point instead of main (grammars that
+                support it read it as c.mainName)
   -code SRC     take the final program's source from SRC (inline) instead of a file,
                 e.g. languages/calculator-interpreter-1.abnf -code '9*(2+3)'
   -code-stdin   take the final program's source from stdin instead of a file
-  -pipe         start a new pipeline segment fed by the previous segment's text output
-                (e.g. c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf)
+  -pipe         start a new pipeline segment: the text a language prints becomes the
+                program input of the next segment, so one language (e.g. a preprocessor)
+                can transform the source another language then consumes, e.g.
+                c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
   -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
-  -trace F      stream runtime events to file F as JSON lines
+  -trace F      stream runtime events to file F as JSON lines; also the -render input
   -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
-  -render K     standalone: read the JSON-lines file named by -trace F and write graph
-                K to stdout as Graphviz DOT, then exit. K = calls | vars (from a -trace
-                run) or static (from a -callgraph run)
+  -render K     standalone (no pipeline): read the JSON-lines file named by -trace F
+                and write graph K to stdout as Graphviz DOT, then exit. K = calls | vars
+                (from a -trace run) or static (from a -callgraph run)
   -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
-  -lb, -lf      parser block-list / found-list debugging aids
+  -lb, -lf      parser block-list / found-list (debugging aids)
   -speed N      speed test: warm up once, then time N parse+compile cycles of the first file
 `)
 }
