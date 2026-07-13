@@ -610,7 +610,7 @@ func (ps *frozenParserScript) init() {
 			return productions
 		},
 		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
-			return compileASGInternal(asg, aGrammar, ps.fileName, slot, traceEnabled, false)
+			return compileASGInternal(asg, aGrammar, ps.fileName, slot, traceEnabled, ps.pa.opts.PreventDefaultOutput)
 		},
 		"ABNFagrammar":    AbnfAgrammar,
 		"tracing":         TraceMarkersWanted(),

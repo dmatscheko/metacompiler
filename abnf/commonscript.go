@@ -244,7 +244,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 			return productions
 		},
 		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
-			return compileASGInternal(asg, aGrammar, common.getCurrentModuleFileName(), slot, traceEnabled, false)
+			return compileASGInternal(asg, aGrammar, common.getCurrentModuleFileName(), slot, traceEnabled, preventDefaultOutput)
 		},
 		"ABNFagrammar": AbnfAgrammar,
 		// True when -trace/-cfg collect source positions: the compilers then
