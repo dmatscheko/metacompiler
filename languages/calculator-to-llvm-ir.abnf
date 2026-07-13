@@ -42,22 +42,22 @@ Term        =
 
 // Unary minus is looser than '^', so -3^2 = -(3^2) = -9, matching the scientific
 // interpreter. The right side of a power reaches back down here (so 2^-3 parses), but
-// this integer compiler then rejects a negative or fractional exponent (see makePow).
+// this integer compiler then rejects a negative or fractional exponent (see mkPow).
 Unary       =
-    ( "-" Unary )               <~~push(makeNeg(pop()))~~>
+    ( "-" Unary )               <~~push(mkNeg(pop()))~~>
     |
     Power
     ;
 
 // Right associative power. The exponent is a constant in this variable-free calculator,
-// so makePow unrolls it into that many multiplications instead of a runtime loop.
+// so mkPow unrolls it into that many multiplications instead of a runtime loop.
 Power       =
     (
         Factor
         [ "^" Unary ]
     )                           <~~
                                 var items = takeAll()
-                                if (items.length == 2) push(makePow(items[0], items[1]))
+                                if (items.length == 2) push(mkPow(items[0], items[1]))
                                 else push(items[0])
                                 ~~>
     ;
@@ -69,7 +69,7 @@ Factor      =
         ")"
     )
     |
-    Number                      <~~push(makeNumber(parseInt(up.in)))~~>
+    Number                      <~~push(mkNum(parseInt(up.in), up.in))~~>
     ;
 
 // Only integers: This calculator computes like C.
@@ -85,26 +85,31 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
         return items
     }
 
+    function calcError(msg) {
+        println("Error: " + msg)
+        exit(1)
+    }
+
     var i32 = llvm.types.I32
 
     // paren wraps a composite child in parentheses; a leaf (atom) stays bare, so the printed
     // formula shows exactly how the input parsed. Every pair also carries its text s.
-    function paren(p) { return p.atom ? p.s : "(" + p.s + ")" }
+    function paren(n) { return n.atom ? n.s : "(" + n.s + ")" }
 
-    function makeNumber(n) {
+    function mkNum(v, txt) {
         return {
-            gen: function(b) { return llvm.constant.NewInt(i32, n) },
-            val: n,
-            s: "" + n,
+            gen: function(b) { return llvm.constant.NewInt(i32, v) },
+            v: v,
+            s: txt,
             atom: true
         }
     }
 
-    function makeNeg(p) {
+    function mkNeg(n) {
         return {
-            gen: function(b) { return b.NewSub(llvm.constant.NewInt(i32, 0), p.gen(b)) },
-            val: -p.val,
-            s: "-" + paren(p),
+            gen: function(b) { return b.NewSub(llvm.constant.NewInt(i32, 0), n.gen(b)) },
+            v: -n.v,
+            s: "-" + paren(n),
             atom: false
         }
     }
@@ -112,16 +117,10 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
     // base ^ exp. The exponent value is known at compile time (no variables), so the
     // generator emits exp multiplications of the base. Like the other operators the
     // reference value is a plain JS int, so an out-of-int32 result trips the final check.
-    function makePow(base, ex) {
-        var e = ex.val
-        if (e < 0 || e != Math.floor(e)) {
-            println("Error: this integer calculator needs a whole exponent >= 0, got " + e)
-            exit(1)
-        }
-        if (e > 10000) {
-            println("Error: exponent " + e + " is too large to unroll")
-            exit(1)
-        }
+    function mkPow(base, ex) {
+        var e = ex.v
+        if (e < 0 || e != Math.floor(e)) { calcError("this integer calculator needs a whole exponent >= 0, got " + e) }
+        if (e > 10000) { calcError("exponent " + e + " is too large to unroll") }
         return {
             gen: function(b) {
                 if (e == 0) { return llvm.constant.NewInt(i32, 1) }
@@ -130,9 +129,9 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
                 for (var k = 1; k < e; k++) { acc = b.NewMul(acc, bv) }
                 return acc
             },
-            val: (function() {
+            v: (function() {
                 var v = 1
-                for (var k = 0; k < e; k++) { v = v * base.val }
+                for (var k = 0; k < e; k++) { v = v * base.v }
                 return v
             })(),
             s: paren(base) + "^" + paren(ex),
@@ -156,10 +155,10 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
                 }
                 return v
             },
-            val: (function() {
-                var v = items[0].val
+            v: (function() {
+                var v = items[0].v
                 for (var i = 1; i < items.length; i += 2) {
-                    var w = items[i + 1].val
+                    var w = items[i + 1].v
                     if (items[i] == "+") { v = v + w }
                     if (items[i] == "-") { v = v - w }
                     if (items[i] == "*") { v = v * w }
@@ -178,7 +177,7 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
     }
 
     var res = c.compile(c.asg)
-    var formula = res.stack[0] // The {gen, val} pair of the whole formula.
+    var formula = res.stack[0] // The {gen, v} pair of the whole formula.
 
     // int main() { return <formula>; }
     var m = llvm.ir.NewModule()
@@ -191,10 +190,10 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
 
     // Run it and compare against the reference value.
     var got = llvm.Run(m, "main").Ret | 0 // Ret is unsigned; reinterpret as int32.
-    println("Formula was:         " + formula.s)
-    println("JS reference result: " + formula.val)
+    println("\nFormula was:         " + formula.s)
+    println("JS reference result: " + formula.v)
     println("Compiled result:     " + got)
-    if (got != formula.val) {
+    if (got != formula.v) {
         println("MISMATCH!")
         exit(1)
     }
