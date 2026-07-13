@@ -87,17 +87,25 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
 
     var i32 = llvm.types.I32
 
+    // paren wraps a composite child in parentheses; a leaf (atom) stays bare, so the printed
+    // formula shows exactly how the input parsed. Every pair also carries its text s.
+    function paren(p) { return p.atom ? p.s : "(" + p.s + ")" }
+
     function makeNumber(n) {
         return {
             gen: function(b) { return llvm.constant.NewInt(i32, n) },
-            val: n
+            val: n,
+            s: "" + n,
+            atom: true
         }
     }
 
     function makeNeg(p) {
         return {
             gen: function(b) { return b.NewSub(llvm.constant.NewInt(i32, 0), p.gen(b)) },
-            val: -p.val
+            val: -p.val,
+            s: "-" + paren(p),
+            atom: false
         }
     }
 
@@ -126,12 +134,15 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
                 var v = 1
                 for (var k = 0; k < e; k++) { v = v * base.val }
                 return v
-            })()
+            })(),
+            s: paren(base) + "^" + paren(ex),
+            atom: false
         }
     }
 
     // items = [pair, op, pair, op, pair, ...] -> one left folded pair.
     function foldChain(items) {
+        if (items.length == 1) { return items[0] } // A lone pair keeps its own s/atom.
         return {
             gen: function(b) {
                 var v = items[0].gen(b)
@@ -156,7 +167,13 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
                     if (items[i] == "%") { v = (v % w) | 0 } // Remainder like LLVM srem.
                 }
                 return v
-            })()
+            })(),
+            s: (function() {
+                var str = paren(items[0])
+                for (var i = 1; i < items.length; i += 2) { str = str + " " + items[i] + " " + paren(items[i + 1]) }
+                return str
+            })(),
+            atom: false
         }
     }
 
@@ -174,9 +191,9 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
 
     // Run it and compare against the reference value.
     var got = llvm.Run(m, "main").Ret | 0 // Ret is unsigned; reinterpret as int32.
-    println("Formula was:         " + ltr.in)
-    println("Compiled result:     " + got)
+    println("Formula was:         " + formula.s)
     println("JS reference result: " + formula.val)
+    println("Compiled result:     " + got)
     if (got != formula.val) {
         println("MISMATCH!")
         exit(1)

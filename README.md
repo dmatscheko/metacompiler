@@ -87,9 +87,8 @@ Expression  =
                                 var t2 = popg()
                                 var op = popg()
                                 var t1 = popg()
-                                println("calculating " + t1 + " " + op + " " + t2)
-                                var res = (op=="+") ? t1 + t2 : t1 - t2
-                                pushg(res)
+                                println("calculating " + t1.v + " " + op + " " + t2.v)
+                                pushg(combine(t1, op, t2))
                                 ~~>
     }
     ;
@@ -102,9 +101,8 @@ Term        =
                                 var t2 = popg()
                                 var op = popg()
                                 var t1 = popg()
-                                println("calculating " + t1 + " " + op + " " + t2)
-                                var res = (op=="*") ? t1 * t2 : t1 / t2
-                                pushg(res)
+                                println("calculating " + t1.v + " " + op + " " + t2.v)
+                                pushg(combine(t1, op, t2))
                                 ~~>
     }
     ;
@@ -119,23 +117,40 @@ Factor      =
     Neg
     |
     // The grammar allows a comma as decimal separator, parseFloat() does not.
-    Number                      <~~pushg(parseFloat(up.in.replace(",", ".")))~~>
+    Number                      <~~pushg(mkNum(parseFloat(up.in.replace(",", ".")), up.in))~~>
     ;
 
 // Unary minus negates the factor behind it (and '- -x' works through the recursion).
-Neg         = "-" Factor        <~~pushg(-popg())~~> ;
+Neg         = "-" Factor        <~~pushg(mkNeg(popg()))~~> ;
 
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
 
 
 :startScript(~~
+    // A node carries a value v and the parenthesized text s of its sub-expression; atom
+    // marks a leaf that needs no parentheses when nested, so the printed formula shows
+    // exactly how the input was parsed.
+    function mkNum(v, txt) { return {v: v, s: txt, atom: true} }
+    function paren(n) { return n.atom ? n.s : "(" + n.s + ")" }
+    function mkNeg(n) { return {v: -n.v, s: "-" + paren(n), atom: false} }
+    function combine(a, op, b) {
+        var v = anytype
+        if (op == "+") v = a.v + b.v
+        else if (op == "-") v = a.v - b.v
+        else if (op == "*") v = a.v * b.v
+        else v = a.v / b.v
+        return {v: v, s: paren(a) + " " + op + " " + paren(b), atom: false}
+    }
+
     c.compile(c.asg)
-    println("\nRESULT: " + popg() + "\nFormula was: " + ltr.in)
+    var top = popg()
+    println("\nFormula was: " + top.s + "\nRESULT: " + top.v)
 ~~) ;
 ```
 
-When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
+When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it prints the reconstructed formula
+`1 + (3 * (3 + ((7 - 1) * 2)))` and `RESULT: 46` — the parentheses show how the input parsed.
 </details>
 
 For a richer variant, `languages/calculator-scientific-interpreter.abnf` grows the same idiom

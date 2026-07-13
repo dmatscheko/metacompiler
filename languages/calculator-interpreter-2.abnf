@@ -42,11 +42,11 @@ Factor      =
     Neg
     |
     // The grammar allows a comma as decimal separator, parseFloat() does not.
-    Number                      <~~push(parseFloat(up.in.replace(",", ".")))~~>
+    Number                      <~~push(mkNum(parseFloat(up.in.replace(",", ".")), up.in))~~>
     ;
 
 // Unary minus negates the factor behind it (and '- -x' works through the recursion).
-Neg         = ( "-" Factor )    <~~push(-pop())~~> ;
+Neg         = ( "-" Factor )    <~~push(mkNeg(pop()))~~> ;
 
 Number      = ( "0" | "1"..."9" { "0"..."9" } )
               [ ( "." | "," ) "0"..."9" { "0"..."9" } ] ;
@@ -61,23 +61,33 @@ Number      = ( "0" | "1"..."9" { "0"..."9" } )
         return items
     }
 
-    // items = [value, op, value, op, value, ...] -> the left folded result.
+    // A node carries the value v and the parenthesized text s of its sub-expression;
+    // atom marks a leaf (a number) that needs no parentheses when nested. paren() wraps a
+    // composite child, so the printed formula shows exactly how the input was parsed.
+    function mkNum(v, txt) { return {v: v, s: txt, atom: true} }
+    function paren(n) { return n.atom ? n.s : "(" + n.s + ")" }
+    function mkNeg(n) { return {v: -n.v, s: "-" + paren(n), atom: false} }
+
+    // items = [node, op, node, op, node, ...] -> the left folded node.
     function foldChain(items) {
-        var v = items[0]
+        var node = items[0]
         for (var i = 1; i < items.length; i += 2) {
             var op = items[i]
             var w = items[i + 1]
-            println("calculating " + v + " " + op + " " + w)
-            if (op == "+") { v = v + w }
-            if (op == "-") { v = v - w }
-            if (op == "*") { v = v * w }
-            if (op == "/") { v = v / w }
+            println("calculating " + node.v + " " + op + " " + w.v)
+            var v = anytype
+            if (op == "+") { v = node.v + w.v }
+            if (op == "-") { v = node.v - w.v }
+            if (op == "*") { v = node.v * w.v }
+            if (op == "/") { v = node.v / w.v }
+            node = {v: v, s: paren(node) + " " + op + " " + paren(w), atom: false}
         }
-        return v
+        return node
     }
 
     var res = c.compile(c.asg)
-    // The final value lies on the local stack of the topmost expression,
-    // which arrives here as the combined up.stack of the whole compilation.
-    println("\nRESULT: " + res.stack[0] + "\nFormula was: " + ltr.in)
+    // The final node lies on the local stack of the topmost expression, which arrives
+    // here as the combined up.stack of the whole compilation.
+    var top = res.stack[0]
+    println("\nFormula was: " + top.s + "\nRESULT: " + top.v)
 ~~) ;

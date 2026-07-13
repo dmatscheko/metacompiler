@@ -29,7 +29,7 @@ Expression  =
             ( "+" | "-" )       <~~push(up.in)~~>
             Term
         }
-    )                           <~~push(foldAddSub(takeAll()))~~>
+    )                           <~~push(fold(takeAll()))~~>
     ;
 
 Term        =
@@ -39,13 +39,13 @@ Term        =
             ( "*" | "/" | "%" ) <~~push(up.in)~~>
             Unary
         }
-    )                           <~~push(foldMulDiv(takeAll()))~~>
+    )                           <~~push(fold(takeAll()))~~>
     ;
 
 // Unary minus is looser than '^', so -3^2 = -(3^2) = -9, while the right side of a power
 // still reaches back down here, so 2^-3 = 2^(-3) works too. A leading '+' is a no-op.
 Unary       =
-    ( "-" Unary )               <~~push(-pop())~~>
+    ( "-" Unary )               <~~push(mkNeg(pop()))~~>
     |
     ( "+" Unary )
     |
@@ -59,7 +59,7 @@ Power       =
         [ "^" Unary ]
     )                           <~~
                                 var items = takeAll()
-                                if (items.length == 2) push(Math.pow(items[0], items[1]))
+                                if (items.length == 2) push(mkPow(items[0], items[1]))
                                 else push(items[0])
                                 ~~>
     ;
@@ -71,9 +71,9 @@ Postfix     =
         { "!"                   <~~push("!")~~> }
     )                           <~~
                                 var items = takeAll()
-                                var v = items[0]
-                                for (var i = 1; i < items.length; i++) v = factorial(v)
-                                push(v)
+                                var node = items[0]
+                                for (var i = 1; i < items.length; i++) node = mkFact(node)
+                                push(node)
                                 ~~>
     ;
 
@@ -81,7 +81,7 @@ Primary     =
     ( "(" Expression ")" )
     |
     // Dot is the decimal point (comma is the argument separator in min/max/pow/...).
-    Number                      <~~push(parseFloat(up.in))~~>
+    Number                      <~~push(mkNum(parseFloat(up.in), up.in))~~>
     |
     Atom
     ;
@@ -93,8 +93,8 @@ Atom        =
         [ "(" Expression [ "," Expression ] ")" ]
     )                           <~~
                                 var items = takeAll()
-                                if (items.length == 1) push(constValue(items[0]))
-                                else push(applyFunc(items[0], items.slice(1)))
+                                if (items.length == 1) push(mkConst(items[0]))
+                                else push(mkFunc(items[0], items.slice(1)))
                                 ~~>
     ;
 
@@ -127,26 +127,29 @@ Number      =
         exit(1)
     }
 
-    // items = [value, op, value, op, value, ...] folded left to right.
-    function foldAddSub(items) {
-        var v = items[0]
-        for (var i = 1; i < items.length; i += 2) {
-            if (items[i] == "+") v = v + items[i + 1]
-            else v = v - items[i + 1]
-        }
-        return v
+    // A node carries the value v and the parenthesized text s of its sub-expression; atom
+    // marks a leaf (number, constant, function call) that needs no parentheses when nested.
+    // paren() wraps a composite child, so the printed formula shows how the input parsed.
+    function mkNum(v, txt) { return {v: v, s: txt, atom: true} }
+    function paren(n) { return n.atom ? n.s : "(" + n.s + ")" }
+    function mkNeg(n) { return {v: -n.v, s: "-" + paren(n), atom: false} }
+    function mkPow(a, b) { return {v: Math.pow(a.v, b.v), s: paren(a) + "^" + paren(b), atom: false} }
+
+    function combine(a, op, b) {
+        var v = anytype
+        if (op == "+") v = a.v + b.v
+        else if (op == "-") v = a.v - b.v
+        else if (op == "*") v = a.v * b.v
+        else if (op == "/") v = a.v / b.v
+        else v = a.v % b.v
+        return {v: v, s: paren(a) + " " + op + " " + paren(b), atom: false}
     }
 
-    function foldMulDiv(items) {
-        var v = items[0]
-        for (var i = 1; i < items.length; i += 2) {
-            var op = items[i]
-            var w = items[i + 1]
-            if (op == "*") v = v * w
-            else if (op == "/") v = v / w
-            else v = v % w
-        }
-        return v
+    // items = [node, op, node, op, node, ...] folded left to right (+ - and * / % alike).
+    function fold(items) {
+        var node = items[0]
+        for (var i = 1; i < items.length; i += 2) node = combine(node, items[i], items[i + 1])
+        return node
     }
 
     function factorial(n) {
@@ -156,6 +159,7 @@ Number      =
         for (var i = 2; i <= n; i++) r = r * i
         return r
     }
+    function mkFact(n) { return {v: factorial(n.v), s: paren(n) + "!", atom: false} }
 
     function constValue(name) {
         var n = name.toLowerCase()
@@ -207,6 +211,18 @@ Number      =
         calcError("unknown function '" + name + "'")
     }
 
+    // A bare name is a constant; a name with (args) is a function call. Both are leaves
+    // (self-delimiting) so they are atoms; constValue/applyFunc still work on numbers.
+    function mkConst(name) { return {v: constValue(name), s: name, atom: true} }
+    function mkFunc(name, argNodes) {
+        var vals = []
+        for (var i = 0; i < argNodes.length; i++) vals.push(argNodes[i].v)
+        var argStr = argNodes[0].s
+        for (var i = 1; i < argNodes.length; i++) argStr = argStr + ", " + argNodes[i].s
+        return {v: applyFunc(name, vals), s: name + "(" + argStr + ")", atom: true}
+    }
+
     var res = c.compile(c.asg)
-    println("\nRESULT: " + res.stack[0] + "\nFormula was: " + ltr.in)
+    var top = res.stack[0]
+    println("\nFormula was: " + top.s + "\nRESULT: " + top.v)
 ~~) ;
