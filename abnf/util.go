@@ -113,7 +113,7 @@ func lineCol(data string, pos int) (line, column int, eof bool) {
 // data is reported as EOF, everything outside of the data is reported as invalid.
 func LinePosFromStrPos(data string, pos int) string {
 	if pos < 0 || pos > len(data) {
-		return "position outside of the input (char pos " + strconv.Itoa(pos) + ")"
+		return "char pos " + strconv.Itoa(pos) + ", outside the input"
 	}
 	line, column, eof := lineCol(data, pos)
 	if eof {
