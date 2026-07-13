@@ -138,6 +138,21 @@ Number      = ( "0" | "1"..."9" { "0"..."9" } )
 When fed the input `1 + 3 * (3 + (7 - 1) * 2)`, it outputs `46`.
 </details>
 
+For a richer variant, `languages/calculator-scientific-interpreter.abnf` grows the same idiom
+into a floating-point scientific calculator: `^` (power), `%` (modulo), `!` (factorial), the
+usual functions (`sqrt cbrt exp ln log log2 sin cos tan asin acos atan sinh cosh tanh abs
+sign floor ceil round trunc deg rad`, and the two-argument `min max pow atan2 hypot` and
+`log(x, b)`), and the constants `pi e tau phi`. It still evaluates `9*(2+3)`, and pairs nicely
+with `-code`:
+
+```
+./mec languages/calculator-scientific-interpreter.abnf -code '2^10 + 5! - sqrt(144)'   # RESULT: 1132
+./mec languages/calculator-scientific-interpreter.abnf -code 'log(1000) + sin(0)'       # RESULT: 3
+```
+
+Here a dot is the decimal point and a comma separates function arguments (`max(3, 7)`), the
+opposite of the two teaching calculators above, which read a comma as the decimal separator.
+
 ## Documentation
 
 ### Build / Usage
@@ -215,6 +230,7 @@ and the test programs are self checking: the exit code of the run is 0 on succes
 | Language     | Interpreter                                                  | Compiler (to LLVM IR)        | Test inputs                                       |
 | ------------ | ------------------------------------------------------------ | ---------------------------- | ------------------------------------------------- |
 | Calculator   | calculator-interpreter-1.abnf, calculator-interpreter-2.abnf | calculator-to-llvm-ir.abnf   | calculator-test-1.txt                             |
+| Calc (sci)   | calculator-scientific-interpreter.abnf                       | -                            | calculator-scientific-test.txt                    |
 | Brainfuck    | brainfuck-interpreter.abnf                                   | brainfuck-to-llvm-ir.abnf    | brainfuck-test-1.txt, brainfuck-test-2.txt        |
 | TinyC        | tinyc-interpreter.abnf                                       | tinyc-to-llvm-ir.abnf        | tinyc-test-1.txt, tinyc-test-2.txt                |
 | Lisp         | lisp-interpreter.abnf                                        | lisp-to-llvm-ir.abnf         | lisp-test-1.txt                                   |

@@ -35,6 +35,18 @@
             "program": "${workspaceFolder}","args": ["languages/calculator-interpreter-2.abnf", "tests/calculator-test-1.txt"]
         },
         {
+            "name": "Scientific calculator features (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-scientific-interpreter.abnf", "tests/calculator-scientific-test.txt", "-q"]
+        },
+        {
+            "name": "Scientific calculator -code inline source",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/calculator-scientific-interpreter.abnf", "-code", "2^10 + 5! - sqrt(144) + log(1000)", "-q"]
+        },
+        {
             "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",

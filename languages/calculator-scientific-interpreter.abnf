@@ -1,0 +1,212 @@
+:title("Scientific calculator interpreter") ;
+:description("A floating-point scientific calculator built on the local stacks (push/pop), the same
+tag data-flow idiom as calculator-interpreter-2.abnf but with a full operator and function
+set. It understands + - * / (with unary minus and brackets, so 9*(2+3) still gives 45),
+plus these extras:
+
+  ^   power        right associative, so 2^3^2 = 2^(3^2) = 512
+  %   modulo       remainder, same precedence as * and /
+  !   factorial    postfix, 5! = 120
+  functions        sqrt cbrt exp ln log log2 sin cos tan asin acos atan
+                   sinh cosh tanh abs sign floor ceil round trunc deg rad
+                   and the two-argument min max pow atan2 hypot log (log(x,b) = log base b)
+  constants        pi e tau phi
+  numbers          decimal dot and scientific notation like 1.5e-3 (comma separates
+                   arguments in min/max/pow/..., so unlike the two teaching calculators
+                   a comma is not a decimal separator here)
+
+Precedence, lowest to highest: + -   <   * / %   <   unary -   <   ^   <   ! (postfix)   <
+atoms. Every number is a float64; the tags evaluate eagerly during the compile walk (the
+same host Math the frozen VM and goja share, so -q output is byte identical on both).") ;
+
+
+:startRule(Expression) ;
+
+Expression  =
+    (
+        Term
+        {
+            ( "+" | "-" )       <~~push(up.in)~~>
+            Term
+        }
+    )                           <~~push(foldAddSub(takeAll()))~~>
+    ;
+
+Term        =
+    (
+        Unary
+        {
+            ( "*" | "/" | "%" ) <~~push(up.in)~~>
+            Unary
+        }
+    )                           <~~push(foldMulDiv(takeAll()))~~>
+    ;
+
+// Unary minus is looser than '^', so -3^2 = -(3^2) = -9, while the right side of a power
+// still reaches back down here, so 2^-3 = 2^(-3) works too. A leading '+' is a no-op.
+Unary       =
+    ( "-" Unary )               <~~push(-pop())~~>
+    |
+    ( "+" Unary )
+    |
+    Power
+    ;
+
+// Right associative power: the right operand recurses through Unary back into Power.
+Power       =
+    (
+        Postfix
+        [ "^" Unary ]
+    )                           <~~
+                                var items = takeAll()
+                                if (items.length == 2) push(Math.pow(items[0], items[1]))
+                                else push(items[0])
+                                ~~>
+    ;
+
+// Postfix factorial, one or more '!' (so 3!! = (3!)! = 720).
+Postfix     =
+    (
+        Primary
+        { "!"                   <~~push("!")~~> }
+    )                           <~~
+                                var items = takeAll()
+                                var v = items[0]
+                                for (var i = 1; i < items.length; i++) v = factorial(v)
+                                push(v)
+                                ~~>
+    ;
+
+Primary     =
+    ( "(" Expression ")" )
+    |
+    // Dot is the decimal point (comma is the argument separator in min/max/pow/...).
+    Number                      <~~push(parseFloat(up.in))~~>
+    |
+    Atom
+    ;
+
+// One identifier: a bare name is a constant, a name with (args) is a function call.
+Atom        =
+    (
+        Ident
+        [ "(" Expression [ "," Expression ] ")" ]
+    )                           <~~
+                                var items = takeAll()
+                                if (items.length == 1) push(constValue(items[0]))
+                                else push(applyFunc(items[0], items.slice(1)))
+                                ~~>
+    ;
+
+Ident       = ( Alpha { Alpha | Digit } ) <~~push(up.in)~~> ;
+
+Alpha       = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+
+Number      =
+    (
+        ( Digit { Digit } [ "." { Digit } ] )
+        |
+        ( "." Digit { Digit } )
+    )
+    [ ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } ]
+    ;
+
+
+:startScript(~~
+    // takeAll empties the local stack of the current tag and returns its items in push order.
+    function takeAll() {
+        var items = []
+        var v = anytype
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    function calcError(msg) {
+        println("Error: " + msg)
+        exit(1)
+    }
+
+    // items = [value, op, value, op, value, ...] folded left to right.
+    function foldAddSub(items) {
+        var v = items[0]
+        for (var i = 1; i < items.length; i += 2) {
+            if (items[i] == "+") v = v + items[i + 1]
+            else v = v - items[i + 1]
+        }
+        return v
+    }
+
+    function foldMulDiv(items) {
+        var v = items[0]
+        for (var i = 1; i < items.length; i += 2) {
+            var op = items[i]
+            var w = items[i + 1]
+            if (op == "*") v = v * w
+            else if (op == "/") v = v / w
+            else v = v % w
+        }
+        return v
+    }
+
+    function factorial(n) {
+        if (n < 0 || n != Math.floor(n)) calcError("factorial needs a non-negative integer, got " + n)
+        if (n > 170) return Infinity // 171! already overflows a float64 to Infinity.
+        var r = 1
+        for (var i = 2; i <= n; i++) r = r * i
+        return r
+    }
+
+    function constValue(name) {
+        var n = name.toLowerCase()
+        if (n == "pi") return Math.PI
+        if (n == "e") return Math.E
+        if (n == "tau") return 2 * Math.PI
+        if (n == "phi") return (1 + Math.sqrt(5)) / 2
+        calcError("unknown name '" + name + "'")
+    }
+
+    function applyFunc(name, args) {
+        var n = name.toLowerCase()
+        var a = args[0]
+        var two = args.length == 2
+        // Two-argument functions.
+        if (n == "min") return Math.min(a, args[1])
+        if (n == "max") return Math.max(a, args[1])
+        if (n == "pow") return Math.pow(a, args[1])
+        if (n == "atan2") return Math.atan2(a, args[1])
+        if (n == "hypot") return two ? Math.hypot(a, args[1]) : Math.abs(a)
+        if (n == "log" && two) return Math.log(a) / Math.log(args[1]) // log base args[1].
+        // One-argument functions.
+        if (two) calcError(name + " takes one argument")
+        if (n == "sqrt") return Math.sqrt(a)
+        if (n == "cbrt") return Math.cbrt(a)
+        if (n == "exp") return Math.exp(a)
+        if (n == "ln") return Math.log(a)
+        if (n == "log") return Math.log10(a)
+        if (n == "log2") return Math.log2(a)
+        if (n == "log10") return Math.log10(a)
+        if (n == "sin") return Math.sin(a)
+        if (n == "cos") return Math.cos(a)
+        if (n == "tan") return Math.tan(a)
+        if (n == "asin") return Math.asin(a)
+        if (n == "acos") return Math.acos(a)
+        if (n == "atan") return Math.atan(a)
+        if (n == "sinh") return Math.sinh(a)
+        if (n == "cosh") return Math.cosh(a)
+        if (n == "tanh") return Math.tanh(a)
+        if (n == "abs") return Math.abs(a)
+        if (n == "sign") return Math.sign(a)
+        if (n == "floor") return Math.floor(a)
+        if (n == "ceil") return Math.ceil(a)
+        if (n == "round") return Math.round(a)
+        if (n == "trunc") return Math.trunc(a)
+        if (n == "fact") return factorial(a)
+        if (n == "deg") return a * 180 / Math.PI
+        if (n == "rad") return a * Math.PI / 180
+        calcError("unknown function '" + name + "'")
+    }
+
+    var res = c.compile(c.asg)
+    println("\nRESULT: " + res.stack[0] + "\nFormula was: " + ltr.in)
+~~) ;
