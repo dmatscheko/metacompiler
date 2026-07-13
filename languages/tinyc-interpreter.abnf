@@ -363,15 +363,19 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // Collect all function definitions.
     c.compile(c.asg)
 
-    if (funcs["main"] == undefined) {
-        println("Error: TinyC programs need a main() function.")
+    // The entry point defaults to main() but the -main flag (c.mainName) can name any
+    // other defined function.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
+    if (funcs[entry] == undefined) {
+        println("Error: TinyC programs need a " + entry + "() function.")
         exit(1)
     }
 
-    // Run main(). The exit code of this metacompiler run is what main() returned,
+    // Run the entry point. The exit code of this metacompiler run is what it returned,
     // so test programs are self checking.
-    var ret = callFunction("main", [])
-    println("tinyc interpreter: main() returned " + ret)
+    var ret = callFunction(entry, [])
+    println("tinyc interpreter: " + entry + "() returned " + ret)
     exit(ret)
 
 ~~) ;

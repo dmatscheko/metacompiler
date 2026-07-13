@@ -1258,8 +1258,12 @@ KwLet       = "let" KwEnd ;
         callExt(b, "js_set", [consoleV, emitStr(b, "Write"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
         b = makeSeq(items)(b)
+        // The entry defaults to Program.Main but -main (c.mainName) can name another
+        // static method of Program.
+        var entry = c.mainName
+        if (entry == undefined || entry == "") { entry = "Main" }
         var progCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Program")])
-        var mainV = callExt(b, "js_get", [progCls, emitStr(b, "Main")])
+        var mainV = callExt(b, "js_get", [progCls, emitStr(b, entry)])
         var argsV = callExt(b, "js_arr_new", [])
         b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
     }
@@ -1269,7 +1273,9 @@ KwLet       = "let" KwEnd ;
     println(m)
 
     var res = llvm.RunJS(m, "jsmain")
-    println("csharp compiler: main() returned " + res.Ret)
+    var entryName = c.mainName
+    if (entryName == undefined || entryName == "") { entryName = "Main" }
+    println("csharp compiler: " + entryName + "() returned " + res.Ret)
     exit(res.Ret)
 
 ~~) ;

@@ -24,10 +24,11 @@ var WarnUnresolvedImports = false
 var WarnUnsupported = false
 
 // EntryPoint is the name of the top-level function a compiled program calls as
-// its entry point, set from the -main CLI flag (default "main"). Grammars read it
-// as c.mainName; it lets a program whose entry function is not named main - or a
-// real-world file with no main() at all - be run from a chosen function instead.
-var EntryPoint = "main"
+// its entry point, set from the -main CLI flag. Grammars read it as c.mainName; it
+// lets a program whose entry function is not named main - or a real-world file with
+// no main() at all - be run from a chosen function instead. Empty means "unset": each
+// grammar then falls back to its own default entry (main for most, Main for C#).
+var EntryPoint = ""
 
 // ----------------------------------------------------------------------------
 // ASG compiler

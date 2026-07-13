@@ -1218,19 +1218,23 @@ KwSync      = "synchronized" KwEnd ;
 
     c.compile(c.asg)
 
+    // The entry point defaults to the static main of class Main, but the -main flag
+    // (c.mainName) can name any other static method of Main.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
     var mainCls = globalScope["Main"]
-    if (mainCls == undefined || typeof mainCls["main"] != "function") {
-        fail("Java programs need a class Main with a static main method.")
+    if (mainCls == undefined || typeof mainCls[entry] != "function") {
+        fail("Java programs need a class Main with a static " + entry + " method.")
     }
-    // A user exception that escapes main() is reported like any runtime error.
+    // A user exception that escapes the entry point is reported like any runtime error.
     var ret = anytype
     try {
-        ret = mainCls["main"]([])
+        ret = mainCls[entry]([])
     } catch (e) {
         if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
         throw e
     }
-    println("java interpreter: main() returned " + (ret === undefined ? 0 : ret))
+    println("java interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
 ~~) ;

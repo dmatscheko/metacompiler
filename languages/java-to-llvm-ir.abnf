@@ -1439,8 +1439,12 @@ KwSync      = "synchronized" KwEnd ;
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
         b = makeSeq(importedItems.concat(items))(b)
+        // The entry defaults to Main.main but -main (c.mainName) can name another static
+        // method of Main.
+        var entry = c.mainName
+        if (entry == undefined || entry == "") { entry = "main" }
         var mainCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Main")])
-        var mainV = callExt(b, "js_get", [mainCls, emitStr(b, "main")])
+        var mainV = callExt(b, "js_get", [mainCls, emitStr(b, entry)])
         var argsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [argsV, callExt(b, "js_arr_new", [])])
         b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
@@ -1451,7 +1455,9 @@ KwSync      = "synchronized" KwEnd ;
     println(m)
 
     var res = llvm.RunJS(m, "jsmain")
-    println("java compiler: main() returned " + res.Ret)
+    var entryName = c.mainName
+    if (entryName == undefined || entryName == "") { entryName = "main" }
+    println("java compiler: " + entryName + "() returned " + res.Ret)
     exit(res.Ret)
 
 ~~) ;

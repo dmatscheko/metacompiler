@@ -449,19 +449,23 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // Build the module out of the parsed program.
     c.compile(c.asg)
 
-    if (funcs["main"] == undefined || funcs["main"].Blocks.length == 0) {
-        println("Error: TinyC programs need a main() function.")
+    // The entry point defaults to main() but the -main flag (c.mainName) can name any
+    // other defined function.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
+    if (funcs[entry] == undefined || funcs[entry].Blocks.length == 0) {
+        println("Error: TinyC programs need a " + entry + "() function.")
         exit(1)
     }
 
     // Show the compiler output (the LLVM IR module).
     println(m)
 
-    // Run main() with the built-in IR interpreter. The exit code of this metacompiler
-    // run is what main() returned, so test programs are self checking.
-    var res = llvm.Run(m, "main")
+    // Run the entry point with the built-in IR interpreter. The exit code of this
+    // metacompiler run is what it returned, so test programs are self checking.
+    var res = llvm.Run(m, entry)
     print(res.Out)
-    println("tinyc: main() returned " + res.Ret)
+    println("tinyc: " + entry + "() returned " + res.Ret)
     exit(res.Ret)
 
 ~~) ;

@@ -948,12 +948,16 @@ KwDefault   = "default" KwEnd ;
 
     c.compile(c.asg)
 
-    if (funcs["main"] == undefined) {
-        println("Error: C programs need a main() function.")
+    // The entry point defaults to main() but the -main flag (c.mainName) can name any
+    // other defined function.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
+    if (funcs[entry] == undefined) {
+        println("Error: C programs need a " + entry + "() function.")
         exit(1)
     }
-    var ret = callFunction("main", [])
-    println("c interpreter: main() returned " + ret)
+    var ret = callFunction(entry, [])
+    println("c interpreter: " + entry + "() returned " + ret)
     exit(ret)
 
 ~~) ;
