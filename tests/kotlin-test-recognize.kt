@@ -112,5 +112,16 @@ fun main() {
     boxOf(9).tag = 100               // foo(x).field = y: write not modelled, sides run
     if (boxOf(9).tag != 9) { fails = fails + 1 }
 
+    // a range as a VALUE (outside a for-loop / when-in) is recognised but not modelled
+    // (no iterable range object): the bounds still run, the range itself is a placeholder.
+    // The genuine for-loop and when-in range forms are unaffected (they bind bounds lower).
+    val someRange = helper(0) until helper(3)      // a until b as a value: notImpl
+    val stepped = 0..10 step 2                      // a..b step c as a value: notImpl
+    var loopSum = 0
+    for (i in 0 until 4) { loopSum = loopSum + i }  // for-loop range: still genuine
+    if (loopSum != 6) { fails = fails + 1 }
+    val inRange = when (3) { in 0..5 -> 1; else -> 0 }   // when-in range: still genuine
+    if (inRange != 1) { fails = fails + 1 }
+
     exitProcess(fails)
 }

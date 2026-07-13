@@ -269,12 +269,12 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 // positive step (soft keywords: until/downTo/step stay usable as names).
 For         = ForRange | ForList ;
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression RangeOp Expression [ StepSfx ] ")" Statement ;
+            = KwFor "(" Id <~~ push(up.in) ~~> KwIn AddExpr RangeOp AddExpr [ StepSfx ] ")" Statement ;
 RangeOp     = ".." <~~ push({rop: ".."}) ~~>
             | KwUntil <~~ push({rop: "until"}) ~~>
             | KwDownTo <~~ push({rop: "downTo"}) ~~> ;
 StepSfx     <~~ push({step: pop()}) ~~>
-            = KwStep Expression ;
+            = KwStep AddExpr ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 
@@ -335,9 +335,9 @@ WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
 WhenCond    = WhenIn | WhenNotIn | WhenIs | WhenVal ;
 WhenIs      <~~ var t = pop(); push({isType: true, neg: pop(), tname: t, pos: up.pos}) ~~> = IsKw TypeName ;
 WhenIn      <~~ var h = pop(); push({lo: pop(), hi: h, neg: false}) ~~>
-            = KwIn Expression ".." Expression ;
+            = KwIn AddExpr ".." AddExpr ;
 WhenNotIn   <~~ var h = pop(); push({lo: pop(), hi: h, neg: true}) ~~>
-            = "!" KwIn Expression ".." Expression ;
+            = "!" KwIn AddExpr ".." AddExpr ;
 WhenVal     <~~ push({v: pop()}) ~~>
             = Expression ;
 
@@ -438,8 +438,22 @@ Elvis       <~~ push(makeElvis(takeAll())) ~~>
 // otherwise), shl/shr/ushr to the int32 shift externs. Only these built-in infix
 // names are recognised; the names stay usable as identifiers (KwEnd word boundary).
 InfixExpr   <~~ push(makeInfix(takeAll())) ~~>
-            = AddExpr { InfixOp AddExpr } ;
+            = RangeExpr { InfixOp RangeExpr } ;
 InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) <~~ push({iop: up.in}) ~~> KwEnd ;
+
+// A range expression as a VALUE - a..b, a..<b, a until b, a downTo b, a step b - in
+// general operand position ((0 until n).joinToString(...)). The range value itself is
+// not modelled (no iterable range object), so a range is not implemented; both bounds
+// still run so their calls stay visible. Without a range operator RangeExpr is a pure
+// pass-through (its single AddExpr thunk is returned unchanged), so ordinary
+// expressions are byte-identical. The for-loop and when(x){ in a..b } forms bind their
+// bounds at AddExpr, below this level, so they keep splitting on their own range token.
+RangeExpr   <~~ push(makeRange(takeAll(), up.pos)) ~~>
+            = AddExpr { RangeInfix AddExpr } ;
+RangeInfix  = ( "..<" | ".." ) <~~ push({rop: up.in}) ~~>
+            | KwUntil <~~ push({rop: "until"}) ~~>
+            | KwDownTo <~~ push({rop: "downTo"}) ~~>
+            | KwStep <~~ push({rop: "step"}) ~~> ;
 
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
@@ -936,6 +950,18 @@ KwStep      = "step" KwEnd ;
                 else { v = intWrap(b, callExt(b, "js_ushr", [v, r2.v])) }
             }
             return {b: b, v: v}
+        }
+    }
+    // A range value (a..b, a until b, a downTo b, a step b) in operand position. No
+    // iterable range object is modelled, so it is not implemented; both bounds are still
+    // emitted (they sit at the even indices - the {rop} markers are odd). A range-less
+    // RangeExpr is a pass-through: its single AddExpr thunk is returned unchanged.
+    function makeRange(items, pos) {
+        if (items.length == 1) { return items[0] }
+        notImpl("range expression", pos)
+        return function(b) {
+            for (var i = 0; i < items.length; i += 2) { b = items[i](b).b }
+            return {b: b, v: hUndef}
         }
     }
     // x in coll / x !in coll -> coll.contains(x) via js_mcall (the same call the
