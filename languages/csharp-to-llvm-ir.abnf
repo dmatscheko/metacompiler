@@ -1262,10 +1262,15 @@ KwLet       = "let" KwEnd ;
         // static method of Program.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "Main" }
-        var progCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Program")])
-        var mainV = callExt(b, "js_get", [progCls, emitStr(b, entry)])
-        var argsV = callExt(b, "js_arr_new", [])
-        b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        if (mainIsSnippet(entry)) {
+            b = emitMainSnippet(b, entry, "Statement")
+            b.NewRet(emitNum(b, 0))
+        } else {
+            var progCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Program")])
+            var mainV = callExt(b, "js_get", [progCls, emitStr(b, entry)])
+            var argsV = callExt(b, "js_arr_new", [])
+            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        }
     }
 
     c.compile(c.asg)
@@ -1275,7 +1280,11 @@ KwLet       = "let" KwEnd ;
     var res = llvm.RunJS(m, "jsmain")
     var entryName = c.mainName
     if (entryName == undefined || entryName == "") { entryName = "Main" }
-    println("csharp compiler: " + entryName + "() returned " + res.Ret)
+    if (mainIsSnippet(entryName)) {
+        println("csharp compiler: -main snippet returned " + res.Ret)
+    } else {
+        println("csharp compiler: " + entryName + "() returned " + res.Ret)
+    }
     exit(res.Ret)
 
 ~~) ;

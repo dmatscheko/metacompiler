@@ -1485,9 +1485,15 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // The entry point defaults to main() but -main (c.mainName) can name another.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }
-        var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
-        var argsV = callExt(bm, "js_arr_new", [])
-        bm.NewRet(callExt(bm, "js_call", [mainV, hUndef, argsV]))
+        if (mainIsSnippet(entry)) {
+            curScopeV = sc // The snippet resolves names in the populated program scope.
+            bm = emitMainSnippet(bm, entry, "Statement")
+            bm.NewRet(emitNum(bm, 0))
+        } else {
+            var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
+            var argsV = callExt(bm, "js_arr_new", [])
+            bm.NewRet(callExt(bm, "js_call", [mainV, hUndef, argsV]))
+        }
     }
 
     // ----- Widened (recognized-but-not-lowered) constructs -----
@@ -1544,7 +1550,13 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // The exit code of this metacompiler run is what main() returned, so test
     // programs are self checking.
     var res = llvm.RunJS(m, "jsmain")
-    println("typescript compiler: main() returned " + res.Ret)
+    var entryName = c.mainName
+    if (entryName == undefined || entryName == "") { entryName = "main" }
+    if (mainIsSnippet(entryName)) {
+        println("typescript compiler: -main snippet returned " + res.Ret)
+    } else {
+        println("typescript compiler: " + entryName + "() returned " + res.Ret)
+    }
     exit(res.Ret)
 
 ~~) ;

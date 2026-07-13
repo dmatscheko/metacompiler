@@ -1398,12 +1398,19 @@ KwInstanceof = "instanceof" KwEnd ;
         var bm = fm.NewBlock("entry")
         var sc = callExt(bm, "js_scope_new", [fm.Params[0]])
         bm.NewCall(f, [sc, fm.Params[1]])
-        // The entry point defaults to main() but -main (c.mainName) can name another.
+        // The entry defaults to main(); -main (c.mainName) can name another function or,
+        // with a '(', a JS snippet parsed and emitted into jsmain (see emitMainSnippet).
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }
-        var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
-        var argsV = callExt(bm, "js_arr_new", [])
-        bm.NewRet(callExt(bm, "js_call", [mainV, hUndef, argsV]))
+        if (mainIsSnippet(entry)) {
+            curScopeV = sc // The snippet resolves names in the populated program scope.
+            bm = emitMainSnippet(bm, entry, "Statement")
+            bm.NewRet(emitNum(bm, 0))
+        } else {
+            var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
+            var argsV = callExt(bm, "js_arr_new", [])
+            bm.NewRet(callExt(bm, "js_call", [mainV, hUndef, argsV]))
+        }
     }
 
     // ===== goja driver =====
@@ -1421,7 +1428,13 @@ KwInstanceof = "instanceof" KwEnd ;
     // The exit code of this metacompiler run is what main() returned, so test
     // programs are self checking.
     var res = llvm.RunJS(m, "jsmain")
-    println("js compiler: main() returned " + res.Ret)
+    var entryName = c.mainName
+    if (entryName == undefined || entryName == "") { entryName = "main" }
+    if (mainIsSnippet(entryName)) {
+        println("js compiler: -main snippet returned " + res.Ret)
+    } else {
+        println("js compiler: " + entryName + "() returned " + res.Ret)
+    }
     exit(res.Ret)
 
 ~~) ;

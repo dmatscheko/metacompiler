@@ -1443,11 +1443,16 @@ KwSync      = "synchronized" KwEnd ;
         // method of Main.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }
-        var mainCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Main")])
-        var mainV = callExt(b, "js_get", [mainCls, emitStr(b, entry)])
-        var argsV = callExt(b, "js_arr_new", [])
-        callExt(b, "js_arr_push", [argsV, callExt(b, "js_arr_new", [])])
-        b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        if (mainIsSnippet(entry)) {
+            b = emitMainSnippet(b, entry, "Statement")
+            b.NewRet(emitNum(b, 0))
+        } else {
+            var mainCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Main")])
+            var mainV = callExt(b, "js_get", [mainCls, emitStr(b, entry)])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, callExt(b, "js_arr_new", [])])
+            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        }
     }
 
     c.compile(c.asg)
@@ -1457,7 +1462,11 @@ KwSync      = "synchronized" KwEnd ;
     var res = llvm.RunJS(m, "jsmain")
     var entryName = c.mainName
     if (entryName == undefined || entryName == "") { entryName = "main" }
-    println("java compiler: " + entryName + "() returned " + res.Ret)
+    if (mainIsSnippet(entryName)) {
+        println("java compiler: -main snippet returned " + res.Ret)
+    } else {
+        println("java compiler: " + entryName + "() returned " + res.Ret)
+    }
     exit(res.Ret)
 
 ~~) ;

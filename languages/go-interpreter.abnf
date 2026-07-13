@@ -977,15 +977,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params, body: mm.body})
     }
 
-    // The entry point defaults to main() but the -main flag (c.mainName) can name any
-    // other top-level function.
+    // The entry point defaults to main(), but the -main flag (c.mainName) can override it:
+    // a bare identifier names a top-level function to call, anything with a '(' is a Go
+    // snippet parsed and run in the program's scope (see runMainSnippet).
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
-    if (typeof globalScope[entry] != "function") {
-        fail("Go programs need a func " + entry + "().")
+    var ret = anytype
+    if (mainIsSnippet(entry)) {
+        ret = runMainSnippet(entry, "Statement")
+        println("go interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
+    } else {
+        if (typeof globalScope[entry] != "function") {
+            fail("Go programs need a func " + entry + "().")
+        }
+        ret = globalScope[entry]()
+        println("go interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))
     }
-    var ret = globalScope[entry]()
-    println("go interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
 ~~) ;

@@ -1969,9 +1969,7 @@ KwStep      = "step" KwEnd ;
         var mainName = c.mainName
         if (mainName == undefined || mainName == "") { mainName = "main" }
         if (mainIsSnippet(mainName)) {
-            var frag = c.parseFrom(c.agrammar, mainName, "Statement")
-            var snippetT = c.compile(frag).stack[0]
-            b = snippetT(b)
+            b = emitMainSnippet(b, mainName, "Statement")
             b.NewRet(emitNum(b, 0))
         } else {
             var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, mainName)])
@@ -1982,13 +1980,6 @@ KwStep      = "step" KwEnd ;
 
     // ----- Core library config (see lib/compile-core.js) -----
     core.scopeGetExt = "js_kget" // Scope read with fallback to properties of this.
-
-    // A -main value is a snippet (a piece of Kotlin to parse and emit) rather than a bare
-    // function name exactly when it contains a '(' - a call, and no bare identifier can.
-    function mainIsSnippet(s) {
-        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
-        return false
-    }
 
     c.compile(c.asg)
 

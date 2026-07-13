@@ -85,6 +85,20 @@ function notImpl(construct, pos) {
 function notImplStmt(construct, pos) { notImpl(construct, pos); return function(b) { return b } }
 function notImplExpr(construct, pos) { notImpl(construct, pos); return function(b) { return {b: b, v: hUndef} } }
 
+// ----- -main snippet: emit a fragment of the language as the entry point -----
+// A -main value is a snippet (a statement to parse and emit) rather than a bare function
+// name exactly when it contains a '(' - a call, which no bare identifier has.
+function mainIsSnippet(s) {
+    for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
+    return false
+}
+// Parse the -main snippet from the grammar's stmtRule production, compile it, and emit the
+// resulting statement thunk into block b (in the current scope); returns the next block.
+function emitMainSnippet(b, snippet, stmtRule) {
+    var frag = c.parseFrom(c.agrammar, snippet, stmtRule)
+    return c.compile(frag).stack[0](b)
+}
+
 function hexAt(s, pos, len) {
     var v = 0
     for (var i = 0; i < len; i++) {

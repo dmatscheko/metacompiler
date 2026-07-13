@@ -1222,19 +1222,30 @@ KwSync      = "synchronized" KwEnd ;
     // (c.mainName) can name any other static method of Main.
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
-    var mainCls = globalScope["Main"]
-    if (mainCls == undefined || typeof mainCls[entry] != "function") {
-        fail("Java programs need a class Main with a static " + entry + " method.")
-    }
     // A user exception that escapes the entry point is reported like any runtime error.
     var ret = anytype
-    try {
-        ret = mainCls[entry]([])
-    } catch (e) {
-        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
-        throw e
+    if (mainIsSnippet(entry)) {
+        // A snippet (e.g. Main.helper()) runs in the scope where the classes are bound.
+        try {
+            ret = runMainSnippet(entry, "Statement")
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
+        println("java interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
+    } else {
+        var mainCls = globalScope["Main"]
+        if (mainCls == undefined || typeof mainCls[entry] != "function") {
+            fail("Java programs need a class Main with a static " + entry + " method.")
+        }
+        try {
+            ret = mainCls[entry]([])
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
+        println("java interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))
     }
-    println("java interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
 ~~) ;

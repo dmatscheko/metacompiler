@@ -1240,9 +1240,14 @@ KwFactory   = "factory" KwEnd ;
         // The entry point defaults to main() but -main (c.mainName) can name another.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }
-        var mainV = callExt(b, "js_kget", [curScopeV, emitStr(b, entry)])
-        var argsV = callExt(b, "js_arr_new", [])
-        b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        if (mainIsSnippet(entry)) {
+            b = emitMainSnippet(b, entry, "Statement")
+            b.NewRet(emitNum(b, 0))
+        } else {
+            var mainV = callExt(b, "js_kget", [curScopeV, emitStr(b, entry)])
+            var argsV = callExt(b, "js_arr_new", [])
+            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        }
     }
 
     // ----- Core library config (see lib/compile-core.js) -----
@@ -1253,7 +1258,13 @@ KwFactory   = "factory" KwEnd ;
     println(m)
 
     var res = llvm.RunJS(m, "dartmain")
-    println("dart compiler: main() returned " + res.Ret)
+    var entryName = c.mainName
+    if (entryName == undefined || entryName == "") { entryName = "main" }
+    if (mainIsSnippet(entryName)) {
+        println("dart compiler: -main snippet returned " + res.Ret)
+    } else {
+        println("dart compiler: " + entryName + "() returned " + res.Ret)
+    }
     exit(res.Ret)
 
 ~~) ;

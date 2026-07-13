@@ -1709,13 +1709,6 @@ KwStep      = "step" KwEnd ;
         return false
     }
 
-    // A -main value is a snippet (a piece of Kotlin to parse and run) rather than a bare
-    // function name exactly when it contains a '(' - a call, and no bare identifier can.
-    function mainIsSnippet(s) {
-        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
-        return false
-    }
-
     c.compile(c.asg)
 
     // The entry point defaults to main(), but the -main flag (c.mainName) can override it.
@@ -1727,10 +1720,8 @@ KwStep      = "step" KwEnd ;
     if (mainName == undefined || mainName == "") { mainName = "main" }
     var ret = anytype
     if (mainIsSnippet(mainName)) {
-        var frag = c.parseFrom(c.agrammar, mainName, "Statement")
-        var snippetT = c.compile(frag).stack[0]
         try {
-            ret = snippetT()
+            ret = runMainSnippet(mainName, "Statement")
         } catch (e) {
             if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
             throw e

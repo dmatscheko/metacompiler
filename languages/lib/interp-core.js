@@ -102,6 +102,20 @@ function notImpl(construct, pos) {
 function notImplStmt(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
 function notImplExpr(construct, pos) { notImpl(construct, pos); return function() { return undefined } }
 
+// ----- -main snippet: run a fragment of the language as the entry point -----
+// A -main value is a snippet (a statement to parse and run) rather than a bare function
+// name exactly when it contains a '(' - a call, which no bare identifier has.
+function mainIsSnippet(s) {
+    for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
+    return false
+}
+// Parse the -main snippet from the grammar's stmtRule production, compile it, and run the
+// resulting statement thunk in the current (already-populated) scope; returns its value.
+function runMainSnippet(snippet, stmtRule) {
+    var frag = c.parseFrom(c.agrammar, snippet, stmtRule)
+    return c.compile(frag).stack[0]()
+}
+
 // ----- Exceptions (try/catch/finally/throw), shared across the interpreters -----
 // A throw wraps its value in a marker object and raises it as a real host exception,
 // so it unwinds through any depth of expression evaluation up to the nearest catch.

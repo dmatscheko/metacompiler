@@ -1272,18 +1272,28 @@ KwInstanceof = "instanceof" KwEnd ;
     // other top-level function.
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
-    if (!hasOwn(globalScope, entry) || typeof globalScope[entry] != "function") {
-        fail("JavaScript programs need a " + entry + "() function.")
-    }
     // A user exception that escapes the entry point is reported like any runtime error.
     var ret = anytype
-    try {
-        ret = globalScope[entry]()
-    } catch (e) {
-        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
-        throw e
+    if (mainIsSnippet(entry)) {
+        try {
+            ret = runMainSnippet(entry, "Statement")
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
+        println("js interpreter: -main snippet returned " + ret)
+    } else {
+        if (!hasOwn(globalScope, entry) || typeof globalScope[entry] != "function") {
+            fail("JavaScript programs need a " + entry + "() function.")
+        }
+        try {
+            ret = globalScope[entry]()
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
+        println("js interpreter: " + entry + "() returned " + ret)
     }
-    println("js interpreter: " + entry + "() returned " + ret)
     exit(ret | 0)
 
 ~~) ;

@@ -729,17 +729,26 @@ KwDefault   = "default" KwEnd ;
     var ret = anytype
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
+    var snip = mainIsSnippet(entry)
     try {
         progT()
-        if (!hasOwn(globalScope, entry) || typeof globalScope[entry].v != "function") {
-            fail("MetaJS programs need a " + entry + "() function.")
+        if (snip) {
+            ret = runMainSnippet(entry, "Statement")
+        } else {
+            if (!hasOwn(globalScope, entry) || typeof globalScope[entry].v != "function") {
+                fail("MetaJS programs need a " + entry + "() function.")
+            }
+            ret = globalScope[entry].v()
         }
-        ret = globalScope[entry].v()
     } catch (e) {
         if (isUserExc(e)) { fail("uncaught exception: " + e.v) }
         throw e
     }
-    println("js interpreter: " + entry + "() returned " + ret)
+    if (snip) {
+        println("js interpreter: -main snippet returned " + ret)
+    } else {
+        println("js interpreter: " + entry + "() returned " + ret)
+    }
     exit(ret | 0)
 
 ~~) ;
