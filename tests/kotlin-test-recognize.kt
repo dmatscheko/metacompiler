@@ -21,6 +21,7 @@ fun weightedSum(base: Int, factor: Int = 2, vararg extra: Int): Int {
 }
 
 fun helper(x: Int): Int = x * 3
+fun boxOf(k: Int): Holder = Holder(k)
 
 // A class carrying a nested type declaration: recognised but not lowered (the subset
 // has a flat class model). Under -warn-unsupported the nested type is skipped and the
@@ -103,6 +104,13 @@ fun main() {
 
     // the enclosing class with a nested type still works (the nested type was skipped)
     if (Holder(21).doubled() != 42) { fails = fails + 1 }
+
+    // an assignment whose left side contains a call is recognised but not written: the
+    // target is a call result / plusAssign, not a modelled lvalue. Both sides still run
+    // (the calls stay observable), but the placeholder writes nothing.
+    helper(3) += 1                   // plusAssign on a call result: notImpl, sides run
+    boxOf(9).tag = 100               // foo(x).field = y: write not modelled, sides run
+    if (boxOf(9).tag != 9) { fails = fails + 1 }
 
     exitProcess(fails)
 }

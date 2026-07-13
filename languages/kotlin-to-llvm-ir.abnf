@@ -291,9 +291,17 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
-Expression  = Assignment | CondLevel ;
+Expression  = Assignment | CallAssign | CondLevel ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+// An assignment whose left side is a postfix expression containing a call, not a plain
+// variable/field/index target: map.getOrPut(k) { ... } += v, foo(x).field = y. The
+// target is not a modelled lvalue (a call result or a plusAssign call), so the write
+// is not implemented; BOTH sides are still evaluated so their calls stay visible in a
+// call graph. Tried only after Assignment fails - i.e. when a plain Target (Id rooted,
+// dot/index steps) cannot cover the whole left side because a `(` call breaks the chain.
+CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
+            = CallMember ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
@@ -1326,6 +1334,20 @@ KwStep      = "step" KwEnd ;
                 callExt(b, "js_set", [p.obj, p.key, v])
             }
             return {b: b, v: v}
+        }
+    }
+    // An assignment to a non-lvalue left side (a postfix expression ending in or
+    // containing a call). Not implemented as a write, but both sides are emitted so
+    // their calls stay observable; the left side is emitted first (as Kotlin evaluates
+    // the receiver of a plusAssign before its argument).
+    function makeCallAssign(items, pos) {
+        notImpl("assignment to a computed target", pos)
+        var lhsT = items[0]
+        var rhsT = items[2]
+        return function(b) {
+            var r0 = lhsT(b)
+            var r1 = rhsT(r0.b)
+            return {b: r1.b, v: r1.v}
         }
     }
     function makeIncDec(items) {
