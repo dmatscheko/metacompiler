@@ -1709,24 +1709,46 @@ KwStep      = "step" KwEnd ;
         return false
     }
 
+    // A -main value is a snippet (a piece of Kotlin to parse and run) rather than a bare
+    // function name exactly when it contains a '(' - a call, and no bare identifier can.
+    function mainIsSnippet(s) {
+        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
+        return false
+    }
+
     c.compile(c.asg)
 
-    // The entry point defaults to main() but the -main flag (c.mainName) can name any
-    // other top-level function, e.g. to run a real-world file that has no main().
+    // The entry point defaults to main(), but the -main flag (c.mainName) can override it.
+    // A bare identifier (no '(') names a top-level function to call; anything else is a
+    // snippet of Kotlin - a single statement such as greet("a", 2) - parsed with the same
+    // grammar (from its Statement rule) and run in the program's already-populated scope,
+    // so it can call the file's functions with real arguments.
     var mainName = c.mainName
     if (mainName == undefined || mainName == "") { mainName = "main" }
-    if (typeof globalScope[mainName] != "function") {
-        fail("Kotlin programs need a top level " + mainName + "() function.")
-    }
-    // A user exception that escapes the entry point is reported like any runtime error.
     var ret = anytype
-    try {
-        ret = globalScope[mainName]()
-    } catch (e) {
-        if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
-        throw e
+    if (mainIsSnippet(mainName)) {
+        var frag = c.parseFrom(c.agrammar, mainName, "Statement")
+        var snippetT = c.compile(frag).stack[0]
+        try {
+            ret = snippetT()
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
+        println("kotlin interpreter: -main snippet returned " + (ret === undefined ? 0 : ret))
+    } else {
+        if (typeof globalScope[mainName] != "function") {
+            fail("Kotlin programs need a top level " + mainName + "() function.")
+        }
+        // A user exception that escapes the entry point is reported like a runtime error.
+        try {
+            ret = globalScope[mainName]()
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            throw e
+        }
+        println("kotlin interpreter: " + mainName + "() returned " + (ret === undefined ? 0 : ret))
     }
-    println("kotlin interpreter: " + mainName + "() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
 ~~) ;

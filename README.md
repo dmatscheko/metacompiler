@@ -431,6 +431,14 @@ C, TinyC (a top-level function), and Java and C# (a static method of `Main` /
 Languages that just run their top level (Python, Ruby, Lua, PHP, Swift, Lisp) have
 no distinct entry to name.
 
+The value may also be a **snippet** of the target language rather than a bare
+name: if it contains a `(` it is parsed with the same grammar (from its `Statement`
+rule, via the `c.parseFrom` / `-StartRule` override) and run in the program's
+already-populated scope, so it can call the file's functions with real arguments -
+`-main 'greet("one", 2, three)'`, or `-main 'exitProcess(check())'` to choose the
+exit code. Implemented for Kotlin (both engines, byte-identical). The snippet is a
+single statement.
+
 #### Grammar linting (-verify)
 
 `-verify` checks a grammar for name consistency without running it and exits

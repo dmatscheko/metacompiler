@@ -217,11 +217,21 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 	// })
 
 	*compilerFuncMap = map[string]r.Object{
-		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules { // TODO: Implement a feature to state the start rule.
+		"parse": func(agrammar *r.Rules, srcCode string, options *Parseropts) *r.Rules {
 			if options == nil {
 				options = &Parseropts{}
 			}
 			productions, err := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), options)
+			if err != nil {
+				panic(err)
+			}
+			return productions
+		},
+		// parseFrom is parse with an explicit start production: it parses srcCode from the
+		// named rule (e.g. "Statement") rather than the grammar's declared :startRule().
+		// Used by the -main snippet form to parse a code fragment of the target language.
+		"parseFrom": func(agrammar *r.Rules, srcCode string, startRule string) *r.Rules {
+			productions, err := ParseWithAgrammar(agrammar, srcCode, common.getCurrentModuleFileName(), &Parseropts{StartRule: startRule})
 			if err != nil {
 				panic(err)
 			}

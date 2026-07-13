@@ -1961,17 +1961,34 @@ KwStep      = "step" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         b = makeSeq(importedItems.concat(items))(b)
-        // The entry point defaults to main() but the -main flag (c.mainName) can name any
-        // other top-level function, e.g. to run a real-world file that has no main().
+        // The entry point defaults to main(), but the -main flag (c.mainName) can override
+        // it. A bare identifier (no '(') names a top-level function to call; anything else
+        // is a snippet of Kotlin - a single statement such as greet("a", 2) - parsed with
+        // the same grammar (from its Statement rule) and emitted into jsmain's scope, so it
+        // can call the file's functions with real arguments.
         var mainName = c.mainName
         if (mainName == undefined || mainName == "") { mainName = "main" }
-        var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, mainName)])
-        var argsV = callExt(b, "js_arr_new", [])
-        b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        if (mainIsSnippet(mainName)) {
+            var frag = c.parseFrom(c.agrammar, mainName, "Statement")
+            var snippetT = c.compile(frag).stack[0]
+            b = snippetT(b)
+            b.NewRet(emitNum(b, 0))
+        } else {
+            var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, mainName)])
+            var argsV = callExt(b, "js_arr_new", [])
+            b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
+        }
     }
 
     // ----- Core library config (see lib/compile-core.js) -----
     core.scopeGetExt = "js_kget" // Scope read with fallback to properties of this.
+
+    // A -main value is a snippet (a piece of Kotlin to parse and emit) rather than a bare
+    // function name exactly when it contains a '(' - a call, and no bare identifier can.
+    function mainIsSnippet(s) {
+        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
+        return false
+    }
 
     c.compile(c.asg)
 
@@ -1980,7 +1997,11 @@ KwStep      = "step" KwEnd ;
     var res = llvm.RunJS(m, "jsmain")
     var entryName = c.mainName
     if (entryName == undefined || entryName == "") { entryName = "main" }
-    println("kotlin compiler: " + entryName + "() returned " + res.Ret)
+    if (mainIsSnippet(entryName)) {
+        println("kotlin compiler: -main snippet returned " + res.Ret)
+    } else {
+        println("kotlin compiler: " + entryName + "() returned " + res.Ret)
+    }
     exit(res.Ret)
 
 ~~) ;

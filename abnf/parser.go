@@ -60,6 +60,11 @@ var includedByGrammar = map[*r.Rules]map[string]bool{}
 // Parseropts are the command line options that influence the parser.
 type Parseropts struct {
 	UseBlockList, UseFoundList, TraceEnabled, PreventDefaultOutput bool
+	// StartRule, when non-empty, overrides the grammar's declared :startRule() for this
+	// one parse: parsing begins from the production of this name instead. Used to parse a
+	// fragment (e.g. a single Statement) of a language rather than a whole program - the
+	// -main snippet form relies on it.
+	StartRule string
 }
 
 // getRulePosId maps the pair (rule, position in the target text) to one unique int,
@@ -1044,12 +1049,26 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 
 	// The references were corrected above (and again after every :include()), so an
 	// invalid position means the named start production really does not exist.
-	if startRule.Int < 0 || startRule.Int >= len(*pa.agrammar) {
-		panic("The production '" + startRule.String + "' of :startRule() was not found in the grammar.")
+	startIdx := startRule.Int
+	startName := startRule.String
+	// A StartRule override (used by the -main snippet form) begins the parse from a named
+	// production - e.g. a single Statement - instead of the declared :startRule().
+	if options != nil && options.StartRule != "" {
+		startName = options.StartRule
+		startIdx = -1
+		for i := 0; i < len(*pa.agrammar); i++ {
+			if rule := (*pa.agrammar)[i]; rule.Operator == r.Production && rule.String == startName {
+				startIdx = i
+				break
+			}
+		}
+	}
+	if startIdx < 0 || startIdx >= len(*pa.agrammar) {
+		panic("The production '" + startName + "' requested as the start rule was not found in the grammar.")
 	}
 
 	// For the parsing, the start rule is necessary. For the compilation not.
-	newProductions := pa.apply((*pa.agrammar)[startRule.Int], pa.initialSpaces, false, 0)
+	newProductions := pa.apply((*pa.agrammar)[startIdx], pa.initialSpaces, false, 0)
 
 	// Check if the position is at EOF at end of parsing. There can be spaces left, but otherwise its an error:
 	if pa.initialSpaces != nil {

@@ -1157,6 +1157,18 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-main.kt", "-q", "-main", "checkAll"]
         },
         {
+            "name": "Kotlin -main snippet (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-main.kt", "-q", "-main", "exitProcess(checkAll())"]
+        },
+        {
+            "name": "Kotlin -main snippet (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-main.kt", "-q", "-main", "exitProcess(checkAll())"]
+        },
+        {
             "name": "C -main entry point (interpreter)",
             "type": "go",
             "request": "launch",

@@ -332,6 +332,14 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 			}
 			return productions
 		},
+		// parseFrom parses srcCode from the named start production (see commonscript.go).
+		"parseFrom": func(agrammar *r.Rules, srcCode string, startRule string) *r.Rules {
+			productions, err := ParseWithAgrammar(agrammar, srcCode, eng.fileName, &Parseropts{StartRule: startRule})
+			if err != nil {
+				panic(err)
+			}
+			return productions
+		},
 		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
 			return compileASGInternal(asg, aGrammar, eng.fileName, slot, traceEnabled, eng.preventDefaultOutput)
 		},
@@ -582,6 +590,14 @@ func (ps *frozenParserScript) init() {
 				options = &Parseropts{}
 			}
 			productions, err := ParseWithAgrammar(agrammar, srcCode, ps.fileName, options)
+			if err != nil {
+				panic(err)
+			}
+			return productions
+		},
+		// parseFrom parses srcCode from the named start production (see commonscript.go).
+		"parseFrom": func(agrammar *r.Rules, srcCode string, startRule string) *r.Rules {
+			productions, err := ParseWithAgrammar(agrammar, srcCode, ps.fileName, &Parseropts{StartRule: startRule})
 			if err != nil {
 				panic(err)
 			}
