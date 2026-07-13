@@ -50,6 +50,10 @@ fun sum3(
     c: Int,
 ): Int = a + b + c
 
+// Soft-keyword modifiers (data/value/inner) doubling as ordinary parameter names: the
+// grammar's NotColon guard keeps them from being eaten as modifiers when a `:` follows.
+fun softParams(data: Int, value: Int, inner: Int): Int = data * 100 + value * 10 + inner
+
 // ----- closures and higher-order functions -----
 fun makeCounter(): (Int) -> Int {
     var c = 0
@@ -423,6 +427,7 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("fn-early-return", sign(-9) == -1 && sign(9) == 1)
     check("fn-recursion", fib(6) == 8)
     check("fn-mutual-recursion", isEven(4) && isOdd(5))
+    check("fn-soft-kw-params", softParams(1, 2, 3) == 123)
     val c1 = makeCounter()
     val c2 = makeCounter()
     c1(1)

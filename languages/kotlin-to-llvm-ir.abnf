@@ -74,11 +74,15 @@ Program     <~~ buildMain(takeAll()) ~~>
 // (enum/annotation/companion) are NOT consumed here - those declaration forms
 // route to notImplemented instead.
 Modifiers   = { Modifier | Annotation } ;
+// The trailing NotColon lets a soft-keyword modifier double as an identifier when it
+// is actually a name: a real modifier is never immediately followed by `:`, but a
+// parameter or property named `data`/`value`/`inner` is (data: Intent?). Without the
+// guard [Modifiers] would eat the name and strand the `:`.
 Modifier    = ( "public" | "private" | "protected" | "internal" | "open" | "final"
               | "abstract" | "sealed" | "data" | "override" | "lateinit" | "const"
               | "inner" | "vararg" | "noinline" | "crossinline" | "tailrec"
               | "operator" | "infix" | "inline" | "external" | "suspend"
-              | "expect" | "actual" | "reified" ) KwEnd ;
+              | "expect" | "actual" | "reified" ) KwEnd NotColon ;
 // An annotation: an optional use-site target, then either an @[...] set or a single
 // entry (a possibly-qualified name with an optional balanced argument list).
 Annotation  = "@" [ AnnTarget ":" ] ( AnnSet | AnnEntry ) ;
@@ -400,6 +404,18 @@ NotParen    = :script(~~
         var cc = c.peek(i)
         while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
         return (cc === 40) ? abnf.newToken("\x01paren-follows", 0) : undefined
+    })()
+~~) ;
+
+// A zero-width guard that fails when the next non-whitespace token is `:` - used so a
+// soft-keyword modifier (data/value/inner/...) that is really a parameter or property
+// NAME is not consumed as a modifier (a genuine modifier is never followed by `:`).
+NotColon    = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        return (cc === 58) ? abnf.newToken("\x01colon-follows", 0) : undefined
     })()
 ~~) ;
 
