@@ -75,6 +75,11 @@ fun withNamed(op: (root: Boolean, count: Int) -> Int): Int = op(true, 3)
 // the value is still an ordinary callable (the lambda takes the receiver as its arg).
 fun scoped(block: FeatScope.() -> Int): Int = block(FeatScope(9))
 class FeatScope(val v: Int)
+// A `suspend` function type (suspend () -> R, suspend (A) -> R, suspend Recv.() -> R):
+// the `suspend` modifier is parsed and dropped, so the parameter is an ordinary callable.
+fun callSuspend(block: suspend () -> Int): Int = block()
+fun callSuspendArg(block: suspend (Int) -> Int): Int = block(20)
+fun callSuspendRecv(block: suspend Int.() -> Int): Int = block(10)
 
 // ----- extension functions (top-level, with a body; dispatch by name) -----
 fun Int.doubled(): Int = this * 2
@@ -490,6 +495,9 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("fn-annotated-type", themed { 7 } == 7)
     check("fn-named-params-type", withNamed { r, c -> if (r) c else 0 } == 3)
     check("fn-receiver-type", scoped { s -> s.v } == 9)
+    check("suspend-fn-type", callSuspend { 42 } == 42)
+    check("suspend-fn-type-arg", callSuspendArg { n -> n + 1 } == 21)
+    check("suspend-recv-fn-type", callSuspendRecv { r -> r + 1 } == 11)
 
     // ----- collection constructors: set/array constructors collapse onto listOf -----
     check("ctor-setof", setOf(1, 2, 3).size == 3 && setOf("a", "b").contains("b"))
