@@ -2870,10 +2870,13 @@ func standardJSBindings() map[string]interface{} {
 			os.Exit(int(int32(jsToInt(rt.toNumber(argAt(args, 0))))))
 			return jsUndef
 		}),
-		"Math":   mathObj,
-		"String": stringObj,
-		"Object": objectObj,
-		"Array":  arrayObj,
+		// Standard numeric globals (goja has them natively; the frozen VM did not).
+		"Infinity": math.Inf(1),
+		"NaN":      math.NaN(),
+		"Math":     mathObj,
+		"String":   stringObj,
+		"Object":   objectObj,
+		"Array":    arrayObj,
 		// The declaration marker: var v = anytype declares v as never pinning.
 		// frozenBaseBindings inherits it, so tag scripts get it under -frozen too.
 		"anytype": jsAnytype,
