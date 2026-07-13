@@ -39,7 +39,7 @@ Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // The whole program is a sequence of definitions and statements executed in order.
-Program     <~~ runProgram(takeAll()) ~~>
+Program     <~~ buildMain(takeAll()) ~~>
             = { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement } ;
 
 // module M ... end: accepted but not implemented (no namespacing). Its body is a
@@ -1371,7 +1371,6 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- program entry -----
-    function runProgram(items) { buildMain(items) }
     function buildMain(items) {
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f

@@ -44,7 +44,7 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
 
 // The whole program: the '<?php' tag, then definitions and statements in order,
 // then an optional '?>' close tag.
-Program     <~~ runProgram(takeAll()) ~~>
+Program     <~~ buildMain(takeAll()) ~~>
             = OpenTag { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | EnumDecl | ConstDecl | TypeDecl | NsDecl | UseDecl | Statement } [ CloseTag ] ;
 OpenTag     = "<?php" :whitespace(Whitespace) ;
 CloseTag    = "?>" :whitespace(Whitespace) ;
@@ -1117,7 +1117,6 @@ KwInstanceof = "instanceof" KwEnd ;
     }
 
     // ----- program entry -----
-    function runProgram(items) { buildMain(items) }
     function buildMain(items) {
         var f = m.NewFunc("phpmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
