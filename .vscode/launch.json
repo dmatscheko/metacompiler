@@ -341,6 +341,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.js", "-q"]
         },
         {
+            "name": "TypeScript multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/typescript-interpreter.abnf", "tests/typescript-test-multifile.ts", "-q"]
+        },
+        {
+            "name": "TypeScript multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-multifile.ts", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

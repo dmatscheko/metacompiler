@@ -64,22 +64,34 @@ Statement   = Block | ImportDecl | ExportDecl | NamespaceDecl | DecoratedDecl | 
             | Throw | FuncDecl | DebuggerStmt | Empty | ExprStmt ;
 
 // --- TypeScript module system (import / export) and namespaces. ---
-// import binds no runtime values here (the interpreter has no module loader), so every
-// import form is accepted structurally and reported as not-implemented. export in front
-// of a real declaration is a transparent prefix: the inner class/function/var/type is
-// interpreted genuinely (the 'export' is erased); the value-less export forms (export {..},
-// export * from, export =, export default <expr>) are accepted and not-implemented.
-ImportDecl  <~~ takeAll(); push(notImplStmt("import statement", up.pos)) ~~>
+// The module specifier is handed to resolveImport (core.importFile): a specifier that
+// names a project file ('import { Vec } from "./geomlib"' -> geomlib.ts, searched under
+// the program's directory and the -i roots) is parsed with this grammar and its top-level
+// declarations register flatly in the global scope, like the main file's; the named
+// binding list is cosmetic. A specifier that names no project file is recognized but not
+// implemented (abort by default, warn+ignore under -warn-unsupported), the old behavior.
+// The import statement itself contributes no runtime value (a no-op thunk). export in
+// front of a real declaration is a transparent prefix: the inner class/function/var/type
+// is interpreted genuinely (the 'export' is erased); the value-less export forms
+// (export {..}, export * from, export =, export default <expr>) are not-implemented.
+ImportDecl  <~~ resolveImport(importSpec(takeAll()), up.pos); push(function() {}) ~~>
             = KwImport ( ImportEquals | ImportBare | ImportTypeOnly | ImportFull ) ;
-ImportBare  = StringLit [ ";" ] ;
-ImportEquals = Id "=" Id "(" StringLit ")" [ ";" ] ;
-ImportTypeOnly = KwType ImportClause KwFrom StringLit [ ";" ] ;
-ImportFull  = ImportClause KwFrom StringLit [ ";" ] ;
+ImportBare  = ImportPath [ ";" ] ;
+ImportEquals = Id "=" Id "(" ImportPath ")" [ ";" ] ;
+ImportTypeOnly = KwType ImportClause KwFrom ImportPath [ ";" ] ;
+ImportFull  = ImportClause KwFrom ImportPath [ ";" ] ;
 ImportClause = ImportDefault [ "," ( ImportNS | ImportNamed ) ] | ImportNS | ImportNamed ;
 ImportDefault = Id ;
 ImportNS    = "*" KwAs Id ;
 ImportNamed = "{" [ ImportSpec { "," ImportSpec } [ "," ] ] "}" ;
 ImportSpec  = [ KwType ] ( Id | StringLit ) [ KwAs Id ] ;
+// The module specifier of an import: the same double/single quoted literal as StringLit,
+// but it pushes the DECODED PATH TEXT (a plain string, not a value thunk) so the
+// ImportDecl tag can hand it to resolveImport. The mid-rule tag position that captures the
+// inner content is identical to DqString/SqString (languages/lib/dq-strings.abnf).
+ImportPath  = DqPath | SqPath ;
+DqPath      = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+SqPath      = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 // export: a declaration keeps running (the keyword is dropped); the value-less forms
 // notImpl. ExportBody delegates to the ordinary declaration productions, whose thunk
@@ -1400,6 +1412,51 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Build the program thunk out of the parsed source.
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "typescript"
+
+    // ----- Project-file imports -----
+    // TypeScript has no importable builtins in this subset, so nothing resolves as a
+    // stdlib prefix; every specifier is tried as a project file. A found file is parsed
+    // with this grammar and its top-level program thunk is run at once, so its classes,
+    // functions and consts register flatly in the global scope, exactly like the main
+    // file's. A specifier that names no project file keeps the pre-import behavior:
+    // recognized but not implemented (abort by default, warn+ignore under
+    // -warn-unsupported). A file is imported once; repeats and cycles are no-ops.
+    core.stdlibImports = []
+    // The module specifier is the last item the import rules push (ImportPath: a plain string).
+    function importSpec(items) { return items.length > 0 ? items[items.length - 1] : "" }
+    // A specifier -> the matching existing file (via the -i roots), or "" when none matches.
+    // 'import "./geomlib"' -> geomlib.ts: a leading './' is stripped and '.ts' appended when
+    // there is no explicit .ts / .js extension.
+    function tsFindImport(path) {
+        var rel = path
+        if (rel.length >= 2 && rel.slice(0, 2) == "./") { rel = rel.slice(2) }
+        var hasExt = false
+        if (rel.length >= 3) {
+            var ext = rel.slice(rel.length - 3)
+            if (ext == ".ts" || ext == ".js") { hasExt = true }
+        }
+        var cand = hasExt ? rel : rel + ".ts"
+        return c.findImport(cand)
+    }
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        var file = tsFindImport(path)
+        if (file == "") {
+            // Not a project file: recognized but not implemented (the pre-import behavior).
+            notImpl("import statement", pos)
+            return true
+        }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        c.compile(asg)      // the imported file's Program tag pushes its program thunk (pushg)
+        c.popSource()
+        var impT = popg()   // pop that program thunk
+        impT()              // run it now: its top-level declarations register in globalScope
+        return true
+    }
 
     c.compile(c.asg)
     var progT = popg()

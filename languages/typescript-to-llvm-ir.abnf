@@ -70,22 +70,35 @@ Statement   <~~ push(stmtPos(pop())) ~~>
             | Throw | FuncDecl | DebuggerStmt | Empty | ExprStmt ;
 
 // --- TypeScript module system (import / export) and namespaces. ---
-// import binds no runtime values here (the metacompiler has no module loader), so every
-// import form is accepted structurally and reported as not-implemented. export in front
-// of a real declaration is a transparent prefix: the inner class/function/var/type is
-// compiled genuinely (the 'export' is erased); the value-less export forms (export {..},
-// export * from, export =, export default <expr>) are accepted and not-implemented.
-ImportDecl  <~~ takeAll(); push(notImplStmt("import statement", up.pos)) ~~>
+// The module specifier is handed to resolveImport (core.importFile): a specifier that
+// names a project file ('import { Vec } from "./geomlib"' -> geomlib.ts, searched under
+// the program's directory and the -i roots) is parsed with this grammar and its top-level
+// declarations are stashed (importDepth > 0) and prepended to jsrun, so they run before
+// the main file's; the named binding list is cosmetic. A specifier that names no project
+// file is recognized but not implemented (abort by default, warn+ignore under
+// -warn-unsupported), the old behavior. The import statement itself emits nothing (a
+// no-op statement thunk). export in front of a real declaration is a transparent prefix:
+// the inner class/function/var/type is compiled genuinely (the 'export' is erased); the
+// value-less export forms (export {..}, export * from, export =, export default <expr>)
+// are accepted and not-implemented.
+ImportDecl  <~~ resolveImport(importSpec(takeAll()), up.pos); push(function(b) { return b }) ~~>
             = KwImport ( ImportEquals | ImportBare | ImportTypeOnly | ImportFull ) ;
-ImportBare  = StringLit [ ";" ] ;
-ImportEquals = Id "=" Id "(" StringLit ")" [ ";" ] ;
-ImportTypeOnly = KwType ImportClause KwFrom StringLit [ ";" ] ;
-ImportFull  = ImportClause KwFrom StringLit [ ";" ] ;
+ImportBare  = ImportPath [ ";" ] ;
+ImportEquals = Id "=" Id "(" ImportPath ")" [ ";" ] ;
+ImportTypeOnly = KwType ImportClause KwFrom ImportPath [ ";" ] ;
+ImportFull  = ImportClause KwFrom ImportPath [ ";" ] ;
 ImportClause = ImportDefault [ "," ( ImportNS | ImportNamed ) ] | ImportNS | ImportNamed ;
 ImportDefault = Id ;
 ImportNS    = "*" KwAs Id ;
 ImportNamed = "{" [ ImportSpec { "," ImportSpec } [ "," ] ] "}" ;
 ImportSpec  = [ KwType ] ( Id | StringLit ) [ KwAs Id ] ;
+// The module specifier of an import: the same double/single quoted literal as StringLit,
+// but it pushes the DECODED PATH TEXT (a plain string, not a value thunk) so the
+// ImportDecl tag can hand it to resolveImport. The mid-rule tag position that captures the
+// inner content is identical to DqString/SqString (languages/lib/dq-strings.abnf).
+ImportPath  = DqPath | SqPath ;
+DqPath      = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+SqPath      = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 // export: a declaration keeps compiling (the keyword is dropped); the value-less forms
 // notImpl. ExportBody delegates to the ordinary declaration productions, whose thunk
@@ -643,6 +656,53 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // A clean compile-time abort (used by the shared notImpl helper in compile-core.js
     // for constructs that parse but cannot be lowered).
     function fail(msg) { println("typescript compiler error: " + msg); exit(1) }
+
+    // ----- Project-file imports -----
+    // TypeScript has no importable builtins in this subset, so nothing resolves as a
+    // stdlib prefix; every specifier is tried as a project file ('import "./geomlib"' ->
+    // geomlib.ts, searched under the program's directory and the -i roots). A found file is
+    // parsed with this grammar; its top-level statements are stashed by buildMain
+    // (importDepth > 0) and prepended to jsrun, so they run before the main file's. A
+    // specifier that names no project file keeps the pre-import behavior: recognized but
+    // not implemented (abort by default, warn+ignore under -warn-unsupported). A file is
+    // imported once; repeats and cycles are no-ops.
+    core.stdlibImports = []
+    // The module specifier is the last item the import rules push (ImportPath: a plain string).
+    function importSpec(items) { return items.length > 0 ? items[items.length - 1] : "" }
+    // A specifier -> the matching existing file (via the -i roots), or "" when none matches.
+    // A leading './' is stripped and '.ts' appended when there is no .ts / .js extension.
+    function tsFindImport(path) {
+        var rel = path
+        if (rel.length >= 2 && rel.slice(0, 2) == "./") { rel = rel.slice(2) }
+        var hasExt = false
+        if (rel.length >= 3) {
+            var ext = rel.slice(rel.length - 3)
+            if (ext == ".ts" || ext == ".js") { hasExt = true }
+        }
+        var cand = hasExt ? rel : rel + ".ts"
+        return c.findImport(cand)
+    }
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var file = tsFindImport(path)
+        if (file == "") {
+            // Not a project file: recognized but not implemented (the pre-import behavior).
+            notImpl("import statement", pos)
+            return true
+        }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)      // buildMain stashes the imported top-level (importDepth > 0)
+        importDepth = importDepth - 1
+        c.popSource()
+        return true
+    }
 
     // ----- The emitter state -----
 
@@ -1469,12 +1529,18 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // jsmain(env, args) is the standalone entry on top of it: it makes a fresh scope,
     // runs the program, and then calls main() - the self checking test convention.
     function buildMain(items) {
+        // The walk of an imported file ends here too: stash its top-level statements for
+        // the real jsrun (below) instead of emitting a second jsrun/jsmain.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("jsrun", i64, [llvm.ir.NewParam("scope", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
-        b = makeSeq(items)(b)
+        b = makeSeq(importedItems.concat(items))(b) // imported files' declarations run first
         b.NewRet(callExt(b, "js_getret", []))
 
         var fm = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
