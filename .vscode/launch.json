@@ -47,6 +47,18 @@
             "program": "${workspaceFolder}","args": ["languages/calculator-scientific-interpreter.abnf", "-code", "2^10 + 5! - sqrt(144) + log(1000)", "-q"]
         },
         {
+            "name": "LaTeX calculator (interpreter, variables + solving)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/latex-calculator-interpreter.abnf", "tests/latex-calculator-test.txt", "-q"]
+        },
+        {
+            "name": "LaTeX calculator -code solve equation",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/latex-calculator-interpreter.abnf", "-code", "x^2 - x - 6 = 0", "-q"]
+        },
+        {
             "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",

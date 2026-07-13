@@ -1,0 +1,383 @@
+:title("LaTeX calculator interpreter (variables and equation solving)") ;
+:description("A calculator whose input is LaTeX math. It reads a program of one statement per line and
+supports three kinds of statement:
+
+  assignment   a single-letter variable, '=', and an expression, e.g.  r = 3
+  equation     any other 'lhs = rhs'; the one free variable is solved numerically,
+               e.g.  x^2 = 9   or   2x + 3 = 7   or   \\sin(x) = 0
+  evaluation   a bare expression, printed as its value, e.g.  \\frac{9}{2} + \\sqrt{16}
+
+The expression language is a useful LaTeX subset: + - and the products *, \\cdot, \\times,
+/, \\div, \\frac{a}{b}, powers a^b and a^{b}, \\sqrt{x} and \\sqrt[n]{x}, factorial x!,
+absolute value |x| / \\left|x\\right|, grouping ( ) { } \\left( \\right), the constants
+\\pi \\tau \\phi and e, and the functions \\sin \\cos \\tan \\arcsin \\arccos \\arctan
+\\sinh \\cosh \\tanh \\ln \\log \\exp. Variables are single letters, so juxtaposition is
+multiplication: 2x is 2*x, xy is x*y, \\pi r^2 is pi*r*r.
+
+Solving is numeric: for one unknown the solver scans f(x) = lhs - rhs over [-100, 100],
+bisects every sign change AND refines every small local minimum of |f|, so it finds crossing
+roots (x^2 = 9 gives -3 and 3), touch roots (x^2 = 0 gives 0, \\sin(x) = 1 its peaks) and
+non-polynomial equations, capping a long list of periodic roots. It still misses roots
+outside [-100, 100] and very sharp tangents that fall between scan points. Every value is a
+float64 from the host Math the frozen VM and goja share, so -q output is byte identical on
+both engines.") ;
+
+
+:whitespace(Sp) ;
+:startRule(Program) ;
+
+// One statement per line: a newline, ';' or LaTeX '\\' ends a statement. Blank lines and
+// stray separators are skipped. Sp (below) deliberately excludes the newline so that a line
+// break is significant - otherwise '5 y' on two lines would read as one product 5*y.
+Program     = { Sep | Statement } ;
+Sep         = "\n" | ";" | "\\\\" ;
+
+Statement   = Assign | Equation | Eval ;
+
+Assign      = ( VarName "=" Sum )   <~~ stmtLhs(takeAll(), up.in) ~~> ;
+Equation    = ( Sum "=" Sum )       <~~ stmtEquation(takeAll(), up.in) ~~> ;
+Eval        = ( Sum )               <~~ stmtEval(takeAll(), up.in) ~~> ;
+
+VarName     = Alpha                 <~~ push(up.in) ~~> ;
+
+Sum         = ( Term { AddOp Term } )       <~~ push(foldAddSub(takeAll())) ~~> ;
+AddOp       = ( "+" | "-" )                 <~~ push(up.in) ~~> ;
+
+// Unary sign. '-' negates; a leading '+' is a no-op.
+Term        = ( "-" Term )                  <~~ push(mkNeg(pop())) ~~>
+            | ( "+" Term )
+            | Product ;
+
+// A product is a run of powers joined by explicit *, \cdot, \times, /, \div, OR by mere
+// juxtaposition (implicit multiplication). foldProduct sees [node, op, node, node, ...]:
+// a node with no operator in front of it is an implicit multiply.
+Product     = ( Power { MulTail } )         <~~ push(foldProduct(takeAll())) ~~> ;
+MulTail     = ( MulOp Power ) | Power ;
+MulOp       = ( "\\cdot" | "\\times" | "*" ) <~~ push("*") ~~>
+            | ( "\\div" | "/" )              <~~ push("/") ~~> ;
+
+// Power is right associative (2^3^2 = 2^(3^2)); use braces for a compound exponent (x^{n+1}).
+Power       = ( Postfix [ "^" Power ] )     <~~
+                                             var it = takeAll()
+                                             if (it.length == 2) push(mkPow(it[0], it[1]))
+                                             else push(it[0])
+                                            ~~> ;
+
+Postfix     = ( Primary { "!" <~~push("!")~~> } ) <~~
+                                             var it = takeAll()
+                                             var n = it[0]
+                                             for (var i = 1; i < it.length; i++) n = mkFact(n)
+                                             push(n)
+                                            ~~> ;
+
+Primary     = Group | Abs | Frac | Root | Func | Const | Number | Variable ;
+
+Group       = ( "\\left(" Sum "\\right)" )
+            | ( "(" Sum ")" )
+            | ( "{" Sum "}" ) ;
+
+Abs         = ( "\\left|" Sum "\\right|" )  <~~ push(mkAbs(pop())) ~~>
+            | ( "|" Sum "|" )               <~~ push(mkAbs(pop())) ~~> ;
+
+Frac        = ( "\\frac" "{" Sum "}" "{" Sum "}" ) <~~
+                                             var it = takeAll()
+                                             push(mkBin("/", it[0], it[1]))
+                                            ~~> ;
+
+Root        = ( "\\sqrt" [ "[" Sum "]" ] "{" Sum "}" ) <~~
+                                             var it = takeAll()
+                                             if (it.length == 2) push(mkRoot(it[0], it[1]))
+                                             else push(mkFunc("sqrt", it[0]))
+                                            ~~> ;
+
+Func        = ( FuncName FuncArg )          <~~
+                                             var it = takeAll()
+                                             push(mkFunc(it[0], it[1]))
+                                            ~~> ;
+// Longer names first: \sinh must win over \sin, \arcsin over \sin.
+FuncName    = ( "\\arcsin" | "\\arccos" | "\\arctan"
+              | "\\sinh" | "\\cosh" | "\\tanh"
+              | "\\sin" | "\\cos" | "\\tan"
+              | "\\ln" | "\\log" | "\\exp" ) <~~ push(up.in.slice(1)) ~~> ;
+FuncArg     = ( "(" Sum ")" ) | ( "{" Sum "}" ) | Power ;
+
+Const       = ( "\\pi" )                    <~~ push(mkNum(Math.PI)) ~~>
+            | ( "\\tau" )                   <~~ push(mkNum(2 * Math.PI)) ~~>
+            | ( "\\phi" )                   <~~ push(mkNum((1 + Math.sqrt(5)) / 2)) ~~> ;
+
+Number      = ( ( Digit { Digit } [ "." { Digit } ] ) | ( "." Digit { Digit } ) )
+                                            <~~ push(mkNum(parseFloat(up.in))) ~~> ;
+
+Variable    = Alpha                         <~~ push(mkVar(up.in)) ~~> ;
+
+Alpha       = "a"..."z" | "A"..."Z" ;
+Digit       = "0"..."9" ;
+Sp          = { " " | "\t" | "\r" } ;
+
+
+:startScript(~~
+    // ---- the local-stack helper, shared with the other calculators ----
+    function takeAll() {
+        var items = []
+        var v = anytype
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    function calcError(msg) {
+        println("Error: " + msg)
+        exit(1)
+    }
+
+    // ---- the expression AST: each node is { ev: function(env), vars: [names] } ----
+    // env is an array of { n: name, v: value }; no host object-key iteration is used
+    // because the frozen MetaJS engine has no for-in.
+    function envHas(env, name) {
+        for (var i = 0; i < env.length; i++) { if (env[i].n == name) return true }
+        return false
+    }
+    function envGet(env, name) {
+        for (var i = 0; i < env.length; i++) { if (env[i].n == name) return env[i].v }
+        return undefined
+    }
+    function envSet(env, name, val) {
+        for (var i = 0; i < env.length; i++) {
+            if (env[i].n == name) { env[i].v = val; return true }
+        }
+        env.push({ n: name, v: val })
+        return true
+    }
+    function varsUnion(a, b) {
+        var r = []
+        for (var i = 0; i < a.length; i++) { r.push(a[i]) }
+        for (var j = 0; j < b.length; j++) {
+            var seen = false
+            for (var k = 0; k < r.length; k++) { if (r[k] == b[j]) seen = true }
+            if (!seen) r.push(b[j])
+        }
+        return r
+    }
+
+    function applyOp(op, l, r) {
+        if (op == "+") return l + r
+        if (op == "-") return l - r
+        if (op == "*") return l * r
+        if (op == "/") return l / r
+        calcError("bad operator '" + op + "'")
+    }
+
+    function applyFunc(key, x) {
+        if (key == "sin") return Math.sin(x)
+        if (key == "cos") return Math.cos(x)
+        if (key == "tan") return Math.tan(x)
+        if (key == "arcsin") return Math.asin(x)
+        if (key == "arccos") return Math.acos(x)
+        if (key == "arctan") return Math.atan(x)
+        if (key == "sinh") return Math.sinh(x)
+        if (key == "cosh") return Math.cosh(x)
+        if (key == "tanh") return Math.tanh(x)
+        if (key == "ln") return Math.log(x)
+        if (key == "log") return Math.log10(x)
+        if (key == "exp") return Math.exp(x)
+        if (key == "sqrt") return Math.sqrt(x)
+        calcError("unknown function '\\" + key + "'")
+    }
+
+    function factorial(n) {
+        if (n < 0 || n != Math.floor(n)) calcError("factorial needs a non-negative integer, got " + n)
+        if (n > 170) return Infinity
+        var r = 1
+        for (var i = 2; i <= n; i++) { r = r * i }
+        return r
+    }
+
+    function mkNum(n)  { return { ev: function(env) { return n }, vars: [] } }
+    function mkVar(name) {
+        return {
+            ev: function(env) {
+                if (envHas(env, name)) return envGet(env, name)
+                if (name == "e") return Math.E
+                calcError("unknown variable '" + name + "' (assign it, e.g. " + name + " = 3)")
+            },
+            vars: [name]
+        }
+    }
+    function mkNeg(a)      { return { ev: function(env) { return -a.ev(env) }, vars: a.vars } }
+    function mkBin(op, a, b) { return { ev: function(env) { return applyOp(op, a.ev(env), b.ev(env)) }, vars: varsUnion(a.vars, b.vars) } }
+    function mkPow(a, b)   { return { ev: function(env) { return Math.pow(a.ev(env), b.ev(env)) }, vars: varsUnion(a.vars, b.vars) } }
+    function mkFunc(key, a) { return { ev: function(env) { return applyFunc(key, a.ev(env)) }, vars: a.vars } }
+    function mkAbs(a)      { return { ev: function(env) { return Math.abs(a.ev(env)) }, vars: a.vars } }
+    function mkFact(a)     { return { ev: function(env) { return factorial(a.ev(env)) }, vars: a.vars } }
+    function mkRoot(n, x)  { return { ev: function(env) { return Math.pow(x.ev(env), 1 / n.ev(env)) }, vars: varsUnion(n.vars, x.vars) } }
+
+    function foldAddSub(items) {
+        var node = items[0]
+        for (var i = 1; i < items.length; i += 2) { node = mkBin(items[i], node, items[i + 1]) }
+        return node
+    }
+    // items = [node, op, node, node, ...]; a node with no operator before it is implicit *.
+    function foldProduct(items) {
+        var node = items[0]
+        var i = 1
+        while (i < items.length) {
+            if (typeof items[i] == "string") { node = mkBin(items[i], node, items[i + 1]); i = i + 2 }
+            else { node = mkBin("*", node, items[i]); i = i + 1 }
+        }
+        return node
+    }
+
+    // ---- the numeric solver ----
+    function isFiniteNum(x) { return x == x && x != Infinity && x != -Infinity }
+
+    function cleanNum(x) {
+        if (!isFiniteNum(x)) return x
+        var r = Math.round(x * 1000000000) / 1000000000 // Snap bisection noise to 9 decimals.
+        if (r == 0) return 0                            // Fold -0 into 0.
+        return r
+    }
+
+    function bisect(f, a, fa, b) {
+        for (var i = 0; i < 100; i++) {
+            var m = (a + b) / 2
+            var fm = f(m)
+            if (fm == 0) return m
+            if ((fa < 0) == (fm < 0)) { a = m; fa = fm } else { b = m }
+        }
+        return (a + b) / 2
+    }
+
+    function addRoot(roots, f, r) {
+        r = cleanNum(r)
+        // Reject poles (a sign change across a vertical asymptote, no real root there).
+        if (Math.abs(f(r)) > 0.000001) return false
+        // Skip a root we already have (adjacent brackets can rediscover the same one).
+        for (var i = 0; i < roots.length; i++) {
+            if (Math.abs(roots[i] - r) < 0.0000001) return false
+        }
+        roots.push(r)
+        return true
+    }
+
+    // Ternary search for the point of least |f| on [a, b]; finds a touch root (a tangent
+    // like x^2 = 0 or \sin(x) = 1, where f grazes zero without changing sign).
+    function refineMin(f, a, b) {
+        for (var i = 0; i < 100; i++) {
+            var m1 = a + (b - a) / 3
+            var m2 = b - (b - a) / 3
+            if (Math.abs(f(m1)) < Math.abs(f(m2))) b = m2
+            else a = m1
+        }
+        return (a + b) / 2
+    }
+
+    // Scan f over [lo, hi] keeping a three-sample window (a, b, c). To stay inside the
+    // frozen IR interpreter's cumulative step budget the loop caches |f| and finiteness, so
+    // it spends just one Math.abs and one isFiniteNum per step.
+    function solveFor(diff, base, name) {
+        var env = base.slice()
+        env.push({ n: name, v: 0 })
+        var idx = env.length - 1
+        function f(t) { env[idx].v = t; return diff.ev(env) }
+
+        var roots = []
+        var lo = -100
+        var hi = 100
+        var step = 0.05
+        var ax = lo
+        var af = f(lo)
+        var aaf = Math.abs(af)
+        var faf = isFiniteNum(af)
+        if (af == 0) addRoot(roots, f, ax)
+        var bx = lo + step
+        var bf = f(bx)
+        var abf = Math.abs(bf)
+        var fbf = isFiniteNum(bf)
+        if (faf && fbf && ((af < 0) != (bf < 0))) addRoot(roots, f, bisect(f, ax, af, bx))
+        var x = bx
+        while (x < hi) {
+            x = x + step
+            var cf = f(x)
+            var acf = Math.abs(cf)
+            var fcf = isFiniteNum(cf)
+            // A sign change between b and c brackets a crossing root; bisect it.
+            if (fbf && fcf && ((bf < 0) != (cf < 0))) addRoot(roots, f, bisect(f, bx, bf, x))
+            // |f| dips to a small local minimum at b without crossing: a possible touch root.
+            if (faf && fbf && fcf && abf < aaf && abf < acf && abf < 0.001) addRoot(roots, f, refineMin(f, ax, x))
+            ax = bx
+            af = bf
+            aaf = abf
+            faf = fbf
+            bx = x
+            bf = cf
+            abf = acf
+            fbf = fcf
+        }
+        return roots
+    }
+
+    // ---- statement dispatch ----
+    var assignedEnv = []
+
+    function unknownsOf(node) {
+        var r = []
+        for (var i = 0; i < node.vars.length; i++) {
+            var nm = node.vars[i]
+            if (nm != "e" && !envHas(assignedEnv, nm)) r.push(nm)
+        }
+        return r
+    }
+
+    function reportRoots(raw, name, roots) {
+        if (roots.length == 0) {
+            println(raw + "   =>   no real solution for " + name + " in [-100, 100]")
+        } else {
+            var shown = roots
+            var extra = ""
+            if (roots.length > 12) { // Periodic equations have many roots; keep it readable.
+                shown = roots.slice(0, 12)
+                extra = "   (and " + (roots.length - 12) + " more)"
+            }
+            println(raw + "   =>   " + name + " = " + shown.join("   or   ") + extra)
+        }
+    }
+
+    function solveEq(lhs, rhs, raw) {
+        var diff = mkBin("-", lhs, rhs)
+        var unk = unknownsOf(diff)
+        if (unk.length == 0) {
+            var l = lhs.ev(assignedEnv)
+            var r = rhs.ev(assignedEnv)
+            if (Math.abs(l - r) < 0.000000001) println(raw + "   (holds: both sides = " + l + ")")
+            else println(raw + "   (does not hold: " + l + " != " + r + ")")
+        } else if (unk.length == 1) {
+            reportRoots(raw, unk[0], solveFor(diff, assignedEnv, unk[0]))
+        } else {
+            println(raw + "   =>   cannot solve: " + unk.length + " unknowns (" + unk.join(", ") + ")")
+        }
+    }
+
+    // A lone 'name = expr': an assignment when the right side is fully known, otherwise an
+    // equation to solve (so x = x + 1 with x unknown is an equation, not an assignment).
+    function stmtLhs(items, raw) {
+        var name = items[0]
+        var rhs = items[1]
+        if (unknownsOf(rhs).length == 0) {
+            var val = rhs.ev(assignedEnv)
+            envSet(assignedEnv, name, val)
+            println(raw + "        (" + name + " = " + val + ")")
+        } else {
+            solveEq(mkVar(name), rhs, raw)
+        }
+    }
+
+    function stmtEquation(items, raw) { solveEq(items[0], items[1], raw) }
+
+    function stmtEval(items, raw) {
+        var node = items[0]
+        var unk = unknownsOf(node)
+        if (unk.length > 0) println(raw + "   =>   needs a value for: " + unk.join(", "))
+        else println(raw + "   =   " + node.ev(assignedEnv))
+    }
+
+    c.compile(c.asg)
+~~) ;
