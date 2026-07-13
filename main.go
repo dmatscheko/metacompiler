@@ -286,9 +286,7 @@ func main() {
 	abnf.WarnUnresolvedImports = o.warnImports
 	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
-	if o.entryPoint != "" {
-		abnf.EntryPoint = o.entryPoint
-	}
+	abnf.EntryPoint = o.entryPoint
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath
