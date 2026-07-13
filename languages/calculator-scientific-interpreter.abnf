@@ -117,7 +117,7 @@ Number      =
     // takeAll empties the local stack of the current tag and returns its items in push order.
     function takeAll() {
         var items = []
-        var v = anytype
+        var v = anytype // The tags push values of every type.
         while ((v = pop()) != null) items.unshift(v)
         return items
     }
