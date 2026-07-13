@@ -1,0 +1,34 @@
+; Multi-file Lisp test: helper functions live in tests/imports/geomlib.lisp and are found
+; via the -i include root (mec -i tests/imports ...). Lisp has no import form, so
+; (load "geomlib.lisp") - an ordinary s-expression whose head symbol is 'load' - is
+; intercepted and the file is parsed with the same grammar and its (define ...)s registered
+; before the forms below run. The interpreter (lisp-interpreter.abnf) and the LLVM-IR
+; compiler (lisp-to-llvm-ir.abnf) both load it and must agree. The value of the last
+; top-level form is the exit code, so this program ends in 0 exactly when every check
+; passed; on success it also prints a pass line (Lisp prints one character at a time).
+
+(load "geomlib.lisp")
+
+(define (check got want) (if (= got want) 0 1))   ; 0 when equal, 1 when not
+
+; Print "lisp multifile test passed\n" one character at a time (Lisp's only output is
+; (putchar n), which writes the byte n); begin yields its last form, so this returns 0.
+(define (announce)
+  (begin
+    (putchar 108) (putchar 105) (putchar 115) (putchar 112) (putchar 32)   ; "lisp "
+    (putchar 109) (putchar 117) (putchar 108) (putchar 116) (putchar 105)  ; "multi"
+    (putchar 102) (putchar 105) (putchar 108) (putchar 101) (putchar 32)   ; "file "
+    (putchar 116) (putchar 101) (putchar 115) (putchar 116) (putchar 32)   ; "test "
+    (putchar 112) (putchar 97) (putchar 115) (putchar 115) (putchar 101) (putchar 100)  ; "passed"
+    (putchar 10)                                                            ; newline
+    0))
+
+(let ((failures (+ (check (vec-dot 3 4 2 -1) 2)     ; 3*2 + 4*-1 = 2
+                   (check (vec-dot 1 2 3 4) 11)      ; 1*3 + 2*4 = 11
+                   (check (square 7) 49)
+                   (check (vec-len2 3 4) 25)         ; 9 + 16 = 25
+                   (check (gcd 48 36) 12)
+                   (check (gcd 17 5) 1))))
+  (if (= failures 0)
+      (announce)                                     ; prints the pass line, yields 0
+      failures))                                     ; otherwise the failure count (nonzero)

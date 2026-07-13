@@ -20,7 +20,7 @@ test programs are self checking: they end in 0 on success.") ;
 
 Program     = { Form } ;
 
-Form        = List | Number | Symbol ;
+Form        = List | Number | String | Symbol ;
 
 // The local stack holds the values of all inner forms in source order.
 List        <~~ push(takeAll()) ~~>
@@ -33,6 +33,11 @@ Number      <~~ push(parseInt(up.in)) ~~>
 Symbol      <~~ push({sym: up.in}) ~~>
             = SymbolStart :whitespace() { SymbolStart | "0"..."9" } :whitespace(Whitespace) ;
 SymbolStart = "a"..."z" | "A"..."Z" | @"+-*/<>=!?_" ;
+
+// A double quoted string. Only used as the path in (load "file.lisp"): the inline tag
+// captures the characters between the quotes as {str: ...} (a file path needs no escapes).
+String      = '"' :whitespace() { StringChar } <~~ push({str: up.in}) ~~> '"' :whitespace(Whitespace) ;
+StringChar  = "\x20"..."\x21" | "\x23"..."\U0010ffff" ;
 
 // Spaces and ; line comments.
 Whitespace  = { @+" \t\r\n" | ";" :whitespace() { NotNewline } :whitespace(Whitespace) } ;
@@ -108,6 +113,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // the block that the following code has to continue in, and the LLVM value.
     function compileExpr(form, env, b) {
         if (typeof form == "number") return {b: b, v: llvm.constant.NewInt(i32, form)}
+        if (form.str != undefined) fail("A string literal is only valid as the (load ...) path")
         if (form.sym != undefined) {
             var bound = lookup(env, form.sym) // Parameters and let values are plain SSA values.
             if (bound != null) return {b: b, v: bound}
@@ -246,36 +252,75 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         r.b.NewRet(r.v)
     }
 
-    // Build the s-expression tree; the top level forms end up on the global stack.
-    var res = c.compile(c.asg)
-    var forms = res.stack
+    // ----- Project-file imports: (load "file.lisp") -----
+    // Same mechanism as the interpreter (see lisp-interpreter.abnf). (load <string>) is an
+    // ordinary s-expression, intercepted at walk time; the named file is located under the
+    // program's directory and the -i roots (c.findImport), parsed with this grammar and
+    // walked with this same loop, so its (define (f ...) ...)s compile into the shared
+    // module (the funcs table) and become callable from the main file, and its (define x e)
+    // globals initialize in main()'s flow at the load point. A file is loaded once; repeats
+    // and cycles are no-ops. A program that never calls (load ...) is byte-identical.
+    var importedFiles = {}
+    function importFile(path) {
+        var rel = path
+        if (rel.slice(0, 2) == "./") rel = rel.slice(2)
+        var file = c.findImport(rel)
+        if (file == "") return false
+        if (importedFiles["$" + file] == true) return true
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        var imported = c.compile(asg)
+        c.popSource()
+        runForms(imported.stack)
+        return true
+    }
 
-    // int main() { <all top level non-define forms, defines initialize their global>; return <last value>; }
+    // int main() { <all top level non-define forms; defines initialize their global>;
+    // return <last value>; }. mainF/mainB/value are module-level so processForm and
+    // importFile can thread the main flow across a (load ...).
     var mainF = getFunc("main", 0)
     curF = mainF
-    var b = mainF.NewBlock("entry")
+    var mainB = mainF.NewBlock("entry")
     var value = zero
 
-    for (var i = 0; i < forms.length; i++) {
-        var form = forms[i]
-        if (Array.isArray(form) && form.length > 0 && form[0].sym == "define") {
-            if (Array.isArray(form[1])) {
-                var mainB = b // compileFunction changes curF; save and restore the main context.
-                compileFunction(form)
-                curF = mainF
-                b = mainB
+    // A (load "file.lisp") form: a list whose head is the symbol 'load'.
+    function isLoad(form) {
+        return Array.isArray(form) && form.length > 0 && form[0] != null && form[0].sym == "load"
+    }
+
+    // Process one top-level form: (load ...) imports, (define (f ...) ...) compiles a
+    // function, (define x e) initializes a global in the main flow, anything else is
+    // compiled into the main flow and its value feeds the final return.
+    function processForm(form) {
+        if (isLoad(form)) {
+            if (form.length != 2 || form[1] == null || form[1].str == undefined) fail("(load ...) needs exactly one string path")
+            if (!importFile(form[1].str)) fail("Cannot find the file to load: " + form[1].str)
+        } else if (Array.isArray(form) && form.length > 0 && form[0].sym == "define") {
+            if (Array.isArray(form[1])) { // (define (f a b) body...) -> its own i32 function
+                compileFunction(form) // changes curF; it builds the new function's own
+                curF = mainF          // blocks, so mainB is untouched - just restore curF.
             } else { // (define x expr): initialize the global inside the main flow.
-                var r = compileExpr(form[2], {vars: {}, parent: null}, b)
-                b = r.b
-                b.NewStore(r.v, getGlobal(form[1].sym))
+                var r = compileExpr(form[2], {vars: {}, parent: null}, mainB)
+                mainB = r.b
+                mainB.NewStore(r.v, getGlobal(form[1].sym))
             }
         } else {
-            var r = compileExpr(form, {vars: {}, parent: null}, b)
-            b = r.b
+            var r = compileExpr(form, {vars: {}, parent: null}, mainB)
+            mainB = r.b
             value = r.v
         }
     }
-    b.NewRet(value)
+
+    function runForms(forms) {
+        for (var i = 0; i < forms.length; i++) processForm(forms[i])
+    }
+
+    // Build the s-expression tree; the top level forms end up on the global stack, then
+    // walk them into the module.
+    runForms(c.compile(c.asg).stack)
+    mainB.NewRet(value)
 
     // Show the compiler output (the LLVM IR module).
     println(m)

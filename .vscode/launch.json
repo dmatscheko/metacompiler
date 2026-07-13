@@ -413,6 +413,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lua-to-llvm-ir.abnf", "tests/lua-test-multifile.lua", "-q"]
         },
         {
+            "name": "Lisp multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lisp-interpreter.abnf", "tests/lisp-test-multifile.txt", "-q"]
+        },
+        {
+            "name": "Lisp multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lisp-to-llvm-ir.abnf", "tests/lisp-test-multifile.txt", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
