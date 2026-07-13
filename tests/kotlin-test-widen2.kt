@@ -51,6 +51,7 @@ class WithExtras(val n: Int) {
         doubled = n * 2
     }
     constructor() : this(0) { }
+    constructor(s: String) : this(s.length)   // bodiless: pure delegation, no { }
     val label: String
         get() = "n=$n"
 

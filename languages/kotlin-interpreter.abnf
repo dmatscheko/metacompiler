@@ -737,8 +737,10 @@ CompanionReal <~~ push({companion: takeAll()}) ~~>
             = KwCompanion KwObject [ Id ] [ ":" SuperList ] "{" { Member } "}" ;
 CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
             = KwCompanion KwObject [ Id ] [ ":" SuperList ] SkipBlock ;
+// The body is optional: a purely delegating secondary constructor
+// (constructor(x) : this(x)) carries no { } - just the delegation. notImpl either way.
 SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
-            = KwConstructor "(" [ SParam { "," SParam } [ "," ] ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" ] SkipBlock ;
+            = KwConstructor "(" [ SParam { "," SParam } [ "," ] ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" ] [ SkipBlock ] ;
 SParam      = [ Modifiers ] Id ":" Type [ "=" DiscardExpr ] ;
 PropAccessor <~~ notImpl("property accessor", up.pos) ~~>
             = ( "val" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
