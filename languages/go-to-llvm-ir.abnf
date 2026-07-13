@@ -1070,7 +1070,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         ab.NewRet(aArr)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "append"), callExt(b, "js_closure", [handle(apIdx), curScopeV])])
         b = makeSeq(items)(b)
-        var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "main")])
+        // The entry point defaults to main() but -main (c.mainName) can name another.
+        var entry = c.mainName
+        if (entry == undefined || entry == "") { entry = "main" }
+        var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, entry)])
         var argsV = callExt(b, "js_arr_new", [])
         b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
     }

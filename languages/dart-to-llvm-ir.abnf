@@ -1237,7 +1237,10 @@ KwFactory   = "factory" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
         b = makeSeq(items)(b)
-        var mainV = callExt(b, "js_kget", [curScopeV, emitStr(b, "main")])
+        // The entry point defaults to main() but -main (c.mainName) can name another.
+        var entry = c.mainName
+        if (entry == undefined || entry == "") { entry = "main" }
+        var mainV = callExt(b, "js_kget", [curScopeV, emitStr(b, entry)])
         var argsV = callExt(b, "js_arr_new", [])
         b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
     }

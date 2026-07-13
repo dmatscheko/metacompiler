@@ -977,11 +977,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         cls[mm.name] = makeMethodClosure({recvName: recvVar, name: mm.name, params: mm.params, body: mm.body})
     }
 
-    if (typeof globalScope["main"] != "function") {
-        fail("Go programs need a func main().")
+    // The entry point defaults to main() but the -main flag (c.mainName) can name any
+    // other top-level function.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
+    if (typeof globalScope[entry] != "function") {
+        fail("Go programs need a func " + entry + "().")
     }
-    var ret = globalScope["main"]()
-    println("go interpreter: main() returned " + (ret === undefined ? 0 : ret))
+    var ret = globalScope[entry]()
+    println("go interpreter: " + entry + "() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
 ~~) ;

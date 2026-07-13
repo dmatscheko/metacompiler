@@ -1482,7 +1482,10 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var bm = fm.NewBlock("entry")
         var sc = callExt(bm, "js_scope_new", [fm.Params[0]])
         bm.NewCall(f, [sc, fm.Params[1]])
-        var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, "main")])
+        // The entry point defaults to main() but -main (c.mainName) can name another.
+        var entry = c.mainName
+        if (entry == undefined || entry == "") { entry = "main" }
+        var mainV = callExt(bm, "js_scope_get", [sc, emitStr(bm, entry)])
         var argsV = callExt(bm, "js_arr_new", [])
         bm.NewRet(callExt(bm, "js_call", [mainV, hUndef, argsV]))
     }

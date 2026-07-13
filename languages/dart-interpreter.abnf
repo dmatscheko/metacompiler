@@ -1110,18 +1110,22 @@ KwFactory   = "factory" KwEnd ;
 
     // Run the top level (binds functions and classes), then call int main().
     progT()
-    if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
-        fail("Dart programs need an int main() function.")
+    // The entry point defaults to main() but the -main flag (c.mainName) can name any
+    // other top-level function.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
+    if (!hasOwn(globalScope, entry) || typeof globalScope[entry] != "function") {
+        fail("Dart programs need an int " + entry + "() function.")
     }
-    // A user exception that escapes main() is reported like any runtime error.
+    // A user exception that escapes the entry point is reported like any runtime error.
     var ret = anytype
     try {
-        ret = globalScope["main"]()
+        ret = globalScope[entry]()
     } catch (e) {
         if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
         throw e
     }
-    println("dart interpreter: main() returned " + ret)
+    println("dart interpreter: " + entry + "() returned " + ret)
     exit(ret | 0)
 
 ~~) ;

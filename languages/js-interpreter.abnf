@@ -1268,18 +1268,22 @@ KwInstanceof = "instanceof" KwEnd ;
     // Run the top level (it binds the functions), then call main(). The exit code of
     // this metacompiler run is what main() returned, so test programs are self checking.
     progT()
-    if (!hasOwn(globalScope, "main") || typeof globalScope["main"] != "function") {
-        fail("JavaScript programs need a main() function.")
+    // The entry point defaults to main() but the -main flag (c.mainName) can name any
+    // other top-level function.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
+    if (!hasOwn(globalScope, entry) || typeof globalScope[entry] != "function") {
+        fail("JavaScript programs need a " + entry + "() function.")
     }
-    // A user exception that escapes main() is reported like any runtime error.
+    // A user exception that escapes the entry point is reported like any runtime error.
     var ret = anytype
     try {
-        ret = globalScope["main"]()
+        ret = globalScope[entry]()
     } catch (e) {
         if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
         throw e
     }
-    println("js interpreter: main() returned " + ret)
+    println("js interpreter: " + entry + "() returned " + ret)
     exit(ret | 0)
 
 ~~) ;
