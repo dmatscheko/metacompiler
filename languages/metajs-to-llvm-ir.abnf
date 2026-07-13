@@ -57,8 +57,17 @@ Program     <~~ buildMain(takeAll()) ~~>
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
+            = Block | ImportStmt | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
             | TryStmt | Throw | FuncDecl | Empty | ExprStmt ;
+
+// import "./mod.js"; loads the referenced file (resolveImport -> core.importFile). Its
+// top-level declarations are stashed by buildMain (importDepth > 0) and prepended to jsrun,
+// so they register in the shared program scope before the main program's statements.
+ImportStmt  <~~ push(metajsImport(takeAll(), up.pos)) ~~>
+            = KwImport ModPath [ ";" ] ;
+ModPath     = ModDq | ModSq ;
+ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
 // anywhere. The body is a flat list - the labels must be tried before Statement,
@@ -250,6 +259,7 @@ HexLit      <~~ push(makeConst(hexAt(up.in, 2, up.in.length - 2))) ~~>
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 
 // The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
+KwImport    = "import" KwEnd ;
 KwVar       = ( "var" | "let" | "const" ) KwEnd ;
 KwFunction  = "function" KwEnd ;
 KwIf        = "if" KwEnd ;
@@ -750,13 +760,54 @@ KwDefault   = "default" KwEnd ;
     // the completion value: what the last executed expression statement produced.
     // jsmain(env, args) is the standalone entry on top of it: it makes a fresh scope,
     // runs the program, and then calls main() - the self checking test convention.
+    // ----- Project-file imports (see the ImportStmt rule) -----
+    // compile-core's resolveImport calls fail() on an unresolved import; add a local one.
+    function fail(msg) { println("metajs compiler error: " + msg); exit(1) }
+    function metajsImport(items, pos) {
+        resolveImport(items[items.length - 1], pos)
+        return function(b) { return b }
+    }
+    // MetaJS has no importable stdlib modules, so every import path is a project file.
+    core.stdlibImports = []
+    // An imported file is parsed with this grammar and walked with importDepth > 0, so its
+    // buildMain stashes its top-level thunks into importedItems; the real buildMain prepends
+    // them to jsrun. Imported once; a leading './' is dropped and a missing '.js' extension
+    // appended before the -i-root search. Declared before buildMain so the vars exist when
+    // the freezer self-compiles the Program tag.
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var rel = path
+        if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.substring(2) }
+        if (!(rel.length >= 3 && rel.substring(rel.length - 3) == ".js")) { rel = rel + ".js" }
+        var file = c.findImport(rel)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        return true
+    }
+
     function buildMain(items) {
+        // The walk of an imported file ends too (importDepth > 0): stash its top-level
+        // statement thunks for the real jsrun instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("jsrun", i64, [llvm.ir.NewParam("scope", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
-        b = makeSeq(items)(b)
+        b = makeSeq(importedItems.concat(items))(b)
         b.NewRet(callExt(b, "js_getret", []))
 
         var fm = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])

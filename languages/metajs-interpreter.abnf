@@ -58,8 +58,17 @@ Program     <~~ pushg(makeSeq(takeAll())) ~~>
             = { Statement } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
+Statement   = Block | ImportStmt | VarDecl | If | While | Do | For | Switch | Return | Break | Continue
             | TryStmt | Throw | FuncDecl | Empty | ExprStmt ;
+
+// import "./mod.js"; loads the referenced file (resolveImport -> core.importFile) and runs
+// its top level, so its function/var declarations register in the shared global scope
+// before the main program runs. A flat, side-effect module model (no binding clause).
+ImportStmt  <~~ push(metajsImport(takeAll(), up.pos)) ~~>
+            = KwImport ModPath [ ";" ] ;
+ModPath     = ModDq | ModSq ;
+ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
 // anywhere. The body is a flat list - the labels must be tried before Statement,
@@ -251,6 +260,7 @@ HexLit      <~~ push(makeConst(hexAt(up.in, 2, up.in.length - 2))) ~~>
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
 
 // The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
+KwImport    = "import" KwEnd ;
 KwVar       = ( "var" | "let" | "const" ) KwEnd ;
 KwFunction  = "function" KwEnd ;
 KwIf        = "if" KwEnd ;
@@ -717,6 +727,36 @@ KwDefault   = "default" KwEnd ;
     // Build the program thunk out of the parsed source.
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "js"
+
+    // ----- Project-file imports (see the ImportStmt rule) -----
+    function metajsImport(items, pos) {
+        resolveImport(items[items.length - 1], pos)
+        return function() { return undefined }
+    }
+    // MetaJS has no importable stdlib modules, so every import path is a project file.
+    core.stdlibImports = []
+    // Load the file, parse+walk it (its top-level program thunk lands on the global stack)
+    // and run that thunk now, so the file's declarations register in the shared global scope
+    // before the main program runs. Imported once; a leading './' is dropped and a missing
+    // '.js' extension appended before the -i-root search.
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        var rel = path
+        if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.substring(2) }
+        if (!(rel.length >= 3 && rel.substring(rel.length - 3) == ".js")) { rel = rel + ".js" }
+        var file = c.findImport(rel)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        c.compile(asg)
+        c.popSource()
+        var mod = popg()
+        mod()
+        return true
+    }
 
     c.compile(c.asg)
     var progT = popg()

@@ -389,6 +389,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/c-to-llvm-ir.abnf", "tests/c-test-multifile.c", "-q"]
         },
         {
+            "name": "MetaJS multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/metajs-interpreter.abnf", "tests/metajs-test-multifile.js", "-q"]
+        },
+        {
+            "name": "MetaJS multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-multifile.js", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
