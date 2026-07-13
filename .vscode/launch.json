@@ -317,6 +317,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/go-to-llvm-ir.abnf", "tests/go-test-multifile.go", "-q"]
         },
         {
+            "name": "Dart multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/dart-interpreter.abnf", "tests/dart-test-multifile.dart", "-q"]
+        },
+        {
+            "name": "Dart multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/dart-to-llvm-ir.abnf", "tests/dart-test-multifile.dart", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

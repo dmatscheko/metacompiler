@@ -9,10 +9,11 @@
 //   ./mec languages/dart-to-llvm-ir.abnf tests/dart-test-recognize.dart -q                    (fails)
 //   ./mec languages/dart-to-llvm-ir.abnf tests/dart-test-recognize.dart -q -warn-unsupported  (exit 0)
 
-// --- Directives (not implemented: no module system) ---
+// --- Directives: import now resolves ('dart:*' is a builtin no-op, project files load via
+//     -i); library / export / part remain not implemented ---
 library recognize_demo;
 import 'dart:math';
-import 'package:collection/collection.dart' as coll;
+import 'dart:collection' as coll;
 export 'src/helpers.dart' show Helper hide Internal;
 part 'recognize_part.dart';
 

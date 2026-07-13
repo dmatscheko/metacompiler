@@ -44,8 +44,14 @@ Program     <~~ pushg(makeSeq(takeAll())) ~~>
 // Library directives: accepted, not implemented (there is no module system). Each pushes
 // nothing, so only the statement thunks reach makeSeq.
 Directive   = ImportD | ExportD | PartD | LibraryD ;
-ImportD     <~~ notImpl("import directive", up.pos) ~~>
-            = KwImport UriStr [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
+// import 'lib.dart'; maps to a project file (searched under the program's directory and the
+// -i roots); a dart: import (dart:math, ...) is a builtin no-op. ImportUri captures the main
+// URI with its surrounding quotes stripped and hands it to resolveImport; the show/hide
+// combinators and a conditional-import URI are parsed and ignored.
+ImportD     <~~ resolveImport(pop(), up.pos) ~~>
+            = KwImport ImportUri [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
+ImportUri   <~~ push(uriPath(up.in)) ~~>
+            = UriStr ;
 ExportD     <~~ notImpl("export directive", up.pos) ~~>
             = KwExport UriStr { Combinator } ";" ;
 PartD       <~~ notImpl("part directive", up.pos) ~~>
@@ -1103,6 +1109,47 @@ KwFactory   = "factory" KwEnd ;
             if (hasOwn(scopes[i], "this")) { return scopes[i]["this"] }
         }
         return undefined
+    }
+
+    // ----- Project-file imports (import 'lib.dart';) -----
+    // dart: libraries are builtins the runtime already provides, so importing one is a
+    // no-op (resolveImport short-circuits on these prefixes, whole path or prefix).
+    core.stdlibImports = ["dart:core", "dart:math", "dart:async", "dart:collection", "dart:convert"]
+
+    // The URI text of an import directive, with any whitespace and the surrounding quotes
+    // stripped: 'geomlib.dart' -> geomlib.dart (39 = ', 34 = ").
+    function uriPath(raw) {
+        var s = stripWs(raw)
+        if (s.length >= 2) {
+            var q = s.charCodeAt(0)
+            if (q == 39 || q == 34) { s = s.substring(1, s.length - 1) }
+        }
+        return s
+    }
+
+    // A non-dart: import names a project file: strip a leading './', ensure the .dart
+    // extension, then search the program's directory and the -i roots (c.findImport). The
+    // file is parsed with this grammar and its top-level declaration thunk is run right
+    // here, so its classes and functions register into the shared global scope before the
+    // main file's own top level runs; only the main file's main() is the entry point. A
+    // file is imported once; repeats and cycles are no-ops.
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        var p = path
+        if (p.length >= 2 && p.substring(0, 2) == "./") { p = p.substring(2) }
+        if (!(p.length >= 5 && p.substring(p.length - 5) == ".dart")) { p = p + ".dart" }
+        var file = c.findImport(p)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        c.compile(asg)
+        var impProgT = popg()
+        impProgT()
+        c.popSource()
+        return true
     }
 
     c.compile(c.asg)

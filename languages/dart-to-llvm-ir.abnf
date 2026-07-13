@@ -48,8 +48,14 @@ Program     <~~ buildMain(takeAll()) ~~>
 // Library directives: accepted, not implemented (there is no module system). Each pushes
 // nothing, so only the statement thunks reach buildMain.
 Directive   = ImportD | ExportD | PartD | LibraryD ;
-ImportD     <~~ notImpl("import directive", up.pos) ~~>
-            = KwImport UriStr [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
+// import 'lib.dart'; maps to a project file (searched under the program's directory and the
+// -i roots); a dart: import (dart:math, ...) is a builtin no-op. ImportUri captures the main
+// URI with its surrounding quotes stripped and hands it to resolveImport; the show/hide
+// combinators and a conditional-import URI are parsed and ignored.
+ImportD     <~~ resolveImport(pop(), up.pos) ~~>
+            = KwImport ImportUri [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
+ImportUri   <~~ push(uriPath(up.in)) ~~>
+            = UriStr ;
 ExportD     <~~ notImpl("export directive", up.pos) ~~>
             = KwExport UriStr { Combinator } ";" ;
 PartD       <~~ notImpl("part directive", up.pos) ~~>
@@ -530,6 +536,49 @@ KwFactory   = "factory" KwEnd ;
 
     // A clean compile-time abort (used by the shared notImpl helper in compile-core.js).
     function fail(msg) { println("dart compiler error: " + msg); exit(1) }
+
+    // ----- Project-file imports (import 'lib.dart';) -----
+    // dart: libraries are builtins the runtime already provides, so importing one is a
+    // no-op (resolveImport short-circuits on these prefixes, whole path or prefix).
+    core.stdlibImports = ["dart:core", "dart:math", "dart:async", "dart:collection", "dart:convert"]
+
+    // The URI text of an import directive, with any whitespace and the surrounding quotes
+    // stripped: 'geomlib.dart' -> geomlib.dart (39 = ', 34 = ").
+    function uriPath(raw) {
+        var s = stripWs(raw)
+        if (s.length >= 2) {
+            var q = s.charCodeAt(0)
+            if (q == 39 || q == 34) { s = s.substring(1, s.length - 1) }
+        }
+        return s
+    }
+
+    // A non-dart: import names a project file: strip a leading './', ensure the .dart
+    // extension, then search the program's directory and the -i roots (c.findImport). The
+    // file is parsed with this grammar; its top-level declaration thunks are stashed by
+    // buildMain (importDepth > 0) and prepended to dartmain, so its classes and functions
+    // register before the main file's own top level. A file is imported once; repeats and
+    // cycles are no-ops.
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var p = path
+        if (p.length >= 2 && p.substring(0, 2) == "./") { p = p.substring(2) }
+        if (!(p.length >= 5 && p.substring(p.length - 5) == ".dart")) { p = p + ".dart" }
+        var file = c.findImport(p)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        return true
+    }
 
     var curClassName = ""
     var classNames = {} // Known class names (bare-name construction).
@@ -1229,6 +1278,12 @@ KwFactory   = "factory" KwEnd ;
     // The top level statements become dartmain(env, args): declare the top level (functions,
     // classes, top level vars), then call int main(). Its return value is the exit code.
     function buildMain(items) {
+        // The walk of an imported file ends here too: stash its top-level declaration
+        // thunks for the real dartmain instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("dartmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
@@ -1236,7 +1291,8 @@ KwFactory   = "factory" KwEnd ;
         // Dart print writes its argument followed by a newline (like println).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
-        b = makeSeq(items)(b)
+        // Imported declarations first, then the main file's own top level.
+        b = makeSeq(importedItems.concat(items))(b)
         // The entry point defaults to main() but -main (c.mainName) can name another.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }
