@@ -157,8 +157,8 @@ Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | Nest
 // pushes nothing, so makeClassStmt simply skips it.
 NestedType  <~~ notImpl("nested type declaration", up.pos) ~~>
             = [ KwEnum | KwAnnotation ] KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ SkipBlock ]
-            | KwInterface Id [ SkipAngle ] [ ":" SuperList ] SkipBlock
-            | KwObject Id [ ":" SuperList ] SkipBlock ;
+            | KwInterface Id [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ]
+            | KwObject Id [ ":" SuperList ] [ SkipBlock ] ;
 // A trailing visibility-only accessor (var x = 0; private set) is parsed and ignored:
 // the subset does not enforce visibility, so the property still binds its initializer.
 // A body-carrying accessor (get() = ..., set(v) { ... }) has a `(` after get/set and is
@@ -733,17 +733,20 @@ DiscardExpr <~~ pop() ~~> = Expression ;
 // Type declarations accepted structurally, then reported as not implemented (so a
 // full Kotlin file parses; -warn-unsupported lets the rest compile). Body is skipped.
 UnsupType   = Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias ;
+// The body is optional: a marker interface (interface State) has no { } - it still
+// parses and is reported via notImpl exactly like a bodied one.
 Interface   <~~ push(notImplStmt("interface", up.pos)) ~~>
-            = KwInterface Id [ SkipAngle ] [ ":" SuperList ] SkipBlock ;
+            = KwInterface Id [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ] ;
 // object Name { ... } is a real singleton: its member body is lowered into a backing
 // js_obj_new (properties initialized once at program start, methods reachable via the
 // name and dispatched through js_mcall). A body outside the subset (e.g. a char
-// literal) falls back to ObjectSkip (notImplemented), so the widened surface parses.
+// literal), or no body at all (a bodiless object), falls back to ObjectSkip
+// (notImplemented), so the widened surface still parses.
 ObjectDecl  = ObjectReal | ObjectSkip ;
 ObjectReal  <~~ push(makeObjectStmt(takeAll())) ~~>
             = KwObject Id <~~ push(up.in) ~~> [ ":" SuperList ] "{" { Member } "}" ;
 ObjectSkip  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
-            = KwObject Id [ ":" SuperList ] SkipBlock ;
+            = KwObject Id [ ":" SuperList ] [ SkipBlock ] ;
 EnumClass   <~~ push(notImplStmt("enum class", up.pos)) ~~>
             = KwEnum KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
 AnnotationClass <~~ push(notImplStmt("annotation class", up.pos)) ~~>

@@ -7,7 +7,8 @@
  * warned, dropped, and the rest runs, so the genuinely lowered multi-statement lambdas
  * self-check. main() ends with exitProcess(fails), so that run exits 0 when they pass.
  * SkipBlock is stressed inside the skipped bodies: nested braces, a string holding a
- * lone } and a string template ${...}, and a char literal. **/
+ * lone } and a string template ${...}, and a char literal. The marker interface and
+ * empty object below exercise the OPTIONAL body (a bodiless declaration - no { } at all). **/
 
 interface Shape {
     fun area(): Int
@@ -34,6 +35,15 @@ enum class Color(val rgb: Int) {
 annotation class Marker
 
 typealias IntList = List<Int>
+
+// Bodiless declarations (no { } body): a marker interface, one with a supertype, and an
+// empty object. Each still parses and is reported via notImpl, exactly like the bodied
+// interface/object above - the body is optional, not required.
+interface Marker
+
+interface Tagged : Marker
+
+object Singleton
 
 class WithExtras(val n: Int) {
     var doubled: Int = 0
