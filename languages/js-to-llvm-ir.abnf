@@ -418,17 +418,27 @@ MemberMod   = "static" KwEnd ;
 
 // ----- Widened statement surface (ACCEPTED, routed to notImplemented) -----
 
-// ES module import/export. The clause shapes are parsed structurally and dropped;
-// there is no module loader in the subset (imports for the other languages resolve
-// against a stdlib set; this dynamic dialect has none).
-ImportStmt  <~~ takeAll(); push(notImplStmt("import statement", up.pos)) ~~>
-            = KwImport ( ImportClause KwFrom StringLit | StringLit ) [ ";" ] ;
+// Project-file imports: `import ... from './lib.js'` and the bare `import './lib.js'`
+// load the referenced file (resolveImport -> core.importFile). Its top-level declarations
+// are stashed by buildMain (importDepth > 0) and prepended to jsrun, so they register in
+// the shared program scope before the main program's own statements. A flat module model:
+// the binding clause is parsed and dropped (the names are global once the file is loaded).
+// The path is the last string ModPath pushed (an import clause may push earlier string
+// specs, which jsImport ignores).
+ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
+            = KwImport ( ImportClause KwFrom ModPath | ModPath ) [ ";" ] ;
 ImportClause = ImportBinding [ "," ImportTail ] | ImportTail ;
 ImportBinding = Id ;
 ImportTail  = ImportNs | ImportNamed ;
 ImportNs    = "*" KwAs Id ;
 ImportNamed = "{" [ ImportSpec { "," ImportSpec } [ "," ] ] "}" ;
 ImportSpec  = ( Id | StringLit ) [ KwAs Id ] ;
+// A module-path string literal that pushes the raw (unescaped) path text - unlike the
+// general StringLit, which builds a makeConst value thunk. The inner tokens are shared
+// with the string lib (StrEsc / DqPlain / SqPlain).
+ModPath     = ModDq | ModSq ;
+ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 ExportStmt  <~~ takeAll(); push(notImplStmt("export statement", up.pos)) ~~>
             = KwExport ( ExportAll | ExportNamed [ KwFrom StringLit ] | KwDefault AssignExpr | Statement ) [ ";" ] ;
@@ -546,6 +556,48 @@ KwInstanceof = "instanceof" KwEnd ;
     // A clean compile-time abort (used by the shared notImpl helper in compile-core.js
     // for constructs that parse but cannot be lowered).
     function fail(msg) { println("js compiler error: " + msg); exit(1) }
+
+    // ----- Project-file imports (see the ImportStmt rule) -----
+
+    // Build an import statement: resolve the referenced file at compile time - which
+    // parses and walks it, stashing its top-level thunks into importedItems - and leave a
+    // no-op statement in the program. The path is the last item ModPath pushed.
+    function jsImport(items, pos) {
+        resolveImport(items[items.length - 1], pos)
+        return function(b) { return b }
+    }
+
+    // JS has no importable stdlib modules in this subset, so every import path is a
+    // project file (resolveImport hands them all to core.importFile below).
+    core.stdlibImports = []
+
+    // An imported file is parsed with this grammar and walked with importDepth > 0, so its
+    // buildMain stashes its top-level statement thunks into importedItems instead of
+    // emitting a second jsrun/jsmain; the real buildMain then prepends them to jsrun (so
+    // the imported declarations register in the shared program scope before the main
+    // program's statements). A file is imported once; repeats and cycles are no-ops. The
+    // path is a literal relative path ('./geomlib.js'): a leading './' is dropped and a
+    // missing '.js' extension is appended before the -i-root search.
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var rel = path
+        if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.substring(2) }
+        if (!(rel.length >= 3 && rel.substring(rel.length - 3) == ".js")) { rel = rel + ".js" }
+        var file = c.findImport(rel)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        return true
+    }
 
     // ----- The emitter state -----
 
@@ -1385,12 +1437,18 @@ KwInstanceof = "instanceof" KwEnd ;
     // jsmain(env, args) is the standalone entry on top of it: it makes a fresh scope,
     // runs the program, and then calls main() - the self checking test convention.
     function buildMain(items) {
+        // The walk of an imported file ends here too (importDepth > 0): stash its
+        // top-level statement thunks for the real jsrun instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("jsrun", i64, [llvm.ir.NewParam("scope", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
-        b = makeSeq(items)(b)
+        b = makeSeq(importedItems.concat(items))(b)
         b.NewRet(callExt(b, "js_getret", []))
 
         var fm = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])

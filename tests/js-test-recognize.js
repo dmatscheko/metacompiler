@@ -3,8 +3,9 @@
 // these grammars now RECOGNIZE but do NOT lower: spread/rest, the modern object-literal
 // property forms, default parameters, optional chaining, nullish coalescing, **,
 // instanceof/in, delete/void/await/yield, async/generator functions, class expressions,
-// new.target, ES import/export, with/debugger, regex literals and the widened number
-// literals (binary/octal/BigInt/numeric-separator).
+// new.target, ES export, with/debugger, regex literals and the widened number
+// literals (binary/octal/BigInt/numeric-separator). (ES import is now a real feature -
+// project-file loading - so it is exercised by tests/js-test-multifile.js instead.)
 //
 // Each of those constructs is ACCEPTED (it parses) and routed to notImplemented, so:
 //   * a DEFAULT run of either grammar aborts cleanly at the first not-lowered construct
@@ -14,9 +15,6 @@
 //
 // Only genuinely supported behavior is asserted; the not-lowered constructs are merely
 // exercised (so they warn) and their placeholder results are never checked.
-
-import { readFile } from "fs";                 // import: named
-import defaultExport, * as ns from "./util.js"; // import: default + namespace
 
 export const VERSION = 2;                       // export: declaration
 export { VERSION as v };                        // export: named with 'as'

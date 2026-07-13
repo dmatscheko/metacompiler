@@ -329,6 +329,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/dart-to-llvm-ir.abnf", "tests/dart-test-multifile.dart", "-q"]
         },
         {
+            "name": "JS multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-interpreter.abnf", "tests/js-test-multifile.js", "-q"]
+        },
+        {
+            "name": "JS multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/js-to-llvm-ir.abnf", "tests/js-test-multifile.js", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",
