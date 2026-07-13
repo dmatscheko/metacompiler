@@ -1939,8 +1939,20 @@ KwStep      = "step" KwEnd ;
         var lob = lo.NewBlock("entry")
         lob.NewRet(lo.Params[1])
         var loV = callExt(b, "js_closure", [handle(loIdx), curScopeV])
+        // The set/array constructors collapse onto listOf: in this untyped subset a set
+        // is modelled as a list (element uniqueness is not enforced). setOf()/emptyList()
+        // with no arguments yields the empty list, since jsf just returns its arg array.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "mutableListOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayListOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arrayOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "setOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "mutableSetOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "hashSetOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "linkedSetOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sortedSetOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptySet"), loV])
         // abs/max/min from Math, exitProcess from exit.
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])

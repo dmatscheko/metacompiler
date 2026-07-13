@@ -458,6 +458,11 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     check("fn-named-params-type", withNamed { r, c -> if (r) c else 0 } == 3)
     check("fn-receiver-type", scoped { s -> s.v } == 9)
 
+    // ----- collection constructors: set/array constructors collapse onto listOf -----
+    check("ctor-setof", setOf(1, 2, 3).size == 3 && setOf("a", "b").contains("b"))
+    check("ctor-arrayof", arrayOf(7, 8).size == 2 && arrayListOf(9).contains(9))
+    check("ctor-empty", emptyList<Int>().size == 0 && emptySet<Int>().size == 0)
+
     // ----- list higher-order methods (trailing lambdas, `it`) -----
     val nums = listOf(3, 1, 4)
     val doubled = nums.map { it * 2 }

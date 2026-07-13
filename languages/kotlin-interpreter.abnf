@@ -927,7 +927,20 @@ KwStep      = "step" KwEnd ;
         for (var i = 0; i < arguments.length; i++) out.push(arguments[i])
         return out
     }
+    // The set/array constructors collapse onto listOf: in this untyped subset a set is
+    // modelled as a list (element uniqueness is not enforced), which is enough to parse
+    // and run the collection-literal top level of real code. setOf()/emptyList() with no
+    // arguments yields the empty list.
     hostGlobals["mutableListOf"] = hostGlobals["listOf"]
+    hostGlobals["arrayListOf"] = hostGlobals["listOf"]
+    hostGlobals["arrayOf"] = hostGlobals["listOf"]
+    hostGlobals["setOf"] = hostGlobals["listOf"]
+    hostGlobals["mutableSetOf"] = hostGlobals["listOf"]
+    hostGlobals["hashSetOf"] = hostGlobals["listOf"]
+    hostGlobals["linkedSetOf"] = hostGlobals["listOf"]
+    hostGlobals["sortedSetOf"] = hostGlobals["listOf"]
+    hostGlobals["emptyList"] = hostGlobals["listOf"]
+    hostGlobals["emptySet"] = hostGlobals["listOf"]
 
     function kstr(v) {
         if (v === undefined) return "kotlin.Unit"
