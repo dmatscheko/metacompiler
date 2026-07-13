@@ -1127,6 +1127,24 @@ KwDefault   = "default" KwEnd ;
     // other defined function.
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
+    if (mainIsSnippet(entry)) {
+        // A snippet (e.g. return greet(3, 4);) is emitted as a synthetic entry function
+        // that runs in a fresh frame with the file's functions available (as buildFunction).
+        var frag = c.parseFrom(c.agrammar, entry, "Statement")
+        var thunk = c.compile(frag).stack[0]
+        var sf = m.NewFunc("__mecmain__", i32, [])
+        curF = sf
+        var sb = sf.NewBlock("entry")
+        scopes.push({})
+        sb = thunk(sb)
+        sb.NewRet(zero)
+        scopes.pop()
+        println(m)
+        var sres = llvm.Run(m, "__mecmain__")
+        print(sres.Out)
+        println("c compiler: -main snippet returned " + sres.Ret)
+        exit(sres.Ret)
+    }
     if (funcs[entry] == undefined || funcs[entry].Blocks.length == 0) {
         println("Error: C programs need a " + entry + "() function.")
         exit(1)

@@ -948,10 +948,20 @@ KwDefault   = "default" KwEnd ;
 
     c.compile(c.asg)
 
-    // The entry point defaults to main() but the -main flag (c.mainName) can name any
-    // other defined function.
+    // The entry point defaults to main(), but the -main flag (c.mainName) can override it:
+    // a bare identifier names a defined function to call, anything with a '(' is a C
+    // snippet (e.g. greet(3, 4);) parsed and run in a fresh frame with the file's functions.
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
+    if (mainIsSnippet(entry)) {
+        var callerScopes = scopes
+        scopes = [globalScope, {}]
+        var r = runMainSnippet(entry, "Statement")
+        scopes = callerScopes
+        var sret = (r != undefined && r.isRet) ? r.v : 0
+        println("c interpreter: -main snippet returned " + sret)
+        exit(sret)
+    }
     if (funcs[entry] == undefined) {
         println("Error: C programs need a " + entry + "() function.")
         exit(1)

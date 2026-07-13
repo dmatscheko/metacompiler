@@ -363,10 +363,28 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // Collect all function definitions.
     c.compile(c.asg)
 
-    // The entry point defaults to main() but the -main flag (c.mainName) can name any
-    // other defined function.
+    // A -main value that contains a '(' is a snippet (a statement to run), not a bare
+    // function name (TinyC does not include the shared cores, so mainIsSnippet is local).
+    function mainIsSnippet(s) {
+        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
+        return false
+    }
+    // The entry point defaults to main(), but the -main flag (c.mainName) can override it:
+    // a bare identifier names a defined function to call, a snippet (e.g. return f(2);) is
+    // parsed and run in a fresh frame with the file's functions.
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
+    if (mainIsSnippet(entry)) {
+        var frag = c.parseFrom(c.agrammar, entry, "Statement")
+        var thunk = c.compile(frag).stack[0]
+        var callerScopes = scopes
+        scopes = [{}]
+        var r = thunk()
+        scopes = callerScopes
+        var sret = (r != undefined) ? r.ret : 0
+        println("tinyc interpreter: -main snippet returned " + sret)
+        exit(sret)
+    }
     if (funcs[entry] == undefined) {
         println("Error: TinyC programs need a " + entry + "() function.")
         exit(1)

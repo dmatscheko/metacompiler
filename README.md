@@ -433,11 +433,15 @@ no distinct entry to name.
 
 The value may also be a **snippet** of the target language rather than a bare
 name: if it contains a `(` it is parsed with the same grammar (from its `Statement`
-rule, via the `c.parseFrom` / `-StartRule` override) and run in the program's
-already-populated scope, so it can call the file's functions with real arguments -
-`-main 'greet("one", 2, three)'`, or `-main 'exitProcess(check())'` to choose the
-exit code. Implemented for Kotlin (both engines, byte-identical). The snippet is a
-single statement.
+rule, via the `c.parseFrom` / `Parseropts.StartRule` override) and run in the
+program's already-populated scope, so it can call the file's functions with real
+arguments - `-main 'greet("one", 2, three)'`, or `-main 'exitProcess(check())'` to
+choose the exit code. The snippet is a single statement (the languages that need a
+statement terminator want the `;`, e.g. `-main 'return add(3, 4);'`). Implemented
+for every language that has a nameable entry: the handle-runtime languages run/emit
+the snippet in the program scope (Kotlin, Go, JS, TS, MetaJS, Dart, Java, C#), and
+C/TinyC run it in a fresh frame / a synthetic entry function. Both engines,
+byte-identical.
 
 #### Grammar linting (-verify)
 

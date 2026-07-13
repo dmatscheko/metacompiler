@@ -1181,6 +1181,18 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-main.c", "-q", "-main", "checkAll"]
         },
         {
+            "name": "C -main snippet (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-interpreter.abnf", "tests/c-test-main.c", "-q", "-main", "return checkAll();"]
+        },
+        {
+            "name": "C -main snippet (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-main.c", "-q", "-main", "return checkAll();"]
+        },
+        {
             "name": "C# -main entry point (interpreter)",
             "type": "go",
             "request": "launch",

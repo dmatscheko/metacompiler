@@ -449,10 +449,33 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
     // Build the module out of the parsed program.
     c.compile(c.asg)
 
-    // The entry point defaults to main() but the -main flag (c.mainName) can name any
-    // other defined function.
+    // A -main value that contains a '(' is a snippet (a statement to emit), not a bare
+    // function name (TinyC does not include the shared cores, so mainIsSnippet is local).
+    function mainIsSnippet(s) {
+        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 40) { return true } }
+        return false
+    }
+    // The entry point defaults to main(), but the -main flag (c.mainName) can override it:
+    // a bare identifier names a defined function, a snippet (e.g. return f(2);) is emitted
+    // as a synthetic entry function with the file's functions available (as buildFunction).
     var entry = c.mainName
     if (entry == undefined || entry == "") { entry = "main" }
+    if (mainIsSnippet(entry)) {
+        var frag = c.parseFrom(c.agrammar, entry, "Statement")
+        var thunk = c.compile(frag).stack[0]
+        var sf = m.NewFunc("__mecmain__", i32, [])
+        curF = sf
+        var sb = sf.NewBlock("entry")
+        scopes.push({})
+        sb = thunk(sb)
+        sb.NewRet(zero)
+        scopes.pop()
+        println(m)
+        var sres = llvm.Run(m, "__mecmain__")
+        print(sres.Out)
+        println("tinyc: -main snippet returned " + sres.Ret)
+        exit(sres.Ret)
+    }
     if (funcs[entry] == undefined || funcs[entry].Blocks.length == 0) {
         println("Error: TinyC programs need a " + entry + "() function.")
         exit(1)
