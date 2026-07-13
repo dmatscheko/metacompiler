@@ -703,6 +703,19 @@ c""".length == 5 && """v=${2 + 3}""" == "v=5")
     }
     check("localfun-in-lambda", lamLocalFun(5) == 11)
 
+    // ----- a { } block in value position (if / when arm) yields its last expression -----
+    val ifBlockVal = if (fails == 0) { val t = 3; t * 2 } else { -1 }
+    check("if-block-value", ifBlockVal == 6)
+    val whenBlockVal = when (checks) {
+        0 -> { -1 }
+        else -> {
+            val a = 10
+            val b = 5
+            a + b
+        }
+    }
+    check("when-block-value", whenBlockVal == 15)
+
     // ----- everything combined -----
     check("combined-pipeline", transform(listOf(1, 2, -3)) == "o1e2x")
 

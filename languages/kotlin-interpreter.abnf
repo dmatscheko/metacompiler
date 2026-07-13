@@ -301,7 +301,7 @@ CondLevel   = IfExpr | WhenExpr | OrExpr ;
 
 // if as an expression needs both arms.
 IfExpr      <~~ push(makeIfExpr(pop(), pop(), pop())) ~~>
-            = KwIf "(" Expression ")" Expression KwElse Expression ;
+            = KwIf "(" Expression ")" ( ValueBlock | Expression ) KwElse ( ValueBlock | Expression ) ;
 
 // when { c1 -> e1; else -> e } and when (x) { 1, 2 -> e1; else -> e }.
 WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
@@ -316,9 +316,9 @@ WhenExprSubj <~~ push({subj: pop()}) ~~>
             = Expression ;
 // The else arm must be tried first: otherwise 'else' would parse as a variable arm
 // (and only fail at run time, when no other arm matches).
-WhenElse    = KwElse "->" Expression <~~ push({els: pop()}) ~~> [ ";" ] ;
+WhenElse    = KwElse "->" ( ValueBlock | Expression ) <~~ push({els: pop()}) ~~> [ ";" ] ;
 WhenArm     <~~ push(makeWhenArm(takeAll())) ~~>
-            = WhenCond { "," WhenCond } [ "," ] "->" Expression [ ";" ] ;
+            = WhenCond { "," WhenCond } [ "," ] "->" ( ValueBlock | Expression ) [ ";" ] ;
 // A branch condition: an inclusive range test (in / !in), a type test (is T / !is T,
 // undecidable so it never matches and warns), or a value to compare with.
 WhenCond    = WhenIn | WhenNotIn | WhenIs | WhenVal ;
@@ -524,6 +524,12 @@ ThisExpr    <~~ push(makeVarRef("this")) ~~>
 // one expression; without parameters the single argument is bound to 'it'.
 Lambda      <~~ push(makeLambda(takeAll())) ~~>
             = "{" [ LambdaParams ] { LamStmt } "}" ;
+// A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
+// statements in a fresh scope and its value is the last expression (Unit if it ends in a
+// statement). Tried before a plain Expression in those arms; a real lambda ({ x -> ... })
+// has parameters, so it fails ValueBlock and falls through to Lambda.
+ValueBlock  <~~ push(makeValueBlock(takeAll())) ~~>
+            = "{" { LamStmt } "}" ;
 // A lambda body is a sequence of statements whose value is its last expression
 // (a single expression is the common case). Genuinely lowered, not notImpl.
 // A leading annotation (runCatching { @Suppress("DEPRECATION") val x = ... }) is
@@ -1210,6 +1216,27 @@ KwStep      = "step" KwEnd ;
                 scopes = saved
                 return last
             }
+        }
+    }
+    // A { ... } block in value position (an if / when arm): run its statements in a fresh
+    // nested scope; the value is the last expression (Unit if it ends in a statement). A
+    // return/break/continue inside propagates out as the usual {isRet}/BRK/CONT signal.
+    function makeValueBlock(items) {
+        return function() {
+            scopes.push({})
+            var last = anytype // A block's value hops types across items.
+            last = undefined
+            for (var k = 0; k < items.length; k++) {
+                if (items[k].expr != undefined) {
+                    last = items[k].expr()
+                } else {
+                    last = undefined
+                    var r = items[k].stmt()
+                    if (r != undefined) { scopes.pop(); return r }
+                }
+            }
+            scopes.pop()
+            return last
         }
     }
     // A destructuring declaration is not lowered; evaluate the initializer (so its
