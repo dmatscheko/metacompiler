@@ -81,7 +81,7 @@ Abs         = ( "\\left|" Sum "\\right|" )  <~~ push(mkAbs(pop())) ~~>
 
 Frac        = ( "\\frac" "{" Sum "}" "{" Sum "}" ) <~~
                                              var it = takeAll()
-                                             push(mkBin("/", it[0], it[1]))
+                                             push(mkBin(it[0], "/", it[1]))
                                             ~~> ;
 
 Root        = ( "\\sqrt" [ "[" Sum "]" ] "{" Sum "}" ) <~~
@@ -203,7 +203,7 @@ Sp          = { " " | "\t" | "\r" } ;
         }
     }
     function mkNeg(a)      { return { ev: function(env) { return -a.ev(env) }, vars: a.vars } }
-    function mkBin(op, a, b) { return { ev: function(env) { return applyOp(op, a.ev(env), b.ev(env)) }, vars: varsUnion(a.vars, b.vars) } }
+    function mkBin(a, op, b) { return { ev: function(env) { return applyOp(op, a.ev(env), b.ev(env)) }, vars: varsUnion(a.vars, b.vars) } }
     function mkPow(a, b)   { return { ev: function(env) { return Math.pow(a.ev(env), b.ev(env)) }, vars: varsUnion(a.vars, b.vars) } }
     function mkFunc(key, a) { return { ev: function(env) { return applyFunc(key, a.ev(env)) }, vars: a.vars } }
     function mkAbs(a)      { return { ev: function(env) { return Math.abs(a.ev(env)) }, vars: a.vars } }
@@ -212,7 +212,7 @@ Sp          = { " " | "\t" | "\r" } ;
 
     function foldAddSub(items) {
         var node = items[0]
-        for (var i = 1; i < items.length; i += 2) { node = mkBin(items[i], node, items[i + 1]) }
+        for (var i = 1; i < items.length; i += 2) { node = mkBin(node, items[i], items[i + 1]) }
         return node
     }
     // items = [node, op, node, node, ...]; a node with no operator before it is implicit *.
@@ -220,8 +220,8 @@ Sp          = { " " | "\t" | "\r" } ;
         var node = items[0]
         var i = 1
         while (i < items.length) {
-            if (typeof items[i] == "string") { node = mkBin(items[i], node, items[i + 1]); i = i + 2 }
-            else { node = mkBin("*", node, items[i]); i = i + 1 }
+            if (typeof items[i] == "string") { node = mkBin(node, items[i], items[i + 1]); i = i + 2 }
+            else { node = mkBin(node, "*", items[i]); i = i + 1 }
         }
         return node
     }
@@ -342,7 +342,7 @@ Sp          = { " " | "\t" | "\r" } ;
     }
 
     function solveEq(lhs, rhs, raw) {
-        var diff = mkBin("-", lhs, rhs)
+        var diff = mkBin(lhs, "-", rhs)
         var unk = unknownsOf(diff)
         if (unk.length == 0) {
             var l = lhs.ev(assignedEnv)
