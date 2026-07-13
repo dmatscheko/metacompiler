@@ -68,6 +68,16 @@ Number      = ( "0" | "1"..."9" { "0"..."9" } )
     function paren(n) { return n.atom ? n.s : "(" + n.s + ")" }
     function mkNeg(n) { return {v: -n.v, s: "-" + paren(n), atom: false} }
 
+    // combine applies a binary operator to two nodes (as in calculator-interpreter-1).
+    function combine(a, op, b) {
+        var v = anytype
+        if (op == "+") v = a.v + b.v
+        else if (op == "-") v = a.v - b.v
+        else if (op == "*") v = a.v * b.v
+        else v = a.v / b.v
+        return {v: v, s: paren(a) + " " + op + " " + paren(b), atom: false}
+    }
+
     // items = [node, op, node, op, node, ...] -> the left folded node.
     function foldChain(items) {
         var node = items[0]
@@ -75,12 +85,7 @@ Number      = ( "0" | "1"..."9" { "0"..."9" } )
             var op = items[i]
             var w = items[i + 1]
             println("calculating " + node.v + " " + op + " " + w.v)
-            var v = anytype
-            if (op == "+") { v = node.v + w.v }
-            if (op == "-") { v = node.v - w.v }
-            if (op == "*") { v = node.v * w.v }
-            if (op == "/") { v = node.v / w.v }
-            node = {v: v, s: paren(node) + " " + op + " " + paren(w), atom: false}
+            node = combine(node, op, w)
         }
         return node
     }
