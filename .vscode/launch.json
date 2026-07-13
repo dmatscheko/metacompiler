@@ -377,6 +377,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-multifile.rb", "-q"]
         },
         {
+            "name": "C multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/c-interpreter.abnf", "tests/c-test-multifile.c", "-q"]
+        },
+        {
+            "name": "C multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/c-to-llvm-ir.abnf", "tests/c-test-multifile.c", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

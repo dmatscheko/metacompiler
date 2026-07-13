@@ -1121,6 +1121,26 @@ KwDefault   = "default" KwEnd ;
     // external library we cannot resolve (see resolveImport in lib/compile-core.js).
     core.stdlibImports = ["stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h", "stdbool.h", "stdint.h", "stddef.h", "limits.h", "assert.h", "stdarg.h"]
 
+    // Project-file includes: #include "geomlib.h" loads geomlib.h (searched under the
+    // program's directory and the -i roots) and compiles it, so its functions emit into
+    // this module like the main file's (header-only in this subset). System <...> headers
+    // in core.stdlibImports stay no-ops. A file is included once; repeats and cycles no-op.
+    var importedFiles = {}
+    core.importFile = function(path, pos) {
+        var rel = path
+        if (rel.slice(0, 2) == "./") { rel = rel.slice(2) }
+        var file = c.findImport(rel)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        c.compile(asg)
+        c.popSource()
+        return true
+    }
+
     c.compile(c.asg)
 
     // The entry point defaults to main() but the -main flag (c.mainName) can name any
