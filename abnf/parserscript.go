@@ -53,7 +53,7 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 	}
 	v, err := ps.common.Run(module+":parserCommand:"+strconv.Itoa(rule.Pos), code, rule.Int)
 	if err != nil {
-		panic(err.Error() + "\nError was in " + rule.ToString() + ", Code: '" + code + "'")
+		panic(wrapScriptError(err, rule.ToString(), code))
 	}
 
 	res, ok := v.Export().(*r.Rule)

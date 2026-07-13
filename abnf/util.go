@@ -85,6 +85,13 @@ func ShortenColored(s string) string {
 	return head.String() + "\n[...]\n" + tail.String()
 }
 
+// wrapScriptError builds the panic message for a tag or :script whose JS code threw:
+// the original error, a short form of the rule it ran in, and the offending code. Every
+// tag/script error site (goja and frozen, parser and compiler) shares this one wording.
+func wrapScriptError(err interface{}, ruleText, code string) string {
+	return fmt.Sprintf("%s\nError was in %s, Code: '%s'", err, ruleText, code)
+}
+
 func SprintRule(rule *r.Rule) string {
 	return rule.ToString()
 }

@@ -168,7 +168,7 @@ func (we *walkEngine) RunTagCode(tag *r.Rule, name string, upStream map[string]r
 	}
 	defer func() {
 		if err := recover(); err != nil {
-			panic(fmt.Sprintf("%s\nError was while compiling a script, in the emitter tag: '%s'", err, code))
+			panic(wrapScriptError(err, tag.ToString(), code))
 		}
 	}()
 	we.curUp = upStream
@@ -490,7 +490,7 @@ func (eng *frozenEngine) RunTagCode(tag *r.Rule, name string, upStream map[strin
 	code := (*tag.CodeChilds)[slot].String
 	defer func() {
 		if err := recover(); err != nil {
-			panic(fmt.Sprintf("%s\nError was in %s, Code: '%s'", err, tag.ToString(), code))
+			panic(wrapScriptError(err, tag.ToString(), code))
 		}
 	}()
 

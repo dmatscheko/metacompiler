@@ -135,7 +135,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 
 	v, err := cs.common.Run(name, code, tag.Int)
 	if err != nil {
-		panic(err.Error() + "\nError was in " + tag.ToString() + ", Code: '" + code + "'")
+		panic(wrapScriptError(err, tag.ToString(), code))
 	}
 
 	if cs.traceEnabled {
