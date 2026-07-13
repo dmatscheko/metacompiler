@@ -128,5 +128,12 @@ fun main() {
     // value itself is a placeholder (left unused here). The try/catch STATEMENT is unaffected.
     val fromTry = try { helper(4) } catch (e: Exception) { -1 }
 
+    // a destructuring for-loop iterates the collection genuinely, but the per-element
+    // destructuring is not modelled (a and b bind to undefined, so they are left unused);
+    // the loop still runs once per pair, so the counter reaches the list size.
+    var pairsSeen = 0
+    for ((a, b) in listOf(10 to 1, 20 to 2, 30 to 3)) { pairsSeen = pairsSeen + 1 }
+    if (pairsSeen != 3) { fails = fails + 1 }
+
     exitProcess(fails)
 }

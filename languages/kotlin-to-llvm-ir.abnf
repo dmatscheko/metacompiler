@@ -266,8 +266,10 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 
 // for (i in 1..n) and for (x in list); the range is tried first. Ranges come as
 // 1..n (inclusive), 0 until n (exclusive) and n downTo 1, all with an optional
-// positive step (soft keywords: until/downTo/step stay usable as names).
-For         = ForRange | ForList ;
+// positive step (soft keywords: until/downTo/step stay usable as names). The
+// destructuring form for ((a, b) in pairs) is tried last (it opens with a second
+// paren, which the other two reject).
+For         = ForRange | ForList | ForDestruct ;
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn AddExpr RangeOp AddExpr [ StepSfx ] ")" Statement ;
 RangeOp     = ".." <~~ push({rop: ".."}) ~~>
@@ -277,6 +279,14 @@ StepSfx     <~~ push({step: pop()}) ~~>
             = KwStep AddExpr ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+// A destructuring for-loop, for ((typeName, path) in byPath). The loop iterates the
+// collection genuinely (so the body runs once per element and its calls stay visible),
+// but the per-element destructuring is not modelled: each component name binds to
+// undefined, exactly like a destructuring lambda parameter or a val (a, b) = declaration.
+ForDestruct <~~ push(makeForDestruct(takeAll(), up.pos)) ~~>
+            = KwFor "(" DTuple KwIn Expression ")" Statement ;
+DTuple      <~~ push({dnames: takeAll()}) ~~>
+            = "(" DName { "," DName } [ "," ] ")" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
@@ -1628,6 +1638,49 @@ KwStep      = "step" KwEnd ;
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
+            loopStack.push({cont: postB, brk: exitB, label: lbl})
+            bodyT(bodyB).NewBr(postB)
+            loopStack.pop()
+            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_jadd", [iV3, emitNum(postB, 1)])])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    // for ((a, b) in coll): the same list loop as makeForList, but the per-element
+    // destructuring is not modelled - the component names are declared once as undefined
+    // and never bound to arr[i]. A non-list collection (e.g. a map) has no length and so
+    // iterates zero times, exactly as in the interpreter.
+    function makeForDestruct(items, pos) {
+        notImpl("destructuring for-loop", pos)
+        var names = items[0].dnames
+        var collT = items[1]
+        var bodyT = items[2]
+        return function(b) {
+            var lbl = pendingLabel
+            pendingLabel = null
+            hidCount++
+            var iName = "$i" + hidCount
+            var aName = "$a" + hidCount
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var r = collT(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            for (var n = 0; n < names.length; n++) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), hUndef])
+            }
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()

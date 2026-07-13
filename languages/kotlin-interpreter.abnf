@@ -245,8 +245,10 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 
 // for (i in 1..n) and for (x in list); the range is tried first. Ranges come as
 // 1..n (inclusive), 0 until n (exclusive) and n downTo 1, all with an optional
-// positive step (soft keywords: until/downTo/step stay usable as names).
-For         = ForRange | ForList ;
+// positive step (soft keywords: until/downTo/step stay usable as names). The
+// destructuring form for ((a, b) in pairs) is tried last (it opens with a second
+// paren, which the other two reject).
+For         = ForRange | ForList | ForDestruct ;
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn AddExpr RangeOp AddExpr [ StepSfx ] ")" Statement ;
 RangeOp     = ".." <~~ push({rop: ".."}) ~~>
@@ -256,6 +258,14 @@ StepSfx     <~~ push({step: pop()}) ~~>
             = KwStep AddExpr ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
             = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+// A destructuring for-loop, for ((typeName, path) in byPath). The loop iterates the
+// collection genuinely (so the body runs once per element and its calls stay visible),
+// but the per-element destructuring is not modelled: each component name binds to
+// undefined, exactly like a destructuring lambda parameter or a val (a, b) = declaration.
+ForDestruct <~~ push(makeForDestruct(takeAll(), up.pos)) ~~>
+            = KwFor "(" DTuple KwIn Expression ")" Statement ;
+DTuple      <~~ push({dnames: takeAll()}) ~~>
+            = "(" DName { "," DName } [ "," ] ")" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
@@ -1464,6 +1474,35 @@ KwStep      = "step" KwEnd ;
             declVar(name, undefined)
             for (var i = 0; i < arr.length; i++) {
                 setVar(name, arr[i])
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) break
+                    if (r === CONT) continue
+                    if (lbl != null && r.contL === lbl) continue
+                    res = r
+                    break
+                }
+            }
+            scopes.pop()
+            return res
+        }
+    }
+    // for ((a, b) in coll): iterate coll like a list (0 iterations for a non-list, e.g.
+    // a map), running the body each time so its calls stay visible. The component names
+    // bind to undefined - the per-element destructuring is not modelled.
+    function makeForDestruct(items, pos) {
+        notImpl("destructuring for-loop", pos)
+        var names = items[0].dnames
+        var collT = items[1]
+        var bodyT = items[2]
+        return function() {
+            var lbl = pendingLabel
+            pendingLabel = null
+            var arr = collT()
+            var res = undefined
+            scopes.push({})
+            for (var n = 0; n < names.length; n++) { declVar(names[n], undefined) }
+            for (var i = 0; i < arr.length; i++) {
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
