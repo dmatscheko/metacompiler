@@ -1711,18 +1711,22 @@ KwStep      = "step" KwEnd ;
 
     c.compile(c.asg)
 
-    if (typeof globalScope["main"] != "function") {
-        fail("Kotlin programs need a top level main() function.")
+    // The entry point defaults to main() but the -main flag (c.mainName) can name any
+    // other top-level function, e.g. to run a real-world file that has no main().
+    var mainName = c.mainName
+    if (mainName == undefined || mainName == "") { mainName = "main" }
+    if (typeof globalScope[mainName] != "function") {
+        fail("Kotlin programs need a top level " + mainName + "() function.")
     }
-    // A user exception that escapes main() is reported like any runtime error.
+    // A user exception that escapes the entry point is reported like any runtime error.
     var ret = anytype
     try {
-        ret = globalScope["main"]()
+        ret = globalScope[mainName]()
     } catch (e) {
         if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
         throw e
     }
-    println("kotlin interpreter: main() returned " + (ret === undefined ? 0 : ret))
+    println("kotlin interpreter: " + mainName + "() returned " + (ret === undefined ? 0 : ret))
     exit(ret === undefined ? 0 : ret | 0)
 
 ~~) ;

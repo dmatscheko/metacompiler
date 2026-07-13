@@ -42,6 +42,8 @@ import (
 //  -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
 //  -warn-unsupported  warn and placeholder parsed-but-unimplemented syntax (default: abort);
 //                lets call graphs / CFGs / traces be built from partially understood languages
+//  -main NAME    call NAME as the program entry point instead of main (grammars that
+//                support it read it as c.mainName)
 //  -pipe         start a new pipeline segment: the text a language prints becomes the
 //                program input of the next segment, so one language (e.g. a preprocessor)
 //                can transform the source another language then consumes. Example:
@@ -69,7 +71,8 @@ type options struct {
 	frozen, verify, pretty                bool
 	warnImports                           bool     // -warn-imports: warn+skip unresolved imports instead of aborting.
 	importRoots                           []string // -i include roots for project-file imports, in order.
-	warnUnsupported                       bool // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
+	warnUnsupported                       bool   // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
+	entryPoint                            string // -main: entry-point function name a compiled program calls (default "main").
 	speedTest, useBlockList, useFoundList bool
 	speedCount                            int   // Timed cycle count for -speed (>0 when set).
 	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
@@ -126,6 +129,8 @@ func parseArgs(args []string) (*options, error) {
 			o.warnImports = true
 		case "-warn-unsupported":
 			o.warnUnsupported = true
+		case "-main":
+			o.entryPoint, err = takeVal()
 		case "-pipe":
 			// A pipeline segment boundary: the TEXT output of the segment so far
 			// becomes the program input of the next segment (see runPipeline).
@@ -226,6 +231,9 @@ func main() {
 	abnf.WarnUnresolvedImports = o.warnImports
 	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
+	if o.entryPoint != "" {
+		abnf.EntryPoint = o.entryPoint
+	}
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath
@@ -494,6 +502,7 @@ anywhere among the files.
   -warn-imports warn and skip imports a grammar cannot resolve (default: abort)
   -warn-unsupported  warn+placeholder parsed-but-unimplemented syntax instead of aborting;
                 lets call graphs / CFGs / traces be built from partially understood languages
+  -main NAME    call NAME as the program entry point instead of main (c.mainName)
   -pipe         start a new pipeline segment fed by the previous segment's text output
                 (e.g. c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf)
   -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)

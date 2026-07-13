@@ -1961,7 +1961,11 @@ KwStep      = "step" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "exitProcess"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         b = makeSeq(importedItems.concat(items))(b)
-        var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "main")])
+        // The entry point defaults to main() but the -main flag (c.mainName) can name any
+        // other top-level function, e.g. to run a real-world file that has no main().
+        var mainName = c.mainName
+        if (mainName == undefined || mainName == "") { mainName = "main" }
+        var mainV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, mainName)])
         var argsV = callExt(b, "js_arr_new", [])
         b.NewRet(callExt(b, "js_call", [mainV, hUndef, argsV]))
     }
@@ -1974,7 +1978,9 @@ KwStep      = "step" KwEnd ;
     println(m)
 
     var res = llvm.RunJS(m, "jsmain")
-    println("kotlin compiler: main() returned " + res.Ret)
+    var entryName = c.mainName
+    if (entryName == undefined || entryName == "") { entryName = "main" }
+    println("kotlin compiler: " + entryName + "() returned " + res.Ret)
     exit(res.Ret)
 
 ~~) ;

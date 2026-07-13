@@ -241,6 +241,8 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		"warnUnsupported": WarnUnsupported,
 		"file":            traceSrcName,
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
+		// The entry-point function name (-main flag, default "main").
+		"mainName": EntryPoint,
 		// Project-file imports (the -i include roots): findImport locates a
 		// grammar-mapped relative path ("a/b/C.kt"), readFile loads it, and
 		// pushSource/popSource swap the file/line attribution around the

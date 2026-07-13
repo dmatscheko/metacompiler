@@ -23,6 +23,12 @@ var WarnUnresolvedImports = false
 // c.warnUnsupported via the lib notImplemented() family.
 var WarnUnsupported = false
 
+// EntryPoint is the name of the top-level function a compiled program calls as
+// its entry point, set from the -main CLI flag (default "main"). Grammars read it
+// as c.mainName; it lets a program whose entry function is not named main - or a
+// real-world file with no main() at all - be run from a chosen function instead.
+var EntryPoint = "main"
+
 // ----------------------------------------------------------------------------
 // ASG compiler
 

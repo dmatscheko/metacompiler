@@ -420,6 +420,13 @@ merge into one node (class attribution is a planned refinement). The flags
 default to off and change nothing when unused; interpreter-grammar runs and a
 stepper are the planned next layers.
 
+`-main NAME` names the entry-point function a compiled program calls instead of
+`main` (grammars that support it read it as `c.mainName`; the Kotlin pair does).
+It lets a program whose entry is not named `main` run, and lets a real-world file
+that has no `main()` be driven from a chosen function - handy for rooting a
+`-callgraph` / `-trace` at a specific function. It defaults to `main`, so runs
+without the flag are unchanged.
+
 #### Grammar linting (-verify)
 
 `-verify` checks a grammar for name consistency without running it and exits

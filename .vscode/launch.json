@@ -1145,6 +1145,18 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-recognize.kt", "-q", "-warn-unsupported"]
         },
         {
+            "name": "Kotlin -main entry point (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-main.kt", "-q", "-main", "checkAll"]
+        },
+        {
+            "name": "Kotlin -main entry point (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-main.kt", "-q", "-main", "checkAll"]
+        },
+        {
             "name": "Kotlin delegation SHOULD FAIL (interpreter)",
             "type": "go",
             "request": "launch",
