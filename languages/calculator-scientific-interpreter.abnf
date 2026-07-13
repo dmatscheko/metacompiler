@@ -29,7 +29,7 @@ Expression  =
             ( "+" | "-" )       <~~push(up.in)~~>
             Term
         }
-    )                           <~~push(fold(takeAll()))~~>
+    )                           <~~push(foldChain(takeAll()))~~>
     ;
 
 Term        =
@@ -39,7 +39,7 @@ Term        =
             ( "*" | "/" | "%" ) <~~push(up.in)~~>
             Unary
         }
-    )                           <~~push(fold(takeAll()))~~>
+    )                           <~~push(foldChain(takeAll()))~~>
     ;
 
 // Unary minus is looser than '^', so -3^2 = -(3^2) = -9, while the right side of a power
@@ -146,7 +146,7 @@ Number      =
     }
 
     // items = [node, op, node, op, node, ...] folded left to right (+ - and * / % alike).
-    function fold(items) {
+    function foldChain(items) {
         var node = items[0]
         for (var i = 1; i < items.length; i += 2) node = combine(node, items[i], items[i + 1])
         return node
