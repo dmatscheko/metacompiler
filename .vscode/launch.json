@@ -401,6 +401,18 @@
             "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/metajs-to-llvm-ir.abnf", "tests/metajs-test-multifile.js", "-q"]
         },
         {
+            "name": "Lua multifile (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lua-interpreter.abnf", "tests/lua-test-multifile.lua", "-q"]
+        },
+        {
+            "name": "Lua multifile (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["-i", "tests/imports", "languages/lua-to-llvm-ir.abnf", "tests/lua-test-multifile.lua", "-q"]
+        },
+        {
             "name": "Kotlin unresolved import SHOULD FAIL",
             "type": "go",
             "request": "launch",

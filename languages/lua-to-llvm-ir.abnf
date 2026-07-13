@@ -96,7 +96,17 @@ NotEnders = :script(~~
 // call statement, because its targets look like the start of a call until the '='.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = If | While | Repeat | NumFor | GenFor | DoBlock | LocalFunc | Local | Func
-            | Return | Break | Goto | Label | EmptyStat | AssignStat | CallStat ;
+            | Return | Break | Goto | Label | EmptyStat | Require | AssignStat | CallStat ;
+
+// require "mod" / require("mod"): loads mod.lua (resolveImport -> core.importFile). Its
+// top-level declarations are stashed by buildMain (importDepth > 0) and prepended to
+// jsmain, so they register before the main chunk. A bareword require with a string-literal
+// argument; anything else rolls back to a normal call. A flat module model.
+Require     <~~ push(luaImport(takeAll(), up.pos)) ~~>
+            = "require" KwEnd ( "(" ReqPath ")" | ReqPath ) ;
+ReqPath     = ModDq | ModSq ;
+ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
+ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf Expression KwThen Block { ElseIf } [ Else ] KwEndKw ;
@@ -1098,6 +1108,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // jsmain: declare print, then run the file top to bottom.
     function buildMain(items) {
+        // The walk of a required file ends here too (importDepth > 0): stash its top-level
+        // statement thunks for the real jsmain instead of emitting a second one.
+        if (importDepth > 0) {
+            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            return
+        }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         curF = f
         var b = f.NewBlock("entry")
@@ -1110,14 +1126,44 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
         b = emitLibs(b)
-        b = makeSeq(items)(b)
+        b = makeSeq(importedItems.concat(items))(b)
         b.NewRet(hUndef)
     }
     function buildChunk(items) { buildMain(items) }
 
     // ----- Core library config (see lib/compile-core.js) -----
-    // Lua stdlib prefixes the runtime already provides (none are needed for the subset).
-    core.stdlibImports = []
+    // Lua stdlib libraries the runtime already provides; require of one is a no-op.
+    core.stdlibImports = ["string", "table", "math", "io", "os", "coroutine"]
+
+    // ----- Project-file imports (see the Require rule) -----
+    function luaImport(items, pos) {
+        resolveImport(items[items.length - 1], pos)
+        return function(b) { return b }
+    }
+    // A required file is parsed with this grammar and walked with importDepth > 0, so its
+    // buildMain stashes its top-level thunks into importedItems; the real buildMain prepends
+    // them to jsmain. Required once; a leading './' is dropped and a missing '.lua' extension
+    // appended before the -i-root search.
+    var importedFiles = {}
+    var importDepth = 0
+    var importedItems = []
+    core.importFile = function(path, pos) {
+        var rel = path
+        if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.substring(2) }
+        if (!(rel.length >= 4 && rel.substring(rel.length - 4) == ".lua")) { rel = rel + ".lua" }
+        var file = c.findImport(rel)
+        if (file == "") { return false }
+        if (importedFiles["$" + file] == true) { return true }
+        importedFiles["$" + file] = true
+        var text = c.readFile(file)
+        var asg = c.parse(c.agrammar, text, null, file)
+        c.pushSource(file, text)
+        importDepth = importDepth + 1
+        c.compile(asg)
+        importDepth = importDepth - 1
+        c.popSource()
+        return true
+    }
 
     c.compile(c.asg)
 
