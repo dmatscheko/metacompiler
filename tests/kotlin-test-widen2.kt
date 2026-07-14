@@ -45,6 +45,11 @@ interface Tagged : Marker
 
 object Singleton
 
+// A top-level extension property (receiver + get() accessor). Both the receiver and the
+// accessor are recognised and notImpl - the flat model has no extension/computed props.
+val Int.asMarker: String
+    get() = "marker"
+
 class WithExtras(val n: Int) {
     var doubled: Int = 0
     init {

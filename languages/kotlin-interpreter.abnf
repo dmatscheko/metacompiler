@@ -54,7 +54,7 @@ The entry point is fun main(); self checking programs end with exitProcess(failu
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | UnsupFun | ClassDecl | TopProp ) } ;
+Program     = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ registerFun(pop()) ~~> | ExtFun | UnsupFun | ClassDecl | PropAccessor | TopProp ) } ;
 
 // Modifiers/annotations before a declaration are parsed and ignored. Annotations
 // accept ALL forms: an argument list @Suppress("Unused"), qualified names @a.b.C,
@@ -744,8 +744,12 @@ CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
 SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
             = KwConstructor "(" [ SParam { "," SParam } [ "," ] ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" ] [ SkipBlock ] ;
 SParam      = [ Modifiers ] Id ":" Type [ "=" DiscardExpr ] ;
+// Also matches an EXTENSION property (val Recv.name ... get() = ...): the receiver is
+// absorbed by the tag-less RecvSeg, exactly like an extension function. notImpl either
+// way. Reachable at top level too (a Program alternative), where an extension/computed
+// property otherwise falls to TopProp's Decl, which requires a plain `= init`.
 PropAccessor <~~ notImpl("property accessor", up.pos) ~~>
-            = ( "val" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
 Accessor    = ( KwGet | KwSet ) "(" [ Id [ ":" Type ] ] ")" [ ":" Type ] [ SkipBlock | "=" DiscardExpr ] [ ";" ] ;
 
 // A destructuring declaration: accepted, reported as not implemented; the

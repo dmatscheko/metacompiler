@@ -64,7 +64,7 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassDecl | TopProp ) } ;
+            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassDecl | PropAccessor | TopProp ) } ;
 
 // Modifiers and annotations before a declaration are parsed and ignored (they do
 // not change what we lower). Annotations accept ALL forms: an argument list
@@ -774,8 +774,12 @@ CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
 SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
             = KwConstructor "(" [ SParam { "," SParam } [ "," ] ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" ] [ SkipBlock ] ;
 SParam      = [ Modifiers ] Id ":" Type [ "=" DiscardExpr ] ;
+// Also matches an EXTENSION property (val Recv.name ... get() = ...): the receiver is
+// absorbed by the tag-less RecvSeg, exactly like an extension function. notImpl either
+// way. Reachable at top level too (a Program alternative), where an extension/computed
+// property otherwise falls to TopProp's Decl, which requires a plain `= init`.
 PropAccessor <~~ notImpl("property accessor", up.pos) ~~>
-            = ( "val" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
 Accessor    = ( KwGet | KwSet ) "(" [ Id [ ":" Type ] ] ")" [ ":" Type ] [ SkipBlock | "=" DiscardExpr ] [ ";" ] ;
 
 // A destructuring declaration: accepted, reported as not implemented; the
