@@ -3067,7 +3067,7 @@ func (rt *jsrt) toInt32(v interface{}) int32 {
 
 // runJSModule is llvm.RunJS(): it executes the entry function of a MetaJS
 // module with the standard host bindings and returns its int32 result.
-// This is the program runtime, so the -cfg and -trace hooks live here.
+// This is the program runtime, so the -cfgraph and -trace hooks live here.
 func runJSModule(m *ir.Module, entry string) *RunResult {
 	maybeDumpCFG(m)
 	maybeDumpCallgraph(m)

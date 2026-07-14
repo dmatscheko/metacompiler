@@ -346,7 +346,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		"compileRunStartScript": func(asg *r.Rules, aGrammar *r.Rules, slot int, traceEnabled bool) interface{} {
 			return compileASGInternal(asg, aGrammar, eng.fileName, slot, traceEnabled, eng.preventDefaultOutput)
 		},
-		// True when -trace/-cfg collect source positions: the compilers then
+		// True when -trace/-cfgraph collect source positions: the compilers then
 		// emit js_srcpos statement markers (see lib/compile-core.js stmtPos).
 		"tracing": TraceMarkersWanted(),
 		// Import policy + source positions for clean grammar errors (mirrors the

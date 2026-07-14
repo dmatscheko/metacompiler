@@ -53,7 +53,7 @@ import (
 //                program input of the next segment, so one language (e.g. a preprocessor)
 //                can transform the source another language then consumes, e.g.
 //                c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
-//  -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
+//  -cfgraph F    write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
 //  -trace F      stream runtime events to file F as JSON lines; also the -render input
 //  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
 //  -render K     standalone (no pipeline): read the JSON-lines file named by -trace F
@@ -181,7 +181,7 @@ func parseArgs(args []string) (*options, error) {
 			o.traceAll = true
 		case "-freeze":
 			o.freezePath, err = takeVal()
-		case "-cfg":
+		case "-cfgraph":
 			o.cfgPath, err = takeVal()
 		case "-trace":
 			o.tracePath, err = takeVal()
@@ -582,7 +582,7 @@ anywhere among the files.
                 program input of the next segment, so one language (e.g. a preprocessor)
                 can transform the source another language then consumes, e.g.
                 c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
-  -cfg F        write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
+  -cfgraph F    write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
   -trace F      stream runtime events to file F as JSON lines; also the -render input
   -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
   -render K     standalone (no pipeline): read the JSON-lines file named by -trace F

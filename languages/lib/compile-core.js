@@ -251,7 +251,7 @@ function excDispatch(b, ctl) {
     b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, kind, handle(1)), retB, afterRet)
     // retStmt terminates retB and hands back a fresh unreachable block; nothing else
     // flows into it, so terminate it too, or the emitted module has a block with no
-    // terminator (harmless at run time but it breaks IR printing / -cfg / -callgraph).
+    // terminator (harmless at run time but it breaks IR printing / -cfgraph / -callgraph).
     retStmt(retB, callExt(retB, "js_ctl_value", [ctl])).NewRet(hUndef)
     // break/continue can only arise from valid code if there is somewhere to send them:
     // an enclosing loop, or an enclosing try body to re-signal through. Otherwise (a
@@ -274,7 +274,7 @@ function excDispatch(b, ctl) {
 // stmtPos wraps a statement thunk with a js_srcpos marker carrying the source
 // position of its node (up.pos), so traces, diagrams and steppers know which
 // statement executes. Only when the host collects positions (c.tracing, i.e.
-// -trace or -cfg): otherwise the emitted IR stays exactly as without markers.
+// -trace or -cfgraph): otherwise the emitted IR stays exactly as without markers.
 // The grammars apply it with a production level tag on their Statement rule.
 function stmtPos(t) {
     if (!c.tracing || up.pos == undefined) return t

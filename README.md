@@ -416,12 +416,12 @@ identical event streams (abnf/trace.go):
 
 ```
 ./mec languages/java-to-llvm-ir.abnf tests/java-test-1.java -q \
-      -cfg java.dot -trace java.jsonl   # run + control flow graph + event stream
+      -cfgraph java.dot -trace java.jsonl   # run + control flow graph + event stream
 ./mec -render calls -trace java.jsonl > calls.dot   # dynamic call graph (counts)
 ./mec -render vars  -trace java.jsonl > vars.dot    # which function touches which variable
 ```
 
-`-cfg` writes the basic block graph of every executed IR module as Graphviz DOT
+`-cfgraph` writes the basic block graph of every executed IR module as Graphviz DOT
 (Mermaid when the file name ends in .mmd) - the compilers literally build the
 control flow, so the diagram is the program's real branch structure, for the
 integer-IR languages (TinyC, C subset) too. `-trace` streams runtime events as
@@ -435,10 +435,10 @@ streams of one program are identical. `-render` turns a stream into DOT on stdou
 Events carry source lines: every tag sees the position of its node as up.pos, and
 the compiler grammars wrap their Statement production with stmtPos()
 (lib/compile-core.js), which plants a js_srcpos marker per statement - but only
-while -trace, -cfg or -callgraph is active (the tag scripts read the switch as
+while -trace, -cfgraph or -callgraph is active (the tag scripts read the switch as
 c.tracing), so
 the emitted IR is untouched otherwise. The runtime remembers the marker as the
-current position and stamps it on every event; -cfg labels the blocks with their
+current position and stamps it on every event; -cfgraph labels the blocks with their
 line ranges (entry L15-16).
 
 `-callgraph` extracts a STATIC call graph from the compiled module - the written
@@ -464,7 +464,7 @@ or for a kotlin project:
 ```
 ./mec languages/kotlin-to-llvm-ir.abnf -warn-imports -warn-unsupported \
    app/.../MainActivity.kt -i app/src/main/java -q \
-   -cfg kotlin.dot -callgraph kcg.jsonl -trace k.jsonl
+   -cfgraph kotlin.dot -callgraph kcg.jsonl -trace k.jsonl
 ./mec -render static -trace kcg.jsonl > codebase.dot   # whole-codebase call graph
 ```
 
