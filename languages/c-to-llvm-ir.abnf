@@ -1170,6 +1170,16 @@ KwDefault   = "default" KwEnd ;
         exit(1)
     }
 
+    // With -exe PATH, link the module into a native executable (clang) instead of running
+    // it. main() returns int and output goes through putchar, so the binary prints and
+    // reports main()'s value as its process exit code.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("c compiler: wrote executable " + c.exePath)
+        exit(0)
+    }
+
     println(m)
 
     var res = llvm.Run(m, entry)

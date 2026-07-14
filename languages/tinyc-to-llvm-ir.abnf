@@ -481,6 +481,16 @@ NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
         exit(1)
     }
 
+    // With -exe PATH, link the module into a native executable (clang) instead of running
+    // it. TinyC's main() returns int, and its output goes through putchar, so the binary
+    // both prints and reports main()'s value as its process exit code.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("tinyc: wrote executable " + c.exePath)
+        exit(0)
+    }
+
     // Show the compiler output (the LLVM IR module).
     println(m)
 

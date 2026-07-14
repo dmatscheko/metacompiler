@@ -990,10 +990,40 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	"BuildExecutable": buildExecutable,
 }
 
+// libcExterns are the external functions the IR interpreter implements and that clang
+// resolves from the C runtime; every OTHER declared-but-undefined function is a
+// user/language function with no linkable symbol (e.g. a lisp form that references a
+// never-defined name inside a short-circuit) and would make clang fail at link time.
+var libcExterns = map[string]bool{"putchar": true, "getchar": true, "puts": true, "abs": true}
+
+// stubUndefined gives every declared-but-undefined non-libc function a trivial body
+// (return the zero value of its result type) so the module links. These stubs are only
+// reached if such a function is actually called - which the IR interpreter would reject
+// too - so a program that never calls them behaves identically to `llvm.Run`.
+func stubUndefined(m *ir.Module) {
+	for _, f := range m.Funcs {
+		if len(f.Blocks) > 0 || libcExterns[f.Name()] {
+			continue
+		}
+		blk := f.NewBlock("")
+		switch rt := f.Sig.RetType.(type) {
+		case *types.IntType:
+			blk.NewRet(constant.NewInt(rt, 0))
+		case *types.PointerType:
+			blk.NewRet(constant.NewNull(rt))
+		case *types.VoidType:
+			blk.NewRet(nil)
+		default:
+			blk.NewRet(constant.NewZeroInitializer(rt))
+		}
+	}
+}
+
 // buildExecutable emits m as LLVM IR text and links it into a native executable with
 // clang (override with the MEC_CLANG env var). It returns "" on success, else an error
 // message the calling grammar prints before exiting non-zero.
 func buildExecutable(m *ir.Module, outPath string) string {
+	stubUndefined(m)
 	tmp, err := os.CreateTemp("", "mec-*.ll")
 	if err != nil {
 		return "cannot create temporary .ll file: " + err.Error()
