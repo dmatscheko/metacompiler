@@ -7,9 +7,9 @@ package abnf
 // traces Java, Kotlin, Go, Python, Lisp and MetaJS programs alike, under goja
 // and under -frozen (llvm.RunJS is engine independent). The integer-IR
 // languages (TinyC, C subset) have no jsrt events, but their modules still get
-// the -cfg control flow dump.
+// the -cfgraph control flow dump.
 //
-//	-cfg out.dot      write the CFG of every executed module (Mermaid with .mmd)
+//	-cfgraph out.dot      write the CFG of every executed module (Mermaid with .mmd)
 //	-trace out.jsonl  stream runtime events (decl/read/write/mread/mwrite/call/ret)
 //	-render calls     turn a -trace file into a dynamic call graph (DOT, stdout)
 //	-render vars      ... into a function/variable access graph (DOT, stdout)
@@ -31,7 +31,7 @@ import (
 	"github.com/llir/llvm/ir/constant"
 )
 
-// CFGOutPath and TraceOutPath are set from the -cfg and -trace CLI flags.
+// CFGOutPath and TraceOutPath are set from the -cfgraph and -trace CLI flags.
 var (
 	CFGOutPath   string
 	TraceOutPath string
@@ -224,7 +224,7 @@ func (rt *jsrt) calleeName(callee interface{}) string {
 }
 
 // ----------------------------------------------------------------------------
-// The control flow dump (-cfg)
+// The control flow dump (-cfgraph)
 
 var (
 	cfgMu    sync.Mutex
@@ -307,7 +307,7 @@ func blockCalls(b *ir.Block) []string {
 }
 
 // blockLines derives the source line range of a block from its js_srcpos
-// markers (present when the module was compiled with -trace or -cfg active).
+// markers (present when the module was compiled with -trace or -cfgraph active).
 func blockLines(b *ir.Block) string {
 	lo, hi := 0, 0
 	for _, inst := range b.Insts {
