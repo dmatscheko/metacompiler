@@ -476,6 +476,38 @@ merge into one node (class attribution is a planned refinement). The flags
 default to off and change nothing when unused; interpreter-grammar runs and a
 stepper are the planned next layers.
 
+**Viewing the graphs.** The `-cfgraph`, `-callgraph` and `-render` files are
+Graphviz DOT; `-cfgraph` also emits Mermaid when the output name ends in `.mmd`.
+Two full viewing paths on a fresh macOS box:
+
+*Graphviz* (works for every output). Render the DOT to a zoomable SVG - vector, so
+a thousand-node graph stays readable under zoom where a PNG would melt - then open
+it:
+
+```
+brew install graphviz
+dot  -Tsvg codebase.dot -o codebase.svg && open codebase.svg           # hierarchical: best for -render call graphs
+sfdp -Tsvg -Goverlap=scale kotlin.dot -o kotlin.svg && open kotlin.svg  # force-directed: scales to the big -cfgraph CFGs
+```
+
+`dot` lays the caller-to-callee hierarchy out top-down; `sfdp` handles the large
+per-block CFGs a `-cfgraph` dump produces (`-Goverlap=scale` spreads the nodes
+apart - the `prune` / `voronoi` values need a GTS-enabled Graphviz that the
+Homebrew bottle lacks). Swap `-Tsvg` for `-Tpdf` to open in Preview.app instead.
+
+*Mermaid* (the `-cfgraph` CFG only; the call graphs stay DOT). Name the dump `.mmd`
+and view it in VS Code (the *Markdown Preview Mermaid Support* extension) or any
+Mermaid renderer - best for a single small program, as Mermaid is slower than
+Graphviz on large graphs:
+
+```
+./mec languages/java-to-llvm-ir.abnf tests/java-test-1.java -q -cfgraph java.mmd
+```
+
+A whole-codebase graph is often a hairball; trim it before rendering - grep the
+`.dot` down to the edges you want, or root the run at one function with `-main`
+(below).
+
 `-main NAME` names the entry-point function a compiled program calls instead of
 its default. It lets a program whose entry is not named `main` run, and lets a
 real-world file that has no `main()` be driven from a chosen function - handy for
