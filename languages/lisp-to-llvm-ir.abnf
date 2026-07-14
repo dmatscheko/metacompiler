@@ -322,6 +322,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     runForms(c.compile(c.asg).stack)
     mainB.NewRet(value)
 
+    // With -exe PATH, link the module into a native executable (clang) instead of running
+    // it. A lisp form may reference a never-defined name inside a short-circuit (never
+    // actually called); llvm.BuildExecutable stubs such functions so the module still links.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("lisp: wrote executable " + c.exePath)
+        exit(0)
+    }
+
     // Show the compiler output (the LLVM IR module).
     println(m)
 

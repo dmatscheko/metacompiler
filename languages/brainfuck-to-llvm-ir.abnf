@@ -165,6 +165,15 @@ Whitespace = { !@+"><+-.,?[]" } ;
     //    return 0;
     blockCode.NewRet(zero)
 
+    // With -exe PATH, link the module into a native executable (clang) instead of running
+    // it; the Brainfuck program's output goes through putchar, so the binary prints it.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("brainfuck: wrote executable " + c.exePath)
+        exit(0)
+    }
+
     // Print the generated LLVM IR module (this is the compiler output).
     println(m)
 
