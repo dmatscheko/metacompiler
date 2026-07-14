@@ -79,6 +79,7 @@ type options struct {
 	importRoots                           []string // -i include roots for project-file imports, in order.
 	warnUnsupported                       bool     // -warn-unsupported: warn+placeholder for not-implemented syntax instead of aborting.
 	entryPoint                            string   // -main: entry-point function name a compiled program calls (default "main").
+	exePath                               string   // -exe PATH: a -to-llvm-ir grammar links a native executable at PATH (via clang) instead of running the module.
 	code                                  string   // -code VALUE: the final program's source, given inline instead of as a file.
 	codeSet, codeStdin                    bool     // -code / -code-stdin were passed (codeStdin reads the source from stdin).
 	speedTest, useBlockList, useFoundList bool
@@ -139,6 +140,8 @@ func parseArgs(args []string) (*options, error) {
 			o.warnUnsupported = true
 		case "-main":
 			o.entryPoint, err = takeVal()
+		case "-exe":
+			o.exePath, err = takeVal()
 		case "-code":
 			o.code, err = takeVal()
 			o.codeSet = true
@@ -287,6 +290,7 @@ func main() {
 	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
 	abnf.EntryPoint = o.entryPoint
+	abnf.ExePath = o.exePath
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath

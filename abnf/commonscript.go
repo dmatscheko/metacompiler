@@ -259,6 +259,10 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		"lineOf":          func(pos int) int { return lineOfPos(pos) },
 		// The entry-point function name (-main flag, default "main").
 		"mainName": EntryPoint,
+		// Output path for a native executable (-exe flag); "" means run in the IR
+		// interpreter instead. A -to-llvm-ir grammar hands its module to
+		// llvm.BuildExecutable when this is set.
+		"exePath": ExePath,
 		// Project-file imports (the -i include roots): findImport locates a
 		// grammar-mapped relative path ("a/b/C.kt"), readFile loads it, and
 		// pushSource/popSource swap the file/line attribution around the

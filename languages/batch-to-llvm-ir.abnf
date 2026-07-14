@@ -22,8 +22,9 @@ global i8* slots; a per-variable i32 'defined' flag backs `if defined`. set /a d
 modulo guard a zero divisor (result 0), matching the interpreter and cmd.exe.
 
 The generated module is printed (this is the compiler output) and is valid LLVM IR: clang can
-turn the compiled batch script into a native executable. The supported subset and the explicit
-non-goals are exactly those documented in batch-interpreter.abnf.") ;
+turn the compiled batch script into a native executable, either from the printed .ll or by
+passing -exe PATH to mec (mec languages/batch-to-llvm-ir.abnf script.bat -exe out && ./out). The
+supported subset and the explicit non-goals are exactly those documented in batch-interpreter.abnf.") ;
 
 :startRule(Program) ;
 :whitespace(Hspace) ;
@@ -770,6 +771,15 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     }
 
     c.compile(c.asg)
+
+    // With -exe PATH, link the module into a native executable (clang) instead of
+    // running it in the built-in IR interpreter.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("batch-to-llvm-ir: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
     var res = llvm.Run(m, "main")
