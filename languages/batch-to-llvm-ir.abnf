@@ -1,0 +1,780 @@
+:title("Batch to LLVM IR compiler") ;
+:description("Compiles the same Windows Batch (.bat) subset that batch-interpreter.abnf
+interprets to an LLVM IR module, then runs it with the built-in IR interpreter. The parse
+grammar is byte-for-byte the interpreter's; only the startScript changes from executing the
+tree to emitting IR.
+
+A Batch script is a flat list of labels and statement-lines driven by a program counter, so
+the control model maps directly onto basic blocks: every top-level line becomes a block, a
+label is the block you can branch to, and fall-through is a branch to the next line's block.
+`goto :label` is a direct branch (the target is a compile-time label); `goto :eof`, `exit /b`
+and the end of a called subroutine are a RETURN, which pops a small call stack of return ids
+(a global [N x i32] array) and dispatches back to the line after the matching `call`, or ends
+the program when the stack is empty. `exit` ends the program unconditionally. if/for bodies are
+parenthesized blocks emitted as nested control flow inline in main; a goto/call/exit inside a
+body simply branches out, which reproduces the interpreter's signal that unwinds the body to
+the program counter.
+
+Every value is a string, so the module carries the same tiny string runtime as the Bash
+compiler (rt_bump over a global arena, rt_strlen / rt_streq / rt_strcat, rt_int2str /
+rt_str2int for the 32-bit integers of set /a and if EQU/... ). Variables and %%for letters are
+global i8* slots; a per-variable i32 'defined' flag backs `if defined`. set /a division and
+modulo guard a zero divisor (result 0), matching the interpreter and cmd.exe.
+
+The generated module is printed (this is the compiler output) and is valid LLVM IR: clang can
+turn the compiled batch script into a native executable. The supported subset and the explicit
+non-goals are exactly those documented in batch-interpreter.abnf.") ;
+
+:startRule(Program) ;
+:whitespace(Hspace) ;
+
+// ----- program: a flat list of labels and statement-lines (PC executes them) -----
+Program     <~~ push(runProgram(takeAll())) ~~>
+            = { Line } ;
+Line        = BlankLine | ColonComment | LabelLine | StmtLine ;
+BlankLine   = Newline ;
+ColonComment = "::" :whitespace() { NotNL } Newline ;
+LabelLine   <~~ push({lbl: pop()}) ~~>
+            = ":" LabelName :whitespace() { NotNL } Newline ;
+StmtLine    <~~ push({stmt: pop()}) ~~>
+            = [ At ] Stmt Newline ;
+At          = "@" :whitespace() ;
+
+// A statement (also used inside ( ) blocks, where Newlines separate them).
+Stmt        = Rem | EchoCtl | EchoDot | Echo | SetA | Set | If | For | GotoEof | Goto | Call | ExitB | Exit ;
+
+// ----- echo -----
+Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
+EchoCtl     <~~ push(makeNop()) ~~> = KwEcho ( KwOn | KwOff ) ;
+EchoDot     <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "." :whitespace() ;
+Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
+
+// ----- set VAR=value  /  set /a VAR=expr -----
+SetA        <~~ push(makeSetA(takeAll())) ~~>
+            = KwSet "/a" :whitespace(Hspace) SetName "=" Arith ;
+Set         <~~ push(makeSet(takeAll())) ~~>
+            = KwSet SetName "=" ( LineText | Empty ) ;
+SetName     <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+Empty       <~~ push(makeStr("")) ~~> = "" ;
+
+// ----- goto / call / exit -----
+GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
+Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto LabelName :whitespace(Hspace) ;
+Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { Word } :whitespace(Hspace) ;
+ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" [ Word ] :whitespace(Hspace) ;
+Exit        <~~ push(makeExit(takeAll())) ~~> = KwExit [ Word ] :whitespace(Hspace) ;
+
+// ----- if / for (parenthesized bodies) -----
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf [ KwNot <~~ push({neg: true}) ~~> ] Cond Body [ KwElse Body ] ;
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor ForVar KwIn "(" { Word } ")" KwDo Body ;
+ForVar      = "%%" ForLetter :whitespace(Hspace) ;
+// A body is a ( ... ) block (statements separated by newlines) or a single statement.
+Body        = Block | Single ;
+Block       <~~ push({body: makeSeq(takeAll())}) ~~>
+            = "(" :whitespace(Hspace) OptNL { Stmt SepNL } ")" :whitespace(Hspace) ;
+Single      <~~ push({body: pop()}) ~~> = Stmt ;
+OptNL       = { Newline } ;
+SepNL       = { Newline } ;
+
+// ----- conditions -----
+Cond        = DefinedCond | CmpCond | StrCond ;
+DefinedCond <~~ push(mkDefined(pop())) ~~> = KwDefined SetName ;
+CmpCond     <~~ push(mkCmp(takeAll())) ~~> = CmpArg CmpOp CmpArg ;
+StrCond     <~~ push(mkStrCmp(takeAll())) ~~> = CmpArg "==" <~~ push("==") ~~> CmpArg ;
+CmpArg      = QWord | Word ;
+QWord       <~~ push(pop()) ~~> = DQuote ;
+CmpOp       = ( "EQU" | "NEQ" | "LSS" | "LEQ" | "GTR" | "GEQ"
+              | "equ" | "neq" | "lss" | "leq" | "gtr" | "geq" ) <~~ push(up.in) ~~> ;
+
+// ----- words & %expansion% -----
+// After the first Part, :whitespace() keeps the remaining Parts ADJACENT (no space
+// between them); the word ends at the first space, which :whitespace(Hspace) then skips.
+// Without this the engine's leading skip would let { Part } slurp across spaces and
+// swallow the next token (1 EQU 1 became one word 1EQU1).
+Word        <~~ push(makeWord(takeAll())) ~~>
+            = Part :whitespace() { Part } :whitespace(Hspace) ;
+Part        = VarPct | ForRef | DQuote | Bareword ;
+VarPct      <~~ push(mkVarRef(pop())) ~~>
+            = "%" VarNm "%" :whitespace() ;
+VarNm       <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+ForRef      <~~ push(mkForRef(pop())) ~~>
+            = "%%" ForLetter :whitespace() ;
+ForLetter   <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" ) :whitespace() ;
+DQuote      <~~ push(makeWord(takeAll())) ~~>
+            = '"' :whitespace() { DPart } '"' :whitespace() ;
+DPart       = VarPct | ForRef | DText ;
+DText       <~~ push(makeStr(up.in)) ~~> = { NotDQPct } ;
+Bareword    <~~ push(makeStr(up.in)) ~~>
+            = BareChar :whitespace() { BareChar } :whitespace() ;
+
+// LineText: the rest of the line (for echo / set value), with %expansion%.
+LineText    <~~ push(makeWord(takeAll())) ~~>
+            = { LinePart } :whitespace(Hspace) ;
+LinePart    = VarPct | ForRef | LineChars ;
+LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
+
+// ----- arithmetic (integer): + - * / %, comparisons, parens, bare names, numbers -----
+Arith       = ArithCmp ;
+ArithCmp    <~~ push(foldArith(takeAll())) ~~>
+            = ArithAdd { ( "==" | "!=" | "<=" | "<" | ">=" | ">" ) <~~ push(up.in) ~~> ArithAdd } ;
+ArithAdd    <~~ push(foldArith(takeAll())) ~~>
+            = ArithMul { ( "+" | "-" ) <~~ push(up.in) ~~> ArithMul } ;
+ArithMul    <~~ push(foldArith(takeAll())) ~~>
+            = ArithAtom { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ArithAtom } ;
+ArithAtom   = ( "(" Arith ")" ) | ArithNeg | ArithNum | ArithVar ;
+ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" ArithAtom ;
+ArithNum    <~~ push(mkANum(up.in)) ~~> = ( "0"..."9" { "0"..."9" } ) :whitespace(Hspace) ;
+ArithVar    <~~ push(mkAVar(up.in)) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
+
+// ----- keywords (lowercase or UPPERCASE; word-boundary terminated) -----
+KwRem     = ( "rem" | "REM" ) KwEnd ;
+KwEcho    = ( "echo" | "ECHO" ) KwEnd ;
+KwEchoW   = ( "echo" | "ECHO" ) ;                 // no boundary: echo. is echo + '.'
+KwOn      = ( "on" | "ON" ) KwEnd ;
+KwOff     = ( "off" | "OFF" ) KwEnd ;
+KwSet     = ( "set" | "SET" ) KwEnd ;
+KwIf      = ( "if" | "IF" ) KwEnd ;
+KwNot     = ( "not" | "NOT" ) KwEnd ;
+KwElse    = ( "else" | "ELSE" ) KwEnd ;
+KwDefined = ( "defined" | "DEFINED" ) KwEnd ;
+KwFor     = ( "for" | "FOR" ) KwEnd ;
+KwIn      = ( "in" | "IN" ) KwEnd ;
+KwDo      = ( "do" | "DO" ) KwEnd ;
+KwGoto    = ( "goto" | "GOTO" ) KwEnd ;
+KwCall    = ( "call" | "CALL" ) KwEnd ;
+KwExit    = ( "exit" | "EXIT" ) KwEnd ;
+KwEnd     = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+// ----- character classes -----
+Hspace      = { @+" \t" | LineCont } ;
+LineCont    = "^" ( "\r\n" | "\n" | "\r" ) ;
+Newline     = ( "\r\n" | "\n" | "\r" ) :whitespace(Hspace) ;
+LabelName   <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." } :whitespace() ;
+// A bareword char: printable except whitespace, ) % " and the special glue.
+BareChar    = "\x21" | "\x23"..."\x24" | "\x26"..."\x27" | "\x2a"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
+LineChar    = "\x20"..."\x24" | "\x26"..."\x28" | "\x2a"..."\U0010ffff" ;   // except % ) and newline
+NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not " (0x22) or % (0x25)
+:startScript(~~
+
+    // ===================================================================================
+    //  Stack / string helpers. String-producing thunks are plain objects {fn, c} (the
+    //  local stack strips expando properties off pushed functions but keeps plain objects);
+    //  statement / arithmetic / condition thunks are bare functions.
+    // ===================================================================================
+
+    function takeAll() {
+        var items = []
+        var v = anytype
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+    function fail(msg) { println("batch-to-llvm-ir error: " + msg); exit(2) }
+    function parseDec(s) {
+        var neg = false, i = 0
+        if (s.charAt(0) == "-") { neg = true; i = 1 } else if (s.charAt(0) == "+") { i = 1 }
+        var v = 0
+        while (i < s.length) { v = (v * 10 + (s.charCodeAt(i) - 48)) | 0; i = i + 1 }
+        return neg ? ((0 - v) | 0) : v
+    }
+    function utf8Len(s) {
+        var n = 0, i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c < 0x80) { n += 1 }
+            else if (c < 0x800) { n += 2 }
+            else if (c >= 0xd800 && c <= 0xdbff) { n += 4; i += 1 }
+            else { n += 3 }
+            i += 1
+        }
+        return n
+    }
+
+    // ===================================================================================
+    //  LLVM types, module, externs and the runtime globals.
+    // ===================================================================================
+
+    var i1 = llvm.types.I1
+    var i8 = llvm.types.I8
+    var i32 = llvm.types.I32
+    var i8ptr = llvm.types.I8Ptr
+    var zero = llvm.constant.NewInt(i32, 0)
+    var one = llvm.constant.NewInt(i32, 1)
+    var ten = llvm.constant.NewInt(i32, 10)
+    var zero8 = llvm.constant.NewInt(i8, 0)
+    var truei1 = llvm.constant.NewInt(i1, 1)
+    var nullStr = llvm.constant.NewNull(i8ptr)
+
+    var m = llvm.ir.NewModule()
+    var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
+
+    var ARENA = 1 << 18
+    var arenaTy = llvm.types.NewArray(ARENA, i8)
+    var gArena = m.NewGlobalDef("arena", llvm.constant.NewZeroInitializer(arenaTy))
+    var gApos = m.NewGlobalDef("arena_pos", zero)
+    var gExitCode = m.NewGlobalDef("exit_code", zero)
+
+    // A real "" at a nonzero address (the IR interpreter traps loads at address 0).
+    var gEmpty = m.NewGlobalDef("empty", llvm.constant.NewCharArrayFromString("\x00"))
+    var emptyTy = llvm.types.NewArray(1, i8)
+    function emptyPtr(b) { return b.NewGetElementPtr(emptyTy, gEmpty, zero, zero) }
+
+    // The call/return stack: return ids pushed by `call`, popped by `exit /b` / `goto :eof`.
+    var DEPTH = 256
+    var cstackTy = llvm.types.NewArray(DEPTH, i32)
+    var gCstack = m.NewGlobalDef("call_stack", llvm.constant.NewZeroInitializer(cstackTy))
+    var gCsp = m.NewGlobalDef("call_sp", zero)
+    var gRetId = m.NewGlobalDef("ret_id", zero)
+
+    // ===================================================================================
+    //  Emitter state.
+    // ===================================================================================
+
+    var curF = null
+    var deadCount = 0
+    function deadBlock() { deadCount = deadCount + 1; return curF.NewBlock("dead" + deadCount) }
+
+    var strGlobals = {}, strCount = 0
+    function internStr(s) {
+        var key = "$" + s
+        if (hasOwn(strGlobals, key)) { return strGlobals[key] }
+        var ty = llvm.types.NewArray(utf8Len(s) + 1, i8)
+        var g = m.NewGlobalDef("str" + strCount, llvm.constant.NewCharArrayFromString(s + "\x00"))
+        strCount = strCount + 1
+        var rec = {g: g, ty: ty}
+        strGlobals[key] = rec
+        return rec
+    }
+    function gepStr(b, s) {
+        if (s == "") { return emptyPtr(b) }
+        var r = internStr(s)
+        return b.NewGetElementPtr(r.ty, r.g, zero, zero)
+    }
+
+    var varSlots = {}, varSlotList = []
+    function getVarSlot(name) {
+        var key = "$" + name
+        if (hasOwn(varSlots, key)) { return varSlots[key] }
+        var g = m.NewGlobalDef("gv_" + name, nullStr)
+        varSlots[key] = g
+        varSlotList.push(g)
+        return g
+    }
+    var defSlots = {}, defSlotList = []
+    function getDefSlot(name) {
+        var key = "$" + name
+        if (hasOwn(defSlots, key)) { return defSlots[key] }
+        var g = m.NewGlobalDef("gd_" + name, zero)
+        defSlots[key] = g
+        defSlotList.push(g)
+        return g
+    }
+    var forSlots = {}, forSlotList = []
+    function getForSlot(letter) {
+        var key = "$" + letter
+        if (hasOwn(forSlots, key)) { return forSlots[key] }
+        var g = m.NewGlobalDef("gf_" + letter, nullStr)
+        forSlots[key] = g
+        forSlotList.push(g)
+        return g
+    }
+
+    // ===================================================================================
+    //  The string runtime, hand-emitted as IR functions (identical to the Bash compiler).
+    // ===================================================================================
+
+    var rtBump = m.NewFunc("rt_bump", i8ptr, llvm.ir.NewParam("n", i32))
+    ;(function() {
+        var n = rtBump.Params[0]
+        var b = rtBump.NewBlock("entry")
+        var p = b.NewLoad(i32, gApos)
+        var ptr = b.NewGetElementPtr(arenaTy, gArena, zero, p)
+        b.NewStore(b.NewAdd(p, n), gApos)
+        b.NewRet(ptr)
+    })()
+
+    var rtStrlen = m.NewFunc("rt_strlen", i32, llvm.ir.NewParam("s", i8ptr))
+    ;(function() {
+        var s = rtStrlen.Params[0]
+        var e = rtStrlen.NewBlock("entry"), h = rtStrlen.NewBlock("head")
+        var bd = rtStrlen.NewBlock("body"), x = rtStrlen.NewBlock("exit")
+        var ip = e.NewAlloca(i32)
+        e.NewStore(zero, ip); e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, ch, zero8), x, bd)
+        bd.NewStore(bd.NewAdd(i, one), ip); bd.NewBr(h)
+        x.NewRet(x.NewLoad(i32, ip))
+    })()
+
+    var rtStreq = m.NewFunc("rt_streq", i32, [llvm.ir.NewParam("a", i8ptr), llvm.ir.NewParam("b", i8ptr)])
+    ;(function() {
+        var a = rtStreq.Params[0], b2 = rtStreq.Params[1]
+        var e = rtStreq.NewBlock("entry"), h = rtStreq.NewBlock("head"), chk = rtStreq.NewBlock("chk")
+        var ne = rtStreq.NewBlock("ne"), eq = rtStreq.NewBlock("eq"), cont = rtStreq.NewBlock("cont")
+        var ip = e.NewAlloca(i32)
+        e.NewStore(zero, ip); e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var ca = h.NewLoad(i8, h.NewGetElementPtr(i8, a, i))
+        var cb = h.NewLoad(i8, h.NewGetElementPtr(i8, b2, i))
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredNE, ca, cb), ne, chk)
+        chk.NewCondBr(chk.NewICmp(llvm.enum.IPredEQ, ca, zero8), eq, cont)
+        cont.NewStore(cont.NewAdd(i, one), ip); cont.NewBr(h)
+        ne.NewRet(zero); eq.NewRet(one)
+    })()
+
+    var rtStrcat = m.NewFunc("rt_strcat", i8ptr, [llvm.ir.NewParam("a", i8ptr), llvm.ir.NewParam("b", i8ptr)])
+    ;(function() {
+        var a = rtStrcat.Params[0], b2 = rtStrcat.Params[1]
+        var e = rtStrcat.NewBlock("entry")
+        var la = e.NewCall(rtStrlen, a), lb = e.NewCall(rtStrlen, b2)
+        var dst = e.NewCall(rtBump, e.NewAdd(e.NewAdd(la, lb), one))
+        var ip = e.NewAlloca(i32), dp = e.NewAlloca(i32)
+        e.NewStore(zero, dp); e.NewStore(zero, ip)
+        var ha = rtStrcat.NewBlock("ha"), bda = rtStrcat.NewBlock("bda"), xa = rtStrcat.NewBlock("xa")
+        e.NewBr(ha)
+        var ia = ha.NewLoad(i32, ip)
+        var cha = ha.NewLoad(i8, ha.NewGetElementPtr(i8, a, ia))
+        ha.NewCondBr(ha.NewICmp(llvm.enum.IPredEQ, cha, zero8), xa, bda)
+        var da = bda.NewLoad(i32, dp)
+        bda.NewStore(cha, bda.NewGetElementPtr(i8, dst, da))
+        bda.NewStore(bda.NewAdd(da, one), dp); bda.NewStore(bda.NewAdd(ia, one), ip); bda.NewBr(ha)
+        xa.NewStore(zero, ip)
+        var hb = rtStrcat.NewBlock("hb"), bdb = rtStrcat.NewBlock("bdb"), xb = rtStrcat.NewBlock("xb")
+        xa.NewBr(hb)
+        var ib = hb.NewLoad(i32, ip)
+        var chb = hb.NewLoad(i8, hb.NewGetElementPtr(i8, b2, ib))
+        hb.NewCondBr(hb.NewICmp(llvm.enum.IPredEQ, chb, zero8), xb, bdb)
+        var db = bdb.NewLoad(i32, dp)
+        bdb.NewStore(chb, bdb.NewGetElementPtr(i8, dst, db))
+        bdb.NewStore(bdb.NewAdd(db, one), dp); bdb.NewStore(bdb.NewAdd(ib, one), ip); bdb.NewBr(hb)
+        var dn = xb.NewLoad(i32, dp)
+        xb.NewStore(zero8, xb.NewGetElementPtr(i8, dst, dn))
+        xb.NewRet(dst)
+    })()
+
+    var rtInt2str = m.NewFunc("rt_int2str", i8ptr, llvm.ir.NewParam("n", i32))
+    ;(function() {
+        var tmpArrTy = llvm.types.NewArray(16, i8)
+        var n = rtInt2str.Params[0]
+        var e = rtInt2str.NewBlock("entry"), isZero = rtInt2str.NewBlock("zero"), nz = rtInt2str.NewBlock("nz")
+        var dst = e.NewCall(rtBump, llvm.constant.NewInt(i32, 16))
+        var tmp = e.NewAlloca(tmpArrTy)
+        e.NewCondBr(e.NewICmp(llvm.enum.IPredEQ, n, zero), isZero, nz)
+        isZero.NewStore(llvm.constant.NewInt(i8, 48), isZero.NewGetElementPtr(i8, dst, zero))
+        isZero.NewStore(zero8, isZero.NewGetElementPtr(i8, dst, one))
+        isZero.NewRet(dst)
+        var neg = nz.NewICmp(llvm.enum.IPredSLT, n, zero)
+        var absn = nz.NewSelect(neg, nz.NewSub(zero, n), n)
+        var ap = nz.NewAlloca(i32), tp = nz.NewAlloca(i32)
+        nz.NewStore(absn, ap); nz.NewStore(llvm.constant.NewInt(i32, 15), tp)
+        var dh = rtInt2str.NewBlock("dh"), dbd = rtInt2str.NewBlock("dbd"), dx = rtInt2str.NewBlock("dx")
+        nz.NewBr(dh)
+        var av = dh.NewLoad(i32, ap)
+        dh.NewCondBr(dh.NewICmp(llvm.enum.IPredSLE, av, zero), dx, dbd)
+        var d = dbd.NewSRem(av, ten)
+        var ti = dbd.NewLoad(i32, tp)
+        dbd.NewStore(dbd.NewTrunc(dbd.NewAdd(d, llvm.constant.NewInt(i32, 48)), i8), dbd.NewGetElementPtr(tmpArrTy, tmp, zero, ti))
+        dbd.NewStore(dbd.NewSub(ti, one), tp); dbd.NewStore(dbd.NewSDiv(av, ten), ap); dbd.NewBr(dh)
+        var dip = dx.NewAlloca(i32)
+        dx.NewStore(zero, dip)
+        var wsign = rtInt2str.NewBlock("wsign"), asm = rtInt2str.NewBlock("asm")
+        dx.NewCondBr(neg, wsign, asm)
+        wsign.NewStore(llvm.constant.NewInt(i8, 45), wsign.NewGetElementPtr(i8, dst, zero))
+        wsign.NewStore(one, dip); wsign.NewBr(asm)
+        var jp = asm.NewAlloca(i32)
+        asm.NewStore(asm.NewAdd(asm.NewLoad(i32, tp), one), jp)
+        var ah = rtInt2str.NewBlock("ah"), abd = rtInt2str.NewBlock("abd"), ax = rtInt2str.NewBlock("ax")
+        asm.NewBr(ah)
+        var j = ah.NewLoad(i32, jp)
+        ah.NewCondBr(ah.NewICmp(llvm.enum.IPredSGT, j, llvm.constant.NewInt(i32, 15)), ax, abd)
+        var digit = abd.NewLoad(i8, abd.NewGetElementPtr(tmpArrTy, tmp, zero, j))
+        var di = abd.NewLoad(i32, dip)
+        abd.NewStore(digit, abd.NewGetElementPtr(i8, dst, di))
+        abd.NewStore(abd.NewAdd(di, one), dip); abd.NewStore(abd.NewAdd(j, one), jp); abd.NewBr(ah)
+        ax.NewStore(zero8, ax.NewGetElementPtr(i8, dst, ax.NewLoad(i32, dip)))
+        ax.NewRet(dst)
+    })()
+
+    var rtStr2int = m.NewFunc("rt_str2int", i32, llvm.ir.NewParam("s", i8ptr))
+    ;(function() {
+        var s = rtStr2int.Params[0]
+        var e = rtStr2int.NewBlock("entry")
+        var ip = e.NewAlloca(i32), vp = e.NewAlloca(i32), sp = e.NewAlloca(i32)
+        e.NewStore(zero, ip); e.NewStore(zero, vp); e.NewStore(one, sp)
+        var wh = rtStr2int.NewBlock("wh"), wbd = rtStr2int.NewBlock("wbd"), wx = rtStr2int.NewBlock("wx")
+        e.NewBr(wh)
+        var wi = wh.NewLoad(i32, ip)
+        var wc = wh.NewLoad(i8, wh.NewGetElementPtr(i8, s, wi))
+        var isSp = wh.NewICmp(llvm.enum.IPredEQ, wc, llvm.constant.NewInt(i8, 32))
+        var isTab = wh.NewICmp(llvm.enum.IPredEQ, wc, llvm.constant.NewInt(i8, 9))
+        wh.NewCondBr(wh.NewOr(isSp, isTab), wbd, wx)
+        wbd.NewStore(wbd.NewAdd(wi, one), ip); wbd.NewBr(wh)
+        var ci = wx.NewLoad(i32, ip)
+        var cc = wx.NewLoad(i8, wx.NewGetElementPtr(i8, s, ci))
+        var isMinus = wx.NewICmp(llvm.enum.IPredEQ, cc, llvm.constant.NewInt(i8, 45))
+        var isPlus = wx.NewICmp(llvm.enum.IPredEQ, cc, llvm.constant.NewInt(i8, 43))
+        var signBlk = rtStr2int.NewBlock("sign"), digs = rtStr2int.NewBlock("digs")
+        wx.NewCondBr(wx.NewOr(isMinus, isPlus), signBlk, digs)
+        signBlk.NewStore(signBlk.NewSelect(isMinus, llvm.constant.NewInt(i32, -1), one), sp)
+        signBlk.NewStore(signBlk.NewAdd(ci, one), ip); signBlk.NewBr(digs)
+        var dh = rtStr2int.NewBlock("dh"), dbd = rtStr2int.NewBlock("dbd"), dx = rtStr2int.NewBlock("dx")
+        digs.NewBr(dh)
+        var di = dh.NewLoad(i32, ip)
+        var dc = dh.NewLoad(i8, dh.NewGetElementPtr(i8, s, di))
+        var dc32 = dh.NewSExt(dc, i32)
+        var ge0 = dh.NewICmp(llvm.enum.IPredSGE, dc32, llvm.constant.NewInt(i32, 48))
+        var le9 = dh.NewICmp(llvm.enum.IPredSLE, dc32, llvm.constant.NewInt(i32, 57))
+        dh.NewCondBr(dh.NewAnd(ge0, le9), dbd, dx)
+        var v = dbd.NewLoad(i32, vp)
+        dbd.NewStore(dbd.NewAdd(dbd.NewMul(v, ten), dbd.NewSub(dc32, llvm.constant.NewInt(i32, 48))), vp)
+        dbd.NewStore(dbd.NewAdd(di, one), ip); dbd.NewBr(dh)
+        dx.NewRet(dx.NewMul(dx.NewLoad(i32, vp), dx.NewLoad(i32, sp)))
+    })()
+
+    var rtPrints = m.NewFunc("rt_prints", i32, llvm.ir.NewParam("s", i8ptr))
+    ;(function() {
+        var s = rtPrints.Params[0]
+        var e = rtPrints.NewBlock("entry"), h = rtPrints.NewBlock("head")
+        var bd = rtPrints.NewBlock("body"), x = rtPrints.NewBlock("exit")
+        var ip = e.NewAlloca(i32)
+        e.NewStore(zero, ip); e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, ch, zero8), x, bd)
+        bd.NewCall(extPutchar, bd.NewZExt(ch, i32))
+        bd.NewStore(bd.NewAdd(i, one), ip); bd.NewBr(h)
+        x.NewRet(zero)
+    })()
+
+    // ===================================================================================
+    //  Value / word thunks:  {fn: function(b) -> {b, v: i8*}, c: const-string|undefined}
+    // ===================================================================================
+
+    function makeStr(s) { return {fn: function(b) { return {b: b, v: gepStr(b, s)} }, c: s} }
+    function mkVarRef(name) { return {fn: function(b) { return {b: b, v: b.NewLoad(i8ptr, getVarSlot(name))} }, c: undefined} }
+    function mkForRef(letter) { return {fn: function(b) { return {b: b, v: b.NewLoad(i8ptr, getForSlot(letter))} }, c: undefined} }
+    function makeWord(parts) {
+        if (parts.length == 0) { return makeStr("") }
+        var allConst = true, joined = ""
+        var i
+        for (i = 0; i < parts.length; i++) {
+            if (parts[i].c == undefined) { allConst = false } else { joined = joined + parts[i].c }
+        }
+        if (allConst) { return makeStr(joined) }
+        if (parts.length == 1) { return parts[0] }
+        return {fn: function(b) {
+            var r = parts[0].fn(b)
+            var bb = r.b, v = r.v
+            var k
+            for (k = 1; k < parts.length; k++) {
+                var r2 = parts[k].fn(bb)
+                bb = r2.b
+                v = bb.NewCall(rtStrcat, [v, r2.v])
+            }
+            return {b: bb, v: v}
+        }, c: undefined}
+    }
+
+    // ===================================================================================
+    //  Arithmetic thunks (bare functions):  function(b) -> {b, v: i32}
+    // ===================================================================================
+
+    function mkANum(text) { var c = llvm.constant.NewInt(i32, parseDec(text)); return function(b) { return {b: b, v: c} } }
+    function mkAVar(name) { return function(b) { return {b: b, v: b.NewCall(rtStr2int, b.NewLoad(i8ptr, getVarSlot(name)))} } }
+    function mkANeg(t) { return function(b) { var r = t(b); return {b: r.b, v: r.b.NewSub(zero, r.v)} } }
+    function aOp(b, op, l, r) {
+        if (op == "+") { return {b: b, v: b.NewAdd(l, r)} }
+        if (op == "-") { return {b: b, v: b.NewSub(l, r)} }
+        if (op == "*") { return {b: b, v: b.NewMul(l, r)} }
+        if (op == "/" || op == "%") {
+            // guard a zero divisor -> 0 (branch, since sdiv/srem by 0 traps).
+            var isz = b.NewICmp(llvm.enum.IPredEQ, r, zero)
+            var zb = curF.NewBlock(""), db = curF.NewBlock(""), cb = curF.NewBlock("")
+            b.NewCondBr(isz, zb, db)
+            zb.NewBr(cb)
+            var dv = (op == "/") ? db.NewSDiv(l, r) : db.NewSRem(l, r)
+            db.NewBr(cb)
+            var phi = cb.NewPhi([llvm.ir.NewIncoming(zero, zb), llvm.ir.NewIncoming(dv, db)])
+            return {b: cb, v: phi}
+        }
+        var pred = null
+        if (op == "==") { pred = llvm.enum.IPredEQ }
+        if (op == "!=") { pred = llvm.enum.IPredNE }
+        if (op == "<") { pred = llvm.enum.IPredSLT }
+        if (op == "<=") { pred = llvm.enum.IPredSLE }
+        if (op == ">") { pred = llvm.enum.IPredSGT }
+        if (op == ">=") { pred = llvm.enum.IPredSGE }
+        return {b: b, v: b.NewZExt(b.NewICmp(pred, l, r), i32)}
+    }
+    function foldArith(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            var bb = r.b, v = r.v
+            var i
+            for (i = 1; i < items.length; i += 2) {
+                var r2 = items[i + 1](bb)
+                var res = aOp(r2.b, items[i], v, r2.v)
+                bb = res.b
+                v = res.v
+            }
+            return {b: bb, v: v}
+        }
+    }
+
+    // ===================================================================================
+    //  Condition thunks (bare functions):  function(b) -> {b, v: i1}
+    // ===================================================================================
+
+    function mkDefined(name) {
+        return function(b) { return {b: b, v: b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, getDefSlot(name)), zero)} }
+    }
+    function mkStrCmp(items) {
+        var lT = items[0], rT = items[2]
+        return function(b) {
+            var rl = lT.fn(b), rr = rT.fn(rl.b)
+            return {b: rr.b, v: rr.b.NewICmp(llvm.enum.IPredNE, rr.b.NewCall(rtStreq, [rl.v, rr.v]), zero)}
+        }
+    }
+    function mkCmp(items) {
+        var lT = items[0], op = items[1], rT = items[2]
+        return function(b) {
+            var rl = lT.fn(b), rr = rT.fn(rl.b)
+            var bb = rr.b
+            var il = bb.NewCall(rtStr2int, rl.v), ir = bb.NewCall(rtStr2int, rr.v)
+            var pred = null
+            if (op == "EQU" || op == "equ") { pred = llvm.enum.IPredEQ }
+            if (op == "NEQ" || op == "neq") { pred = llvm.enum.IPredNE }
+            if (op == "LSS" || op == "lss") { pred = llvm.enum.IPredSLT }
+            if (op == "LEQ" || op == "leq") { pred = llvm.enum.IPredSLE }
+            if (op == "GTR" || op == "gtr") { pred = llvm.enum.IPredSGT }
+            if (op == "GEQ" || op == "geq") { pred = llvm.enum.IPredSGE }
+            return {b: bb, v: bb.NewICmp(pred, il, ir)}
+        }
+    }
+
+    // ===================================================================================
+    //  Statement thunks (bare functions):  function(b) -> continuation block.
+    // ===================================================================================
+
+    // PC / control-flow state, set up by runProgram.
+    var Lblocks = null      // one block per top-level item (+ end)
+    var labelIdx = null     // "$"+labelName -> item index
+    var curNextItem = null  // the block a `call` in the current item returns to
+    var exitBlock = null
+    var returnDispatch = null
+    var retSites = []       // retid -> return block
+
+    function makeNop() { return function(b) { return b } }
+    function makeEcho(wordT) {
+        return function(b) {
+            var r = wordT.fn(b)
+            b = r.b
+            b.NewCall(rtPrints, r.v)
+            b.NewCall(extPutchar, llvm.constant.NewInt(i32, 10))
+            return b
+        }
+    }
+    function makeSet(items) {
+        var name = items[0], valT = items[1]
+        return function(b) {
+            var r = valT.fn(b)
+            b = r.b
+            b.NewStore(r.v, getVarSlot(name))
+            b.NewStore(one, getDefSlot(name))
+            return b
+        }
+    }
+    function makeSetA(items) {
+        var name = items[0], arithT = items[1]
+        return function(b) {
+            var r = arithT(b)
+            b = r.b
+            b.NewStore(b.NewCall(rtInt2str, r.v), getVarSlot(name))
+            b.NewStore(one, getDefSlot(name))
+            return b
+        }
+    }
+
+    // Pop a return id (or exit with codeVal when the call stack is empty).
+    function emitReturn(b, codeVal) {
+        var sp = b.NewLoad(i32, gCsp)
+        var exitP = curF.NewBlock(""), popP = curF.NewBlock("")
+        b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, sp, zero), exitP, popP)
+        exitP.NewStore(codeVal, gExitCode)
+        exitP.NewBr(exitBlock)
+        var sp2 = popP.NewSub(sp, one)
+        popP.NewStore(sp2, gCsp)
+        popP.NewStore(popP.NewLoad(i32, popP.NewGetElementPtr(cstackTy, gCstack, zero, sp2)), gRetId)
+        popP.NewBr(returnDispatch)
+    }
+    function labelMissing(b, name) {
+        b.NewCall(rtPrints, gepStr(b, "The system cannot find the batch label specified - " + name + "\n"))
+        b.NewStore(one, gExitCode)
+        b.NewBr(exitBlock)
+    }
+    function makeGoto(name) {
+        return function(b) {
+            if (name == "eof") { emitReturn(b, zero); return deadBlock() }
+            if (!hasOwn(labelIdx, "$" + name)) { labelMissing(b, name); return deadBlock() }
+            b.NewBr(Lblocks[labelIdx["$" + name]])
+            return deadBlock()
+        }
+    }
+    function makeCall(items) {
+        var label = items[0]
+        return function(b) {
+            if (!hasOwn(labelIdx, "$" + label)) { labelMissing(b, label); return deadBlock() }
+            var retid = retSites.length
+            retSites.push(curNextItem)
+            var sp = b.NewLoad(i32, gCsp)
+            b.NewStore(llvm.constant.NewInt(i32, retid), b.NewGetElementPtr(cstackTy, gCstack, zero, sp))
+            b.NewStore(b.NewAdd(sp, one), gCsp)
+            b.NewBr(Lblocks[labelIdx["$" + label]])
+            return deadBlock()
+        }
+    }
+    function makeExitB(items) {
+        var codeT = items.length > 0 ? items[0] : null
+        return function(b) {
+            var code = zero
+            if (codeT != null) { var r = codeT.fn(b); b = r.b; code = b.NewCall(rtStr2int, r.v) }
+            emitReturn(b, code)
+            return deadBlock()
+        }
+    }
+    function makeExit(items) {
+        var codeT = items.length > 0 ? items[0] : null
+        return function(b) {
+            var code = zero
+            if (codeT != null) { var r = codeT.fn(b); b = r.b; code = b.NewCall(rtStr2int, r.v) }
+            b.NewStore(code, gExitCode)
+            b.NewBr(exitBlock)
+            return deadBlock()
+        }
+    }
+    function makeSeq(items) {
+        return function(b) {
+            var i
+            for (i = 0; i < items.length; i++) { b = items[i](b) }
+            return b
+        }
+    }
+    // items = [ {neg}?, condThunk, {body:thenSeq}, {body:elseSeq}? ]
+    function makeIf(items) {
+        var neg = false, idx = 0
+        if (items[0] != null && typeof items[0] == "object" && items[0].neg != undefined) { neg = true; idx = 1 }
+        var condT = items[idx]
+        var thenT = items[idx + 1].body
+        var elseT = (items.length > idx + 2) ? items[idx + 2].body : null
+        return function(b) {
+            var rc = condT(b)
+            b = rc.b
+            var cond = rc.v
+            if (neg) { cond = b.NewXor(cond, truei1) }
+            var thenB = curF.NewBlock(""), merge = curF.NewBlock("")
+            var elseB = (elseT != null) ? curF.NewBlock("") : merge
+            b.NewCondBr(cond, thenB, elseB)
+            thenT(thenB).NewBr(merge)
+            if (elseT != null) { elseT(elseB).NewBr(merge) }
+            return merge
+        }
+    }
+    // items = [letter, wordObj..., {body:bodySeq}]. The word list is static -> unrolled.
+    function makeFor(items) {
+        var letter = items[0]
+        var last = items[items.length - 1]
+        var bodyT = last.body
+        var words = items.slice(1, items.length - 1)
+        return function(b) {
+            var j
+            for (j = 0; j < words.length; j++) {
+                var r = words[j].fn(b)
+                b = r.b
+                b.NewStore(r.v, getForSlot(letter))
+                b = bodyT(b)
+            }
+            return b
+        }
+    }
+
+    // ===================================================================================
+    //  Program: the flat line list becomes a chain of blocks driven by branches.
+    // ===================================================================================
+
+    function fillReturnDispatch() {
+        if (retSites.length == 0) { returnDispatch.NewBr(exitBlock); return }
+        var rid = returnDispatch.NewLoad(i32, gRetId)
+        var cur = returnDispatch
+        var i
+        for (i = 0; i < retSites.length; i++) {
+            var isMatch = cur.NewICmp(llvm.enum.IPredEQ, rid, llvm.constant.NewInt(i32, i))
+            var nextChk = (i < retSites.length - 1) ? curF.NewBlock("") : exitBlock
+            cur.NewCondBr(isMatch, retSites[i], nextChk)
+            cur = nextChk
+        }
+    }
+
+    function runProgram(items) {
+        var main = m.NewFunc("main", i32)
+        curF = main
+        var entry = main.NewBlock("entry")
+        exitBlock = main.NewBlock("exit")
+        returnDispatch = main.NewBlock("retdisp")
+        Lblocks = []
+        var k
+        for (k = 0; k < items.length; k++) { Lblocks.push(main.NewBlock("L" + k)) }
+        Lblocks.push(main.NewBlock("Lend")) // one past the end
+        labelIdx = {}
+        for (k = 0; k < items.length; k++) { if (items[k].lbl != undefined) { labelIdx["$" + items[k].lbl] = k } }
+        // Emit each line into its block; fall-through branches to the next block.
+        for (k = 0; k < items.length; k++) {
+            var it = items[k]
+            curNextItem = Lblocks[k + 1]
+            if (it.lbl != undefined) {
+                Lblocks[k].NewBr(Lblocks[k + 1])
+            } else {
+                var cont = it.stmt(Lblocks[k])
+                cont.NewBr(Lblocks[k + 1])
+            }
+        }
+        // Falling off the end -> exit 0 (like the interpreter's while-loop exhaustion).
+        Lblocks[items.length].NewStore(zero, gExitCode)
+        Lblocks[items.length].NewBr(exitBlock)
+        exitBlock.NewRet(exitBlock.NewLoad(i32, gExitCode))
+        fillReturnDispatch()
+        // entry: initialize every slot, empty the call stack, jump to the first line.
+        var ep = emptyPtr(entry)
+        var i
+        for (i = 0; i < varSlotList.length; i++) { entry.NewStore(ep, varSlotList[i]) }
+        for (i = 0; i < forSlotList.length; i++) { entry.NewStore(ep, forSlotList[i]) }
+        for (i = 0; i < defSlotList.length; i++) { entry.NewStore(zero, defSlotList[i]) }
+        entry.NewStore(zero, gCsp)
+        entry.NewBr(items.length > 0 ? Lblocks[0] : exitBlock)
+    }
+
+    c.compile(c.asg)
+
+    println(m)
+    var res = llvm.Run(m, "main")
+    print(res.Out)
+    println("batch-to-llvm-ir: exit status " + res.Ret)
+    exit(res.Ret)
+
+~~) ;
