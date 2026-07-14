@@ -65,6 +65,12 @@
             "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-test-1.sh", "-q"]
         },
         {
+            "name": "Batch interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/batch-interpreter.abnf", "tests/batch-test-1.bat", "-q"]
+        },
+        {
             "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",

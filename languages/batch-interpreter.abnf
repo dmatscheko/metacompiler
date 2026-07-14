@@ -1,0 +1,380 @@
+:title("Batch interpreter") ;
+:description("Interprets a subset of Windows Batch (cmd.exe .bat) directly, without
+generating code. The script is a flat list of lines - labels and statements - executed
+by a program counter, so goto and call :label work; if/for bodies are parenthesized
+( ) blocks whose goto/exit signals propagate out to that program counter. Every value is
+a string; set /a and (( )) arithmetic are 32 bit integer (an unset or non-numeric operand
+is 0). Implemented: @ prefix and @echo off (ignored); echo text and echo.; set VAR=value;
+set /a VAR=expr; %VAR% expansion and %%i for-variables; if with string ==, numeric
+EQU/NEQ/LSS/LEQ/GTR/GEQ, `if defined VAR`, `if not`, and an else ( ) branch; for %%i in
+(words) do ( ); labels :name, goto name, goto :eof, call :name, exit /b [N], exit [N];
+rem and :: comments. Keywords are recognised in all-lowercase or all-UPPERCASE; labels
+are case sensitive. The run's exit code is the script's, so a self checking script that
+ends with `exit /b <failures>` is green exactly when it passes.
+
+NOT modelled: delayed expansion !x!, for /f //l //r, pipes/redirection, real external
+commands, %1 call parameters, environment inheritance.") ;
+
+:startRule(Program) ;
+:whitespace(Hspace) ;
+
+// ----- program: a flat list of labels and statement-lines (PC executes them) -----
+Program     <~~ push(runProgram(takeAll())) ~~>
+            = { Line } ;
+Line        = BlankLine | ColonComment | LabelLine | StmtLine ;
+BlankLine   = Newline ;
+ColonComment = "::" :whitespace() { NotNL } Newline ;
+LabelLine   <~~ push({lbl: pop()}) ~~>
+            = ":" LabelName :whitespace() { NotNL } Newline ;
+StmtLine    <~~ push({stmt: pop()}) ~~>
+            = [ At ] Stmt Newline ;
+At          = "@" :whitespace() ;
+
+// A statement (also used inside ( ) blocks, where Newlines separate them).
+Stmt        = Rem | EchoCtl | EchoDot | Echo | SetA | Set | If | For | GotoEof | Goto | Call | ExitB | Exit ;
+
+// ----- echo -----
+Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
+EchoCtl     <~~ push(makeNop()) ~~> = KwEcho ( KwOn | KwOff ) ;
+EchoDot     <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "." :whitespace() ;
+Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
+
+// ----- set VAR=value  /  set /a VAR=expr -----
+SetA        <~~ push(makeSetA(takeAll())) ~~>
+            = KwSet "/a" :whitespace(Hspace) SetName "=" Arith ;
+Set         <~~ push(makeSet(takeAll())) ~~>
+            = KwSet SetName "=" ( LineText | Empty ) ;
+SetName     <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+Empty       <~~ push(makeStr("")) ~~> = "" ;
+
+// ----- goto / call / exit -----
+GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
+Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto LabelName :whitespace(Hspace) ;
+Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { Word } :whitespace(Hspace) ;
+ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" [ Word ] :whitespace(Hspace) ;
+Exit        <~~ push(makeExit(takeAll())) ~~> = KwExit [ Word ] :whitespace(Hspace) ;
+
+// ----- if / for (parenthesized bodies) -----
+If          <~~ push(makeIf(takeAll())) ~~>
+            = KwIf [ KwNot <~~ push({neg: true}) ~~> ] Cond Body [ KwElse Body ] ;
+For         <~~ push(makeFor(takeAll())) ~~>
+            = KwFor ForVar KwIn "(" { Word } ")" KwDo Body ;
+ForVar      = "%%" ForLetter :whitespace(Hspace) ;
+// A body is a ( ... ) block (statements separated by newlines) or a single statement.
+Body        = Block | Single ;
+Block       <~~ push({body: makeSeq(takeAll())}) ~~>
+            = "(" :whitespace(Hspace) OptNL { Stmt SepNL } ")" :whitespace(Hspace) ;
+Single      <~~ push({body: pop()}) ~~> = Stmt ;
+OptNL       = { Newline } ;
+SepNL       = { Newline } ;
+
+// ----- conditions -----
+Cond        = DefinedCond | CmpCond | StrCond ;
+DefinedCond <~~ push(mkDefined(pop())) ~~> = KwDefined SetName ;
+CmpCond     <~~ push(mkCmp(takeAll())) ~~> = CmpArg CmpOp CmpArg ;
+StrCond     <~~ push(mkStrCmp(takeAll())) ~~> = CmpArg "==" <~~ push("==") ~~> CmpArg ;
+CmpArg      = QWord | Word ;
+QWord       <~~ push(pop()) ~~> = DQuote ;
+CmpOp       = ( "EQU" | "NEQ" | "LSS" | "LEQ" | "GTR" | "GEQ"
+              | "equ" | "neq" | "lss" | "leq" | "gtr" | "geq" ) <~~ push(up.in) ~~> ;
+
+// ----- words & %expansion% -----
+// After the first Part, :whitespace() keeps the remaining Parts ADJACENT (no space
+// between them); the word ends at the first space, which :whitespace(Hspace) then skips.
+// Without this the engine's leading skip would let { Part } slurp across spaces and
+// swallow the next token (1 EQU 1 became one word 1EQU1).
+Word        <~~ push(makeWord(takeAll())) ~~>
+            = Part :whitespace() { Part } :whitespace(Hspace) ;
+Part        = VarPct | ForRef | DQuote | Bareword ;
+VarPct      <~~ push(mkVarRef(pop())) ~~>
+            = "%" VarNm "%" :whitespace() ;
+VarNm       <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
+ForRef      <~~ push(mkForRef(pop())) ~~>
+            = "%%" ForLetter :whitespace() ;
+ForLetter   <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" ) :whitespace() ;
+DQuote      <~~ push(makeWord(takeAll())) ~~>
+            = '"' :whitespace() { DPart } '"' :whitespace() ;
+DPart       = VarPct | ForRef | DText ;
+DText       <~~ push(makeStr(up.in)) ~~> = { NotDQPct } ;
+Bareword    <~~ push(makeStr(up.in)) ~~>
+            = BareChar :whitespace() { BareChar } :whitespace() ;
+
+// LineText: the rest of the line (for echo / set value), with %expansion%.
+LineText    <~~ push(makeWord(takeAll())) ~~>
+            = { LinePart } :whitespace(Hspace) ;
+LinePart    = VarPct | ForRef | LineChars ;
+LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
+
+// ----- arithmetic (integer): + - * / %, comparisons, parens, bare names, numbers -----
+Arith       = ArithCmp ;
+ArithCmp    <~~ push(foldArith(takeAll())) ~~>
+            = ArithAdd { ( "==" | "!=" | "<=" | "<" | ">=" | ">" ) <~~ push(up.in) ~~> ArithAdd } ;
+ArithAdd    <~~ push(foldArith(takeAll())) ~~>
+            = ArithMul { ( "+" | "-" ) <~~ push(up.in) ~~> ArithMul } ;
+ArithMul    <~~ push(foldArith(takeAll())) ~~>
+            = ArithAtom { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ArithAtom } ;
+ArithAtom   = ( "(" Arith ")" ) | ArithNeg | ArithNum | ArithVar ;
+ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" ArithAtom ;
+ArithNum    <~~ push(mkANum(up.in)) ~~> = ( "0"..."9" { "0"..."9" } ) :whitespace(Hspace) ;
+ArithVar    <~~ push(mkAVar(up.in)) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
+
+// ----- keywords (lowercase or UPPERCASE; word-boundary terminated) -----
+KwRem     = ( "rem" | "REM" ) KwEnd ;
+KwEcho    = ( "echo" | "ECHO" ) KwEnd ;
+KwEchoW   = ( "echo" | "ECHO" ) ;                 // no boundary: echo. is echo + '.'
+KwOn      = ( "on" | "ON" ) KwEnd ;
+KwOff     = ( "off" | "OFF" ) KwEnd ;
+KwSet     = ( "set" | "SET" ) KwEnd ;
+KwIf      = ( "if" | "IF" ) KwEnd ;
+KwNot     = ( "not" | "NOT" ) KwEnd ;
+KwElse    = ( "else" | "ELSE" ) KwEnd ;
+KwDefined = ( "defined" | "DEFINED" ) KwEnd ;
+KwFor     = ( "for" | "FOR" ) KwEnd ;
+KwIn      = ( "in" | "IN" ) KwEnd ;
+KwDo      = ( "do" | "DO" ) KwEnd ;
+KwGoto    = ( "goto" | "GOTO" ) KwEnd ;
+KwCall    = ( "call" | "CALL" ) KwEnd ;
+KwExit    = ( "exit" | "EXIT" ) KwEnd ;
+KwEnd     = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+
+// ----- character classes -----
+Hspace      = { @+" \t" | LineCont } ;
+LineCont    = "^" ( "\r\n" | "\n" | "\r" ) ;
+Newline     = ( "\r\n" | "\n" | "\r" ) :whitespace(Hspace) ;
+LabelName   <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." } :whitespace() ;
+// A bareword char: printable except whitespace, ) % " and the special glue.
+BareChar    = "\x21" | "\x23"..."\x24" | "\x26"..."\x27" | "\x2a"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
+LineChar    = "\x20"..."\x24" | "\x26"..."\x28" | "\x2a"..."\U0010ffff" ;   // except % ) and newline
+NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not " (0x22) or % (0x25)
+
+:startScript(~~
+
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+    function takeAll() {
+        var items = []
+        var v = anytype
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    // ----- integer -> decimal string, hand rolled to avoid any engine formatting drift -----
+    var DIGITS = "0123456789"
+    function intToStr(n) {
+        var m = n | 0
+        if (m == 0) { return "0" }
+        var neg = m < 0
+        if (neg) { m = (0 - m) | 0 }
+        var s = ""
+        while (m > 0) {
+            var d = m % 10
+            s = DIGITS.charAt(d) + s
+            m = (m / 10) | 0
+        }
+        return neg ? ("-" + s) : s
+    }
+    function toInt(s) {
+        var n = parseInt(s, 10)
+        return (n != n) ? 0 : (n | 0)
+    }
+
+    // ----- variables: a single global string environment (keys "$"-prefixed) -----
+    var vars = {}
+    function setVar(name, val) { vars["$" + name] = "" + val }
+    function getVar(name) { return hasOwn(vars, "$" + name) ? vars["$" + name] : "" }
+    function isDefined(name) { return hasOwn(vars, "$" + name) }
+    // for-loop variables live in their own table, keyed by the %%x letter.
+    var forVars = {}
+    function setForVar(letter, val) { forVars["$" + letter] = "" + val }
+    function getForVar(letter) { return hasOwn(forVars, "$" + letter) ? forVars["$" + letter] : "" }
+
+    // ----- value / word thunks: function() -> string -----
+    function makeStr(s) { return function() { return s } }
+    function mkVarRef(name) { return function() { return getVar(name) } }
+    function mkForRef(letter) { return function() { return getForVar(letter) } }
+    function makeWord(parts) {
+        return function() {
+            var out = ""
+            var i = 0
+            for (i = 0; i < parts.length; i++) { out = out + parts[i]() }
+            return out
+        }
+    }
+
+    // ----- arithmetic thunks: function() -> 32 bit int -----
+    function mkANum(s) { var n = toInt(s); return function() { return n } }
+    function mkAVar(name) { return function() { return toInt(getVar(name)) } }
+    function mkANeg(t) { return function() { return (0 - t()) | 0 } }
+    function aOp(op, l, r) {
+        if (op == "+") return (l + r) | 0
+        if (op == "-") return (l - r) | 0
+        if (op == "*") return Math.imul(l, r)
+        if (op == "/") return (r == 0) ? 0 : ((l / r) | 0)
+        if (op == "%") return (r == 0) ? 0 : ((l % r) | 0)
+        if (op == "==") return (l == r) ? 1 : 0
+        if (op == "!=") return (l != r) ? 1 : 0
+        if (op == "<") return (l < r) ? 1 : 0
+        if (op == "<=") return (l <= r) ? 1 : 0
+        if (op == ">") return (l > r) ? 1 : 0
+        if (op == ">=") return (l >= r) ? 1 : 0
+        return 0
+    }
+    function foldArith(items) {
+        if (items.length == 1) return items[0]
+        return function() {
+            var v = items[0]()
+            var i = 1
+            for (i = 1; i < items.length; i += 2) { v = aOp(items[i], v, items[i + 1]()) }
+            return v
+        }
+    }
+
+    // ----- condition thunks: function() -> boolean -----
+    function mkDefined(name) { return function() { return isDefined(name) } }
+    function mkStrCmp(items) {                         // [leftWord, "==", rightWord]
+        var lT = items[0], rT = items[2]
+        return function() { return lT() == rT() }
+    }
+    function mkCmp(items) {                            // [leftWord, OP, rightWord]
+        var lT = items[0], op = items[1], rT = items[2]
+        var opl = op
+        return function() {
+            var x = toInt(lT()), y = toInt(rT())
+            if (opl == "EQU" || opl == "equ") return x == y
+            if (opl == "NEQ" || opl == "neq") return x != y
+            if (opl == "LSS" || opl == "lss") return x < y
+            if (opl == "LEQ" || opl == "leq") return x <= y
+            if (opl == "GTR" || opl == "gtr") return x > y
+            if (opl == "GEQ" || opl == "geq") return x >= y
+            return false
+        }
+    }
+
+    // ----- statement thunks: function() -> undefined | signal -----
+    // signals: {gotoLbl}, {callLbl}, {ret: code}, {procexit: code}
+    function makeNop() { return function() { return undefined } }
+    function makeEcho(wordT) {
+        return function() { println(wordT()); return undefined }
+    }
+    function makeSet(items) {                          // [name, valueLineThunk]
+        var name = items[0], valT = items[1]
+        return function() { setVar(name, valT()); return undefined }
+    }
+    function makeSetA(items) {                         // [name, arithThunk]
+        var name = items[0], arithT = items[1]
+        return function() { setVar(name, intToStr(arithT())); return undefined }
+    }
+    function makeGoto(name) { return function() { return {gotoLbl: name} } }
+    function makeCall(items) { return function() { return {callLbl: items[0]} } }   // items[0]=label; args ignored (no %1 params)
+    function makeExitB(items) {
+        var codeT = items.length > 0 ? items[0] : null
+        return function() { return {ret: codeT != null ? toInt(codeT()) : 0} }
+    }
+    function makeExit(items) {
+        var codeT = items.length > 0 ? items[0] : null
+        return function() { return {procexit: codeT != null ? toInt(codeT()) : 0} }
+    }
+    function makeSeq(items) {
+        return function() {
+            var i = 0, r = undefined
+            for (i = 0; i < items.length; i++) {
+                r = items[i]()
+                if (r != undefined) return r
+            }
+            return undefined
+        }
+    }
+    // items = [ {neg}?, condThunk, {body:thenSeq}, {body:elseSeq}? ]
+    function makeIf(items) {
+        var neg = false
+        var idx = 0
+        if (items[0] != null && typeof items[0] == "object" && items[0].neg != undefined) { neg = true; idx = 1 }
+        var condT = items[idx]
+        var thenT = items[idx + 1].body
+        var elseT = (items.length > idx + 2) ? items[idx + 2].body : null
+        return function() {
+            var c2 = condT()
+            if (neg) { c2 = !c2 }
+            if (c2) { return thenT() }
+            if (elseT != null) { return elseT() }
+            return undefined
+        }
+    }
+    // items = [letter, wordThunk..., {body:bodySeq}]
+    function makeFor(items) {
+        var letter = items[0]
+        var last = items[items.length - 1]
+        var bodyT = last.body
+        var words = items.slice(1, items.length - 1)
+        return function() {
+            var j = 0
+            for (j = 0; j < words.length; j++) {
+                setForVar(letter, words[j]())
+                var r = bodyT()
+                if (r != undefined) return r
+            }
+            return undefined
+        }
+    }
+
+    // ----- the program counter: runs the flat line list, honouring goto/call/exit -----
+    function runProgram(items) {
+        var labelMap = {}
+        var i = 0
+        for (i = 0; i < items.length; i++) {
+            if (items[i].lbl != undefined) { labelMap["$" + items[i].lbl] = i }
+        }
+        var callStack = []
+        var pc = 0
+        while (pc < items.length) {
+            var it = items[pc]
+            if (it.lbl != undefined) { pc = pc + 1; continue }
+            var sig = it.stmt()
+            if (sig == undefined) { pc = pc + 1; continue }
+            if (sig.procexit != undefined) { exit(sig.procexit) }
+            if (sig.gotoLbl != undefined) {
+                if (sig.gotoLbl == "eof") {
+                    if (callStack.length > 0) { pc = callStack.pop() } else { exit(0) }
+                } else if (hasOwn(labelMap, "$" + sig.gotoLbl)) {
+                    pc = labelMap["$" + sig.gotoLbl]
+                } else {
+                    println("The system cannot find the batch label specified - " + sig.gotoLbl)
+                    exit(1)
+                }
+                continue
+            }
+            if (sig.callLbl != undefined) {
+                if (hasOwn(labelMap, "$" + sig.callLbl)) {
+                    callStack.push(pc + 1)
+                    pc = labelMap["$" + sig.callLbl]
+                } else {
+                    println("The system cannot find the batch label specified - " + sig.callLbl)
+                    exit(1)
+                }
+                continue
+            }
+            if (sig.ret != undefined) {
+                if (callStack.length > 0) { pc = callStack.pop() } else { exit(sig.ret) }
+                continue
+            }
+            pc = pc + 1
+        }
+        exit(0)
+        return undefined
+    }
+
+    c.compile(c.asg)
+
+~~) ;
