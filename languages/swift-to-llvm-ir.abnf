@@ -475,11 +475,7 @@ KwContinue  = "continue" KwEnd ;
     // Each do/catch body compiles to its own IR closure handed to js_try (jsrt.go): it
     // runs the try under a Go recover and routes a thrown value to the catch closure (a
     // one-parameter function bound to the catch name). The first catch clause wins.
-    // items = [name, blockThunk] (a name is always pushed, so length is 2).
-    function makeCatch(items) {
-        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
-        return {catchbody: items[0], catchname: undefined}
-    }
+    // makeCatch is shared - see lib/compile-core.js.
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype
         for (var i = 0; i < items.length; i++) {

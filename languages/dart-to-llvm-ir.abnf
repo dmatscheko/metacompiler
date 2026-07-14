@@ -633,11 +633,7 @@ KwFactory   = "factory" KwEnd ;
             return b
         }
     }
-    // items = [name, blockThunk] (a bound catch) or [blockThunk] (on Type { } - no binding).
-    function makeCatch(items) {
-        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
-        return {catchbody: items[0], catchname: undefined}
-    }
+    // makeCatch is shared - see lib/compile-core.js.
     // try/catch/finally: each body becomes its own IR closure over the current scope; js_try
     // (jsrt.go) runs the try under a Go recover, routes a thrown value to the catch closure
     // (a one-parameter function bound to the catch name) and always runs finally. The

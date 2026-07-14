@@ -477,3 +477,11 @@ function makeContinue() {
     return function(b) { emitContinue(b); return deadBlock() }
 }
 
+// items = [name, blockThunk] or [blockThunk] (no binding): package a catch clause into
+// {catchbody, catchname} for the language's makeTry. The compiler twin of interp-core's
+// excCatch; every compiler that lowers try/catch consumes it the same way.
+function makeCatch(items) {
+    if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
+    return {catchbody: items[0], catchname: undefined}
+}
+

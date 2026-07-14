@@ -1100,11 +1100,7 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
 
     // try/catch/finally is not implemented; under -warn the try block runs.
-    // items = [name, blockThunk] or [blockThunk] (no binding).
-    function makeCatch(items) {
-        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
-        return {catchbody: items[0], catchname: undefined}
-    }
+    // makeCatch is shared - see lib/compile-core.js.
     // try/catch/finally: each body compiles to its own IR closure handed to js_try; the
     // try and catch bodies are ctl closures, so a return/break/continue leaving them
     // becomes a control signal that excDispatch re-issues here.
