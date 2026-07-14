@@ -1,0 +1,623 @@
+:title("Bash interpreter (subset)") ;
+:description("Parses a bounded, honest subset of Bash and executes it directly during the
+compile walk, without generating code. Every value is a string (Bash's only data type);
+integer arithmetic converts on demand. Commands return an integer exit status (0 = success,
+like the shell); a 'return' inside a function yields the wrapper {ret: n} that the enclosing
+statement thunks pass on. echo writes to stdout, and 'exit N' ends the run with code N, so a
+test script is self checking: it echoes PASS/FAIL lines and exits with the failure count.
+
+Supported subset:
+  - variable assignment name=value (no spaces around =), expansion $name and ${name}
+  - strings: double \"...\" with $var / ${var} / $((..)) interpolation, single '...' literal
+  - echo with multiple space-joined args (trailing newline; echo -n suppresses it)
+  - integer arithmetic $(( expr )): + - * / %, unary minus, parentheses, comparisons
+    < > <= >= == != (result 1 or 0); bare names and $names are read as operands
+  - if/elif/else/fi and while, both testing a command list's status; the test builtin
+    [ cond ] with -eq -ne -lt -le -gt -ge (ints) and = == != -z -n (strings)
+  - && and || between simple commands (short circuit on exit status)
+  - for name in w1 w2 ...; do ...; done  and  while [ cond ]; do ...; done
+  - functions: name() { ...; } definitions and calls; positional $1..$9, $#, and $? work
+  - true / false / : builtins, exit N, return N, and # line comments
+
+Deliberately OUT OF SCOPE (avoid them): pipes |, redirection > <, real command substitution
+$(cmd), subshells, globbing, brace/tilde expansion, arrays, case, word splitting of an
+expanded variable, and external commands. A leading # always starts a comment, so do not put
+a bare # inside an unquoted word (quote it).") ;
+
+
+// --- main rules
+
+:startRule(Program) ;
+:whitespace(Whitespace) ;
+
+// A whole script: statements separated by ; or newlines (blank / comment lines collapse).
+// The production tag runs all top level statement thunks and exits with the final status.
+Program     <~~ runProgram(takeAll()) ~~>
+            = OptSep [ Statement { Sep Statement } OptSep ] ;
+
+// Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
+// skipped before each separator token, so blank and comment-only lines vanish here.
+OptSep      = [ Sep ] ;
+Sep         = SepTok { SepTok } ;
+SepTok      = ";" | "\n" ;
+
+Statement   = IfStmt | ForStmt | WhileStmt | FuncDef | AndOrList ;
+
+// A brace / keyword delimited body: at least one statement. The trailing OptSep swallows the
+// final ; or newline before the closing keyword (fi / done / }), and a reserved word in
+// command position (guarded in SimpleCommand) stops the list so that keyword can match.
+CompoundList <~~ push(makeSeq(takeAll())) ~~>
+            = OptSep Statement { Sep Statement } OptSep ;
+
+
+// --- compound statements
+
+// if LIST; then LIST; [elif LIST; then LIST;]* [else LIST;] fi
+IfStmt      <~~ push(makeIf(takeAll())) ~~>
+            = IfClause { ElifClause } [ ElseClause ] KwFi ;
+IfClause    <~~ push(mkCond(takeAll())) ~~>
+            = KwIf CompoundList KwThen CompoundList ;
+ElifClause  <~~ push(mkCond(takeAll())) ~~>
+            = KwElif CompoundList KwThen CompoundList ;
+ElseClause  <~~ push(mkElse(pop())) ~~>
+            = KwElse CompoundList ;
+
+// while LIST; do LIST; done
+WhileStmt   <~~ push(makeWhile(takeAll())) ~~>
+            = KwWhile CompoundList KwDo CompoundList KwDone ;
+
+// for NAME in WORD...; do LIST; done  -- each word is one iteration value (no re-splitting).
+ForStmt     <~~ push(makeFor(takeAll())) ~~>
+            = KwFor ForName KwIn ForWords Sep KwDo CompoundList KwDone ;
+ForName     <~~ push({fname: up.in}) ~~>
+            = Name ;
+ForWords    <~~ push({words: takeAll()}) ~~>
+            = { Word } ;
+
+// NAME() { LIST; }  -- registers the body thunk when the definition statement runs.
+FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
+            = FuncName "(" ")" OptSep "{" CompoundList "}" ;
+FuncName    <~~ push({fname: up.in}) ~~>
+            = Name ;
+
+Name        = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+
+// --- simple commands, && / || lists and assignments
+
+// cmd1 && cmd2 || cmd3 : left to right, short circuit on the running exit status.
+AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
+            = Command { AndOrOp Command } ;
+AndOrOp     <~~ push({op: up.in}) ~~>
+            = "&&" | "||" ;
+
+Command     = Assignment | SimpleCommand ;
+
+// name=value : the = must stick to the name (no surrounding spaces), so the disable
+// (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
+// (name= is valid) and starts immediately after = with no space.
+Assignment  <~~ push(makeAssign(takeAll())) ~~>
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() "=" :whitespace() [ Word ] ;
+AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+
+// A command word followed by argument words. NotReserved blocks a bare reserved keyword in
+// command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
+SimpleCommand <~~ push(makeSimpleCommand(takeAll())) ~~>
+            = NotReserved Word { Word } ;
+
+
+// --- words: a run of segments with NO whitespace between them ---------------------
+// The first segment is matched under the caller's whitespace state (so leading space is
+// skipped in argument position, but NOT after = in an assignment); :whitespace() then turns
+// skipping off for the remaining segments so foo\"bar\"$x concatenates as one word.
+
+Word        <~~ push(mkWord(takeAll())) ~~>
+            = WordSeg :whitespace() { WordSeg } ;
+WordSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | BareSeg ;
+
+// 'single quoted' : everything up to the next ' is literal (no escapes, may span lines).
+SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
+
+// "double quoted" : literal runs, escapes and $ expansions concatenated.
+DqSeg       <~~ push(mkWord(takeAll())) ~~>
+            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
+DqLit       <~~ push(makeConst(up.in)) ~~>
+            = !@+"\"$\\" ;
+DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
+            = "\\" AnyCh ;
+
+// An unquoted \x escape: the backslash is dropped, the next char is literal (\  -> space).
+EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
+            = "\\" AnyCh ;
+
+// A bare run: any char that is not whitespace, a separator, or a shell metacharacter.
+BareSeg     <~~ push(makeConst(up.in)) ~~>
+            = !@+" \t\n\r;#$'\"\\(){}&|<>`" ;
+
+AnyCh       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+
+// --- $ expansions -----------------------------------------------------------------
+
+ExpSeg      = ArithExp | DollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+
+// $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
+ArithExp    <~~ push(mkArith(pop())) ~~>
+            = "$((" :whitespace(Whitespace) ArCmp "))" ;
+
+DollarBrace = "${" VarName <~~ push(mkVarRef(up.in)) ~~> "}" ;
+DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
+DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
+DollarSpecial = DollarHash | DollarQ ;
+DollarHash  <~~ push(mkVarRef("#")) ~~> = "$#" ;
+DollarQ     <~~ push(mkVarRef("?")) ~~> = "$?" ;
+DollarLit   <~~ push(makeConst("$")) ~~> = "$" ;
+
+VarName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+ArgDigit    = "0"..."9" ;
+
+
+// --- $(( )) arithmetic: precedence comparison < additive < multiplicative < unary --------
+
+ArCmp       <~~ push(foldBin(takeAll())) ~~>
+            = ArAdd { ArCmpOp ArAdd } ;
+ArCmpOp     <~~ push({op: up.in}) ~~> = "<=" | ">=" | "==" | "!=" | "<" | ">" ;
+ArAdd       <~~ push(foldBin(takeAll())) ~~>
+            = ArMul { ArAddOp ArMul } ;
+ArAddOp     <~~ push({op: up.in}) ~~> = "+" | "-" ;
+ArMul       <~~ push(foldBin(takeAll())) ~~>
+            = ArUnary { ArMulOp ArUnary } ;
+ArMulOp     <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
+ArUnary     = ArNeg | ArPrimary ;
+ArNeg       <~~ push(mkNeg(pop())) ~~> = "-" ArUnary ;
+// A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
+ArPrimary   = ArGroup | ArNum | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArVar ;
+ArGroup     = "(" ArCmp ")" ;
+ArNum       <~~ push(mkInt(up.in)) ~~>
+            = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+ArVar       <~~ push(mkArVar(up.in)) ~~> = ArName ;
+ArDollarVar = "$" ArName <~~ push(mkArVar(up.in)) ~~> ;
+ArDollarDigit = "$" ArgDigit <~~ push(mkArVar(up.in)) ~~> :whitespace(Whitespace) ;
+ArDollarHash <~~ push(mkArVar("#")) ~~> = "$#" :whitespace(Whitespace) ;
+ArDollarQ   <~~ push(mkArVar("?")) ~~> = "$?" :whitespace(Whitespace) ;
+ArName      = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+
+
+// --- keywords, keyword boundary and the reserved-word guard ------------------------
+
+KwIf        = "if" KwEnd ;
+KwThen      = "then" KwEnd ;
+KwElif      = "elif" KwEnd ;
+KwElse      = "else" KwEnd ;
+KwFi        = "fi" KwEnd ;
+KwFor       = "for" KwEnd ;
+KwWhile     = "while" KwEnd ;
+KwDo        = "do" KwEnd ;
+KwDone      = "done" KwEnd ;
+KwIn        = "in" KwEnd ;
+
+// A keyword only counts when the next char is a word terminator (whitespace, a separator or
+// a metacharacter), so 'done1', 'ifx' and 'in_it' stay ordinary words. Returns the impossible
+// token to FAIL (word continues), undefined to succeed (real boundary).
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc == -1) { return undefined }
+        if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { return undefined }
+        if (cc == 59 || cc == 38 || cc == 124) { return undefined }
+        if (cc == 40 || cc == 41 || cc == 60 || cc == 62 || cc == 35) { return undefined }
+        return abnf.newToken("\x01kw-boundary", 0)
+    })()
+~~) ;
+
+// Succeeds (consumes nothing) unless the upcoming word is a reserved keyword with a boundary,
+// in which case it fails so the SimpleCommand does not swallow the keyword.
+NotReserved = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        var w = ""
+        cc = c.peek(i)
+        while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { w = w + String.fromCharCode(cc); i = i + 1; cc = c.peek(i) }
+        var boundary = (cc == -1 || cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 59 || cc == 38 || cc == 124 || cc == 40 || cc == 41 || cc == 60 || cc == 62 || cc == 35)
+        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "while" || w == "do" || w == "done" || w == "in")
+        if (kw && boundary) { return abnf.newToken("\x01reserved-word", 0) }
+        return undefined
+    })()
+~~) ;
+
+
+// --- whitespace: spaces, tabs, CR and # line comments; NEVER a newline (that is structure).
+
+Whitespace  = { @+" \t\r" | Comment } ;
+Comment     = "#" :whitespace() { NotNL } :whitespace(Whitespace) ;
+NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+
+
+// ---
+
+:startScript(~~
+
+    // ---- tiny stack / string helpers (self contained, no shared core) ----
+
+    // Drains the current tag's local stack into an array in push order.
+    function takeAll() {
+        var items = []
+        var v = anytype // Tags push values of every type.
+        while ((v = pop()) != null) items.unshift(v)
+        return items
+    }
+
+    // Own-property test: a bare o[name] read resolves inherited Object.prototype members
+    // (toString, constructor, ...) under goja, so every user-keyed map below is queried and
+    // written with a "$" prefixed key AND checked with hasOwn.
+    function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+
+    function fail(msg) {
+        println("bash interpreter error: " + msg)
+        exit(2)
+    }
+
+    // Integer -> decimal string built by hand, so the two engines cannot disagree on any
+    // number formatting (goja and the frozen VM differ on large / float toString).
+    function numToStr(n) {
+        n = n | 0
+        if (n == 0) { return "0" }
+        var neg = false
+        if (n < 0) { neg = true; n = (0 - n) | 0 }
+        var s = ""
+        while (n > 0) {
+            var d = n % 10
+            s = String.fromCharCode(48 + d) + s
+            n = ((n - d) / 10) | 0
+        }
+        if (neg) { s = "-" + s }
+        return s
+    }
+
+    // Decimal string -> 32 bit int (leading spaces and one +/- sign, digits until the first
+    // non-digit; empty or non-numeric yields 0, like an unset variable in Bash arithmetic).
+    function strToInt(s) {
+        var i = 0
+        var n = s.length
+        var c0 = anytype
+        while (i < n) { c0 = s.charCodeAt(i); if (c0 == 32 || c0 == 9) { i = i + 1 } else { i = n + 1 } }
+        if (i > n) { i = i - (n + 1) } else { i = 0 }
+        var neg = false
+        if (i < n) {
+            var c1 = s.charCodeAt(i)
+            if (c1 == 45) { neg = true; i = i + 1 }
+            else if (c1 == 43) { i = i + 1 }
+        }
+        var v = 0
+        var stop = false
+        while (i < n) {
+            if (stop) { i = n } else {
+                var c = s.charCodeAt(i)
+                if (c < 48 || c > 57) { stop = true } else { v = (v * 10 + (c - 48)) | 0; i = i + 1 }
+            }
+        }
+        if (neg) { v = (0 - v) | 0 }
+        return v
+    }
+
+    // ---- interpreter state ----
+
+    var vars = {}        // variables:  vars["$" + name] = string value
+    var funcs = {}       // functions:  funcs["$" + name] = body thunk
+    var posParams = []   // current positional parameters $1.. (an array of strings)
+    var lastStatus = 0   // $? : exit status of the most recent command
+
+    function setStatus(s) { lastStatus = s | 0 }
+
+    function setVarVal(name, val) { vars["$" + name] = val }
+    function getVarVal(name) {
+        if (name == "?") { return numToStr(lastStatus) }
+        if (name == "#") { return numToStr(posParams.length) }
+        if (name.length == 1) {
+            var cc = name.charCodeAt(0)
+            if (cc >= 48 && cc <= 57) {
+                var idx = cc - 48
+                if (idx == 0) { return "" }
+                if (idx <= posParams.length) { return posParams[idx - 1] }
+                return ""
+            }
+        }
+        var key = "$" + name
+        if (hasOwn(vars, key)) { return vars[key] }
+        return ""
+    }
+
+    // ---- word / expansion thunks: function() -> string ----
+
+    function makeConst(s) { return function() { return s } }
+    function mkVarRef(name) { return function() { return getVarVal(name) } }
+    function mkArith(intThunk) { return function() { return numToStr(intThunk()) } }
+    function mkWord(segThunks) {
+        return function() {
+            var out = ""
+            var i
+            for (i = 0; i < segThunks.length; i++) { out = out + segThunks[i]() }
+            return out
+        }
+    }
+
+    // Unquoted \x : drop the backslash, keep the char (\  -> space, \$ -> $, \\ -> \).
+    function escChar(t) { return t.slice(1) }
+    // Double quoted \x : the backslash stays literal UNLESS it escapes $ " \ or `.
+    function dqEsc(t) {
+        var c = t.slice(1)
+        if (c == "$" || c == "\"" || c == "\\" || c == "`") { return c }
+        return t
+    }
+
+    // ---- arithmetic thunks: function() -> int ----
+
+    function mkInt(text) { var n = strToInt(text); return function() { return n } }
+    function mkArVar(name) { return function() { return strToInt(getVarVal(name)) } }
+    function mkNeg(t) { return function() { return (0 - t()) | 0 } }
+    function arOp(op, l, r) {
+        if (op == "+") { return (l + r) | 0 }
+        if (op == "-") { return (l - r) | 0 }
+        if (op == "*") { return (l * r) | 0 }
+        if (op == "/") { return (l / r) | 0 }
+        if (op == "%") { return (l % r) | 0 }
+        if (op == "<")  { return (l < r) ? 1 : 0 }
+        if (op == ">")  { return (l > r) ? 1 : 0 }
+        if (op == "<=") { return (l <= r) ? 1 : 0 }
+        if (op == ">=") { return (l >= r) ? 1 : 0 }
+        if (op == "==") { return (l == r) ? 1 : 0 }
+        if (op == "!=") { return (l != r) ? 1 : 0 }
+        return 0
+    }
+    // items = [thunk, {op}, thunk, {op}, thunk, ...] -> one left folded int thunk.
+    function foldBin(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = items[0]()
+            var i
+            for (i = 1; i < items.length; i += 2) { v = arOp(items[i].op, v, items[i + 1]()) }
+            return v
+        }
+    }
+
+    // ---- statement / command thunks: function() -> int status | {ret: int} ----
+
+    // items = [{aname}] or [{aname}, valueWordThunk].
+    function makeAssign(items) {
+        var name = items[0].aname
+        var valT = (items.length > 1) ? items[1] : null
+        return function() {
+            var v = (valT != null) ? valT() : ""
+            setVarVal(name, v)
+            setStatus(0)
+            return 0
+        }
+    }
+
+    // words[0] is the command word thunk, the rest are argument word thunks.
+    function makeSimpleCommand(words) {
+        var cmdT = words[0]
+        var argTs = words.slice(1)
+        return function() {
+            var cmd = cmdT()
+            var args = []
+            var i
+            for (i = 0; i < argTs.length; i++) { args.push(argTs[i]()) }
+            return runCommand(cmd, args)
+        }
+    }
+
+    function echoCmd(args) {
+        var i = 0
+        var newline = true
+        if (args.length > 0 && args[0] == "-n") { newline = false; i = 1 }
+        var out = ""
+        var first = true
+        while (i < args.length) {
+            if (!first) { out = out + " " }
+            out = out + args[i]
+            first = false
+            i = i + 1
+        }
+        if (newline) { out = out + "\n" }
+        print(out)
+    }
+
+    // The test builtin: [ ... ] (drops the closing ]) or `test ...`.
+    function testBuiltin(cmd, argsIn) {
+        var a = argsIn
+        if (cmd == "[") {
+            if (a.length == 0 || a[a.length - 1] != "]") { fail("[ used without the closing ]") }
+            a = a.slice(0, a.length - 1)
+        }
+        if (a.length == 0) { return 1 }
+        if (a.length == 1) { return (a[0] != "") ? 0 : 1 }
+        if (a.length == 2) {
+            var op1 = a[0]
+            var s = a[1]
+            if (op1 == "-z") { return (s == "") ? 0 : 1 }
+            if (op1 == "-n") { return (s != "") ? 0 : 1 }
+            fail("unknown unary test operator: " + op1)
+        }
+        if (a.length == 3) {
+            var l = a[0]
+            var op = a[1]
+            var r = a[2]
+            if (op == "-eq") { return (strToInt(l) == strToInt(r)) ? 0 : 1 }
+            if (op == "-ne") { return (strToInt(l) != strToInt(r)) ? 0 : 1 }
+            if (op == "-lt") { return (strToInt(l) < strToInt(r)) ? 0 : 1 }
+            if (op == "-le") { return (strToInt(l) <= strToInt(r)) ? 0 : 1 }
+            if (op == "-gt") { return (strToInt(l) > strToInt(r)) ? 0 : 1 }
+            if (op == "-ge") { return (strToInt(l) >= strToInt(r)) ? 0 : 1 }
+            if (op == "=" || op == "==") { return (l == r) ? 0 : 1 }
+            if (op == "!=") { return (l != r) ? 0 : 1 }
+            fail("unknown binary test operator: " + op)
+        }
+        fail("test: too many arguments")
+        return 2
+    }
+
+    // Dispatch a command by its (already expanded) name. Returns an int status, or {ret: n}
+    // for the return builtin; exit terminates the whole run immediately.
+    function runCommand(cmd, args) {
+        if (cmd == "echo") { echoCmd(args); setStatus(0); return 0 }
+        if (cmd == "[" || cmd == "test") { var st = testBuiltin(cmd, args); setStatus(st); return st }
+        if (cmd == "true" || cmd == ":") { setStatus(0); return 0 }
+        if (cmd == "false") { setStatus(1); return 1 }
+        if (cmd == "exit") {
+            var code = (args.length > 0) ? strToInt(args[0]) : lastStatus
+            exit(code)
+        }
+        if (cmd == "return") {
+            var rc = (args.length > 0) ? strToInt(args[0]) : lastStatus
+            return {ret: rc}
+        }
+        var key = "$" + cmd
+        if (hasOwn(funcs, key)) { var st2 = callFunc(cmd, args); setStatus(st2); return st2 }
+        fail("command not found: " + cmd)
+        return 127
+    }
+
+    // Call a user function: bind $1.. to args, run the body, restore, return its status.
+    function callFunc(name, args) {
+        var body = funcs["$" + name]
+        var saved = posParams
+        posParams = args
+        var r = anytype
+        r = body()
+        posParams = saved
+        if (typeof r == "object") { return r.ret }
+        return r
+    }
+
+    // cmd1 && cmd2 || cmd3 : short circuit on the running status; a {ret} unwinds at once.
+    function makeAndOr(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var st = anytype
+            st = items[0]()
+            if (typeof st == "object") { return st }
+            var i
+            for (i = 1; i < items.length; i += 2) {
+                var op = items[i].op
+                var runIt = (op == "&&") ? (st == 0) : (st != 0)
+                if (runIt) {
+                    st = items[i + 1]()
+                    if (typeof st == "object") { return st }
+                }
+            }
+            return st
+        }
+    }
+
+    // A statement sequence: the value is the last statement's status; a {ret} unwinds.
+    function makeSeq(thunks) {
+        return function() {
+            var last = 0
+            var r = anytype
+            var i
+            for (i = 0; i < thunks.length; i++) {
+                r = thunks[i]()
+                if (typeof r == "object") { return r }
+                last = r
+            }
+            return last
+        }
+    }
+
+    function mkCond(items) { return {cond: items[0], body: items[1]} }
+    function mkElse(bodyT) { return {els: bodyT} }
+    // clauses = [{cond,body} (if), {cond,body} (elif)*, {els} (else)?].
+    function makeIf(clauses) {
+        return function() {
+            var i
+            var cst = anytype
+            for (i = 0; i < clauses.length; i++) {
+                var cl = clauses[i]
+                if (cl.els != undefined) { return cl.els() }
+                cst = cl.cond()
+                if (typeof cst == "object") { return cst }
+                if (cst == 0) { return cl.body() }
+            }
+            return 0
+        }
+    }
+
+    // items = [condThunk, bodyThunk].
+    function makeWhile(items) {
+        var condT = items[0]
+        var bodyT = items[1]
+        return function() {
+            var last = 0
+            var cst = anytype
+            var r = anytype
+            var loop = true
+            while (loop) {
+                cst = condT()
+                if (typeof cst == "object") { return cst }
+                if (cst != 0) { loop = false } else {
+                    r = bodyT()
+                    if (typeof r == "object") { return r }
+                    last = r
+                }
+            }
+            return last
+        }
+    }
+
+    // items = [{fname}, {words:[wordThunks]}, bodyThunk] in source order.
+    function makeFor(items) {
+        var fname = ""
+        var wordThunks = anytype
+        var bodyT = anytype
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { bodyT = it }
+            else if (it.words != undefined) { wordThunks = it.words }
+            else if (it.fname != undefined) { fname = it.fname }
+        }
+        return function() {
+            var last = 0
+            var r = anytype
+            var k
+            for (k = 0; k < wordThunks.length; k++) {
+                setVarVal(fname, wordThunks[k]())
+                r = bodyT()
+                if (typeof r == "object") { return r }
+                last = r
+            }
+            return last
+        }
+    }
+
+    // items = [{fname}, bodyThunk]. Registration happens when the statement runs.
+    function makeFuncDef(items) {
+        var fname = items[0].fname
+        var bodyT = items[1]
+        return function() {
+            funcs["$" + fname] = bodyT
+            setStatus(0)
+            return 0
+        }
+    }
+
+    // ---- run ----
+
+    // Build all statement thunks, then run them top to bottom. The exit code of the whole
+    // metacompiler run is the status of the last command (or an explicit exit N).
+    function runProgram(stmts) {
+        var i
+        var r = anytype
+        for (i = 0; i < stmts.length; i++) {
+            r = stmts[i]()
+            if (typeof r == "object") { setStatus(r.ret) }
+        }
+        exit(lastStatus)
+    }
+
+    c.compile(c.asg)
+
+~~) ;

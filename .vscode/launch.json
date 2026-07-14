@@ -59,6 +59,12 @@
             "program": "${workspaceFolder}","args": ["languages/calculator-latex-interpreter.abnf", "-code", "x^2 - x - 6 = 0", "-q"]
         },
         {
+            "name": "Bash interpreter",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/bash-interpreter.abnf", "tests/bash-test-1.sh", "-q"]
+        },
+        {
             "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",
