@@ -923,11 +923,7 @@ KwLet       = "let" KwEnd ;
     // try/catch/finally: each body compiles to its own IR closure handed to js_try; the
     // try and catch bodies are ctl closures (isCtl), so a return/break/continue leaving
     // them becomes a control signal that excDispatch re-issues here. The first catch wins.
-    // items = [name, blockThunk] or [blockThunk] (no binding).
-    function makeCatch(items) {
-        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
-        return {catchbody: items[0], catchname: undefined}
-    }
+    // makeCatch is shared - see lib/compile-core.js.
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {

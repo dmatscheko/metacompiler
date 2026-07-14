@@ -906,10 +906,7 @@ KwStep      = "step" KwEnd ;
     // js_try (jsrt.go) runs the try under a Go recover, routes a thrown value to the
     // catch closure (a one-parameter function bound to the catch name) and always runs
     // finally. The first catch clause wins. See the TryStmt LIMITATION note above.
-    function makeCatch(items) {
-        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
-        return {catchbody: items[0], catchname: undefined}
-    }
+    // makeCatch is shared - see lib/compile-core.js.
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {

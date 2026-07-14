@@ -519,11 +519,7 @@ KwInstanceof = "instanceof" KwEnd ;
     makeContinue = function(items) {
         return function(b) { emitContinue(b); return deadBlock() }
     }
-    // items = [name, blockThunk] or [blockThunk]: PHP's catch variable is optional.
-    function makeCatch(items) {
-        if (items.length > 1) { return {catchbody: items[1], catchname: items[0]} }
-        return {catchbody: items[0], catchname: undefined}
-    }
+    // makeCatch is shared - see lib/compile-core.js.
     // try/catch/finally: each body compiles to its own IR closure handed to js_try. The
     // try and catch bodies are ctl closures, so a return/break/continue leaving them
     // becomes a control signal that excDispatch re-issues here; the finally is a plain
