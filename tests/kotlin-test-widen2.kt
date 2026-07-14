@@ -50,6 +50,10 @@ object Singleton
 val Int.asMarker: String
     get() = "marker"
 
+// A top-level extension DELEGATED property (receiver + a `by` delegate): both recognised
+// and notImpl. The delegate expression is parsed and discarded (never evaluated).
+val Int.viaStore: String by storeDelegate("m")
+
 class WithExtras(val n: Int) {
     var doubled: Int = 0
     init {

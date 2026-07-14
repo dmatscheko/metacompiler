@@ -163,7 +163,7 @@ PropDelegate = LazyProp | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
             = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
 UnsupDelegate <~~ notImpl("delegated property", up.pos) ~~>
-            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] { PropVis } [ ";" ] ;
 // The lazy initializer lambda, wrapped so it runs once and yields its value: the
 // property's init thunk. EAGER - the value is computed at the declaration, not on
 // first access (single-threaded, deterministic). Deviation: a lazy initializer that
@@ -233,12 +233,15 @@ Decl        <~~ push(makeDecl(takeAll())) ~~>
             = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
 // A local or top-level delegated property (val x by <delegate>). Same split as
 // PropDelegate: `val x by lazy { init }` is GENUINE (LazyDecl - the initializer runs
-// once and x becomes an ordinary binding); every other delegate is not implemented.
+// once and x becomes an ordinary binding); every other delegate is not implemented -
+// including an EXTENSION delegated property (val Recv.x by preferencesDataStore(...)):
+// its receiver is absorbed by the tag-less RecvSeg, and it never matches genuine LazyDecl
+// (which has no receiver), so it lands in UnsupDelegateDecl.
 DelegateDecl = LazyDecl | UnsupDelegateDecl ;
 LazyDecl    <~~ push(makeDecl(takeAll())) ~~>
             = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
 UnsupDelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;

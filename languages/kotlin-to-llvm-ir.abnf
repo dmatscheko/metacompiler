@@ -181,7 +181,7 @@ PropDelegate = LazyProp | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
             = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
 UnsupDelegate <~~ notImpl("delegated property", up.pos) ~~>
-            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] { PropVis } [ ";" ] ;
 // The lazy initializer lambda, wrapped so it lowers to "build the closure, call it
 // once (no args)" - the property's init thunk. EAGER: the value is computed at the
 // declaration, not on first access (single-threaded, deterministic). Deviation: a
@@ -259,7 +259,7 @@ DelegateDecl = LazyDecl | UnsupDelegateDecl ;
 LazyDecl    <~~ push(makeDecl(takeAll())) ~~>
             = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
 UnsupDelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
