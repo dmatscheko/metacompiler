@@ -6,6 +6,11 @@ h
 2 \cdot 3 + \frac{10}{4}
 \sin(0) + \cos(0)
 \ln(e) + \log(1000)
+arcsin(1) + arccos(0)
+sin(0) + cos(0) + tan(0)
+sqrt(16) + exp(0)
+arctan(1) * 4
+ln(e) + log(1000)
 5! - \frac{6!}{6}
 |3 - 8| + \left|-2\right|
 2^{3^2}

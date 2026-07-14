@@ -90,7 +90,7 @@ Root        = ( "\\sqrt" [ "[" Sum "]" ] "{" Sum "}" ) <~~
                                              else push(mkFunc("sqrt", it[0]))
                                             ~~> ;
 
-Func        = ( FuncName FuncArg )          <~~
+Func        = ( FuncName FuncArg | PlainName FuncArgParen ) <~~
                                              var it = takeAll()
                                              push(mkFunc(it[0], it[1]))
                                             ~~> ;
@@ -99,7 +99,17 @@ FuncName    = ( "\\arcsin" | "\\arccos" | "\\arctan"
               | "\\sinh" | "\\cosh" | "\\tanh"
               | "\\sin" | "\\cos" | "\\tan"
               | "\\ln" | "\\log" | "\\exp" ) <~~ push(up.in.slice(1)) ~~> ;
+// The same functions WITHOUT the leading backslash (arcsin, sin, sqrt, ...). A bare name
+// would otherwise steal a run of single-letter variables - cost must stay c*o*s*t, not
+// cos(t) - so a backslash-less call REQUIRES an explicit ( ) or { } argument (FuncArgParen),
+// not the bare-Power FuncArg the \-form allows: sin(x) is the function, sinx is s*i*n*x.
+// Longer names first, same as FuncName.
+PlainName   = ( "arcsin" | "arccos" | "arctan"
+              | "sinh" | "cosh" | "tanh"
+              | "sin" | "cos" | "tan"
+              | "ln" | "log" | "exp" | "sqrt" ) <~~ push(up.in) ~~> ;
 FuncArg     = ( "(" Sum ")" ) | ( "{" Sum "}" ) | Power ;
+FuncArgParen = ( "(" Sum ")" ) | ( "{" Sum "}" ) ;
 
 Const       = ( "\\pi" )                    <~~ push(mkNum(Math.PI)) ~~>
             | ( "\\tau" )                   <~~ push(mkNum(2 * Math.PI)) ~~>
