@@ -692,15 +692,7 @@ KwInstanceof = "instanceof" KwEnd ;
             return d
         }
     }
-    function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
-    function dictFind(d, k) {
-        for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) { return i } }
-        return -1
-    }
-    function dictSet(d, k, v) {
-        var i = dictFind(d, k)
-        if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
-    }
+    // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
 
     // ----- string coercion and concatenation (PHP '.') -----
     function phpStr(v) {

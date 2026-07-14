@@ -448,3 +448,18 @@ function invokeBody(params, body, self, recvName, args) {
     scopes = saved
     return (r != undefined && r.isRet) ? r.v : undefined
 }
+
+// ----- Dictionaries: an insertion-ordered {__dict, keys, vals} box with two parallel
+// arrays (mirrors the compiled runtime's js_dict handle). Any ===-comparable key works
+// and keys keep their insertion order. Shared by the languages whose value model has a
+// distinct dict/map type (python, ruby, php, swift, dart, c#); each language file adds
+// its own literal/constructor builders (newDict, makeMap, makeDict, ...) on top.
+function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+function dictFind(d, k) {
+    for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) { return i } }
+    return -1
+}
+function dictSet(d, k, v) {
+    var i = dictFind(d, k)
+    if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
+}

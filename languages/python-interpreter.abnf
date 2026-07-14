@@ -504,21 +504,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Dicts: {__dict, keys, vals} with two parallel arrays. The arrays keep
     // the insertion order (like Python) and allow any === comparable key. -----
-    function isDict(v) {
-        return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
-    }
+    // isDict/dictFind/dictSet are shared - see lib/interp-core.js.
     function newDict() { return {__dict: true, keys: [], vals: []} }
-    function dictFind(d, k) {
-        for (var i = 0; i < d.keys.length; i++) {
-            if (d.keys[i] === k) return i
-        }
-        return -1
-    }
-    function dictSet(d, k, v) {
-        var i = dictFind(d, k)
-        if (i >= 0) { d.vals[i] = v }
-        else { d.keys.push(k); d.vals.push(v) }
-    }
 
     // Python style rendering: True/False/None, lists in brackets, dicts in braces.
     function prepr(v) {
