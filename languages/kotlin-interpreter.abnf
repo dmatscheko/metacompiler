@@ -987,27 +987,34 @@ KwStep      = "step" KwEnd ;
                "keys", "values", "get", "add", "append", "pop", "removeLast", "size",
                "contains", "map", "filter", "sumOf", "forEach", "count", "any"]
     for (var bi = 0; bi < bmn.length; bi++) { builtinMethodNames["$" + bmn[bi]] = true }
-    // items = [name, {params}, body]: the receiver type was dropped by RecvSeg.
-    // Like makeMethodClosure/invokeBody, but `this` is declared UNCONDITIONALLY:
-    // a nullable-receiver extension runs with this = null (invokeBody would skip
-    // the null binding, and the compiled twin binds args[0] unconditionally).
+    // Run a function/method/lambda body in a fresh frame: install `base` as the scope
+    // chain (its last element is the body's own scope), optionally bind `this` to self,
+    // bind the params from args starting at argOff, run the frame hooks, then restore
+    // the scopes and unwrap an {isRet}. Generalises invokeBody (interp-core) over the
+    // base chain (global-rooted vs a captured closure chain) and the this-policy
+    // (forced, even when null, vs none) that the three closures below need.
+    function runFrame(base, self, bindThis, params, args, argOff, body) {
+        var saved = scopes
+        scopes = base
+        if (bindThis) { declVar("this", self) }
+        for (var i = 0; i < params.length; i++) {
+            declVar(params[i], (i + argOff) < args.length ? args[i + argOff] : undefined)
+        }
+        if (core.framePush != null) core.framePush()
+        var r = body()
+        if (core.framePop != null) core.framePop()
+        scopes = saved
+        return (r != undefined && r.isRet) ? r.v : undefined
+    }
+    // items = [name, {params}, body]: the receiver type was dropped by RecvSeg. `this`
+    // is bound UNCONDITIONALLY (even to null: a nullable-receiver extension runs with
+    // this = null, and the compiled twin binds args[0] unconditionally). Global-rooted
+    // like a top-level function; the receiver is args[0], so params start at argOff 1.
     function registerExtFun(items) {
         var params = items[1].params
         var body = items[2]
         extFuns["$" + items[0]] = function() {
-            var recv = arguments[0]
-            var args = arguments
-            var saved = scopes
-            scopes = [globalScope, {}]
-            declVar("this", recv)
-            for (var i = 0; i < params.length; i++) {
-                declVar(params[i], i + 1 < args.length ? args[i + 1] : undefined)
-            }
-            if (core.framePush != null) core.framePush()
-            var r = body()
-            if (core.framePop != null) core.framePop()
-            scopes = saved
-            return (r != undefined && r.isRet) ? r.v : undefined
+            return runFrame([globalScope, {}], arguments[0], true, params, arguments, 1, body)
         }
     }
     function extResolves(name) {
@@ -1303,21 +1310,25 @@ KwStep      = "step" KwEnd ;
     // env is that same scope), with the instance and parameters in a child scope.
     function makeCapturedMethod(f, captured) {
         return function() {
-            var self = arguments[0]
-            var args = arguments
-            var saved = scopes
-            scopes = captured.slice(0)
-            scopes.push({})
-            declVar("this", self)
-            for (var i = 0; i < f.params.length; i++) {
-                declVar(f.params[i], i + 1 < args.length ? args[i + 1] : undefined)
-            }
-            if (core.framePush != null) core.framePush()
-            var r = f.body()
-            if (core.framePop != null) core.framePop()
-            scopes = saved
-            return (r != undefined && r.isRet) ? r.v : undefined
+            var base = captured.slice(0)
+            base.push({})
+            return runFrame(base, arguments[0], true, f.params, arguments, 1, f.body)
         }
+    }
+    // Split walked members (from `start`) into property initializers ({prop,init}),
+    // methods (the method object of a {method}) and the companion member list (a
+    // {companion}, only classes carry one). Written once so every class/object/
+    // companion builder partitions its members the same way.
+    function splitMembers(items, start) {
+        var props = []
+        var methods = []
+        var companion = null
+        for (var i = start; i < items.length; i++) {
+            if (items[i].companion != undefined) { companion = items[i].companion }
+            else if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]) }
+            else if (items[i].method != undefined) { methods.push(items[i].method) }
+        }
+        return {props: props, methods: methods, companion: companion}
     }
     // items = members ({prop} | {method}): an anonymous class instance per
     // evaluation. The descriptor is rebuilt each time so its methods close over
@@ -1325,12 +1336,9 @@ KwStep      = "step" KwEnd ;
     // the fresh object as `this`. Method names register in classMethodNames (an
     // extension function never shadows a member).
     function makeObjectExpr(items) {
-        var props = []
-        var methods = []
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]) }
-            else if (items[i].method != undefined) { methods.push(items[i].method) }
-        }
+        var parts = splitMembers(items, 0)
+        var props = parts.props
+        var methods = parts.methods
         for (var m2 = 0; m2 < methods.length; m2++) { classMethodNames["$" + methods[m2].name] = true }
         return function() {
             var captured = scopes.slice(0)
@@ -1429,6 +1437,20 @@ KwStep      = "step" KwEnd ;
     // the directly labelled loop takes the name (an inner loop sees null). A
     // labelled break that escapes to the wrapper is absorbed here.
     var pendingLabel = null
+    // Consume the label a Labeled wrapper parked in pendingLabel, clearing it so an
+    // inner loop does not re-consume it. Every loop runner calls this on entry.
+    function takeLabel() { var l = pendingLabel; pendingLabel = null; return l }
+    // Classify a loop body's non-undefined result against this loop's label lbl:
+    // "brk" (a plain break - stop), "cont" (a plain continue, or a labelled continue
+    // aimed at THIS loop - next iteration), or "stop" (propagate the signal outward: a
+    // return, or a break/continue meant for an OUTER label). Every loop runner shares it;
+    // the caller keeps the break/continue keyword and its own propagate tail.
+    function loopSignal(r, lbl) {
+        if (r === BRK) { return "brk" }
+        if (r === CONT) { return "cont" }
+        if (lbl != null && r.contL === lbl) { return "cont" }
+        return "stop"
+    }
     function makeLabeled(items, pos) {
         var name = items[0].lbl
         var innerT = items[1]
@@ -1475,14 +1497,13 @@ KwStep      = "step" KwEnd ;
     // labelled continue; the shared core makeWhile is reassigned to do the same.
     makeWhile = function(bodyT, condT) {
         return function() {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             while (core.test(condT())) {
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) break
-                    if (r === CONT) continue
-                    if (lbl != null && r.contL === lbl) continue
+                    var act = loopSignal(r, lbl)
+                    if (act == "brk") break
+                    if (act == "cont") continue
                     return r
                 }
             }
@@ -1501,14 +1522,13 @@ KwStep      = "step" KwEnd ;
     }
     function makeDo(condT, bodyT) {
         return function() {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             do {
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) break
-                    if (r === CONT) continue
-                    if (lbl != null && r.contL === lbl) continue
+                    var act = loopSignal(r, lbl)
+                    if (act == "brk") break
+                    if (act == "cont") continue
                     return r
                 }
             } while (condT())
@@ -1525,8 +1545,7 @@ KwStep      = "step" KwEnd ;
         var stepT = items.length > 5 ? items[4].step : null
         var bodyT = items[items.length - 1]
         return function() {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             var res = undefined
             scopes.push({})
             declVar(name, 0)
@@ -1540,9 +1559,9 @@ KwStep      = "step" KwEnd ;
                 setVar(name, i)
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) break
-                    if (r === CONT) continue
-                    if (lbl != null && r.contL === lbl) continue
+                    var act = loopSignal(r, lbl)
+                    if (act == "brk") break
+                    if (act == "cont") continue
                     res = r
                     break
                 }
@@ -1553,8 +1572,7 @@ KwStep      = "step" KwEnd ;
     }
     function makeForList(bodyT, listT, name) {
         return function() {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             var arr = listT()
             var res = undefined
             scopes.push({})
@@ -1563,9 +1581,9 @@ KwStep      = "step" KwEnd ;
                 setVar(name, arr[i])
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) break
-                    if (r === CONT) continue
-                    if (lbl != null && r.contL === lbl) continue
+                    var act = loopSignal(r, lbl)
+                    if (act == "brk") break
+                    if (act == "cont") continue
                     res = r
                     break
                 }
@@ -1583,8 +1601,7 @@ KwStep      = "step" KwEnd ;
         var collT = items[1]
         var bodyT = items[2]
         return function() {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             var arr = collT()
             var res = undefined
             scopes.push({})
@@ -1592,9 +1609,9 @@ KwStep      = "step" KwEnd ;
             for (var i = 0; i < arr.length; i++) {
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) break
-                    if (r === CONT) continue
-                    if (lbl != null && r.contL === lbl) continue
+                    var act = loopSignal(r, lbl)
+                    if (act == "brk") break
+                    if (act == "cont") continue
                     res = r
                     break
                 }
@@ -1638,18 +1655,9 @@ KwStep      = "step" KwEnd ;
         return function() {
             var captured = scopes.slice(0)
             declVar(f.name, function() {
-                var args = arguments
-                var saved = scopes
-                scopes = captured.slice(0)
-                scopes.push({})
-                for (var i = 0; i < f.params.length; i++) {
-                    declVar(f.params[i], i < args.length ? args[i] : undefined)
-                }
-                if (core.framePush != null) core.framePush()
-                var r = f.body()
-                if (core.framePop != null) core.framePop()
-                scopes = saved
-                return (r != undefined && r.isRet) ? r.v : undefined
+                var base = captured.slice(0)
+                base.push({})
+                return runFrame(base, undefined, false, f.params, arguments, 0, f.body)
             })
         }
     }
@@ -1689,14 +1697,10 @@ KwStep      = "step" KwEnd ;
             cparams = items[1].cparams
             i = 2
         }
-        var props = []
-        var methods = []
-        var comp = null
-        for (; i < items.length; i++) {
-            if (items[i].companion != undefined) { comp = items[i].companion }
-            else if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
-            else if (items[i].method != undefined) methods.push(items[i].method)
-        }
+        var parts = splitMembers(items, i)
+        var props = parts.props
+        var methods = parts.methods
+        var comp = parts.companion
         var cls = {__isclass: true, __name: name}
         // The constructor: bind the primary constructor parameters, store the
         // property parameters on the instance, then run the property initializers
@@ -1731,12 +1735,9 @@ KwStep      = "step" KwEnd ;
     // descriptor as 'this'.
     function attachCompanion(cls, comp) {
         if (comp == null) { return }
-        var cprops = []
-        var cmethods = []
-        for (var i = 0; i < comp.length; i++) {
-            if (comp[i].prop != undefined && comp[i].init != undefined) { cprops.push(comp[i]) }
-            else if (comp[i].method != undefined) { cmethods.push(comp[i].method) }
-        }
+        var cparts = splitMembers(comp, 0)
+        var cprops = cparts.props
+        var cmethods = cparts.methods
         if (cmethods.length > 0) {
             var holder = {}
             for (var k = 0; k < cmethods.length; k++) {
@@ -1760,12 +1761,9 @@ KwStep      = "step" KwEnd ;
     // initializers see the object as 'this' (implicit member access works).
     function buildObject(items) {
         var name = items[0]
-        var props = []
-        var methods = []
-        for (var i = 1; i < items.length; i++) {
-            if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]) }
-            else if (items[i].method != undefined) { methods.push(items[i].method) }
-        }
+        var parts = splitMembers(items, 1)
+        var props = parts.props
+        var methods = parts.methods
         var cls = {__isclass: true, __name: name}
         for (var m2 = 0; m2 < methods.length; m2++) {
             cls[methods[m2].name] = makeMethodClosure(methods[m2])
