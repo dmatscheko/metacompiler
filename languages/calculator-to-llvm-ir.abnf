@@ -185,6 +185,17 @@ Number      = "0" | "1"..."9" { "0"..."9" } ;
     var b = main.NewBlock("")
     b.NewRet(formula.gen(b))
 
+    // With -exe PATH, link the module into a native executable (clang). This calculator's
+    // result is the return value of main(), so the binary reports it only through its
+    // process EXIT CODE (0-255, wrapping) and prints nothing - unlike the bash/batch
+    // compilers, whose programs write to stdout.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("calculator-to-llvm-ir: wrote executable " + c.exePath + " (result is its exit code, mod 256)")
+        exit(0)
+    }
+
     // Show the compiler output (the LLVM IR module).
     println(m)
 
