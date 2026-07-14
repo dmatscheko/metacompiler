@@ -23,8 +23,9 @@ value (the last status, or the exit code) becomes the process exit code of the w
 compiled test script is self checking, just like the interpreted one.
 
 The generated module is printed (this is the compiler output); it is valid LLVM IR and can be
-handed to clang. The supported subset, and everything deliberately out of scope, is exactly the
-one documented in bash-interpreter.abnf. In addition, the compiler currently requires the
+handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
+(mec languages/bash-to-llvm-ir.abnf script.sh -exe out && ./out). The supported subset, and
+everything deliberately out of scope, is exactly the one documented in bash-interpreter.abnf. In addition, the compiler currently requires the
 command word of a simple command to be a literal (static dispatch): a computed command name and
 a computed test operator are not yet lowered.") ;
 
@@ -971,6 +972,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     c.compile(c.asg)
+
+    // With -exe PATH, link the module into a native executable (clang) instead of
+    // running it in the built-in IR interpreter.
+    if (c.exePath != undefined && c.exePath != "") {
+        var buildErr = llvm.BuildExecutable(m, c.exePath)
+        if (buildErr != "") { println(buildErr); exit(1) }
+        println("bash-to-llvm-ir: wrote executable " + c.exePath)
+        exit(0)
+    }
 
     println(m)
     var res = llvm.Run(m, "main")

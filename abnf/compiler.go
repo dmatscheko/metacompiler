@@ -30,6 +30,12 @@ var WarnUnsupported = false
 // grammar then falls back to its own default entry (main for most, Main for C#).
 var EntryPoint = ""
 
+// ExePath is the output path for a native executable, set from the -exe CLI flag.
+// A -to-llvm-ir grammar reads it as c.exePath: when non-empty it hands the built
+// ir.Module to llvm.BuildExecutable (clang) and writes a real binary instead of
+// running the module in the built-in IR interpreter. Empty means "unset".
+var ExePath = ""
+
 // ----------------------------------------------------------------------------
 // ASG compiler
 

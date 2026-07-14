@@ -3,6 +3,8 @@ package abnf
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 
 	"14.gy/mec/abnf/r"
@@ -981,6 +983,40 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 	// named function is the module entry (usually "jsmain"); its i64 handle result
 	// is converted to an int32 and returned as Ret.
 	"RunJS": runJSModule,
+	// BuildExecutable writes the module as textual LLVM IR to a temp file and invokes
+	// clang to link a native executable at outPath. Returns "" on success or a
+	// human-readable error string. Driven by the -exe flag (c.exePath) from a compiler
+	// grammar, so `mec <compiler> <source> -exe out` turns the source into a real binary.
+	"BuildExecutable": buildExecutable,
+}
+
+// buildExecutable emits m as LLVM IR text and links it into a native executable with
+// clang (override with the MEC_CLANG env var). It returns "" on success, else an error
+// message the calling grammar prints before exiting non-zero.
+func buildExecutable(m *ir.Module, outPath string) string {
+	tmp, err := os.CreateTemp("", "mec-*.ll")
+	if err != nil {
+		return "cannot create temporary .ll file: " + err.Error()
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.WriteString(m.String()); err != nil {
+		tmp.Close()
+		return "cannot write .ll file: " + err.Error()
+	}
+	if err := tmp.Close(); err != nil {
+		return "cannot finish .ll file: " + err.Error()
+	}
+	clangBin := os.Getenv("MEC_CLANG")
+	if clangBin == "" {
+		clangBin = "clang"
+	}
+	// -Wno-override-module silences the note that the IR carries no target triple.
+	out, err := exec.Command(clangBin, "-Wno-override-module", "-o", outPath, tmpName).CombinedOutput()
+	if err != nil {
+		return "clang could not build the executable (" + err.Error() + "):\n" + string(out)
+	}
+	return ""
 }
 
 // callgraph returns the callgraph in Graphviz DOT format of the given LLVM IR module.
