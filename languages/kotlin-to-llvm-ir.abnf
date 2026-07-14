@@ -1336,34 +1336,55 @@ KwStep      = "step" KwEnd ;
     // a lambda), a fresh instance, then the property initializers in a child scope
     // holding the instance as `this`. Method names register in classMethodNames at
     // walk time (an extension function never shadows a member).
-    function makeObjectExpr(items) {
+    // Split walked members (from `start`) into property initializers ({prop,init}),
+    // methods (the method object of a {method}) and the companion member list (a
+    // {companion}, only classes carry one). Written once so every class/object/
+    // companion emitter partitions its members the same way.
+    function splitMembers(items, start) {
         var props = []
         var methods = []
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
-            else if (items[i].method != undefined) methods.push(items[i].method)
+        var companion = null
+        for (var i = start; i < items.length; i++) {
+            if (items[i].companion != undefined) { companion = items[i].companion }
+            else if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]) }
+            else if (items[i].method != undefined) { methods.push(items[i].method) }
         }
+        return {props: props, methods: methods, companion: companion}
+    }
+    // Emit a class-style descriptor (methods closed over the current scope via js_closure)
+    // plus an instance whose __class is the descriptor, then run the property initializers
+    // with the instance bound to `this`. Shared by the object EXPRESSION (returns the fresh
+    // instance as a value) and the object DECLARATION (which also binds the singleton to its
+    // name); the only per-caller difference is the __name string and what happens with the
+    // instance afterwards.
+    function emitObjectInstance(b, name, methods, props) {
+        var clsV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+        for (var k = 0; k < methods.length; k++) {
+            var idx = emitFunc(methods[k].params, methods[k].body, true)
+            callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+        }
+        var objV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), objV])
+        for (var p = 0; p < props.length; p++) {
+            var r = props[p].init(b)
+            b = r.b
+            callExt(b, "js_set", [objV, emitStr(b, props[p].prop), r.v])
+        }
+        curScopeV = saved
+        return {b: b, v: objV}
+    }
+    function makeObjectExpr(items) {
+        var parts = splitMembers(items, 0)
+        var props = parts.props
+        var methods = parts.methods
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
-            var clsV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "<object>")])
-            for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
-            }
-            var objV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), objV])
-            for (var p = 0; p < props.length; p++) {
-                var r = props[p].init(b)
-                b = r.b
-                callExt(b, "js_set", [objV, emitStr(b, props[p].prop), r.v])
-            }
-            curScopeV = saved
-            return {b: b, v: objV}
+            return emitObjectInstance(b, "<object>", methods, props)
         }
     }
 
@@ -1508,6 +1529,9 @@ KwStep      = "step" KwEnd ;
     // makes a labelled BLOCK breakable; its cont falls back to the enclosing
     // loop like a switch does.
     var pendingLabel = null
+    // Consume the label a Labeled wrapper parked in pendingLabel, clearing it so an
+    // inner loop does not re-consume it. Every loop emitter calls this on entry.
+    function takeLabel() { var l = pendingLabel; pendingLabel = null; return l }
     function makeLabeled(items, pos) {
         var name = items[0].lbl
         var innerT = items[1]
@@ -1574,8 +1598,7 @@ KwStep      = "step" KwEnd ;
     // the shared core makeWhile is reassigned to do the same.
     makeWhile = function(bodyT, condT) {
         return function(b) {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
@@ -1591,8 +1614,7 @@ KwStep      = "step" KwEnd ;
 
     function makeDo(condT, bodyT) {
         return function(b) {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             var bodyB = curF.NewBlock("")
             var condB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
@@ -1616,8 +1638,7 @@ KwStep      = "step" KwEnd ;
         var stepT = items.length > 5 ? items[4].step : null
         var bodyT = items[items.length - 1]
         return function(b) {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             hidCount++
             var tName = "$to" + hidCount
             var sName = "$st" + hidCount
@@ -1661,8 +1682,7 @@ KwStep      = "step" KwEnd ;
     }
     function makeForList(bodyT, listT, name) {
         return function(b) {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             hidCount++
             var iName = "$i" + hidCount
             var aName = "$a" + hidCount
@@ -1705,8 +1725,7 @@ KwStep      = "step" KwEnd ;
         var collT = items[1]
         var bodyT = items[2]
         return function(b) {
-            var lbl = pendingLabel
-            pendingLabel = null
+            var lbl = takeLabel()
             hidCount++
             var iName = "$i" + hidCount
             var aName = "$a" + hidCount
@@ -1839,7 +1858,9 @@ KwStep      = "step" KwEnd ;
         var savedF = curF
         var savedScope = curScopeV
         var savedLoops = loopStack
+        var savedTag = curFTag
         curF = f
+        curFTag = idx
         loopStack = []
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
@@ -1859,6 +1880,7 @@ KwStep      = "step" KwEnd ;
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
+        curFTag = savedTag
         return idx
     }
 
@@ -1871,14 +1893,10 @@ KwStep      = "step" KwEnd ;
             cparams = items[1].cparams
             i = 2
         }
-        var props = []
-        var methods = []
-        var comp = null
-        for (; i < items.length; i++) {
-            if (items[i].companion != undefined) { comp = items[i].companion }
-            else if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
-            else if (items[i].method != undefined) methods.push(items[i].method)
-        }
+        var parts = splitMembers(items, i)
+        var props = parts.props
+        var methods = parts.methods
+        var comp = parts.companion
         classNames[name] = 1
         for (var cm = 0; cm < methods.length; cm++) { classMethodNames["$" + methods[cm].name] = true }
         if (comp != null) {
@@ -1907,12 +1925,9 @@ KwStep      = "step" KwEnd ;
     // js_mcall, which prepends clsV as the receiver), properties become fields of clsV
     // (so ClassName.prop reads them). The property initializers see clsV as 'this'.
     function emitCompanion(b, clsV, comp) {
-        var cprops = []
-        var cmethods = []
-        for (var i = 0; i < comp.length; i++) {
-            if (comp[i].prop != undefined && comp[i].init != undefined) { cprops.push(comp[i]) }
-            else if (comp[i].method != undefined) { cmethods.push(comp[i].method) }
-        }
+        var cparts = splitMembers(comp, 0)
+        var cprops = cparts.props
+        var cmethods = cparts.methods
         if (cmethods.length > 0) {
             var holderV = callExt(b, "js_obj_new", [])
             for (var k = 0; k < cmethods.length; k++) {
@@ -1940,33 +1955,14 @@ KwStep      = "step" KwEnd ;
     // calls dispatch through js_mcall exactly like class instances.
     function makeObjectStmt(items) {
         var name = items[0]
-        var props = []
-        var methods = []
-        for (var i = 1; i < items.length; i++) {
-            if (items[i].prop != undefined && items[i].init != undefined) props.push(items[i])
-            else if (items[i].method != undefined) methods.push(items[i].method)
-        }
+        var parts = splitMembers(items, 1)
+        var props = parts.props
+        var methods = parts.methods
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
-            var clsV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
-            for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
-            }
-            var objV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
-            var saved = curScopeV
-            curScopeV = callExt(b, "js_scope_new", [curScopeV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), objV])
-            for (var p = 0; p < props.length; p++) {
-                var r = props[p].init(b)
-                b = r.b
-                callExt(b, "js_set", [objV, emitStr(b, props[p].prop), r.v])
-            }
-            curScopeV = saved
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), objV])
+            var r = emitObjectInstance(b, name, methods, props)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
             return b
         }
     }
