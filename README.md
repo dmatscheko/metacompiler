@@ -459,6 +459,15 @@ done                                   # .jsonl appends; a run without main() ma
 ./mec -render static -trace cg.jsonl > codebase.dot
 ```
 
+or for a kotlin project:
+
+```
+./mec languages/kotlin-to-llvm-ir.abnf -warn-imports -warn-unsupported \
+   app/.../MainActivity.kt -i app/src/main/java -q \
+   -cfg kotlin.dot -callgraph kcg.jsonl -trace k.jsonl
+./mec -render static -trace kcg.jsonl > codebase.dot   # whole-codebase call graph
+```
+
 The result clusters the definitions per source file, merges the nodes by name (a
 cross-file call connects to the defining file's node), draws undefined callees
 dashed, and labels edges with the number of call sites. A non-.jsonl -callgraph
