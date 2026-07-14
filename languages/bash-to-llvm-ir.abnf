@@ -641,12 +641,21 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function mkInt(text) { var c = llvm.constant.NewInt(i32, parseDec(text)); return function(b) { return {b: b, v: c} } }
     function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtStr2int, varString(b, name))} } }
     function mkNeg(t) { return function(b) { var r = t(b); return {b: r.b, v: r.b.NewSub(zero, r.v)} } }
+    // Returns {b, v}: only / and % branch (a zero divisor yields 0, like the interpreter's
+    // (l/r)|0 / (l%r)|0, and unlike a raw sdiv/srem which would trap in the IR interpreter).
     function arOp(b, op, l, r) {
-        if (op == "+") { return b.NewAdd(l, r) }
-        if (op == "-") { return b.NewSub(l, r) }
-        if (op == "*") { return b.NewMul(l, r) }
-        if (op == "/") { return b.NewSDiv(l, r) }
-        if (op == "%") { return b.NewSRem(l, r) }
+        if (op == "+") { return {b: b, v: b.NewAdd(l, r)} }
+        if (op == "-") { return {b: b, v: b.NewSub(l, r)} }
+        if (op == "*") { return {b: b, v: b.NewMul(l, r)} }
+        if (op == "/" || op == "%") {
+            var isz = b.NewICmp(llvm.enum.IPredEQ, r, zero)
+            var zb = curF.NewBlock(""), db = curF.NewBlock(""), cb = curF.NewBlock("")
+            b.NewCondBr(isz, zb, db)
+            zb.NewBr(cb)
+            var dv = (op == "/") ? db.NewSDiv(l, r) : db.NewSRem(l, r)
+            db.NewBr(cb)
+            return {b: cb, v: cb.NewPhi([llvm.ir.NewIncoming(zero, zb), llvm.ir.NewIncoming(dv, db)])}
+        }
         var pred = null
         if (op == "<") { pred = llvm.enum.IPredSLT }
         if (op == ">") { pred = llvm.enum.IPredSGT }
@@ -654,7 +663,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == ">=") { pred = llvm.enum.IPredSGE }
         if (op == "==") { pred = llvm.enum.IPredEQ }
         if (op == "!=") { pred = llvm.enum.IPredNE }
-        return b.NewZExt(b.NewICmp(pred, l, r), i32)
+        return {b: b, v: b.NewZExt(b.NewICmp(pred, l, r), i32)}
     }
     function foldBin(items) {
         if (items.length == 1) { return items[0] }
@@ -664,8 +673,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var i
             for (i = 1; i < items.length; i += 2) {
                 var r2 = items[i + 1](bb)
-                bb = r2.b
-                v = arOp(bb, items[i].op, v, r2.v)
+                var res = arOp(r2.b, items[i].op, v, r2.v)
+                bb = res.b
+                v = res.v
             }
             return {b: bb, v: v}
         }
