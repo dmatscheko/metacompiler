@@ -77,6 +77,12 @@
             "program": "${workspaceFolder}","args": ["languages/batch-interpreter.abnf", "tests/batch-test-1.bat", "-q"]
         },
         {
+            "name": "Batch to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/batch-to-llvm-ir.abnf", "tests/batch-test-1.bat", "-q"]
+        },
+        {
             "name": "Tiny Self Parse",
             "type": "go",
             "request": "launch",
