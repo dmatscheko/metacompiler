@@ -391,7 +391,10 @@
   }
 
   // ---- build render objects for a freshly parsed graph --------------------
-  function buildGraph(g) {
+  function buildGraph(g, keep) {
+    // `keep` (optional): survivor positions { px, py, pz } to preserve instead of a
+    // fresh scatter - used by removeNode() so deleting a node just drops it and lets
+    // the rest gently re-settle in place, camera untouched (no re-scatter/reframe).
     // tear down old
     if (nodeMesh) { scene.remove(nodeMesh); nodeMesh.material.dispose(); nodeMesh = null; }
     if (edgeLines) { scene.remove(edgeLines); edgeLines.geometry.dispose(); edgeLines.material.dispose(); edgeLines = null; }
@@ -399,7 +402,11 @@
 
     nodes = g.nodes; links = g.links; clusterFiles = g.clusterFiles || [];
     N = nodes.length; L = links.length;
-    if (N === 0) return;
+    // reset focus + highlight geometry so an empty graph or a rebuild starts clean
+    focusIdx = -1; hlNodes.length = 0; hlEdges.length = 0;
+    hlOut.edges.length = 0; hlIn.edges.length = 0;
+    hlOut.cyl.count = 0; hlOut.cones.count = 0; hlIn.cyl.count = 0; hlIn.cones.count = 0;
+    if (N === 0) { updateHud(); return; }
 
     // degrees
     for (var i = 0; i < N; i++) nodes[i].deg = 0;
@@ -418,15 +425,15 @@
       adjOut[i] = []; adjIn[i] = [];
     }
     for (e = 0; e < L; e++) { adjOut[links[e].s].push(e); adjIn[links[e].t].push(e); }
-    focusIdx = -1; hlNodes.length = 0; hlEdges.length = 0;
-    spreadDist = 0;                                     // re-capture the X push for this new graph
+    if (!keep) spreadDist = 0;                          // re-capture the X push for a genuinely new graph
     _hlNodeStamp = new Int32Array(N); _hlNodeLf = new Float32Array(N);
     _hlBfsVisited = new Int32Array(N); _hlEdgeStamp = new Int32Array(L);
 
-    // layout arrays + initial scatter over a LARGE sphere shell
+    // layout arrays: preserve survivor positions on a rebuild, else scatter fresh
     px = new Float32Array(N); py = new Float32Array(N); pz = new Float32Array(N);
     vx = new Float32Array(N); vy = new Float32Array(N); vz = new Float32Array(N);
-    scatterNodes();
+    if (keep) { px.set(keep.px); py.set(keep.py); pz.set(keep.pz); alpha = Math.max(alpha, 0.35); }
+    else scatterNodes();
 
     // node instanced mesh
     var nmat = new THREE.MeshBasicMaterial({ toneMapped: false });
@@ -473,6 +480,12 @@
     edgeLines = new THREE.LineSegments(eg, emat);
     edgeLines.frustumCulled = false;
     scene.add(edgeLines);
+
+    // On a rebuild (keep) the graph is already laid out: skip the heavy warmup and
+    // the camera reframe so removing a node doesn't jump the view - the small alpha
+    // bump above lets the live sim tidy the gap. A fresh graph gets the full warmup
+    // and an establishing overview camera below.
+    if (keep) { updateGraphRadius(); updateHud(); return; }
 
     // warm the layout up so the first frame isn't a random cloud
     for (i = 0; i < CFG.warmup; i++) layoutTick();
@@ -547,6 +560,32 @@
       vx[i] = vy[i] = vz[i] = 0;
     }
     alpha = 1;                                          // re-heat so the forces re-settle it
+  }
+
+  // Delete a node and its incident edges, KEEPING every survivor where it is, then
+  // rebuild the render objects in place (InstancedMesh counts are fixed at N, so the
+  // meshes must be recreated). The camera doesn't move; the sim eases the small gap
+  // shut. Triggered by a plain left-click on the highlighted node.
+  function removeNode(idx) {
+    if (idx < 0 || idx >= N) return;
+    var removedId = nodes[idx].id;
+    var remap = new Int32Array(N);                      // old index -> new index
+    var newNodes = [], kx = [], ky = [], kz = [], i;
+    for (i = 0; i < N; i++) {
+      if (i === idx) { remap[i] = -1; continue; }
+      remap[i] = newNodes.length;
+      newNodes.push(nodes[i]);
+      kx.push(px[i]); ky.push(py[i]); kz.push(pz[i]);
+    }
+    var newLinks = [];
+    for (var e = 0; e < L; e++) {
+      var s = links[e].s, t = links[e].t;
+      if (s === idx || t === idx) continue;             // drop edges that touched the removed node
+      newLinks.push({ s: remap[s], t: remap[t], w: links[e].w });
+    }
+    buildGraph({ nodes: newNodes, links: newLinks, clusterFiles: clusterFiles },
+               { px: Float32Array.from(kx), py: Float32Array.from(ky), pz: Float32Array.from(kz) });
+    flash('Removed ' + removedId + '  (' + N + ' nodes, ' + L + ' edges left)');
   }
 
   // ---- force layout (grid-accelerated repulsion) --------------------------
@@ -845,7 +884,7 @@
   //   cursor  - the visible cursor IS the crosshair; hovering picks the node under
   //             it (no camera turn); click-drag turns; WASD moves. Good for
   //             inspecting connections without flying.
-  var dragging = false;
+  var dragging = false, downMoved = 0, downLocked = false;
   function rotateCam(dx, dy) {
     // Post-multiply by rotations about canonical axes => LOCAL-frame yaw/pitch:
     // no pole clamp, no gimbal, free look in any direction.
@@ -855,15 +894,24 @@
     registerSteer();
   }
   renderer.domElement.addEventListener('mousedown', function (ev) {
-    dragging = true; document.body.classList.add('grabbing');
+    dragging = true; downMoved = 0;
+    downLocked = document.pointerLockElement === renderer.domElement;   // was the pointer already captured?
+    document.body.classList.add('grabbing');
     if (lookMode === 'capture' && renderer.domElement.requestPointerLock) renderer.domElement.requestPointerLock();
     if (lookMode === 'capture') registerSteer();       // cursor-mode: a plain click shouldn't hijack from autopilot
     ev.preventDefault();
   });
-  window.addEventListener('mouseup', function () { dragging = false; document.body.classList.remove('grabbing'); });
+  window.addEventListener('mouseup', function () {
+    // A clean click (barely moved) on a highlighted node deletes it; a drag past the
+    // slop turned the camera instead, so it never removes. In capture mode the very
+    // click that first grabs the pointer (downLocked false) is a grab, not a delete.
+    if (dragging && downMoved < 6 && focusIdx >= 0 && !(lookMode === 'capture' && !downLocked)) removeNode(focusIdx);
+    dragging = false; document.body.classList.remove('grabbing');
+  });
   document.addEventListener('pointerlockchange', updateCrosshair);
   window.addEventListener('mousemove', function (ev) {
     cursorX = ev.clientX; cursorY = ev.clientY;         // always track for cursor-mode focus
+    if (dragging) downMoved += Math.abs(ev.movementX || 0) + Math.abs(ev.movementY || 0); // click-vs-drag slop
     var locked = document.pointerLockElement === renderer.domElement;
     var turn = (lookMode === 'capture') ? (locked || dragging) : dragging;
     if (turn) rotateCam(ev.movementX || 0, ev.movementY || 0);

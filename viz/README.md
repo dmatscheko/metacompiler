@@ -54,6 +54,7 @@ edges and flies smoothly. (For flat, printable output, keep using Graphviz
 | | |
 |---|---|
 | **Drag** | turn the camera (in *Look* mode a click captures the pointer for FPS-style look) |
+| **Left-click** | on a highlighted node — remove it (and its edges) from the graph; a drag turns instead |
 | **W A S D** | move · **Q/E** down/up · **Shift** boost |
 | **scroll** | fly speed |
 | **Esc** | release the pointer |
@@ -95,6 +96,11 @@ Press **1 / 2 / 3** (or set `CFG.hlDepth`) to fan the highlight out that many
 **hops** — 2nd- and 3rd-order callers/callees — each hop drawn dimmer and thinner
 (`CFG.hlFalloff`). Tune the overall glow with `CFG.hlBright` and the arrowhead
 size with `CFG.coneSize`.
+
+**Left-click a highlighted node to delete it** (its edges go too). Every survivor
+keeps its position and the camera holds still — the layout just eases the gap
+shut. A click that drags past a few pixels turns the camera instead, so you never
+delete by accident while flying.
 
 ## Notes
 
