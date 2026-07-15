@@ -25,7 +25,7 @@
     repulsion: 240,      // node-node repulsion strength (full, once cooled)
     repMin: 0.12,        // repulsion scale while HOT: weak early so groups clump before it enforces spacing
     spring: 0.025,       // edge spring stiffness: attraction between CONNECTED nodes (nudged up for tighter clusters)
-    gravity: 0.008,      // pull toward origin - the only thing drawing UNconnected nodes together; lowered a lot so groups separate
+    gravity: 0.001,      // pull toward origin - the only thing drawing UNconnected nodes together; lowered a lot so groups separate
     damping: 0.86,       // velocity retention per tick
     maxStep: 9,          // clamp on per-tick displacement (anti-explosion; also lets it contract)
     alphaDecay: 0.988,   // simulated-annealing cooling
@@ -57,9 +57,7 @@
 
     // appearance / focus highlight
     nodeDim: 0.55,       // resting node brightness (darkened so the focus highlight pops)
-    hitMargin: 1.75,     // pick radius as a multiple of the node's radius - sized to the VISIBLE ball (the
-                         //   bloom glow makes a node look ~1.8x its geometry, so a tight geom hit felt "off")
-    hitMinPx: 4,         // ...but never smaller than this many screen px, so far/tiny nodes stay pickable
+    lineRadius: 0.32,    // world radius of a highlighted edge's cylinder (the fat line)
     labelMax: 40,        // most node names shown at once
     labelDist: 1.4       // show a name for nodes within (this * coreRadius) of the camera
   };
@@ -124,42 +122,44 @@
   var edgeCol = null, edgeColBase = null; // live + resting edge vertex colors
   var adjOut = [], adjIn = [];            // per-node outgoing / incoming link indices
 
+  // GPU picking: a second instanced mesh of the nodes, each drawn in a colour
+  // that encodes its index, rendered into a 1x1 buffer at the cursor. Reading
+  // that pixel back gives EXACTLY the node whose real geometry is under the
+  // cursor - no projection maths to get wrong, no bloom glow, correct depth for
+  // free (the nearest node writes the pixel). This is the whole point: it can't
+  // be "at the wrong place" because it reads what was actually drawn there.
+  var pickScene = new THREE.Scene();
+  var pickTarget = new THREE.WebGLRenderTarget(1, 1, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+  var pickMesh = null, pickBuf = new Uint8Array(4), _pickCol = new THREE.Color();
+
   // focus highlight state (the one node under the crosshair + its neighbourhood)
   var focusIdx = -1, hlNodes = [], hlEdges = [];
   var COL_FOCUS = new THREE.Color(1.0, 1.0, 1.0);   // the targeted node
   var COL_OUT = new THREE.Color(0.30, 1.0, 0.65);   // edges it calls (outgoing)
   var COL_IN = new THREE.Color(1.0, 0.5, 0.2);      // edges that call it (incoming)
 
-  // Thicker highlighted edges via fat lines (LineSegments2): two single-colour
-  // objects - green for outgoing, orange for incoming - so colour comes from the
-  // material (reliable) rather than per-vertex arrays. Only the focus node's
-  // handful of edges are thickened, so it's a few dozen quads, not 1829.
-  var fatOK = !!(THREE.LineSegments2 && THREE.LineMaterial && THREE.LineSegmentsGeometry);
-  var CONE_MAX = 600;                                  // per direction; caps arrowhead count
+  // Highlighted edges: each is drawn as a solid CYLINDER (the fat line) plus a
+  // CONE (the arrowhead) - both InstancedMesh of real geometry. This is the same
+  // mechanism as the arrowheads, which always render correctly; the old
+  // LineSegments2 fat lines quietly dropped view-aligned / near-plane segments,
+  // so some highlighted edges showed only their cone. Solid geometry can't do
+  // that: every edge in the list gets a cylinder, no matter its orientation.
+  var HL_MAX = 4000;                                   // per direction: cylinder/cone instance cap
+  var cylGeom = new THREE.CylinderGeometry(1, 1, 1, 6); // unit cylinder along +Y (radius 1, height 1)
   var hlOut = null, hlIn = null;
-  function makeFatLine(color) {
-    var mat = new THREE.LineMaterial({
-      color: color, linewidth: 2.6, transparent: true, opacity: 0.92,
-      blending: THREE.NormalBlending, depthWrite: false, depthTest: true, toneMapped: false
-    });
-    mat.resolution.set(window.innerWidth, window.innerHeight);
-    var geo = new THREE.LineSegmentsGeometry();
-    var line = new THREE.LineSegments2(geo, mat);
-    line.frustumCulled = false; line.visible = false;
-    scene.add(line);
-    // arrowhead cones (one per edge, at the target end, pointing along the edge)
+  function makeHighlight(color) {
+    var lmat = new THREE.MeshBasicMaterial({ color: color, toneMapped: false });
+    var cyl = new THREE.InstancedMesh(cylGeom, lmat, HL_MAX);
+    cyl.frustumCulled = false; cyl.count = 0;
+    scene.add(cyl);
     var cmat = new THREE.MeshBasicMaterial({ color: color, toneMapped: false });
-    var cones = new THREE.InstancedMesh(coneGeom, cmat, CONE_MAX);
+    var cones = new THREE.InstancedMesh(coneGeom, cmat, HL_MAX);
     cones.frustumCulled = false; cones.count = 0;
     scene.add(cones);
-    return { line: line, geo: geo, mat: mat, cones: cones, pos: null, edges: [] };
+    return { cyl: cyl, cones: cones, edges: [] };
   }
-  if (fatOK) {
-    try {
-      hlOut = makeFatLine(new THREE.Color(0.25, 1.0, 0.55));   // outgoing: green
-      hlIn = makeFatLine(new THREE.Color(1.0, 0.5, 0.12));     // incoming: orange
-    } catch (err) { fatOK = false; }
-  }
+  hlOut = makeHighlight(new THREE.Color(0.25, 1.0, 0.55));   // outgoing: green
+  hlIn = makeHighlight(new THREE.Color(1.0, 0.5, 0.12));     // incoming: orange
 
   // ---- DOT / JSON parsing -------------------------------------------------
   function unesc(s) { return s.replace(/\\"/g, '"'); }
@@ -311,6 +311,7 @@
     // tear down old
     if (nodeMesh) { scene.remove(nodeMesh); nodeMesh.material.dispose(); nodeMesh = null; }
     if (edgeLines) { scene.remove(edgeLines); edgeLines.geometry.dispose(); edgeLines.material.dispose(); edgeLines = null; }
+    if (pickMesh) { pickScene.remove(pickMesh); pickMesh.material.dispose(); pickMesh = null; }
 
     nodes = g.nodes; links = g.links; clusterFiles = g.clusterFiles || [];
     N = nodes.length; L = links.length;
@@ -347,6 +348,21 @@
     for (i = 0; i < N; i++) nodeMesh.setColorAt(i, baseCol[i]);
     if (nodeMesh.instanceColor) nodeMesh.instanceColor.needsUpdate = true;
     scene.add(nodeMesh);
+
+    // pick mesh: same geometry, SHARES nodeMesh's instanceMatrix (so identical
+    // positions/sizes every frame for free), each instance coloured by its index
+    // (i+1, so 0 = "nothing"). Rendered to a 1x1 buffer for GPU picking.
+    // white material + per-instance instanceColor (set below) => the shader
+    // outputs exactly the encoded id colour (InstancedMesh multiplies the white
+    // base by instanceColor; no vertexColors, which would need a vertex-colour
+    // attribute the icosahedron doesn't have and would render black).
+    var pmat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false, fog: false });
+    pickMesh = new THREE.InstancedMesh(nodeGeom, pmat, N);
+    pickMesh.instanceMatrix = nodeMesh.instanceMatrix;      // share the buffer
+    pickMesh.frustumCulled = false;
+    for (i = 0; i < N; i++) { var id = i + 1; _pickCol.setRGB(((id >> 16) & 255) / 255, ((id >> 8) & 255) / 255, (id & 255) / 255); pickMesh.setColorAt(i, _pickCol); }
+    pickMesh.instanceColor.needsUpdate = true;
+    pickScene.add(pickMesh);
 
     // edges: additive line segments, brighter at the caller, dim at the callee.
     // edgeColBase is the resting look; edgeCol is what's drawn (focus recolors it).
@@ -546,7 +562,7 @@
     }
     edgeLines.geometry.attributes.position.needsUpdate = true;
 
-    if (fatOK && focusIdx >= 0) updateFatPositions();   // keep thick edges on their moving endpoints
+    if (focusIdx >= 0) updateHighlightGeom();           // keep the fat edges on their moving endpoints
   }
 
   // ---- camera: shared state ----------------------------------------------
@@ -808,131 +824,122 @@
     for (a = 0; a < hlNodes.length; a++) { i = hlNodes[a]; nodeMesh.setColorAt(i, baseCol[i]); scaleMul[i] = 1; }
     for (a = 0; a < hlEdges.length; a++) { e = hlEdges[a]; o = e * 6; for (c = 0; c < 6; c++) edgeCol[o + c] = edgeColBase[o + c]; }
     hlNodes.length = 0; hlEdges.length = 0;
-    if (fatOK) { hlOut.edges.length = 0; hlIn.edges.length = 0; }
+    hlOut.edges.length = 0; hlIn.edges.length = 0;
     focusIdx = nf;
     if (nf >= 0) {
       nodeMesh.setColorAt(nf, COL_FOCUS); scaleMul[nf] = 1.4; hlNodes.push(nf);
       var lo = adjOut[nf], li = adjIn[nf];
-      // Two representations per highlighted edge: (1) recolour its thin base
-      // edge - a plain LineSegments the GPU near-plane-clips correctly, so it is
-      // the always-drawn guarantee - and (2) a fat overlay line (thicker, the
-      // one you actually notice). An edge pointing nearly straight at the camera
-      // projects to ~a point either way, so only its arrowhead (a mesh, so it
-      // keeps its girth) stays visible - that is honest foreshortening.
+      // Each highlighted edge gets a solid cylinder (fat line) + cone (arrowhead)
+      // built below; its thin base edge is also recoloured as a subtle underglow.
       for (k = 0; k < lo.length; k++) {
         markNeighbour(links[lo[k]].t); setEdgeColor(lo[k], COL_OUT); hlEdges.push(lo[k]);
-        if (fatOK) hlOut.edges.push(lo[k]);
+        hlOut.edges.push(lo[k]);
       }
       for (k = 0; k < li.length; k++) {
         markNeighbour(links[li[k]].s); setEdgeColor(li[k], COL_IN); hlEdges.push(li[k]);
-        if (fatOK) hlIn.edges.push(li[k]);
+        hlIn.edges.push(li[k]);
       }
     }
     if (nodeMesh.instanceColor) nodeMesh.instanceColor.needsUpdate = true;
     edgeLines.geometry.attributes.color.needsUpdate = true;
-    if (fatOK) updateFatPositions();
+    updateHighlightGeom();
   }
 
-  // fat-line overlay: rebuild each object's endpoints from the current node
-  // positions (only the focus node's edges, so a handful of segments)
-  function updateFatPositions() {
-    if (!fatOK) return;
-    // Keep the line width's resolution pinned to the ACTUAL canvas size every
-    // frame. LineMaterial turns its pixel linewidth into clip space using this;
-    // if it ever goes stale (a resize we missed, a 0-size frame) the fat lines
-    // collapse to zero width and vanish while the cones - plain meshes, immune
-    // to it - stay, which reads as "arrowhead but no line". Re-pinning here
-    // makes that impossible.
-    var w = renderer.domElement.clientWidth || window.innerWidth || 1;
-    var h = renderer.domElement.clientHeight || window.innerHeight || 1;
-    hlOut.mat.resolution.set(w, h); hlIn.mat.resolution.set(w, h);
-    updateFatLine(hlOut);
-    updateFatLine(hlIn);
+  // Rebuild the highlight geometry - a cylinder (fat line) and a cone (arrowhead)
+  // per focus edge - from the current node positions. Redone each frame so they
+  // track the moving endpoints; only the focus node's edges, so a few dozen
+  // instances. Solid geometry ALWAYS renders, so every listed edge shows a line.
+  function updateHighlightGeom() {
+    updateHighlightLine(hlOut);
+    updateHighlightLine(hlIn);
   }
   var _cUp = new THREE.Vector3(0, 1, 0), _cd = new THREE.Vector3(), _cq = new THREE.Quaternion(),
       _cpos = new THREE.Vector3(), _cscale = new THREE.Vector3(1, 1, 1), _cm = new THREE.Matrix4();
-  function updateFatLine(fl) {
-    var n = fl.edges.length;
-    if (n === 0) { fl.line.visible = false; fl.cones.count = 0; return; }
-    var need = n * 6;
-    if (!fl.pos || fl.pos.length !== need) fl.pos = new Float32Array(need);
-    var m = Math.min(n, CONE_MAX), k;
-    for (k = 0; k < n; k++) {
-      var e = fl.edges[k], s = links[e].s, t = links[e].t, o = k * 6;
-      fl.pos[o] = px[s]; fl.pos[o + 1] = py[s]; fl.pos[o + 2] = pz[s];
-      fl.pos[o + 3] = px[t]; fl.pos[o + 4] = py[t]; fl.pos[o + 5] = pz[t];
-      if (k < m) {
-        // arrowhead at the TARGET end, pointing from source -> target (the call direction)
-        _cd.set(px[t] - px[s], py[t] - py[s], pz[t] - pz[s]);
-        var len = _cd.length() || 1; _cd.multiplyScalar(1 / len);
-        _cq.setFromUnitVectors(_cUp, _cd);
-        var back = nodeRadius[t] + 2.0;                // sit just outside the target node
-        _cpos.set(px[t] - _cd.x * back, py[t] - _cd.y * back, pz[t] - _cd.z * back);
-        _cm.compose(_cpos, _cq, _cscale);
-        fl.cones.setMatrixAt(k, _cm);
-      }
+  function updateHighlightLine(fl) {
+    var n = Math.min(fl.edges.length, HL_MAX);
+    if (n === 0) { fl.cyl.count = 0; fl.cones.count = 0; return; }
+    for (var k = 0; k < n; k++) {
+      var e = fl.edges[k], s = links[e].s, t = links[e].t;
+      var sx = px[s], sy = py[s], sz = pz[s], tx = px[t], ty = py[t], tz = pz[t];
+      _cd.set(tx - sx, ty - sy, tz - sz);
+      var len = _cd.length() || 1e-3; _cd.multiplyScalar(1 / len);
+      _cq.setFromUnitVectors(_cUp, _cd);              // orient +Y along source -> target
+      // fat line: a thin cylinder spanning source -> target (centred at midpoint)
+      _cpos.set((sx + tx) * 0.5, (sy + ty) * 0.5, (sz + tz) * 0.5);
+      _cscale.set(CFG.lineRadius, len, CFG.lineRadius);
+      _cm.compose(_cpos, _cq, _cscale);
+      fl.cyl.setMatrixAt(k, _cm);
+      // arrowhead: a cone just outside the target node, same orientation
+      var back = nodeRadius[t] + 2.0;
+      _cpos.set(tx - _cd.x * back, ty - _cd.y * back, tz - _cd.z * back);
+      _cscale.set(1, 1, 1);
+      _cm.compose(_cpos, _cq, _cscale);
+      fl.cones.setMatrixAt(k, _cm);
     }
-    fl.geo.setPositions(fl.pos);
-    fl.line.visible = true;
-    fl.cones.count = m;
-    fl.cones.instanceMatrix.needsUpdate = true;
+    fl.cyl.count = n; fl.cyl.instanceMatrix.needsUpdate = true;
+    fl.cones.count = n; fl.cones.instanceMatrix.needsUpdate = true;
   }
 
-  // Pick the node under the aim point by RAY-SPHERE intersection, not screen
-  // distance: cast a ray through the cursor and keep the nearest node the ray
-  // actually enters. This fixes two things the old "nearest projected centre
-  // within a fixed screen circle" got wrong - (1) depth: a node in front now
-  // wins over one behind it that merely projects closer to the cursor, and
-  // (2) size: the hit area is the node's OWN radius (a small screen-px floor
-  // keeps far nodes reachable), instead of a fat fixed circle that lit up nodes
-  // the cursor was nowhere near.
-  var _pv = new THREE.Vector3(), labelCands = [], raycaster = new THREE.Raycaster(), _ndc = new THREE.Vector2();
+  // GPU pick: render the pick mesh's 1x1 region at (aimX, aimY) into pickTarget
+  // and read the pixel back. camera.setViewOffset squeezes exactly that one
+  // screen pixel to fill the 1x1 buffer, so the readback is the node actually
+  // drawn under the cursor - or -1 for the background. Coordinates are plain CSS
+  // pixels (clientX/Y), the same space setViewOffset wants, so there is nothing
+  // to misalign; devicePixelRatio, FOV and perspective are all already baked
+  // into the camera that draws it.
+  function pickAt(aimX, aimY, w, h) {
+    if (!pickMesh) return -1;
+    camera.setViewOffset(w, h, aimX | 0, aimY | 0, 1, 1);
+    renderer.setRenderTarget(pickTarget);
+    renderer.setClearColor(0x000000, 1);
+    renderer.render(pickScene, camera);          // auto-clears the 1x1 target first
+    renderer.setRenderTarget(null);
+    renderer.setClearColor(CFG.bg, 1);
+    camera.clearViewOffset();
+    renderer.readRenderTargetPixels(pickTarget, 0, 0, 1, 1, pickBuf);
+    var id = (pickBuf[0] << 16) | (pickBuf[1] << 8) | pickBuf[2];
+    return (id > 0 && id <= N) ? id - 1 : -1;
+  }
+
+  var _pv = new THREE.Vector3(), labelCands = [];
   function updateOverlays() {
     if (!nodeMesh || N === 0) { elLabel.style.display = 'none'; return; }
-    var w = window.innerWidth, h = window.innerHeight;
-    // aim point: the moving cursor in inspect mode, the fixed centre otherwise
-    var aimX = (lookMode === 'cursor') ? cursorX : w * 0.5;
-    var aimY = (lookMode === 'cursor') ? cursorY : h * 0.5;
-    _ndc.set((aimX / w) * 2 - 1, -(aimY / h) * 2 + 1);
-    raycaster.setFromCamera(_ndc, camera);
-    var ro = raycaster.ray.origin, rd = raycaster.ray.direction;
-    // world units per screen pixel, per unit of distance from the camera
-    var pxToWorld = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov * 0.5)) / h;
-    var best = -1, bestT = Infinity;
+    // Work in the CANVAS's own coordinate space, not the viewport's. The cursor
+    // is clientX/Y (viewport-relative) but the render fills the canvas, which is
+    // NOT guaranteed to sit at (0,0) - a stray in-flow panel can push it down.
+    // getBoundingClientRect gives the canvas's on-screen box, so we subtract its
+    // origin for picking and add it back for the (viewport-positioned) labels.
+    var rect = renderer.domElement.getBoundingClientRect();
+    var cw = rect.width, ch = rect.height;
+    if (cw < 1 || ch < 1) return;
+    // aim point (canvas-local): the moving cursor in inspect mode, the centre otherwise
+    var aimX = (lookMode === 'cursor') ? (cursorX - rect.left) : cw * 0.5;
+    var aimY = (lookMode === 'cursor') ? (cursorY - rect.top) : ch * 0.5;
+    var best = pickAt(aimX, aimY, cw, ch);
+    if (best !== focusIdx) applyFocus(best);
+    // nearby-node name labels: project only the nodes close to the camera
     var labD = coreRadius * CFG.labelDist, labD2 = labD * labD;
+    var camx = camera.position.x, camy = camera.position.y, camz = camera.position.z;
     labelCands.length = 0;
     for (var i = 0; i < N; i++) {
-      var ocx = ro.x - px[i], ocy = ro.y - py[i], ocz = ro.z - pz[i];
-      var wd = ocx * ocx + ocy * ocy + ocz * ocz;    // squared distance camera -> node
-      // hit radius: the node's own radius, but at least hitMinPx on screen
-      var rr = nodeRadius[i] * CFG.hitMargin;
-      var minR = CFG.hitMinPx * pxToWorld * Math.sqrt(wd);
-      if (minR > rr) rr = minR;
-      var b = ocx * rd.x + ocy * rd.y + ocz * rd.z;
-      var disc = b * b - (wd - rr * rr);
-      if (disc >= 0) {
-        var tHit = -b - Math.sqrt(disc);             // near intersection
-        if (tHit < 0) tHit = -b + Math.sqrt(disc);   // camera inside the sphere
-        if (tHit >= 0 && tHit < bestT) { bestT = tHit; best = i; }   // nearest to the camera
-      }
+      var dx = px[i] - camx, dy = py[i] - camy, dz = pz[i] - camz, wd = dx * dx + dy * dy + dz * dz;
       if (wd < labD2) {
         _pv.set(px[i], py[i], pz[i]).project(camera);
-        if (_pv.z <= 1) labelCands.push({ i: i, sx: (_pv.x * 0.5 + 0.5) * w, sy: (-_pv.y * 0.5 + 0.5) * h, wd: wd });
+        if (_pv.z <= 1) labelCands.push({ i: i, sx: (_pv.x * 0.5 + 0.5) * cw + rect.left, sy: (-_pv.y * 0.5 + 0.5) * ch + rect.top, wd: wd });
       }
     }
-    if (best !== focusIdx) applyFocus(best);
-    renderFocusLabel(w, h);
+    renderFocusLabel(cw, ch, rect.left, rect.top);
     renderNearLabels(labD);
   }
 
-  function renderFocusLabel(w, h) {
+  function renderFocusLabel(w, h, ox, oy) {
     if (focusIdx < 0) { elLabel.style.display = 'none'; return; }
     _pv.set(px[focusIdx], py[focusIdx], pz[focusIdx]).project(camera);
     var n = nodes[focusIdx];
     var where = n.external ? 'external' : (clusterFiles[n.cluster] ? baseName(clusterFiles[n.cluster]) : 'cluster ' + n.cluster);
     elLabel.style.display = 'block';
-    elLabel.style.left = ((_pv.x * 0.5 + 0.5) * w + 16) + 'px';
-    elLabel.style.top = ((-_pv.y * 0.5 + 0.5) * h - 10) + 'px';
+    elLabel.style.left = ((_pv.x * 0.5 + 0.5) * w + ox + 16) + 'px';
+    elLabel.style.top = ((-_pv.y * 0.5 + 0.5) * h + oy - 10) + 'px';
     elLabel.innerHTML = '<b>' + escapeHtml(n.id) + '</b>' + (n.line ? ' :' + n.line : '') +
       '<span class="dim"> &middot; ' + escapeHtml(where) + ' &middot; ' + n.deg + ' link' + (n.deg === 1 ? '' : 's') + '</span>';
   }
@@ -961,7 +968,10 @@
   // ---- HUD ----------------------------------------------------------------
   function updateHud() {
     elMode.textContent = mode === 'auto' ? 'AUTO' : 'FLY';
-    elMode.className = mode === 'auto' ? 'auto' : 'fly';
+    // keep the `panel` class! setting className = 'fly' dropped it, which lost
+    // position:fixed, so the bar fell into flow and pushed the canvas down 34px
+    // - offsetting every cursor pick by that much until the panel was hidden.
+    elMode.className = 'panel ' + (mode === 'auto' ? 'auto' : 'fly');
     var files = clusterFiles.filter(function (x) { return x; }).length;
     elHud.innerHTML =
       '<b>' + N + '</b> nodes &nbsp; <b>' + L + '</b> edges' +
@@ -1010,7 +1020,7 @@
     renderer.setSize(w, h);
     if (composer) composer.setSize(w, h);
     if (bloom) bloom.setSize(w, h);
-    if (fatOK) { hlOut.mat.resolution.set(w, h); hlIn.mat.resolution.set(w, h); }
+    // (GPU picking renders a 1x1 region via camera.setViewOffset, so it needs no resize)
   });
 
   // ---- main loop ----------------------------------------------------------
