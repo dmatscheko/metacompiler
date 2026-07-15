@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>graph3d — metacompiler call graphs in 3D</title>
+<style>
+  :root {
+    --fg: #cdd3e0;
+    --dim: #7c8598;
+    --panel: rgba(12, 15, 26, 0.62);
+    --edge: rgba(120, 140, 190, 0.22);
+    --accent: #6ee7ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060c; }
+  body {
+    font: 12px/1.5 ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--fg);
+    -webkit-font-smoothing: antialiased;
+    cursor: default;
+  }
+  canvas { display: block; cursor: grab; }
+  body.grabbing, body.grabbing canvas { cursor: grabbing; }
+
+  .panel {
+    position: fixed;
+    background: var(--panel);
+    border: 1px solid var(--edge);
+    border-radius: 12px;
+    padding: 10px 13px;
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    user-select: none;
+  }
+  .panel b { color: #fff; font-weight: 600; }
+  .dim { color: var(--dim); }
+
+  #top { top: 14px; left: 14px; display: flex; align-items: center; gap: 12px; }
+  #title { font-weight: 600; color: #fff; letter-spacing: .3px; }
+  #title span { color: var(--accent); }
+  #hud { color: var(--fg); }
+  #loadBtn {
+    cursor: pointer; color: var(--accent);
+    border: 1px solid var(--edge); border-radius: 8px;
+    padding: 3px 9px; background: rgba(110, 231, 255, 0.06);
+    transition: background .15s;
+  }
+  #loadBtn:hover { background: rgba(110, 231, 255, 0.16); }
+
+  #mode {
+    top: 14px; right: 14px; font-weight: 700; letter-spacing: 1.5px;
+    padding: 8px 14px; min-width: 74px; text-align: center;
+  }
+  #mode.auto { color: #7dffc0; border-color: rgba(125, 255, 192, .35); box-shadow: 0 0 22px rgba(125,255,192,.18), 0 8px 30px rgba(0,0,0,.45); }
+  #mode.fly  { color: #ffd47d; border-color: rgba(255, 212, 125, .35); box-shadow: 0 0 22px rgba(255,212,125,.18), 0 8px 30px rgba(0,0,0,.45); }
+
+  #controls { top: 62px; right: 14px; display: flex; flex-direction: column; gap: 7px; padding: 9px 10px; }
+  .tg {
+    cursor: pointer; font: inherit; font-size: 11px; color: var(--dim);
+    background: rgba(255,255,255,.03); border: 1px solid var(--edge);
+    border-radius: 8px; padding: 5px 10px; text-align: left; white-space: nowrap;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .tg:hover { background: rgba(255,255,255,.10); color: var(--fg); }
+  .tg.on { color: #7dffc0; border-color: rgba(125,255,192,.4); background: rgba(125,255,192,.08); }
+
+  body.cursormode canvas { cursor: crosshair; }
+
+  #legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 8px; color: var(--dim); }
+  #legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  #legend .sw.cool { background: linear-gradient(135deg, #6ee7ff, #8f7dff); }
+  #legend .sw.ext { background: #e6a94d; }
+  #legend .sz { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--fg); margin-right: 4px; vertical-align: -1px; }
+
+  #help { bottom: 14px; left: 14px; max-width: 340px; color: var(--dim); line-height: 1.7; }
+  #help b { color: var(--fg); font-weight: 600; }
+  #help kbd {
+    color: var(--fg); background: rgba(255,255,255,.06);
+    border: 1px solid var(--edge); border-bottom-width: 2px;
+    border-radius: 5px; padding: 0 5px; font: inherit; font-size: 11px;
+  }
+  #help .hint { color: var(--dim); opacity: .8; margin-top: 6px; display: block; }
+  body.hidehelp #help { display: none; }
+
+  #flash {
+    bottom: 20px; left: 50%; transform: translateX(-50%);
+    opacity: 0; transition: opacity .4s; pointer-events: none;
+    color: #fff; background: rgba(12,15,26,.8);
+  }
+
+  #label {
+    position: fixed; display: none; pointer-events: none;
+    padding: 4px 8px; border-radius: 7px; white-space: nowrap;
+    background: rgba(6, 8, 16, .85); border: 1px solid var(--edge);
+    color: #fff; font-size: 11px; z-index: 7;
+    box-shadow: 0 4px 18px rgba(0,0,0,.5);
+  }
+  #label .dim { font-weight: 400; }
+
+  #crosshair {
+    position: fixed; display: block; left: 50%; top: 50%;
+    width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%;
+    border: 1.5px solid rgba(200, 230, 255, .32);
+    pointer-events: none; z-index: 6;
+  }
+  #crosshair::after {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px; border-radius: 50%;
+    background: rgba(230, 245, 255, .85); box-shadow: 0 0 6px rgba(110,231,255,.9);
+  }
+
+  /* names drawn on nearby nodes */
+  #labelLayer { position: fixed; inset: 0; pointer-events: none; z-index: 4; }
+  .nlabel {
+    position: fixed; display: none; pointer-events: none; transform: translateY(-50%);
+    font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap; color: #eef2fa;
+    text-shadow: 0 0 6px rgba(0,0,0,.98), 0 0 3px rgba(0,0,0,.95), 0 1px 2px rgba(0,0,0,.9);
+  }
+
+  /* drag-to-load overlay */
+  body.dragging::after {
+    content: "Drop a .dot or .json graph";
+    position: fixed; inset: 0; display: grid; place-items: center;
+    font-size: 20px; color: #fff; letter-spacing: .5px;
+    background: rgba(5, 12, 24, .72);
+    border: 2px dashed rgba(110, 231, 255, .6);
+    z-index: 20;
+  }
+</style>
+</head>
+<body>
+  <div id="top" class="panel">
+    <span id="title">meta<span>·</span>graph3d</span>
+    <span id="hud"></span>
+    <span id="loadBtn" onclick="window.__graph3d&amp;&amp;window.__graph3d.load()">Load .dot</span>
+  </div>
+
+  <div id="mode" class="panel auto">AUTO</div>
+
+  <div id="controls" class="panel">
+    <button id="tgAuto" class="tg on" type="button">Autopilot: on</button>
+    <button id="tgMouse" class="tg" type="button">Mouse: Look</button>
+  </div>
+
+  <div id="help" class="panel">
+    <div><b>Click</b> to look &nbsp;·&nbsp; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp;·&nbsp; <kbd>Q</kbd>/<kbd>E</kbd> down/up &nbsp;·&nbsp; <kbd>Shift</kbd> boost</div>
+    <div>scroll = speed &nbsp;·&nbsp; <kbd>Esc</kbd> release &nbsp;·&nbsp; <kbd>Space</kbd> re-heat &nbsp;·&nbsp; <kbd>H</kbd> hide</div>
+    <div>aim a node: it lights up &mdash; <b style="color:#4dffa0">green&nbsp;&#9654;</b> it calls, <b style="color:#ff9a4d">orange&nbsp;&#9654;</b> calls it (arrows point the way)</div>
+    <div id="legend">
+      <span><span class="sw cool"></span>your functions (by file)</span>
+      <span><span class="sw ext"></span>external calls</span>
+      <span><span class="sz"></span>bigger = more connected</span>
+    </div>
+    <span class="hint">Top-right: toggle <b>Autopilot</b>, and switch the mouse between <b>Look</b> (fly) and <b>Inspect</b> (hover nodes without moving). Drop a <b>.dot</b> from <b>-callgraph</b> / <b>-cfgraph</b> / <b>-render</b> on the window.</span>
+  </div>
+
+  <div id="flash" class="panel"></div>
+  <div id="label"></div>
+  <div id="crosshair"></div>
+  <input id="fileInput" type="file" accept=".dot,.json,.gv" style="display:none">
+
+  <!-- three.js r136 (global build) + optional postprocessing for bloom, from CDN.
+       Needs an internet connection on first load; if it fails the viewer says so. -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/shaders/CopyShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/postprocessing/EffectComposer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/postprocessing/RenderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/postprocessing/ShaderPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/postprocessing/MaskPass.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+  <!-- fat lines (thicker highlighted edges); optional, degrades to 1px lines if absent -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/lines/LineSegmentsGeometry.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/lines/LineMaterial.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.136.0/examples/js/lines/LineSegments2.js"></script>
+  <script src="graph3d.js"></script>
+</body>
+</html>
