@@ -49,7 +49,7 @@
                          //   snap together. ↑ = long bridges pull taut and clusters ball up
                          //   tightly; 0 = a plain linear Hooke spring (pull grows only
                          //   linearly with distance).
-    extSpring: 0.3,      // spring-stiffness multiplier for edges touching an EXTERNAL node
+    extSpring: 0.1,      // spring-stiffness multiplier for edges touching an EXTERNAL node
                          //   (amber calls-to-the-outside): < 1 makes the caller->external tether
                          //   weaker, so repulsion carries those callees further out to the rim -
                          //   which fits, they ARE the outward calls. Unlike an outward push this
