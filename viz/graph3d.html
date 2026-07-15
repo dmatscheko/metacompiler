@@ -82,7 +82,8 @@
     border-radius: 5px; padding: 0 5px; font: inherit; font-size: 11px;
   }
   #help .hint { color: var(--dim); opacity: .8; margin-top: 6px; display: block; }
-  body.hidehelp #help { display: none; }
+  /* H hides ALL chrome panels, not just the help box */
+  body.hideui #top, body.hideui #mode, body.hideui #controls, body.hideui #help { display: none; }
 
   #flash {
     bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -137,16 +138,16 @@
     <span id="loadBtn" onclick="window.__graph3d&amp;&amp;window.__graph3d.load()">Load .dot</span>
   </div>
 
-  <div id="mode" class="panel auto">AUTO</div>
+  <div id="mode" class="panel fly">FLY</div>
 
   <div id="controls" class="panel">
-    <button id="tgAuto" class="tg on" type="button">Autopilot: on</button>
-    <button id="tgMouse" class="tg" type="button">Mouse: Look</button>
+    <button id="tgAuto" class="tg" type="button">Autopilot: off</button>
+    <button id="tgMouse" class="tg on" type="button">Mouse: Inspect</button>
   </div>
 
   <div id="help" class="panel">
-    <div><b>Click</b> to look &nbsp;·&nbsp; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp;·&nbsp; <kbd>Q</kbd>/<kbd>E</kbd> down/up &nbsp;·&nbsp; <kbd>Shift</kbd> boost</div>
-    <div>scroll = speed &nbsp;·&nbsp; <kbd>Esc</kbd> release &nbsp;·&nbsp; <kbd>Space</kbd> re-heat &nbsp;·&nbsp; <kbd>H</kbd> hide</div>
+    <div><b>Drag</b> to turn &nbsp;·&nbsp; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move &nbsp;·&nbsp; <kbd>Q</kbd>/<kbd>E</kbd> down/up &nbsp;·&nbsp; <kbd>Shift</kbd> boost</div>
+    <div>scroll = speed &nbsp;·&nbsp; <kbd>Space</kbd> re-heat &nbsp;·&nbsp; <kbd>X</kbd> spread &nbsp;·&nbsp; <kbd>H</kbd> hide UI</div>
     <div>aim a node: it lights up &mdash; <b style="color:#4dffa0">green&nbsp;&#9654;</b> it calls, <b style="color:#ff9a4d">orange&nbsp;&#9654;</b> calls it (arrows point the way)</div>
     <div id="legend">
       <span><span class="sw cool"></span>your functions (by file)</span>

@@ -24,14 +24,15 @@
     restLen: 9,          // preferred edge length
     repulsion: 240,      // node-node repulsion strength (full, once cooled)
     repMin: 0.12,        // repulsion scale while HOT: weak early so groups clump before it enforces spacing
-    spring: 0.02,        // edge spring stiffness
-    gravity: 0.014,      // pull toward origin (also draws the big starting shell inward)
+    spring: 0.025,       // edge spring stiffness: attraction between CONNECTED nodes (nudged up for tighter clusters)
+    gravity: 0.008,      // pull toward origin - the only thing drawing UNconnected nodes together; lowered a lot so groups separate
     damping: 0.86,       // velocity retention per tick
     maxStep: 9,          // clamp on per-tick displacement (anti-explosion; also lets it contract)
     alphaDecay: 0.988,   // simulated-annealing cooling
     alphaMin: 0.015,     // floor so the graph keeps breathing very gently
     warmup: 320,         // synchronous layout ticks before first paint (spread -> contract -> settle)
     initSpread: 5,       // start on a sphere shell this * the natural radius, then pull together
+    spreadMult: 2.0,     // X-key spread: push every node outward by (furthest-node distance * this), keeping its direction
 
     // appearance
     bg: 0x05060c,
@@ -56,8 +57,9 @@
 
     // appearance / focus highlight
     nodeDim: 0.55,       // resting node brightness (darkened so the focus highlight pops)
-    hitMargin: 1.15,     // pick radius as a multiple of the node's own radius (was a fixed screen circle)
-    hitMinPx: 6,         // ...but never smaller than this many screen px, so far/tiny nodes stay pickable
+    hitMargin: 1.75,     // pick radius as a multiple of the node's radius - sized to the VISIBLE ball (the
+                         //   bloom glow makes a node look ~1.8x its geometry, so a tight geom hit felt "off")
+    hitMinPx: 4,         // ...but never smaller than this many screen px, so far/tiny nodes stay pickable
     labelMax: 40,        // most node names shown at once
     labelDist: 1.4       // show a name for nodes within (this * coreRadius) of the camera
   };
@@ -381,8 +383,9 @@
     var frameDist = viewRadius / Math.sin(halfFov) * 1.1;
     camera.position.set(0, viewRadius * 0.35, frameDist);
     var fwd = new THREE.Vector3(0, 0, 0).sub(camera.position).normalize();
-    seedAuto(camera.position, fwd);
-    mode = 'auto';
+    camera.lookAt(0, 0, 0);            // face the graph from the overview spot
+    seedAuto(camera.position, fwd);    // prime the spline in case autopilot is turned on
+    mode = autopilot ? 'auto' : 'fly'; // autopilot off (default) -> park here, let the user drive
 
     updateHud();
   }
@@ -404,6 +407,33 @@
       vx[i] = vy[i] = vz[i] = 0;
     }
     alpha = 1;
+  }
+
+  // Spread (X): unlike re-heat's random scatter, this keeps every node's
+  // DIRECTION from the centre and only pushes it outward, so the angular
+  // structure (which clusters sit where) is preserved while the graph inflates
+  // and re-sorts. Push distance = furthest node's distance from centre * mult.
+  function spreadNodes() {
+    if (N === 0) return;
+    var cx = 0, cy = 0, cz = 0, i;
+    for (i = 0; i < N; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= N; cy /= N; cz /= N;
+    var maxD = 0;
+    for (i = 0; i < N; i++) {
+      var ex = px[i] - cx, ey = py[i] - cy, ez = pz[i] - cz;
+      var d = Math.sqrt(ex * ex + ey * ey + ez * ez);
+      if (d > maxD) maxD = d;
+    }
+    var push = maxD * CFG.spreadMult;
+    for (i = 0; i < N; i++) {
+      var dx = px[i] - cx, dy = py[i] - cy, dz = pz[i] - cz;
+      var dd = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dd < 1e-4) continue;                          // a node exactly at the centre has no direction
+      var k = (dd + push) / dd;                         // same direction, dd + push out from centre
+      px[i] = cx + dx * k; py[i] = cy + dy * k; pz[i] = cz + dz * k;
+      vx[i] = vy[i] = vz[i] = 0;
+    }
+    alpha = 1;                                          // re-heat so the forces re-settle it
   }
 
   // ---- force layout (grid-accelerated repulsion) --------------------------
@@ -520,9 +550,9 @@
   }
 
   // ---- camera: shared state ----------------------------------------------
-  var mode = 'auto';                 // 'auto' (autopilot flying) | 'fly' (user in control)
-  var autopilot = true;              // may the camera fly itself when idle?
-  var lookMode = 'capture';          // 'capture' (pointer-lock look) | 'cursor' (hover to inspect)
+  var mode = 'fly';                  // 'auto' (autopilot flying) | 'fly' (user in control)
+  var autopilot = false;             // may the camera fly itself when idle? (off by default)
+  var lookMode = 'cursor';           // 'capture' (pointer-lock look) | 'cursor' (hover to inspect - default)
   var lastInput = -1e9;
   var keys = {};
   var flyVel = new THREE.Vector3();
@@ -676,8 +706,9 @@
   var MOVEKEYS = { w: 1, a: 1, s: 1, d: 1, q: 1, e: 1, shift: 1 };
   window.addEventListener('keydown', function (ev) {
     var k = ev.key.toLowerCase();
-    if (k === ' ') { scatterNodes(); ev.preventDefault(); return; } // re-heat: blow apart & re-sort
-    if (k === 'h') { document.body.classList.toggle('hidehelp'); return; }
+    if (k === ' ') { scatterNodes(); ev.preventDefault(); return; } // re-heat: random scatter & re-sort
+    if (k === 'x') { spreadNodes(); ev.preventDefault(); return; }  // spread: push out radially, keep direction
+    if (k === 'h') { document.body.classList.toggle('hideui'); return; }
     if (MOVEKEYS[k]) { keys[k] = true; registerSteer(); }
   });
   window.addEventListener('keyup', function (ev) { keys[ev.key.toLowerCase()] = false; });
