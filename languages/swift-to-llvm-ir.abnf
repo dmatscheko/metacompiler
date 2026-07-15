@@ -447,7 +447,7 @@ KwContinue  = "continue" KwEnd ;
     // repeats and cycles are no-ops.
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         var rel = path.split(".").join("/")
         var cands = [rel + ".swift"]
@@ -1094,7 +1094,7 @@ KwContinue  = "continue" KwEnd ;
         // The walk of an imported file ends here too: stash its top-level declaration
         // statements for the real jsmain (prepended below) instead of emitting a second one.
         if (importDepth > 0) {
-            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1111,7 +1111,8 @@ KwContinue  = "continue" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
         // Imported declarations first (so the main file's code can use them), then the
         // main file's top level statements in source order.
-        b = makeSeq(importedItems.concat(items))(b)
+        b = emitImported(b)
+        b = makeSeq(items)(b)
         b.NewRet(handle(0))
     }
 

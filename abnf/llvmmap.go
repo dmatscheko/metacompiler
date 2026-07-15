@@ -224,7 +224,13 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 		"NewXor":            ir.NewXor,
 		"NewZExt":           ir.NewZExt,
 		"NewLocalIdent":     ir.NewLocalIdent,
-		"NewModule":         ir.NewModule,
+		// Wrapped so the call graph can attribute each function to its own
+		// source file: record the module being built (see beginCompileModule).
+		"NewModule": func() *ir.Module {
+			m := ir.NewModule()
+			beginCompileModule(m)
+			return m
+		},
 		"NewOperandBundle":  ir.NewOperandBundle,
 		"NewParam":          ir.NewParam,
 		"NewBr":             ir.NewBr,

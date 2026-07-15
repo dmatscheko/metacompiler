@@ -1146,7 +1146,7 @@ KwInstanceof = "instanceof" KwEnd ;
     core.stdlibImports = []
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         if (path.length >= 2 && path.charAt(0) == "." && path.charAt(1) == "/") { path = path.substring(2) }
         if (!(path.length >= 4 && path.substring(path.length - 4) == ".php")) { path = path + ".php" }
@@ -1167,7 +1167,7 @@ KwInstanceof = "instanceof" KwEnd ;
         // The walk of an imported file ends here too: stash its top-level thunks for the
         // real phpmain instead of emitting a second one.
         if (importDepth > 0) {
-            for (var s = 0; s < items.length; s++) { importedItems.push(items[s]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("phpmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1178,8 +1178,8 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
-        var all = importedItems.concat(items)
-        for (var i = 0; i < all.length; i++) { b = all[i](b) }
+        b = emitImported(b)   // imported files' items, each under its own source
+        b = makeSeq(items)(b)
         b.NewRet(handle(0))
     }
 
