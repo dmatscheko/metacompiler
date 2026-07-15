@@ -59,6 +59,7 @@ edges and flies smoothly. (For flat, printable output, keep using Graphviz
 | **Esc** | release the pointer |
 | **Space** | re-heat — random scatter, then re-settle |
 | **X** | spread — push every node straight out from the centre (keeping its direction), then re-settle |
+| **1 2 3** | highlight depth — light up 1, 2 or 3 hops of connections from the aimed node |
 | **H** | hide *all* panels |
 
 Two switches, top-right:
@@ -90,6 +91,11 @@ call direction. Each highlighted edge is a solid cylinder + cone (real geometry,
 so *every* edge shows a line — no dropped segments). Its neighbours brighten and
 nearby nodes show their name.
 
+Press **1 / 2 / 3** (or set `CFG.hlDepth`) to fan the highlight out that many
+**hops** — 2nd- and 3rd-order callers/callees — each hop drawn dimmer and thinner
+(`CFG.hlFalloff`). Tune the overall glow with `CFG.hlBright` and the arrowhead
+size with `CFG.coneSize`.
+
 ## Notes
 
 - Colours: cool = defined functions (by source file), warm amber = external
@@ -115,5 +121,6 @@ nearby nodes show their name.
 - `window.__graph3d` exposes `load()`, `loadUrl(url)`, `loadText(name, text)`
   plus debug hooks: `state()`, `dbg()`, `extent()` (live max/mean node distance
   from the centroid + the current X-spread step — handy for tuning the `CFG`
-  force knobs), `simulate(steps, dt)`, `overview()`, and `lookAtHub()` (park the
-  camera on the highest-degree node).
+  force knobs), `focus(i, depth)` (force the highlight onto node `i` and report
+  its multi-hop fan-out), `simulate(steps, dt)`, `overview()`, and `lookAtHub()`
+  (park the camera on the highest-degree node).
