@@ -111,10 +111,12 @@
     // ---- appearance: focus highlight & labels ----
     nodeDim: 0.55,       // resting node brightness (colour * nodeDim), dimmed so the white
                          //   focus highlight pops. ↑ = brighter resting nodes (less contrast).
-    hlBright: 1.0,       // MASTER brightness of the whole focus highlight - the fat edge
-                         //   cylinders, the arrowhead cones, the lit-up nodes, and the thin
-                         //   edge underglow are ALL multiplied by this. ↑ = more blown-out,
-                         //   heavier bloom; ↓ = subtler. 1.0 = the raw highlight colours.
+    hlBright: 0.8,       // brightness of the highlighted EDGES - the fat cylinders, the
+                         //   arrowhead cones and the thin edge underglow (NOT the nodes; the
+                         //   focus stays pure white and neighbours keep their vivid colour).
+                         //   The hue is in the material, so lowering this just dims the green/
+                         //   orange, it never washes to white. ↑ = brighter, heavier bloom
+                         //   (keep <= ~1 or the bloom starts to whiten it); ↓ = calmer.
     lineRadius: 0.20,    // world radius of a highlighted edge's cylinder (the fat line). ↑ =
                          //   chunkier highlight lines. (Thinner at deeper hops - see hlFalloff.)
     coneSize: 1.0,       // scale of the arrowhead cone on highlighted edges. ↑ = bigger
@@ -130,8 +132,13 @@
                          //   fade out fast; ↑ toward 1 = deeper hops stay nearly as bold.
     labelMax: 130,       // most node-name labels drawn at once (nearest-to-camera win). ↑ = more
                          //   names on screen but more clutter and DOM cost.
-    labelDist: 4.5       // show a node's name when it's within labelDist*coreRadius of the
+    labelDist: 4.5,      // show a node's name when it's within labelDist*coreRadius of the
                          //   camera. ↑ = names appear from further away.
+    focusLabels: false   // label mode. false = normal (names by distance, above). true = names
+                         //   show by distance UNTIL a node is highlighted; then ONLY the focus
+                         //   node and its highlighted connections show their name, at ANY
+                         //   distance (everything else's label hides). Great for reading exactly
+                         //   who a node talks to. Follows hlDepth, so 1/2/3 widens the labelled set.
   };
 
   // ---- DOM ----------------------------------------------------------------
@@ -226,21 +233,24 @@
   var HL_MAX = 4000;                                   // per direction: cylinder/cone instance cap
   var cylGeom = new THREE.CylinderGeometry(1, 1, 1, 6); // unit cylinder along +Y (radius 1, height 1)
   var hlOut = null, hlIn = null;
-  // White base material + per-instance colour (set each frame in updateHighlightLine),
-  // exactly like the pick mesh: the shader outputs instanceColor * white, so every
-  // cylinder/cone carries its OWN colour - the base green/orange (`baseColor`) scaled
-  // by CFG.hlBright and dimmed per hop. That per-instance colour is what lets a single
-  // mesh draw hop 1 bright and hops 2-3 progressively fainter.
+  // The HUE lives in the MATERIAL (green/orange), so a cylinder/cone is always its
+  // colour - never white. The per-instance colour is only a GREY brightness multiplier
+  // (set in updateHighlightLine) that dims deeper hops and applies CFG.hlBright.
+  //   why not colour via instanceColor? these meshes start at count 0 with instanceColor
+  //   null, so it is created only AFTER the first render - and this three.js build won't
+  //   recolour a MeshBasicMaterial from an instanceColor added late, so the lines came out
+  //   white. Colouring the material fixes that; we still pre-seed instanceColor here (one
+  //   setColorAt) so it exists before the first render and the grey dimming takes effect.
   function makeHighlight(color) {
-    var lmat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+    var lmat = new THREE.MeshBasicMaterial({ color: color, toneMapped: false });
     var cyl = new THREE.InstancedMesh(cylGeom, lmat, HL_MAX);
-    cyl.frustumCulled = false; cyl.count = 0;
+    cyl.frustumCulled = false; cyl.setColorAt(0, new THREE.Color(1, 1, 1)); cyl.count = 0;
     scene.add(cyl);
-    var cmat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+    var cmat = new THREE.MeshBasicMaterial({ color: color, toneMapped: false });
     var cones = new THREE.InstancedMesh(coneGeom, cmat, HL_MAX);
-    cones.frustumCulled = false; cones.count = 0;
+    cones.frustumCulled = false; cones.setColorAt(0, new THREE.Color(1, 1, 1)); cones.count = 0;
     scene.add(cones);
-    return { cyl: cyl, cones: cones, edges: [], baseColor: color.clone() };
+    return { cyl: cyl, cones: cones, edges: [] };
   }
   hlOut = makeHighlight(new THREE.Color(0.25, 1.0, 0.55));   // outgoing: green
   hlIn = makeHighlight(new THREE.Color(1.0, 0.5, 0.12));     // incoming: orange
@@ -965,8 +975,8 @@
 
   function setEdgeColor(e, col, lf) {
     // Boost past 1.0 so the additive line blooms in its own colour (green/orange)
-    // instead of washing to white next to the bright focus node. Scaled by the
-    // master highlight brightness and dimmed per hop (lf) for the thin underglow.
+    // instead of washing to white next to the bright focus node. Scaled by the edge
+    // highlight brightness (hlBright) and dimmed per hop (lf) for the thin underglow.
     var o = e * 6, b = 1.9 * CFG.hlBright * lf;
     edgeCol[o] = col.r * b; edgeCol[o + 1] = col.g * b; edgeCol[o + 2] = col.b * b;
     edgeCol[o + 3] = col.r * b; edgeCol[o + 4] = col.g * b; edgeCol[o + 5] = col.b * b;
@@ -980,8 +990,8 @@
     if (_hlNodeStamp[i] !== _focusGen) { _hlNodeStamp[i] = _focusGen; _hlNodeLf[i] = -1; hlNodes.push(i); }
     if (lf <= _hlNodeLf[i]) return;                 // already lit this bright (or brighter)
     _hlNodeLf[i] = lf;
-    _tmpC.copy(nodeColors[i]).multiplyScalar(CFG.hlBright * lf);
-    nodeMesh.setColorAt(i, _tmpC);                  // vivid cluster colour, scaled by brightness & hop
+    _tmpC.copy(nodeColors[i]).multiplyScalar(lf);   // vivid cluster colour, only dimmed per hop
+    nodeMesh.setColorAt(i, _tmpC);                  // (nodes aren't touched by hlBright - that's for the edges)
     var bump = 1 + 0.25 * lf;                       // hop 1 -> 1.25; deeper hops swell less
     if (scaleMul[i] < bump) scaleMul[i] = bump;
   }
@@ -995,8 +1005,7 @@
     focusIdx = nf;
     if (nf >= 0) {
       _focusGen++;                                    // fresh generation for the node/edge de-dup stamps
-      _tmpC.copy(COL_FOCUS).multiplyScalar(CFG.hlBright);
-      nodeMesh.setColorAt(nf, _tmpC); scaleMul[nf] = 1.4; hlNodes.push(nf);
+      nodeMesh.setColorAt(nf, COL_FOCUS); scaleMul[nf] = 1.4; hlNodes.push(nf);   // focus stays pure white
       // Fan out up to CFG.hlDepth hops from the focus: outgoing calls (green) and
       // incoming callers (orange), each hop dimmer & thinner. Every highlighted edge
       // gets a solid cylinder (fat line) + cone (arrowhead), its thin base edge
@@ -1081,8 +1090,9 @@
       _cscale.set(csz, csz, csz);
       _cm.compose(_cpos, _cq, _cscale);
       fl.cones.setMatrixAt(k, _cm);
-      // per-instance colour: base green/orange * master brightness, dimmed per hop
-      _hlC.copy(fl.baseColor).multiplyScalar(CFG.hlBright * lf);
+      // per-instance BRIGHTNESS only (a grey multiplier): the hue is in the material,
+      // so the line stays green/orange - this just dims it by hlBright and per hop (lf).
+      _hlC.setScalar(CFG.hlBright * lf);
       fl.cyl.setColorAt(k, _hlC);
       fl.cones.setColorAt(k, _hlC);
     }
@@ -1129,15 +1139,26 @@
     var aimY = (lookMode === 'cursor') ? (cursorY - rect.top) : ch * 0.5;
     var best = pickAt(aimX, aimY, cw, ch);
     if (best !== focusIdx) applyFocus(best);
-    // nearby-node name labels: project only the nodes close to the camera
+    // node-name labels. Normally: the nodes near the camera (name fades with distance).
+    // In focusLabels mode WITH something highlighted: ONLY the focus node + its lit
+    // connections, at ANY distance (wd = 0, no distance cull) - so you read exactly who
+    // it talks to. Follows hlDepth via hlNodes, so 1/2/3 widens the labelled set.
     var labD = coreRadius * CFG.labelDist, labD2 = labD * labD;
-    var camx = camera.position.x, camy = camera.position.y, camz = camera.position.z;
     labelCands.length = 0;
-    for (var i = 0; i < N; i++) {
-      var dx = px[i] - camx, dy = py[i] - camy, dz = pz[i] - camz, wd = dx * dx + dy * dy + dz * dz;
-      if (wd < labD2) {
-        _pv.set(px[i], py[i], pz[i]).project(camera);
-        if (_pv.z <= 1) labelCands.push({ i: i, sx: (_pv.x * 0.5 + 0.5) * cw + rect.left, sy: (-_pv.y * 0.5 + 0.5) * ch + rect.top, wd: wd });
+    if (CFG.focusLabels && focusIdx >= 0) {
+      for (var h = 0; h < hlNodes.length; h++) {
+        var hi = hlNodes[h];
+        _pv.set(px[hi], py[hi], pz[hi]).project(camera);
+        if (_pv.z <= 1) labelCands.push({ i: hi, sx: (_pv.x * 0.5 + 0.5) * cw + rect.left, sy: (-_pv.y * 0.5 + 0.5) * ch + rect.top, wd: 0 });
+      }
+    } else {
+      var camx = camera.position.x, camy = camera.position.y, camz = camera.position.z;
+      for (var i = 0; i < N; i++) {
+        var dx = px[i] - camx, dy = py[i] - camy, dz = pz[i] - camz, wd = dx * dx + dy * dy + dz * dz;
+        if (wd < labD2) {
+          _pv.set(px[i], py[i], pz[i]).project(camera);
+          if (_pv.z <= 1) labelCands.push({ i: i, sx: (_pv.x * 0.5 + 0.5) * cw + rect.left, sy: (-_pv.y * 0.5 + 0.5) * ch + rect.top, wd: wd });
+        }
       }
     }
     renderFocusLabel(cw, ch, rect.left, rect.top);
@@ -1265,6 +1286,8 @@
     load: function () { elFile.click(); },
     loadUrl: loadUrl,
     loadText: loadText,
+    cfg: CFG,               // the live tunables - mutate e.g. __graph3d.cfg.hlBright to tweak on the fly
+
     state: function () {
       var cx = 0, cy = 0, cz = 0, i;
       for (i = 0; i < N; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
