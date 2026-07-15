@@ -83,7 +83,9 @@ real up or down.
 
 The aimed node lights up white; thick **green** edges (with arrowheads) are the
 ones it calls, thick **orange** the ones that call it — the arrows point the
-call direction. Its neighbours brighten and nearby nodes show their name.
+call direction. Each highlighted edge is a solid cylinder + cone (real geometry,
+so *every* edge shows a line — no dropped segments). Its neighbours brighten and
+nearby nodes show their name.
 
 ## Notes
 
@@ -96,12 +98,14 @@ call direction. Its neighbours brighten and nearby nodes show their name.
   drawn toward the centre (`CFG.gravity`) and repels its neighbours — nudge the
   spring up / gravity down for tighter, better-separated groups. Other knobs:
   `CFG.initSpread` / `repMin` / `warmup` / `spreadMult`.
-- Targeting a node is a ray-sphere test: a ray is cast through the cursor and the
-  nearest node it actually enters wins (so a foreground node beats one merely
-  projecting nearby), with the hit radius sized to the node's *visible* ball
-  (`CFG.hitMargin`, ~1.8× its geometry because of the bloom glow).
-- Self-contained: `graph3d.html` (shell + CDN three.js r136 + bloom + fat lines)
-  and `graph3d.js` (everything else). No build step.
+- Targeting is **GPU picking**: the nodes are re-rendered, each in a colour that
+  encodes its index, into a 1×1 buffer at the cursor (`camera.setViewOffset`);
+  reading that one pixel back gives exactly the node whose real geometry is drawn
+  there — pixel-precise, correct depth for free, no projection maths to drift, no
+  glow to over-shoot. Coordinates are canvas-relative (`getBoundingClientRect`),
+  so a mis-positioned canvas can't offset it.
+- Self-contained: `graph3d.html` (shell + CDN three.js r136 + bloom) and
+  `graph3d.js` (everything else). No build step.
 - `window.__graph3d` exposes `load()`, `loadUrl(url)`, `loadText(name, text)`
   plus debug hooks: `state()`, `simulate(steps, dt)`, `overview()`, and
   `lookAtHub()` (park the camera on the highest-degree node).
