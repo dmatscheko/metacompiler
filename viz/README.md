@@ -93,9 +93,14 @@ so *every* edge shows a line — no dropped segments). Its neighbours brighten a
 nearby nodes show their name.
 
 Press **1 / 2 / 3** (or set `CFG.hlDepth`) to fan the highlight out that many
-**hops** — 2nd- and 3rd-order callers/callees — each hop drawn dimmer and thinner
-(`CFG.hlFalloff`). Tune the overall glow with `CFG.hlBright` and the arrowhead
-size with `CFG.coneSize`.
+**hops** — 2nd- and 3rd-order callers/callees, both directions at once — each hop
+drawn dimmer and thinner (`CFG.hlFalloff`). Tune the edge glow with `CFG.hlBright`
+and the arrowhead size with `CFG.coneSize`.
+
+Set `CFG.focusLabels = true` for a focus-reading label mode: names show normally
+until you highlight a node, then **only that node and its highlighted connections
+keep their names** — at any distance — so you can read exactly who it talks to
+(it follows `CFG.hlDepth`, so `1`/`2`/`3` widens the labelled set).
 
 **Left-click a highlighted node to delete it** (its edges go too). Every survivor
 keeps its position and the camera holds still — the layout just eases the gap
@@ -124,8 +129,9 @@ delete by accident while flying.
   so a mis-positioned canvas can't offset it.
 - Self-contained: `graph3d.html` (shell + CDN three.js r136 + bloom) and
   `graph3d.js` (everything else). No build step.
-- `window.__graph3d` exposes `load()`, `loadUrl(url)`, `loadText(name, text)`
-  plus debug hooks: `state()`, `dbg()`, `extent()` (live max/mean node distance
+- `window.__graph3d` exposes `load()`, `loadUrl(url)`, `loadText(name, text)`,
+  `cfg` (the live `CFG` tunables — mutate e.g. `__graph3d.cfg.hlBright` to tweak on
+  the fly) plus debug hooks: `state()`, `dbg()`, `extent()` (live max/mean node distance
   from the centroid + the current X-spread step — handy for tuning the `CFG`
   force knobs), `focus(i, depth)` (force the highlight onto node `i` and report
   its multi-hop fan-out), `simulate(steps, dt)`, `overview()`, and `lookAtHub()`
