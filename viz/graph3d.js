@@ -49,17 +49,17 @@
                          //   snap together. ↑ = long bridges pull taut and clusters ball up
                          //   tightly; 0 = a plain linear Hooke spring (pull grows only
                          //   linearly with distance).
+    extSpring: 0.3,      // spring-stiffness multiplier for edges touching an EXTERNAL node
+                         //   (amber calls-to-the-outside): < 1 makes the caller->external tether
+                         //   weaker, so repulsion carries those callees further out to the rim -
+                         //   which fits, they ARE the outward calls. Unlike an outward push this
+                         //   is a BALANCED spring (equal-and-opposite on both ends), so it never
+                         //   drifts the whole graph. ↓ = externals drift further out (looser
+                         //   tether); 1 = external edges pull like every other edge.
     gravity: 0.005,       // every node's pull toward the origin: accel += -pos*gravity. This
                          //   is the ONLY force on UNconnected nodes, so it sets how far loose
                          //   pieces drift. ↑ = the whole graph hugs the centre (groups
                          //   overlap); ↓ = groups fly apart and separate (loners wander off).
-    extPush: 1.0,        // OUTWARD push on EXTERNAL nodes (amber calls-to-the-outside) - the
-                         //   inverse of gravity: accel += pos*extPush, so they drift to the RIM
-                         //   instead of being reeled into the core by their callers' springs,
-                         //   which fits (they ARE the outward calls). Proportional to distance,
-                         //   so it self-scales to the graph. (Gravity is far too weak next to the
-                         //   springs to place them - this is its own force.) ↑ = pushed further
-                         //   out (the caller springs stretch to hold them); 0 = off.
     damping: 0.86,       // fraction of velocity kept per tick: vel = (vel+accel)*damping -
                          //   i.e. friction. ↓ (≈0.7) = sluggish, settles fast but stiff; ↑
                          //   toward 1 = springy, keeps jiggling and can oscillate.
@@ -661,22 +661,10 @@
       var stretch = dl - CFG.restLen;
       var f = CFG.spring * stretch;
       if (stretch > 0) f *= 1 + CFG.springStretch * stretch / CFG.restLen;
+      if (isExt[s] || isExt[t]) f *= CFG.extSpring;   // weaker tether to external callees -> they drift to the rim
       var gx = ex / dl * f, gy = ey / dl * f, gz = ez / dl * f;
       ax[s] += gx; ay[s] += gy; az[s] += gz;
       ax[t] -= gx; ay[t] -= gy; az[t] -= gz;
-    }
-
-    // External nodes get an OUTWARD push - the exact inverse of gravity's pull, so
-    // calls-to-the-outside drift to the rim instead of being reeled into the core by
-    // their callers' springs. Proportional to distance (like gravity), so it self-
-    // scales to the graph; the super-linear springStretch always wins far out, so it
-    // settles rather than runs away. (A gravity multiplier was far too weak; this is a
-    // force in its own right.)
-    if (CFG.extPush) {
-      var ep = CFG.extPush;
-      for (i = 0; i < N; i++) {
-        if (isExt[i]) { ax[i] += px[i] * ep; ay[i] += py[i] * ep; az[i] += pz[i] * ep; }
-      }
     }
 
     // gravity toward origin + integrate
