@@ -448,7 +448,8 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // ----- Project-file import state (see core.importFile near the core config) -----
     var importedFiles = {} // "$" + absolute file path -> already imported (once only)
-    var importedItems = [] // imported files' top-level declaration thunks, run in jsmain
+    // imported files' top-level declaration thunks are stashed via stashImported
+    // (compile-core) and emitted by emitImported, each under its own source
     var importDepth = 0    // > 0 while an imported file is being compiled
     var pkgExports = {}    // "$" + package base name -> its exported function names
     var pkgOrder = []      // package base names, in first-import order
@@ -1046,7 +1047,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // are stashed for the real jsmain instead of emitting a second one.
     function buildMain(items) {
         if (importDepth > 0) {
-            for (var ii = 0; ii < items.length; ii++) { importedItems.push(items[ii]) }
+            stashImported(items) // emitted later under this file's own source (see compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1090,7 +1091,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         // imported package resolves its OWN names unqualified; then the package objects are
         // assembled from the exported functions (pkg.Fn, like fmt/os); then the main file's
         // own declarations run.
-        b = makeSeq(importedItems)(b)
+        b = emitImported(b)   // imported files' declarations, each under its own source
         b = buildPackages(b)
         b = makeSeq(items)(b)
         // The entry defaults to main(); -main (c.mainName) can name another function or,

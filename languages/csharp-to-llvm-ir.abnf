@@ -556,7 +556,7 @@ KwLet       = "let" KwEnd ;
     // jsmain. A file is imported once; repeats and cycles are no-ops.
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         var rel = path.split(".").join("/")
         var cands = [rel + ".cs"]
@@ -1277,7 +1277,7 @@ KwLet       = "let" KwEnd ;
         // The walk of an imported file ends here too: stash its top-level declarations
         // for the real jsmain instead of emitting a second one.
         if (importDepth > 0) {
-            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1289,7 +1289,8 @@ KwLet       = "let" KwEnd ;
         callExt(b, "js_set", [consoleV, emitStr(b, "WriteLine"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
         callExt(b, "js_set", [consoleV, emitStr(b, "Write"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
-        b = makeSeq(importedItems.concat(items))(b)
+        b = emitImported(b)
+        b = makeSeq(items)(b)
         // The entry defaults to Program.Main but -main (c.mainName) can name another
         // static method of Program.
         var entry = c.mainName

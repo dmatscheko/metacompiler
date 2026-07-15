@@ -55,7 +55,8 @@ import (
 //                c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
 //  -cfgraph F    write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
 //  -trace F      stream runtime events to file F as JSON lines; also the -render input
-//  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
+//  -callgraph F  write the static call graph to file F, overwriting it (.jsonl feeds -render static)
+//  -callgraph-append F  like -callgraph but keeps F and adds to it, to accumulate a graph across many runs
 //  -render K     standalone (no pipeline): read the JSON-lines file named by -trace F
 //                and write graph K to stdout as Graphviz DOT, then exit. K = calls | vars
 //                (from a -trace run) or static (from a -callgraph run)
@@ -87,6 +88,7 @@ type options struct {
 	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
 
 	freezePath, cfgPath, tracePath, callgraphPath, renderKind string
+	callgraphAppend                                           bool // -callgraph-append: add to the .jsonl instead of overwriting (accumulate across runs).
 }
 
 // parseArgs classifies the command line into files (positional) and flags
@@ -187,6 +189,9 @@ func parseArgs(args []string) (*options, error) {
 			o.tracePath, err = takeVal()
 		case "-callgraph":
 			o.callgraphPath, err = takeVal()
+		case "-callgraph-append":
+			o.callgraphPath, err = takeVal()
+			o.callgraphAppend = true
 		case "-render":
 			o.renderKind, err = takeVal()
 		default:
@@ -294,8 +299,10 @@ func main() {
 	abnf.CFGOutPath = o.cfgPath
 	abnf.TraceOutPath = o.tracePath
 	abnf.CallgraphOutPath = o.callgraphPath
+	abnf.CallgraphAppend = o.callgraphAppend
 	abnf.OpenTrace() // Truncate up front: a zero-event run must not leave a stale file.
 	defer abnf.CloseTrace()
+	abnf.OpenCallgraph() // Same for -callgraph .jsonl (overwrite); -callgraph-append keeps the old file.
 
 	if len(o.files) == 0 {
 		printUsage()
@@ -584,7 +591,9 @@ anywhere among the files.
                 c-preprocessor.abnf prog.c -pipe c-to-llvm-ir.abnf
   -cfgraph F    write the control flow graph of every executed module to file F (DOT; .mmd = Mermaid)
   -trace F      stream runtime events to file F as JSON lines; also the -render input
-  -callgraph F  write the static call graph to file F (.jsonl appends for -render static)
+  -callgraph F  write the static call graph to file F, overwriting it (.jsonl feeds -render static)
+  -callgraph-append F
+                like -callgraph but keeps F and adds to it, to accumulate a graph across many runs
   -render K     standalone (no pipeline): read the JSON-lines file named by -trace F
                 and write graph K to stdout as Graphviz DOT, then exit. K = calls | vars
                 (from a -trace run) or static (from a -callgraph run)

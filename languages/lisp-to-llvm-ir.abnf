@@ -272,8 +272,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var asg = c.parse(c.agrammar, text, null, file)
         c.pushSource(file, text)
         var imported = c.compile(asg)
+        runForms(imported.stack) // emit the imported forms UNDER this file's source (call-graph attribution)
         c.popSource()
-        runForms(imported.stack)
         return true
     }
 

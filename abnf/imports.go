@@ -52,6 +52,7 @@ type savedTraceSource struct {
 var traceSourceStack []savedTraceSource
 
 func pushTraceSource(name, text string) {
+	attributeModuleFuncs() // stamp functions compiled under the OUTGOING source
 	traceSourceStack = append(traceSourceStack, savedTraceSource{traceSrcName, traceLineStarts})
 	SetTraceSource(name, text)
 }
@@ -60,7 +61,19 @@ func popTraceSource() {
 	if len(traceSourceStack) == 0 {
 		return
 	}
+	attributeModuleFuncs() // stamp functions compiled under the source being popped
 	s := traceSourceStack[len(traceSourceStack)-1]
 	traceSourceStack = traceSourceStack[:len(traceSourceStack)-1]
 	traceSrcName, traceLineStarts = s.name, s.starts
+}
+
+// pushTraceSourceFile re-pushes a source by NAME, reusing the line-start table
+// remembered when the file was first read (SetTraceSource). buildMain uses it to
+// emit each imported file's deferred top-level items under that file's source -
+// so the call graph attributes those functions to their real file - without
+// having to carry the source text around a second time. popTraceSource undoes it.
+func pushTraceSourceFile(name string) {
+	attributeModuleFuncs() // stamp functions compiled under the OUTGOING source
+	traceSourceStack = append(traceSourceStack, savedTraceSource{traceSrcName, traceLineStarts})
+	traceSrcName, traceLineStarts = name, sourceLineStarts[name]
 }

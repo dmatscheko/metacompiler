@@ -561,7 +561,7 @@ KwFactory   = "factory" KwEnd ;
     // cycles are no-ops.
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         var p = path
         if (p.length >= 2 && p.substring(0, 2) == "./") { p = p.substring(2) }
@@ -1277,7 +1277,7 @@ KwFactory   = "factory" KwEnd ;
         // The walk of an imported file ends here too: stash its top-level declaration
         // thunks for the real dartmain instead of emitting a second one.
         if (importDepth > 0) {
-            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("dartmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1288,7 +1288,8 @@ KwFactory   = "factory" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
         // Imported declarations first, then the main file's own top level.
-        b = makeSeq(importedItems.concat(items))(b)
+        b = emitImported(b)
+        b = makeSeq(items)(b)
         // The entry point defaults to main() but -main (c.mainName) can name another.
         var entry = c.mainName
         if (entry == undefined || entry == "") { entry = "main" }

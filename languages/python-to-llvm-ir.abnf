@@ -1260,7 +1260,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The walk of an imported file ends here too: stash its statements for
         // the real jsmain instead of emitting a second one.
         if (importDepth > 0) {
-            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1313,7 +1313,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             xb.NewRet(xb.NewCall(getExtern("js_pyexc", 2), [emitStr(xb, excNames[e0]), xf.Params[1]]))
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), callExt(b, "js_closure", [handle(exIdx), curScopeV])])
         }
-        b = makeSeq(importedItems.concat(items))(b)
+        b = emitImported(b)
+        b = makeSeq(items)(b)
         b.NewRet(hUndef)
     }
 
@@ -1332,7 +1333,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // directly (flat, no module object), so use the from-import style.
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         var rel = path.split(".").join("/")
         var cands = [rel + ".py"]

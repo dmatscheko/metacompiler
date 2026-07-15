@@ -360,11 +360,12 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		// Output path for a native executable (-exe flag); see commonscript.go.
 		"exePath": ExePath,
 		// Project-file imports (the -i include roots); see commonscript.go.
-		"curFile":    func() string { return traceSrcName },
-		"findImport": func(relPath string) string { return findImportFile(relPath) },
-		"readFile":   func(path string) string { return readImportFile(path) },
-		"pushSource": func(name, text string) { pushTraceSource(name, text) },
-		"popSource":  func() { popTraceSource() },
+		"curFile":        func() string { return traceSrcName },
+		"findImport":     func(relPath string) string { return findImportFile(relPath) },
+		"readFile":       func(path string) string { return readImportFile(path) },
+		"pushSource":     func(name, text string) { pushTraceSource(name, text) },
+		"pushSourceFile": func(name string) { pushTraceSourceFile(name) },
+		"popSource":      func() { popTraceSource() },
 	}
 
 	bindings := frozenBaseBindings(preventDefaultOutput)
@@ -625,11 +626,12 @@ func (ps *frozenParserScript) init() {
 		// Project-file imports (the -i include roots); mirrors the goja c map in
 		// commonscript.go and the frozen compiler engine, so a parser :script that
 		// resolves an import does not become a latent abort only under -frozen.
-		"curFile":    func() string { return traceSrcName },
-		"findImport": func(relPath string) string { return findImportFile(relPath) },
-		"readFile":   func(path string) string { return readImportFile(path) },
-		"pushSource": func(name, text string) { pushTraceSource(name, text) },
-		"popSource":  func() { popTraceSource() },
+		"curFile":        func() string { return traceSrcName },
+		"findImport":     func(relPath string) string { return findImportFile(relPath) },
+		"readFile":       func(path string) string { return readImportFile(path) },
+		"pushSource":     func(name, text string) { pushTraceSource(name, text) },
+		"pushSourceFile": func(name string) { pushTraceSourceFile(name) },
+		"popSource":      func() { popTraceSource() },
 	}
 	bindings := frozenBaseBindings(ps.pa.opts.PreventDefaultOutput)
 	bindings["llvm"] = llvmFuncMap

@@ -1111,7 +1111,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // The walk of a required file ends here too (importDepth > 0): stash its top-level
         // statement thunks for the real jsmain instead of emitting a second one.
         if (importDepth > 0) {
-            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1126,7 +1126,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
         b = emitLibs(b)
-        b = makeSeq(importedItems.concat(items))(b)
+        b = emitImported(b)
+        b = makeSeq(items)(b)
         b.NewRet(hUndef)
     }
     function buildChunk(items) { buildMain(items) }
@@ -1146,7 +1147,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // appended before the -i-root search.
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         var rel = path
         if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.substring(2) }

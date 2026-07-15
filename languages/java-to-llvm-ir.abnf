@@ -548,7 +548,7 @@ KwSync      = "synchronized" KwEnd ;
     // is imported once; repeats and cycles are no-ops.
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImported (compile-core)
     core.importFile = function(path, pos) {
         if (path.length > 2 && path.substring(path.length - 2) == ".*") { return false }
         var rel = path.split(".").join("/")
@@ -1419,7 +1419,7 @@ KwSync      = "synchronized" KwEnd ;
         // The walk of an imported file ends here too: stash its class
         // statements for the real jsmain instead of emitting a second one.
         if (importDepth > 0) {
-            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1434,7 +1434,8 @@ KwSync      = "synchronized" KwEnd ;
         callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
-        b = makeSeq(importedItems.concat(items))(b)
+        b = emitImported(b)
+        b = makeSeq(items)(b)
         // The entry defaults to Main.main but -main (c.mainName) can name another static
         // method of Main.
         var entry = c.mainName

@@ -454,10 +454,17 @@ files still compiles alone - so a whole codebase graphs file by file:
 ```
 rm -f cg.jsonl
 for f in src/*.js; do
-  ./mec languages/metajs-to-llvm-ir.abnf "$f" -q -callgraph cg.jsonl || true
-done                                   # .jsonl appends; a run without main() may exit 1
+  ./mec languages/metajs-to-llvm-ir.abnf "$f" -q -callgraph-append cg.jsonl || true
+done                                   # -callgraph-append merges the runs; one without main() may exit 1
 ./mec -render static -trace cg.jsonl > codebase.dot
 ```
+
+Plain `-callgraph` overwrites its file each run, like `-cfgraph`, `-trace` and
+`-exe` - a re-run reflects only that run. `-callgraph-append` is the exception
+that keeps the file and adds to it, so the loop above accumulates one graph from
+many separate commands (hence the `rm -f` to start clean). A single run that
+already pulls in the whole tree via `-i` - the kotlin project below - needs no
+loop and no append:
 
 or for a kotlin project:
 

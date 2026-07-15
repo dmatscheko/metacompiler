@@ -55,22 +55,36 @@ func SetTraceSource(name, text string) {
 			traceLineStarts = append(traceLineStarts, i+1)
 		}
 	}
+	// Remember each file's table so a source can be re-pushed by name alone
+	// (pushTraceSourceFile) when its deferred items are emitted, without the text.
+	if name != "" {
+		if sourceLineStarts == nil {
+			sourceLineStarts = map[string][]int{}
+		}
+		sourceLineStarts[name] = traceLineStarts
+	}
 }
 
 var (
-	traceSrcName    string
-	traceLineStarts []int // Byte offset of every line start; nil = no source known.
+	traceSrcName     string
+	traceLineStarts  []int            // Byte offset of every line start; nil = no source known.
+	sourceLineStarts map[string][]int // file name -> its line-start table (for re-push by name).
 )
 
-// lineOfPos converts a byte offset to a 1-based line number (0 = unknown).
-func lineOfPos(pos int) int {
-	if traceLineStarts == nil || pos < 0 {
+// lineOfPos converts a byte offset to a 1-based line number (0 = unknown),
+// against the current source. lineOfPosIn does the same against an explicit
+// line-start table - the call graph passes each function's OWN file's table so
+// functions compiled from imported files get their own line numbers.
+func lineOfPos(pos int) int { return lineOfPosIn(pos, traceLineStarts) }
+
+func lineOfPosIn(pos int, starts []int) int {
+	if starts == nil || pos < 0 {
 		return 0
 	}
-	lo, hi := 0, len(traceLineStarts)-1
+	lo, hi := 0, len(starts)-1
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
-		if traceLineStarts[mid] <= pos {
+		if starts[mid] <= pos {
 			lo = mid
 		} else {
 			hi = mid - 1

@@ -9,9 +9,10 @@ package abnf
 //
 // Because the dynamic languages never resolve names at compile time, a file
 // that calls functions defined elsewhere still compiles alone: compiling every
-// file of a codebase with `-callgraph graph.jsonl` (append mode) and rendering
-// once with `-render static` yields a codebase wide graph whose cross-file
-// edges connect by name.
+// file of a codebase with `-callgraph-append graph.jsonl` (which keeps and adds
+// to the file) and rendering once with `-render static` yields a codebase wide
+// graph whose cross-file edges connect by name. Plain `-callgraph` overwrites
+// the file each run, like the other exports.
 
 import (
 	"encoding/json"
@@ -27,9 +28,15 @@ import (
 	"github.com/llir/llvm/ir/value"
 )
 
-// CallgraphOutPath is set from the -callgraph CLI flag: a .jsonl path appends
+// CallgraphOutPath is set from the -callgraph CLI flag: a .jsonl path holds
 // sdef/scall records for a later -render static, anything else writes DOT.
-var CallgraphOutPath string
+// CallgraphAppend (from -callgraph-append) keeps the existing .jsonl and adds to
+// it, so many runs on different files accumulate one codebase-wide graph; the
+// default -callgraph overwrites the file up front, like -trace and -cfgraph.
+var (
+	CallgraphOutPath string
+	CallgraphAppend  bool
+)
 
 type cgDef struct {
 	Name string
@@ -46,7 +53,70 @@ type cgCall struct {
 var (
 	cgMu        sync.Mutex
 	cgFileCount int
+	cgDead      bool // OpenCallgraph could not truncate the .jsonl; appends then skip.
 )
+
+// OpenCallgraph truncates the -callgraph .jsonl file up front, so a re-run
+// overwrites the previous run's graph instead of appending to it - and a run
+// that extracts no records still replaces a stale file rather than leaving the
+// old one in place (the same reason OpenTrace pre-creates the -trace file). The
+// modules of THIS run still accumulate, because maybeDumpCallgraph appends after
+// this initial truncate. -callgraph-append (CallgraphAppend) skips the truncate
+// to accumulate across many runs; the DOT form writes a whole file per module
+// (os.WriteFile truncates) and needs no pre-truncation.
+func OpenCallgraph() {
+	if CallgraphOutPath == "" || CallgraphAppend || !strings.HasSuffix(CallgraphOutPath, ".jsonl") {
+		return
+	}
+	f, err := os.Create(CallgraphOutPath)
+	if err != nil {
+		cgDead = true
+		fmt.Fprintln(os.Stderr, "callgraph failed: ", err)
+		return
+	}
+	f.Close()
+}
+
+// Per-function source attribution. A module built from several files (imports
+// compiled into one module, e.g. Kotlin -i) would otherwise stamp EVERY
+// function with the one global traceSrcName, collapsing the whole codebase into
+// a single file. compileFuncFile records the file (and its line-start table)
+// that was active while each IR function was compiled: it is filled at every
+// trace-source push/pop (attributeModuleFuncs) and once before extraction, so
+// each function keeps its own file and line numbers after the source stack has
+// unwound. This is language-agnostic - every language builds via llvm.ir.
+// NewModule and brackets imported files with pushSource/popSource.
+type funcSrc struct {
+	file   string
+	starts []int
+}
+
+var (
+	compileModule   *ir.Module // the module currently being built (set by llvm.ir.NewModule)
+	compileFuncFile = map[string]funcSrc{}
+)
+
+// attributeModuleFuncs stamps every not-yet-stamped module function with the
+// CURRENT trace source. Called just before the source is switched (push/pop)
+// and once before extraction.
+func attributeModuleFuncs() {
+	if compileModule == nil || !TraceMarkersWanted() {
+		return
+	}
+	for _, f := range compileModule.Funcs {
+		n := f.Name()
+		if _, ok := compileFuncFile[n]; !ok {
+			compileFuncFile[n] = funcSrc{traceSrcName, traceLineStarts}
+		}
+	}
+}
+
+// beginCompileModule is called by the llvm.ir.NewModule wrapper: it records the
+// module so attributeModuleFuncs can walk it, and clears any prior attribution.
+func beginCompileModule(m *ir.Module) {
+	compileModule = m
+	compileFuncFile = map[string]funcSrc{}
+}
 
 // maybeDumpCallgraph extracts and writes the static call graph of a module
 // about to be executed (hooked next to maybeDumpCFG).
@@ -78,9 +148,14 @@ func maybeDumpCallgraph(m *ir.Module) {
 	}
 }
 
-// appendCallgraphRecords accumulates the records of one module in the shared
-// .jsonl file; several mec runs on different source files merge there.
+// appendCallgraphRecords adds the records of one module to the .jsonl file. Each
+// run's OpenCallgraph truncated it first (unless -callgraph-append), so this
+// accumulates the modules of one run - and, with -callgraph-append, several mec
+// runs on different source files merge into one codebase-wide graph.
 func appendCallgraphRecords(defs []cgDef, calls []cgCall) {
+	if cgDead {
+		return
+	}
 	f, err := os.OpenFile(CallgraphOutPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "callgraph append failed: ", err)
@@ -189,9 +264,22 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 	// Pass 3: definitions and edges. The module entry scaffolding (jsmain and
 	// the shared-scope variant jsrun) is not program structure: its edges come
 	// from "(top)" and it never registers as a definition.
+	// Stamp any functions still unattributed (the main file's, compiled after
+	// the last import popped) with the final source, so every function has one.
+	attributeModuleFuncs()
+	// Each function's own file + line-start table (falls back to the global
+	// source for the single-file case, where compileFuncFile mirrors it anyway).
+	srcOf := func(f *ir.Func) (string, []int) {
+		if fs, ok := compileFuncFile[f.Name()]; ok {
+			return fs.file, fs.starts
+		}
+		return traceSrcName, traceLineStarts
+	}
+
 	scaffold := func(n string) bool { return n == "jsmain" || n == "jsrun" }
 	var defs []cgDef
 	var calls []cgCall
+	unattributed := 0
 	for _, f := range m.Funcs {
 		if len(f.Blocks) == 0 {
 			continue // Extern declaration, not a definition.
@@ -199,6 +287,10 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 		from := display(f.Name())
 		if scaffold(f.Name()) {
 			from = "(top)"
+		}
+		file, starts := srcOf(f)
+		if file == "" && !scaffold(f.Name()) {
+			unattributed++
 		}
 		line := 0
 		for _, b := range f.Blocks {
@@ -212,7 +304,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 				case callee == "js_srcpos":
 					if len(call.Args) > 0 {
 						if ci, ok := call.Args[0].(*constant.Int); ok {
-							if l := lineOfPos(int(ci.X.Int64())); l > 0 && (line == 0 || l < line) {
+							if l := lineOfPosIn(int(ci.X.Int64()), starts); l > 0 && (line == 0 || l < line) {
 								line = l
 							}
 						}
@@ -226,7 +318,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 							to = display(fn)
 						}
 					}
-					calls = append(calls, cgCall{from, to, traceSrcName})
+					calls = append(calls, cgCall{from, to, file})
 				case callee == "js_mcall":
 					to := "(dynamic)"
 					if len(call.Args) >= 2 {
@@ -234,7 +326,7 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 							to = s
 						}
 					}
-					calls = append(calls, cgCall{from, to, traceSrcName})
+					calls = append(calls, cgCall{from, to, file})
 				case callee == "js_supercall":
 					to := "(dynamic)"
 					if len(call.Args) >= 3 {
@@ -242,20 +334,23 @@ func extractCallGraph(m *ir.Module) ([]cgDef, []cgCall) {
 							to = s
 						}
 					}
-					calls = append(calls, cgCall{from, to, traceSrcName})
+					calls = append(calls, cgCall{from, to, file})
 				case strings.HasPrefix(callee, "js_"):
 					// Runtime fabric, not program structure.
 				case scaffold(callee):
 					// jsmain calling jsrun: scaffolding, not an edge.
 				default:
 					// A direct call (the integer-IR languages, putchar, ...).
-					calls = append(calls, cgCall{from, callee, traceSrcName})
+					calls = append(calls, cgCall{from, callee, file})
 				}
 			}
 		}
 		if !scaffold(f.Name()) {
-			defs = append(defs, cgDef{Name: from, File: traceSrcName, Line: line})
+			defs = append(defs, cgDef{Name: from, File: file, Line: line})
 		}
+	}
+	if unattributed > 0 {
+		fmt.Fprintf(os.Stderr, "callgraph: %d function(s) had no source file (attribution incomplete)\n", unattributed)
 	}
 	return defs, calls
 }

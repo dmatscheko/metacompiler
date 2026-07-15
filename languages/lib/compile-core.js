@@ -427,6 +427,38 @@ function makeSeq(items) {
         return b
     }
 }
+
+// Deferred emission of imported files' top-level items. A file imported with -i
+// is parsed and walked immediately, but its top-level thunks are STASHED (its
+// buildMain returns early for importDepth > 0) and emitted later, inside the
+// main file's buildMain. stashImported records each file's items WITH its source
+// file; emitImported then emits each group under that file's own trace source
+// (c.pushSourceFile) so the call graph attributes the functions to their real
+// file instead of collapsing every import onto the importing file. Shared by
+// every -to-llvm-ir grammar that supports imports. importedGroups resets per
+// compile (fresh script load); emitImported clears it so a re-run starts empty.
+var importedGroups = []
+function stashImported(items) {
+    importedGroups.push({file: c.curFile(), items: items})
+}
+// Emit every stashed group, each under its own trace source. `apply(item, b)`
+// runs one item and returns the next block, so a grammar whose statement thunks
+// return {b} (Ruby) can pass its own applier; emitImported's default matches
+// makeSeq (thunks return the block directly), so it is byte-identical to the old
+// makeSeq(importedItems...) emission.
+function emitImportedWith(b, apply) {
+    for (var gi = 0; gi < importedGroups.length; gi++) {
+        var g = importedGroups[gi]
+        c.pushSourceFile(g.file)
+        for (var ii = 0; ii < g.items.length; ii++) { b = apply(g.items[ii], b) }
+        c.popSource()
+    }
+    importedGroups = []
+    return b
+}
+function emitImported(b) {
+    return emitImportedWith(b, function(item, bb) { return item(bb) })
+}
 function makeBlockStmt(items) {
     var seq = makeSeq(items)
     return function(b) {

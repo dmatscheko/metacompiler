@@ -1404,7 +1404,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // repeats and cycles are no-ops.
     var importedFiles = {}
     var importDepth = 0
-    var importedItems = []
+    // imported files top-level items: stashImported / emitImportedWith (compile-core)
     core.importFile = function(path, pos) {
         var rel = path
         if (rel.length >= 2 && rel.charAt(0) == "." && rel.charAt(1) == "/") { rel = rel.slice(2) }
@@ -1429,7 +1429,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // The walk of an imported file ends here too (importDepth > 0): stash its top-level
         // thunks for the real jsmain instead of emitting a second one.
         if (importDepth > 0) {
-            for (var i = 0; i < items.length; i++) { importedItems.push(items[i]) }
+            stashImported(items) // stashed with its file; emitted later (compile-core)
             return
         }
         var f = m.NewFunc("jsmain", i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1438,12 +1438,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
-        // Imported definitions first (prepended), then this file's own items.
-        var all = importedItems.concat(items)
-        for (var i = 0; i < all.length; i++) {
-            var r = all[i](b)
-            b = r.b
-        }
+        // Imported definitions first, each under its own source, then this file's own items.
+        b = emitImportedWith(b, function(item, bb) { return item(bb).b })
+        for (var i = 0; i < items.length; i++) { b = items[i](b).b }
         b.NewRet(handle(0))
     }
 
