@@ -73,9 +73,12 @@ Two switches, top-right:
 
 **Re-heat vs. spread.** `Space` scatters the nodes randomly onto a shell and lets
 the forces re-sort from scratch. `X` instead keeps each node's *direction* from
-the centre and only pushes it outward (distance = the furthest node's distance ×
-`CFG.spreadMult`), so the angular structure is preserved while the graph inflates
-and re-settles — usually into cleaner groupings.
+the centre and only pushes it straight outward, so the angular structure is
+preserved while the graph inflates and re-settles — usually into cleaner
+groupings. The push distance is captured on the **first** `X` (the furthest
+node's distance × `CFG.spreadMult`) and reused on every later `X`, so each press
+adds the same fixed step outward rather than inflating an already-spread graph by
+an ever-growing amount.
 
 Look is free — the camera rotates about its own axes (no fixed up, no pole
 limit), so it feels the same whichever way you face, fitting a graph with no
@@ -94,10 +97,13 @@ nearby nodes show their name.
   degree, so hubs read as the giants.
 - Layout: nodes start spread over a large sphere and are pulled together while
   repulsion ramps up as the sim cools, so connected groups clump before spacing
-  is enforced. Connected nodes attract along edges (`CFG.spring`); everything is
-  drawn toward the centre (`CFG.gravity`) and repels its neighbours — nudge the
-  spring up / gravity down for tighter, better-separated groups. Other knobs:
-  `CFG.initSpread` / `repMin` / `warmup` / `spreadMult`.
+  is enforced. Connected nodes attract along edges (`CFG.spring`), and that pull
+  grows *super-linearly* the more an edge is stretched (`CFG.springStretch`), so
+  far-apart connected nodes snap back hard; everything is drawn toward the centre
+  (`CFG.gravity`) and repels its neighbours — nudge spring / springStretch up and
+  gravity down for tighter, better-separated groups. Every knob in the `CFG`
+  block at the top of `graph3d.js` is documented inline: what it does, the effect
+  of raising or lowering it, and the formula that reads it.
 - Targeting is **GPU picking**: the nodes are re-rendered, each in a colour that
   encodes its index, into a 1×1 buffer at the cursor (`camera.setViewOffset`);
   reading that one pixel back gives exactly the node whose real geometry is drawn
@@ -107,5 +113,7 @@ nearby nodes show their name.
 - Self-contained: `graph3d.html` (shell + CDN three.js r136 + bloom) and
   `graph3d.js` (everything else). No build step.
 - `window.__graph3d` exposes `load()`, `loadUrl(url)`, `loadText(name, text)`
-  plus debug hooks: `state()`, `simulate(steps, dt)`, `overview()`, and
-  `lookAtHub()` (park the camera on the highest-degree node).
+  plus debug hooks: `state()`, `dbg()`, `extent()` (live max/mean node distance
+  from the centroid + the current X-spread step — handy for tuning the `CFG`
+  force knobs), `simulate(steps, dt)`, `overview()`, and `lookAtHub()` (park the
+  camera on the highest-degree node).
