@@ -26,11 +26,11 @@
   // scales all forces) a little toward alphaMin. See layoutTick() for the maths.
   var CFG = {
     // ---- force layout ----
-    restLen: 9,          // preferred edge length, in world units - the separation the
+    restLen: 30,          // preferred edge length, in world units - the separation the
                          //   spring pulls connected nodes toward. ↑ = looser, airier
                          //   graph; ↓ = tighter. Also sizes the repulsion grid cell
                          //   (restLen*1.8) and the initial scatter shell.
-    repulsion: 240,      // node-node repulsion strength once fully cooled. Every nearby
+    repulsion: 3000,      // node-node repulsion strength once fully cooled. Every nearby
                          //   pair pushes apart with force repulsion/dist². ↑ = more
                          //   personal space, the graph inflates; ↓ = nodes pack tight.
     repMin: 0.12,        // repulsion scale while still HOT, ramping to 1.0 as it cools:
@@ -38,18 +38,18 @@
                          //   Low = springs & gravity win early so groups CLUMP before
                          //   spacing kicks in. ↑ toward 1 = even spacing from the start
                          //   (less clumping); ↓ = a stronger initial huddle.
-    spring: 0.05,        // edge spring stiffness: the attraction between CONNECTED nodes.
+    spring: 0.5,         // edge spring stiffness: the attraction between CONNECTED nodes.
                          //   f = spring*(dist-restLen), applied along the edge. ↑ = tighter,
                          //   more compact clusters (can cramp); ↓ = edges slacken and
                          //   connected groups drift apart.
-    springStretch: 0.6,  // super-linear EXTRA pull when an edge is stretched past restLen:
+    springStretch: 1.6,  // super-linear EXTRA pull when an edge is stretched past restLen:
                          //   the spring force is multiplied by (1 + springStretch*stretch/
                          //   restLen), where stretch = dist-restLen (only while stretched).
                          //   So the further apart two connected nodes are, the HARDER they
                          //   snap together. ↑ = long bridges pull taut and clusters ball up
                          //   tightly; 0 = a plain linear Hooke spring (pull grows only
                          //   linearly with distance).
-    gravity: 0.001,      // every node's pull toward the origin: accel += -pos*gravity. This
+    gravity: 0.005,       // every node's pull toward the origin: accel += -pos*gravity. This
                          //   is the ONLY force on UNconnected nodes, so it sets how far loose
                          //   pieces drift. ↑ = the whole graph hugs the centre (groups
                          //   overlap); ↓ = groups fly apart and separate (loners wander off).
@@ -111,8 +111,23 @@
     // ---- appearance: focus highlight & labels ----
     nodeDim: 0.55,       // resting node brightness (colour * nodeDim), dimmed so the white
                          //   focus highlight pops. ↑ = brighter resting nodes (less contrast).
-    lineRadius: 0.32,    // world radius of a highlighted edge's cylinder (the fat line). ↑ =
-                         //   chunkier highlight lines.
+    hlBright: 1.0,       // MASTER brightness of the whole focus highlight - the fat edge
+                         //   cylinders, the arrowhead cones, the lit-up nodes, and the thin
+                         //   edge underglow are ALL multiplied by this. ↑ = more blown-out,
+                         //   heavier bloom; ↓ = subtler. 1.0 = the raw highlight colours.
+    lineRadius: 0.20,    // world radius of a highlighted edge's cylinder (the fat line). ↑ =
+                         //   chunkier highlight lines. (Thinner at deeper hops - see hlFalloff.)
+    coneSize: 1.0,       // scale of the arrowhead cone on highlighted edges. ↑ = bigger
+                         //   arrowheads; ↓ = smaller. The head is re-seated just off the target
+                         //   node as it grows, and (like the line) shrinks at deeper hops.
+    hlDepth: 1,          // how many HOPS of connections the focus lights up: 1 = only direct
+                         //   callers/callees, 2 = also THEIR callers/callees, 3 = three hops out.
+                         //   Green fans out along outgoing calls, orange along incoming callers.
+                         //   Live keys 1 / 2 / 3 set this too. ↑ = a wider neighbourhood.
+    hlFalloff: 0.5,      // per-hop dimming AND thinning when hlDepth > 1: each further hop's
+                         //   brightness, line radius and cone are multiplied again by this
+                         //   (hop-k factor lf = hlFalloff^(k-1); hop 1 = 1.0). ↓ = deeper hops
+                         //   fade out fast; ↑ toward 1 = deeper hops stay nearly as bold.
     labelMax: 130,       // most node-name labels drawn at once (nearest-to-camera win). ↑ = more
                          //   names on screen but more clutter and DOM cost.
     labelDist: 4.5       // show a node's name when it's within labelDist*coreRadius of the
@@ -195,6 +210,12 @@
   var COL_FOCUS = new THREE.Color(1.0, 1.0, 1.0);   // the targeted node
   var COL_OUT = new THREE.Color(0.30, 1.0, 0.65);   // edges it calls (outgoing)
   var COL_IN = new THREE.Color(1.0, 0.5, 0.2);      // edges that call it (incoming)
+  // multi-hop highlight scratch (sized per graph in buildGraph). Stamp-keyed so we
+  // never have to clear whole-N arrays: _focusGen bumps once per applyFocus (node &
+  // edge de-dup across BOTH directions), _bfsGen bumps per BFS traversal (so the
+  // out-tree and in-tree grow their frontiers independently even where they touch).
+  var _hlNodeStamp = null, _hlNodeLf = null, _hlEdgeStamp = null, _hlBfsVisited = null;
+  var _focusGen = 0, _bfsGen = 0;
 
   // Highlighted edges: each is drawn as a solid CYLINDER (the fat line) plus a
   // CONE (the arrowhead) - both InstancedMesh of real geometry. This is the same
@@ -205,16 +226,21 @@
   var HL_MAX = 4000;                                   // per direction: cylinder/cone instance cap
   var cylGeom = new THREE.CylinderGeometry(1, 1, 1, 6); // unit cylinder along +Y (radius 1, height 1)
   var hlOut = null, hlIn = null;
+  // White base material + per-instance colour (set each frame in updateHighlightLine),
+  // exactly like the pick mesh: the shader outputs instanceColor * white, so every
+  // cylinder/cone carries its OWN colour - the base green/orange (`baseColor`) scaled
+  // by CFG.hlBright and dimmed per hop. That per-instance colour is what lets a single
+  // mesh draw hop 1 bright and hops 2-3 progressively fainter.
   function makeHighlight(color) {
-    var lmat = new THREE.MeshBasicMaterial({ color: color, toneMapped: false });
+    var lmat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
     var cyl = new THREE.InstancedMesh(cylGeom, lmat, HL_MAX);
     cyl.frustumCulled = false; cyl.count = 0;
     scene.add(cyl);
-    var cmat = new THREE.MeshBasicMaterial({ color: color, toneMapped: false });
+    var cmat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
     var cones = new THREE.InstancedMesh(coneGeom, cmat, HL_MAX);
     cones.frustumCulled = false; cones.count = 0;
     scene.add(cones);
-    return { cyl: cyl, cones: cones, edges: [] };
+    return { cyl: cyl, cones: cones, edges: [], baseColor: color.clone() };
   }
   hlOut = makeHighlight(new THREE.Color(0.25, 1.0, 0.55));   // outgoing: green
   hlIn = makeHighlight(new THREE.Color(1.0, 0.5, 0.12));     // incoming: orange
@@ -394,6 +420,8 @@
     for (e = 0; e < L; e++) { adjOut[links[e].s].push(e); adjIn[links[e].t].push(e); }
     focusIdx = -1; hlNodes.length = 0; hlEdges.length = 0;
     spreadDist = 0;                                     // re-capture the X push for this new graph
+    _hlNodeStamp = new Int32Array(N); _hlNodeLf = new Float32Array(N);
+    _hlBfsVisited = new Int32Array(N); _hlEdgeStamp = new Int32Array(L);
 
     // layout arrays + initial scatter over a LARGE sphere shell
     px = new Float32Array(N); py = new Float32Array(N); pz = new Float32Array(N);
@@ -801,6 +829,12 @@
     if (k === ' ') { scatterNodes(); ev.preventDefault(); return; } // re-heat: random scatter & re-sort
     if (k === 'x') { spreadNodes(); ev.preventDefault(); return; }  // spread: push out radially, keep direction
     if (k === 'h') { document.body.classList.toggle('hideui'); return; }
+    if (k >= '1' && k <= '3') {                                     // highlight depth: 1/2/3-hop neighbourhood
+      CFG.hlDepth = +k;
+      if (focusIdx >= 0) applyFocus(focusIdx);                      // re-light the current focus at the new depth
+      flash(k + '-hop highlight');
+      ev.preventDefault(); return;
+    }
     if (MOVEKEYS[k]) { keys[k] = true; registerSteer(); }
   });
   window.addEventListener('keyup', function (ev) { keys[ev.key.toLowerCase()] = false; });
@@ -881,21 +915,30 @@
     return labelPool[k];
   }
 
-  function setEdgeColor(e, col) {
+  function setEdgeColor(e, col, lf) {
     // Boost past 1.0 so the additive line blooms in its own colour (green/orange)
-    // instead of washing to white next to the bright focus node.
-    var o = e * 6, b = 1.9;
+    // instead of washing to white next to the bright focus node. Scaled by the
+    // master highlight brightness and dimmed per hop (lf) for the thin underglow.
+    var o = e * 6, b = 1.9 * CFG.hlBright * lf;
     edgeCol[o] = col.r * b; edgeCol[o + 1] = col.g * b; edgeCol[o + 2] = col.b * b;
     edgeCol[o + 3] = col.r * b; edgeCol[o + 4] = col.g * b; edgeCol[o + 5] = col.b * b;
   }
-  function markNeighbour(i) {
+  // Brighten a highlighted node, fainter the further out its hop (lf). Stamp-keyed
+  // to this focus (_focusGen) so each node is pushed to hlNodes exactly once for the
+  // restore pass, and KEEPS the brightest hop's look if several paths (or both the
+  // out- and in-tree) reach it.
+  function markNeighbour(i, lf) {
     if (i === focusIdx) return;
-    nodeMesh.setColorAt(i, nodeColors[i]);          // full vivid (brighter than base, not white)
-    if (scaleMul[i] < 1.25) scaleMul[i] = 1.25;
-    hlNodes.push(i);
+    if (_hlNodeStamp[i] !== _focusGen) { _hlNodeStamp[i] = _focusGen; _hlNodeLf[i] = -1; hlNodes.push(i); }
+    if (lf <= _hlNodeLf[i]) return;                 // already lit this bright (or brighter)
+    _hlNodeLf[i] = lf;
+    _tmpC.copy(nodeColors[i]).multiplyScalar(CFG.hlBright * lf);
+    nodeMesh.setColorAt(i, _tmpC);                  // vivid cluster colour, scaled by brightness & hop
+    var bump = 1 + 0.25 * lf;                       // hop 1 -> 1.25; deeper hops swell less
+    if (scaleMul[i] < bump) scaleMul[i] = bump;
   }
   function applyFocus(nf) {
-    var a, i, e, o, c, k;
+    var a, i, e, o, c;
     // restore whatever was highlighted last frame
     for (a = 0; a < hlNodes.length; a++) { i = hlNodes[a]; nodeMesh.setColorAt(i, baseCol[i]); scaleMul[i] = 1; }
     for (a = 0; a < hlEdges.length; a++) { e = hlEdges[a]; o = e * 6; for (c = 0; c < 6; c++) edgeCol[o + c] = edgeColBase[o + c]; }
@@ -903,22 +946,55 @@
     hlOut.edges.length = 0; hlIn.edges.length = 0;
     focusIdx = nf;
     if (nf >= 0) {
-      nodeMesh.setColorAt(nf, COL_FOCUS); scaleMul[nf] = 1.4; hlNodes.push(nf);
-      var lo = adjOut[nf], li = adjIn[nf];
-      // Each highlighted edge gets a solid cylinder (fat line) + cone (arrowhead)
-      // built below; its thin base edge is also recoloured as a subtle underglow.
-      for (k = 0; k < lo.length; k++) {
-        markNeighbour(links[lo[k]].t); setEdgeColor(lo[k], COL_OUT); hlEdges.push(lo[k]);
-        hlOut.edges.push(lo[k]);
-      }
-      for (k = 0; k < li.length; k++) {
-        markNeighbour(links[li[k]].s); setEdgeColor(li[k], COL_IN); hlEdges.push(li[k]);
-        hlIn.edges.push(li[k]);
-      }
+      _focusGen++;                                    // fresh generation for the node/edge de-dup stamps
+      _tmpC.copy(COL_FOCUS).multiplyScalar(CFG.hlBright);
+      nodeMesh.setColorAt(nf, _tmpC); scaleMul[nf] = 1.4; hlNodes.push(nf);
+      // Fan out up to CFG.hlDepth hops from the focus: outgoing calls (green) and
+      // incoming callers (orange), each hop dimmer & thinner. Every highlighted edge
+      // gets a solid cylinder (fat line) + cone (arrowhead), its thin base edge
+      // recoloured as a subtle underglow. hlDepth = 1 is just the direct neighbours.
+      var depth = CFG.hlDepth | 0; if (depth < 1) depth = 1;
+      exploreHighlight(nf, adjOut, hlOut, COL_OUT, edgeTarget, depth);
+      exploreHighlight(nf, adjIn, hlIn, COL_IN, edgeSource, depth);
     }
     if (nodeMesh.instanceColor) nodeMesh.instanceColor.needsUpdate = true;
     edgeLines.geometry.attributes.color.needsUpdate = true;
     updateHighlightGeom();
+  }
+  function edgeTarget(e) { return links[e].t; }       // far end when walking OUTgoing calls
+  function edgeSource(e) { return links[e].s; }       // far end when walking INcoming callers
+
+  // Breadth-first walk out from the focus, up to `depth` hops, following `adj`
+  // (adjOut = what it calls, adjIn = what calls it). Each edge is recorded ONCE per
+  // focus (shared _focusGen edge stamp) into fl.edges with its hop's dim/thin factor
+  // lf = hlFalloff^(hop-1); its thin base edge is recoloured (thinCol) and the reached
+  // node brightened. The frontier uses a per-traversal stamp (_bfsGen) so the out-
+  // and in-trees expand independently even where they overlap.
+  function exploreHighlight(start, adj, fl, thinCol, farNode, depth) {
+    _bfsGen++;
+    var vis = _hlBfsVisited;
+    vis[start] = _bfsGen;
+    var frontier = [start], hop, next, fi, u, list, k, e, v, lf;
+    for (hop = 1; hop <= depth; hop++) {
+      lf = Math.pow(CFG.hlFalloff, hop - 1);          // hop 1 -> 1, hop 2 -> hlFalloff, ...
+      next = [];
+      for (fi = 0; fi < frontier.length; fi++) {
+        u = frontier[fi]; list = adj[u];
+        for (k = 0; k < list.length; k++) {
+          e = list[k]; v = farNode(e);
+          if (_hlEdgeStamp[e] !== _focusGen) {        // light each edge once, at its nearest hop
+            _hlEdgeStamp[e] = _focusGen;
+            fl.edges.push({ e: e, lf: lf });
+            setEdgeColor(e, thinCol, lf);
+            hlEdges.push(e);
+          }
+          markNeighbour(v, lf);
+          if (vis[v] !== _bfsGen) { vis[v] = _bfsGen; next.push(v); }   // queue for the next hop
+        }
+      }
+      frontier = next;
+      if (frontier.length === 0) break;
+    }
   }
 
   // Rebuild the highlight geometry - a cylinder (fat line) and a cone (arrowhead)
@@ -930,30 +1006,42 @@
     updateHighlightLine(hlIn);
   }
   var _cUp = new THREE.Vector3(0, 1, 0), _cd = new THREE.Vector3(), _cq = new THREE.Quaternion(),
-      _cpos = new THREE.Vector3(), _cscale = new THREE.Vector3(1, 1, 1), _cm = new THREE.Matrix4();
+      _cpos = new THREE.Vector3(), _cscale = new THREE.Vector3(1, 1, 1), _cm = new THREE.Matrix4(),
+      _hlC = new THREE.Color(), _tmpC = new THREE.Color();
   function updateHighlightLine(fl) {
     var n = Math.min(fl.edges.length, HL_MAX);
     if (n === 0) { fl.cyl.count = 0; fl.cones.count = 0; return; }
     for (var k = 0; k < n; k++) {
-      var e = fl.edges[k], s = links[e].s, t = links[e].t;
+      var rec = fl.edges[k], e = rec.e, lf = rec.lf, s = links[e].s, t = links[e].t;
       var sx = px[s], sy = py[s], sz = pz[s], tx = px[t], ty = py[t], tz = pz[t];
       _cd.set(tx - sx, ty - sy, tz - sz);
       var len = _cd.length() || 1e-3; _cd.multiplyScalar(1 / len);
       _cq.setFromUnitVectors(_cUp, _cd);              // orient +Y along source -> target
-      // fat line: a thin cylinder spanning source -> target (centred at midpoint)
+      // fat line: a cylinder spanning source -> target (centred at midpoint),
+      // thinner at deeper hops (lineRadius * lf)
+      var rad = CFG.lineRadius * lf;
       _cpos.set((sx + tx) * 0.5, (sy + ty) * 0.5, (sz + tz) * 0.5);
-      _cscale.set(CFG.lineRadius, len, CFG.lineRadius);
+      _cscale.set(rad, len, rad);
       _cm.compose(_cpos, _cq, _cscale);
       fl.cyl.setMatrixAt(k, _cm);
-      // arrowhead: a cone just outside the target node, same orientation
-      var back = nodeRadius[t] + 2.0;
+      // arrowhead: a cone scaled by coneSize (and shrinking with hop), seated just
+      // off the target node - back = node radius + a small gap + the cone half-length
+      // (geom height 2.8 -> half 1.4), so the tip stays clear of the ball as it grows.
+      var csz = CFG.coneSize * lf;
+      var back = nodeRadius[t] + 0.6 + 1.4 * csz;
       _cpos.set(tx - _cd.x * back, ty - _cd.y * back, tz - _cd.z * back);
-      _cscale.set(1, 1, 1);
+      _cscale.set(csz, csz, csz);
       _cm.compose(_cpos, _cq, _cscale);
       fl.cones.setMatrixAt(k, _cm);
+      // per-instance colour: base green/orange * master brightness, dimmed per hop
+      _hlC.copy(fl.baseColor).multiplyScalar(CFG.hlBright * lf);
+      fl.cyl.setColorAt(k, _hlC);
+      fl.cones.setColorAt(k, _hlC);
     }
     fl.cyl.count = n; fl.cyl.instanceMatrix.needsUpdate = true;
     fl.cones.count = n; fl.cones.instanceMatrix.needsUpdate = true;
+    if (fl.cyl.instanceColor) fl.cyl.instanceColor.needsUpdate = true;
+    if (fl.cones.instanceColor) fl.cones.instanceColor.needsUpdate = true;
   }
 
   // GPU pick: render the pick mesh's 1x1 region at (aimX, aimY) into pickTarget
@@ -1164,6 +1252,20 @@
         sum += d;
       }
       return { max: +mx.toFixed(2), mean: +(sum / N).toFixed(2), spreadDist: +spreadDist.toFixed(2) };
+    },
+    // Debug: force the focus highlight onto node i (bypassing hover), optionally
+    // setting the hop depth, and report how many edges/nodes lit up - bucketed by
+    // their per-hop dim factor lf - to verify the multi-hop highlight fan-out.
+    focus: function (i, depth) {
+      if (i == null || i < 0 || i >= N) return 'i out of range 0..' + (N - 1);
+      if (depth != null) CFG.hlDepth = depth | 0;
+      applyFocus(i);
+      var tally = function (fl) {
+        var byLf = {};
+        for (var k = 0; k < fl.edges.length; k++) { var key = fl.edges[k].lf.toFixed(3); byLf[key] = (byLf[key] || 0) + 1; }
+        return { edges: fl.edges.length, byHopFactor: byLf };
+      };
+      return { focus: nodes[i].id, depth: CFG.hlDepth, litNodes: hlNodes.length, out: tally(hlOut), in: tally(hlIn) };
     },
     // Debug: pull the camera back to frame the whole graph (to inspect layout).
     overview: function () {
