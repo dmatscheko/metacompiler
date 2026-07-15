@@ -19,47 +19,104 @@
   'use strict';
 
   // ---- tunables -----------------------------------------------------------
+  // Every knob below lists: WHAT it controls · the EFFECT of raising / lowering
+  // it · the FORMULA that reads it. The layout is a simulated-annealed force sim:
+  // each tick sums repulsion + edge springs + gravity into an acceleration,
+  // integrates it with damping into velocity/position, then cools `alpha` (which
+  // scales all forces) a little toward alphaMin. See layoutTick() for the maths.
   var CFG = {
-    // force layout
-    restLen: 9,          // preferred edge length
-    repulsion: 240,      // node-node repulsion strength (full, once cooled)
-    repMin: 0.12,        // repulsion scale while HOT: weak early so groups clump before it enforces spacing
-    spring: 0.025,       // edge spring stiffness: attraction between CONNECTED nodes (nudged up for tighter clusters)
-    gravity: 0.001,      // pull toward origin - the only thing drawing UNconnected nodes together; lowered a lot so groups separate
-    damping: 0.86,       // velocity retention per tick
-    maxStep: 9,          // clamp on per-tick displacement (anti-explosion; also lets it contract)
-    alphaDecay: 0.988,   // simulated-annealing cooling
-    alphaMin: 0.015,     // floor so the graph keeps breathing very gently
-    warmup: 320,         // synchronous layout ticks before first paint (spread -> contract -> settle)
-    initSpread: 5,       // start on a sphere shell this * the natural radius, then pull together
-    spreadMult: 2.0,     // X-key spread: push every node outward by (furthest-node distance * this), keeping its direction
+    // ---- force layout ----
+    restLen: 9,          // preferred edge length, in world units - the separation the
+                         //   spring pulls connected nodes toward. ↑ = looser, airier
+                         //   graph; ↓ = tighter. Also sizes the repulsion grid cell
+                         //   (restLen*1.8) and the initial scatter shell.
+    repulsion: 240,      // node-node repulsion strength once fully cooled. Every nearby
+                         //   pair pushes apart with force repulsion/dist². ↑ = more
+                         //   personal space, the graph inflates; ↓ = nodes pack tight.
+    repMin: 0.12,        // repulsion scale while still HOT, ramping to 1.0 as it cools:
+                         //   repScale = repMin + (1-repMin)*cooled  (cooled: 0 hot → 1 cold).
+                         //   Low = springs & gravity win early so groups CLUMP before
+                         //   spacing kicks in. ↑ toward 1 = even spacing from the start
+                         //   (less clumping); ↓ = a stronger initial huddle.
+    spring: 0.05,        // edge spring stiffness: the attraction between CONNECTED nodes.
+                         //   f = spring*(dist-restLen), applied along the edge. ↑ = tighter,
+                         //   more compact clusters (can cramp); ↓ = edges slacken and
+                         //   connected groups drift apart.
+    springStretch: 0.6,  // super-linear EXTRA pull when an edge is stretched past restLen:
+                         //   the spring force is multiplied by (1 + springStretch*stretch/
+                         //   restLen), where stretch = dist-restLen (only while stretched).
+                         //   So the further apart two connected nodes are, the HARDER they
+                         //   snap together. ↑ = long bridges pull taut and clusters ball up
+                         //   tightly; 0 = a plain linear Hooke spring (pull grows only
+                         //   linearly with distance).
+    gravity: 0.001,      // every node's pull toward the origin: accel += -pos*gravity. This
+                         //   is the ONLY force on UNconnected nodes, so it sets how far loose
+                         //   pieces drift. ↑ = the whole graph hugs the centre (groups
+                         //   overlap); ↓ = groups fly apart and separate (loners wander off).
+    damping: 0.86,       // fraction of velocity kept per tick: vel = (vel+accel)*damping -
+                         //   i.e. friction. ↓ (≈0.7) = sluggish, settles fast but stiff; ↑
+                         //   toward 1 = springy, keeps jiggling and can oscillate.
+    maxStep: 9,          // hard clamp on how far a node may move in ONE tick (world units) -
+                         //   the anti-explosion guard when forces spike (e.g. a fresh
+                         //   scatter). ↓ = calmer but slower to settle; ↑ = snaps into place
+                         //   faster, risking overshoot.
+    alphaDecay: 0.988,   // annealing cooldown per tick: alpha *= alphaDecay. alpha scales ALL
+                         //   forces and drives the repulsion ramp. ↓ (≈0.97) = cools fast,
+                         //   freezes sooner (less settling); ↑ toward 1 = simmers longer for
+                         //   a cleaner layout, but takes longer to get there.
+    alphaMin: 0.015,     // floor alpha never cools below, so the sim keeps breathing gently
+                         //   forever instead of freezing solid. ↑ = more idle drift/life;
+                         //   ↓ toward 0 = the graph comes fully to rest.
+    warmup: 320,         // layout ticks run synchronously BEFORE the first frame, so the graph
+                         //   opens already settled (scatter → contract → settle). ↑ = a better
+                         //   first look but a longer load pause; ↓ = loads faster but opens
+                         //   mid-collapse.
+    initSpread: 5,       // initial scatter size, as a multiple of the natural radius: nodes
+                         //   start on a shell of restLen*cbrt(N)*initSpread+40, then contract.
+                         //   ↑ = starts more exploded (helps big graphs untangle); ↓ = starts
+                         //   compact (can trap knots).
+    spreadMult: 2.0,     // X-key spread amount: the FIRST X captures a push distance of
+                         //   (furthest-node distance * spreadMult); every later X moves each
+                         //   node that SAME stored distance further out along its direction.
+                         //   ↑ = each X inflates the graph more; ↓ = gentler nudges.
 
-    // appearance
-    bg: 0x05060c,
-    nodeBase: 1.0,       // base node radius
-    fog: 0.0022,
+    // ---- appearance ----
+    bg: 0x05060c,        // background + fog colour (near-black).
+    nodeBase: 1.0,       // base node radius. The drawn radius grows with degree:
+                         //   nodeBase*(0.7 + 1.7*sqrt(deg/maxDeg)). ↑ = bigger balls overall.
+    fog: 0.0022,         // exponential fog density - a depth cue fading distant nodes into the
+                         //   background. ↑ = murkier, shorter sight line; ↓ = clearer, deeper.
 
-    // camera - fly
-    flySpeed: 46,        // units/sec
-    flyBoost: 3.2,       // Shift multiplier
-    mouseSens: 0.0022,
+    // ---- camera: fly (manual) ----
+    flySpeed: 80,        // WASD / Q / E move speed, world units/sec (before scroll & boost).
+    flyBoost: 5,         // Shift multiplier on flySpeed for a fast dash.
+    mouseSens: 0.0022,   // radians of camera turn per pixel of mouse motion. ↑ = twitchier look.
 
-    // camera - auto
-    autoSpeed: 24,       // units/sec along the spline
-    autoLook: 0.08,      // orientation smoothing toward the flight tangent
-    lookSmooth: 0.08,    // low-pass on the look target itself (gentler turns)
-    maxTurn: 0.9,        // rad/sec HARD cap on the turn rate (no fast spins at sharp curves)
-    avoidRadius: 10,     // only dodge nodes this close (ones it would actually clip)
-    avoidStrength: 3.5,  // per-node dodge magnitude; soft, falls to 0 at avoidRadius
-    maxAvoid: 4,         // HARD cap on the dodge offset (units): a gentle nudge, never a shove
-    avoidSmooth: 0.07,   // how fast the dodge offset eases in/out (slower = softer)
-    idleMs: 10000,       // idle time before AUTO resumes
+    // ---- camera: auto (autopilot spline) ----
+    autoSpeed: 24,       // travel speed along the flight spline, world units/sec.
+    autoLook: 0.5,       // how hard the camera turns toward the flight tangent (slerp
+                         //   fraction). ↑ = snappier aim; ↓ = lazier, driftier aim.
+    lookSmooth: 0.08,    // low-pass on the look TARGET itself (A.look eased toward the tangent).
+                         //   ↓ = smoother, wider turns; ↑ = hugs the curve more tightly.
+    maxTurn: 1.0,        // hard cap on turn rate, rad/sec, so sharp curvature or a node-dodge
+                         //   can't yank the view around. ↓ = calmer camera.
+    avoidRadius: 10,     // autopilot only dodges nodes within this distance (ones it would
+                         //   actually clip). ↑ = gives every node a wider berth.
+    avoidStrength: 3.0,  // per-node dodge magnitude; soft, falling to 0 at avoidRadius.
+    maxAvoid: 4,         // hard cap on the total dodge offset (world units): a nudge through
+                         //   the gaps, never a shove out of the graph.
+    avoidSmooth: 0.07,   // how fast the dodge offset eases in/out (lower = softer).
+    idleMs: 10000,       // ms of no input before autopilot (when ON) resumes flying itself.
 
-    // appearance / focus highlight
-    nodeDim: 0.55,       // resting node brightness (darkened so the focus highlight pops)
-    lineRadius: 0.32,    // world radius of a highlighted edge's cylinder (the fat line)
-    labelMax: 40,        // most node names shown at once
-    labelDist: 1.4       // show a name for nodes within (this * coreRadius) of the camera
+    // ---- appearance: focus highlight & labels ----
+    nodeDim: 0.55,       // resting node brightness (colour * nodeDim), dimmed so the white
+                         //   focus highlight pops. ↑ = brighter resting nodes (less contrast).
+    lineRadius: 0.32,    // world radius of a highlighted edge's cylinder (the fat line). ↑ =
+                         //   chunkier highlight lines.
+    labelMax: 130,       // most node-name labels drawn at once (nearest-to-camera win). ↑ = more
+                         //   names on screen but more clutter and DOM cost.
+    labelDist: 4.5       // show a node's name when it's within labelDist*coreRadius of the
+                         //   camera. ↑ = names appear from further away.
   };
 
   // ---- DOM ----------------------------------------------------------------
@@ -110,6 +167,7 @@
   // Layout arrays (structure-of-arrays for speed / low GC).
   var px, py, pz, vx, vy, vz;
   var alpha = 1, graphRadius = 60, coreRadius = 40, viewRadius = 60;
+  var spreadDist = 0;    // X-key push distance, captured once per graph (0 = not yet)
 
   // Render objects.
   var nodeMesh = null, edgeLines = null, edgePos = null;
@@ -335,6 +393,7 @@
     }
     for (e = 0; e < L; e++) { adjOut[links[e].s].push(e); adjIn[links[e].t].push(e); }
     focusIdx = -1; hlNodes.length = 0; hlEdges.length = 0;
+    spreadDist = 0;                                     // re-capture the X push for this new graph
 
     // layout arrays + initial scatter over a LARGE sphere shell
     px = new Float32Array(N); py = new Float32Array(N); pz = new Float32Array(N);
@@ -428,19 +487,29 @@
   // Spread (X): unlike re-heat's random scatter, this keeps every node's
   // DIRECTION from the centre and only pushes it outward, so the angular
   // structure (which clusters sit where) is preserved while the graph inflates
-  // and re-sorts. Push distance = furthest node's distance from centre * mult.
+  // and re-sorts.
+  //
+  // The push distance is captured ONCE, on the first X for this graph: the
+  // furthest node's distance from the centre * spreadMult. Every later X reuses
+  // that same stored distance, so each press adds a FIXED amount to every node's
+  // distance from the centre - the graph inflates by equal steps, instead of by
+  // an ever-growing multiple of an already-spread graph (which would run away).
+  // spreadDist resets to 0 on load (buildGraph), so a new graph re-captures.
   function spreadNodes() {
     if (N === 0) return;
     var cx = 0, cy = 0, cz = 0, i;
     for (i = 0; i < N; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
     cx /= N; cy /= N; cz /= N;
-    var maxD = 0;
-    for (i = 0; i < N; i++) {
-      var ex = px[i] - cx, ey = py[i] - cy, ez = pz[i] - cz;
-      var d = Math.sqrt(ex * ex + ey * ey + ez * ez);
-      if (d > maxD) maxD = d;
+    if (spreadDist === 0) {                             // first X: measure & remember the push
+      var maxD = 0;
+      for (i = 0; i < N; i++) {
+        var ex = px[i] - cx, ey = py[i] - cy, ez = pz[i] - cz;
+        var d = Math.sqrt(ex * ex + ey * ey + ez * ez);
+        if (d > maxD) maxD = d;
+      }
+      spreadDist = maxD * CFG.spreadMult;
     }
-    var push = maxD * CFG.spreadMult;
+    var push = spreadDist;                              // same additive push on every press
     for (i = 0; i < N; i++) {
       var dx = px[i] - cx, dy = py[i] - cy, dz = pz[i] - cz;
       var dd = Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -492,12 +561,19 @@
       }
     }
 
-    // spring attraction along edges
+    // Spring attraction along edges. A plain Hooke spring, f = spring*(dl-restLen),
+    // already pulls harder the more an edge is stretched - but only LINEARLY. The
+    // springStretch knob adds a super-linear boost while stretched, multiplying the
+    // force by (1 + springStretch*stretch/restLen), so far-apart connected nodes are
+    // yanked back together disproportionately hard (collapsing long bridges, balling
+    // clusters up). A compressed edge (dl < restLen) keeps the plain linear push-out.
     for (var e = 0; e < L; e++) {
       var s = links[e].s, t = links[e].t;
       var ex = px[t] - px[s], ey = py[t] - py[s], ez = pz[t] - pz[s];
       var dl = Math.sqrt(ex * ex + ey * ey + ez * ez) || 0.0001;
-      var f = CFG.spring * (dl - CFG.restLen);
+      var stretch = dl - CFG.restLen;
+      var f = CFG.spring * stretch;
+      if (stretch > 0) f *= 1 + CFG.springStretch * stretch / CFG.restLen;
       var gx = ex / dl * f, gy = ey / dl * f, gz = ez / dl * f;
       ax[s] += gx; ay[s] += gy; az[s] += gz;
       ax[t] -= gx; ay[t] -= gy; az[t] -= gz;
@@ -783,7 +859,7 @@
   if (elTgMouse) elTgMouse.addEventListener('click', function () {
     lookMode = (lookMode === 'capture') ? 'cursor' : 'capture';
     elTgMouse.classList.toggle('on', lookMode === 'cursor');
-    elTgMouse.textContent = 'Mouse: ' + (lookMode === 'capture' ? 'Look' : 'Inspect');
+    elTgMouse.textContent = 'Mouse: ' + (lookMode === 'capture' ? 'Fly' : 'Inspect');
     if (lookMode === 'cursor' && document.pointerLockElement) document.exitPointerLock();
     updateCrosshair();
   });
@@ -1071,6 +1147,23 @@
     },
     dbg: function () {
       return { lookMode: lookMode, autopilot: autopilot, mode: mode, cursor: [cursorX | 0, cursorY | 0], focusIdx: focusIdx, focusId: focusIdx >= 0 ? nodes[focusIdx].id : null };
+    },
+    // Debug: live spatial extent, recomputed from the CURRENT node positions
+    // (unlike state().graphRadius, which is the value cached each frame by
+    // updateGraphRadius). Max/mean distance from the centroid - handy for
+    // checking that X-spread pushes every node out by the same fixed step.
+    extent: function () {
+      var cx = 0, cy = 0, cz = 0, i;
+      for (i = 0; i < N; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+      cx /= N; cy /= N; cz /= N;
+      var mx = 0, sum = 0;
+      for (i = 0; i < N; i++) {
+        var dx = px[i] - cx, dy = py[i] - cy, dz = pz[i] - cz;
+        var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > mx) mx = d;
+        sum += d;
+      }
+      return { max: +mx.toFixed(2), mean: +(sum / N).toFixed(2), spreadDist: +spreadDist.toFixed(2) };
     },
     // Debug: pull the camera back to frame the whole graph (to inspect layout).
     overview: function () {
