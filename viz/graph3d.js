@@ -53,6 +53,13 @@
                          //   is the ONLY force on UNconnected nodes, so it sets how far loose
                          //   pieces drift. ↑ = the whole graph hugs the centre (groups
                          //   overlap); ↓ = groups fly apart and separate (loners wander off).
+    extPush: 1.0,        // OUTWARD push on EXTERNAL nodes (amber calls-to-the-outside) - the
+                         //   inverse of gravity: accel += pos*extPush, so they drift to the RIM
+                         //   instead of being reeled into the core by their callers' springs,
+                         //   which fits (they ARE the outward calls). Proportional to distance,
+                         //   so it self-scales to the graph. (Gravity is far too weak next to the
+                         //   springs to place them - this is its own force.) ↑ = pushed further
+                         //   out (the caller springs stretch to hold them); 0 = off.
     damping: 0.86,       // fraction of velocity kept per tick: vel = (vel+accel)*damping -
                          //   i.e. friction. ↓ (≈0.7) = sluggish, settles fast but stiff; ↑
                          //   toward 1 = springy, keeps jiggling and can oscillate.
@@ -198,6 +205,7 @@
   var nodeColors = []; // vivid THREE.Color per node (used when highlighted)
   var baseCol = [];    // darkened resting color per node
   var nodeRadius = []; // per node
+  var isExt = null;    // per-node 1/0 external flag (for the external-gravity multiplier)
   var scaleMul = null; // per-node scale multiplier (focus/neighbours bump it)
   var edgeCol = null, edgeColBase = null; // live + resting edge vertex colors
   var adjOut = [], adjIn = [];            // per-node outgoing / incoming link indices
@@ -427,11 +435,13 @@
     // per-node vivid color (for highlights) + darkened resting color + radius/scale
     nodeColors = []; baseCol = []; nodeRadius = [];
     scaleMul = new Float32Array(N); scaleMul.fill(1);
+    isExt = new Uint8Array(N);
     adjOut = new Array(N); adjIn = new Array(N);
     for (i = 0; i < N; i++) {
       nodeColors[i] = clusterColor(nodes[i].cluster);
       baseCol[i] = nodeColors[i].clone().multiplyScalar(CFG.nodeDim);
       nodeRadius[i] = CFG.nodeBase * (0.7 + 1.7 * Math.sqrt(nodes[i].deg / maxDeg));
+      isExt[i] = nodes[i].external ? 1 : 0;
       adjOut[i] = []; adjIn[i] = [];
     }
     for (e = 0; e < L; e++) { adjOut[links[e].s].push(e); adjIn[links[e].t].push(e); }
@@ -654,6 +664,19 @@
       var gx = ex / dl * f, gy = ey / dl * f, gz = ez / dl * f;
       ax[s] += gx; ay[s] += gy; az[s] += gz;
       ax[t] -= gx; ay[t] -= gy; az[t] -= gz;
+    }
+
+    // External nodes get an OUTWARD push - the exact inverse of gravity's pull, so
+    // calls-to-the-outside drift to the rim instead of being reeled into the core by
+    // their callers' springs. Proportional to distance (like gravity), so it self-
+    // scales to the graph; the super-linear springStretch always wins far out, so it
+    // settles rather than runs away. (A gravity multiplier was far too weak; this is a
+    // force in its own right.)
+    if (CFG.extPush) {
+      var ep = CFG.extPush;
+      for (i = 0; i < N; i++) {
+        if (isExt[i]) { ax[i] += px[i] * ep; ay[i] += py[i] * ep; az[i] += pz[i] * ep; }
+      }
     }
 
     // gravity toward origin + integrate
@@ -1315,14 +1338,19 @@
       var cx = 0, cy = 0, cz = 0, i;
       for (i = 0; i < N; i++) { cx += px[i]; cy += py[i]; cz += pz[i]; }
       cx /= N; cy /= N; cz /= N;
-      var mx = 0, sum = 0;
+      var mx = 0, sum = 0, es = 0, en = 0, is = 0, iN = 0;
       for (i = 0; i < N; i++) {
         var dx = px[i] - cx, dy = py[i] - cy, dz = pz[i] - cz;
         var d = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (d > mx) mx = d;
         sum += d;
+        if (isExt[i]) { es += d; en++; } else { is += d; iN++; }   // external vs internal radius
       }
-      return { max: +mx.toFixed(2), mean: +(sum / N).toFixed(2), spreadDist: +spreadDist.toFixed(2) };
+      return {
+        max: +mx.toFixed(2), mean: +(sum / N).toFixed(2),
+        extMean: +(en ? es / en : 0).toFixed(2), intMean: +(iN ? is / iN : 0).toFixed(2),
+        spreadDist: +spreadDist.toFixed(2)
+      };
     },
     // Debug: force the focus highlight onto node i (bypassing hover), optionally
     // setting the hop depth, and report how many edges/nodes lit up - bucketed by

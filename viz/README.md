@@ -118,9 +118,11 @@ delete by accident while flying.
   grows *super-linearly* the more an edge is stretched (`CFG.springStretch`), so
   far-apart connected nodes snap back hard; everything is drawn toward the centre
   (`CFG.gravity`) and repels its neighbours — nudge spring / springStretch up and
-  gravity down for tighter, better-separated groups. Every knob in the `CFG`
-  block at the top of `graph3d.js` is documented inline: what it does, the effect
-  of raising or lowering it, and the formula that reads it.
+  gravity down for tighter, better-separated groups. **External** callees get an
+  extra outward push (`CFG.extPush`, the inverse of gravity) so the calls-to-the-
+  outside settle on the rim rather than being reeled into the core. Every knob in
+  the `CFG` block at the top of `graph3d.js` is documented inline: what it does,
+  the effect of raising or lowering it, and the formula that reads it.
 - Targeting is **GPU picking**: the nodes are re-rendered, each in a colour that
   encodes its index, into a 1×1 buffer at the cursor (`camera.setViewOffset`);
   reading that one pixel back gives exactly the node whose real geometry is drawn
