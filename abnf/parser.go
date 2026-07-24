@@ -50,6 +50,21 @@ type parser struct {
 
 	rangeCache      [256]*r.Rule // Reusable single-char Token rules, see the comment in case r.CharOf of apply().
 	referencesCache *references  // Resolves production names and assigns the tag code UIDs.
+
+	wsCache map[*r.Rule]*wsMemo // The memoized whitespace skips, per whitespace rule. See skipSpaces().
+}
+
+// wsMemo is what skipSpaces() remembers about one whitespace rule.
+type wsMemo struct {
+	memoize bool    // False for a rule that has to be applied for real every time.
+	ends    []int32 // The end position of the skip per start position, -1 = not computed yet.
+}
+
+// setSrc replaces the target text. Only a :script() rule can do that (c.setSrc()), and
+// every cache that is keyed by a position in the old text has to go with it.
+func (pa *parser) setSrc(src string) {
+	pa.Src = src
+	pa.wsCache = map[*r.Rule]*wsMemo{}
 }
 
 // includedByGrammar tracks, per a-grammar, which :include() files were already
@@ -161,6 +176,80 @@ func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces b
 		skip = "  spaces:➰  " // Skip spaces.
 	}
 	fmt.Print(times(" ", depth), "<", depth, "  (", pa.traceCount, ")  ", LinePosFromStrPos(string(pa.Src), pa.Sdx), "  char:", c, skip, rule.ToString(), " found:", found != nil, "\n")
+}
+
+// skipSpaces advances pa.Sdx over the whitespace that ws describes, in front of every
+// terminal that reads from the target text (see apply(), cases r.Token / r.CharOf /
+// r.CharsOf / r.Range).
+//
+// The skip is a pure function of (ws, position): it creates no productions (skippingSpaces
+// is true), reads nothing but the target text and leaves no state behind, so its end
+// position is memoized per whitespace rule and start position. That matters because the
+// probes dominate the parse - for a C style ' { @+" \t\r\n" | Comment } ' about 15 rule
+// applications and 15 allocations for the usual O(1) answer "the next char is not a
+// space", at every terminal attempt of every backtracking path (73 % of all apply() calls).
+//
+// Two cases opt out: a whitespace rule containing a :script(), whose result can depend on
+// parser state that is not part of the key, and tracing, whose output would otherwise lose
+// the skipped probes.
+func (pa *parser) skipSpaces(ws *r.Rule, depth int) {
+	memo := pa.wsCache[ws]
+	if memo == nil {
+		// Whether the rule may be memoized only depends on the a-grammar, which does not
+		// change any more once the parsing has started (an :include() runs before it), so
+		// this is decided once per whitespace rule.
+		memo = &wsMemo{memoize: !pa.opts.TraceEnabled && !pa.hasScript(ws, map[*r.Rule]bool{})}
+		pa.wsCache[ws] = memo
+	}
+	if !memo.memoize {
+		pa.apply(ws, ws, true, depth+1) // Skip spaces.
+		return
+	}
+	if len(memo.ends) != len(pa.Src)+1 { // A changed length also means a new text, see setSrc().
+		memo.ends = make([]int32, len(pa.Src)+1)
+		for i := range memo.ends {
+			memo.ends[i] = -1
+		}
+	}
+	start := pa.Sdx
+	if end := memo.ends[start]; end >= 0 {
+		pa.Sdx = int(end)
+		return
+	}
+	pa.apply(ws, ws, true, depth+1) // Skip spaces.
+	memo.ends[start] = int32(pa.Sdx)
+}
+
+// hasScript searches a rule tree for a :script() command and follows the Identifier links
+// into the a-grammar while doing so. seen ends the recursion on the (very common)
+// recursive productions.
+func (pa *parser) hasScript(rule *r.Rule, seen map[*r.Rule]bool) bool {
+	if rule == nil || seen[rule] {
+		return false
+	}
+	seen[rule] = true
+	if rule.Operator == r.Command && rule.String == "script" {
+		return true
+	}
+	if rule.Operator == r.Identifier {
+		if rule.Int < 0 || rule.Int >= len(*pa.agrammar) {
+			return true // Unresolved: rather assume the worst than memoize a rule we cannot see.
+		}
+		if pa.hasScript((*pa.agrammar)[rule.Int], seen) {
+			return true
+		}
+	}
+	for _, childs := range [2]*r.Rules{rule.Childs, rule.CodeChilds} {
+		if childs == nil {
+			continue
+		}
+		for _, child := range *childs {
+			if pa.hasScript(child, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
@@ -428,7 +517,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	case r.Token:
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
-			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
 		}
 		size := len(rule.String)
 		if pa.Sdx+size > len(pa.Src) || rule.String != pa.Src[pa.Sdx:pa.Sdx+size] {
@@ -444,7 +533,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	case r.CharOf:
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
-			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
 		}
 		if pa.Sdx+1 > len(pa.Src) {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
@@ -502,7 +591,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	case r.CharsOf:
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
-			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
 		}
 		length := len(pa.Src)
 		startPos := pa.Sdx
@@ -554,7 +643,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 	case r.Range:
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
-			pa.apply(skipSpaceRule, skipSpaceRule, true, depth+1) // Skip spaces.
+			pa.skipSpaces(skipSpaceRule, depth) // Skip spaces (memoized).
 		}
 		if pa.Sdx >= len(pa.Src) {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
@@ -972,29 +1061,52 @@ func (re *references) correctReferencesAndIDs(rules *r.Rules) {
 // mergeTerminals combines neighbouring Token rules of the finished ASG into single Token
 // rules (recursively). The parser creates one Token per matched char range or string, which
 // would make the ASG unnecessarily large.
+//
+// One forward pass: a run of adjacent Tokens is located first, then built with a single
+// strings.Builder and written back over the input slice (out always trails i, so the
+// compaction can never overwrite an element that is still to be read). Merging char by
+// char instead - concatenating the strings and shifting the tail down per merged token -
+// cost O(k*n) shifts and O(k^2) copied bytes per run of k tokens, which made the parse
+// of a large grammar quadratic in its own size (93 % of the parse time, GC bound).
 func mergeTerminals(productions *r.Rules) {
 	if productions == nil {
 		return
 	}
-	lastWasTerminal := false
-	for i := 0; i < len(*productions); i++ {
-		if (*productions)[i].Operator == r.Token {
-			if lastWasTerminal {
-				(*productions)[i-1].String += (*productions)[i].String
-				*productions = append((*productions)[0:i], (*productions)[i+1:]...)
-				i--
-			} else {
-				(*productions)[i] = &r.Rule{Operator: r.Token, String: (*productions)[i].String, Pos: (*productions)[i].Pos} // Create a copy of the Token to be able to change it.
-				lastWasTerminal = true
-			}
-		} else {
-			lastWasTerminal = false
+	src := *productions
+	out := src[:0]
+	for i := 0; i < len(src); i++ {
+		if src[i].Operator != r.Token {
 			// Not all rules have childs. E.g. a Number (from :number()) is a leaf like a Token.
-			if (*productions)[i].Childs != nil && len(*(*productions)[i].Childs) > 0 {
-				mergeTerminals((*productions)[i].Childs)
+			if src[i].Childs != nil && len(*src[i].Childs) > 0 {
+				mergeTerminals(src[i].Childs)
 			}
+			out = append(out, src[i])
+			continue
 		}
+		// Find the end of this run of Tokens.
+		j := i + 1
+		for j < len(src) && src[j].Operator == r.Token {
+			j++
+		}
+		if j == i+1 { // A single Token: keep a copy of it, like the merged case below.
+			out = append(out, &r.Rule{Operator: r.Token, String: src[i].String, Pos: src[i].Pos})
+			continue
+		}
+		n := 0
+		for k := i; k < j; k++ {
+			n += len(src[k].String)
+		}
+		var b strings.Builder
+		b.Grow(n)
+		for k := i; k < j; k++ {
+			b.WriteString(src[k].String)
+		}
+		// A copy of the run, never one of the shared grammar rules: the Token rules of the
+		// ASG come from pa.rangeCache and must not be changed (see apply(), case r.CharOf).
+		out = append(out, &r.Rule{Operator: r.Token, String: b.String(), Pos: src[i].Pos})
+		i = j - 1
 	}
+	*productions = out
 }
 
 // ParseErrorWithCode and ParseErrorUnabridged shape the "not everything could be parsed"
@@ -1035,6 +1147,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	pa.blockList = make(map[applyKey]bool)
 	pa.foundList = make(map[applyKey]*r.Rules)
 	pa.foundSdxList = make(map[applyKey]int)
+	pa.wsCache = make(map[*r.Rule]*wsMemo)
 	pa.lastParsePosition = 0
 	pa.fileName = filepath.Clean(fileName)
 	pa.referencesCache = NewReferences()

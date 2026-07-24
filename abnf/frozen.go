@@ -580,7 +580,7 @@ func (ps *frozenParserScript) init() {
 	}
 	ps.cMap = map[string]r.Object{
 		"getSrc": func() string { return ps.pa.Src },
-		"setSrc": func(src string) { ps.pa.Src = src },
+		"setSrc": func(src string) { ps.pa.setSrc(src) },
 		"getSdx": func() int { return ps.pa.Sdx },
 		"setSdx": func(sdx int) { ps.pa.Sdx = sdx },
 		"peek": func(offset int) int {

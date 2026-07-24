@@ -1124,6 +1124,15 @@ type machine struct {
 	// (putchar etc.) are tried. The JS runtime (jsrt.go) plugs its js_* host
 	// functions in here.
 	externs map[string]func(args []uint64) uint64
+
+	// externBound is externs resolved per function OBJECT, filled by bindExterns()
+	// as soon as the extern table is known and completed lazily for functions that
+	// appear later. It exists because llir's f.Name() is not a field read: it runs
+	// a strconv.ParseInt over the name to decide whether it needs quoting, and that
+	// parse FAILS (allocating a *strconv.NumError plus a copy of the name) for every
+	// name that is not a number - i.e. for all of them. With ~1.5 M extern calls per
+	// frozen run that was 12 % of all allocated bytes.
+	externBound map[*ir.Func]func(args []uint64) uint64
 }
 
 // frame holds the SSA values of one function invocation.
@@ -1135,10 +1144,11 @@ type frame struct {
 // the globals and indexes the functions.
 func newMachine(m *ir.Module, input string) *machine {
 	ma := &machine{
-		mem:     make([]byte, 8), // Offset 0 stays unused, so 0 can act as null pointer.
-		globals: map[*ir.Global]uint64{},
-		funcs:   map[string]*ir.Func{},
-		input:   []byte(input),
+		mem:         make([]byte, 8), // Offset 0 stays unused, so 0 can act as null pointer.
+		globals:     map[*ir.Global]uint64{},
+		funcs:       map[string]*ir.Func{},
+		externBound: map[*ir.Func]func(args []uint64) uint64{},
+		input:       []byte(input),
 	}
 	for _, g := range m.Globals {
 		off := ma.alloc(ma.sizeOf(g.ContentType))
@@ -1150,6 +1160,7 @@ func newMachine(m *ir.Module, input string) *machine {
 	for _, f := range m.Funcs {
 		ma.funcs[f.Name()] = f
 	}
+	ma.bindExterns() // Only the built-ins here; jsrt.attach() binds again once its host table is set.
 	return ma
 }
 
@@ -1630,40 +1641,80 @@ func (ma *machine) icmp(pred enum.IPred, x, y uint64, bits uint64) bool {
 	}
 }
 
-// extern implements the external (libc like) functions that the compiler grammars use.
-// getchar() reads from the input given to run() and returns 0 at its end.
+// extern calls one of the external functions that the compiler grammars use: a host
+// function of the attached runtime (the js_* of jsrt.go) or one of the built-in libc like
+// ones. The handler is looked up by function OBJECT, not by name - see externBound.
 func (ma *machine) extern(f *ir.Func, args []uint64) uint64 {
+	fn, ok := ma.externBound[f]
+	if !ok {
+		// Not pre-bound: a function that entered the module after bindExterns() ran.
+		// Undefined ones stay unbound, they panic right below instead of being cached.
+		fn = ma.resolveExtern(f)
+		if fn == nil {
+			panic("IR interpreter: call to undefined external function " + f.Ident())
+		}
+		ma.externBound[f] = fn
+	}
+	return fn(args)
+}
+
+// bindExterns resolves the handler of every declared (block-less) function of the module
+// once, so that no call has to go through the function name any more. It is called after
+// the extern table of the machine is in place (see jsrt.attach()).
+func (ma *machine) bindExterns() {
+	for _, f := range ma.funcs {
+		if len(f.Blocks) > 0 {
+			continue
+		}
+		if fn := ma.resolveExtern(f); fn != nil {
+			ma.externBound[f] = fn
+		}
+	}
+}
+
+// resolveExtern finds the handler for one external function by name, or nil if the name is
+// not known at all. The host functions of the attached runtime win over the built-in ones.
+// getchar() reads from the input given to run() and returns 0 at its end.
+func (ma *machine) resolveExtern(f *ir.Func) func(args []uint64) uint64 {
+	name := f.Name()
 	if ma.externs != nil {
-		if fn, ok := ma.externs[f.Name()]; ok {
-			return fn(args)
+		if fn, ok := ma.externs[name]; ok {
+			return fn
 		}
 	}
-	switch f.Name() {
+	switch name {
 	case "putchar":
-		ma.out.WriteByte(byte(args[0]))
-		return args[0]
+		return func(args []uint64) uint64 {
+			ma.out.WriteByte(byte(args[0]))
+			return args[0]
+		}
 	case "getchar":
-		if ma.inPos < len(ma.input) {
-			c := ma.input[ma.inPos]
-			ma.inPos++
-			return uint64(c)
+		return func(args []uint64) uint64 {
+			if ma.inPos < len(ma.input) {
+				c := ma.input[ma.inPos]
+				ma.inPos++
+				return uint64(c)
+			}
+			return 0
 		}
-		return 0
 	case "puts":
-		addr := args[0]
-		for addr < uint64(len(ma.mem)) && ma.mem[addr] != 0 {
-			ma.out.WriteByte(ma.mem[addr])
-			addr++
+		return func(args []uint64) uint64 {
+			addr := args[0]
+			for addr < uint64(len(ma.mem)) && ma.mem[addr] != 0 {
+				ma.out.WriteByte(ma.mem[addr])
+				addr++
+			}
+			ma.out.WriteByte(0x0a)
+			return 0
 		}
-		ma.out.WriteByte(0x0a)
-		return 0
 	case "abs":
-		v := signedOf(args[0], 32)
-		if v < 0 {
-			v = -v
+		return func(args []uint64) uint64 {
+			v := signedOf(args[0], 32)
+			if v < 0 {
+				v = -v
+			}
+			return uint64(v)
 		}
-		return uint64(v)
-	default:
-		panic("IR interpreter: call to undefined external function " + f.Ident())
 	}
+	return nil
 }

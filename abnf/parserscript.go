@@ -74,7 +74,7 @@ func (ps *parserscript) initFuncMap() {
 	ps.common = NewCommonScript(ps.vm, &ps.compilerFuncMap, ps.preventDefaultOutput)
 
 	ps.compilerFuncMap["getSrc"] = func() string { return ps.pa.Src }
-	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.Src = src }
+	ps.compilerFuncMap["setSrc"] = func(src string) { ps.pa.setSrc(src) }
 	ps.compilerFuncMap["getSdx"] = func() int { return ps.pa.Sdx }
 	ps.compilerFuncMap["setSdx"] = func(sdx int) { ps.pa.Sdx = sdx }
 	// peek returns the byte at the current parse position plus offset, or -1 outside of the

@@ -205,6 +205,7 @@ func newJSRT(bindings map[string]interface{}) *jsrt {
 func (rt *jsrt) attach(m *ir.Module) *machine {
 	ma := newMachine(m, "")
 	ma.externs = rt.externs(ma)
+	ma.bindExterns() // Resolve every declared function to its handler now, not per call.
 	return ma
 }
 
