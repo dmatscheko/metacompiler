@@ -31,8 +31,8 @@ import (
 
 // scriptCacheFormat invalidates the whole cache when the Go side changes what
 // compileScript emits for the same source (e.g. a compile-walk change in
-// compiler.go). Bump it in that case.
-const scriptCacheFormat = "1"
+// compiler.go) or when the entry format itself changes. Bump it in that case.
+const scriptCacheFormat = "2"
 
 var scriptCacheDir string  // "" = disabled; set by scriptCacheInit.
 var scriptCacheKey string  // Hash over format+snapshot, mixed into every entry name.
@@ -73,6 +73,8 @@ func scriptCachePath(code string) string {
 }
 
 // loadCachedScript returns the cached module of a script source, or nil.
+// Entries are written in the binary form of scriptcodec.go; the .ll fallback is
+// read too, for the modules the codec cannot represent.
 func loadCachedScript(code string) *ir.Module {
 	path := scriptCachePath(code)
 	if path == "" {
@@ -82,11 +84,25 @@ func loadCachedScript(code string) *ir.Module {
 	if err != nil {
 		return nil
 	}
-	mod, err := asm.ParseString(path, string(dat))
-	if err != nil {
-		return nil // Corrupt entry: compileScript recompiles and overwrites it.
+	var mod *ir.Module
+	if len(dat) >= len(scriptBinMagic) && string(dat[:len(scriptBinMagic)]) == string(scriptBinMagic) {
+		if mod, err = decodeModule(dat); err != nil {
+			return nil // Corrupt entry: compileScript recompiles and overwrites it.
+		}
+	} else if mod, err = asm.ParseString(path, string(dat)); err != nil {
+		return nil
 	}
-	return mod
+	// Every compiled script is executed through its jsrun entry (runScriptModule),
+	// so a module without one did not come out of compileScript. That is the
+	// check that makes a damaged entry harmless: the llir assembly parser accepts
+	// enough garbage to hand back an EMPTY module, and the run would then fail
+	// with "function not found in module: jsrun" instead of just recompiling.
+	for _, f := range mod.Funcs {
+		if f.GlobalName == "jsrun" {
+			return mod
+		}
+	}
+	return nil
 }
 
 // storeCachedScript writes the compiled module of a script source, atomically.
@@ -98,12 +114,18 @@ func storeCachedScript(code string, mod *ir.Module) {
 	if path == "" {
 		return
 	}
-	text := mod.String()
+	// The binary form loads an order of magnitude faster than LLVM assembly
+	// (see scriptcodec.go). A module the codec does not cover falls back to the
+	// text, which loadCachedScript still reads.
+	data, err := encodeModule(mod)
+	if err != nil {
+		data = []byte(mod.String())
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".mec-script-*")
 	if err != nil {
 		return
 	}
-	_, werr := tmp.WriteString(text)
+	_, werr := tmp.Write(data)
 	cerr := tmp.Close()
 	if werr != nil || cerr != nil {
 		os.Remove(tmp.Name())
