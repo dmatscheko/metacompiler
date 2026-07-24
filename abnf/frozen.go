@@ -6,6 +6,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"time"
 
 	"14.gy/mec/abnf/r"
@@ -212,6 +214,90 @@ func newWalkRuntime() (*jsrt, *walkEngine) {
 	rt := newJSRT(bindings)
 	we.rt = rt
 	return rt, we
+}
+
+// prefetchCachedScripts loads the disk-cached modules of an a-grammar's
+// annotation scripts in parallel, before the walk starts asking for them one at
+// a time.
+//
+// It is the same work compileScript would do, just not serialized: reading a
+// cached module means running the llir assembly parser over its .ll text, which
+// costs about 0.5 ms per module and is dominated by allocation - one Kotlin run
+// loads 104 of them and spent 57 ms of its 266 ms in there, single threaded,
+// while a goja run compiles the same scripts with goja itself. The modules are
+// independent, so on a multi core machine this is nearly free. Everything here
+// is best effort: a script with no (or a corrupt) cache entry is simply left for
+// compileScript.
+func (k *fkernel) prefetchCachedScripts(agrammar *r.Rules) {
+	scriptCacheInit() // Once, HERE: the workers below must not race on it.
+	if agrammar == nil || scriptCacheDir == "" {
+		return
+	}
+
+	var codes []string
+	seen := map[string]bool{}
+	var collect func(rules *r.Rules)
+	collect = func(rules *r.Rules) {
+		if rules == nil {
+			return
+		}
+		for _, rule := range *rules {
+			if rule.Operator == r.Tag || (rule.Operator == r.Command && rule.String == "script") {
+				if rule.CodeChilds != nil {
+					for _, c := range *rule.CodeChilds {
+						if c.Operator != r.Token || seen[c.String] {
+							continue
+						}
+						seen[c.String] = true
+						if _, done := k.compiled[c.String]; !done {
+							codes = append(codes, c.String)
+						}
+					}
+				}
+			}
+			collect(rule.Childs)
+			if rule.Operator == r.Tag {
+				collect(rule.CodeChilds) // Tags can nest rules inside CodeChilds in theory.
+			}
+		}
+	}
+	collect(agrammar)
+
+	if len(codes) < 2 {
+		return
+	}
+
+	workers := runtime.NumCPU()
+	if workers > len(codes) {
+		workers = len(codes)
+	}
+	type loaded struct {
+		code string
+		mod  *ir.Module
+	}
+	jobs := make(chan string)
+	results := make(chan loaded, len(codes))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for code := range jobs {
+				if mod := loadCachedScript(code); mod != nil {
+					results <- loaded{code, mod}
+				}
+			}
+		}()
+	}
+	for _, code := range codes {
+		jobs <- code
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+	for res := range results {
+		k.compiled[res.code] = res.mod
+	}
 }
 
 // compileScript turns one annotation script into an IR module (cached by
@@ -426,6 +512,10 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		runScriptModule(rt, eng.machineFor(mod), eng.sharedScope)
 		return true
 	})
+
+	// The walk is about to run this grammar's tag scripts one after another;
+	// whatever of them is already on disk is loaded here, in parallel.
+	frozenKernel().prefetchCachedScripts(aGrammar)
 
 	eng.rt = newJSRT(bindings)
 	eng.sharedScope = eng.rt.newScopeHandle(nil)
