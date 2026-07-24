@@ -1133,11 +1133,98 @@ type machine struct {
 	// name that is not a number - i.e. for all of them. With ~1.5 M extern calls per
 	// frozen run that was 12 % of all allocated bytes.
 	externBound map[*ir.Func]func(args []uint64) uint64
+
+	layouts   map[*ir.Func]*funcLayout // Frame layout per function, built on first call.
+	framePool []*frame                 // Frames of finished calls, ready to be used again.
 }
 
-// frame holds the SSA values of one function invocation.
+// funcLayout is the frame layout of one function: every value the function can
+// define - its parameters and the results of its instructions - gets a dense
+// slot, so one invocation is a flat register array instead of a map keyed by the
+// instruction. That map was the most expensive thing in the interpreter: one
+// hash assignment per executed instruction and one hash lookup per operand, plus
+// a fresh map per call (41 MB per compile of languages/kotlin-to-llvm-ir.abnf
+// under -frozen, and with it ~18 % of the run in Go's map code).
+//
+// The numbering is parameters first, then the instructions of the blocks in
+// order. That order lets the block loop derive the slot an instruction writes
+// from its POSITION (blockBase + index), so the writer side needs no lookup at
+// all; only operand reads still consult slots, and that map is built once per
+// function and never written again.
+type funcLayout struct {
+	slots     map[value.Value]int // An operand's register, for valueOf.
+	blockBase map[*ir.Block]int   // Register of a block's first instruction.
+	size      int                 // Registers per frame.
+	maxArgs   int                 // Widest call instruction, for the frame's argument buffer.
+}
+
+// layoutOf returns the frame layout of a function, building it on first use.
+func (ma *machine) layoutOf(f *ir.Func) *funcLayout {
+	if l, ok := ma.layouts[f]; ok {
+		return l
+	}
+	l := &funcLayout{
+		slots:     make(map[value.Value]int, len(f.Params)+16),
+		blockBase: make(map[*ir.Block]int, len(f.Blocks)),
+	}
+	for _, p := range f.Params {
+		l.slots[p] = l.size
+		l.size++
+	}
+	for _, b := range f.Blocks {
+		l.blockBase[b] = l.size
+		for _, inst := range b.Insts {
+			// Instructions without a result (a store) still take a slot: the
+			// positional arithmetic above depends on the slots of one block
+			// being consecutive.
+			if v, ok := inst.(value.Value); ok {
+				l.slots[v] = l.size
+			}
+			if call, ok := inst.(*ir.InstCall); ok && len(call.Args) > l.maxArgs {
+				l.maxArgs = len(call.Args)
+			}
+			l.size++
+		}
+	}
+	ma.layouts[f] = l
+	return l
+}
+
+// frame holds the SSA values of one function invocation, one register per slot
+// of the function's layout. Frames are pooled per machine: acquire clears the
+// registers, so a value that the function never assigned reads as 0 instead of
+// leaking the previous call's register.
 type frame struct {
-	vals map[value.Value]uint64
+	regs   []uint64 // The registers, indexed by layout slot.
+	args   []uint64 // Argument buffer shared by all call instructions of this frame.
+	layout *funcLayout
+}
+
+func (ma *machine) acquireFrame(l *funcLayout) *frame {
+	if n := len(ma.framePool); n > 0 {
+		fr := ma.framePool[n-1]
+		ma.framePool = ma.framePool[:n-1]
+		if cap(fr.regs) >= l.size {
+			fr.regs = fr.regs[:l.size]
+			for i := range fr.regs {
+				fr.regs[i] = 0
+			}
+		} else {
+			fr.regs = make([]uint64, l.size)
+		}
+		if cap(fr.args) >= l.maxArgs {
+			fr.args = fr.args[:l.maxArgs]
+		} else {
+			fr.args = make([]uint64, l.maxArgs)
+		}
+		fr.layout = l
+		return fr
+	}
+	return &frame{regs: make([]uint64, l.size), args: make([]uint64, l.maxArgs), layout: l}
+}
+
+func (ma *machine) releaseFrame(fr *frame) {
+	ma.framePool = append(ma.framePool, fr)
 }
 
 // newMachine loads a module into a fresh machine: it allocates and initializes
@@ -1148,6 +1235,7 @@ func newMachine(m *ir.Module, input string) *machine {
 		globals:     map[*ir.Global]uint64{},
 		funcs:       map[string]*ir.Func{},
 		externBound: map[*ir.Func]func(args []uint64) uint64{},
+		layouts:     map[*ir.Func]*funcLayout{},
 		input:       []byte(input),
 	}
 	for _, g := range m.Globals {
@@ -1372,8 +1460,8 @@ func (ma *machine) valueOf(fr *frame, v value.Value) uint64 {
 	case constant.Constant:
 		return ma.constValue(v)
 	default:
-		if val, ok := fr.vals[v]; ok {
-			return val
+		if slot, ok := fr.layout.slots[v]; ok {
+			return fr.regs[slot]
 		}
 		panic("IR interpreter: use of an undefined value: " + v.Ident())
 	}
@@ -1388,25 +1476,30 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 	if len(args) != len(f.Params) {
 		panic(fmt.Sprintf("IR interpreter: call of %s with %d arguments, but it has %d parameters", f.Ident(), len(args), len(f.Params)))
 	}
-	fr := &frame{vals: map[value.Value]uint64{}}
-	for i, p := range f.Params {
-		fr.vals[p] = args[i]
+	fr := ma.acquireFrame(ma.layoutOf(f))
+	for i := range f.Params {
+		fr.regs[i] = args[i] // The parameters are the first slots of the layout.
 	}
 
 	// The step budget is per top-level call, not per machine lifetime:
 	// machines are cached per (engine, module) for a whole compile run, so a
 	// cumulative count tripped the emergency brake on big legitimate compiles
 	// (thousands of runs of one hot tag script's module). The defer keeps the
-	// depth right when a js_throw panic unwinds through this frame.
+	// depth right when a js_throw panic unwinds through this frame, and hands
+	// the frame back for the next call.
 	ma.depth++
 	if ma.depth == 1 {
 		ma.steps = 0
 	}
-	defer func() { ma.depth-- }()
+	defer func() {
+		ma.depth--
+		ma.releaseFrame(fr)
+	}()
 
 	block := f.Blocks[0]
 	var prevBlock *ir.Block // The block we came from. Only needed by phi.
 	for {
+		base := fr.layout.blockBase[block] // The slot of this block's first instruction.
 		// The phis at the top of a block resolve SIMULTANEOUSLY: read every
 		// incoming value against the predecessor's frame first, then assign.
 		// Resolving them one after another let a phi that reads an earlier phi
@@ -1429,15 +1522,15 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 				phiVals[i] = ma.phiValue(fr, block.Insts[i].(*ir.InstPhi), prevBlock)
 			}
 			for i := 0; i < numPhis; i++ {
-				fr.vals[block.Insts[i].(*ir.InstPhi)] = phiVals[i]
+				fr.regs[base+i] = phiVals[i]
 			}
 		}
-		for _, inst := range block.Insts[numPhis:] {
+		for i, inst := range block.Insts[numPhis:] {
 			ma.steps++
 			if ma.steps > machineMaxSteps {
 				panic("IR interpreter: step limit exceeded (endless loop?)")
 			}
-			ma.exec(fr, inst, prevBlock)
+			ma.exec(fr, inst, prevBlock, base+numPhis+i)
 		}
 		switch term := block.Term.(type) {
 		case *ir.TermBr:
@@ -1471,17 +1564,19 @@ func (ma *machine) phiValue(fr *frame, phi *ir.InstPhi, prevBlock *ir.Block) uin
 	panic("IR interpreter: phi has no incoming value for the previous block")
 }
 
-// exec executes one instruction inside the given frame.
-func (ma *machine) exec(fr *frame, inst ir.Instruction, prevBlock *ir.Block) {
+// exec executes one instruction inside the given frame. slot is the register the
+// instruction's result goes into; the caller knows it from the instruction's
+// position, so there is no lookup here (see funcLayout).
+func (ma *machine) exec(fr *frame, inst ir.Instruction, prevBlock *ir.Block, slot int) {
 	switch inst := inst.(type) {
 	case *ir.InstAlloca:
 		n := uint64(1)
 		if inst.NElems != nil {
 			n = ma.valueOf(fr, inst.NElems)
 		}
-		fr.vals[inst] = ma.alloc(ma.sizeOf(inst.ElemType) * n)
+		fr.regs[slot] = ma.alloc(ma.sizeOf(inst.ElemType) * n)
 	case *ir.InstLoad:
-		fr.vals[inst] = ma.load(ma.valueOf(fr, inst.Src), ma.sizeOf(inst.ElemType))
+		fr.regs[slot] = ma.load(ma.valueOf(fr, inst.Src), ma.sizeOf(inst.ElemType))
 	case *ir.InstStore:
 		// Aggregate constants (e.g. zeroinitializer of an array or struct) are written as a whole.
 		if c, ok := inst.Src.(constant.Constant); ok {
@@ -1502,73 +1597,76 @@ func (ma *machine) exec(fr *frame, inst ir.Instruction, prevBlock *ir.Block) {
 			off += d
 			t = next
 		}
-		fr.vals[inst] = off
+		fr.regs[slot] = off
 	case *ir.InstAdd:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstSub:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstMul:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstUDiv:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstSDiv:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstURem:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstSRem:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstAnd:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstOr:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstXor:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstShl:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstLShr:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstAShr:
-		fr.vals[inst] = ma.binOp(fr, inst, inst.X, inst.Y)
+		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
 	case *ir.InstICmp:
 		if ma.icmp(inst.Pred, ma.valueOf(fr, inst.X), ma.valueOf(fr, inst.Y), widthOf(inst.X.Type())) {
-			fr.vals[inst] = 1
+			fr.regs[slot] = 1
 		} else {
-			fr.vals[inst] = 0
+			fr.regs[slot] = 0
 		}
 	case *ir.InstZExt:
-		fr.vals[inst] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.From.Type()))
+		fr.regs[slot] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.From.Type()))
 	case *ir.InstSExt:
-		fr.vals[inst] = maskTo(uint64(signedOf(ma.valueOf(fr, inst.From), widthOf(inst.From.Type()))), widthOf(inst.To))
+		fr.regs[slot] = maskTo(uint64(signedOf(ma.valueOf(fr, inst.From), widthOf(inst.From.Type()))), widthOf(inst.To))
 	case *ir.InstTrunc:
-		fr.vals[inst] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
+		fr.regs[slot] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
 	case *ir.InstIntToPtr:
 		// Addresses are plain offsets into the arena; the width already fits.
-		fr.vals[inst] = ma.valueOf(fr, inst.From)
+		fr.regs[slot] = ma.valueOf(fr, inst.From)
 	case *ir.InstPtrToInt:
-		fr.vals[inst] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
+		fr.regs[slot] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
 	case *ir.InstBitCast:
-		fr.vals[inst] = ma.valueOf(fr, inst.From)
+		fr.regs[slot] = ma.valueOf(fr, inst.From)
 	case *ir.InstSelect:
 		if maskTo(ma.valueOf(fr, inst.Cond), 1) != 0 {
-			fr.vals[inst] = ma.valueOf(fr, inst.ValueTrue)
+			fr.regs[slot] = ma.valueOf(fr, inst.ValueTrue)
 		} else {
-			fr.vals[inst] = ma.valueOf(fr, inst.ValueFalse)
+			fr.regs[slot] = ma.valueOf(fr, inst.ValueFalse)
 		}
 	case *ir.InstPhi:
 		// Leading phis are resolved simultaneously by the block loop in call();
 		// this fallback only runs for a phi behind a non-phi instruction
 		// (invalid LLVM, kept sequential for compatibility).
-		fr.vals[inst] = ma.phiValue(fr, inst, prevBlock)
+		fr.regs[slot] = ma.phiValue(fr, inst, prevBlock)
 	case *ir.InstCall:
 		callee, ok := inst.Callee.(*ir.Func)
 		if !ok {
 			panic(fmt.Sprintf("IR interpreter: unsupported callee type %T (function pointers are not supported)", inst.Callee))
 		}
-		args := make([]uint64, len(inst.Args))
+		// The frame's argument buffer is wide enough for every call of this
+		// function, and the callee copies the values into its own registers
+		// right away - so one buffer per frame does instead of a slice per call.
+		args := fr.args[:len(inst.Args)]
 		for i, a := range inst.Args {
 			args[i] = ma.valueOf(fr, a)
 		}
-		fr.vals[inst] = ma.call(callee, args)
+		fr.regs[slot] = ma.call(callee, args)
 	default:
 		panic(fmt.Sprintf("IR interpreter: unsupported instruction type %T", inst))
 	}
