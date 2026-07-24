@@ -114,14 +114,80 @@ type jsCtl struct {
 
 // jsScope is one link of a scope chain. Variables can hold undefined, so
 // existence is the map key, not the value.
+// jsScope is one link of the variable chain. The names of a scope live in
+// parallel slices, not in a map: a scope holds a handful of names (a call frame,
+// a block), and for those a linear scan over one contiguous slice beats hashing
+// every read - a map also had to be ALLOCATED per scope and per declaration,
+// which was 23 % of everything the frozen engine allocated. Scopes that do grow
+// (the root scope, a script's top level) build an index once they pass
+// jsScopeLinear entries, so a big scope stays O(1).
 type jsScope struct {
-	vars   map[string]interface{}
+	names  []string
+	vals   []interface{}
+	tcs    []string // Pinned type class per name, "" = unpinned. See typedDecl.
+	index  map[string]int
 	parent *jsScope
+}
 
-	// types backs the MetaJS type pinning (js_tdecl/js_tset): it pins the type
-	// class of a variable at its first non-undefined, non-null value. Languages
-	// that declare through js_scope_decl/js_scope_set stay unpinned.
-	types map[string]string
+// jsScopeLinear is where a scope switches from scanning to an index.
+const jsScopeLinear = 8
+
+func (s *jsScope) find(name string) int {
+	if s.index != nil {
+		if i, ok := s.index[name]; ok {
+			return i
+		}
+		return -1
+	}
+	for i, n := range s.names {
+		if n == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func (s *jsScope) get(name string) (interface{}, bool) {
+	if i := s.find(name); i >= 0 {
+		return s.vals[i], true
+	}
+	return nil, false
+}
+
+func (s *jsScope) has(name string) bool { return s.find(name) >= 0 }
+
+// put declares a name or overwrites it, like an assignment into the old map.
+func (s *jsScope) put(name string, v interface{}) {
+	if i := s.find(name); i >= 0 {
+		s.vals[i] = v
+		return
+	}
+	s.names = append(s.names, name)
+	s.vals = append(s.vals, v)
+	s.tcs = append(s.tcs, "")
+	if s.index != nil {
+		s.index[name] = len(s.names) - 1
+	} else if len(s.names) > jsScopeLinear {
+		s.index = make(map[string]int, 2*len(s.names))
+		for i, n := range s.names {
+			s.index[n] = i
+		}
+	}
+}
+
+// typeClassOf reports the pinned type class of a name ("" when unpinned).
+func (s *jsScope) typeClassOf(name string) string {
+	if i := s.find(name); i >= 0 {
+		return s.tcs[i]
+	}
+	return ""
+}
+
+// pinType pins (or with "" unpins) the type class of a name.
+func (s *jsScope) pinType(name, tc string) {
+	if i := s.find(name); i >= 0 {
+		s.tcs[i] = tc
+	}
 }
 
 // hostFunc is a builtin implemented directly on handles (no reflection).
@@ -191,11 +257,10 @@ func newJSRT(bindings map[string]interface{}) *jsrt {
 		retSlot:   jsUndef,
 		curPos:    -1,
 	}
-	rootVars := map[string]interface{}{}
+	rt.root = &jsScope{}
 	for k, v := range bindings {
-		rootVars[k] = v
+		rt.root.put(k, v)
 	}
-	rt.root = &jsScope{vars: rootVars}
 	return rt
 }
 
@@ -212,7 +277,7 @@ func (rt *jsrt) attach(m *ir.Module) *machine {
 // setRootVar binds or rebinds a host global. The frozen engine uses this to
 // point 'up' and the stack functions at the environment of the current tag.
 func (rt *jsrt) setRootVar(name string, v interface{}) {
-	rt.root.vars[name] = v
+	rt.root.put(name, v)
 }
 
 // newScopeHandle creates a scope (a child of the root scope by default) and
@@ -222,7 +287,7 @@ func (rt *jsrt) newScopeHandle(parent *jsScope) uint64 {
 	if parent == nil {
 		parent = rt.root
 	}
-	return rt.wrap(&jsScope{vars: map[string]interface{}{}, parent: parent})
+	return rt.wrap(&jsScope{parent: parent})
 }
 
 func (rt *jsrt) fail(format string, args ...interface{}) {
@@ -689,7 +754,7 @@ func (rt *jsrt) scopeOf(h uint64) *jsScope {
 
 func (rt *jsrt) scopeGet(sc *jsScope, name string) interface{} {
 	for s := sc; s != nil; s = s.parent {
-		if v, ok := s.vars[name]; ok {
+		if v, ok := s.get(name); ok {
 			if rt.traced {
 				rt.trVar("read", name, v)
 			}
@@ -702,8 +767,8 @@ func (rt *jsrt) scopeGet(sc *jsScope, name string) interface{} {
 
 func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
 	for s := sc; s != nil; s = s.parent {
-		if _, ok := s.vars[name]; ok {
-			s.vars[name] = v
+		if s.has(name) {
+			s.put(name, v)
 			if rt.traced {
 				rt.trVar("write", name, v)
 			}
@@ -721,15 +786,15 @@ func (rt *jsrt) scopeSet(sc *jsScope, name string, v interface{}) {
 // requires a prior declaration.
 func (rt *jsrt) scopeSetOrCreate(sc *jsScope, name string, v interface{}) {
 	for s := sc; s != nil; s = s.parent {
-		if _, ok := s.vars[name]; ok {
-			s.vars[name] = v
+		if s.has(name) {
+			s.put(name, v)
 			if rt.traced {
 				rt.trVar("write", name, v)
 			}
 			return
 		}
 	}
-	rt.root.vars[name] = v
+	rt.root.put(name, v)
 	if rt.traced {
 		rt.trVar("decl", name, v)
 	}
@@ -754,23 +819,16 @@ func (rt *jsrt) typeClass(v interface{}) string {
 // Declaring with the anytype marker starts the variable as undefined and
 // exempts it from pinning ("*") until a redeclaration says otherwise.
 func (rt *jsrt) typedDecl(sc *jsScope, name string, v interface{}) {
-	if sc.types == nil {
-		sc.types = map[string]string{}
-	}
 	if isAnytype(v) {
-		sc.vars[name] = jsUndef
-		sc.types[name] = "*"
+		sc.put(name, jsUndef)
+		sc.pinType(name, "*")
 		if rt.traced {
 			rt.trVar("decl", name, jsUndef)
 		}
 		return
 	}
-	sc.vars[name] = v
-	if tc := rt.typeClass(v); tc != "" {
-		sc.types[name] = tc
-	} else {
-		delete(sc.types, name) // A redeclaration starts untyped again.
-	}
+	sc.put(name, v)
+	sc.pinType(name, rt.typeClass(v)) // "" means a redeclaration starts untyped again.
 	if rt.traced {
 		rt.trVar("decl", name, v)
 	}
@@ -784,21 +842,18 @@ func (rt *jsrt) typedSet(sc *jsScope, name string, v interface{}) {
 		rt.fail("MetaJS: anytype can only initialize a declaration")
 	}
 	for s := sc; s != nil; s = s.parent {
-		if _, ok := s.vars[name]; ok {
+		if s.has(name) {
 			if tc := rt.typeClass(v); tc != "" {
-				old, pinned := s.types[name]
-				if pinned && old == "*" {
+				old := s.typeClassOf(name)
+				if old == "*" {
 					// anytype variable: no check, and nothing re-pins it.
-				} else if pinned && old != tc {
+				} else if old != "" && old != tc {
 					rt.fail("MetaJS: variable '%s' has type %s and cannot hold a %s", name, old, tc)
 				} else {
-					if s.types == nil {
-						s.types = map[string]string{}
-					}
-					s.types[name] = tc
+					s.pinType(name, tc)
 				}
 			}
-			s.vars[name] = v
+			s.put(name, v)
 			if rt.traced {
 				rt.trVar("write", name, v)
 			}
@@ -1904,11 +1959,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 	return map[string]func(args []uint64) uint64{
 		// Scopes.
 		"js_scope_new": func(a []uint64) uint64 {
-			return w(&jsScope{vars: map[string]interface{}{}, parent: rt.scopeOf(a[0])})
+			return w(&jsScope{parent: rt.scopeOf(a[0])})
 		},
 		"js_scope_decl": func(a []uint64) uint64 {
 			name := rt.toString(u(a[1]))
-			rt.scopeOf(a[0]).vars[name] = u(a[2])
+			rt.scopeOf(a[0]).put(name, u(a[2]))
 			if rt.traced {
 				rt.trVar("decl", name, u(a[2]))
 			}
@@ -1935,7 +1990,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))
 			for s := sc; s != nil; s = s.parent {
-				if v, ok := s.vars[name]; ok {
+				if v, ok := s.get(name); ok {
 					if rt.traced {
 						rt.trVar("read", name, v)
 					}
@@ -1943,7 +1998,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			for s := sc; s != nil; s = s.parent {
-				if t, ok := s.vars["this"]; ok {
+				if t, ok := s.get("this"); ok {
 					if obj, isObj := t.(*jsObject); isObj {
 						if v, ok := obj.props[name]; ok {
 							if rt.traced {
@@ -1963,8 +2018,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			name := rt.toString(u(a[1]))
 			v := u(a[2])
 			for s := sc; s != nil; s = s.parent {
-				if _, ok := s.vars[name]; ok {
-					s.vars[name] = v
+				if s.has(name) {
+					s.put(name, v)
 					if rt.traced {
 						rt.trVar("write", name, v)
 					}
@@ -1972,7 +2027,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			for s := sc; s != nil; s = s.parent {
-				if t, ok := s.vars["this"]; ok {
+				if t, ok := s.get("this"); ok {
 					if obj, isObj := t.(*jsObject); isObj {
 						if _, ok := obj.props[name]; ok {
 							obj.set(name, v)
@@ -2542,15 +2597,15 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))
 			for s := sc; s != nil; s = s.parent {
-				if _, ok := s.vars[name]; ok {
-					s.vars[name] = u(a[2])
+				if s.has(name) {
+					s.put(name, u(a[2]))
 					if rt.traced {
 						rt.trVar("write", name, u(a[2]))
 					}
 					return 0
 				}
 			}
-			sc.vars[name] = u(a[2])
+			sc.put(name, u(a[2]))
 			if rt.traced {
 				rt.trVar("decl", name, u(a[2]))
 			}
@@ -2572,8 +2627,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			for root.parent != nil {
 				root = root.parent
 			}
-			if _, ok := root.vars[name]; !ok {
-				root.vars[name] = jsUndef
+			if !root.has(name) {
+				root.put(name, jsUndef)
 			}
 			return 0
 		},
@@ -2581,7 +2636,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			sc := rt.scopeOf(a[0])
 			name := rt.toString(u(a[1]))
 			for s := sc.parent; s != nil && s.parent != nil; s = s.parent {
-				if _, ok := s.vars[name]; ok {
+				if s.has(name) {
 					return 0
 				}
 			}
