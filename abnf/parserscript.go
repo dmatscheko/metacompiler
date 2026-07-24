@@ -33,6 +33,7 @@ type parserscript struct {
 // functions), the parser applies that rule at the current position; the result of every other
 // return value is nil, which means there is nothing to apply.
 func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules, depth int) *r.Rule {
+	ps.init()
 	ps.compilerFuncMap["localAsg"] = localProductions // The local part of the abstract semantic graph.
 
 	// if ps.traceEnabled {
@@ -100,14 +101,23 @@ func (ps *parserscript) initFuncMap() {
 	})
 }
 
-// NewParserScript creates the JS VM for the dynamic :script() rules of one parse run.
+// NewParserScript creates the script subsystem for the dynamic :script() rules
+// of one parse run.
 func NewParserScript(pa *parser, preventDefaultOutput bool) *parserscript {
 	var ps parserscript
 	ps.pa = pa
 	ps.preventDefaultOutput = preventDefaultOutput
+	return &ps
+}
 
+// init builds the JS VM on first use: most grammars have no :script() rules at
+// all, and a parse of an imported file used to pay for a goja runtime plus its
+// whole host API that nothing ever called. The frozen parser engine has always
+// worked this way (frozen.go, frozenParserScript.init).
+func (ps *parserscript) init() {
+	if ps.vm != nil {
+		return
+	}
 	ps.vm = goja.New()
 	ps.initFuncMap()
-
-	return &ps
 }
