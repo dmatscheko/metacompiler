@@ -21,6 +21,7 @@ type compilerscript struct {
 
 	LtrStream map[string]r.Object // The global variables ('ltr' in JS; the local variables are in upStream).
 	Stack     []r.Object          // The global stack (via pushg()/popg(); the local stack is in upStream["stack"]).
+	curUp     map[string]r.Object // The upStream of the tag that is running right now: what 'up', push() and pop() work on.
 
 	traceEnabled bool
 	traceCount   int
@@ -132,44 +133,29 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name scriptName, upStream m
 	}
 
 	// A script can start a nested compile (c.compile inside a startScript or
-	// tag), whose tags rebind up/push/pop below. Restore the caller's bindings
-	// afterwards like the frozen engine does (walkEngine saves curUp), so the
-	// rest of the outer script does not keep operating on the LAST inner tag's
-	// upStream - that leaked, and goja and -frozen printed different up.in.
-	savedUp := cs.vm.Get("up")
-	savedPop := cs.vm.Get("pop")
-	savedPush := cs.vm.Get("push")
+	// tag), whose tags point up/push/pop at their own upStream. Restore the
+	// caller's afterwards like the frozen engine does (walkEngine saves curUp),
+	// so the rest of the outer script does not keep operating on the LAST inner
+	// tag's upStream - that leaked, and goja and -frozen printed different up.in.
+	// Restoring 'up' costs nothing: it puts a goja Value that already exists
+	// back into the global object.
+	savedUp, savedUpVal := cs.curUp, cs.vm.Get("up")
 	defer func() {
-		cs.vm.Set("up", savedUp)
-		cs.vm.Set("pop", savedPop)
-		cs.vm.Set("push", savedPush)
+		cs.curUp = savedUp
+		cs.vm.Set("up", savedUpVal)
 	}()
 
-	cs.vm.Set("up", upStream)                 // Basically the local variables. The map 'ltr' (left to right) holds the global variables.
+	cs.curUp = upStream
+	// 'up' is the local variable bag of THIS tag; the map 'ltr' (left to right)
+	// holds the global ones. It is rebound per tag on purpose: a script that
+	// captures the object (let u = up) must keep seeing the map of the tag it
+	// captured it in, which is what the frozen engine does with its root var.
+	// The wrapper goja builds for a Go map is cheap; the two host functions
+	// above are not, which is why only they moved out of this path.
+	cs.vm.Set("up", upStream)
 	cs.compilerFuncMap["localAsg"] = localASG // The local part of the abstract semantic graph.
 	// The node's source position is exposed as up.pos (set in compiler.go), which
 	// is what abnf-of-abnf stamps onto the rules it builds; there is no c.Pos.
-
-	cs.vm.Set("pop", func() interface{} {
-		stack, ok := upStream["stack"].([]interface{})
-		if !ok {
-			return nil
-		}
-		if len(stack) > 0 {
-			res := stack[len(stack)-1]
-			upStream["stack"] = stack[:len(stack)-1]
-			return res
-		}
-		return nil
-	})
-
-	cs.vm.Set("push", func(v interface{}) {
-		stack, ok := upStream["stack"].([]interface{})
-		if !ok {
-			stack = []interface{}{}
-		}
-		upStream["stack"] = append(stack, v)
-	})
 
 	if cs.traceEnabled {
 		cs.traceCount++
@@ -224,6 +210,32 @@ func (cs *compilerscript) initFuncMap() {
 	})
 
 	cs.vm.Set("ltr", cs.vm.NewDynamicObject(&ltrObject{vm: cs.vm, ltr: cs.LtrStream}))
+
+	// The local stack functions are installed ONCE and work on the upStream of
+	// the tag that is running (cs.curUp, set by HandleTagCode). Re-setting them
+	// per tag execution made goja build two fresh native function objects every
+	// time - the single largest allocation source of the compile phase. ('up'
+	// itself is still rebound per tag, see HandleTagCode.)
+	cs.vm.Set("pop", func() interface{} {
+		stack, ok := cs.curUp["stack"].([]interface{})
+		if !ok {
+			return nil
+		}
+		if len(stack) > 0 {
+			res := stack[len(stack)-1]
+			cs.curUp["stack"] = stack[:len(stack)-1]
+			return res
+		}
+		return nil
+	})
+
+	cs.vm.Set("push", func(v interface{}) {
+		stack, ok := cs.curUp["stack"].([]interface{})
+		if !ok {
+			stack = []interface{}{}
+		}
+		cs.curUp["stack"] = append(stack, v)
+	})
 
 	cs.compilerFuncMap["compile"] = func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
 		// The JS parameter can only turn tracing on, not off: c.compile(c.asg) leaves out the
