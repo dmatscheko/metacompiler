@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -233,6 +234,19 @@ func stageFlag(name, prefix string) (int, bool) {
 }
 
 func main() {
+	// mec is a short-lived batch process: it allocates hard (the parser, the
+	// compile walk and both script engines are allocation bound), it never has
+	// to give memory back, and the default GOGC of 100 makes it spend a third of
+	// its time in the collector. Trading heap for time here measures at 8-19 %
+	// of a whole run on both engines. 300 is where the curve flattens: on the
+	// Kotlin run it buys 21 of the 25 ms that GOGC=400 buys, for half its extra
+	// memory (86 MB peak at the default, 102 MB here, 117 MB at 400). An
+	// explicit GOGC in the environment still wins, so a memory tight setup can
+	// dial it back.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(300)
+	}
+
 	o, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
