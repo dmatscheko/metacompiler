@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -310,9 +311,112 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		"pushSourceFile": func(name string) { pushTraceSourceFile(name) },
 		"popSource":      func() { popTraceSource() },
 	}
-	vm.Set("c", compilerFuncMap)
-	vm.Set("abnf", r.AbnfFuncMap)
-	vm.Set("llvm", llvmFuncMap)
+	// The three host API objects are wrapped for goja ONCE per member instead of
+	// per access (see hostAPIObject). c.localAsg is the only entry a run rebinds
+	// (per tag / per :script()), so it is the only one read through every time.
+	vm.Set("c", newHostAPIObject(vm, compilerFuncMap, "localAsg"))
+	vm.Set("abnf", newHostAPIObject(vm, r.AbnfFuncMap))
+	vm.Set("llvm", newHostAPIObject(vm, llvmFuncMap))
 
 	return &common
+}
+
+// hostAPIObject exposes one of the host API maps (c, abnf, llvm) to goja.
+// Binding the Go map itself made goja wrap the accessed member again on EVERY
+// read: a tag script that calls abnf.newRule() a thousand times had goja build a
+// thousand native function objects for that one Go function, and
+// llvm.ir.NewModule() rebuilt the wrapper of the nested 'ir' map on top of it.
+// Here each member is wrapped once and the same goja Value is handed out
+// afterwards; a nested map (abnf.oid, llvm.ir, ...) becomes a caching object of
+// its own. Members whose Go value is rebound while the run goes on are named as
+// live and never cached. Everything else behaves like goja's Go-map wrapper:
+// reads go through vm.ToValue, writes store the exported value in the map.
+type hostAPIObject struct {
+	vm    *goja.Runtime
+	m     reflect.Value // The Go map, or a pointer to it.
+	live  map[string]bool
+	cache map[string]goja.Value
+}
+
+// newHostAPIObject binds a string-keyed Go map (or a pointer to one) as a
+// caching JS object.
+func newHostAPIObject(vm *goja.Runtime, goMap interface{}, live ...string) *goja.Object {
+	o := &hostAPIObject{vm: vm, m: reflect.ValueOf(goMap), cache: map[string]goja.Value{}}
+	if len(live) > 0 {
+		o.live = make(map[string]bool, len(live))
+		for _, key := range live {
+			o.live[key] = true
+		}
+	}
+	return vm.NewDynamicObject(o)
+}
+
+// goMap resolves the map behind the binding. It is kept as a pointer where the
+// caller has one (the 'c' map), so that replacing the whole map stays visible.
+func (o *hostAPIObject) goMap() reflect.Value {
+	if o.m.Kind() == reflect.Ptr {
+		return o.m.Elem()
+	}
+	return o.m
+}
+
+func (o *hostAPIObject) Get(key string) goja.Value {
+	if v, ok := o.cache[key]; ok {
+		return v
+	}
+	mv := o.goMap().MapIndex(reflect.ValueOf(key))
+	if !mv.IsValid() {
+		return nil // Not there: JS sees undefined.
+	}
+	raw := mv.Interface()
+	var val goja.Value
+	if sub := reflect.ValueOf(raw); sub.Kind() == reflect.Map && sub.Type().Key().Kind() == reflect.String {
+		val = newHostAPIObject(o.vm, raw) // A nested API group: cache its members too.
+	} else {
+		val = o.vm.ToValue(raw)
+	}
+	if !o.live[key] {
+		o.cache[key] = val
+	}
+	return val
+}
+
+func (o *hostAPIObject) Set(key string, val goja.Value) bool {
+	m := o.goMap()
+	elem := m.Type().Elem()
+	v := reflect.ValueOf(val.Export())
+	switch {
+	case !v.IsValid(): // null/undefined.
+		v = reflect.Zero(elem)
+	case v.Type().AssignableTo(elem):
+	case elem.Kind() != reflect.String && v.Type().ConvertibleTo(elem):
+		// A number into one of the typed groups (abnf.oid and friends). String
+		// targets are left out on purpose: Go would turn a number into the
+		// character of that code point instead of rejecting it.
+		v = v.Convert(elem)
+	default:
+		return false
+	}
+	m.SetMapIndex(reflect.ValueOf(key), v)
+	delete(o.cache, key)
+	return true
+}
+
+func (o *hostAPIObject) Has(key string) bool {
+	return o.goMap().MapIndex(reflect.ValueOf(key)).IsValid()
+}
+
+func (o *hostAPIObject) Delete(key string) bool {
+	o.goMap().SetMapIndex(reflect.ValueOf(key), reflect.Value{})
+	delete(o.cache, key)
+	return true
+}
+
+func (o *hostAPIObject) Keys() []string {
+	m := o.goMap()
+	keys := make([]string, 0, m.Len())
+	for _, k := range m.MapKeys() {
+		keys = append(keys, k.String())
+	}
+	return keys
 }
