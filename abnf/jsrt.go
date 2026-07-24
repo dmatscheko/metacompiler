@@ -922,9 +922,11 @@ func (rt *jsrt) importGoValue(v interface{}) interface{} {
 	if v == nil {
 		return jsUndef
 	}
-	switch v.(type) {
+	switch t := v.(type) {
 	case bool, string, float64, *jsObject, *jsArray, *jsClosure, *hostFunc, *boundMethod, jsUndefT, jsNullT:
 		return v
+	case *ltrText:
+		return t.String() // The lazy ltr.in accumulator materializes on read.
 	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {

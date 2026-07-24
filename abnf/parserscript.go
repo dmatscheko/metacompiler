@@ -1,8 +1,6 @@
 package abnf
 
 import (
-	"strconv"
-
 	"14.gy/mec/abnf/r"
 	"github.com/dop251/goja"
 )
@@ -51,7 +49,7 @@ func (ps *parserscript) HandleScriptRule(rule *r.Rule, localProductions *r.Rules
 	if module == "" {
 		module = ps.pa.fileName
 	}
-	v, err := ps.common.Run(module+":parserCommand:"+strconv.Itoa(rule.Pos), code, rule.Int)
+	v, err := ps.common.Run(nodeScript(module, ":parserCommand:", rule.Pos), code, rule.Int)
 	if err != nil {
 		panic(wrapScriptError(err, rule.ToString(), code))
 	}

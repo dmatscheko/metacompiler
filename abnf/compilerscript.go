@@ -31,6 +31,51 @@ type compilerscript struct {
 	co *compiler
 }
 
+// ltrObject exposes the ltr map (the global left-to-right variables) to goja.
+// A plain vm.Set of the Go map would read ltr.in straight out of the map, which
+// forces the walk to keep it materialized on every Token; this dynamic object
+// materializes the ltrText accumulator on READ instead. Everything else behaves
+// exactly like goja's own map wrapper: reads go through vm.ToValue, writes store
+// the exported value back into the same map.
+type ltrObject struct {
+	vm  *goja.Runtime
+	ltr map[string]r.Object
+}
+
+func (o *ltrObject) Get(key string) goja.Value {
+	v, ok := o.ltr[key]
+	if !ok {
+		return nil // Not there: JS sees undefined.
+	}
+	if text, isText := v.(*ltrText); isText {
+		return o.vm.ToValue(text.String())
+	}
+	return o.vm.ToValue(v)
+}
+
+func (o *ltrObject) Set(key string, val goja.Value) bool {
+	o.ltr[key] = val.Export()
+	return true
+}
+
+func (o *ltrObject) Has(key string) bool {
+	_, ok := o.ltr[key]
+	return ok
+}
+
+func (o *ltrObject) Delete(key string) bool {
+	delete(o.ltr, key)
+	return true
+}
+
+func (o *ltrObject) Keys() []string {
+	keys := make([]string, 0, len(o.ltr))
+	for k := range o.ltr {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // sprintTraceStack formats the global stack for the tag trace, one element per line.
 func sprintTraceStack(stack []r.Object, space string) string {
 	res := ""
@@ -81,7 +126,7 @@ func traceTagBottom(stack []r.Object, ltr map[string]r.Object, upStream map[stri
 // code slots when a Tag was written with multiple comma separated code strings). It returns
 // the JS result value of the code, or nil if the tag has no code for that slot. The code can
 // change upStream (visible to it as 'up').
-func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) goja.Value { // => (changes upStream)
+func (cs *compilerscript) HandleTagCode(tag *r.Rule, name scriptName, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) goja.Value { // => (changes upStream)
 	if !(slot < len(*tag.CodeChilds)) { // If the tag has no slot with that number.
 		return nil
 	}
@@ -147,7 +192,7 @@ func (cs *compilerscript) HandleTagCode(tag *r.Rule, name string, upStream map[s
 
 // RunTagCode adapts HandleTagCode to the scriptEngine interface: it exports the
 // goja result value to a plain Go value.
-func (cs *compilerscript) RunTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool) {
+func (cs *compilerscript) RunTagCode(tag *r.Rule, name scriptName, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool) {
 	v := cs.HandleTagCode(tag, name, upStream, localASG, slot, depth)
 	if v == nil {
 		return nil, false
@@ -178,7 +223,7 @@ func (cs *compilerscript) initFuncMap() {
 		cs.Stack = append(cs.Stack, v)
 	})
 
-	cs.vm.Set("ltr", cs.LtrStream)
+	cs.vm.Set("ltr", cs.vm.NewDynamicObject(&ltrObject{vm: cs.vm, ltr: cs.LtrStream}))
 
 	cs.compilerFuncMap["compile"] = func(asg *r.Rules, slot int, traceEnabled bool) map[string]r.Object {
 		// The JS parameter can only turn tracing on, not off: c.compile(c.asg) leaves out the

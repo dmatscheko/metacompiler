@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -53,6 +54,38 @@ func UnescapeTilde(s string) string {
 	return string(buf)
 }
 
+// scriptName is the name of one script module: the file (or grammar module) it
+// belongs to, plus the source position of the node it was written on. The name
+// is only ever needed when a script is COMPILED for the first time (it is baked
+// into the program for stack traces and for the relative path resolution of
+// load()/store()/include()) or when an error is reported - but the compile walk
+// runs a tag script ten thousand times per grammar, so formatting the name per
+// execution was pure waste. The walk therefore passes the parts and the engines
+// format on demand.
+type scriptName struct {
+	name string // The module/file name; the whole name when pos < 0.
+	kind string // What the position names, e.g. ":tag:pos:".
+	pos  int    // Source position of the node, or < 0 for a name without one.
+}
+
+// nodeScript names the script of an ASG node at a source position.
+func nodeScript(name, kind string, pos int) scriptName {
+	return scriptName{name: name, kind: kind, pos: pos}
+}
+
+// fileScript names a script that is already fully named (a start script, an
+// include, an eval).
+func fileScript(name string) scriptName {
+	return scriptName{name: name, pos: -1}
+}
+
+func (n scriptName) String() string {
+	if n.pos < 0 {
+		return n.name
+	}
+	return n.name + n.kind + strconv.Itoa(n.pos)
+}
+
 // Run executes the given source string in the global context.
 // Compiled programs are cached: Code with a UID (ID > 0, assigned by correctReferencesAndIDs())
 // is cached per UID. The comparison with the cached source is cheap (usually only a pointer
@@ -61,8 +94,9 @@ func UnescapeTilde(s string) string {
 // never got a UID) is cached by its name plus source text. The name is part of the key because
 // it is compiled into the program (for stack traces and relative paths), so byte-identical
 // code from two different files must not share one program.
-func (cs *commonscript) Run(name, src string, ID int) (goja.Value, error) {
+func (cs *commonscript) Run(name scriptName, src string, ID int) (goja.Value, error) {
 	var p *goja.Program
+	var key string
 	if ID > 0 {
 		if ID >= len(cs.codeCache) {
 			tmp := make([]cachedProgram, ID*2)
@@ -71,20 +105,21 @@ func (cs *commonscript) Run(name, src string, ID int) (goja.Value, error) {
 			p = cs.codeCache[ID].p
 		}
 	} else {
-		p = cs.codeCacheBySrc[name+"\x00"+src]
+		key = name.String() + "\x00" + src
+		p = cs.codeCacheBySrc[key]
 	}
 
 	// Compile and cache on the first run.
 	if p == nil {
 		var err error
-		p, err = goja.Compile(name, src, true)
+		p, err = goja.Compile(name.String(), src, true)
 		if err != nil {
 			return nil, err
 		}
 		if ID > 0 {
 			cs.codeCache[ID] = cachedProgram{src: src, p: p}
 		} else {
-			cs.codeCacheBySrc[name+"\x00"+src] = p
+			cs.codeCacheBySrc[key] = p
 		}
 	}
 
@@ -170,7 +205,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		}
 		srcCode := string(dat)
 
-		_, err = common.Run(includeFileName, srcCode, -1)
+		_, err = common.Run(fileScript(includeFileName), srcCode, -1)
 		if err != nil {
 			panic(err.Error() + "\nError was in " + includeFileName)
 		}

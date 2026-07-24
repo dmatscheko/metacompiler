@@ -157,7 +157,7 @@ type walkEngine struct {
 
 func (we *walkEngine) Ltr() map[string]r.Object { return we.ltr }
 
-func (we *walkEngine) RunTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool) {
+func (we *walkEngine) RunTagCode(tag *r.Rule, name scriptName, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool) {
 	if !(slot < len(*tag.CodeChilds)) {
 		return nil, false
 	}
@@ -216,7 +216,7 @@ func newWalkRuntime() (*jsrt, *walkEngine) {
 
 // compileScript turns one annotation script into an IR module (cached by
 // source, both in process and on disk - see scriptcache.go).
-func (k *fkernel) compileScript(code string, name string) *ir.Module {
+func (k *fkernel) compileScript(code string, name scriptName) *ir.Module {
 	if mod, ok := k.compiled[code]; ok {
 		return mod
 	}
@@ -225,9 +225,12 @@ func (k *fkernel) compileScript(code string, name string) *ir.Module {
 		return mod
 	}
 
-	asg, err := ParseWithAgrammar(k.jsG, code, name, &Parseropts{PreventDefaultOutput: true})
+	// Only from here on is the name needed - so it is formatted here, not on
+	// every one of the ~10 000 tag executions of a grammar compile.
+	scriptFile := name.String()
+	asg, err := ParseWithAgrammar(k.jsG, code, scriptFile, &Parseropts{PreventDefaultOutput: true})
 	if err != nil {
-		panic(fmt.Sprintf("frozen: cannot parse script %s: %s\nScript was: %s", name, err, code))
+		panic(fmt.Sprintf("frozen: cannot parse script %s: %s\nScript was: %s", scriptFile, err, code))
 	}
 
 	rt, we := newWalkRuntime()
@@ -235,7 +238,7 @@ func (k *fkernel) compileScript(code string, name string) *ir.Module {
 	mod, tags := bootObject(rt, maBoot)
 	we.tags = tags
 
-	co := &compiler{eng: we, fileName: name}
+	co := &compiler{eng: we, fileName: scriptFile}
 	co.compile(asg, 0, 0)
 
 	storeCachedScript(code, mod)
@@ -412,7 +415,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		if err != nil {
 			panic(err)
 		}
-		mod := frozenKernel().compileScript(string(dat), resolved)
+		mod := frozenKernel().compileScript(string(dat), fileScript(resolved))
 		// The included file runs AS its own module (goja names each program
 		// after its file): a nested include(), load() or moduleName() inside
 		// it resolves relative to the included file, not to the includer -
@@ -430,7 +433,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 	// eval compiles the string like any other script and runs it in the shared
 	// scope, so evaluated code sees (and can create) the script globals.
 	eng.rt.setRootVar("eval", jsHostFunc("eval", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		mod := frozenKernel().compileScript(rt.toString(argAt(args, 0)), "eval")
+		mod := frozenKernel().compileScript(rt.toString(argAt(args, 0)), fileScript("eval"))
 		return runScriptModule(rt, eng.machineFor(mod), eng.sharedScope)
 	}))
 
@@ -483,7 +486,7 @@ func (eng *frozenEngine) machineFor(mod *ir.Module) *machine {
 
 func (eng *frozenEngine) Ltr() map[string]r.Object { return eng.ltrStream }
 
-func (eng *frozenEngine) RunTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool) {
+func (eng *frozenEngine) RunTagCode(tag *r.Rule, name scriptName, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool) {
 	if !(slot < len(*tag.CodeChilds)) {
 		return nil, false
 	}
@@ -672,7 +675,7 @@ func (ps *frozenParserScript) init() {
 		if err != nil {
 			panic(err)
 		}
-		mod := frozenKernel().compileScript(string(dat), resolved)
+		mod := frozenKernel().compileScript(string(dat), fileScript(resolved))
 		ma, ok := ps.machines[mod]
 		if !ok {
 			ma = ps.rt.attach(mod)
@@ -702,7 +705,7 @@ func (ps *frozenParserScript) init() {
 	ps.sharedScope = ps.rt.newScopeHandle(nil)
 
 	ps.rt.setRootVar("eval", jsHostFunc("eval", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		mod := frozenKernel().compileScript(rt.toString(argAt(args, 0)), "eval")
+		mod := frozenKernel().compileScript(rt.toString(argAt(args, 0)), fileScript("eval"))
 		ma, ok := ps.machines[mod]
 		if !ok {
 			ma = ps.rt.attach(mod)
@@ -743,7 +746,7 @@ func (ps *frozenParserScript) HandleScriptRule(rule *r.Rule, localProductions *r
 		ps.rt.call(cl, jsUndef, nil)
 		completion = ps.rt.retSlot
 	} else {
-		mod := frozenKernel().compileScript(code, ps.pa.fileName+":parserCommand")
+		mod := frozenKernel().compileScript(code, fileScript(ps.pa.fileName+":parserCommand"))
 		ma, ok := ps.machines[mod]
 		if !ok {
 			ma = ps.rt.attach(mod)

@@ -3,7 +3,6 @@ package abnf
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 
 	"14.gy/mec/abnf/r"
 )
@@ -45,9 +44,105 @@ var ExePath = ""
 type scriptEngine interface {
 	// RunTagCode executes the code of the given slot of a Tag. It returns the
 	// completion value of the code and whether the tag had code for that slot.
-	RunTagCode(tag *r.Rule, name string, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool)
+	RunTagCode(tag *r.Rule, name scriptName, upStream map[string]r.Object, localASG *r.Rules, slot int, depth int) (r.Object, bool)
 	// Ltr returns the global (left to right) variables, e.g. ltr.in.
 	Ltr() map[string]r.Object
+}
+
+// ----------------------------------------------------------------------------
+// The ltr.in accumulator
+
+// ltrText holds the text of all Token the walk has seen so far - the value
+// behind ltr.in. Appending to a plain string copied the whole text per Token,
+// which made the walk quadratic in the input size (185 MB of copying for one
+// compile of languages/kotlin-to-llvm-ir.abnf, the largest allocation site of
+// the phase). The text is therefore appended to a buffer and only materialized
+// into a string when a script actually READS ltr.in - which the engines
+// mediate: the goja engine hands out ltr through a dynamic object and the
+// frozen engine through importGoValue, and both call String() there. A
+// String() method also keeps the tag trace (%v of the ltr map) unchanged.
+type ltrText struct {
+	buf   []byte
+	str   string // The materialized text of buf, valid while fresh.
+	fresh bool
+}
+
+func (t *ltrText) add(s string) {
+	t.buf = append(t.buf, s...)
+	t.fresh = false
+}
+
+func (t *ltrText) String() string {
+	if !t.fresh {
+		t.str, t.fresh = string(t.buf), true
+	}
+	return t.str
+}
+
+// addLtrIn appends the text of one Token to ltr.in. A script may have assigned
+// a plain string to ltr.in (or the walk may not have seen a Token yet), so the
+// accumulator is created on demand.
+func addLtrIn(ltr map[string]r.Object, s string) {
+	switch cur := ltr["in"].(type) {
+	case *ltrText:
+		cur.add(s)
+	case string:
+		t := &ltrText{buf: make([]byte, 0, len(cur)+len(s)+64)}
+		t.buf = append(append(t.buf, cur...), s...)
+		ltr["in"] = t
+	default:
+		panic("Variable 'ltr.in' must only contain strings")
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Upstream keys
+
+// The kinds of upstream variable, by name: 'in' and up.str* are concatenated as
+// strings, 'stack' and up.arr* are appended as arrays, everything else is
+// collected into an array of the sibling values.
+const (
+	upOther = iota
+	upIn
+	upStr
+	upStack
+	upArr
+)
+
+// upKeyKind classifies one upstream key. The merge asks for every key of every
+// child, so it switches on the first byte instead of running two
+// strings.HasPrefix over each of them.
+func upKeyKind(k string) int {
+	if len(k) < 2 {
+		return upOther
+	}
+	switch k[0] {
+	case 'i':
+		if k == "in" {
+			return upIn
+		}
+	case 's':
+		if k == "stack" {
+			return upStack
+		}
+		if len(k) >= 3 && k[1] == 't' && k[2] == 'r' {
+			return upStr
+		}
+	case 'a':
+		if len(k) >= 3 && k[1] == 'r' && k[2] == 'r' {
+			return upArr
+		}
+	}
+	return upOther
+}
+
+// appendUpValue adds one child value to a 'stack'/up.arr* accumulator: an array
+// contributes its elements, anything else itself.
+func appendUpValue(dst []interface{}, v r.Object) []interface{} {
+	if arr, ok := v.([]interface{}); ok {
+		return append(dst, arr...)
+	}
+	return append(dst, v)
 }
 
 type compiler struct {
@@ -92,60 +187,62 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 
 	if len(*localASG) > 1 { // "SEQUENCE" Iterate through all rules and applies.
 
-		upStreamMerged := map[string]r.Object{"in": "", "stack": []interface{}{}}
+		// 'in' and the up.str*/up.arr* keys are accumulated in local buffers and
+		// stored into the map ONCE, at the end: merging a sibling list by
+		// concatenating string into string per child made a node with n children
+		// copy its text n times (the widest node of languages/kotlin-to-llvm-ir.abnf
+		// has 1102 children), and storing a slice back into an interface{} per
+		// child boxed a fresh slice header every time.
+		var inBuf []byte
+		var strBufs map[string][]byte     // up.str*, on demand: most nodes have none.
+		var arrs map[string][]interface{} // up.arr*, likewise.
+		stack := []interface{}{}          // Stays a non-nil empty array when no child has one.
+		upStreamMerged := map[string]r.Object{}
 
 		for _, rule := range *localASG {
 			// Compile:
-			upStreamNew := co.compile(&r.Rules{rule}, slot, depth+1)
+			upStreamNew := co.compileRule(rule, nil, slot, depth+1)
 
 			for k, v := range upStreamNew {
-				if k == "in" || strings.HasPrefix(k, "str") {
-					str1, ok1 := upStreamMerged[k].(string)
-					str2, ok2 := v.(string)
-					if !ok1 {
-						// A missing left side starts empty like in the arr*
-						// branch below (an up.str* set in one sibling branch
-						// used to panic here); a present non-string is still
-						// a real error.
-						if old, exists := upStreamMerged[k]; exists {
-							panic(fmt.Sprintf("Left variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, old, rule.ToString()))
-						}
-						str1 = ""
-					}
-					if !ok2 {
+				// A key that no earlier sibling had starts empty; a value that
+				// is not a string where a string belongs is a real error.
+				switch upKeyKind(k) {
+				case upIn, upStr:
+					str, ok := v.(string)
+					if !ok {
 						panic(fmt.Sprintf("Right variable 'up.%s' must only contain strings. Contains: %#v in rule %s.", k, v, rule.ToString()))
 					}
-					upStreamMerged[k] = str1 + str2
-					continue
-				} else if k == "stack" || strings.HasPrefix(k, "arr") {
-					// Both sides must be arrays before they can be appended.
-					// A missing left side starts empty, everything else that is not an array gets wrapped into one.
-					arr1, ok1 := upStreamMerged[k].([]interface{})
-					arr2, ok2 := v.([]interface{})
-					if !ok1 {
-						if old, exists := upStreamMerged[k]; exists {
-							arr1 = []interface{}{old}
-						} else {
-							arr1 = []interface{}{}
-						}
+					if k == "in" {
+						inBuf = append(inBuf, str...)
+						continue
 					}
-					if !ok2 {
-						arr2 = []interface{}{v}
+					if strBufs == nil {
+						strBufs = map[string][]byte{}
 					}
-					upStreamMerged[k] = append(arr1, arr2...)
-					continue
-				}
-				// If upStreamMerged[k] already holds an array, it must stay that array and must NOT get filled with newer v.
-				// So if upStreamMerged[k] has no previous entry, create an array inside and add the array v one object.
-				if _, ok := upStreamMerged[k]; !ok {
-					upStreamMerged[k] = []interface{}{}
-				}
-				if arr, ok := upStreamMerged[k].([]interface{}); ok {
+					strBufs[k] = append(strBufs[k], str...)
+				case upStack:
+					stack = appendUpValue(stack, v)
+				case upArr:
+					if arrs == nil {
+						arrs = map[string][]interface{}{}
+					}
+					arrs[k] = appendUpValue(arrs[k], v)
+				default:
+					// If upStreamMerged[k] already holds an array, it must stay that array and must NOT get filled with newer v.
+					// So if upStreamMerged[k] has no previous entry, create an array inside and add the array v one object.
+					arr, _ := upStreamMerged[k].([]interface{})
 					upStreamMerged[k] = append(arr, v)
-				} else {
-					panic("Array missing in upStreamMerged")
 				}
 			}
+		}
+
+		upStreamMerged["in"] = string(inBuf)
+		upStreamMerged["stack"] = stack
+		for k, buf := range strBufs {
+			upStreamMerged[k] = string(buf)
+		}
+		for k, arr := range arrs {
+			upStreamMerged[k] = arr
 		}
 
 		return upStreamMerged
@@ -155,16 +252,18 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 	// Inside each split arm do this
 
 	// There is only one production:
-	rule := (*localASG)[0]
+	return co.compileRule((*localASG)[0], localASG, slot, depth)
+}
 
+// compileRule is the walk of ONE rule (one split arm). localASG is the single
+// rule list the enclosing compile() was called with - the list a Tag script sees
+// as c.localAsg. The sibling walk above has no such list and passes nil; only a
+// Tag then needs one, so only a Tag allocates it (it used to wrap every child of
+// every node in a one element r.Rules just to re-enter compile()).
+func (co *compiler) compileRule(rule *r.Rule, localASG *r.Rules, slot int, depth int) map[string]r.Object { // => (upStream)
 	switch rule.Operator {
 	case r.Token:
-		ltr := co.eng.Ltr()
-		if str, ok := ltr["in"].(string); ok {
-			ltr["in"] = str + rule.String
-		} else {
-			panic("Variable 'ltr.in' must only contain strings")
-		}
+		addLtrIn(co.eng.Ltr(), rule.String)
 		return map[string]r.Object{"in": rule.String, "stack": []interface{}{}}
 	case r.Tag:
 		// First collect all the data.
@@ -172,11 +271,14 @@ func (co *compiler) compile(localASG *r.Rules, slot int, depth int) map[string]r
 		// The tag sees the source position of its node as up.pos (the builders
 		// capture it for traces and diagrams); it does not propagate upwards.
 		upStream["pos"] = rule.Pos
+		if localASG == nil {
+			localASG = &r.Rules{rule}
+		}
 		// Then run the script on it. The module is the GRAMMAR (the tag code
 		// lives there), so a load()/include() in a tag resolves relative to the
 		// grammar under goja exactly like under -frozen; the position suffix
 		// still names the input node for error messages.
-		co.eng.RunTagCode(rule, fmt.Sprintf("%s:tag:pos:%d", co.moduleName, rule.Pos), upStream, localASG, slot, depth)
+		co.eng.RunTagCode(rule, nodeScript(co.moduleName, ":tag:pos:", rule.Pos), upStream, localASG, slot, depth)
 		delete(upStream, "pos")
 		return upStream
 	default:
@@ -215,7 +317,7 @@ func compileASGInternal(asg *r.Rules, aGrammar *r.Rules, fileName string, slot i
 			"in": "", // This is the parser input (the terminals).
 		}
 		// The actual co.compile() of the ASG is called from inside the start script (via the JS function c.compile()).
-		v, ran := co.eng.RunTagCode(startScript, co.moduleName+":startScript", upStream, asg, slot, 0)
+		v, ran := co.eng.RunTagCode(startScript, fileScript(co.moduleName+":startScript"), upStream, asg, slot, 0)
 		if ran { // False if the start script has no code for the requested slot.
 			res = v
 		}
