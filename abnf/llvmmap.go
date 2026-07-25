@@ -3,6 +3,7 @@ package abnf
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"strings"
@@ -1107,18 +1108,28 @@ type RunResult struct {
 	Out string // Everything the program has written via putchar / puts.
 }
 
-const machineMaxSteps = 100000000 // Emergency brake against endless loops.
+// machineMaxStepsDefault is the emergency brake against endless loops: the number
+// of IR instructions ONE top-level call may execute before the interpreter gives
+// up. MaxIRSteps carries the effective value (the -max-steps flag writes it), so a
+// legitimately long running program can raise it instead of dying at 1e8.
+const machineMaxStepsDefault = 100000000
+
+// MaxIRSteps is the step budget of one top-level IR call, set from the -max-steps
+// CLI flag. 0 means "no limit"; newMachine() turns that into a budget nothing can
+// reach, so the check in run() stays a single comparison.
+var MaxIRSteps = machineMaxStepsDefault
 
 // machine holds the state of one IR program run.
 type machine struct {
-	mem     []byte                // One flat memory arena for globals and allocas. Offset 0 is reserved as null.
-	globals map[*ir.Global]uint64 // The memory offset of every global.
-	funcs   map[string]*ir.Func   // All module functions by name (for host initiated calls).
-	input   []byte                // The stdin content for getchar().
-	inPos   int
-	out     strings.Builder // The stdout content written by putchar() / puts().
-	steps   int             // The instruction budget of the CURRENT top-level call (reset at depth 0).
-	depth   int             // The call nesting inside this machine, for the steps reset.
+	mem      []byte                // One flat memory arena for globals and allocas. Offset 0 is reserved as null.
+	globals  map[*ir.Global]uint64 // The memory offset of every global.
+	funcs    map[string]*ir.Func   // All module functions by name (for host initiated calls).
+	input    []byte                // The stdin content for getchar().
+	inPos    int
+	out      strings.Builder // The stdout content written by putchar() / puts().
+	steps    int             // The instruction budget of the CURRENT top-level call (reset at depth 0).
+	maxSteps int             // The budget's limit, from MaxIRSteps when the machine was made.
+	depth    int             // The call nesting inside this machine, for the steps reset.
 
 	// externs resolves calls to declared functions before the built-in ones
 	// (putchar etc.) are tried. The JS runtime (jsrt.go) plugs its js_* host
@@ -1642,6 +1653,15 @@ func (ma *machine) releaseFrame(fr *frame) {
 	ma.framePool = append(ma.framePool, fr)
 }
 
+// stepLimitMsg names the safety valve that just tripped. The limit is not a
+// property of the program, so the message says what it is and how to lift it -
+// a long but finite run used to abort with a text that read like a grammar bug.
+func (ma *machine) stepLimitMsg() string {
+	return fmt.Sprintf("IR interpreter: step limit exceeded - one call ran more than %d instructions.\n"+
+		"This is a safety valve against endless loops, not a limit of the language: if the program\n"+
+		"legitimately runs that long, raise it with -max-steps N (or -max-steps 0 for no limit).", ma.maxSteps)
+}
+
 // newMachine loads a module into a fresh machine: it allocates and initializes
 // the globals and indexes the functions.
 func newMachine(m *ir.Module, input string) *machine {
@@ -1654,6 +1674,10 @@ func newMachine(m *ir.Module, input string) *machine {
 		sizes:       map[types.Type]uint64{},
 		fieldOffs:   map[*types.StructType][]uint64{},
 		input:       []byte(input),
+		maxSteps:    MaxIRSteps,
+	}
+	if ma.maxSteps <= 0 { // -max-steps 0: no limit, expressed as one nothing can reach.
+		ma.maxSteps = math.MaxInt64
 	}
 	for _, g := range m.Globals {
 		off := ma.alloc(ma.sizeOf(g.ContentType))
@@ -1953,8 +1977,8 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 			}
 			for i := range b.phis {
 				ma.steps++
-				if ma.steps > machineMaxSteps {
-					panic("IR interpreter: step limit exceeded (endless loop?)")
+				if ma.steps > ma.maxSteps {
+					panic(ma.stepLimitMsg())
 				}
 				vals[i] = fr.rd(phiOperand(b.phis[i].incs, prev))
 			}
@@ -1964,8 +1988,8 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 		}
 		for i := range b.insts {
 			ma.steps++
-			if ma.steps > machineMaxSteps {
-				panic("IR interpreter: step limit exceeded (endless loop?)")
+			if ma.steps > ma.maxSteps {
+				panic(ma.stepLimitMsg())
 			}
 			ma.exec(fr, &b.insts[i], prev)
 		}

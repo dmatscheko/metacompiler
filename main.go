@@ -63,6 +63,8 @@ import (
 //                (from a -trace run) or static (from a -callgraph run)
 //  -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
 //  -lb, -lf      parser block-list / found-list (debugging aids)
+//  -max-steps N  raise the IR interpreter's endless-loop brake: how many instructions ONE
+//                top-level call may run (default 100000000, 0 = no limit)
 //  -speed N      speed test: warm up once, then time N parse+compile cycles of the first file
 
 // options is the parsed command line.
@@ -86,6 +88,8 @@ type options struct {
 	codeSet, codeStdin                    bool     // -code / -code-stdin were passed (codeStdin reads the source from stdin).
 	speedTest, useBlockList, useFoundList bool
 	speedCount                            int   // Timed cycle count for -speed (>0 when set).
+	maxSteps                              int   // -max-steps N: the IR interpreter's per-call instruction budget (0 = no limit).
+	maxStepsSet                           bool  // -max-steps was passed; otherwise the built-in default stands.
 	pipeBounds                            []int // -pipe boundaries: file indices where a new pipeline segment starts.
 
 	freezePath, cfgPath, tracePath, callgraphPath, renderKind string
@@ -165,6 +169,15 @@ func parseArgs(args []string) (*options, error) {
 					return nil, fmt.Errorf("flag %s needs a positive integer cycle count, got %q", name, v)
 				}
 				o.speedTest, o.speedCount = true, n
+			}
+		case "-max-steps":
+			var v string
+			if v, err = takeVal(); err == nil {
+				n, serr := strconv.Atoi(v)
+				if serr != nil || n < 0 {
+					return nil, fmt.Errorf("flag %s needs a non-negative instruction count (0 = no limit), got %q", name, v)
+				}
+				o.maxSteps, o.maxStepsSet = n, true
 			}
 		case "-lb":
 			o.useBlockList = true
@@ -308,6 +321,9 @@ func main() {
 	abnf.WarnUnresolvedImports = o.warnImports
 	abnf.ImportRoots = o.importRoots
 	abnf.WarnUnsupported = o.warnUnsupported
+	if o.maxStepsSet {
+		abnf.MaxIRSteps = o.maxSteps
+	}
 	abnf.EntryPoint = o.entryPoint
 	abnf.ExePath = o.exePath
 	abnf.CFGOutPath = o.cfgPath
@@ -613,6 +629,8 @@ anywhere among the files.
                 (from a -trace run) or static (from a -callgraph run)
   -freeze F     (re)create the frozen bootstrap snapshot from grammar file F, then exit
   -lb, -lf      parser block-list / found-list (debugging aids)
+  -max-steps N  raise the IR interpreter's endless-loop brake: how many instructions ONE
+                top-level call may run (default 100000000, 0 = no limit)
   -speed N      speed test: warm up once, then time N parse+compile cycles of the first file
 `)
 }
