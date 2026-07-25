@@ -401,12 +401,11 @@ function makeBreak() { return function() { return BRK } }
 
 function makeContinue() { return function() { return CONT } }
 
+// The receiver-prepend of every instance method call ([target] + args). concat is
+// one host call for the whole job, where the push loop was one per element - and
+// under -frozen every one of those is an extern into the handle runtime.
 function concat2impl(a, b) {
-    var out = []
-    var i
-    for (i = 0; i < a.length; i++) out.push(a[i])
-    for (i = 0; i < b.length; i++) out.push(b[i])
-    return out
+    return a.concat(b)
 }
 
 // binOps is the base operator table: one function(l, r) per operator, built once

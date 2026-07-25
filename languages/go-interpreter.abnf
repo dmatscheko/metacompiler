@@ -436,12 +436,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         return v !== undefined && v !== null && typeof v == "object" && v.__dict === true
     }
     function newMap(zero) { return {__dict: true, keys: [], vals: [], zero: zero} }
-    function mapFind(m, k) {
-        for (var i = 0; i < m.keys.length; i++) {
-            if (m.keys[i] === k) return i
-        }
-        return -1
-    }
+    function mapFind(m, k) { return m.keys.indexOf(k) } // indexOf compares with ===, like the scan it replaces.
     function mapGet(m, k) {
         var i = mapFind(m, k)
         return i >= 0 ? m.vals[i] : m.zero

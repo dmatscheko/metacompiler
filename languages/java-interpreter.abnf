@@ -841,17 +841,7 @@ KwSync      = "synchronized" KwEnd ;
         }
     }
     // Splits a dotted path "a.b.c" into ["a", "b", "c"].
-    function splitDots(s) {
-        var parts = []
-        var cur = ""
-        for (var i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (ch == ".") { parts.push(cur); cur = "" }
-            else { cur = cur + ch }
-        }
-        parts.push(cur)
-        return parts
-    }
+    function splitDots(s) { return s.split(".") }
 
     // ----- Statement thunks -----
 

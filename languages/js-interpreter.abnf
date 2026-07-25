@@ -668,11 +668,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var keys = []
             for (var i = 0; i < props.length; i++) {
                 scopePut(o, props[i].k, props[i].t())
-                if (!isInternalKey(props[i].k)) {
-                    var found = false
-                    for (var j = 0; j < keys.length; j++) { if (keys[j] === props[i].k) { found = true } }
-                    if (!found) keys.push(props[i].k)
-                }
+                if (!isInternalKey(props[i].k) && keys.indexOf(props[i].k) < 0) { keys.push(props[i].k) }
             }
             o["__keys"] = keys
             return o
@@ -686,8 +682,7 @@ KwInstanceof = "instanceof" KwEnd ;
         if (isInternalKey(key)) { return }
         if (!hasOwn(o, "__keys")) { return }
         var ks = o["__keys"]
-        for (var i = 0; i < ks.length; i++) { if (ks[i] === key) { return } }
-        ks.push(key)
+        if (ks.indexOf(key) < 0) { ks.push(key) }
     }
     // The own keys of an object for for-in: a snapshot (so the body may add keys), the
     // __-prefixed internals never appear (they are never recorded in __keys).

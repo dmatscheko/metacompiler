@@ -757,11 +757,7 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             for (var i = 0; i < props.length; i++) {
                 var k = props[i].kt()            // the key thunk (static or computed)
                 scopePut(o, k, props[i].t())
-                if (!isInternalKey(k)) {
-                    var found = false
-                    for (var j = 0; j < keys.length; j++) { if (keys[j] === k) { found = true } }
-                    if (!found) keys.push(k)
-                }
+                if (!isInternalKey(k) && keys.indexOf(k) < 0) { keys.push(k) }
             }
             o["__keys"] = keys
             return o
@@ -775,8 +771,7 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (isInternalKey(key)) { return }
         if (!hasOwn(o, "__keys")) { return }
         var ks = o["__keys"]
-        for (var i = 0; i < ks.length; i++) { if (ks[i] === key) { return } }
-        ks.push(key)
+        if (ks.indexOf(key) < 0) { ks.push(key) }
     }
     // The own keys of an object for for-in: a snapshot (so the body may add keys), the
     // __-prefixed internals never appear (they are never recorded in __keys).

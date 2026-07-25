@@ -873,17 +873,7 @@ KwSync      = "synchronized" KwEnd ;
         }
     }
     // Splits a dotted path "a.b.c" into ["a", "b", "c"].
-    function splitDots(s) {
-        var parts = []
-        var cur = ""
-        for (var i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
-            if (ch == ".") { parts.push(cur); cur = "" }
-            else { cur = cur + ch }
-        }
-        parts.push(cur)
-        return parts
-    }
+    function splitDots(s) { return s.split(".") }
     // A method call is a functional-interface invocation when the receiver is a
     // closure (a lambda / method reference): route it to js_call(receiver, args)
     // instead of js_mcall, which only dispatches named methods on objects/strings.
