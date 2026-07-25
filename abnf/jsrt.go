@@ -63,8 +63,22 @@ func isAnytype(v interface{}) bool {
 	return ok
 }
 
+// jsHandleID lets a value the runtime itself creates carry its own handle
+// instead of being looked up in the identity intern map. Object identity (the
+// same pointer must always wrap to the same handle) is what the map provided;
+// a field on the object provides it too, in O(1) and without growing a map that
+// is never emptied - and a compile creates hundreds of thousands of these.
+// hrt records WHICH runtime the handle belongs to, because a process runs
+// several (one per stage, plus the compiled program's own): for any other
+// runtime the value falls back to that runtime's intern map.
+type jsHandleID struct {
+	h   uint64
+	hrt *jsrt
+}
+
 // jsObject is a plain MetaJS object. The key order is kept for deterministic behavior.
 type jsObject struct {
+	id    jsHandleID
 	props map[string]interface{}
 	keys  []string
 }
@@ -82,6 +96,7 @@ func (o *jsObject) set(key string, v interface{}) {
 
 // jsArray is a MetaJS array.
 type jsArray struct {
+	id    jsHandleID
 	elems []interface{}
 
 	// When this array is the key array of a dict, dictIdx maps a key to its
@@ -98,6 +113,7 @@ type jsArray struct {
 // different modules (e.g. a helper library and a tag script) can call each
 // other through one shared runtime.
 type jsClosure struct {
+	id  jsHandleID
 	fn  *ir.Func
 	env uint64 // Scope handle of the creation site.
 	ma  *machine
@@ -136,6 +152,7 @@ type jsCtl struct {
 // declaration, and it measures slower than the scan below the threshold and
 // slower than the index above it.
 type jsScope struct {
+	id     jsHandleID
 	names  []string
 	vals   []interface{}
 	tcs    []string // Pinned type class per name, "" = unpinned. See typedDecl.
@@ -235,6 +252,8 @@ type jsrt struct {
 	retSlot interface{}
 
 	lastGets [][2]uint64 // The most recent member lookups (obj, key handles), for error messages.
+
+	callBuf [2]uint64 // The (env, args) pair handed to a compiled callee; see callInner.
 
 	// strCache remembers what indexing and interning had to derive from the
 	// last few long strings (see strEntry); strScratch serves the short ones.
@@ -346,6 +365,17 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 		return rt.wrapNum(float64(t))
 	case uint64:
 		return rt.wrapNum(float64(t))
+
+	// The values the runtime creates itself carry their handle (see
+	// jsHandleID): no reflection, no intern map, no map growth.
+	case *jsObject:
+		return rt.wrapID(&t.id, v)
+	case *jsArray:
+		return rt.wrapID(&t.id, v)
+	case *jsScope:
+		return rt.wrapID(&t.id, v)
+	case *jsClosure:
+		return rt.wrapID(&t.id, v)
 	}
 
 	rv := reflect.ValueOf(v)
@@ -379,6 +409,22 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 		rt.table = append(rt.table, v)
 		return uint64(len(rt.table) - 1)
 	}
+}
+
+// wrapID hands out the handle a runtime-owned value carries, creating it on
+// first use. A value first wrapped by ANOTHER runtime keeps that runtime's
+// handle in the field and goes through this runtime's intern map instead, so
+// identity stays right in both.
+func (rt *jsrt) wrapID(id *jsHandleID, v interface{}) uint64 {
+	if id.hrt == rt {
+		return id.h
+	}
+	if id.hrt != nil {
+		return rt.wrapIdentity(v)
+	}
+	rt.table = append(rt.table, v)
+	id.h, id.hrt = uint64(len(rt.table)-1), rt
+	return id.h
 }
 
 func (rt *jsrt) wrapIdentity(v interface{}) uint64 {
@@ -1127,8 +1173,18 @@ func (rt *jsrt) setGoMember(obj interface{}, name string, val interface{}) {
 // Calls
 
 func (rt *jsrt) call(callee interface{}, this interface{}, args []interface{}) interface{} {
+	return rt.callH(callee, this, args, 0)
+}
+
+// callH is call with the handle of the array the arguments came in, if the
+// caller had one (js_call and friends build one per call site). A compiled
+// callee receives its arguments AS an array handle, so that array can be
+// handed straight through instead of boxing a second one - the call sites
+// build a fresh array per execution and drop it right after the call, so
+// nothing can observe the sharing. 0 means "no array handle", box one.
+func (rt *jsrt) callH(callee interface{}, this interface{}, args []interface{}, argsH uint64) interface{} {
 	if !rt.traced {
-		return rt.callInner(callee, this, args)
+		return rt.callInner(callee, this, args, argsH)
 	}
 	traceEmit(&TraceEvent{Ev: "call", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Name: rt.calleeName(callee)})
 	rt.traceDepth++
@@ -1145,7 +1201,7 @@ func (rt *jsrt) call(callee interface{}, this interface{}, args []interface{}) i
 		rt.traceDepth--
 		traceEmit(&TraceEvent{Ev: "ret", Depth: rt.traceDepth, Line: lineOfPos(rt.curPos), Val: "throw!"})
 	}()
-	ret := rt.callInner(callee, this, args)
+	ret := rt.callInner(callee, this, args, argsH)
 	completed = true
 	rt.curPos = savedPos // The caller's statement continues after the call.
 	rt.traceDepth--
@@ -1153,11 +1209,17 @@ func (rt *jsrt) call(callee interface{}, this interface{}, args []interface{}) i
 	return ret
 }
 
-func (rt *jsrt) callInner(callee interface{}, this interface{}, args []interface{}) interface{} {
+func (rt *jsrt) callInner(callee interface{}, this interface{}, args []interface{}, argsH uint64) interface{} {
 	switch c := callee.(type) {
 	case *jsClosure:
-		arr := &jsArray{elems: args}
-		ret := c.ma.call(c.fn, []uint64{c.env, rt.wrap(arr)})
+		if argsH == 0 {
+			argsH = rt.wrap(&jsArray{elems: args})
+		}
+		// The two-element argument slice is reused: machine.call copies the
+		// parameters into the callee's frame before anything can run, so a
+		// nested call may overwrite the buffer afterwards.
+		rt.callBuf[0], rt.callBuf[1] = c.env, argsH
+		ret := c.ma.call(c.fn, rt.callBuf[:])
 		return rt.unwrap(ret)
 	case *hostFunc:
 		return c.fn(rt, rt.wrap(this), args)
@@ -2186,6 +2248,13 @@ func clampIndex(i, length int) int {
 func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 	u := rt.unwrap
 	w := rt.wrap
+	// The handle of a module string constant is invariant: the emitter puts every
+	// literal into a module global and js_str_mem(ptr,len) is emitted at each USE
+	// site, so the same few hundred constants are re-derived hundreds of
+	// thousands of times per run. Remembering the handle per (ptr,len) of this
+	// module turns that into one small map probe - no byte copy out of the arena
+	// and no hash of the string body.
+	strMemCache := map[[2]uint64]uint64{}
 	boolH := func(b bool) uint64 {
 		if b {
 			return jsHTrue
@@ -2305,11 +2374,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 
 		// Constants.
 		"js_str_mem": func(a []uint64) uint64 { // (ptr, len) -> string handle
+			key := [2]uint64{a[0], a[1]}
+			if h, ok := strMemCache[key]; ok {
+				return h
+			}
 			ptr, n := a[0], a[1]
 			if ptr+n > uint64(len(ma.mem)) {
 				rt.fail("js_str_mem out of range")
 			}
-			return rt.wrapStr(string(ma.mem[ptr : ptr+n]))
+			h := rt.wrapStr(string(ma.mem[ptr : ptr+n]))
+			strMemCache[key] = h
+			return h
 		},
 		"js_num_i": func(a []uint64) uint64 { // (i64 value) -> number handle
 			return rt.wrapNum(float64(int64(a[0])))
@@ -2391,7 +2466,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if !ok {
 				rt.fail("js_call args must be an array")
 			}
-			return w(rt.call(u(a[0]), u(a[1]), args.elems))
+			return w(rt.callH(u(a[0]), u(a[1]), args.elems, a[2]))
 		},
 		"js_mcall": func(a []uint64) uint64 { // (target, method name, args array)
 			args, ok := u(a[2]).(*jsArray)
