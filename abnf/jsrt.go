@@ -30,9 +30,11 @@ import (
 // maps, slices, variadic functions), so the compiled scripts can drive e.g.
 // the llir/llvm builder objects or the abnf.* rule builders directly.
 //
-// Handle 0..3 are the singletons undefined, null, false and true. All other
-// handles index the table. Numbers and strings are interned by value, our own
-// pointer kinds by identity, so the table does not grow with every operation.
+// Handle 0..3 are the singletons undefined, null, false and true. A handle with
+// the top bit set carries an integer VALUE in its payload and needs no table
+// entry (see numHandle); every other handle indexes the table. Strings are
+// interned by value, our own pointer kinds by identity, so the table does not
+// grow with every operation.
 
 const (
 	jsHUndefined = uint64(0)
@@ -40,6 +42,53 @@ const (
 	jsHFalse     = uint64(2)
 	jsHTrue      = uint64(3)
 )
+
+// Table chunking: 64 Ki entries (1 MB) per chunk.
+const (
+	tblChunkBits = 16
+	tblChunkSize = 1 << tblChunkBits
+	tblChunkMask = tblChunkSize - 1
+)
+
+// Immediate integers. The runtime is a value-per-table-entry design with no
+// reclamation, so every number a program ever produces used to cost a table
+// slot, a boxed float64 and an intern-map entry FOREVER - a loop over a million
+// integers left a million of each behind. Integers that fit the payload are
+// therefore encoded in the handle itself: nothing is allocated, nothing is
+// interned, and the value is recovered by shifting. Handle identity for numbers
+// is not observable (=== compares the unwrapped values, and the dict index and
+// the trace hooks do the same), so this is invisible to a program.
+const (
+	numTag  = uint64(1) << 63 // Set = the handle IS the number.
+	numBits = 62              // Payload width, signed: [-2^61, 2^61).
+	numMask = uint64(1)<<numBits - 1
+	numSign = uint64(1) << (numBits - 1)
+	numLim  = float64(int64(1) << (numBits - 1))
+)
+
+// numHandle encodes f as an immediate handle, or reports that it cannot.
+// Non-integers, values outside the payload range, NaN and negative zero (whose
+// handle must stay distinct from +0's, so 1/-0 keeps its sign) fall back to the
+// table.
+func numHandle(f float64) (uint64, bool) {
+	if !(f >= -numLim && f < numLim) { // Also false for NaN.
+		return 0, false
+	}
+	i := int64(f)
+	if float64(i) != f || (i == 0 && math.Signbit(f)) {
+		return 0, false
+	}
+	return numTag | uint64(i)&numMask, true
+}
+
+// numValue decodes an immediate handle (sign-extending the payload).
+func numValue(h uint64) float64 {
+	x := h & numMask
+	if x&numSign != 0 {
+		x |= ^numMask
+	}
+	return float64(int64(x))
+}
 
 // jsUndef and jsNull are the singleton marker values inside the table.
 type jsUndefT struct{}
@@ -236,10 +285,15 @@ type boundMethod struct {
 // jsrt is one MetaJS runtime: a shared value table, a root scope with the host
 // bindings, and any number of attached IR modules (each on its own machine).
 type jsrt struct {
-	table []interface{}
+	// The value table is chunked, not one growing slice: it reaches millions of
+	// entries on a loop-heavy program, and doubling a contiguous slice of that
+	// size copies and re-maps tens of megabytes per growth step (it showed up as
+	// runtime.madvise/mmap). Chunks are allocated once and never moved.
+	chunks [][]interface{}
+	count  uint64 // Handles handed out so far = the next free slot.
 
 	strIntern map[string]uint64
-	numIntern map[uint64]uint64 // Keyed by the float bits, so -0 and +0 stay distinct handles.
+	numIntern map[uint64]uint64      // Keyed by the float bits, so -0 and +0 stay distinct handles.
 	objIntern map[interface{}]uint64 // Identity interning for pointer-like values.
 
 	root *jsScope
@@ -288,13 +342,16 @@ func (rt *jsrt) formatLastGets() string {
 // scope (the host globals that the compiled programs can see).
 func newJSRT(bindings map[string]interface{}) *jsrt {
 	rt := &jsrt{
-		table:     []interface{}{jsUndef, jsNull, false, true},
 		strIntern: map[string]uint64{},
 		numIntern: map[uint64]uint64{},
 		objIntern: map[interface{}]uint64{},
 		retSlot:   jsUndef,
 		curPos:    -1,
 	}
+	rt.alloc(jsUndef) // Handles 0..3, the singletons.
+	rt.alloc(jsNull)
+	rt.alloc(false)
+	rt.alloc(true)
 	rt.root = &jsScope{}
 	for k, v := range bindings {
 		rt.root.put(k, v)
@@ -406,9 +463,19 @@ func (rt *jsrt) wrap(v interface{}) uint64 {
 		// (Funcs must NOT be interned by their code pointer: all reflect
 		// method values share one adapter, so bound methods of different
 		// receivers would collide.)
-		rt.table = append(rt.table, v)
-		return uint64(len(rt.table) - 1)
+		return rt.alloc(v)
 	}
+}
+
+// alloc puts v in the next free table slot and returns its handle.
+func (rt *jsrt) alloc(v interface{}) uint64 {
+	h := rt.count
+	if int(h>>tblChunkBits) == len(rt.chunks) {
+		rt.chunks = append(rt.chunks, make([]interface{}, tblChunkSize))
+	}
+	rt.chunks[h>>tblChunkBits][h&tblChunkMask] = v
+	rt.count = h + 1
+	return h
 }
 
 // wrapID hands out the handle a runtime-owned value carries, creating it on
@@ -422,8 +489,7 @@ func (rt *jsrt) wrapID(id *jsHandleID, v interface{}) uint64 {
 	if id.hrt != nil {
 		return rt.wrapIdentity(v)
 	}
-	rt.table = append(rt.table, v)
-	id.h, id.hrt = uint64(len(rt.table)-1), rt
+	id.h, id.hrt = rt.alloc(v), rt
 	return id.h
 }
 
@@ -435,13 +501,15 @@ func (rt *jsrt) wrapIdentityKey(key, v interface{}) uint64 {
 	if h, ok := rt.objIntern[key]; ok {
 		return h
 	}
-	rt.table = append(rt.table, v)
-	h := uint64(len(rt.table) - 1)
+	h := rt.alloc(v)
 	rt.objIntern[key] = h
 	return h
 }
 
 func (rt *jsrt) wrapNum(f float64) uint64 {
+	if h, ok := numHandle(f); ok {
+		return h
+	}
 	// The intern key is the bit pattern, not the value: -0.0 == 0.0 as a float
 	// key, so a value-keyed map handed out one shared handle for both zeros
 	// (whichever was wrapped first supplied the other). NaN stays uninterned:
@@ -452,8 +520,7 @@ func (rt *jsrt) wrapNum(f float64) uint64 {
 			return h
 		}
 	}
-	rt.table = append(rt.table, f)
-	h := uint64(len(rt.table) - 1)
+	h := rt.alloc(f)
 	if f == f {
 		rt.numIntern[bits] = h
 	}
@@ -478,17 +545,19 @@ func (rt *jsrt) internStr(s string) uint64 {
 	if h, ok := rt.strIntern[s]; ok {
 		return h
 	}
-	rt.table = append(rt.table, s)
-	h := uint64(len(rt.table) - 1)
+	h := rt.alloc(s)
 	rt.strIntern[s] = h
 	return h
 }
 
 func (rt *jsrt) unwrap(h uint64) interface{} {
-	if h >= uint64(len(rt.table)) {
+	if h&numTag != 0 {
+		return numValue(h)
+	}
+	if h >= rt.count {
 		rt.fail("invalid handle %d", h)
 	}
-	return rt.table[h]
+	return rt.chunks[h>>tblChunkBits][h&tblChunkMask]
 }
 
 // ----------------------------------------------------------------------------
