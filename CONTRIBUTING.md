@@ -19,11 +19,8 @@ Examples:
 
 ```
 Refactor CLI flag comments
-Clarify the -render help: reads the -trace F file, writes DOT to stdout
 Rename the "ToString functions" README heading to "Serializer functions"
 Bring back per-stage tag slots as -slotN <v> in the positional CLI
+Clarify the -render help: reads the -trace F file, writes DOT to stdout
 Document every entry of the a-grammar API (abnf.* map + constants)
 ```
-
-> Note for AI assistants: this **overrides** the default of appending a
-> `Co-Authored-By: Claude …` trailer — omit it.

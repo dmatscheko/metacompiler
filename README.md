@@ -19,6 +19,7 @@ This system should allow to define and use compiler for arbitrary computer langu
     - [Small Example](#small-example)
   - [Documentation](#documentation)
     - [Build / Usage](#build--usage)
+    - [Editor support](#editor-support)
     - [Running the tests](#running-the-tests)
     - [High level overview](#high-level-overview)
       - [Default processing steps](#default-processing-steps)
@@ -199,6 +200,28 @@ or, to parse a C file with the full C99 grammar:
 ```
 go run . languages/c99-parser.abnf tests/c99-test-1.c -q
 ```
+
+### Editor support
+
+[`editor/vscode-abnf/`](editor/vscode-abnf/) is a VSCode extension that syntax
+highlights the annotated ABNF dialect for `.abnf` files. It colors the EBNF
+structure (productions, `|` alternatives, `( )` groups, `[ ]` options,
+`{ }` repetitions, counted `3...5 ( X )` repetitions), the rune/byte ranges
+(`...` and `..b`), the whole char-set family (`@ @+ @b @b+` and their negated
+`!@ …` forms), `!'token'` negative lookahead, tokens with their escapes, and
+`:command(...)` calls. The JavaScript embedded in `<~~ ~~>` tags and in
+`~~ ~~` code blocks (such as `:startScript(~~ … ~~)`) is handed to VSCode's
+built-in JavaScript grammar, so it gets real JS coloring and bracket matching.
+
+Install it locally by linking the folder into your extensions directory and
+reloading the window:
+
+```
+ln -s "$PWD/editor/vscode-abnf" ~/.vscode/extensions/abnf-annotated-0.1.0
+```
+
+See [`editor/vscode-abnf/README.md`](editor/vscode-abnf/README.md) for the full
+scope table and packaging instructions.
 
 ### Running the tests
 

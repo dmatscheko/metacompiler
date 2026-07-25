@@ -1,0 +1,216 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "ABNF (annotated)",
+	"scopeName": "source.abnf-annotated",
+	"patterns": [
+		{ "include": "#comments" },
+		{ "include": "#tag-code" },
+		{ "include": "#strings" },
+		{ "include": "#code" },
+		{ "include": "#tag-name" },
+		{ "include": "#command" },
+		{ "include": "#production-name" },
+		{ "include": "#charset" },
+		{ "include": "#range" },
+		{ "include": "#numbers" },
+		{ "include": "#operators" },
+		{ "include": "#identifier" }
+	],
+	"repository": {
+		"comments": {
+			"patterns": [
+				{
+					"name": "comment.line.double-slash.abnf",
+					"begin": "//",
+					"end": "$",
+					"beginCaptures": {
+						"0": { "name": "punctuation.definition.comment.abnf" }
+					}
+				},
+				{
+					"name": "comment.block.abnf",
+					"begin": "/\\*",
+					"end": "\\*/",
+					"beginCaptures": {
+						"0": { "name": "punctuation.definition.comment.begin.abnf" }
+					},
+					"endCaptures": {
+						"0": { "name": "punctuation.definition.comment.end.abnf" }
+					}
+				}
+			]
+		},
+
+		"tag-code": {
+			"comment": "A tag carrying embedded JS: <~~ ... ~~>",
+			"name": "meta.tag.code.abnf",
+			"begin": "<~~",
+			"end": "~~>",
+			"beginCaptures": {
+				"0": { "name": "punctuation.definition.tag.begin.abnf" }
+			},
+			"endCaptures": {
+				"0": { "name": "punctuation.definition.tag.end.abnf" }
+			},
+			"contentName": "meta.embedded.block.js",
+			"patterns": [
+				{ "include": "source.js" }
+			]
+		},
+
+		"code": {
+			"comment": "A bare code block / token: ~~ ... ~~  (start scripts, :startScript(~~ ~~), Code tokens)",
+			"name": "meta.code.abnf",
+			"begin": "~~",
+			"end": "~~",
+			"beginCaptures": {
+				"0": { "name": "punctuation.definition.code.begin.abnf" }
+			},
+			"endCaptures": {
+				"0": { "name": "punctuation.definition.code.end.abnf" }
+			},
+			"contentName": "meta.embedded.block.js",
+			"patterns": [
+				{ "include": "source.js" }
+			]
+		},
+
+		"tag-name": {
+			"comment": "An identifier tag: < Name > or < Name, Token >",
+			"name": "meta.tag.name.abnf",
+			"begin": "<(?!~)",
+			"end": ">",
+			"beginCaptures": {
+				"0": { "name": "punctuation.definition.tag.begin.abnf" }
+			},
+			"endCaptures": {
+				"0": { "name": "punctuation.definition.tag.end.abnf" }
+			},
+			"patterns": [
+				{ "include": "#strings" },
+				{
+					"match": ",",
+					"name": "punctuation.separator.tag.abnf"
+				},
+				{
+					"match": "[A-Za-z][A-Za-z0-9_]*",
+					"name": "variable.parameter.tag.abnf"
+				}
+			]
+		},
+
+		"command": {
+			"comment": "Parser/line commands like :whitespace(), :startRule(...), :title(...)",
+			"match": "(:)([A-Za-z][A-Za-z0-9_]*)",
+			"captures": {
+				"1": { "name": "punctuation.definition.command.abnf" },
+				"2": { "name": "keyword.control.command.abnf" }
+			}
+		},
+
+		"production-name": {
+			"comment": "The rule being defined, followed by an optional tag and then '='",
+			"match": "^\\s*([A-Za-z][A-Za-z0-9_]*)\\s*(?==|<)",
+			"captures": {
+				"1": { "name": "entity.name.function.rule.abnf" }
+			}
+		},
+
+		"charset": {
+			"comment": "Char set family and negative lookahead, longest match first",
+			"patterns": [
+				{
+					"match": "!@b\\+|!@b|!@\\+|!@|@b\\+|@b|@\\+|@",
+					"name": "keyword.operator.charset.abnf"
+				},
+				{
+					"match": "!(?=\\s*[\"'~])",
+					"name": "keyword.operator.lookahead.negative.abnf"
+				}
+			]
+		},
+
+		"range": {
+			"patterns": [
+				{
+					"match": "\\.\\.b",
+					"name": "keyword.operator.range.byte.abnf"
+				},
+				{
+					"match": "\\.\\.\\.",
+					"name": "keyword.operator.range.rune.abnf"
+				}
+			]
+		},
+
+		"strings": {
+			"patterns": [
+				{
+					"name": "string.quoted.double.abnf",
+					"begin": "\"",
+					"end": "\"",
+					"beginCaptures": {
+						"0": { "name": "punctuation.definition.string.begin.abnf" }
+					},
+					"endCaptures": {
+						"0": { "name": "punctuation.definition.string.end.abnf" }
+					},
+					"patterns": [
+						{ "include": "#token-escape" }
+					]
+				},
+				{
+					"name": "string.quoted.single.abnf",
+					"begin": "'",
+					"end": "'",
+					"beginCaptures": {
+						"0": { "name": "punctuation.definition.string.begin.abnf" }
+					},
+					"endCaptures": {
+						"0": { "name": "punctuation.definition.string.end.abnf" }
+					},
+					"patterns": [
+						{ "include": "#token-escape" }
+					]
+				}
+			]
+		},
+
+		"token-escape": {
+			"comment": "Escapes inside tokens: \\n \\t \\xNN \\uNNNN \\UNNNNNNNN and \\<any printable>",
+			"patterns": [
+				{
+					"match": "\\\\(?:x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})",
+					"name": "constant.character.escape.hex.abnf"
+				},
+				{
+					"match": "\\\\[\\x21-\\x7e]",
+					"name": "constant.character.escape.abnf"
+				}
+			]
+		},
+
+		"numbers": {
+			"match": "\\b(0|[1-9][0-9]*)\\b",
+			"name": "constant.numeric.integer.abnf"
+		},
+
+		"operators": {
+			"patterns": [
+				{ "match": "=", "name": "keyword.operator.assignment.abnf" },
+				{ "match": "\\|", "name": "keyword.operator.alternative.abnf" },
+				{ "match": ";", "name": "punctuation.terminator.rule.abnf" },
+				{ "match": ",", "name": "punctuation.separator.abnf" },
+				{ "match": "[\\(\\)]", "name": "punctuation.section.group.abnf" },
+				{ "match": "[\\[\\]]", "name": "punctuation.section.option.abnf" },
+				{ "match": "[\\{\\}]", "name": "punctuation.section.repetition.abnf" }
+			]
+		},
+
+		"identifier": {
+			"comment": "A reference to another rule",
+			"match": "[A-Za-z][A-Za-z0-9_]*",
+			"name": "variable.other.rule-ref.abnf"
+		}
+	}
+}
