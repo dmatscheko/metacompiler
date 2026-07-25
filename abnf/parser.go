@@ -51,7 +51,8 @@ type parser struct {
 	rangeCache      [256]*r.Rule // Reusable single-char Token rules, see the comment in case r.CharOf of apply().
 	referencesCache *references  // Resolves production names and assigns the tag code UIDs.
 
-	wsCache map[*r.Rule]*wsMemo // The memoized whitespace skips, per whitespace rule. See skipSpaces().
+	wsCache   map[*r.Rule]*wsMemo // The memoized whitespace skips, per whitespace rule. See skipSpaces().
+	pureCache map[*r.Rule]bool    // Memoizes isPure() per rule, see there.
 }
 
 // wsMemo is what skipSpaces() remembers about one whitespace rule.
@@ -65,6 +66,12 @@ type wsMemo struct {
 func (pa *parser) setSrc(src string) {
 	pa.Src = src
 	pa.wsCache = map[*r.Rule]*wsMemo{}
+	// The found and block lists are keyed by a position in the old text, so they
+	// have to go as well (-lf / -lb). pureCache survives: it only depends on the
+	// a-grammar.
+	pa.foundList = map[applyKey]*r.Rules{}
+	pa.foundSdxList = map[applyKey]int{}
+	pa.blockList = map[applyKey]bool{}
 }
 
 // includedByGrammar tracks, per a-grammar, which :include() files were already
@@ -108,7 +115,7 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces 
 	var foundSdx int = -1
 	pa.traceCount++
 
-	if rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
+	if rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) && pa.isPure(rule) {
 		key := applyKey{id: pa.getRulePosId(rule, pa.Sdx), ws: skipSpaceRule, skipping: skippingSpaces}
 
 		if pa.opts.UseFoundList {
@@ -151,7 +158,7 @@ func (pa *parser) ruleEnter(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces 
 // Such an early exit must not touch the block and found lists: The list entries belong to the still
 // running outer invocation of the same rule at the same position, not to this blocked one.
 func (pa *parser) ruleExit(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int, found *r.Rules, wasSdx int, wasBlocked bool) {
-	if !wasBlocked && rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) {
+	if !wasBlocked && rule.Operator == r.Identifier && (pa.opts.UseBlockList || pa.opts.UseFoundList) && pa.isPure(rule) {
 		key := applyKey{id: pa.getRulePosId(rule, wasSdx), ws: skipSpaceRule, skipping: skippingSpaces}
 		if pa.opts.UseBlockList {
 			pa.blockList[key] = false // Exit of the rule. It must be unblocked so it can be called again from a parent.
@@ -198,7 +205,7 @@ func (pa *parser) skipSpaces(ws *r.Rule, depth int) {
 		// Whether the rule may be memoized only depends on the a-grammar, which does not
 		// change any more once the parsing has started (an :include() runs before it), so
 		// this is decided once per whitespace rule.
-		memo = &wsMemo{memoize: !pa.opts.TraceEnabled && !pa.hasScript(ws, map[*r.Rule]bool{})}
+		memo = &wsMemo{memoize: !pa.opts.TraceEnabled && pa.isPure(ws)}
 		pa.wsCache[ws] = memo
 	}
 	if !memo.memoize {
@@ -218,6 +225,35 @@ func (pa *parser) skipSpaces(ws *r.Rule, depth int) {
 	}
 	pa.apply(ws, ws, true, depth+1) // Skip spaces.
 	memo.ends[start] = int32(pa.Sdx)
+}
+
+// isPure reports whether applying rule can be reduced to a pure function of
+// (rule, position, whitespace rule, skipping): its reachable subtree contains no
+// :script(), so nothing it does depends on - or changes - parser state that is not
+// part of that key.
+//
+// Everything the parser caches needs this. The whitespace memo of skipSpaces() asks
+// it about the whitespace rule, and ruleEnter()/ruleExit() ask it about every
+// production before they put it into the found list (-lf) or the block list (-lb):
+// the Python grammars track their indentation in :script() rules, so the result of
+// e.g. their Block production depends on an indentation stack, and reusing an earlier
+// result at the same position silently broke the parse ("Not everything could be
+// parsed", tests/python-test-1.py:13:1).
+//
+// The answer only depends on the a-grammar, which no longer changes once the parsing
+// has started (an :include() runs before it), so it is computed once per rule instead
+// of once per application - hasScript() walks a whole production subtree, which is far
+// too expensive to repeat per application.
+func (pa *parser) isPure(rule *r.Rule) bool {
+	if pure, ok := pa.pureCache[rule]; ok {
+		return pure
+	}
+	// Only the result of the rule the question was asked about may be cached: inside
+	// the walk, seen[] cuts recursive productions short with "false", which is the
+	// right answer for that cycle but not necessarily for the rule it was cut at.
+	pure := !pa.hasScript(rule, map[*r.Rule]bool{})
+	pa.pureCache[rule] = pure
+	return pure
 }
 
 // hasScript searches a rule tree for a :script() command and follows the Identifier links
@@ -1148,6 +1184,7 @@ func ParseWithAgrammar(agrammar *r.Rules, srcCode, fileName string, options *Par
 	pa.foundList = make(map[applyKey]*r.Rules)
 	pa.foundSdxList = make(map[applyKey]int)
 	pa.wsCache = make(map[*r.Rule]*wsMemo)
+	pa.pureCache = make(map[*r.Rule]bool)
 	pa.lastParsePosition = 0
 	pa.fileName = filepath.Clean(fileName)
 	pa.referencesCache = NewReferences()
