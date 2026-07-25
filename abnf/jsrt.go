@@ -366,7 +366,41 @@ func (rt *jsrt) attach(m *ir.Module) *machine {
 	ma := newMachine(m, "")
 	ma.externs = rt.externs(ma)
 	ma.bindExterns() // Resolve every declared function to its handler now, not per call.
+	ma.relNew, ma.relThru, ma.release = "js_scope_new", jsScopeThrough, rt.releaseScope
 	return ma
+}
+
+// jsScopeThrough lists the externs whose FIRST argument is a scope handle that
+// the extern only reads: it resolves the handle to the *jsScope, works on that
+// scope for the duration of the call and keeps neither the handle nor a
+// reference the handle would be needed for afterwards. js_scope_new is in the
+// list because a child scope stores its parent as a Go POINTER - the parent's
+// handle is never asked for again (nothing in the runtime turns a *jsScope back
+// into a handle except the creation site itself).
+//
+// js_closure is deliberately NOT here: it stores the scope HANDLE in the
+// closure, which is exactly how a scope outlives the frame that made it. Any
+// extern not listed is treated as retaining, so forgetting one costs memory,
+// never correctness. See machine.recycle.
+var jsScopeThrough = map[string]bool{
+	"js_scope_new": true, "js_scope_decl": true, "js_scope_get": true,
+	"js_scope_set": true, "js_scope_set_or_create": true,
+	"js_kget": true, "js_kset": true, "js_tdecl": true, "js_tset": true,
+	"js_pyset_var": true, "js_pyglobal": true, "js_pynonlocal": true,
+}
+
+// releaseScope drops the value behind a handle the IR machine proved dead. Only
+// a scope is ever released, and only its VALUE: the slot stays taken, so a
+// handle that (against the analysis) is used again finds nil and fails loudly
+// instead of silently reading whatever moved in.
+func (rt *jsrt) releaseScope(h uint64) {
+	if h&numTag != 0 || h >= rt.count {
+		return
+	}
+	chunk, off := rt.chunks[h>>tblChunkBits], h&tblChunkMask
+	if _, ok := chunk[off].(*jsScope); ok {
+		chunk[off] = nil
+	}
 }
 
 // setRootVar binds or rebinds a host global. The frozen engine uses this to

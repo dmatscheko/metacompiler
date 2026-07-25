@@ -1138,6 +1138,12 @@ type machine struct {
 	sizes     map[types.Type]uint64          // Memoized sizeOf: the recursion is paid once per type.
 	fieldOffs map[*types.StructType][]uint64 // Memoized field offsets, for gepStep.
 	framePool []*frame                       // Frames of finished calls, ready to be used again.
+
+	// Handle reclamation, installed by the handle runtime (jsrt.attach); nil
+	// disables it, so the plain IR interpreter is unaffected. See recycle().
+	relNew  string          // Extern that produces a reclaimable handle ("js_scope_new").
+	relThru map[string]bool // Externs that only READ argument 0's handle (see jsScopeThrough).
+	release func(h uint64)  // Drops the value behind a handle that provably went dead.
 }
 
 // funcLayout is the decoded program of one function: every value the function
@@ -1160,6 +1166,10 @@ type funcLayout struct {
 	consts  []uint64 // Constant pool; operand ^i reads consts[i].
 	size    int      // Registers per frame.
 	maxArgs int      // Widest call instruction, for the frame's argument buffer.
+
+	// The destination slots of the reclaimable calls (see recycle): their last
+	// value dies with the frame, so it is released when the call returns.
+	relSlots []int32
 }
 
 // dblock is one decoded basic block: its leading phis (resolved simultaneously),
@@ -1209,6 +1219,7 @@ const (
 	dOpSelect
 	dOpPhi // A phi behind a non-phi instruction; the block loop handles the leading ones.
 	dOpCall
+	dOpCallRel // A call whose result is reclaimable: see recycle.
 )
 
 // dinst is one decoded instruction. Which fields are used depends on op.
@@ -1341,7 +1352,94 @@ func (ma *machine) decode(f *ir.Func) *funcLayout {
 		}
 		db.term = ma.decodeTerm(b.Term, f, blockIdx, opnd)
 	}
+	ma.recycle(l)
 	return l
+}
+
+// recycle marks the calls whose result may be reclaimed when the SAME call
+// executes again in the SAME frame.
+//
+// The handle runtime (jsrt.go) never freed anything, and a loop body is a block,
+// so a program that runs a loop N times leaves N scopes behind - the dominant
+// memory cost of a long-running compiled program. There is no root set to trace:
+// handles live in these register arrays and in the arena as bare integers. What
+// IS decidable is where a handle can go, because the decoded program below holds
+// every operand of the function:
+//
+//   - the result of a `js_scope_new` lives in exactly one register (slots are
+//     dense and never shared between two values), so when the machine executes
+//     that instruction again in the same frame, whatever the register still holds
+//     is the PREVIOUS scope of that same site - one loop iteration earlier;
+//   - that previous handle is unreachable if every use of the value was an
+//     argument that only reads the scope for the duration of the call (relThru:
+//     declare/get/set on that scope, and being the parent of a nested scope,
+//     which keeps a Go POINTER and never needs the parent's handle again).
+//     Any other use - js_closure capturing it, a store into the arena, a phi, a
+//     return, a call to a compiled function - can outlive the frame, and then the
+//     instruction is left alone.
+//
+// Over-approximation is safe: a value wrongly treated as escaping is merely not
+// reclaimed. The scan below therefore reads x/y/z of EVERY instruction, even
+// where a field is a flag rather than an operand.
+//
+// Reclaiming clears the table entry (the value is collected by Go) but never
+// reuses the slot: a reused slot would turn a stale handle into a silently
+// different value, a cleared one into a loud "is not a scope".
+func (ma *machine) recycle(l *funcLayout) {
+	if ma.release == nil {
+		return
+	}
+	cand := map[int32]*dinst{}
+	for bi := range l.blocks {
+		for i := range l.blocks[bi].insts {
+			in := &l.blocks[bi].insts[i]
+			if in.op == dOpCall && in.callee != nil && len(in.callee.Blocks) == 0 && in.callee.Name() == ma.relNew {
+				cand[in.dst] = in
+			}
+		}
+	}
+	if len(cand) == 0 {
+		return
+	}
+	use := func(o int32) { delete(cand, o) }
+	for bi := range l.blocks {
+		db := &l.blocks[bi]
+		for _, ph := range db.phis {
+			for _, inc := range ph.incs {
+				use(inc.x)
+			}
+		}
+		for i := range db.insts {
+			in := &db.insts[i]
+			thru := in.op == dOpCall && in.callee != nil && len(in.callee.Blocks) == 0 && ma.relThru[in.callee.Name()]
+			for ai, a := range in.args {
+				if thru && ai == 0 {
+					continue // Argument 0 is the scope this extern reads.
+				}
+				use(a)
+			}
+			if in.op != dOpCall {
+				use(in.x)
+				use(in.y)
+				use(in.z)
+			}
+			for _, inc := range in.incs {
+				use(inc.x)
+			}
+		}
+		use(db.term.cond)
+	}
+	// In instruction order, not map order: the release order at frame exit stays
+	// the same from run to run.
+	for bi := range l.blocks {
+		for i := range l.blocks[bi].insts {
+			in := &l.blocks[bi].insts[i]
+			if cand[in.dst] == in {
+				in.op = dOpCallRel
+				l.relSlots = append(l.relSlots, in.dst)
+			}
+		}
+	}
 }
 
 // decodeInst translates one non-leading instruction. dst is the register its
@@ -1785,6 +1883,14 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 	}
 	defer func() {
 		ma.depth--
+		// The frame dies here, and with it the last value of every reclaimable
+		// call (see recycle) - on a js_throw unwind too, since the frame is gone
+		// either way and a value that could have escaped it is not marked.
+		for _, s := range l.relSlots {
+			if h := fr.regs[s]; h != 0 {
+				ma.release(h)
+			}
+		}
 		ma.releaseFrame(fr)
 	}()
 
@@ -1868,6 +1974,21 @@ func (ma *machine) exec(fr *frame, in *dinst, prev int32) {
 			return
 		}
 		fr.regs[in.dst] = ma.call(in.callee, args)
+	case dOpCallRel:
+		// A reclaimable extern call (always js_scope_new, see recycle): the
+		// destination register still holds the handle this very instruction
+		// produced the last time round the loop, and nothing else can reach it.
+		args := fr.args[:len(in.args)]
+		for i, a := range in.args {
+			args[i] = fr.rd(a)
+		}
+		if in.fn == nil {
+			in.fn = ma.externHandler(in.callee)
+		}
+		if old := fr.regs[in.dst]; old != 0 {
+			ma.release(old)
+		}
+		fr.regs[in.dst] = in.fn(args)
 	case dOpAdd:
 		fr.regs[in.dst] = maskTo(fr.rd(in.x)+fr.rd(in.y), uint64(in.w))
 	case dOpSub:
