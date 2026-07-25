@@ -231,20 +231,20 @@ var llvmFuncMap = map[string]r.Object{ // The LLVM functions.
 			beginCompileModule(m)
 			return m
 		},
-		"NewOperandBundle":  ir.NewOperandBundle,
-		"NewParam":          ir.NewParam,
-		"NewBr":             ir.NewBr,
-		"NewCallBr":         ir.NewCallBr,
-		"NewCatchRet":       ir.NewCatchRet,
-		"NewCatchSwitch":    ir.NewCatchSwitch,
-		"NewCleanupRet":     ir.NewCleanupRet,
-		"NewCondBr":         ir.NewCondBr,
-		"NewIndirectBr":     ir.NewIndirectBr,
-		"NewInvoke":         ir.NewInvoke,
-		"NewResume":         ir.NewResume,
-		"NewRet":            ir.NewRet,
-		"NewSwitch":         ir.NewSwitch,
-		"NewUnreachable":    ir.NewUnreachable,
+		"NewOperandBundle": ir.NewOperandBundle,
+		"NewParam":         ir.NewParam,
+		"NewBr":            ir.NewBr,
+		"NewCallBr":        ir.NewCallBr,
+		"NewCatchRet":      ir.NewCatchRet,
+		"NewCatchSwitch":   ir.NewCatchSwitch,
+		"NewCleanupRet":    ir.NewCleanupRet,
+		"NewCondBr":        ir.NewCondBr,
+		"NewIndirectBr":    ir.NewIndirectBr,
+		"NewInvoke":        ir.NewInvoke,
+		"NewResume":        ir.NewResume,
+		"NewRet":           ir.NewRet,
+		"NewSwitch":        ir.NewSwitch,
+		"NewUnreachable":   ir.NewUnreachable,
 	},
 
 	// See https://pkg.go.dev/github.com/llir/llvm@v0.3.2/ir/enum
@@ -1134,51 +1134,140 @@ type machine struct {
 	// frozen run that was 12 % of all allocated bytes.
 	externBound map[*ir.Func]func(args []uint64) uint64
 
-	layouts   map[*ir.Func]*funcLayout // Frame layout per function, built on first call.
-	framePool []*frame                 // Frames of finished calls, ready to be used again.
+	layouts   map[*ir.Func]*funcLayout       // Decoded program per function, built on first call.
+	sizes     map[types.Type]uint64          // Memoized sizeOf: the recursion is paid once per type.
+	fieldOffs map[*types.StructType][]uint64 // Memoized field offsets, for gepStep.
+	framePool []*frame                       // Frames of finished calls, ready to be used again.
 }
 
-// funcLayout is the frame layout of one function: every value the function can
-// define - its parameters and the results of its instructions - gets a dense
+// funcLayout is the decoded program of one function: every value the function
+// can define - its parameters and the results of its instructions - gets a dense
 // slot, so one invocation is a flat register array instead of a map keyed by the
-// instruction. That map was the most expensive thing in the interpreter: one
-// hash assignment per executed instruction and one hash lookup per operand, plus
-// a fresh map per call (41 MB per compile of languages/kotlin-to-llvm-ir.abnf
-// under -frozen, and with it ~18 % of the run in Go's map code).
+// instruction, and every instruction is decoded ONCE into a small fixed struct
+// with an opcode, a destination slot and pre-resolved operands. Before that the
+// interpreter walked the llir data structure itself: a type switch over an
+// interface per instruction, a hash lookup per operand (valueOf), a big.Int read
+// per constant use and a re-scan for the leading phis on every block entry -
+// together ~20 % of a frozen mec run and ~40 % of the interpreter's own time.
 //
-// The numbering is parameters first, then the instructions of the blocks in
-// order. That order lets the block loop derive the slot an instruction writes
-// from its POSITION (blockBase + index), so the writer side needs no lookup at
-// all; only operand reads still consult slots, and that map is built once per
-// function and never written again.
+// The slot numbering is parameters first, then the instructions of the blocks in
+// order; instructions without a result (a store) still take a slot so the
+// numbering stays positional. Operands are encoded in one int32: >= 0 is a
+// register slot, < 0 is ^index into consts, the function's pool of values that
+// are already known when the function is decoded (constants, global addresses).
 type funcLayout struct {
-	slots     map[value.Value]int // An operand's register, for valueOf.
-	blockBase map[*ir.Block]int   // Register of a block's first instruction.
-	size      int                 // Registers per frame.
-	maxArgs   int                 // Widest call instruction, for the frame's argument buffer.
+	blocks  []dblock // The decoded blocks, in the function's own order.
+	consts  []uint64 // Constant pool; operand ^i reads consts[i].
+	size    int      // Registers per frame.
+	maxArgs int      // Widest call instruction, for the frame's argument buffer.
 }
 
-// layoutOf returns the frame layout of a function, building it on first use.
+// dblock is one decoded basic block: its leading phis (resolved simultaneously),
+// its remaining instructions and its terminator.
+type dblock struct {
+	phis  []dphi
+	insts []dinst
+	term  dterm
+}
+
+// dphi is a decoded phi: one destination slot and one operand per predecessor.
+type dphi struct {
+	dst  int32
+	incs []dphiInc
+}
+
+type dphiInc struct {
+	pred int32 // Index of the predecessor block, or -2 if it is not a block of this function
+	// (-1 is the "no predecessor yet" of the entry block, which must not match).
+	x int32 // Operand to take when we came from that block.
+}
+
+// The opcodes of the decoded instruction stream.
+const (
+	dOpAlloca uint8 = iota
+	dOpLoad
+	dOpStore
+	dOpStoreConst // Store of an aggregate constant (array / struct initializer).
+	dOpGep
+	dOpAdd
+	dOpSub
+	dOpMul
+	dOpUDiv
+	dOpSDiv
+	dOpURem
+	dOpSRem
+	dOpAnd
+	dOpOr
+	dOpXor
+	dOpShl
+	dOpLShr
+	dOpAShr
+	dOpICmp
+	dOpMask // zext / trunc / ptrtoint: mask the operand to w bits.
+	dOpSExt
+	dOpCopy // inttoptr / bitcast: the value passes through unchanged.
+	dOpSelect
+	dOpPhi // A phi behind a non-phi instruction; the block loop handles the leading ones.
+	dOpCall
+)
+
+// dinst is one decoded instruction. Which fields are used depends on op.
+type dinst struct {
+	op      uint8
+	w, w2   uint8                      // Operand bit width; w2 is the target width of a sext.
+	pred    enum.IPred                 // The comparison of an icmp.
+	dst     int32                      // Destination register.
+	x, y, z int32                      // Operands (z is the false value of a select).
+	size    uint64                     // Byte size of a load / store, element size of an alloca or gep.
+	args    []int32                    // Call arguments, or the indices of a gep.
+	incs    []dphiInc                  // The incoming values of a non-leading phi.
+	callee  *ir.Func                   // The called function.
+	fn      func(args []uint64) uint64 // An extern callee's handler, bound on first execution.
+	gep     *ir.InstGetElementPtr      // The gep whose index types this instruction walks.
+	cst     constant.Constant          // The aggregate constant of an dOpStoreConst.
+}
+
+// The terminator kinds of a decoded block.
+const (
+	tBr uint8 = iota
+	tCondBr
+	tRet
+	tRetVoid
+	tUnreachable
+)
+
+// dterm is a decoded terminator: a branch to block indices, or a return.
+type dterm struct {
+	kind uint8
+	cond int32 // The condition of a conditional branch, or the returned operand.
+	t, f int32 // Target block indices.
+}
+
+// layoutOf returns the decoded program of a function, decoding it on first use.
 func (ma *machine) layoutOf(f *ir.Func) *funcLayout {
 	if l, ok := ma.layouts[f]; ok {
 		return l
 	}
-	l := &funcLayout{
-		slots:     make(map[value.Value]int, len(f.Params)+16),
-		blockBase: make(map[*ir.Block]int, len(f.Blocks)),
-	}
+	l := ma.decode(f)
+	ma.layouts[f] = l
+	return l
+}
+
+// decode numbers the values of a function and translates its instructions into
+// the decoded form described at funcLayout.
+func (ma *machine) decode(f *ir.Func) *funcLayout {
+	l := &funcLayout{}
+	slots := make(map[value.Value]int32, len(f.Params)+16)
 	for _, p := range f.Params {
-		l.slots[p] = l.size
+		slots[p] = int32(l.size)
 		l.size++
 	}
-	for _, b := range f.Blocks {
-		l.blockBase[b] = l.size
+	blockIdx := make(map[*ir.Block]int32, len(f.Blocks))
+	for i, b := range f.Blocks {
+		blockIdx[b] = int32(i)
 		for _, inst := range b.Insts {
-			// Instructions without a result (a store) still take a slot: the
-			// positional arithmetic above depends on the slots of one block
-			// being consecutive.
 			if v, ok := inst.(value.Value); ok {
-				l.slots[v] = l.size
+				slots[v] = int32(l.size)
 			}
 			if call, ok := inst.(*ir.InstCall); ok && len(call.Args) > l.maxArgs {
 				l.maxArgs = len(call.Args)
@@ -1186,8 +1275,188 @@ func (ma *machine) layoutOf(f *ir.Func) *funcLayout {
 			l.size++
 		}
 	}
-	ma.layouts[f] = l
+
+	// pool interns a value that is already known here into the constant pool and
+	// returns its operand encoding.
+	pool := map[value.Value]int32{}
+	opnd := func(v value.Value) int32 {
+		if slot, ok := slots[v]; ok {
+			return slot
+		}
+		if o, ok := pool[v]; ok {
+			return o
+		}
+		var val uint64
+		switch c := v.(type) {
+		case *ir.Global:
+			val = ma.globals[c]
+		case constant.Constant:
+			val = ma.constValue(c)
+		default:
+			panic("IR interpreter: use of an undefined value: " + v.Ident())
+		}
+		o := ^int32(len(l.consts))
+		l.consts = append(l.consts, val)
+		pool[v] = o
+		return o
+	}
+	phiOf := func(phi *ir.InstPhi) []dphiInc {
+		incs := make([]dphiInc, 0, len(phi.Incs))
+		for _, inc := range phi.Incs {
+			pred := int32(-2)
+			if b, ok := inc.Pred.(*ir.Block); ok {
+				if i, ok := blockIdx[b]; ok {
+					pred = i
+				}
+			}
+			incs = append(incs, dphiInc{pred: pred, x: opnd(inc.X)})
+		}
+		return incs
+	}
+
+	l.blocks = make([]dblock, len(f.Blocks))
+	slot := int32(len(f.Params))
+	for bi, b := range f.Blocks {
+		db := &l.blocks[bi]
+		// The phis at the top of a block resolve SIMULTANEOUSLY: the block loop
+		// reads every incoming value against the predecessor's frame first and
+		// assigns afterwards. Resolving them one after another let a phi that
+		// reads an earlier phi of the same block see the NEW value, silently
+		// miscompiling loop-carried swaps ("%a = phi ...,%b" next to
+		// "%b = phi ...,%a").
+		numPhis := 0
+		for numPhis < len(b.Insts) {
+			phi, ok := b.Insts[numPhis].(*ir.InstPhi)
+			if !ok {
+				break
+			}
+			db.phis = append(db.phis, dphi{dst: slot + int32(numPhis), incs: phiOf(phi)})
+			numPhis++
+		}
+		slot += int32(numPhis)
+		db.insts = make([]dinst, 0, len(b.Insts)-numPhis)
+		for _, inst := range b.Insts[numPhis:] {
+			db.insts = append(db.insts, ma.decodeInst(inst, slot, opnd, phiOf))
+			slot++
+		}
+		db.term = ma.decodeTerm(b.Term, f, blockIdx, opnd)
+	}
 	return l
+}
+
+// decodeInst translates one non-leading instruction. dst is the register its
+// result goes into.
+func (ma *machine) decodeInst(inst ir.Instruction, dst int32, opnd func(value.Value) int32, phiOf func(*ir.InstPhi) []dphiInc) dinst {
+	d := dinst{dst: dst}
+	binary := func(op uint8, x, y value.Value) dinst {
+		d.op, d.x, d.y, d.w = op, opnd(x), opnd(y), wbits(x.Type())
+		return d
+	}
+	switch inst := inst.(type) {
+	case *ir.InstAlloca:
+		d.op, d.size = dOpAlloca, ma.sizeOf(inst.ElemType)
+		if inst.NElems != nil {
+			d.x, d.y = opnd(inst.NElems), 1 // y != 0 means "the element count is in x".
+		}
+	case *ir.InstLoad:
+		d.op, d.x, d.size = dOpLoad, opnd(inst.Src), ma.sizeOf(inst.ElemType)
+	case *ir.InstStore:
+		// Aggregate constants (e.g. zeroinitializer of an array or struct) are written as a whole.
+		if c, ok := inst.Src.(constant.Constant); ok {
+			switch inst.Src.Type().(type) {
+			case *types.ArrayType, *types.StructType:
+				d.op, d.x, d.cst = dOpStoreConst, opnd(inst.Dst), c
+				return d
+			}
+		}
+		d.op, d.x, d.y, d.size = dOpStore, opnd(inst.Dst), opnd(inst.Src), ma.sizeOf(inst.Src.Type())
+	case *ir.InstGetElementPtr:
+		d.op, d.x, d.size, d.gep = dOpGep, opnd(inst.Src), ma.sizeOf(inst.ElemType), inst
+		for _, index := range inst.Indices {
+			d.args = append(d.args, opnd(index))
+		}
+	case *ir.InstAdd:
+		return binary(dOpAdd, inst.X, inst.Y)
+	case *ir.InstSub:
+		return binary(dOpSub, inst.X, inst.Y)
+	case *ir.InstMul:
+		return binary(dOpMul, inst.X, inst.Y)
+	case *ir.InstUDiv:
+		return binary(dOpUDiv, inst.X, inst.Y)
+	case *ir.InstSDiv:
+		return binary(dOpSDiv, inst.X, inst.Y)
+	case *ir.InstURem:
+		return binary(dOpURem, inst.X, inst.Y)
+	case *ir.InstSRem:
+		return binary(dOpSRem, inst.X, inst.Y)
+	case *ir.InstAnd:
+		return binary(dOpAnd, inst.X, inst.Y)
+	case *ir.InstOr:
+		return binary(dOpOr, inst.X, inst.Y)
+	case *ir.InstXor:
+		return binary(dOpXor, inst.X, inst.Y)
+	case *ir.InstShl:
+		return binary(dOpShl, inst.X, inst.Y)
+	case *ir.InstLShr:
+		return binary(dOpLShr, inst.X, inst.Y)
+	case *ir.InstAShr:
+		return binary(dOpAShr, inst.X, inst.Y)
+	case *ir.InstICmp:
+		d = binary(dOpICmp, inst.X, inst.Y)
+		d.pred = inst.Pred
+	case *ir.InstZExt:
+		d.op, d.x, d.w = dOpMask, opnd(inst.From), wbits(inst.From.Type())
+	case *ir.InstSExt:
+		d.op, d.x = dOpSExt, opnd(inst.From)
+		d.w, d.w2 = wbits(inst.From.Type()), wbits(inst.To)
+	case *ir.InstTrunc:
+		d.op, d.x, d.w = dOpMask, opnd(inst.From), wbits(inst.To)
+	case *ir.InstIntToPtr:
+		// Addresses are plain offsets into the arena; the width already fits.
+		d.op, d.x = dOpCopy, opnd(inst.From)
+	case *ir.InstPtrToInt:
+		d.op, d.x, d.w = dOpMask, opnd(inst.From), wbits(inst.To)
+	case *ir.InstBitCast:
+		d.op, d.x = dOpCopy, opnd(inst.From)
+	case *ir.InstSelect:
+		d.op, d.x, d.y, d.z = dOpSelect, opnd(inst.Cond), opnd(inst.ValueTrue), opnd(inst.ValueFalse)
+	case *ir.InstPhi:
+		// Only reached for a phi BEHIND a non-phi instruction (invalid LLVM,
+		// kept sequential for compatibility).
+		d.op, d.incs = dOpPhi, phiOf(inst)
+	case *ir.InstCall:
+		callee, ok := inst.Callee.(*ir.Func)
+		if !ok {
+			panic(fmt.Sprintf("IR interpreter: unsupported callee type %T (function pointers are not supported)", inst.Callee))
+		}
+		d.op, d.callee = dOpCall, callee
+		for _, a := range inst.Args {
+			d.args = append(d.args, opnd(a))
+		}
+	default:
+		panic(fmt.Sprintf("IR interpreter: unsupported instruction type %T", inst))
+	}
+	return d
+}
+
+// decodeTerm translates one terminator; branch targets become block indices.
+func (ma *machine) decodeTerm(term ir.Terminator, f *ir.Func, blockIdx map[*ir.Block]int32, opnd func(value.Value) int32) dterm {
+	switch term := term.(type) {
+	case *ir.TermBr:
+		return dterm{kind: tBr, t: blockIdx[term.Target.(*ir.Block)]}
+	case *ir.TermCondBr:
+		return dterm{kind: tCondBr, cond: opnd(term.Cond),
+			t: blockIdx[term.TargetTrue.(*ir.Block)], f: blockIdx[term.TargetFalse.(*ir.Block)]}
+	case *ir.TermRet:
+		if term.X == nil {
+			return dterm{kind: tRetVoid}
+		}
+		return dterm{kind: tRet, cond: opnd(term.X)}
+	case *ir.TermUnreachable:
+		return dterm{kind: tUnreachable}
+	default:
+		panic(fmt.Sprintf("IR interpreter: unsupported terminator %T in %s", term, f.Ident()))
+	}
 }
 
 // frame holds the SSA values of one function invocation, one register per slot
@@ -1198,6 +1467,14 @@ type frame struct {
 	regs   []uint64 // The registers, indexed by layout slot.
 	args   []uint64 // Argument buffer shared by all call instructions of this frame.
 	layout *funcLayout
+}
+
+// rd reads one decoded operand: a register, or a value of the constant pool.
+func (fr *frame) rd(o int32) uint64 {
+	if o >= 0 {
+		return fr.regs[o]
+	}
+	return fr.layout.consts[^o]
 }
 
 func (ma *machine) acquireFrame(l *funcLayout) *frame {
@@ -1236,6 +1513,8 @@ func newMachine(m *ir.Module, input string) *machine {
 		funcs:       map[string]*ir.Func{},
 		externBound: map[*ir.Func]func(args []uint64) uint64{},
 		layouts:     map[*ir.Func]*funcLayout{},
+		sizes:       map[types.Type]uint64{},
+		fieldOffs:   map[*types.StructType][]uint64{},
 		input:       []byte(input),
 	}
 	for _, g := range m.Globals {
@@ -1288,6 +1567,17 @@ func (ma *machine) alloc(size uint64) uint64 {
 // back (packed layout): the interpreter defines its own ABI, real alignment
 // padding does not exist here.
 func (ma *machine) sizeOf(t types.Type) uint64 {
+	if n, ok := ma.sizes[t]; ok {
+		return n
+	}
+	n := ma.sizeOfUncached(t)
+	ma.sizes[t] = n
+	return n
+}
+
+// sizeOfUncached is the recursion behind sizeOf; every step of it goes through
+// the cache, so a nested type is measured once and not once per enclosing type.
+func (ma *machine) sizeOfUncached(t types.Type) uint64 {
 	switch t := t.(type) {
 	case *types.IntType:
 		return (t.BitSize + 7) / 8
@@ -1314,14 +1604,30 @@ func (ma *machine) gepStep(t types.Type, idx uint64) (uint64, types.Type) {
 	case *types.ArrayType:
 		return idx * ma.sizeOf(t.ElemType), t.ElemType
 	case *types.StructType:
-		var off uint64
-		for i := uint64(0); i < idx; i++ {
-			off += ma.sizeOf(t.Fields[i])
+		offs, ok := ma.fieldOffs[t]
+		if !ok {
+			offs = make([]uint64, len(t.Fields))
+			var off uint64
+			for i, f := range t.Fields {
+				offs[i] = off
+				off += ma.sizeOf(f)
+			}
+			ma.fieldOffs[t] = offs
 		}
-		return off, t.Fields[idx]
+		return offs[idx], t.Fields[idx]
 	default:
 		panic("IR interpreter: getelementptr only supports arrays and structs, not " + t.LLString())
 	}
+}
+
+// wbits is widthOf as a decoded operand width. Everything at or above 64 bits is
+// stored as 64: maskTo and signedOf treat those identically, so the clamp keeps a
+// width of e.g. i128 from wrapping around the byte.
+func wbits(t types.Type) uint8 {
+	if w := widthOf(t); w < 64 {
+		return uint8(w)
+	}
+	return 64
 }
 
 // widthOf returns the bit width used for calculations with values of that type.
@@ -1452,21 +1758,6 @@ func (ma *machine) writeConst(off uint64, c constant.Constant) {
 	}
 }
 
-// valueOf resolves an SSA value inside the current frame.
-func (ma *machine) valueOf(fr *frame, v value.Value) uint64 {
-	switch v := v.(type) {
-	case *ir.Global:
-		return ma.globals[v]
-	case constant.Constant:
-		return ma.constValue(v)
-	default:
-		if slot, ok := fr.layout.slots[v]; ok {
-			return fr.regs[slot]
-		}
-		panic("IR interpreter: use of an undefined value: " + v.Ident())
-	}
-}
-
 // call executes a function with the given argument values and returns its return value.
 // Functions without blocks are treated as external functions.
 func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
@@ -1476,7 +1767,8 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 	if len(args) != len(f.Params) {
 		panic(fmt.Sprintf("IR interpreter: call of %s with %d arguments, but it has %d parameters", f.Ident(), len(args), len(f.Params)))
 	}
-	fr := ma.acquireFrame(ma.layoutOf(f))
+	l := ma.layoutOf(f)
+	fr := ma.acquireFrame(l)
 	for i := range f.Params {
 		fr.regs[i] = args[i] // The parameters are the first slots of the layout.
 	}
@@ -1496,215 +1788,171 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 		ma.releaseFrame(fr)
 	}()
 
-	block := f.Blocks[0]
-	var prevBlock *ir.Block // The block we came from. Only needed by phi.
+	bi, prev := int32(0), int32(-1) // The current block and the one we came from (phis need it).
+	var phiVals [8]uint64
 	for {
-		base := fr.layout.blockBase[block] // The slot of this block's first instruction.
-		// The phis at the top of a block resolve SIMULTANEOUSLY: read every
-		// incoming value against the predecessor's frame first, then assign.
-		// Resolving them one after another let a phi that reads an earlier phi
-		// of the same block see the NEW value, silently miscompiling
-		// loop-carried swaps ("%a = phi ...,%b" next to "%b = phi ...,%a").
-		numPhis := 0
-		for numPhis < len(block.Insts) {
-			if _, ok := block.Insts[numPhis].(*ir.InstPhi); !ok {
-				break
+		b := &l.blocks[bi]
+		// The leading phis of a block resolve SIMULTANEOUSLY: read every incoming
+		// value against the predecessor's frame first, then assign (see decode).
+		if n := len(b.phis); n > 0 {
+			vals := phiVals[:]
+			if n > len(vals) {
+				vals = make([]uint64, n)
 			}
-			numPhis++
-		}
-		if numPhis > 0 {
-			phiVals := make([]uint64, numPhis)
-			for i := 0; i < numPhis; i++ {
+			for i := range b.phis {
 				ma.steps++
 				if ma.steps > machineMaxSteps {
 					panic("IR interpreter: step limit exceeded (endless loop?)")
 				}
-				phiVals[i] = ma.phiValue(fr, block.Insts[i].(*ir.InstPhi), prevBlock)
+				vals[i] = fr.rd(phiOperand(b.phis[i].incs, prev))
 			}
-			for i := 0; i < numPhis; i++ {
-				fr.regs[base+i] = phiVals[i]
+			for i := range b.phis {
+				fr.regs[b.phis[i].dst] = vals[i]
 			}
 		}
-		for i, inst := range block.Insts[numPhis:] {
+		for i := range b.insts {
 			ma.steps++
 			if ma.steps > machineMaxSteps {
 				panic("IR interpreter: step limit exceeded (endless loop?)")
 			}
-			ma.exec(fr, inst, prevBlock, base+numPhis+i)
+			ma.exec(fr, &b.insts[i], prev)
 		}
-		switch term := block.Term.(type) {
-		case *ir.TermBr:
-			prevBlock, block = block, term.Target.(*ir.Block)
-		case *ir.TermCondBr:
-			if maskTo(ma.valueOf(fr, term.Cond), 1) != 0 {
-				prevBlock, block = block, term.TargetTrue.(*ir.Block)
+		switch b.term.kind {
+		case tBr:
+			prev, bi = bi, b.term.t
+		case tCondBr:
+			if fr.rd(b.term.cond)&1 != 0 {
+				prev, bi = bi, b.term.t
 			} else {
-				prevBlock, block = block, term.TargetFalse.(*ir.Block)
+				prev, bi = bi, b.term.f
 			}
-		case *ir.TermRet:
-			if term.X == nil {
-				return 0
-			}
-			return ma.valueOf(fr, term.X)
-		case *ir.TermUnreachable:
-			panic("IR interpreter: reached an unreachable terminator in " + f.Ident())
+		case tRet:
+			return fr.rd(b.term.cond)
+		case tRetVoid:
+			return 0
 		default:
-			panic(fmt.Sprintf("IR interpreter: unsupported terminator %T in %s", term, f.Ident()))
+			panic("IR interpreter: reached an unreachable terminator in " + f.Ident())
 		}
 	}
 }
 
-// phiValue picks a phi's incoming value for the block we came from.
-func (ma *machine) phiValue(fr *frame, phi *ir.InstPhi, prevBlock *ir.Block) uint64 {
-	for _, inc := range phi.Incs {
-		if inc.Pred == prevBlock {
-			return ma.valueOf(fr, inc.X)
+// phiOperand picks a phi's incoming operand for the block we came from.
+func phiOperand(incs []dphiInc, prev int32) int32 {
+	for i := range incs {
+		if incs[i].pred == prev {
+			return incs[i].x
 		}
 	}
 	panic("IR interpreter: phi has no incoming value for the previous block")
 }
 
-// exec executes one instruction inside the given frame. slot is the register the
-// instruction's result goes into; the caller knows it from the instruction's
-// position, so there is no lookup here (see funcLayout).
-func (ma *machine) exec(fr *frame, inst ir.Instruction, prevBlock *ir.Block, slot int) {
-	switch inst := inst.(type) {
-	case *ir.InstAlloca:
-		n := uint64(1)
-		if inst.NElems != nil {
-			n = ma.valueOf(fr, inst.NElems)
-		}
-		fr.regs[slot] = ma.alloc(ma.sizeOf(inst.ElemType) * n)
-	case *ir.InstLoad:
-		fr.regs[slot] = ma.load(ma.valueOf(fr, inst.Src), ma.sizeOf(inst.ElemType))
-	case *ir.InstStore:
-		// Aggregate constants (e.g. zeroinitializer of an array or struct) are written as a whole.
-		if c, ok := inst.Src.(constant.Constant); ok {
-			switch inst.Src.Type().(type) {
-			case *types.ArrayType, *types.StructType:
-				ma.writeConst(ma.valueOf(fr, inst.Dst), c)
-				return
-			}
-		}
-		ma.store(ma.valueOf(fr, inst.Dst), ma.valueOf(fr, inst.Src), ma.sizeOf(inst.Src.Type()))
-	case *ir.InstGetElementPtr:
-		// The first index scales by the whole element type, the following ones step
-		// into arrays and structs.
-		off := ma.valueOf(fr, inst.Src) + ma.valueOf(fr, inst.Indices[0])*ma.sizeOf(inst.ElemType)
-		t := inst.ElemType
-		for _, index := range inst.Indices[1:] {
-			d, next := ma.gepStep(t, ma.valueOf(fr, index))
-			off += d
-			t = next
-		}
-		fr.regs[slot] = off
-	case *ir.InstAdd:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstSub:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstMul:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstUDiv:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstSDiv:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstURem:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstSRem:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstAnd:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstOr:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstXor:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstShl:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstLShr:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstAShr:
-		fr.regs[slot] = ma.binOp(fr, inst, inst.X, inst.Y)
-	case *ir.InstICmp:
-		if ma.icmp(inst.Pred, ma.valueOf(fr, inst.X), ma.valueOf(fr, inst.Y), widthOf(inst.X.Type())) {
-			fr.regs[slot] = 1
-		} else {
-			fr.regs[slot] = 0
-		}
-	case *ir.InstZExt:
-		fr.regs[slot] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.From.Type()))
-	case *ir.InstSExt:
-		fr.regs[slot] = maskTo(uint64(signedOf(ma.valueOf(fr, inst.From), widthOf(inst.From.Type()))), widthOf(inst.To))
-	case *ir.InstTrunc:
-		fr.regs[slot] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
-	case *ir.InstIntToPtr:
-		// Addresses are plain offsets into the arena; the width already fits.
-		fr.regs[slot] = ma.valueOf(fr, inst.From)
-	case *ir.InstPtrToInt:
-		fr.regs[slot] = maskTo(ma.valueOf(fr, inst.From), widthOf(inst.To))
-	case *ir.InstBitCast:
-		fr.regs[slot] = ma.valueOf(fr, inst.From)
-	case *ir.InstSelect:
-		if maskTo(ma.valueOf(fr, inst.Cond), 1) != 0 {
-			fr.regs[slot] = ma.valueOf(fr, inst.ValueTrue)
-		} else {
-			fr.regs[slot] = ma.valueOf(fr, inst.ValueFalse)
-		}
-	case *ir.InstPhi:
-		// Leading phis are resolved simultaneously by the block loop in call();
-		// this fallback only runs for a phi behind a non-phi instruction
-		// (invalid LLVM, kept sequential for compatibility).
-		fr.regs[slot] = ma.phiValue(fr, inst, prevBlock)
-	case *ir.InstCall:
-		callee, ok := inst.Callee.(*ir.Func)
-		if !ok {
-			panic(fmt.Sprintf("IR interpreter: unsupported callee type %T (function pointers are not supported)", inst.Callee))
-		}
+// exec executes one decoded instruction inside the given frame. The destination
+// register is part of the instruction, so there is no lookup here (see funcLayout).
+func (ma *machine) exec(fr *frame, in *dinst, prev int32) {
+	switch in.op {
+	case dOpCall:
 		// The frame's argument buffer is wide enough for every call of this
 		// function, and the callee copies the values into its own registers
 		// right away - so one buffer per frame does instead of a slice per call.
-		args := fr.args[:len(inst.Args)]
-		for i, a := range inst.Args {
-			args[i] = ma.valueOf(fr, a)
+		args := fr.args[:len(in.args)]
+		for i, a := range in.args {
+			args[i] = fr.rd(a)
 		}
-		fr.regs[slot] = ma.call(callee, args)
+		if len(in.callee.Blocks) == 0 {
+			// An extern: its handler is bound to the instruction on first use, so
+			// neither the name nor the per-machine handler table is touched again.
+			if in.fn == nil {
+				in.fn = ma.externHandler(in.callee)
+			}
+			fr.regs[in.dst] = in.fn(args)
+			return
+		}
+		fr.regs[in.dst] = ma.call(in.callee, args)
+	case dOpAdd:
+		fr.regs[in.dst] = maskTo(fr.rd(in.x)+fr.rd(in.y), uint64(in.w))
+	case dOpSub:
+		fr.regs[in.dst] = maskTo(fr.rd(in.x)-fr.rd(in.y), uint64(in.w))
+	case dOpMul:
+		fr.regs[in.dst] = maskTo(fr.rd(in.x)*fr.rd(in.y), uint64(in.w))
+	case dOpICmp:
+		bits := uint64(in.w)
+		if ma.icmp(in.pred, fr.rd(in.x), fr.rd(in.y), bits) {
+			fr.regs[in.dst] = 1
+		} else {
+			fr.regs[in.dst] = 0
+		}
+	case dOpMask:
+		fr.regs[in.dst] = maskTo(fr.rd(in.x), uint64(in.w))
+	case dOpCopy:
+		fr.regs[in.dst] = fr.rd(in.x)
+	case dOpSExt:
+		fr.regs[in.dst] = maskTo(uint64(signedOf(fr.rd(in.x), uint64(in.w))), uint64(in.w2))
+	case dOpLoad:
+		fr.regs[in.dst] = ma.load(fr.rd(in.x), in.size)
+	case dOpStore:
+		ma.store(fr.rd(in.x), fr.rd(in.y), in.size)
+	case dOpStoreConst:
+		ma.writeConst(fr.rd(in.x), in.cst)
+	case dOpAlloca:
+		n := uint64(1)
+		if in.y != 0 {
+			n = fr.rd(in.x)
+		}
+		fr.regs[in.dst] = ma.alloc(in.size * n)
+	case dOpGep:
+		// The first index scales by the whole element type, the following ones step
+		// into arrays and structs.
+		off := fr.rd(in.x) + fr.rd(in.args[0])*in.size
+		t := in.gep.ElemType
+		for _, index := range in.args[1:] {
+			d, next := ma.gepStep(t, fr.rd(index))
+			off += d
+			t = next
+		}
+		fr.regs[in.dst] = off
+	case dOpSelect:
+		if fr.rd(in.x)&1 != 0 {
+			fr.regs[in.dst] = fr.rd(in.y)
+		} else {
+			fr.regs[in.dst] = fr.rd(in.z)
+		}
+	case dOpPhi:
+		fr.regs[in.dst] = fr.rd(phiOperand(in.incs, prev))
 	default:
-		panic(fmt.Sprintf("IR interpreter: unsupported instruction type %T", inst))
+		fr.regs[in.dst] = ma.binOp(fr, in)
 	}
 }
 
-// binOp executes one binary integer instruction. The result is masked to the width of the operands.
-func (ma *machine) binOp(fr *frame, inst ir.Instruction, xv, yv value.Value) uint64 {
-	bits := widthOf(xv.Type())
-	x := maskTo(ma.valueOf(fr, xv), bits)
-	y := maskTo(ma.valueOf(fr, yv), bits)
+// binOp executes the binary integer instructions that are not inlined into exec.
+// The result is masked to the width of the operands.
+func (ma *machine) binOp(fr *frame, in *dinst) uint64 {
+	bits := uint64(in.w)
+	x := maskTo(fr.rd(in.x), bits)
+	y := maskTo(fr.rd(in.y), bits)
 	var r uint64
-	switch inst.(type) {
-	case *ir.InstAdd:
-		r = x + y
-	case *ir.InstSub:
-		r = x - y
-	case *ir.InstMul:
-		r = x * y
-	case *ir.InstUDiv:
+	switch in.op {
+	case dOpUDiv:
 		r = x / y
-	case *ir.InstSDiv:
+	case dOpSDiv:
 		r = uint64(signedOf(x, bits) / signedOf(y, bits))
-	case *ir.InstURem:
+	case dOpURem:
 		r = x % y
-	case *ir.InstSRem:
+	case dOpSRem:
 		r = uint64(signedOf(x, bits) % signedOf(y, bits))
-	case *ir.InstAnd:
+	case dOpAnd:
 		r = x & y
-	case *ir.InstOr:
+	case dOpOr:
 		r = x | y
-	case *ir.InstXor:
+	case dOpXor:
 		r = x ^ y
-	case *ir.InstShl:
+	case dOpShl:
 		r = x << y
-	case *ir.InstLShr:
+	case dOpLShr:
 		r = x >> y
-	case *ir.InstAShr:
+	case dOpAShr:
 		r = uint64(signedOf(x, bits) >> y)
+	default:
+		panic(fmt.Sprintf("IR interpreter: unsupported opcode %d", in.op))
 	}
 	return maskTo(r, bits)
 }
@@ -1739,21 +1987,25 @@ func (ma *machine) icmp(pred enum.IPred, x, y uint64, bits uint64) bool {
 	}
 }
 
+// externHandler returns the bound handler of one declared function, resolving and
+// caching it if it entered the module after bindExterns() ran.
+func (ma *machine) externHandler(f *ir.Func) func(args []uint64) uint64 {
+	if fn, ok := ma.externBound[f]; ok {
+		return fn
+	}
+	fn := ma.resolveExtern(f)
+	if fn == nil {
+		panic("IR interpreter: call to undefined external function " + f.Ident())
+	}
+	ma.externBound[f] = fn
+	return fn
+}
+
 // extern calls one of the external functions that the compiler grammars use: a host
 // function of the attached runtime (the js_* of jsrt.go) or one of the built-in libc like
 // ones. The handler is looked up by function OBJECT, not by name - see externBound.
 func (ma *machine) extern(f *ir.Func, args []uint64) uint64 {
-	fn, ok := ma.externBound[f]
-	if !ok {
-		// Not pre-bound: a function that entered the module after bindExterns() ran.
-		// Undefined ones stay unbound, they panic right below instead of being cached.
-		fn = ma.resolveExtern(f)
-		if fn == nil {
-			panic("IR interpreter: call to undefined external function " + f.Ident())
-		}
-		ma.externBound[f] = fn
-	}
-	return fn(args)
+	return ma.externHandler(f)(args)
 }
 
 // bindExterns resolves the handler of every declared (block-less) function of the module
