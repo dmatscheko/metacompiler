@@ -1141,9 +1141,10 @@ type machine struct {
 
 	// Handle reclamation, installed by the handle runtime (jsrt.attach); nil
 	// disables it, so the plain IR interpreter is unaffected. See recycle().
-	relNew  string          // Extern that produces a reclaimable handle ("js_scope_new").
-	relThru map[string]bool // Externs that only READ argument 0's handle (see jsScopeThrough).
-	release func(h uint64)  // Drops the value behind a handle that provably went dead.
+	relNew  map[string]bool   // Externs producing a reclaimable handle (js_scope_new, js_arr_new).
+	relThru map[string]uint32 // Per extern, the argument positions whose handle it only READS (see jsThroughArgs).
+	release func(h uint64)    // Drops the value behind a handle that provably went dead.
+	pin     func(h uint64)    // Marks an argument array the callee can keep past the call.
 }
 
 // funcLayout is the decoded program of one function: every value the function
@@ -1170,6 +1171,11 @@ type funcLayout struct {
 	// The destination slots of the reclaimable calls (see recycle): their last
 	// value dies with the frame, so it is released when the call returns.
 	relSlots []int32
+
+	// pinArgs says that this function can keep its argument array past its own
+	// return (it declares 'arguments', stores it, returns it, ...), so the array
+	// must be pinned when the frame starts. See recycle.
+	pinArgs bool
 }
 
 // dblock is one decoded basic block: its leading phis (resolved simultaneously),
@@ -1352,7 +1358,7 @@ func (ma *machine) decode(f *ir.Func) *funcLayout {
 		}
 		db.term = ma.decodeTerm(b.Term, f, blockIdx, opnd)
 	}
-	ma.recycle(l)
+	ma.recycle(l, f)
 	return l
 }
 
@@ -1366,26 +1372,42 @@ func (ma *machine) decode(f *ir.Func) *funcLayout {
 // IS decidable is where a handle can go, because the decoded program below holds
 // every operand of the function:
 //
-//   - the result of a `js_scope_new` lives in exactly one register (slots are
-//     dense and never shared between two values), so when the machine executes
-//     that instruction again in the same frame, whatever the register still holds
-//     is the PREVIOUS scope of that same site - one loop iteration earlier;
+//   - the result of a `js_scope_new` (or `js_arr_new`) lives in exactly one
+//     register (slots are dense and never shared between two values), so when the
+//     machine executes that instruction again in the same frame, whatever the
+//     register still holds is the PREVIOUS value of that same site - one loop
+//     iteration earlier;
 //   - that previous handle is unreachable if every use of the value was an
-//     argument that only reads the scope for the duration of the call (relThru:
-//     declare/get/set on that scope, and being the parent of a nested scope,
-//     which keeps a Go POINTER and never needs the parent's handle again).
-//     Any other use - js_closure capturing it, a store into the arena, a phi, a
-//     return, a call to a compiled function - can outlive the frame, and then the
-//     instruction is left alone.
+//     argument position the extern only READS (relThru: declare/get/set on that
+//     scope, being the parent of a nested scope - which keeps a Go POINTER and
+//     never needs the parent's handle again - pushing onto that array, or being
+//     the argument array of a call). Any other use - js_closure capturing it, a
+//     store into the arena, a phi, a return, a value argument of any extern -
+//     can outlive the frame, and then the instruction is left alone.
 //
-// Over-approximation is safe: a value wrongly treated as escaping is merely not
-// reclaimed. The scan below therefore reads x/y/z of EVERY instruction, even
-// where a field is a flag rather than an operand.
+// The second kind of site is the per-call ARGUMENT ARRAY: every call site emits
+// js_arr_new plus a js_arr_push per argument, and the array is dead the moment
+// the call returns - with ONE exception, which is why the array's uses are not
+// the whole question. js_call hands the array itself to a compiled callee (it is
+// the callee's second parameter), and the callee may keep it: the JS, TypeScript
+// and MetaJS grammars bind it to 'arguments' in the callee's scope, and a callee
+// may return it. That is not visible at the call site, so it is decided in the
+// CALLEE, by the same scan: pinArgs is set when parameter slot 1 has any use
+// that is not a read-only position, and machine.call then pins the array for
+// good (see jsrt.pinArray). The other call externs never leak the array itself -
+// js_mcall/js_rmcall/js_supercall reach the callee through rt.call, which boxes
+// a fresh array around the ELEMENTS - and host functions receive the element
+// slice, never the array.
+//
+// Over-approximation is safe in both directions: a value wrongly treated as
+// escaping is merely not reclaimed, and a wrongly pinned array is merely not
+// reclaimed either. The scan below therefore reads x/y/z of EVERY instruction,
+// even where a field is a flag rather than an operand.
 //
 // Reclaiming clears the table entry (the value is collected by Go) but never
 // reuses the slot: a reused slot would turn a stale handle into a silently
 // different value, a cleared one into a loud "is not a scope".
-func (ma *machine) recycle(l *funcLayout) {
+func (ma *machine) recycle(l *funcLayout, f *ir.Func) {
 	if ma.release == nil {
 		return
 	}
@@ -1393,15 +1415,29 @@ func (ma *machine) recycle(l *funcLayout) {
 	for bi := range l.blocks {
 		for i := range l.blocks[bi].insts {
 			in := &l.blocks[bi].insts[i]
-			if in.op == dOpCall && in.callee != nil && len(in.callee.Blocks) == 0 && in.callee.Name() == ma.relNew {
+			if in.op == dOpCall && in.callee != nil && len(in.callee.Blocks) == 0 && ma.relNew[in.callee.Name()] {
 				cand[in.dst] = in
 			}
 		}
 	}
-	if len(cand) == 0 {
+	// Slot 1 of a two-parameter function is the argument array of the (env, args)
+	// calling convention; it is not released here, only asked whether the caller
+	// may release it (see pinArgs above).
+	argSlot := int32(-1)
+	if len(f.Params) == 2 {
+		argSlot = 1
+	}
+	if len(cand) == 0 && argSlot < 0 {
 		return
 	}
-	use := func(o int32) { delete(cand, o) }
+	live := make(map[int32]bool, len(cand)+1)
+	for d := range cand {
+		live[d] = true
+	}
+	if argSlot >= 0 {
+		live[argSlot] = true
+	}
+	use := func(o int32) { delete(live, o) }
 	for bi := range l.blocks {
 		db := &l.blocks[bi]
 		for _, ph := range db.phis {
@@ -1411,10 +1447,13 @@ func (ma *machine) recycle(l *funcLayout) {
 		}
 		for i := range db.insts {
 			in := &db.insts[i]
-			thru := in.op == dOpCall && in.callee != nil && len(in.callee.Blocks) == 0 && ma.relThru[in.callee.Name()]
+			var thru uint32
+			if in.op == dOpCall && in.callee != nil && len(in.callee.Blocks) == 0 {
+				thru = ma.relThru[in.callee.Name()]
+			}
 			for ai, a := range in.args {
-				if thru && ai == 0 {
-					continue // Argument 0 is the scope this extern reads.
+				if ai < 32 && thru&(1<<uint(ai)) != 0 {
+					continue // A position the extern only reads.
 				}
 				use(a)
 			}
@@ -1429,12 +1468,13 @@ func (ma *machine) recycle(l *funcLayout) {
 		}
 		use(db.term.cond)
 	}
+	l.pinArgs = argSlot >= 0 && !live[argSlot]
 	// In instruction order, not map order: the release order at frame exit stays
 	// the same from run to run.
 	for bi := range l.blocks {
 		for i := range l.blocks[bi].insts {
 			in := &l.blocks[bi].insts[i]
-			if cand[in.dst] == in {
+			if live[in.dst] && cand[in.dst] == in {
 				in.op = dOpCallRel
 				l.relSlots = append(l.relSlots, in.dst)
 			}
@@ -1870,6 +1910,12 @@ func (ma *machine) call(f *ir.Func, args []uint64) uint64 {
 	for i := range f.Params {
 		fr.regs[i] = args[i] // The parameters are the first slots of the layout.
 	}
+	// This callee can keep its argument array past its own return (it binds it to
+	// 'arguments', stores it, returns it, ...), so the array the CALLER built for
+	// this call must survive the call site's reclamation. See recycle.
+	if l.pinArgs {
+		ma.pin(args[1])
+	}
 
 	// The step budget is per top-level call, not per machine lifetime:
 	// machines are cached per (engine, module) for a whole compile run, so a
@@ -1975,7 +2021,7 @@ func (ma *machine) exec(fr *frame, in *dinst, prev int32) {
 		}
 		fr.regs[in.dst] = ma.call(in.callee, args)
 	case dOpCallRel:
-		// A reclaimable extern call (always js_scope_new, see recycle): the
+		// A reclaimable extern call (js_scope_new or js_arr_new, see recycle): the
 		// destination register still holds the handle this very instruction
 		// produced the last time round the loop, and nothing else can reach it.
 		args := fr.args[:len(in.args)]

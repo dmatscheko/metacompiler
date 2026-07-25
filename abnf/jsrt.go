@@ -155,6 +155,10 @@ type jsArray struct {
 	dictIdx    map[interface{}]int
 	dictIdxLen int
 	dictIdxAll bool
+
+	// pinned marks an argument array a callee can keep past the call, so the
+	// call site must not reclaim it (see machine.recycle and jsrt.pinArray).
+	pinned bool
 }
 
 // jsClosure is a compiled MetaJS function: an IR function plus the captured
@@ -366,40 +370,74 @@ func (rt *jsrt) attach(m *ir.Module) *machine {
 	ma := newMachine(m, "")
 	ma.externs = rt.externs(ma)
 	ma.bindExterns() // Resolve every declared function to its handler now, not per call.
-	ma.relNew, ma.relThru, ma.release = "js_scope_new", jsScopeThrough, rt.releaseScope
+	ma.relNew, ma.relThru = jsReclaimable, jsThroughArgs
+	ma.release, ma.pin = rt.releaseHandle, rt.pinArray
 	return ma
 }
 
-// jsScopeThrough lists the externs whose FIRST argument is a scope handle that
-// the extern only reads: it resolves the handle to the *jsScope, works on that
-// scope for the duration of the call and keeps neither the handle nor a
-// reference the handle would be needed for afterwards. js_scope_new is in the
-// list because a child scope stores its parent as a Go POINTER - the parent's
-// handle is never asked for again (nothing in the runtime turns a *jsScope back
-// into a handle except the creation site itself).
+// jsReclaimable lists the externs whose result the IR machine may reclaim: a
+// per-block scope and a per-call argument array, the two values a compiled
+// program creates once per executed block and once per call. See machine.recycle.
+var jsReclaimable = map[string]bool{"js_scope_new": true, "js_arr_new": true}
+
+// jsThroughArgs lists, per extern, the argument positions whose handle the
+// extern only READS: it resolves the handle, works on the value for the duration
+// of the call and keeps neither the handle nor a reference that would need the
+// handle again.
 //
-// js_closure is deliberately NOT here: it stores the scope HANDLE in the
-// closure, which is exactly how a scope outlives the frame that made it. Any
-// extern not listed is treated as retaining, so forgetting one costs memory,
-// never correctness. See machine.recycle.
-var jsScopeThrough = map[string]bool{
-	"js_scope_new": true, "js_scope_decl": true, "js_scope_get": true,
-	"js_scope_set": true, "js_scope_set_or_create": true,
-	"js_kget": true, "js_kset": true, "js_tdecl": true, "js_tset": true,
-	"js_pyset_var": true, "js_pyglobal": true, "js_pynonlocal": true,
+// js_scope_new is here because a child scope stores its parent as a Go POINTER -
+// the parent's handle is never asked for again (nothing in the runtime turns a
+// *jsScope back into a handle except the creation site itself). js_arr_push
+// appends to the array in position 0 without keeping it; position 1 is the
+// pushed VALUE and is deliberately not listed. The call externs read the
+// argument array in their last position: js_mcall/js_rmcall/js_supercall reach
+// their callee through rt.call, which boxes a fresh array around the elements,
+// and js_call hands the array itself to a compiled callee - which is why the
+// callee is asked separately whether it keeps it (machine.pin, see recycle).
+//
+// js_closure is deliberately absent: it stores the scope HANDLE in the closure,
+// which is exactly how a scope outlives the frame that made it. Any extern not
+// listed is treated as retaining every argument, so forgetting one costs memory,
+// never correctness.
+var jsThroughArgs = map[string]uint32{
+	"js_scope_new": 1 << 0, "js_scope_decl": 1 << 0, "js_scope_get": 1 << 0,
+	"js_scope_set": 1 << 0, "js_scope_set_or_create": 1 << 0,
+	"js_kget": 1 << 0, "js_kset": 1 << 0, "js_tdecl": 1 << 0, "js_tset": 1 << 0,
+	"js_pyset_var": 1 << 0, "js_pyglobal": 1 << 0, "js_pynonlocal": 1 << 0,
+
+	"js_arr_push": 1 << 0, "js_arg": 1 << 0, "js_pyrest": 1 << 0,
+	"js_pyprint": 1 << 0, "js_pyexc": 1 << 1,
+	"js_call": 1 << 2, "js_mcall": 1 << 2, "js_rmcall": 1 << 2, "js_supercall": 1 << 3,
 }
 
-// releaseScope drops the value behind a handle the IR machine proved dead. Only
-// a scope is ever released, and only its VALUE: the slot stays taken, so a
-// handle that (against the analysis) is used again finds nil and fails loudly
-// instead of silently reading whatever moved in.
-func (rt *jsrt) releaseScope(h uint64) {
+// releaseHandle drops the value behind a handle the IR machine proved dead. Only
+// a scope or an argument array is ever released, and only its VALUE: the slot
+// stays taken, so a handle that (against the analysis) is used again finds nil
+// and fails loudly instead of silently reading whatever moved in.
+func (rt *jsrt) releaseHandle(h uint64) {
 	if h&numTag != 0 || h >= rt.count {
 		return
 	}
 	chunk, off := rt.chunks[h>>tblChunkBits], h&tblChunkMask
-	if _, ok := chunk[off].(*jsScope); ok {
+	switch v := chunk[off].(type) {
+	case *jsScope:
 		chunk[off] = nil
+	case *jsArray:
+		if !v.pinned {
+			chunk[off] = nil
+		}
+	}
+}
+
+// pinArray marks an argument array that the callee about to run can keep past
+// its own return, so the call site must not reclaim it. Handles that are not an
+// array (a helper function of the same shape) are simply ignored.
+func (rt *jsrt) pinArray(h uint64) {
+	if h&numTag != 0 || h >= rt.count {
+		return
+	}
+	if arr, ok := rt.chunks[h>>tblChunkBits][h&tblChunkMask].(*jsArray); ok {
+		arr.pinned = true
 	}
 }
 
