@@ -1111,7 +1111,7 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 			switch ks {
 			case "length":
 				return float64(len(o.elems))
-			case "push", "pop", "shift", "unshift", "slice", "indexOf", "join", "concat":
+			case "push", "pop", "shift", "unshift", "reverse", "slice", "indexOf", "join", "concat":
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
@@ -2036,6 +2036,13 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			recv.dropIdx()
 			recv.elems = append(append([]interface{}{}, args...), recv.elems...)
 			return float64(len(recv.elems))
+		case "reverse":
+			// In place, and the array itself is the result, like in JS.
+			recv.dropIdx()
+			for i, j := 0, len(recv.elems)-1; i < j; i, j = i+1, j-1 {
+				recv.elems[i], recv.elems[j] = recv.elems[j], recv.elems[i]
+			}
+			return recv
 		case "slice":
 			begin, end := sliceRange(len(recv.elems), args, rt)
 			out := &jsArray{}

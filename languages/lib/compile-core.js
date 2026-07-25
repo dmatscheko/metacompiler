@@ -21,22 +21,13 @@ var core = {
 // pop() yields a tag's pushed values last-first, so the list has to be turned
 // around. unshift() is O(n) per element and the ASG has nodes with over a
 // thousand children, so it collects with push and reverses once - O(n) instead
-// of O(n^2). (The frozen engine's arrays have no reverse(), hence the swap loop.)
+// of O(n^2). reverse() is a host builtin on both engines, so the turnaround
+// stays one Go-speed pass rather than a per-element loop of externs.
 function takeAll() {
     var items = []
     var v = anytype // The tags push values of every type.
     while ((v = pop()) != null) items.push(v)
-    var i = 0
-    var j = items.length - 1
-    var t = anytype
-    while (i < j) {
-        t = items[i]
-        items[i] = items[j]
-        items[j] = t
-        i++
-        j--
-    }
-    return items
+    return items.reverse()
 }
 function popName() {
     var items = takeAll()
