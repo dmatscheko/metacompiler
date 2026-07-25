@@ -46,6 +46,35 @@ type Rule struct {
 	Pos        int    // The position in the source text where this Rule was defined (in a grammar) or where it has matched (in an ASG).
 	Childs     *Rules // The child rules. Used by most Operators.
 	CodeChilds *Rules // The parameters or the code. Only used when Operator == Tag | Command | Range | Times.
+
+	// Cache for SeqWrapper(), see there. Derived data only: it never influences what
+	// this rule means, and Serialize()/Clone() ignore it.
+	seqWrap   *Rule
+	seqChilds *Rules
+}
+
+// SeqWrapper returns the synthetic ' Sequence(childs) ' rule that the parser applies
+// when it has to run a list of rules as one - a production's body behind an
+// Identifier, the body of an Optional, a Tag, a Repeat or a Times.
+//
+// The wrapper is a pure function of static grammar data ((childs, rule.Pos)), yet the
+// parser used to build a fresh one on EVERY application of EVERY production, which was
+// 23 % of all bytes a program parse allocated. So it is built once and kept on the rule
+// that asks for it - the ASKING rule, not the production, because its Pos is the one
+// that ends up in the wrapper (two Identifiers naming the same production sit at
+// different positions).
+//
+// Storing it on a grammar rule is safe where "never change a rule in apply()" applies:
+// nothing about the rule's meaning changes, and childs is checked, so a grammar whose
+// Identifier links moved (an :include() between two parses) rebuilds instead of reusing
+// a stale wrapper.
+func (rule *Rule) SeqWrapper(childs *Rules) *Rule {
+	if rule.seqWrap != nil && rule.seqChilds == childs {
+		return rule.seqWrap
+	}
+	rule.seqWrap = &Rule{Operator: Sequence, Childs: childs, Pos: rule.Pos}
+	rule.seqChilds = childs
+	return rule.seqWrap
 }
 
 // Type of a Range String. JS-Mapping: abnf.rangeType

@@ -289,7 +289,9 @@ func (pa *parser) hasScript(rule *r.Rule, seen map[*r.Rule]bool) bool {
 }
 
 // This is only a helper for apply() and does not need ruleEnter() and ruleExit().
-func (pa *parser) applyAsSequence(rules *r.Rules, skipSpaceRule *r.Rule, skipSpaces bool, depth int, pos int) *r.Rules {
+// owner is the rule that asks for the list to be applied (an Identifier, an Optional or
+// a Tag); it supplies the position of the Sequence wrapper and caches it, see SeqWrapper.
+func (pa *parser) applyAsSequence(owner *r.Rule, rules *r.Rules, skipSpaceRule *r.Rule, skipSpaces bool, depth int) *r.Rules {
 	if rules == nil {
 		return nil
 	}
@@ -301,8 +303,7 @@ func (pa *parser) applyAsSequence(rules *r.Rules, skipSpaceRule *r.Rule, skipSpa
 	if len(*rules) == 1 && (*rules)[0].Operator != r.Command {
 		newProductions = pa.apply((*rules)[0], skipSpaceRule, skipSpaces, depth)
 	} else {
-		newRule := &r.Rule{Operator: r.Sequence, Childs: rules, Pos: pos}
-		newProductions = pa.apply(newRule, skipSpaceRule, skipSpaces, depth)
+		newProductions = pa.apply(owner.SeqWrapper(rules), skipSpaceRule, skipSpaces, depth)
 	}
 	return newProductions
 }
@@ -489,6 +490,24 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 	}
 }
 
+// appendProd appends to the lazily created production list of apply(): it creates the
+// list on the first rule that actually produces something, so the applications that
+// produce nothing (a failing terminal, a lookahead, a whitespace probe) never allocate
+// one. The r.Append*PossibleSequence* helpers accept a nil target the same way.
+func appendProd(target *r.Rules, rules ...*r.Rule) *r.Rules {
+	if target == nil {
+		target = &r.Rules{}
+	}
+	*target = append(*target, rules...)
+	return target
+}
+
+// emptyProductions is the shared "matched, but produced nothing" answer of the
+// whitespace probes (skippingSpaces == true), which create no productions at all by
+// definition. Only ever read - a probe result reaches nothing but len() checks and the
+// r.Append* helpers, which copy OUT of it - so one instance can serve all of them.
+var emptyProductions = &r.Rules{}
+
 // apply matches one rule of the a-grammar against the target text at the current
 // position pa.Sdx, top down and recursively. It returns the productions that the rule
 // created for the ASG, or nil if the rule did not match. On a failed match, pa.Sdx is
@@ -504,7 +523,13 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 // forever) and no productions are created.
 func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool, depth int) *r.Rules { // => (localProductions)
 	wasSdx := pa.Sdx // Start position of the rule. Return, if the rule does not match.
-	localProductions := &r.Rules{}
+	// Created lazily (see appendProd and r.AppendPossibleSequence, both of which take a
+	// nil target): most applications are terminals that fail on the first byte or
+	// lookaheads that produce nothing, and eagerly allocating one *r.Rules per apply()
+	// was 58 % of all bytes a program parse allocated. Careful with the convention
+	// around it: nil as a RESULT means FAILURE, so every successful path has to hand
+	// back a non-nil (possibly empty) *r.Rules - see the end of this function.
+	var localProductions *r.Rules
 
 	isBlocked, foundRule, foundSdx := pa.ruleEnter(rule, skipSpaceRule, skippingSpaces, depth)
 	if isBlocked {
@@ -563,9 +588,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		pa.Sdx += size
 		if skippingSpaces {
-			return &r.Rules{}
+			return emptyProductions
 		}
-		*localProductions = append(*localProductions, rule)
+		localProductions = appendProd(localProductions, rule)
 	case r.CharOf:
 		// Only skip spaces when actually reading from the target text (Tokens)
 		if !skippingSpaces && skipSpaceRule != nil { // Do not skip spaces again when we are already at skipping spaces. Would result in an infinite loop.
@@ -588,13 +613,13 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			pa.Sdx++
 			if skippingSpaces {
-				return &r.Rules{}
+				return emptyProductions
 			}
 			// Cache and reuse the Token rules for all bytes, see case r.Range.
 			if pa.rangeCache[ch] == nil {
 				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]byte{ch})}
 			}
-			*localProductions = append(*localProductions, pa.rangeCache[ch])
+			localProductions = appendProd(localProductions, pa.rangeCache[ch])
 		} else {
 			ch, size := utf8.DecodeRuneInString(pa.Src[pa.Sdx:])
 			if ch == utf8.RuneError && size == 1 { // An invalid encoding never matches (like in case r.Range).
@@ -609,7 +634,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			pa.Sdx += size
 			if skippingSpaces {
-				return &r.Rules{}
+				return emptyProductions
 			}
 			// Cache and reuse the Token rules for the runes 0...127, because those are by far
 			// the most used chars and their encoding is identical to the single byte (the byte
@@ -619,9 +644,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 				if pa.rangeCache[ch] == nil {
 					pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
 				}
-				*localProductions = append(*localProductions, pa.rangeCache[ch])
+				localProductions = appendProd(localProductions, pa.rangeCache[ch])
 			} else {
-				*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
+				localProductions = appendProd(localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
 			}
 		}
 	case r.CharsOf:
@@ -658,9 +683,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			return nil
 		}
 		if skippingSpaces {
-			return &r.Rules{}
+			return emptyProductions
 		}
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: pa.Src[startPos:pa.Sdx]})
+		localProductions = appendProd(localProductions, &r.Rule{Operator: r.Token, String: pa.Src[startPos:pa.Sdx]})
 	case r.Not:
 		// Negative lookahead: the single child is probed and the position is restored,
 		// so nothing is ever consumed. The Not matches exactly when the child does NOT
@@ -674,7 +699,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			return nil
 		}
 		if skippingSpaces {
-			return &r.Rules{}
+			return emptyProductions
 		}
 	case r.Range:
 		// Only skip spaces when actually reading from the target text (Tokens)
@@ -703,15 +728,15 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			pa.Sdx += size
 			if skippingSpaces {
-				return &r.Rules{}
+				return emptyProductions
 			}
 			if ch >= 0 && ch <= 127 { // Cache and reuse the Token rules for the runes 0...127, see case r.CharOf.
 				if pa.rangeCache[ch] == nil {
 					pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]rune{ch})}
 				}
-				*localProductions = append(*localProductions, pa.rangeCache[ch])
+				localProductions = appendProd(localProductions, pa.rangeCache[ch])
 			} else {
-				*localProductions = append(*localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
+				localProductions = appendProd(localProductions, &r.Rule{Operator: r.Token, String: string([]rune{ch})})
 			}
 		} else if rule.Int == r.RangeTypeByte { // Byte range for binary decoding. JS-Mapping: abnf.rangeType.Byte
 			ch := pa.Src[pa.Sdx]
@@ -725,13 +750,13 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 			pa.Sdx++
 			if skippingSpaces {
-				return &r.Rules{}
+				return emptyProductions
 			}
 			// Cache and reuse the Token rules for all bytes (0...255).
 			if pa.rangeCache[ch] == nil {
 				pa.rangeCache[ch] = &r.Rule{Operator: r.Token, String: string([]byte{ch})}
 			}
-			*localProductions = append(*localProductions, pa.rangeCache[ch])
+			localProductions = appendProd(localProductions, pa.rangeCache[ch])
 		} else {
 			panic(fmt.Sprintf("Not a valid Range mode: %d", rule.Int))
 		}
@@ -756,7 +781,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		if len(*rule.Childs) == 1 {
 			newRule = (*rule.Childs)[0]
 		} else {
-			newRule = &r.Rule{Operator: r.Sequence, Childs: rule.Childs, Pos: rule.Pos}
+			newRule = rule.SeqWrapper(rule.Childs) // Built once per Repeat, not per application.
 		}
 		for { // Repeat as often as possible.
 			sdxBefore := pa.Sdx
@@ -837,13 +862,13 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			}
 		}
 	case r.Optional:
-		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
+		newProductions := pa.applyAsSequence(rule, rule.Childs, skipSpaceRule, skippingSpaces, depth+1)
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions) // If not all child rules matched, newProductions is nil anyways.
 	case r.Identifier: // This identifies another rule (and its index), it is basically a link: E.g. to the expression-rule which is at position 3: { "Identifier", "expression", 3 }
 		if rule.Int < 0 || rule.Int >= len(*pa.agrammar) {
 			panic("Unknown production name '" + rule.String + "'. It is used inside the grammar but never defined.")
 		}
-		newProductions := pa.applyAsSequence((*pa.agrammar)[rule.Int].Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
+		newProductions := pa.applyAsSequence(rule, (*pa.agrammar)[rule.Int].Childs, skipSpaceRule, skippingSpaces, depth+1)
 		if newProductions == nil {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
@@ -851,7 +876,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		}
 		localProductions = r.AppendArrayOfPossibleSequences(localProductions, newProductions)
 	case r.Tag:
-		newProductions := pa.applyAsSequence(rule.Childs, skipSpaceRule, skippingSpaces, depth+1, rule.Pos)
+		newProductions := pa.applyAsSequence(rule, rule.Childs, skipSpaceRule, skippingSpaces, depth+1)
 		if newProductions == nil {
 			pa.ruleExit(rule, skipSpaceRule, skippingSpaces, depth, nil, wasSdx, false)
 			pa.Sdx = wasSdx
@@ -862,7 +887,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		pa.resolveParameterToToken(rule.CodeChilds)
 		// The matched childs get wrapped into a new Tag rule for the ASG. This is the only
 		// grouping that the ASG keeps. Int contains the UID of the script for later caching.
-		*localProductions = append(*localProductions, &r.Rule{Operator: r.Tag, Int: rule.Int, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx})
+		localProductions = appendProd(localProductions, &r.Rule{Operator: r.Tag, Int: rule.Int, CodeChilds: rule.CodeChilds, Childs: newProductions, Pos: pa.Sdx})
 	case r.Command:
 		switch rule.String {
 		case "whitespace":
@@ -945,7 +970,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 			default:
 				panic(fmt.Sprintf("Invalid number type: %d", numberType))
 			}
-			*localProductions = append(*localProductions, &r.Rule{Operator: r.Number, Int: n})
+			localProductions = appendProd(localProductions, &r.Rule{Operator: r.Number, Int: n})
 			pa.Sdx += byteCount
 		case "done": // To end the parsing successfully at this place.
 			// TODO: This should be implemented better (everything should return).
@@ -956,6 +981,9 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		case "script": // Int is reserved for UID for JS cache. // TODO: Maybe move upwards like :whitespace().
 			// The script can be given inline as token or as the name of a production that contains the code.
 			pa.resolveParameterToToken(rule.CodeChilds)
+			// Materialize the (still empty) list before handing it to the script: it
+			// becomes c.localAsg, and a script must see an empty array there, not null.
+			localProductions = appendProd(localProductions)
 			resRule := pa.ps.HandleScriptRule(rule, localProductions, depth) // TODO: localProductions is empty here...
 			if resRule != nil {
 				scriptProductions := pa.apply(resRule, skipSpaceRule, skippingSpaces, depth+1)
@@ -965,7 +993,7 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 					return nil
 				}
 				if len(*scriptProductions) > 0 {
-					*localProductions = append(*localProductions, *scriptProductions...)
+					localProductions = appendProd(localProductions, *scriptProductions...)
 				}
 			}
 		case "title":
@@ -983,8 +1011,14 @@ func (pa *parser) apply(rule *r.Rule, skipSpaceRule *r.Rule, skippingSpaces bool
 		panic(fmt.Sprintf("Invalid rule in apply() function: %s", rule.ToString()))
 	}
 
-	// All failed matches should have returned already.
-	// Here must only be matches which means, localProductions MUST NOT be nil here.
+	// All failed matches should have returned already. Here must only be matches, and a
+	// match MUST NOT return nil - that is what the callers read as "did not match". So a
+	// rule that matched without producing anything (a successful lookahead, an Optional
+	// that took the empty branch, a Repeat that ran zero times) gets its empty list here,
+	// as late as possible.
+	if localProductions == nil {
+		localProductions = &r.Rules{}
+	}
 
 	if pa.Sdx > pa.lastParsePosition {
 		pa.lastParsePosition = pa.Sdx
