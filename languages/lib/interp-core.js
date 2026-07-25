@@ -37,6 +37,7 @@ var core = {
 // ----- Shared interpreter state -----
 // Call frames are scope chains ending in globalScope; hostGlobals holds the built-ins
 // the language file populates (they resolve after all scopes, see getVar).
+var objHasOwn = Object.prototype.hasOwnProperty // See hasOwn below.
 var globalScope = {}
 var scopes = [globalScope]
 var hostGlobals = {}
@@ -184,19 +185,41 @@ function scopePut(obj, name, value) {
 
 function declVar(name, value) { if (name != core.blank) scopePut(scopes[scopes.length - 1], name, value) }
 
+// setVar and getVar walk the scope chain on every write and read of the
+// interpreted program, so both keep `scopes` and the hasOwn function in locals
+// (under the frozen engine every mention of a global is a scope-chain lookup of
+// its own) and call the latter directly rather than through hasOwn. The test
+// itself is unchanged: a variable may legitimately hold undefined, so membership
+// is what decides, innermost scope first.
 function setVar(name, value) {
     if (name == core.blank) { return }
-    for (var i = scopes.length - 1; i >= 0; i--) {
-        if (hasOwn(scopes[i], name)) { scopePut(scopes[i], name, value); return }
+    var sc = scopes
+    var ho = objHasOwn
+    for (var i = sc.length - 1; i >= 0; i--) {
+        if (ho.call(sc[i], name)) { scopePut(sc[i], name, value); return }
     }
     if (core.setMiss != null && core.setMiss(name, value)) { return }
     fail("assignment to unknown variable: " + name)
 }
 
+// pop() yields a tag's pushed values last-first, so the list has to be turned
+// around. unshift() is O(n) per element and the ASG has nodes with over a
+// thousand children, so it collects with push and reverses once - O(n) instead
+// of O(n^2). (The frozen engine's arrays have no reverse(), hence the swap loop.)
 function takeAll() {
     var items = []
     var v = anytype // The tags push values of every type.
-    while ((v = pop()) != null) items.unshift(v)
+    while ((v = pop()) != null) items.push(v)
+    var i = 0
+    var j = items.length - 1
+    var t = anytype
+    while (i < j) {
+        t = items[i]
+        items[i] = items[j]
+        items[j] = t
+        i++
+        j--
+    }
     return items
 }
 
@@ -239,7 +262,12 @@ function unescapeJs(s) {
     return out
 }
 
-function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
+// objHasOwn is Object.prototype.hasOwnProperty, resolved once at include time:
+// hasOwn runs per scope level of every variable access, and the three member
+// reads that spell the name out (Object -> prototype -> hasOwnProperty) cost more
+// than the test itself. The name hasOwn stays a plain function so grammars can
+// call (or override) it as before.
+function hasOwn(o, name) { return objHasOwn.call(o, name) }
 
 // The dynamic type test behind the typed languages' `is` / `instanceof` checks.
 // Must match the Go twin exactly (isTypeName in abnf/jsrt.go, extern js_is_type)
@@ -270,9 +298,12 @@ function rtIsType(v, tname) {
     return false
 }
 
+// See setVar above for the shape of the walk.
 function getVar(name) {
-    for (var i = scopes.length - 1; i >= 0; i--) {
-        if (hasOwn(scopes[i], name)) return scopes[i][name]
+    var sc = scopes
+    var ho = objHasOwn
+    for (var i = sc.length - 1; i >= 0; i--) {
+        if (ho.call(sc[i], name)) return sc[i][name]
     }
     if (core.varMiss != null) { var h = core.varMiss(name); if (h != null) return h.v }
     if (hasOwn(hostGlobals, name)) return hostGlobals[name]
@@ -287,14 +318,31 @@ function makeNeg(t) { return function() { return (0 - t()) | 0 } }
 
 function makeNot(t) { return function() { return !t() } }
 
+// The operator of a fold is known when the thunk is BUILT, so the two-operand
+// case - by far the most common shape - resolves it there and evaluates with a
+// direct call and no operator test. Longer folds keep the accumulator loop
+// (nesting them into pairs costs more calls than the dispatch saves) but bind
+// binOp once. Whatever binOp is current at build time is what runs: every grammar
+// installs its override in the startScript, long before c.compile(c.asg) builds
+// any thunk.
 function foldBinary(items) {
     if (items.length == 1) return items[0]
+    if (items.length == 3) { return foldBinary2(items[0], items[1], items[2]) }
+    var f = binOp
     return function() {
         var v = anytype // A comparison fold turns the running number into a boolean.
         v = items[0]()
-        for (var i = 1; i < items.length; i += 2) v = binOp(items[i], v, items[i + 1]())
+        for (var i = 1; i < items.length; i += 2) v = f(items[i], v, items[i + 1]())
         return v
     }
+}
+// One binary step: the concrete function(l, r) when the base binOp is still in
+// place, and the operator bound into the closure otherwise.
+function foldBinary2(lt, op, rt) {
+    var g = opResolve(op)
+    if (g != null) { return function() { return g(lt(), rt()) } }
+    var f = binOp
+    return function() { return f(op, lt(), rt()) }
 }
 
 function makeOrAnd(items, isOr) {
@@ -370,26 +418,69 @@ function concat2impl(a, b) {
     return out
 }
 
+// binOps is the base operator table: one function(l, r) per operator, built once
+// instead of an if-chain walked per evaluation. binOp stays the entry point every
+// grammar knows - 11 of them replace it, two more wrap it and delegate the rest
+// here - and a grammar that only ADDS operators can equally well put them in
+// binOps, which keeps them on the resolved path below.
+var binOps = {}
+binOps["+"]  = function(l, r) { return core.add(l, r) }
+binOps["-"]  = function(l, r) { return (l - r) | 0 }
+binOps["*"]  = function(l, r) { return (l * r) | 0 }
+binOps["/"]  = function(l, r) { return (l / r) | 0 }
+binOps["%"]  = function(l, r) { return (l % r) | 0 }
+binOps["=="] = function(l, r) { return l === r }
+binOps["!="] = function(l, r) { return l !== r }
+binOps["<"]  = function(l, r) { return l < r }
+binOps[">"]  = function(l, r) { return l > r }
+binOps["<="] = function(l, r) { return l <= r }
+binOps[">="] = function(l, r) { return l >= r }
+
+// A bare binOps[op] would resolve Object.prototype's members under a host JS
+// engine (binOps["toString"] is a function there, binOps["__proto__"] an object),
+// so the function-valued ones are shadowed with undefined once and the typeof
+// test rejects everything else. That keeps the lookup a single property read -
+// hasOwn per call would cost more than the if-chain it replaces.
+var opShadow = ["constructor", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
+                "toLocaleString", "toString", "valueOf",
+                "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__"]
+for (var opsi = 0; opsi < opShadow.length; opsi++) { binOps[opShadow[opsi]] = undefined }
+
 function binOp(op, l, r) {
-    if (op == "+") return core.add(l, r)
-    if (op == "-") return (l - r) | 0
-    if (op == "*") return (l * r) | 0
-    if (op == "/") return (l / r) | 0
-    if (op == "%") return (l % r) | 0
-    if (op == "==") return l === r
-    if (op == "!=") return l !== r
-    if (op == "<")  return l < r
-    if (op == ">")  return l > r
-    if (op == "<=") return l <= r
-    if (op == ">=") return l >= r
+    var f = binOps[op]
+    if (typeof f == "function") { return f(l, r) }
+    return undefined
+}
+// The base binOp, kept for the identity test in opResolve. A grammar's override
+// is installed on binOp, so binOp !== coreBinOp says "someone took over".
+var coreBinOp = binOp
+
+// opResolve returns op's concrete function(l, r), or null when the caller has to
+// keep going through binOp(op, l, r) - either because a grammar overrode it or
+// because the operator has no table entry. Fail-safe: a null just keeps the old
+// path, so an engine that cannot compare the two function values loses the
+// optimization rather than the behavior.
+function opResolve(op) {
+    if (binOp !== coreBinOp) { return null }
+    var f = binOps[op]
+    if (typeof f != "function") { return null }
+    return f
 }
 
+// The compound-assignment twin of binOps. Its operator arrives at run time (the
+// assignment thunks live in the grammars), so only the dispatch is table-driven.
+var applyOps = {}
+applyOps["+="] = function(a, b) { return core.add(a, b) }
+applyOps["-="] = function(a, b) { return (a - b) | 0 }
+applyOps["*="] = function(a, b) { return (a * b) | 0 }
+applyOps["/="] = function(a, b) { return (a / b) | 0 }
+applyOps["%="] = function(a, b) { return (a % b) | 0 }
+for (var opsj = 0; opsj < opShadow.length; opsj++) { applyOps[opShadow[opsj]] = undefined }
+
 function applyOp(op, a, b) {
-    if (op == "+=") return core.add(a, b)
-    if (op == "-=") return (a - b) | 0
-    if (op == "*=") return (a * b) | 0
-    if (op == "/=") return (a / b) | 0
-    if (op == "%=") return (a % b) | 0
+    var f = applyOps[op]
+    if (typeof f == "function") { return f(a, b) }
+    return undefined
 }
 
 // Folds a primary expression with .method(args) / .field / [index] suffixes.

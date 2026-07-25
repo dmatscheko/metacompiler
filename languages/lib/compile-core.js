@@ -18,10 +18,24 @@ var core = {
     truthyExt: "js_truthy"    // The external deciding branch conditions (Python: "js_pytruthy").
 }
 
+// pop() yields a tag's pushed values last-first, so the list has to be turned
+// around. unshift() is O(n) per element and the ASG has nodes with over a
+// thousand children, so it collects with push and reverses once - O(n) instead
+// of O(n^2). (The frozen engine's arrays have no reverse(), hence the swap loop.)
 function takeAll() {
     var items = []
     var v = anytype // The tags push values of every type.
-    while ((v = pop()) != null) items.unshift(v)
+    while ((v = pop()) != null) items.push(v)
+    var i = 0
+    var j = items.length - 1
+    var t = anytype
+    while (i < j) {
+        t = items[i]
+        items[i] = items[j]
+        items[j] = t
+        i++
+        j--
+    }
     return items
 }
 function popName() {
