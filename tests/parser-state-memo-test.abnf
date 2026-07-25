@@ -1,0 +1,75 @@
+:title("Parser state memoization test") ;
+:description("Guards the purity gate of the parser's -lf (found list) and -lb (block list):
+a production whose reachable subtree contains a :script() carries parser state, so its
+result is NOT a function of (rule, position, whitespace rule, skipping) alone and must not
+be memoized or block-listed.
+
+The grammar makes the two ways a :script() can hide from a naive subtree walk observable.
+First and Second share the prefix Probe, and First always fails on the trailing '!', so the
+parser applies Probe at position 0 exactly TWICE. Each application runs both scripts once:
+
+  * NoteI is reached only through a chain of Identifiers (Chain -> Marked -> NoteI), so a
+    walk that does not follow the Identifier links into the a-grammar would call Probe pure.
+  * NoteW is reached only through the CodeChilds of the :whitespace() command of Spaced, so
+    a walk that only looks at Childs would call Spaced pure.
+
+Both scripts count their runs on the persistent parser stack and Check asserts the counts,
+so a wrongly memoized (or wrongly blocked) production shows up as a count of 1 and the parse
+fails. Run with no flag, with -lf and with -lb: all three must print the same line and
+exit 0.") ;
+
+
+:startRule(Test) ;
+
+// First always fails at the '!', which is what makes the parser apply Probe at
+// position 0 a second time - the only way a found-list hit can ever be observed.
+Test    = First | Second ;
+First   = Probe "!" ;
+Second  = Probe Check ;
+Probe   = Chain Spaced ;
+
+// Path 1: the :script() is reachable only through Identifier links.
+Chain   = Marked ;
+Marked  = "a" NoteI ;
+
+// Path 2: the :script() is reachable only through a :whitespace() argument.
+Spaced  = :whitespace(WsNote) "b" ;
+WsNote  = NoteI2 ;
+
+// The counters live on the stack that survives between the :script() calls of one
+// parse run - exactly the parser state that a memoized result would skip.
+NoteI = :script(~~
+    (function() {
+        var s = pop()
+        if (s == null) s = {i: 0, w: 0}
+        s.i++
+        push(s)
+        return undefined
+    })()
+~~) ;
+
+NoteI2 = :script(~~
+    (function() {
+        var s = pop()
+        if (s == null) s = {i: 0, w: 0}
+        s.w++
+        push(s)
+        return undefined
+    })()
+~~) ;
+
+// Both scripts must have run once per Probe application, so twice. Returning a
+// token that cannot match is how a :script() rule reports a failure.
+Check = :script(~~
+    (function() {
+        var s = pop()
+        if (s == null) s = {i: 0, w: 0}
+        push(s)
+        if (s.i === 2 && s.w === 2) {
+            println("parser state memo test passed")
+            return undefined
+        }
+        println("FAIL: the scripts ran i=" + s.i + " w=" + s.w + " time(s), want i=2 w=2")
+        return abnf.newToken("\x01stateful-production-was-memoized", 0)
+    })()
+~~) ;

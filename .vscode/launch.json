@@ -1745,6 +1745,42 @@
             "program": "${workspaceFolder}","args": ["tests/include-test.abnf", "tests/include-test.txt", "-v"]
         },
         {
+            "name": "Parser state memo Test",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/parser-state-memo-test.abnf", "tests/parser-state-memo-test.txt", "-q"]
+        },
+        {
+            "name": "Parser state memo Test (-lf found list)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/parser-state-memo-test.abnf", "tests/parser-state-memo-test.txt", "-q", "-lf"]
+        },
+        {
+            "name": "Parser state memo Test (-lb block list)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["tests/parser-state-memo-test.abnf", "tests/parser-state-memo-test.txt", "-q", "-lb"]
+        },
+        {
+            "name": "Python found list -lf (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-interpreter.abnf", "tests/python-test-1.py", "-q", "-lf"]
+        },
+        {
+            "name": "Python found list -lf (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-1.py", "-q", "-lf"]
+        },
+        {
+            "name": "Python block list -lb (compiler)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-1.py", "-q", "-lb"]
+        },
+        {
             "name": "Infinite Loop",
             "type": "go",
             "request": "launch",
