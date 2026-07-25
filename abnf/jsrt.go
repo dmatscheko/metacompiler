@@ -113,14 +113,19 @@ type jsCtl struct {
 }
 
 // jsScope is one link of a scope chain. Variables can hold undefined, so
-// existence is the map key, not the value.
-// jsScope is one link of the variable chain. The names of a scope live in
-// parallel slices, not in a map: a scope holds a handful of names (a call frame,
-// a block), and for those a linear scan over one contiguous slice beats hashing
-// every read - a map also had to be ALLOCATED per scope and per declaration,
-// which was 23 % of everything the frozen engine allocated. Scopes that do grow
-// (the root scope, a script's top level) build an index once they pass
-// jsScopeLinear entries, so a big scope stays O(1).
+// existence is a name being PRESENT, not the value it holds.
+//
+// The names live in parallel slices, not in a map: a scope holds a handful of
+// names (a call frame, a block), and for those a linear scan over one
+// contiguous slice beats hashing every read - a map also had to be ALLOCATED
+// per scope and per declaration, which was 23 % of everything the frozen engine
+// allocated. The slices stay the storage in every case; a scope that does grow
+// (the root scope with its host bindings, a script's top level) additionally
+// builds an INDEX over them past jsScopeLinear entries, so a big scope is still
+// O(1). Sorting the names for a binary search would be the one option that does
+// not compose with this: it would have to reorder all three slices on every
+// declaration, and it measures slower than the scan below the threshold and
+// slower than the index above it.
 type jsScope struct {
 	names  []string
 	vals   []interface{}
