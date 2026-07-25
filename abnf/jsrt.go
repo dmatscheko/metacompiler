@@ -1,6 +1,7 @@
 package abnf
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -82,6 +83,14 @@ func (o *jsObject) set(key string, v interface{}) {
 // jsArray is a MetaJS array.
 type jsArray struct {
 	elems []interface{}
+
+	// When this array is the key array of a dict, dictIdx maps a key to its
+	// position in elems so a lookup does not scan (see dictFind). dictIdxLen is
+	// the element count it was built for and dictIdxAll says whether every key
+	// made it in; a nil map means "not built / no longer trustworthy".
+	dictIdx    map[interface{}]int
+	dictIdxLen int
+	dictIdxAll bool
 }
 
 // jsClosure is a compiled MetaJS function: an IR function plus the captured
@@ -226,6 +235,11 @@ type jsrt struct {
 	retSlot interface{}
 
 	lastGets [][2]uint64 // The most recent member lookups (obj, key handles), for error messages.
+
+	// strCache remembers what indexing and interning had to derive from the
+	// last few long strings (see strEntry); strScratch serves the short ones.
+	strCache   [strCacheSlots]strInfo
+	strScratch strInfo
 
 	// The -trace hook (see trace.go). Only the program runtime of runJSModule
 	// is traced; the frozen engine's tag-script runtime stays silent.
@@ -400,7 +414,21 @@ func (rt *jsrt) wrapNum(f float64) uint64 {
 	return h
 }
 
+// wrapStr interns s. The map lookup hashes the whole string, so for long
+// strings the handle is remembered in the string cache (see strEntry): a loop
+// that keeps reading one big string would otherwise re-hash it per iteration.
 func (rt *jsrt) wrapStr(s string) uint64 {
+	if len(s) < strMemoMin {
+		return rt.internStr(s)
+	}
+	e := rt.strEntry(s)
+	if e.h == 0 {
+		e.h = rt.internStr(s)
+	}
+	return e.h
+}
+
+func (rt *jsrt) internStr(s string) uint64 {
 	if h, ok := rt.strIntern[s]; ok {
 		return h
 	}
@@ -880,6 +908,41 @@ func isCallable(v interface{}) bool {
 	return reflect.ValueOf(v).Kind() == reflect.Func
 }
 
+// maybeNumeric reports whether key could convert to a number at all. Array and
+// string members that are not a known method go through toNumber to see whether
+// they are an index, and a failing ParseFloat costs a formatted error - so the
+// ordinary property name is rejected by its first byte instead. Only a digit,
+// a sign, a dot, leading space or the start of Infinity/NaN can begin a number.
+func maybeNumeric(key interface{}) bool {
+	s, isStr := key.(string)
+	if !isStr {
+		return true
+	}
+	if s == "" {
+		return true // "" converts to 0, like it always did.
+	}
+	c := s[0]
+	return c <= ' ' || (c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.' ||
+		c == 'I' || c == 'i' || c == 'N' || c == 'n'
+}
+
+// atoiName is strconv.Atoi for a property name, without the error allocation
+// for the names that obviously are not a number.
+func atoiName(name string) (int, error) {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c < '0' || c > '9') && !(i == 0 && (c == '+' || c == '-') && len(name) > 1) {
+			return 0, errNotAnIndex
+		}
+	}
+	if name == "" {
+		return 0, errNotAnIndex
+	}
+	return strconv.Atoi(name)
+}
+
+var errNotAnIndex = errors.New("not an index")
+
 func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 	if isUndefOrNull(obj) {
 		rt.fail("member '%s' of %s", rt.toString(key), rt.toString(obj))
@@ -903,6 +966,9 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
+		if !maybeNumeric(key) { // A property name like 'mname' is not an index.
+			return jsUndef
+		}
 		idx := rt.toNumber(key)
 		if idx == math.Trunc(idx) && idx >= 0 && int(idx) < len(o.elems) {
 			return o.elems[int(idx)]
@@ -912,15 +978,18 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 		if ks, isStr := key.(string); isStr {
 			switch ks {
 			case "length":
-				return float64(jsStrLen(o))
+				return float64(rt.strLen(o))
 			case "charCodeAt", "charAt", "indexOf", "replace", "slice", "substring", "split",
 				"toUpperCase", "toLowerCase", "trim":
 				return &boundMethod{recv: o, name: ks}
 			}
 		}
+		if !maybeNumeric(key) {
+			return jsUndef
+		}
 		idx := rt.toNumber(key)
 		if idx == math.Trunc(idx) && idx >= 0 {
-			if ch := jsStrAt(o, int(idx)); ch != "" {
+			if ch := rt.strAt(o, int(idx)); ch != "" {
 				return ch
 			}
 		}
@@ -966,7 +1035,7 @@ func (rt *jsrt) getGoMember(obj interface{}, name string) interface{} {
 		if name == "length" {
 			return float64(deref.Len())
 		}
-		if idx, err := strconv.Atoi(name); err == nil {
+		if idx, err := atoiName(name); err == nil {
 			if idx >= 0 && idx < deref.Len() {
 				return rt.importGoValue(deref.Index(idx).Interface())
 			}
@@ -1016,11 +1085,15 @@ func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 	case *jsObject:
 		o.set(rt.toString(key), val)
 	case *jsArray:
+		if !maybeNumeric(key) {
+			rt.fail("invalid array index %s", rt.toString(key))
+		}
 		idx := rt.toNumber(key)
 		if idx != math.Trunc(idx) || idx < 0 {
 			rt.fail("invalid array index %s", rt.toString(key))
 		}
 		i := int(idx)
+		o.dropIdx()
 		for len(o.elems) <= i {
 			o.elems = append(o.elems, jsUndef)
 		}
@@ -1272,13 +1345,95 @@ func dictParts(v interface{}) (*jsArray, *jsArray, bool) {
 }
 
 // dictFind returns the position of key k in the keys array, or -1.
+//
+// The array keeps the insertion order, which is part of the value model, so the
+// lookup goes through an index built alongside it (dictIdx). The index is a
+// pure accelerator: it is dropped by every array mutation that is not a dict
+// insertion (see dropIdx), rebuilt when the length no longer matches the one it
+// was built for, and a hit is confirmed against the array before it is used -
+// so a script that writes d.keys behind our back cannot produce a wrong answer,
+// only a rebuild. Keys that cannot be a Go map key (objects, closures) are left
+// out of the index, and a miss then falls back to the scan.
 func (rt *jsrt) dictFind(keys *jsArray, k interface{}) int {
+	if !dictKeyable(k) { // Also keeps an unhashable Go value out of the map.
+		return rt.dictScan(keys, k)
+	}
+	if keys.dictIdx == nil || keys.dictIdxLen != len(keys.elems) {
+		rt.reindex(keys)
+	}
+	if i, ok := keys.dictIdx[k]; ok {
+		if i < len(keys.elems) && rt.strictEq(keys.elems[i], k) {
+			return i
+		}
+		rt.reindex(keys) // An element changed in place: rebuild and answer again.
+		if i, ok := keys.dictIdx[k]; ok && rt.strictEq(keys.elems[i], k) {
+			return i
+		}
+		return -1
+	}
+	if keys.dictIdxAll {
+		return -1
+	}
+	return rt.dictScan(keys, k)
+}
+
+func (rt *jsrt) dictScan(keys *jsArray, k interface{}) int {
 	for i, e := range keys.elems {
 		if rt.strictEq(e, k) {
 			return i
 		}
 	}
 	return -1
+}
+
+// reindex rebuilds the key index. Only the first position of a key is indexed,
+// so a (malformed) array with duplicates still answers like the scan did.
+func (rt *jsrt) reindex(keys *jsArray) {
+	idx := make(map[interface{}]int, len(keys.elems))
+	all := true
+	for i, e := range keys.elems {
+		if !dictKeyable(e) {
+			all = false
+			continue
+		}
+		if _, dup := idx[e]; !dup {
+			idx[e] = i
+		}
+	}
+	keys.dictIdx, keys.dictIdxLen, keys.dictIdxAll = idx, len(keys.elems), all
+}
+
+// dictKeyable reports whether v can be a Go map key with exactly the ===
+// semantics of strictEq. Everything else compares by identity and stays in the
+// scan (a Go map would either panic on it or use the wrong equality).
+func dictKeyable(v interface{}) bool {
+	switch v.(type) {
+	case string, float64, bool, jsUndefT, jsNullT:
+		return true
+	}
+	return false
+}
+
+// dictAppend adds one entry to a dict's parallel arrays, keeping the index.
+func dictAppend(keys, vals *jsArray, k, v interface{}) {
+	keys.elems = append(keys.elems, k)
+	vals.elems = append(vals.elems, v)
+	if keys.dictIdx != nil {
+		if dictKeyable(k) {
+			if _, dup := keys.dictIdx[k]; !dup {
+				keys.dictIdx[k] = len(keys.elems) - 1
+			}
+		} else {
+			keys.dictIdxAll = false
+		}
+		keys.dictIdxLen = len(keys.elems)
+	}
+}
+
+// dropIdx invalidates the key index of an array that is about to be mutated by
+// anything other than a dict insertion.
+func (a *jsArray) dropIdx() {
+	a.dictIdx = nil
 }
 
 // pySliceRange resolves Python slice bounds against a length: undefined ends
@@ -1375,10 +1530,10 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 	case string:
 		switch name {
 		case "length":
-			return float64(jsStrLen(o))
+			return float64(rt.strLen(o))
 		case "charAt":
 			i := jsToInt(rt.toNumber(argAt(args, 0)))
-			ch := jsStrAt(o, i)
+			ch := rt.strAt(o, i)
 			if ch == "" {
 				rt.fail("charAt(%d) out of range for %q", i, o)
 			}
@@ -1386,10 +1541,10 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		case "equals":
 			return rt.strictEq(o, argAt(args, 0))
 		case "substring":
-			begin, end := substringRange(jsStrLen(o), args, rt)
-			return jsStrRange(o, begin, end)
+			begin, end := substringRange(rt.strLen(o), args, rt)
+			return rt.strRange(o, begin, end)
 		case "indexOf":
-			return float64(jsStrIndexOf(o, rt.toString(argAt(args, 0))))
+			return float64(rt.strIndexOf(o, rt.toString(argAt(args, 0))))
 		case "isEmpty":
 			return len(o) == 0
 		}
@@ -1435,9 +1590,11 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 		// Kotlin and Python style list methods.
 		switch name {
 		case "add":
+			o.dropIdx()
 			o.elems = append(o.elems, argAt(args, 0))
 			return true
 		case "append": // Python: returns None.
+			o.dropIdx()
 			o.elems = append(o.elems, argAt(args, 0))
 			return jsUndef
 		case "pop", "removeLast": // Python / Dart: both remove and return the last element.
@@ -1445,6 +1602,7 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 				rt.fail("pop from empty list")
 			}
 			v := o.elems[len(o.elems)-1]
+			o.dropIdx()
 			o.elems = o.elems[:len(o.elems)-1]
 			return v
 		case "size":
@@ -1539,7 +1697,7 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case string:
 		switch name {
 		case "length", "size":
-			return float64(jsStrLen(o))
+			return float64(rt.strLen(o))
 		case "to_s":
 			return o
 		case "upcase":
@@ -1588,6 +1746,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "size", "length":
 		return float64(len(t.elems))
 	case "push", "append", "add":
+		t.dropIdx()
 		t.elems = append(t.elems, argAt(args, 0))
 		return t
 	case "pop":
@@ -1595,6 +1754,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 			return jsNull
 		}
 		v := t.elems[len(t.elems)-1]
+		t.dropIdx()
 		t.elems = t.elems[:len(t.elems)-1]
 		return v
 	case "first":
@@ -1608,7 +1768,7 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 		}
 		return t.elems[len(t.elems)-1]
 	case "include?", "contains":
-		return rt.dictFind(t, argAt(args, 0)) >= 0
+		return rt.dictScan(t, argAt(args, 0)) >= 0 // A list, so a scan and no index.
 	case "to_a":
 		return &jsArray{elems: append([]interface{}{}, t.elems...)}
 	case "each":
@@ -1688,6 +1848,7 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 	case *jsArray:
 		switch m.name {
 		case "push":
+			recv.dropIdx()
 			recv.elems = append(recv.elems, args...)
 			return float64(len(recv.elems))
 		case "pop":
@@ -1695,6 +1856,7 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 				return jsUndef
 			}
 			v := recv.elems[len(recv.elems)-1]
+			recv.dropIdx()
 			recv.elems = recv.elems[:len(recv.elems)-1]
 			return v
 		case "shift":
@@ -1702,9 +1864,11 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 				return jsUndef
 			}
 			v := recv.elems[0]
+			recv.dropIdx()
 			recv.elems = append([]interface{}{}, recv.elems[1:]...)
 			return v
 		case "unshift":
+			recv.dropIdx()
 			recv.elems = append(append([]interface{}{}, args...), recv.elems...)
 			return float64(len(recv.elems))
 		case "slice":
@@ -1748,22 +1912,22 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 		switch m.name {
 		case "charCodeAt":
 			i := jsToInt(argN(0)) // A missing or NaN index reads unit 0 like in JS.
-			if code := jsStrCodeAt(recv, i); code >= 0 {
+			if code := rt.strCodeAt(recv, i); code >= 0 {
 				return float64(code)
 			}
 			return math.NaN()
 		case "charAt":
-			return jsStrAt(recv, jsToInt(argN(0)))
+			return rt.strAt(recv, jsToInt(argN(0)))
 		case "indexOf":
-			return float64(jsStrIndexOf(recv, argS(0)))
+			return float64(rt.strIndexOf(recv, argS(0)))
 		case "replace":
 			return strings.Replace(recv, argS(0), argS(1), 1)
 		case "slice":
-			begin, end := sliceRange(jsStrLen(recv), args, rt)
-			return jsStrRange(recv, begin, end)
+			begin, end := sliceRange(rt.strLen(recv), args, rt)
+			return rt.strRange(recv, begin, end)
 		case "substring":
-			begin, end := substringRange(jsStrLen(recv), args, rt)
-			return jsStrRange(recv, begin, end)
+			begin, end := substringRange(rt.strLen(recv), args, rt)
+			return rt.strRange(recv, begin, end)
 		case "split":
 			parts := strings.Split(recv, argS(0))
 			out := &jsArray{}
@@ -1832,60 +1996,128 @@ func strUnits(s string) []uint16 { return utf16.Encode([]rune(s)) }
 // strFromUnits builds a string back from UTF-16 code units.
 func strFromUnits(u []uint16) string { return string(utf16.Decode(u)) }
 
-// jsStrLen is the JS length of s: its number of UTF-16 code units.
-func jsStrLen(s string) int {
+// unitLen is the JS length of s: its number of UTF-16 code units. It walks s,
+// so the indexing accessors go through the memo below instead.
+func unitLen(s string) int {
 	if strASCII(s) {
 		return len(s)
 	}
 	return len(strUnits(s))
 }
 
-// jsStrIndexOf is the JS indexOf: the byte match position converted to a
+// strInfo is what an indexing accessor needs to know about one string: whether
+// it takes the byte fast path and, if not, its code units. Deriving that costs a
+// walk of the string and interning its handle costs a hash of it, so the runtime
+// remembers both per long string - without the memo the ordinary
+// `for (i...) s.charCodeAt(i)` loop is quadratic in the length of s.
+type strInfo struct {
+	s     string
+	shape int8     // 0 = not derived yet, 1 = ASCII (byte fast path), 2 = units below.
+	units []uint16 // The UTF-16 code units of a non-ASCII string.
+	h     uint64   // Interned handle, 0 (never a string handle) = not looked up yet.
+}
+
+// strCacheSlots is a power of two: the slot is a hash of the string's shape.
+// Only strings of at least strMemoMin bytes take a slot - below that a walk or
+// a map hash is cheaper than the bookkeeping, and keeping the short strings out
+// stops the names and operators of a loop from evicting the string it indexes.
+const (
+	strCacheSlots = 16
+	strMemoMin    = 64
+)
+
+func strSlot(s string) int {
+	h := len(s)*131 + int(s[0])*7 + int(s[len(s)-1])
+	return h & (strCacheSlots - 1)
+}
+
+// strEntry returns the record for s, reset if its slot held another string.
+// The comparison e.s == s compares the string headers first, so the string a
+// loop keeps re-reading hits in O(1), and a record for another value can never
+// be returned in its place.
+func (rt *jsrt) strEntry(s string) *strInfo {
+	e := &rt.strScratch // Short strings answer without taking a slot.
+	if len(s) >= strMemoMin {
+		e = &rt.strCache[strSlot(s)]
+	}
+	if e.s != s {
+		e.s, e.shape, e.units, e.h = s, 0, nil, 0
+	}
+	return e
+}
+
+// strMeta is strEntry with the UTF-16 shape derived.
+func (rt *jsrt) strMeta(s string) *strInfo {
+	e := rt.strEntry(s)
+	if e.shape == 0 {
+		if strASCII(s) {
+			e.shape = 1
+		} else {
+			e.shape, e.units = 2, strUnits(s)
+		}
+	}
+	return e
+}
+
+// strLen is the JS length of s: its number of UTF-16 code units.
+func (rt *jsrt) strLen(s string) int {
+	e := rt.strMeta(s)
+	if e.shape == 1 {
+		return len(s)
+	}
+	return len(e.units)
+}
+
+// strIndexOf is the JS indexOf: the byte match position converted to a
 // code unit index (a UTF-8 substring match always lies on a rune boundary).
-func jsStrIndexOf(s, sub string) int {
+func (rt *jsrt) strIndexOf(s, sub string) int {
 	p := strings.Index(s, sub)
 	if p <= 0 {
 		return p // -1 and 0 are the same in both worlds.
 	}
-	return jsStrLen(s[:p])
+	if rt.strMeta(s).shape == 1 {
+		return p
+	}
+	return unitLen(s[:p])
 }
 
-// jsStrAt returns the one-code-unit string at unit index i, or "" outside.
-func jsStrAt(s string, i int) string {
-	if strASCII(s) {
+// strAt returns the one-code-unit string at unit index i, or "" outside.
+func (rt *jsrt) strAt(s string, i int) string {
+	e := rt.strMeta(s)
+	if e.shape == 1 {
 		if i < 0 || i >= len(s) {
 			return ""
 		}
 		return string(s[i])
 	}
-	units := strUnits(s)
-	if i < 0 || i >= len(units) {
+	if i < 0 || i >= len(e.units) {
 		return ""
 	}
-	return strFromUnits(units[i : i+1])
+	return strFromUnits(e.units[i : i+1])
 }
 
-// jsStrCodeAt returns the code unit at unit index i, or -1 outside.
-func jsStrCodeAt(s string, i int) int {
-	if strASCII(s) {
+// strCodeAt returns the code unit at unit index i, or -1 outside.
+func (rt *jsrt) strCodeAt(s string, i int) int {
+	e := rt.strMeta(s)
+	if e.shape == 1 {
 		if i < 0 || i >= len(s) {
 			return -1
 		}
 		return int(s[i])
 	}
-	units := strUnits(s)
-	if i < 0 || i >= len(units) {
+	if i < 0 || i >= len(e.units) {
 		return -1
 	}
-	return int(units[i])
+	return int(e.units[i])
 }
 
-// jsStrRange slices s by code unit indexes (begin <= end, both in range).
-func jsStrRange(s string, begin, end int) string {
-	if strASCII(s) {
+// strRange slices s by code unit indexes (begin <= end, both in range).
+func (rt *jsrt) strRange(s string, begin, end int) string {
+	e := rt.strMeta(s)
+	if e.shape == 1 {
 		return s[begin:end]
 	}
-	return strFromUnits(strUnits(s)[begin:end])
+	return strFromUnits(e.units[begin:end])
 }
 
 // substringRange resolves JS substring(begin, end) arguments: NaN and negative
@@ -2104,6 +2336,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_arr_push": func(a []uint64) uint64 {
 			arr := u(a[0]).(*jsArray)
+			arr.dropIdx()
 			arr.elems = append(arr.elems, u(a[1]))
 			return 0
 		},
@@ -2419,14 +2652,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return w(o.elems[idx])
 			case string:
-				n := jsStrLen(o)
+				n := rt.strLen(o)
 				if idx < 0 {
 					idx += n
 				}
 				if idx < 0 || idx >= n {
 					rt.fail("string index out of range: %d", int(rt.toNumber(u(a[1]))))
 				}
-				return rt.wrapStr(jsStrAt(o, idx))
+				return rt.wrapStr(rt.strAt(o, idx))
 			}
 			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
 			return 0
@@ -2436,8 +2669,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
 					vals.elems[i] = u(a[2])
 				} else {
-					keys.elems = append(keys.elems, u(a[1]))
-					vals.elems = append(vals.elems, u(a[2]))
+					dictAppend(keys, vals, u(a[1]), u(a[2]))
 				}
 				return 0
 			}
@@ -2452,6 +2684,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			if idx < 0 || idx >= len(arr.elems) {
 				rt.fail("list assignment index out of range")
 			}
+			arr.dropIdx()
 			arr.elems[idx] = u(a[2])
 			return 0
 		},
@@ -2486,6 +2719,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("delete() needs a map")
 			}
 			if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+				keys.dropIdx()
 				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
 				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
 			}
@@ -2496,7 +2730,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			case float64:
 				return rt.wrapNum(o)
 			case string:
-				return rt.wrapNum(float64(jsStrLen(o)))
+				return rt.wrapNum(float64(rt.strLen(o)))
 			case *jsArray:
 				return rt.wrapNum(float64(len(o.elems)))
 			}
@@ -2542,7 +2776,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_pylen": func(a []uint64) uint64 { // len() for strings, lists and dicts.
 			switch o := u(a[0]).(type) {
 			case string:
-				return rt.wrapNum(float64(jsStrLen(o)))
+				return rt.wrapNum(float64(rt.strLen(o)))
 			case *jsArray:
 				return rt.wrapNum(float64(len(o.elems)))
 			}
@@ -2558,8 +2792,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return w(&jsArray{elems: append([]interface{}{}, o.elems...)})
 			case string:
 				out := &jsArray{}
-				for i, n := 0, jsStrLen(o); i < n; i++ {
-					out.elems = append(out.elems, jsStrAt(o, i))
+				for i, n := 0, rt.strLen(o); i < n; i++ {
+					out.elems = append(out.elems, rt.strAt(o, i))
 				}
 				return w(out)
 			}
@@ -2575,8 +2809,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				return a[0]
 			case string:
 				out := &jsArray{}
-				for i, n := 0, jsStrLen(o); i < n; i++ {
-					out.elems = append(out.elems, jsStrAt(o, i))
+				for i, n := 0, rt.strLen(o); i < n; i++ {
+					out.elems = append(out.elems, rt.strAt(o, i))
 				}
 				return w(out)
 			}
@@ -2592,8 +2826,8 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				from, to := rt.pySliceRange(u(a[1]), u(a[2]), len(o.elems))
 				return w(&jsArray{elems: append([]interface{}{}, o.elems[from:to]...)})
 			case string:
-				from, to := rt.pySliceRange(u(a[1]), u(a[2]), jsStrLen(o))
-				return rt.wrapStr(jsStrRange(o, from, to))
+				from, to := rt.pySliceRange(u(a[1]), u(a[2]), rt.strLen(o))
+				return rt.wrapStr(rt.strRange(o, from, to))
 			}
 			rt.fail("slicing a %s", rt.typeOf(u(a[0])))
 			return 0
@@ -2866,7 +3100,7 @@ func standardJSBindings() map[string]interface{} {
 				return true
 			}
 			idx, err := strconv.Atoi(key)
-			return err == nil && idx >= 0 && idx < jsStrLen(o)
+			return err == nil && idx >= 0 && idx < rt.strLen(o)
 		default:
 			rv := reflect.ValueOf(rt.unwrap(this))
 			if rv.Kind() == reflect.Map {

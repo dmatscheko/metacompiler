@@ -455,11 +455,60 @@ function invokeBody(params, body, self, recvName, args) {
 // distinct dict/map type (python, ruby, php, swift, dart, c#); each language file adds
 // its own literal/constructor builders (newDict, makeMap, makeDict, ...) on top.
 function isDict(v) { return v !== null && v !== undefined && typeof v == "object" && v.__dict === true }
+
+// The keys array carries the insertion order, so a lookup cannot reorder it -
+// but scanning it makes every dict-heavy program quadratic. dictIndex keeps a
+// position index in a hidden __idx property next to the arrays: {m: positions,
+// n: the keys.length it describes, all: whether every key made it in}. It is a
+// pure accelerator - a length change rebuilds it, a hit is confirmed against
+// the array before it is used, and keys it cannot represent leave `all` false
+// so a miss still falls back to the scan.
+// dictKeyId is that representation: the type prefix keeps 1 and "1" apart, and
+// keys whose === is not string equality (objects, NaN) stay out.
+function dictKeyId(k) {
+    var t = typeof k
+    if (t == "string") { return "s" + k }
+    if (t == "number") { return (k !== k) ? null : "n" + k }
+    if (t == "boolean") { return "b" + k }
+    return null
+}
+function dictIndex(d) {
+    var ix = hasOwn(d, "__idx") ? d.__idx : null
+    if (ix != null && ix.n == d.keys.length) { return ix }
+    ix = {m: {}, n: d.keys.length, all: true}
+    for (var i = 0; i < d.keys.length; i++) {
+        var id = dictKeyId(d.keys[i])
+        if (id == null) { ix.all = false }
+        else if (!hasOwn(ix.m, id)) { ix.m[id] = i }   // Only the first entry of a key.
+    }
+    d.__idx = ix
+    return ix
+}
 function dictFind(d, k) {
-    for (var i = 0; i < d.keys.length; i++) { if (d.keys[i] === k) { return i } }
+    var id = dictKeyId(k)
+    var ix = dictIndex(d)
+    if (id != null && hasOwn(ix.m, id)) {
+        var i = ix.m[id]
+        if (d.keys[i] === k) { return i }
+        d.__idx = null                                  // An entry changed in place.
+        ix = dictIndex(d)
+        if (hasOwn(ix.m, id) && d.keys[ix.m[id]] === k) { return ix.m[id] }
+        return -1
+    }
+    if (id != null && ix.all) { return -1 }
+    for (var j = 0; j < d.keys.length; j++) { if (d.keys[j] === k) { return j } }
     return -1
 }
 function dictSet(d, k, v) {
     var i = dictFind(d, k)
-    if (i >= 0) { d.vals[i] = v } else { d.keys.push(k); d.vals.push(v) }
+    if (i >= 0) { d.vals[i] = v; return }
+    d.keys.push(k)
+    d.vals.push(v)
+    var ix = hasOwn(d, "__idx") ? d.__idx : null        // dictFind just left it current.
+    if (ix != null && ix.n == d.keys.length - 1) {
+        var id = dictKeyId(k)
+        if (id == null) { ix.all = false }
+        else if (!hasOwn(ix.m, id)) { ix.m[id] = d.keys.length - 1 }
+        ix.n = d.keys.length
+    }
 }
