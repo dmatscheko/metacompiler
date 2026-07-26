@@ -1,0 +1,16 @@
+js-test262-parser-tests	https://github.com/tc39/test262-parser-tests	0e808c74fbec780646434cad17bb22dc52461003
+typescript-conformance	https://github.com/microsoft/TypeScript	cc5c6e2d32e2228fff83a66537bbe6042943054d
+python-cpython	https://github.com/python/cpython	5afbb60e0283caaf34990bbe8437111ebaae04a4
+ruby-spec	https://github.com/ruby/spec	bb3e38bac290459ff29e44aed475f062981f835b
+php-src	https://github.com/php/php-src	7ad79be6550fba20df3d7cea0a5d9da79861c1f9
+csharp-mono	https://github.com/mono/mono	0f53e9e151d92944cacab3e24ac359410c606df6
+swift-parse	https://github.com/swiftlang/swift	5ff147b6e3a40184f6d718e5e6cb4f014ada0408
+dart-language	https://github.com/dart-lang/sdk	c561da23c602765a3cb2c7da4d4af28a29317031
+go-test	https://github.com/golang/go	6db72bb92b2ab681ae177589b70b573e6e337b96
+c-testsuite	https://github.com/c-testsuite/c-testsuite	5c7275656d751de0e68b2d340a95b5681858ed07
+bash-oils	https://github.com/oils-for-unix/oils	15de8fd779569e6e3a9f5fcbfc00e7df0ebe0380
+lua-tests	https://www.lua.org/tests/lua-5.4.6-tests.tar.gz	tarball-url-is-the-pin
+java-openjdk-javac	https://github.com/openjdk/jdk	2d1c83340d0e3d24a52963c77464f6fa796da5e7
+batch-wine	https://github.com/wine-mirror/wine	1012f3d99507b80d4869eabf0853567660a7ecbb
+kotlin-psi	https://github.com/JetBrains/kotlin	bb1b3eafc1c0c65cbc04883a2fed002ce6401b66
+bash-gnu	https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz	tarball-url-is-the-pin
