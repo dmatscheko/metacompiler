@@ -147,9 +147,9 @@ RestParam   <~~ notImpl("rest parameter", up.pos) ~~>
 // A destructuring parameter binds nothing (the pattern is not lowered), but it still
 // occupies its position, so it pushes a placeholder name to keep the arity right.
 PatternParam <~~ takeAll(); push("(pattern)"); notImpl("destructuring parameter", up.pos) ~~>
-            = DPattern ;
+            = WPattern ;
 RestPattern <~~ takeAll(); push("(pattern)"); notImpl("rest parameter", up.pos) ~~>
-            = "..." DPattern ;
+            = "..." WPattern ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -166,7 +166,7 @@ Expression  <~~ push(makeSequence(takeAll(), up.pos)) ~~>
 
 // Assignment is an expression and associates to the right: a = b = c.
 // If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
-AssignExpr  = Assignment | AssignExtended | Yield | CondExpr ;
+AssignExpr  = Assignment | AssignExtended | SuperAssign | Yield | CondExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
@@ -174,6 +174,16 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // accepted but not lowered; the longer operators are tried before their prefixes.
 AssignExtended <~~ takeAll(); push(notImplExpr("compound assignment", up.pos)) ~~>
             = Target ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|=" ) AssignExpr ;
+
+// Assigning THROUGH super - 'super.b = 1', 'super[1] = 2', 'super.c[1] = 2' - inside a
+// method. Target starts at 'NotReserved Id', which refuses the reserved word 'super',
+// so the assignment form cannot come from Target the way every other path does; it is
+// spelled out here on top of the SuperProp value form. Accepted, not lowered.
+SuperAssign <~~ takeAll(); push(notImplExpr("super property assignment", up.pos)) ~~>
+            = SuperProp { CallSuffix | DotSuffix | IndexSuffix }
+              ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
+              | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) AssignExpr ;
+
 Yield       <~~ takeAll(); push(notImplExpr("yield expression", up.pos)) ~~>
             = KwYield [ "*" ] [ AssignExpr ] ;
 
@@ -391,17 +401,42 @@ TplDollar   <~~ push({str: "$"}) ~~>
 // for-of over an array or string iterates its elements/characters (genuine).
 // for-in is not implemented (it needs host key enumeration, an off-limits extern);
 // it is accepted and, under -warn-unsupported, its iterable is evaluated and the
-// body skipped. The loop variable may be preceded by var/let/const or be bare.
-ForOf       <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor "(" [ KwVar ] NotBindName Id <~~ push(up.in) ~~>
-              ( KwOf | KwIn ) <~~ push(up.in) ~~> Expression ")" NestedStatement ;
+// body skipped.
+//
+// The loop target is either a name - optionally preceded by var/let/const, the genuine
+// and lowered form - or, since the loop may also assign into an existing place, a member
+// path: 'for (a.b in c)', 'for (a(x)[1] in d)'. The path form has no name to bind, so it
+// is ACCEPTED and routed to notImplemented.
+// The declared and the bare name are two alternatives rather than one '[ KwVar ] Id'
+// because an optional keeps what it matched: in 'for (let in a)' - a loop over the
+// ordinary variable named 'let' - KwVar would swallow the 'let' and leave no name.
+ForOf       = ForOfName | ForOfPath ;
+ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor "(" ForOfHead Expression ")" NestedStatement ;
+// The head pushes the loop name and then the operator. A target that starts with 'let'
+// is reachable only through the for-IN alternative: 'for (let x of y)' declares, and
+// 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
+// the same shapes with 'in' are legal uses of an ordinary variable named 'let'.
+ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
+ForOfDecl   = KwVar NotBindName Id <~~ push(up.in) ~~> ;
+ForOfBare   = NotBindName Id <~~ push(up.in) ~~> ;
+ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
+ForInOp     = KwIn <~~ push(up.in) ~~> ;
+// The widened member-path target. At least one suffix is required, otherwise this would
+// be a second, unlowered spelling of the plain-name loop ForOfName already handles.
+ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over a member path", up.pos)) ~~>
+            = KwFor "(" ForOfPathHead Expression ")" NestedStatement ;
+ForOfPathHead = NotLet ForOfTarget ( KwOf | KwIn ) | ForOfTarget KwIn ;
+ForOfTarget = NotReserved Id ForOfSuffix { ForOfSuffix } ;
+ForOfSuffix = CallSuffix | DotSuffix | IndexSuffix ;
 
 // A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and nested
 // combinations of the two. The pattern is reified on the stack (arr/obj/id nodes)
 // and lowered by makeDestructure: the initializer runs once, then every leaf name
 // binds to its array element (by index) or object property (by key). The compiler
 // grammar mirrors this exactly, so both engines and both grammars agree.
-Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
+Destructure = DestructureBind | DestructureWide ;
+DestructureBind <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = KwVar DPattern "=" AssignExpr [ ";" ] ;
 DPattern    = ArrPattern | ObjPattern ;
 ArrPattern  <~~ push({dtype: "arr", elems: takeAll()}) ~~>
@@ -413,6 +448,36 @@ DIdElem     <~~ push({dtype: "id", name: up.in}) ~~>
             = NotBindName Id ;
 DField      <~~ push(makeDField(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" DElem ] ;
+
+// The rest of the destructuring surface - a default value ('var [a = b] = c'), a rest
+// element ('catch ([a, ...b])'), a hole ('var [, a] = xs') and a computed key
+// ('function a({[b]: c}) {}') - has no counterpart in makeDestructure, so it must stay
+// OUT of DPattern: that production may only ever produce the arr/obj/id nodes the
+// lowering understands. It gets its own, wider grammar instead, WPattern, which is
+// consumed exclusively by productions that throw the pattern away again - the widened
+// binding right here, and the parameter/rest/catch patterns, which already push a
+// placeholder instead of binding anything. DestructureBind is tried first, so the
+// genuinely lowered shapes keep their lowering.
+DestructureWide <~~ takeAll(); push(notImplStmt("extended destructuring binding", up.pos)) ~~>
+            = KwVar WPattern "=" AssignExpr [ ";" ] ;
+WPattern    = WArrPattern | WObjPattern ;
+// Every array position is optional, which is what makes the holes ('[, a]') and the
+// trailing comma work. The rest element sits OUTSIDE the repetition, because it must be
+// the last thing in the pattern: '[a, ...b,]' and '[...a,]' are syntax errors.
+WArrPattern = "[" [ WElem ] { "," [ WElem ] } [ WRest ] "]" ;
+WObjPattern = "{" [ WField { "," WField } [ "," ] ] "}" ;
+WField      = WRest | WKeyedField | WShorthandField ;
+// A key is a PROPERTY position, so reserved words are fine there ('{ if: a }'); the
+// shorthand form names a VARIABLE and is guarded accordingly.
+WKeyedField = WKey ":" WElem ;
+WShorthandField = NotBindName Id [ "=" WExpr ] ;
+WKey        = "[" WExpr "]" | Id | StringLit | NumberLit ;
+WElem       = ( WPattern | NotBindName Id ) [ "=" WExpr ] ;
+WRest       = "..." ( WPattern | NotBindName Id ) ;
+// A default value and a computed key are an AssignExpr WITHOUT the yield form: a
+// pattern is a binding position, and '{x: y = yield 3}' is a syntax error there even
+// inside a generator.
+WExpr       = Assignment | AssignExtended | SuperAssign | CondExpr ;
 
 // try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
 // raises the value, catch binds it (the binding is optional - ES2019 catch {}), finally
@@ -427,7 +492,7 @@ CatchClause <~~ push(excCatch(takeAll())) ~~>
 // A destructuring catch binding is accepted but not lowered; like a pattern parameter
 // it pushes a placeholder so the clause still has the shape excCatch expects.
 CatchPattern <~~ takeAll(); push("(pattern)"); notImpl("destructuring catch binding", up.pos) ~~>
-            = DPattern ;
+            = WPattern ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 
@@ -759,6 +824,25 @@ NotThis     = :script(~~
         return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))
             ? undefined
             : abnf.newToken("\x01reserved-word", 0)
+    })()
+~~) ;
+// 'let' is not a reserved word (it is an ordinary identifier in non-strict code), so
+// NotReserved lets it through - which is right for 'for (let.let in 1)'. It is wrong for
+// the for-OF head, where the spec says a target starting with 'let' is ALWAYS the
+// declaration form, making 'for (let of y)' and 'for (let.a of 0)' syntax errors. Same
+// shape as NotThis: the impossible token FAILS the guard when the word ahead is 'let'.
+NotLet      = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 108 || c.peek(i + 1) !== 101 || c.peek(i + 2) !== 116) { return undefined }
+        cc = c.peek(i + 3)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))
+            ? undefined
+            : abnf.newToken("\x01let-head", 0)
     })()
 ~~) ;
 
