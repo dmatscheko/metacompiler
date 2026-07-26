@@ -305,7 +305,7 @@ func main() {
 				fmt.Fprintln(os.Stderr, "Error reading stdin: ", e)
 				os.Exit(1)
 			}
-			codeText = string(dat)
+			codeText = abnf.StripBOM(string(dat))
 			name = "(stdin)"
 		}
 		o.files = append(o.files, name)
@@ -383,7 +383,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: ", e)
 			os.Exit(1)
 		}
-		srcs[i] = string(dat)
+		srcs[i] = abnf.StripBOM(string(dat))
 	}
 
 	parseropts := &abnf.Parseropts{

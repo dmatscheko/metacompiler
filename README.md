@@ -660,6 +660,14 @@ The dotted import path maps to a relative file path per language: Kotlin `import
 
 Resolution order per import: builtin prefix (no-op) → project file (parsed and merged) → `-warn-imports` warning or a clean abort.
 
+### Source encoding and byte order marks
+
+Source is read as UTF-8. A file that begins with a **byte order mark** is normalized as it is read, before the parser or the line-number machinery sees a byte: the mark is removed, and if it announced UTF-16 or UTF-32 (`FF FE`, `FE FF`, `FF FE 00 00`, `00 00 FE FF`) the text is transcoded to UTF-8 first. This applies to every source the tool reads - the program, the grammar itself, `:include()`d grammar files, `include()`d script libraries, imported project files and `-code-stdin`.
+
+A BOM states an encoding rather than a character of the program, and no grammar has a production for it, so left in place it makes the very first token unparsable - the parse dies at line 1 column 1 with nothing to suggest that a few invisible bytes are the reason. Files carrying one are common in the wild: 588 files of Microsoft's own TypeScript conformance suite open with a UTF-8 mark. `tests/kotlin-test-bom-utf8.kt`, `-utf16le.kt` and `-utf32be.kt` are the same program in three encodings and must behave identically.
+
+A UTF-16/UTF-32 file with *no* mark is left alone: without a BOM the encoding can only be guessed, and guessing wrong corrupts a file that was merely unusual.
+
 ### Piping one language's output into another (`-pipe`)
 
 The stages above chain *a-grammars*: each grammar compiles the next file. `-pipe` chains along a second, orthogonal axis - *text*. It splits the command line into independent segments; the text a segment prints becomes the program input of the next segment. So one language can transform the source that another language then consumes:

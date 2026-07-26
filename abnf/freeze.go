@@ -46,7 +46,7 @@ func Freeze(grammarPath string, outDir string) error {
 	if err != nil {
 		return err
 	}
-	src := string(dat)
+	src := StripBOM(string(dat))
 	// Grammar level :include() resolves relative to the INPUT file when the
 	// a-grammar is used, but the bootstrap program is parsed under a pseudo
 	// name without a directory - so the freezer inlines the fragments here,
@@ -216,7 +216,7 @@ func inlineDirectives(src string, dir string, re *regexp.Regexp, what string) (s
 			return "", fmt.Errorf("cannot inline %s(%q): %s", what, name, err)
 		}
 		src = src[:m[0]] + "// ----- inlined " + what + "(\"" + name + "\") -----\n" +
-			string(dat) + src[m[1]:]
+			StripBOM(string(dat)) + src[m[1]:]
 	}
 }
 

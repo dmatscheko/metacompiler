@@ -38,7 +38,7 @@ func readImportFile(path string) string {
 	if err != nil {
 		panic("import file vanished: " + path)
 	}
-	return string(dat)
+	return StripBOM(string(dat))
 }
 
 // pushTraceSource swaps the file/line attribution to an imported file for the

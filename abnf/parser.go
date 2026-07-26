@@ -456,7 +456,7 @@ func (pa *parser) applyCommand(rule *r.Rule) {
 		if err != nil {
 			panic(err)
 		}
-		srcCode := string(dat)
+		srcCode := StripBOM(string(dat))
 
 		asg, err := ParseWithAgrammar(AbnfAgrammar, srcCode, fullFileName, pa.opts)
 		if err != nil {

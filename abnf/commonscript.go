@@ -204,7 +204,7 @@ func NewCommonScript(vm *goja.Runtime, compilerFuncMap *map[string]r.Object, pre
 		if err != nil {
 			panic(err)
 		}
-		srcCode := string(dat)
+		srcCode := StripBOM(string(dat))
 
 		_, err = common.Run(fileScript(includeFileName), srcCode, -1)
 		if err != nil {

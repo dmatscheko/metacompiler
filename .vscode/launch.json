@@ -263,6 +263,30 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-1.kt", "-q"]
         },
         {
+            "name": "Kotlin BOM UTF-8 (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-bom-utf8.kt", "-q"]
+        },
+        {
+            "name": "Kotlin BOM UTF-16LE (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-bom-utf16le.kt", "-q"]
+        },
+        {
+            "name": "Kotlin BOM UTF-32BE (interpreter)",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-interpreter.abnf", "tests/kotlin-test-bom-utf32be.kt", "-q"]
+        },
+        {
+            "name": "Kotlin BOM UTF-8 to LLVM IR",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-bom-utf8.kt", "-q"]
+        },
+        {
             "name": "Kotlin imports (interpreter)",
             "type": "go",
             "request": "launch",

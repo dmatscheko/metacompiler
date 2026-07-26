@@ -501,7 +501,7 @@ func newFrozenEngine(co *compiler, asg *r.Rules, aGrammar *r.Rules, traceEnabled
 		if err != nil {
 			panic(err)
 		}
-		mod := frozenKernel().compileScript(string(dat), fileScript(resolved))
+		mod := frozenKernel().compileScript(StripBOM(string(dat)), fileScript(resolved))
 		// The included file runs AS its own module (goja names each program
 		// after its file): a nested include(), load() or moduleName() inside
 		// it resolves relative to the included file, not to the includer -
@@ -765,7 +765,7 @@ func (ps *frozenParserScript) init() {
 		if err != nil {
 			panic(err)
 		}
-		mod := frozenKernel().compileScript(string(dat), fileScript(resolved))
+		mod := frozenKernel().compileScript(StripBOM(string(dat)), fileScript(resolved))
 		ma, ok := ps.machines[mod]
 		if !ok {
 			ma = ps.rt.attach(mod)
