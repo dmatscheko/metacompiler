@@ -1029,7 +1029,20 @@ KwStep      = "step" KwEnd ;
         // name; it runs with the receiver as `this` (null for a nullable receiver).
         if (extResolves(name)) { return extFuns["$" + name].apply(undefined, concat2impl([target], args)) }
         if (typeof target == "string") {
+            // The String methods of the `bmn` list above, with the semantics of the
+            // js_mcall external the compiled twin calls: substring clamps and swaps
+            // its bounds (JS substring, not slice) and charAt rejects an index
+            // outside the string instead of yielding "".
             if (name == "length") return target.length
+            if (name == "charAt") {
+                var ci = args[0]
+                if (ci < 0 || ci >= target.length) fail("charAt(" + ci + ") out of range for " + target)
+                return target.charAt(ci)
+            }
+            if (name == "equals") return target === args[0]
+            if (name == "substring") return args.length > 1 ? target.substring(args[0], args[1]) : target.substring(args[0])
+            if (name == "indexOf") return target.indexOf(args[0])
+            if (name == "isEmpty") return target.length == 0
             fail("unknown String method: " + name)
         }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
