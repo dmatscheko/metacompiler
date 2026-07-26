@@ -89,6 +89,12 @@
             "program": "${workspaceFolder}","args": ["languages/tiny-self-parse.bnf", "languages/tiny-self-parse.bnf"]
         },
         {
+            "name": "Tiniest Self Parse",
+            "type": "go",
+            "request": "launch",
+            "program": "${workspaceFolder}","args": ["languages/tiniest-self-parse.bnf", "languages/tiniest-self-parse.bnf"]
+        },
+        {
             "name": "Brainfuck interpreter",
             "type": "go",
             "request": "launch",

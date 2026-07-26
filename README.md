@@ -375,7 +375,8 @@ inlines grammar includes the same way as script includes. TinyC, Lisp, Calculato
 Brainfuck share almost nothing with the libs and remain deliberately self-contained.
 
 Besides those there are the self describing grammars (abnf-of-abnf.abnf, ebnf-of-ebnf.bnf,
-ebnf-of-abnf.bnf, tiny-self-parse.bnf, brainfuck-parser.bnf and tinyc-parser.bnf as syntax
+ebnf-of-abnf.bnf, tiny-self-parse.bnf and its 22-byte record holder tiniest-self-parse.bnf,
+brainfuck-parser.bnf and tinyc-parser.bnf as syntax
 only variants), the feature
 demos (tlv-test, parser-script-test, include-test, parse-and-compile-from-js, llvm-ir-tests,
 negation-test for the ! and @b forms),
