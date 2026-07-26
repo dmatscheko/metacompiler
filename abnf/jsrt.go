@@ -739,7 +739,7 @@ func (rt *jsrt) toString(v interface{}) string {
 			}
 			parts[i] = rt.toString(e)
 		}
-		return strings.Join(parts, ",")
+		return strJoin(parts, ",")
 	case *jsObject:
 		return "[object Object]"
 	case *jsClosure, *hostFunc, *boundMethod:
@@ -794,19 +794,19 @@ func (rt *jsrt) jsAdd(a, b interface{}) interface{} {
 		if !bIsStr {
 			bs = rt.toString(b)
 		}
-		return as + bs
+		return strConcat(as, bs)
 	}
 	if _, ok := a.(*jsArray); ok {
-		return rt.toString(a) + rt.toString(b)
+		return strConcat(rt.toString(a), rt.toString(b))
 	}
 	if _, ok := b.(*jsArray); ok {
-		return rt.toString(a) + rt.toString(b)
+		return strConcat(rt.toString(a), rt.toString(b))
 	}
 	if _, ok := a.(*jsObject); ok {
-		return rt.toString(a) + rt.toString(b)
+		return strConcat(rt.toString(a), rt.toString(b))
 	}
 	if _, ok := b.(*jsObject); ok {
-		return rt.toString(a) + rt.toString(b)
+		return strConcat(rt.toString(a), rt.toString(b))
 	}
 	return rt.toNumber(a) + rt.toNumber(b)
 }
@@ -1740,7 +1740,7 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 			if ch == "" {
 				rt.fail("charAt(%d) out of range for %q", i, o)
 			}
-			return ch
+			return gojaCharAt(ch)
 		case "equals":
 			return rt.strictEq(o, argAt(args, 0))
 		case "substring":
@@ -2106,7 +2106,7 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 					parts[i] = rt.toString(e)
 				}
 			}
-			return strings.Join(parts, sep)
+			return strJoin(parts, sep)
 		case "concat":
 			out := &jsArray{elems: append([]interface{}{}, recv.elems...)}
 			for _, a := range args {
@@ -2127,7 +2127,7 @@ func (rt *jsrt) builtinMethod(m *boundMethod, args []interface{}) interface{} {
 			}
 			return math.NaN()
 		case "charAt":
-			return rt.strAt(recv, jsToInt(argN(0)))
+			return gojaCharAt(rt.strAt(recv, jsToInt(argN(0))))
 		case "indexOf":
 			return float64(rt.strIndexOf(recv, argS(0)))
 		case "replace":
@@ -2188,8 +2188,24 @@ func derefSliceValue(v reflect.Value) reflect.Value {
 // ("é".length was 1 under goja but the byte count under -frozen, and the
 // byte-based charCodeAt/fromCharCode round trip in unescapeJs double-encoded
 // every non-ASCII string literal). ASCII strings take the byte fast path.
-// Lone surrogate halves cannot round-trip through a Go string (they decode to
-// U+FFFD); BMP behavior is exact.
+//
+// A code unit of an astral character is half a surrogate pair, and a lone
+// surrogate is not a Unicode scalar value, so Go's UTF-8 encoder replaces it
+// with U+FFFD. The unit-at-a-time idiom that every string literal goes through
+// (`out += String.fromCharCode(s.charCodeAt(i))` in unescapeJs) therefore took
+// an emoji apart into two halves and destroyed both before the concatenation
+// could put them back. So a jsrt string is WTF-8, not UTF-8: a lone surrogate
+// keeps its own three byte encoding (the encoding UTF-8 would give the code
+// point if surrogates were scalars), which strUnits decodes back to the unit it
+// came from. Concatenation rejoins a pair split across the seam (strConcat), so
+// the halves only ever exist while the round trip is in flight, and printing
+// substitutes U+FFFD for whatever lone surrogates are left (wtf8Clean), which is
+// what goja writes for them too. Everything below therefore matches goja exactly
+// for BMP and astral text alike (see the utf16-astral checks in
+// tests/metajs-test-features.js). What is left is a string that deliberately
+// keeps a lone half around: the two engines print it the same, but goja will
+// have replaced it by U+FFFD as it crossed into a Go string, so byteLen and any
+// bytes emitted from it (a string global of a compiled module) still differ.
 
 func strASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
@@ -2200,11 +2216,169 @@ func strASCII(s string) bool {
 	return true
 }
 
-// strUnits returns s as UTF-16 code units.
-func strUnits(s string) []uint16 { return utf16.Encode([]rune(s)) }
+const (
+	surrHigh0 = 0xD800 // First high surrogate.
+	surrLow0  = 0xDC00 // First low surrogate.
+	surrEnd   = 0xE000 // First code point after the surrogates.
+)
 
-// strFromUnits builds a string back from UTF-16 code units.
-func strFromUnits(u []uint16) string { return string(utf16.Decode(u)) }
+func isSurrogate(c rune) bool { return c >= surrHigh0 && c < surrEnd }
+func isHighSurr(c rune) bool  { return c >= surrHigh0 && c < surrLow0 }
+func isLowSurr(c rune) bool   { return c >= surrLow0 && c < surrEnd }
+func surrPair(h, l rune) rune { return 0x10000 + (h-surrHigh0)<<10 + (l - surrLow0) }
+
+// appendWTF8 appends the three byte encoding of a lone surrogate.
+func appendWTF8(b []byte, c rune) []byte {
+	return append(b, 0xE0|byte(c>>12), 0x80|byte(c>>6)&0x3F, 0x80|byte(c)&0x3F)
+}
+
+// wtf8Surrogate decodes the WTF-8 encoded lone surrogate at the head of s, or
+// returns 0 when s does not start with one. The three byte form of a surrogate
+// always begins 0xED, which no valid UTF-8 sequence uses for another code point.
+func wtf8Surrogate(s string) rune {
+	if len(s) < 3 || s[0] != 0xED || s[1] < 0xA0 || s[1] > 0xBF || s[2] < 0x80 || s[2] > 0xBF {
+		return 0
+	}
+	return rune(s[0]&0x0F)<<12 | rune(s[1]&0x3F)<<6 | rune(s[2]&0x3F)
+}
+
+// strUnits returns s as UTF-16 code units, decoding WTF-8 lone surrogates back
+// to the single unit each stands for.
+func strUnits(s string) []uint16 {
+	u := make([]uint16, 0, len(s))
+	for i := 0; i < len(s); {
+		if c := s[i]; c < utf8.RuneSelf {
+			u = append(u, uint16(c))
+			i++
+			continue
+		}
+		if c := wtf8Surrogate(s[i:]); c != 0 {
+			u = append(u, uint16(c))
+			i += 3
+			continue
+		}
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r > 0xFFFF {
+			h, l := utf16.EncodeRune(r)
+			u = append(u, uint16(h), uint16(l))
+		} else {
+			u = append(u, uint16(r))
+		}
+		i += n
+	}
+	return u
+}
+
+// strFromUnits builds a string back from UTF-16 code units: a surrogate pair
+// becomes the astral character it spells, a lone surrogate its WTF-8 form.
+func strFromUnits(u []uint16) string {
+	b := make([]byte, 0, len(u)+len(u)/2+4)
+	for i := 0; i < len(u); i++ {
+		c := rune(u[i])
+		if isHighSurr(c) && i+1 < len(u) && isLowSurr(rune(u[i+1])) {
+			b = utf8.AppendRune(b, surrPair(c, rune(u[i+1])))
+			i++
+			continue
+		}
+		if isSurrogate(c) {
+			b = appendWTF8(b, c)
+			continue
+		}
+		b = utf8.AppendRune(b, c)
+	}
+	return string(b)
+}
+
+// seamPair reports the astral character spelled by a WTF-8 high surrogate at the
+// end of a and a WTF-8 low surrogate at the start of b, or 0 when the seam
+// between them does not split a pair.
+func seamPair(a, b string) rune {
+	if len(a) < 3 || len(b) < 3 || a[len(a)-3] != 0xED || b[0] != 0xED {
+		return 0
+	}
+	h, l := wtf8Surrogate(a[len(a)-3:]), wtf8Surrogate(b)
+	if !isHighSurr(h) || !isLowSurr(l) {
+		return 0
+	}
+	return surrPair(h, l)
+}
+
+// strConcat is `a + b` on two strings: plain concatenation, except that a
+// surrogate pair split across the seam is rejoined into its astral character.
+// This is what makes the `out += String.fromCharCode(s.charCodeAt(i))` walk of
+// a string literal give the string back unchanged.
+func strConcat(a, b string) string {
+	if c := seamPair(a, b); c != 0 {
+		return a[:len(a)-3] + string(c) + b[3:]
+	}
+	return a + b
+}
+
+// strJoin is strings.Join with the same seam rejoining, for the operations that
+// build one string out of many ([].join("") is a string walk put back together
+// just as `out +=` is).
+func strJoin(parts []string, sep string) string {
+	if len(parts) < 2 {
+		return strings.Join(parts, sep)
+	}
+	b := make([]byte, 0, len(parts)*(len(sep)+8))
+	add := func(s string) {
+		// The guard keeps the tail out of seamPair (and off the heap) unless the
+		// seam really could split a pair.
+		if len(b) >= 3 && len(s) >= 3 && b[len(b)-3] == 0xED && s[0] == 0xED {
+			if c := seamPair(string(b[len(b)-3:]), s); c != 0 {
+				b = utf8.AppendRune(b[:len(b)-3], c)
+				s = s[3:]
+			}
+		}
+		b = append(b, s...)
+	}
+	add(parts[0])
+	for _, p := range parts[1:] {
+		add(sep)
+		add(p)
+	}
+	return string(b)
+}
+
+// wtf8Clean substitutes U+FFFD for the WTF-8 lone surrogates in s, which is what
+// a Go string can hold and what goja writes for an unpaired half. Output goes
+// through it so that the engines agree on every byte they print.
+func wtf8Clean(s string) string {
+	i := strings.IndexByte(s, 0xED)
+	if i < 0 {
+		return s
+	}
+	b := make([]byte, 0, len(s))
+	b = append(b, s[:i]...)
+	for i < len(s) {
+		if c := wtf8Surrogate(s[i:]); c != 0 {
+			b = utf8.AppendRune(b, utf8.RuneError)
+			i += 3
+			continue
+		}
+		b = append(b, s[i])
+		i++
+	}
+	return string(b)
+}
+
+// gojaCharAt is charAt's one code unit result with a lone surrogate replaced by
+// U+FFFD, because that is what the pinned goja does: its stringproto_charAt
+// (builtin_string.go) ends in string(s.charAt(pos)), a rune-to-string conversion,
+// and Go writes U+FFFD for a rune that is not a scalar value. Later goja
+// versions slice the string instead and keep the half. Being right where goja is
+// wrong would be a divergence, and the engines agreeing is the whole point of
+// -frozen, so charAt - and only charAt - loses the half here too. Index access
+// (s[i]), charCodeAt, substring and split are exact in both engines. Delete this
+// once goja is updated (and the utf16-astral-charat check in
+// tests/metajs-test-features.js will say so).
+func gojaCharAt(ch string) string {
+	if len(ch) == 3 && ch[0] == 0xED {
+		return wtf8Clean(ch)
+	}
+	return ch
+}
 
 // unitLen is the JS length of s: its number of UTF-16 code units. It walks s,
 // so the indexing accessors go through the memo below instead.
@@ -2672,7 +2846,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			_, ls := l.(string)
 			_, rs := r.(string)
 			if ls || rs {
-				return rt.wrapStr(rt.javaString(l) + rt.javaString(r))
+				return rt.wrapStr(strConcat(rt.javaString(l), rt.javaString(r)))
 			}
 			ln, rn := rt.toNumber(l), rt.toNumber(r)
 			if isInt32Value(ln) && isInt32Value(rn) {
@@ -2764,7 +2938,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			inst.set("args", arr)
 			return w(inst)
 		},
-		"js_tonum":  func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
+		"js_tonum": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
 		"js_throw": func(a []uint64) uint64 {
 			// Raise the thrown value as a Go panic; the nearest js_try recovers it.
 			// An uncaught one is turned into a clean runtime error at the program
@@ -3152,7 +3326,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				out += rt.pyString(e)
 			}
-			fmt.Fprintln(outWriter, out)
+			fmt.Fprintln(outWriter, wtf8Clean(out))
 			return 0
 		},
 
@@ -3178,6 +3352,9 @@ func (rt *jsrt) printArgs(args []interface{}) []interface{} {
 	out := make([]interface{}, len(args))
 	for i, a := range args {
 		out[i] = rt.toGoNatural(a)
+		if s, ok := out[i].(string); ok {
+			out[i] = wtf8Clean(s) // A lone surrogate prints as U+FFFD, as in goja.
+		}
 	}
 	return out
 }
@@ -3280,13 +3457,13 @@ func standardJSBindings() map[string]interface{} {
 
 	stringObj := newJSObject()
 	stringObj.set("fromCharCode", jsHostFunc("fromCharCode", func(rt *jsrt, this uint64, args []interface{}) interface{} {
-		var sb strings.Builder
-		for _, a := range args {
+		units := make([]uint16, len(args))
+		for i, a := range args {
 			// ECMA ToUint16: NaN becomes 0 (via jsToInt) and larger values
 			// wrap modulo 2^16 before the code unit becomes a rune.
-			sb.WriteRune(rune(uint16(jsToInt(rt.toNumber(a)))))
+			units[i] = uint16(jsToInt(rt.toNumber(a)))
 		}
-		return sb.String()
+		return strFromUnits(units)
 	}))
 
 	arrayObj := newJSObject()

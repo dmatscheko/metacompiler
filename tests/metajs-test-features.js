@@ -184,6 +184,25 @@ check("utf16-charat", "héllo".charAt(1), "é");
 check("utf16-substring", "héllo".substring(0, 2), "hé");
 check("utf16-fromcharcode", String.fromCharCode(233), "é");
 
+// A character above U+FFFF is a surrogate PAIR: length 2, and every operation
+// that takes it apart hands out halves that are not characters on their own.
+// Both engines must still put it back together (the -frozen side keeps a lone
+// half in WTF-8 - see the UTF-16 note in abnf/jsrt.go).
+check("utf16-astral-length", "🎉".length, 2);
+check("utf16-astral-high", "🎉".charCodeAt(0), 55356);
+check("utf16-astral-low", "🎉".charCodeAt(1), 57225);
+check("utf16-astral-escape", "🎉", "🎉");
+check("utf16-astral-concat", "a" + "🎉" + "é", "a🎉é");
+check("utf16-astral-halves", "🎉".substring(0, 1) + "🎉".substring(1, 2), "🎉");
+check("utf16-astral-index", "🎉"[0] + "🎉"[1], "🎉");
+check("utf16-astral-fromcharcode", String.fromCharCode(55356) + String.fromCharCode(57225), "🎉");
+check("utf16-astral-fromcharcode2", String.fromCharCode(55356, 57225), "🎉");
+check("utf16-astral-split", "🎉".split("").join(""), "🎉");
+// charAt is the one exception: the pinned goja turns a lone half into U+FFFD,
+// and jsrt matches it deliberately (gojaCharAt). When this check starts failing,
+// goja has been updated and gojaCharAt can go.
+check("utf16-astral-charat", "🎉".charAt(0).charCodeAt(0), 65533);
+
 // ----- control flow: if / while / do-while / for -----
 function grade(n) {
     if (n > 10) { return "big"; }

@@ -12,12 +12,12 @@
  * differ most between the three encodings (one byte per character in UTF-8
  * ASCII, always two units in UTF-16, always four in UTF-32).
  *
- * Deliberately BMP-only: a character above U+FFFF is a surrogate PAIR in
- * UTF-16, and while StripBOM decodes those correctly, such a literal cannot
- * survive the -frozen string pipeline (see the UTF-16 note in abnf/jsrt.go:
- * a lone surrogate half cannot round-trip through a Go string). That is a
- * separate, pre-existing limitation, so testing it here would only encode a
- * known-broken expectation into the matrix.
+ * The astral checks are the interesting ones: a character above U+FFFF is a
+ * surrogate PAIR in UTF-16, so it is the case where the three encodings differ
+ * most (four bytes in UTF-8, two units in UTF-16, one in UTF-32) AND the case
+ * the -frozen string pipeline used to destroy, because it takes every string
+ * literal apart one UTF-16 code unit at a time and a lone surrogate half is not
+ * a Unicode scalar value. See the WTF-8 note in abnf/jsrt.go.
  *
  * main() ends with exitProcess(fails), so the run exits 0 exactly when the
  * whole file arrived intact. **/
@@ -55,6 +55,14 @@ fun main() {
     // no character was dropped or widened along the way.
     checkS("mixed", "a" + "ö" + "日" + "z", "aö日z")
     check("mixed length", ("a" + "ö" + "日" + "z").length, 4)
+
+    // Astral: four bytes in UTF-8, a surrogate PAIR in UTF-16 - so length is 2,
+    // as it is in Kotlin itself, whose String is a UTF-16 sequence too.
+    checkS("astral", "🎉", "🎉")
+    check("astral length", "🎉".length, 2)
+
+    checkS("astral mixed", "a" + "🎉" + "ö" + "日", "a🎉ö日")
+    check("astral mixed length", ("a" + "🎉" + "ö" + "日").length, 5)
 
     if (fails == 0) { println("Kotlin BOM self test passed") }
     exitProcess(fails)
