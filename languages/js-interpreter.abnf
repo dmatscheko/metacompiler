@@ -52,7 +52,7 @@ Program     <~~ pushg(makeSeq(takeAll())) ~~>
             = { Statement } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | ImportStmt | ExportStmt | ClassDecl | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
+Statement   = Block | ImportStmt | ExportStmt | ClassDecl | ClassDeclWidened | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncDecl | Empty | ExprStmt ;
 
 // JavaScript has TWO statement positions. A StatementList (the program, a block, a
@@ -315,7 +315,7 @@ AsyncFuncExpr <~~ takeAll(); push(notImplExpr("async function expression", up.po
 GenFuncExpr <~~ takeAll(); push(notImplExpr("generator function expression", up.pos)) ~~>
             = KwFunction "*" [ NotBindName Id ] ParamList Block ;
 ClassExpr   <~~ takeAll(); push(notImplExpr("class expression", up.pos)) ~~>
-            = KwClass [ KwExtends NotReserved Id | NotBindName Id [ KwExtends NotReserved Id ] ] "{" { ClassMember } "}" ;
+            = KwClass [ NotBindName Id ] [ KwExtends ClassHeritage ] "{" { ClassMember } "}" ;
 
 // The optional name of a function expression is accepted but not bound.
 FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
@@ -432,23 +432,47 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
               [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> ]
               "{" { ClassMember } "}" ;
 
+// The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
+// 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. Only the
+// 'extends Name' form above can be lowered (makeClassStmt resolves the parent by name),
+// so a class with any other heritage is ACCEPTED here and routed to notImplemented -
+// which means the class is not defined, not that the file is rejected. Tried after
+// ClassDecl so the lowered form always wins.
+ClassDeclWidened <~~ takeAll(); push(notImplStmt("class heritage expression", up.pos)) ~~>
+            = KwClass NotBindName Id KwExtends ClassHeritage "{" { ClassMember } "}" ;
+// CallMember rather than Expression: 'class a extends b, c {}' is a syntax error, and
+// stopping at the call/member level is what keeps the '{' of the body out of the
+// heritage expression.
+ClassHeritage = CallMember ;
+
 // The members: a constructor, methods and fields (tried in that order so 'constructor'
 // and a method's '(' are recognized before the field form). A stray ';' is skipped.
 // The modern member forms (static block, accessors, async/generator/computed/private
 // methods and fields) are ACCEPTED and routed to notImplemented (they push a skip
 // marker so makeClassStmt ignores them).
-ClassMember = ClassSemi | ClassStaticBlock | CtorDef | ClassGetSet | ClassSpecialMethod | ClassPrivate | ClassComputed | MethodDef | FieldDef ;
+ClassMember = ClassSemi | ClassStaticBlock | CtorDef | ClassGetSet | ClassSpecialMethod | ClassPrivate | ClassComputed | ClassLiteralMember | MethodDef | FieldDef ;
 ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
 ClassStaticBlock <~~ takeAll(); push(notImplMember("static block", up.pos)) ~~>
             = "static" KwEnd Block ;
 ClassGetSet <~~ takeAll(); push(notImplMember("accessor member", up.pos)) ~~>
-            = MemberMods ( "get" KwEnd PropKey GetterParams | "set" KwEnd PropKey SetterParams ) Block ;
+            = MemberMods ( "get" KwEnd MemberKey GetterParams | "set" KwEnd MemberKey SetterParams ) Block ;
 ClassSpecialMethod <~~ takeAll(); push(notImplMember("async/generator method", up.pos)) ~~>
-            = MemberMods ( "async" KwEnd [ "*" ] | "*" ) PropKey ParamList Block ;
+            = MemberMods ( "async" KwEnd [ "*" ] | "*" ) MemberKey ParamList Block ;
 ClassPrivate <~~ takeAll(); push(notImplMember("private member", up.pos)) ~~>
             = MemberMods "#" Id ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
 ClassComputed <~~ takeAll(); push(notImplMember("computed member", up.pos)) ~~>
             = MemberMods "[" AssignExpr "]" ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+// A member whose key is a string or number literal - class a { 'constructor'() {} },
+// class a { 1 = 2 }. The class model keys its members by identifier name, so these are
+// ACCEPTED and routed to notImplemented. Tried before MethodDef/FieldDef, which only
+// know the bare-Id form.
+ClassLiteralMember <~~ takeAll(); push(notImplMember("literal-keyed member", up.pos)) ~~>
+            = MemberMods ( StringLit | NumberLit ) ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+// The key of a widened member: a name, a string/number literal or a computed [expr].
+// PropKey (the object-literal key) has no computed form because ComputedProp spells that
+// case out separately; here the computed form has to be part of the key itself, because
+// 'static *[b]() {}' carries a modifier and a '*' in front of it.
+MemberKey   = Id <~~ push(up.in) ~~> | StringLit | NumberLit | "[" AssignExpr "]" ;
 
 // A constructor.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
@@ -462,10 +486,34 @@ MethodDef   <~~ push(makeMethod(takeAll())) ~~>
 
 // A field (instance unless 'static'), with an optional initializer.
 FieldDef    <~~ push(makeField(takeAll())) ~~>
-            = MemberMods Id <~~ push({fname: up.in}) ~~> [ "=" AssignExpr ] [ ";" ] ;
+            = MemberMods Id <~~ push({fname: up.in}) ~~> FieldNameEnd [ "=" AssignExpr ] [ ";" ] ;
+// FieldDef is the LAST member alternative, so whatever the earlier ones reject lands
+// here - and without this guard a malformed member silently becomes a field plus a
+// method: 'class A { get prop(x) {} }' (a getter with a parameter, a syntax error)
+// parsed as a field named 'get' followed by a method 'prop'. A field name can only be
+// followed by '=', ';', '}' or a line break (ASI), so a name-like, string-like or
+// '('-like continuation means the member was malformed and the class must be rejected.
+// Returns the impossible token to FAIL. Only spaces and tabs are stepped over: a line
+// break ENDS the field, and a comment is left alone (which can only make the guard
+// miss, never misfire).
+FieldNameEnd = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var bad = (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57)
+            || cc === 95 || cc === 36 || cc === 34 || cc === 39 || cc === 96
+            || cc === 40 || cc === 91 || cc === 42 || cc === 35
+        return bad ? abnf.newToken("\x01field-name", 0) : undefined
+    })()
+~~) ;
 
+// 'static' may appear at most once - 'class A { static static m() {} }' is a syntax
+// error, so this is [ ... ] and not { ... }.
 MemberMods  <~~ push({mods: takeAll()}) ~~>
-            = { MemberMod <~~ push(up.in) ~~> } ;
+            = [ MemberMod <~~ push(up.in) ~~> ] ;
 // 'static' directly in front of '(' is the NAME of the method, not the modifier.
 MemberMod   = "static" KwEnd NotParen ;
 NotParen    = :script(~~
