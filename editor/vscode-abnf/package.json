@@ -2,7 +2,7 @@
 	"name": "abnf-annotated",
 	"displayName": "ABNF (annotated EBNF + JS)",
 	"description": "Syntax highlighting for the metacompiler's annotated ABNF dialect: EBNF with commands, char-set operators, and embedded JS in <~~ ~~> tags and ~~ ~~ code blocks.",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"publisher": "metacompiler",
 	"engines": {
 		"vscode": "^1.60.0"
@@ -15,7 +15,7 @@
 			{
 				"id": "abnf-annotated",
 				"aliases": ["ABNF (annotated)", "abnf"],
-				"extensions": [".abnf"],
+				"extensions": [".abnf", ".ebnf", ".bnf"],
 				"configuration": "./language-configuration.json"
 			}
 		],

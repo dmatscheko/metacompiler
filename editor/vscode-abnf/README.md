@@ -39,6 +39,20 @@ Then run **Developer: Reload Window** in VSCode. Open any `.abnf` file.
 To iterate on the grammar, use **Developer: Inspect Editor Tokens and Scopes**
 to see the scope under the cursor.
 
+## Troubleshooting
+
+**Changed a file association (or anything in `contributes`) and it has no
+effect — even after restarting VSCode?** Bump the `"version"` in
+`package.json`. VSCode caches each extension's `contributes` block keyed by
+*id + version*, and on startup it trusts that cache instead of re-reading the
+manifest, so a same-version edit stays invisible across full restarts. Changing
+the version invalidates the cache and forces a re-scan. (Clearing the extension
+cache works too, but a version bump is easier.)
+
+Edits to `syntaxes/abnf.tmLanguage.json` or `language-configuration.json` are
+*not* cached this way — those just need **Developer: Reload Window**. The rule
+of thumb: touch `contributes` → bump the version; touch the grammar → reload.
+
 ## Package a `.vsix` (optional)
 
 ```bash
