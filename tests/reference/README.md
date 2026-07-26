@@ -117,10 +117,122 @@ never commit it, its GPL+CE license costs us nothing.
   output (`@todo_wine@`-prefixed lines are known-broken *in wine*, i.e. real
   cmd.exe behaves as written).
 
-## Suggested workflow (ratchet)
+## Two corpora need extracting first
 
-Sweep a corpus with the matching grammar in recognize/parse mode, count
-pass/fail, fix the biggest cluster, repeat — same spirit as the
-`tests/*-test-full.*` ratchet files, but against the language's own reference
-suite. The per-file pass/fail semantics above tell the runner which files are
-*supposed* to be rejected.
+Two suites pack many cases per file, so they get a one-time split into plain
+programs plus their expected stdout. Both extractors are idempotent and write
+only into the (gitignored) payload, under `<corpus>/extracted/`:
+
+```bash
+./tests/reference/extract-phpt.py
+```
+```bash
+./tests/reference/extract-oils.py
+```
+
+[extract-phpt.py](extract-phpt.py) turns each `.phpt` into `NAME.php` +
+`NAME.expected`. Only tests with a literal `--EXPECT--` survive; `--EXPECTF--`
+(pattern), `--SKIPIF--`, `--INI--`, `--EXTENSIONS--` and friends are skipped
+and counted, because their expected output depends on a PHP runtime we do not
+reproduce. Currently 2,753 of 5,783 tests extract.
+
+[extract-oils.py](extract-oils.py) splits each `spec/*.test.sh` into
+`NNN-slug.sh` + `.expected` (+ `.status`/`.stderr` when the case states them),
+resolving per-shell overrides **for bash**: `## OK bash …` / `## BUG bash …`
+replace the generic expectation, `## N-I bash` cases are skipped, and overrides
+naming only other shells are ignored. YSH files are skipped wholesale.
+Currently 2,562 cases from 139 spec files.
+
+Both write a `manifest.tsv` next to the extracted cases.
+
+## The ratchet sweep
+
+[sweep.sh](sweep.sh) is the reference-corpus counterpart of `./test.sh --full`:
+it runs every corpus file through its language's grammar and reports how much
+of the real language we parse today.
+
+```bash
+./tests/reference/sweep.sh kotlin
+```
+
+```
+LANGUAGE    EXPECT      FILES  PARSED           PARSE-FAIL     TIMEOUT
+kotlin      parse         534     312  58.4%      220  41.2%      2
+            reject?       167      27  16.2%      140  83.8%      0
+
+Top parse-failure clusters (token at the position the parse died):
+  kotlin:
+       88  interface
+       41  <
+```
+
+Each file is run as `mec <grammar> <file> -q -warn-unsupported -warn-imports`
+and classified by what it printed: **parsed** (no parse error — it may still
+fail later at runtime, which is a separate question), **PARSE-FAIL** (`Not
+everything could be parsed` — a real grammar gap), or **timeout**. Expectations
+come from each suite's own convention, as listed in the format notes above:
+`parse` (must parse), `reject` (genuine syntax errors — test262 `fail/`, where
+PARSE-FAIL is the *good* outcome), and `reject?` (upstream negative tests that
+are mostly *semantic*, so a syntax-only front end may legitimately parse them —
+reported but not judged).
+
+The payoff is the cluster histogram: for every parse failure the runner records
+the token sitting where the parse died, then ranks them. The top cluster names
+the construct that would buy the most coverage next. Per-file results land in
+`.results/sweep.tsv` (`lang, expect, result, file, position, token`) so you can
+drill in:
+
+```bash
+awk -F'\t' '$1=="kotlin" && $6=="interface"' tests/reference/.results/sweep.tsv | head
+```
+
+Useful flags: `-n 200` samples a few files per language for a quick look, `-f
+PATTERN` restricts to matching paths, `-j`/`-t` set jobs and the per-file
+timeout, `-c to-llvm-ir` sweeps the compiler grammars instead of the
+interpreters, and `-l` lists the table. Like `test.sh --full`, it is
+informational and always exits 0. A full sweep is ~32k runs and takes roughly
+an hour on 16 cores; use `-n` or a language name while iterating.
+
+### Baseline, 2026-07-26 (32,117 files, interpreter grammars)
+
+The first full sweep — the numbers to ratchet upward. `parse` files must parse;
+for `reject` (test262's genuine syntax errors) the PARSE-FAIL column is the
+score instead.
+
+| Language | expect | files | parsed | parse-fail | timeout |
+|---|---|--:|--:|--:|--:|
+| bash | parse | 2562 | 896 (35.0%) | 1666 | 0 |
+| batch | parse | 2 | 0 (0.0%) | 2 | 0 |
+| c | parse | 220 | 139 (63.2%) | 81 | 0 |
+| csharp | parse | 2752 | 1319 (47.9%) | 1433 | 0 |
+| dart | parse | 3449 | 1228 (35.6%) | 2215 | 6 |
+| | reject? | 1083 | 430 (39.7%) | 652 | 1 |
+| go | parse | 2682 | 870 (32.4%) | 1809 | 3 |
+| | reject? | 714 | 285 (39.9%) | 428 | 1 |
+| java | parse | 4436 | 1962 (44.2%) | 2474 | 0 |
+| | reject? | 1198 | 631 (52.7%) | 567 | 0 |
+| js | parse | 2651 | 2045 (77.1%) | 555 | 51 |
+| | reject | 729 | 347 (47.6%) | **375 (51.4%)** | 7 |
+| kotlin | parse | 542 | 274 (50.6%) | 268 | 0 |
+| | reject? | 159 | 23 (14.5%) | 136 | 0 |
+| lua | parse | 33 | 5 (15.2%) | 28 | 0 |
+| php | parse | 2753 | 1326 (48.2%) | 1427 | 0 |
+| python | parse | 30 | 2 (6.7%) | 28 | 0 |
+| ruby | parse | 162 | 28 (17.3%) | 134 | 0 |
+| swift | parse | 100 | 29 (29.0%) | 70 | 1 |
+| | reject? | 165 | 33 (20.0%) | 132 | 0 |
+| typescript | parse | 5695 | 3262 (57.3%) | 2420 | 13 |
+
+Reading the numbers: a low percentage does not always mean a weak grammar. The
+Python and Lua corpora are a handful of very large files that each exercise the
+whole language, so one unknown construct fails a whole file; test262's tiny
+one-construct-per-file shape is why JS scores highest. The two rows worth
+attention on their own terms are **js/reject** — 347 files that are genuinely
+invalid JavaScript parse anyway, i.e. the grammar is too permissive — and the
+51 JS timeouts, which are PEG backtracking blowups rather than missing syntax.
+
+The cluster histograms name the next feature in each language: `do` (81 files)
+dominates Ruby, `&$` and `<<<` (by-reference parameters and heredocs) dominate
+PHP, and in TypeScript all 588 files that die at line 1 column 1 do so because
+they open with a UTF-8 BOM — three bytes of encoding, not a syntax gap, and by
+far the cheapest win in the table.

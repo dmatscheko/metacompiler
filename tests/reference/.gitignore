@@ -1,5 +1,10 @@
+# The fetched corpora, everything extracted from them and every sweep result
+# stay out of git; the tools and the pins that reproduce them are committed.
 *
 !.gitignore
 !README.md
 !fetch.sh
 !pins.lock
+!extract-phpt.py
+!extract-oils.py
+!sweep.sh
