@@ -379,7 +379,16 @@ TplExpr     <~~ push({expr: pop()}) ~~>
 TplChars    <~~ push({str: unescapeJs(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
-TplEsc      = "\\" "\x00"..."\U0010ffff" ;
+// A template forbids the legacy OCTAL escapes UNCONDITIONALLY - not merely in
+// strict mode, the way a string literal does - so '\1', '\07' and '${x}\02' are
+// syntax errors even in sloppy code. '\0' on its own is still the NUL escape;
+// it only turns octal once a digit follows it. \x and \u carry the same digit
+// requirements as in a string (JsHexEsc / JsUniEsc), while everything else may
+// still be any character at all, including a line continuation.
+TplEsc      = "\\" ( JsHexEsc | JsUniEsc | TplNulEsc | TplEscChar ) ;
+TplNulEsc   = "0" NotDigit ;
+TplEscChar  = !@"xu0123456789" ;
+NotDigit    = !"0" !"1" !"2" !"3" !"4" !"5" !"6" !"7" !"8" !"9" ;
 TplPlain    = "\x00"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
 TplDollar   <~~ push({str: "$"}) ~~>
             = "$" ;
@@ -576,7 +585,38 @@ Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = NotReserved Id ;
 
-StringLit   = DqString | SqString ;
+// JavaScript's own string literals, deliberately NOT the shared lib's
+// DqString/SqString: that lib also serves C, Java and the rest, which disagree
+// about which escapes exist, so its StrEsc is the catch-all "backslash followed
+// by any printable char". JavaScript's escape grammar is specific, and every
+// shape it does NOT have is a syntax ERROR rather than a stray character -
+// without spelling it out '\x', '\u{110000}' and '\9' all "parse". The
+// plain-char alternatives are still the lib's DqPlain / SqPlain, and ModPath
+// above keeps using the lib's StrEsc: a module path is a file name, not a
+// JavaScript value, and its escapes are not JavaScript's problem.
+StringLit   = JsDqString | JsSqString ;
+JsDqString  = '"' :whitespace() { JsStrEsc | DqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"' :whitespace(Whitespace) ;
+JsSqString  = "'" :whitespace() { JsStrEsc | SqPlain } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'" :whitespace(Whitespace) ;
+
+// The legacy OCTAL escapes ('\1', '\07', '\377') stay legal here: they are only
+// an error in STRICT mode, and which code is strict is a static-semantics
+// question this grammar does not answer. '\8' and '\9' have no octal reading at
+// all, so they are excluded - as are a bare 'x' and 'u', which must not fall
+// through to JsEscChar when the digits they require are missing or wrong.
+JsStrEsc    = "\\" ( JsHexEsc | JsUniEsc | JsEscChar ) ;
+JsEscChar   = !"x" !"u" !"8" !"9" "\x20"..b"\x7e" ;
+
+// \xHH is exactly two hex digits; \u is either exactly four, or a braced code
+// POINT, whose value must therefore stay <= 0x10FFFF. Leading zeros do not
+// count towards that limit ('\u{00000041}' is 'A'), so it applies to the
+// SIGNIFICANT digits: at most five of them, or six that begin with '10'.
+JsHexEsc    = "x" HexDigit HexDigit ;
+JsUniEsc    = "u" ( "{" JsCodePoint "}" | HexDigit HexDigit HexDigit HexDigit ) ;
+JsCodePoint = JsCpZeros | JsCpPlane16 | JsCpUpTo5 ;
+JsCpZeros   = "0" { "0" } [ JsCpPlane16 | JsCpUpTo5 ] ;
+JsCpPlane16 = "1" "0" HexDigit HexDigit HexDigit HexDigit ;
+JsCpUpTo5   = HexNonZero [ HexDigit ] [ HexDigit ] [ HexDigit ] [ HexDigit ] ;
+HexNonZero  = "1"..."9" | "a"..."f" | "A"..."F" ;
 
 // The genuine numeric literals (hex tried before decimal) plus the widened forms -
 // binary, octal, BigInt and numeric separators - which are ACCEPTED but not lowered.
