@@ -55,6 +55,21 @@ Program     <~~ pushg(makeSeq(takeAll())) ~~>
 Statement   = Block | ImportStmt | ExportStmt | ClassDecl | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
             | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncDecl | Empty | ExprStmt ;
 
+// JavaScript has TWO statement positions. A StatementList (the program, a block, a
+// switch body) takes Statement OR Declaration; the single-statement BODY of if/else,
+// while, do, for, for-of and with takes only Statement - 'if (1) let x = 10;' and
+// 'with (o) class C {}' are syntax errors, not one-statement bodies. 'var' is not a
+// declaration in this sense and stays legal ('if (x) var a = 1;' is fine), so the
+// split cannot be done by listing alternatives: KwVar covers var/let/const together
+// and VarDecl is shared with the legal 'var' form. Instead the body positions reuse
+// the whole Statement and put a negative lookahead in front of it.
+//
+// The two body positions differ by exactly one form: Annex B B.3.4 makes a plain
+// function declaration a legal if/else body in sloppy mode ('if (x) function f(){}'),
+// while a loop or with body never accepts one.
+NestedStatement = NotDeclHead NotFuncHead Statement ;
+IfBody          = NotDeclHead Statement ;
+
 // The JS switch: === comparison, fallthrough until break, stacked labels, default
 // anywhere. The body is a flat list - the labels must be tried before Statement,
 // because 'case 1:' would otherwise parse as two expression statements (semicolons
@@ -78,18 +93,18 @@ Declarator  <~~ push(makeDecl(takeAll())) ~~>
 
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+            = KwIf "(" Expression ")" IfBody [ KwElse IfBody ] ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile "(" Expression ")" Statement ;
+            = KwWhile "(" Expression ")" NestedStatement ;
 
 Do          <~~ push(makeDo(pop(), pop())) ~~>
-            = KwDo Statement KwWhile "(" Expression ")" [ ";" ] ;
+            = KwDo NestedStatement KwWhile "(" Expression ")" [ ";" ] ;
 
 // The three optional parts are wrapped with a kind marker, otherwise e.g.
 // 'for (;c;)' and 'for (i=0;;)' could not be told apart on the stack.
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
 ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
@@ -370,7 +385,7 @@ TplDollar   <~~ push({str: "$"}) ~~>
 // body skipped. The loop variable may be preceded by var/let/const or be bare.
 ForOf       <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor "(" [ KwVar ] NotBindName Id <~~ push(up.in) ~~>
-              ( KwOf | KwIn ) <~~ push(up.in) ~~> Expression ")" Statement ;
+              ( KwOf | KwIn ) <~~ push(up.in) ~~> Expression ")" NestedStatement ;
 
 // A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and nested
 // combinations of the two. The pattern is reified on the stack (arr/obj/id nodes)
@@ -495,7 +510,7 @@ ExportSpec  = ( Id | StringLit ) [ KwAs ( Id | StringLit ) ] ;
 
 // with, debugger, and async/generator function declarations: accepted, not lowered.
 With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
-            = KwWith "(" Expression ")" Statement ;
+            = KwWith "(" Expression ")" NestedStatement ;
 Debugger    <~~ push(notImplStmt("debugger statement", up.pos)) ~~>
             = KwDebugger [ ";" ] ;
 AsyncFuncDecl <~~ takeAll(); push(notImplStmt("async function", up.pos)) ~~>
@@ -656,6 +671,84 @@ NotThis     = :script(~~
         return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))
             ? undefined
             : abnf.newToken("\x01reserved-word", 0)
+    })()
+~~) ;
+
+// The lookaheads that turn Statement into NestedStatement / IfBody (see there). Both
+// return the impossible token to FAIL - the upcoming statement is a declaration and
+// so may not stand as a single-statement body - and undefined to succeed.
+//
+// NotDeclHead refuses every form that is a Declaration in a nested position:
+//   const/class/import/export   - always a declaration, the bare word settles it
+//   let <binding>               - only when a binding name, '[' or '{' follows;
+//                                 'let' alone is a plain identifier in sloppy mode
+//                                 and 'if (x) let = 1;' stays legal
+//   async function / function*  - Annex B relaxes plain function declarations only,
+//                                 never the async or generator forms
+// 'var' is deliberately absent: 'if (x) var a = 1;' is legal JavaScript.
+NotDeclHead = :script(~~
+    (function() {
+        // Like NotReserved, this guard sits BEFORE the token, so the pending
+        // whitespace has not been skipped yet - step over it here.
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var w = ""
+        while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+            w = w + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        // A trailing identifier char means the word merely STARTS with the keyword
+        // ('constant', 'classy', 'letter'), so it is a plain identifier after all.
+        if (w === "" || (cc >= 48 && cc <= 57) || cc === 95 || cc === 36) { return undefined }
+        if (w === "const" || w === "class" || w === "import" || w === "export") {
+            return abnf.newToken("\x01declaration", 0)
+        }
+        if (w !== "let" && w !== "async" && w !== "function") { return undefined }
+        // For those three the NEXT token decides. Read it the same way.
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (w === "function") {
+            return cc === 42 ? abnf.newToken("\x01declaration", 0) : undefined
+        }
+        if (w === "let") {
+            return (cc === 91 || cc === 123 || cc === 95 || cc === 36
+                || (cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90))
+                ? abnf.newToken("\x01declaration", 0)
+                : undefined
+        }
+        var w2 = ""
+        while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+            w2 = w2 + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (w2 !== "function" || (cc >= 48 && cc <= 57) || cc === 95 || cc === 36) { return undefined }
+        return abnf.newToken("\x01declaration", 0)
+    })()
+~~) ;
+// The extra refusal a loop or with body needs on top of NotDeclHead: a plain function
+// declaration, which only an if/else body may have (Annex B B.3.4).
+NotFuncHead = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var w = ""
+        while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+            w = w + String.fromCharCode(cc)
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (w !== "function" || (cc >= 48 && cc <= 57) || cc === 95 || cc === 36) { return undefined }
+        return abnf.newToken("\x01declaration", 0)
     })()
 ~~) ;
 
