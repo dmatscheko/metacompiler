@@ -104,7 +104,8 @@ int main(void) {
 
     /* sizeof of scalar and pointer types (compile-time constants) */
     check(sizeof(int), 4);
-    check(sizeof(unsigned long), 4);
+    /* LP64: 8, like the sizeof(int*) below and like cc on this machine. */
+    check(sizeof(unsigned long), 8);
     check(sizeof(int*), 8);
     check(sizeof(enum Color), 4);
 

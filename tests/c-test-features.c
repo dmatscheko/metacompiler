@@ -398,7 +398,10 @@ int main() {
 
     /* ----- sizeof of types (compile-time constants) ----- */
     check(sizeof(int) == 4);
-    check(sizeof(unsigned long) == 4);
+    /* LP64, like the pinned data model and like the sizeof(int*) == 8 on the
+       next line: long and unsigned long are 8 bytes, not 4. Verified with
+       cc -std=c11 on this machine (ul=8 l=8 ll=8 ptr=8 int=4). */
+    check(sizeof(unsigned long) == 8);
     check(sizeof(int*) == 8);
     check(sizeof(enum Color) == 4);
 

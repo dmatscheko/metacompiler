@@ -72,10 +72,10 @@ QualName    = Id { "." Id } ;
 Statement   <~~ push(stmtPos(pop())) ~~>
             = [ Annotations ] StatementBody ;
 StatementBody = Block | ClassDecl | EnumDecl | MixinDecl | ExtensionDecl | TypedefDecl
-            | If | Switch | While | DoWhile | For | TryStmt | Return
+            | IfCase | If | Switch | While | DoWhile | For | TryStmt | Return
             | Break | Continue | Rethrow | ThrowStmt | Assert | TopGetter | TopSetter
             | FuncDecl | VarDecl | LabeledStmt
-            | Empty | ExprStmt ;
+            | Empty | PatAssign | ExprStmt ;
 
 // Metadata annotations (@Foo, @Foo.bar, @Foo(args)) are parsed and erased, like in Java.
 Annotations = Annotation { Annotation } ;
@@ -83,8 +83,16 @@ Annotation  = "@" Id { "." Id } [ SkipParen ] ;
 
 // Top-level declarations accepted structurally and reported as not implemented; their
 // bodies are matched with SkipBlock so a full file parses.
-EnumDecl    <~~ push(notImplStmt("enum declaration", up.pos)) ~~>
-            = KwEnum Id [ SkipAngle ] [ KwWith Type { "," Type } ] [ KwImplements Type { "," Type } ] SkipBlock ;
+// An enum is a class whose values are canonical instances: the value list comes first,
+// then (after a ";") the ordinary members of an enhanced enum. Every value gets .index
+// and .name, and the enum itself a static .values list.
+EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = KwEnum CName [ SkipAngle ] [ WithClause ] [ ImplementsClause ]
+              "{" EnumValue { "," EnumValue } [ "," ] [ ";" { Member } ] "}" ;
+EnumValue   <~~ push(makeEnumValue(takeAll())) ~~>
+            = EVName [ SkipAngle ] [ EnumArgs ] ;
+EVName      <~~ push({evname: up.in}) ~~> = Id ;
+EnumArgs    <~~ push({eargs: takeAll()}) ~~> = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 // A mixin is a class body with no constructor. Its `on` type is the superclass interface
 // it may call through with super, so it becomes the mixin descriptor's __super.
 MixinDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -275,10 +283,86 @@ TypeArgs    = "<" TypeArg { "," TypeArg } ">" ;
 TypeArg     = Type ;
 TypeFn      = KwFunction [ SkipAngle ] SkipParen [ "?" ] ;
 
+// --- patterns (Dart 3) ---------------------------------------------------------------
+// One pattern grammar serves every context (declaration, assignment, for-in, if-case,
+// switch statement and switch expression). A BARE identifier is ambiguous - a binder in a
+// declaration, an assignment target in a pattern assignment, a constant elsewhere - so it
+// parses to an "idref" descriptor that the use site resolves (resolvePat, below).
+Pattern     = PatOr ;
+PatOr       <~~ push(makeOrPat(takeAll())) ~~>  = PatAnd { "||" PatAnd } ;
+PatAnd      <~~ push(makeAndPat(takeAll())) ~~> = PatUnary { "&&" PatUnary } ;
+PatUnary    = PatRelOp | PatPostfix ;
+// A relational pattern (< 10, >= 20) compares the matched value with a constant.
+PatRelOp    <~~ push(makeRelPat(takeAll())) ~~> = PatRelSym RelExpr ;
+PatRelSym   <~~ push({relop: up.in}) ~~> = "==" | "!=" | "<=" | ">=" | "<" | ">" ;
+PatPostfix  <~~ push(makePostPat(takeAll())) ~~>
+            = PatPrimary { PatNullCheck | PatNullAssert | PatCast } ;
+PatNullCheck  <~~ push({post: "?"}) ~~> = "?" ;
+PatNullAssert <~~ push({post: "!"}) ~~> = "!" !"=" ;
+PatCast     = KwAs PatCastType ;
+PatCastType <~~ push({post: "as", ty: up.in}) ~~> = Type ;
+
+PatPrimary  = PatList | PatMap | PatRecP | PatVarTyped | PatObject | PatBareId | PatConst ;
+PatList     <~~ push(makeListPat(takeAll())) ~~>
+            = "[" [ PatListElem { "," PatListElem } [ "," ] ] "]" ;
+PatListElem = PatRest | PatElemP ;
+// [a, ..., b] skips the middle; [a, ...rest] binds it.
+PatRest     <~~ push(makeRestPat(takeAll())) ~~> = "..." [ Pattern ] ;
+PatElemP    <~~ push({pelem: pop()}) ~~> = Pattern ;
+PatMap      <~~ push(makeMapPat(takeAll())) ~~>
+            = "{" [ PatMapEntry { "," PatMapEntry } [ "," ] ] "}" ;
+PatMapEntry <~~ var mp = pop(); push({mkey: pop(), mpat: mp}) ~~> = RelExpr ":" Pattern ;
+PatRecP     <~~ push(makeRecPat(takeAll())) ~~>
+            = "(" [ PatFieldP { "," PatFieldP } [ "," ] ] ")" ;
+PatFieldP   = PatNamedFieldP | PatPosFieldP ;
+PatNamedFieldP <~~ var fp = pop(); push({pfname: popName2(), pfpat: fp}) ~~>
+            = Id <~~ push({rn: up.in}) ~~> ":" Pattern ;
+PatPosFieldP <~~ push({pfname: "", pfpat: pop()}) ~~> = Pattern ;
+// A typed / var / final binder: `var v`, `int a`, `final String s`.
+PatVarTyped <~~ push(makeVarPat(takeAll())) ~~> = PatVarLead PatName ;
+PatVarLead  = KwVar | KwFinal [ TypeNamed ] | TypeNamed ;
+PatName     <~~ push({pvname: up.in}) ~~> = NotPatKw Id ;
+// A zero-width guard that fails when the next word is one of the operators that may
+// FOLLOW a pattern (as / when / in / is). Without it `ci as int` reads `ci` as the type
+// and `as` as the variable name, and the enclosing alternative is already committed.
+NotPatKw = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i = i + 1; cc = c.peek(i) }
+        var c1 = c.peek(i + 1)
+        var len = 0
+        if (cc === 97 && c1 === 115) { len = 2 }                   // as
+        else if (cc === 105 && (c1 === 115 || c1 === 110)) { len = 2 } // is / in
+        else if (cc === 119 && c1 === 104 && c.peek(i + 2) === 101 && c.peek(i + 3) === 110) { len = 4 } // when
+        if (len === 0) { return undefined }
+        var n = c.peek(i + len)
+        var isWord = (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n === 95
+        return isWord ? undefined : abnf.newToken("\x01pattern-keyword", 0)
+    })()
+~~) ;
+// An object pattern: Type(field: subpattern, :shorthand).
+PatObject   <~~ push(makeObjPat(takeAll())) ~~>
+            = PatObjType "(" [ PatObjField { "," PatObjField } [ "," ] ] ")" ;
+PatObjType  <~~ push({otype: up.in}) ~~> = TypeNamed ;
+PatObjField = PatObjNamed | PatObjShort ;
+PatObjNamed <~~ var op2 = pop(); push({pfname: popName2(), pfpat: op2}) ~~>
+            = Id <~~ push({rn: up.in}) ~~> ":" Pattern ;
+PatObjShort <~~ push(makeShortField(pop())) ~~> = ":" Pattern ;
+// A bare name. The !"." / !"(" lookaheads keep a qualified constant (EnDir.north) and an
+// object pattern out of this alternative.
+PatBareId   <~~ push({p: "idref", name: up.in}) ~~> = PatBareName ;
+PatBareName = Id !"." !"(" ;
+PatConst    <~~ push({p: "const", t: pop()}) ~~> = RelExpr ;
+
 // Local variable declarations. Separate complete alternatives avoid the optional-type trap.
 // `late` only delays the initialisation check, which this front end does not make, so a
 // late declaration is an ordinary one (uninitialised means null).
-VarDecl     = VarLate | VarKwDecl | VarFinalTyped | VarFinal | VarConstTyped | VarConst | VarTyped ;
+VarDecl     = PatVarDecl | VarLate | VarKwDecl | VarFinalTyped | VarFinal | VarConstTyped | VarConst | VarTyped ;
+// A pattern variable declaration: var (a, b) = e; final [x, ...r] = e;
+PatVarDecl  <~~ push(makePatDecl(takeAll())) ~~>
+            = ( KwVar | KwFinal ) PatDeclHead "=" Expression ";" ;
+PatDeclHead = PatList | PatMap | PatRecP ;
 VarLate     = KwLate ( KwFinal Type | KwFinal | KwVar | Type ) DeclTail ;
 VarKwDecl     = KwVar         DeclTail ;
 VarFinalTyped = KwFinal Type  DeclTail ;
@@ -293,12 +377,21 @@ Declarator  <~~ push(makeDecl(takeAll())) ~~>
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+// if (e case pattern when guard) - the pattern's bindings are in scope in the then branch.
+IfCase      <~~ push(makeIfCase(takeAll())) ~~>
+            = KwIf "(" Expression KwCase Pattern [ SwGuard ] ")" Statement [ KwElse Statement ] ;
+// A pattern assignment: (a, b) = (b, a); - the names must already exist.
+PatAssign   <~~ push(makePatAssign(takeAll())) ~~>
+            = PatDeclHead "=" Expression ";" ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
             = KwWhile "(" Expression ")" Statement ;
 
 // for (x in coll) is tried before the C-style for; both start with 'for ('.
-For         = ForInTyped | ForInBare | ForCStyle ;
+For         = ForInPat | ForInTyped | ForInBare | ForCStyle ;
+// for (var (a, b) in pairs) - a pattern per element.
+ForInPat    <~~ push(makeForInPat(takeAll())) ~~>
+            = KwFor "(" ( KwVar | KwFinal ) PatDeclHead KwIn Expression ")" Statement ;
 ForInTyped  <~~ push(makeForIn(takeAll())) ~~>
             = KwFor "(" ForInLead Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 ForInBare   <~~ push(makeForIn(takeAll())) ~~>
@@ -323,10 +416,56 @@ Continue    <~~ push(makeContinueL(takeAll(), up.pos)) ~~> = KwContinue [ LoopLa
 LoopLabel   <~~ push({label: up.in}) ~~> = Id ;
 Empty       <~~ push(function(b) { return b }) ~~>  = ";" ;
 
-// switch: accepted, not implemented (its body is matched with the balanced SkipBlock so
-// the whole construct parses).
-Switch      <~~ push(notImplStmt("switch statement", up.pos)) ~~>
-            = KwSwitch SkipParen SkipBlock ;
+// A switch statement over patterns. There is no fallthrough in Dart: a non-empty case
+// body ends the switch, while an EMPTY body shares the next case's body (makeSwitch runs
+// the first non-empty body at or after the matching case). break is allowed and swallowed.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchMember } "}" ;
+SwitchMember = SwitchCase | SwitchDefault ;
+SwitchCase  <~~ push(makeSwCase(takeAll())) ~~>
+            = KwCase Pattern [ SwGuard ] ":" SwBody ;
+SwitchDefault <~~ push(makeSwDefault(takeAll())) ~~>
+            = KwDefault ":" SwBody ;
+SwGuard     <~~ push({guard: pop()}) ~~> = KwWhen Expression ;
+SwBody      <~~ push(makeSwBody(takeAll())) ~~> = { NotSwEnd Statement } ;
+// A zero-width guard that stops a case body at the next `case` / `default`. Without it the
+// body swallows `default: ...` as a LABELED STATEMENT (default is a plain identifier here).
+NotSwEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        // Whitespace is NOT skipped before a :script guard, and a case body is routinely
+        // followed by a trailing comment, so both have to be stepped over by hand.
+        var spin = 0
+        while (spin < 200000) {
+            spin = spin + 1
+            if (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                cc = c.peek(i)
+                while (cc >= 0 && cc !== 10) { i = i + 1; cc = c.peek(i) }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                cc = c.peek(i)
+                while (cc >= 0 && !(cc === 42 && c.peek(i + 1) === 47)) { i = i + 1; cc = c.peek(i) }
+                i = i + 2
+                cc = c.peek(i)
+                continue
+            }
+            break
+        }
+        var len = 0
+        if (cc === 99 && c.peek(i + 1) === 97 && c.peek(i + 2) === 115 && c.peek(i + 3) === 101) { len = 4 }
+        else if (cc === 100 && c.peek(i + 1) === 101 && c.peek(i + 2) === 102 && c.peek(i + 3) === 97
+                 && c.peek(i + 4) === 117 && c.peek(i + 5) === 108 && c.peek(i + 6) === 116) { len = 7 }
+        if (len === 0) { return undefined }
+        var n = c.peek(i + len)
+        var isWord = (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n === 95
+        return isWord ? undefined : abnf.newToken("\x01switch-member", 0)
+    })()
+~~) ;
 DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" ";" ;
 
@@ -394,11 +533,19 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 // so ordinary expressions stay unaffected.
 Cascade     <~~ push(makeCascade(takeAll())) ~~>
             = CondExpr { CascadeSection } ;
-CascadeSection = CascadeCall | CascadeSet ;
-CascadeCall <~~ push({kind: "ccall", name: popName(), args: takeAll()}) ~~>
-            = ".." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-CascadeSet  <~~ var cv = pop(); var cn = pop(); push({kind: "cset", name: cn.mname, val: cv}) ~~>
-            = ".." Id <~~ push({mname: up.in}) ~~> "=" CondExpr ;
+// A section is `..` (or the null-aware `?..`) then a selector chain, optionally ending in
+// an assignment: ..a = 1 , ..[1] = 9 , ..m(x) , ..a.b = 2 . The assigned value is parsed
+// at the conditional level, not the cascade level, so `..a = 1..[1] = 9` reads the second
+// `..` as the next section of the OUTER cascade rather than a cascade on the value 1.
+CascadeSection <~~ push(makeCascadeSec(takeAll())) ~~>
+            = CascadeOp CascadeHead { MethodSfx | FieldSfx | IndexSfx } [ CascadeAssign ] ;
+CascadeOp   <~~ push({casc: up.in}) ~~> = "?.." | ".." ;
+CascadeHead = CascadeMcall | CascadeField | IndexSfx ;
+CascadeMcall <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
+            = Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+CascadeField = Id <~~ push({kind: "field", name: up.in}) ~~> ;
+CascadeAssign <~~ push({cassign: pop()}) ~~> = "=" CascadeValue ;
+CascadeValue = ThrowExpr | CondExpr ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
 DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
@@ -478,7 +625,7 @@ RecPosName  = "$" :whitespace() "0"..."9" { "0"..."9" } :whitespace(Whitespace) 
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = ArrowFn | SuperExpr | "(" Expression ")" | TypedColl | ListLit | MapLit | SetLit | StrLit | NumLit
+Primary     = ArrowFn | SuperExpr | SwitchExpr | RecordLit | "(" Expression ")" | TypedColl | ListLit | MapLit | SetLit | StrLit | NumLit
             | True | False | Null | NewExpr | QualCall | QualRef | Call | VarRef ;
 
 // A generic type used as a receiver: List<int>.filled(10, null), Future<Object?>.value().
@@ -497,6 +644,28 @@ SuperMcall  <~~ push(makeSuperMcall(takeAll())) ~~>
             = KwSuper "." SMName "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 SuperFieldExpr <~~ push(makeSuperFieldExpr(takeAll())) ~~> = KwSuper "." SMName ;
 SMName      <~~ push({smname: up.in}) ~~> = Id ;
+
+// A switch expression: switch (e) { pattern => value, ... }. Unmatched is a runtime error
+// (Dart checks exhaustiveness statically, which this front end does not).
+SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" [ SwExprCase { "," SwExprCase } [ "," ] ] "}" ;
+SwExprCase  <~~ push(makeSwExprCase(takeAll())) ~~>
+            = Pattern [ SwGuard ] "=>" AssignExpr ;
+
+// A record literal (Dart 3). It is told apart from a parenthesized expression by needing
+// either two fields, a trailing comma after a single one, or a named field - which is why
+// the three shapes are separate alternatives and RecordLit comes before "(" Expression ")".
+RecordLit   = RecMulti | RecSingle | RecNamedOne ;
+RecMulti    <~~ push(makeRecord(takeAll())) ~~>
+            = "(" RecField "," RecField { "," RecField } [ "," ] ")" ;
+RecSingle   <~~ push(makeRecord(takeAll())) ~~>
+            = "(" RecField "," ")" ;
+RecNamedOne <~~ push(makeRecord(takeAll())) ~~>
+            = "(" NamedRecField [ "," ] ")" ;
+RecField    = NamedRecField | PosRecField ;
+NamedRecField <~~ var rv = pop(); push({rname: popName2(), t: rv}) ~~>
+            = Id <~~ push({rn: up.in}) ~~> ":" AssignExpr ;
+PosRecField <~~ push({rname: "", t: pop()}) ~~> = AssignExpr ;
 
 // Dart number literals: hex (0x..), then the fractional/exponent form, then the plain
 // integer. All three accept '_' digit separators (Dart 3.6). The longest/prefixed forms
@@ -657,6 +826,9 @@ KwIs        = "is" KwEnd ;
 KwAs        = "as" KwEnd ;
 KwThrow     = "throw" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
+KwWhen      = "when" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwTry       = "try" KwEnd ;
 KwCatch     = "catch" KwEnd ;
@@ -1256,6 +1428,23 @@ KwSuper     = "super" KwEnd ;
         return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(sv, strB), llvm.ir.NewIncoming(ov, othB)])}
     }
 
+    // `.values` is a Map's values in every program - except one that declares an ENUM,
+    // where `EnDir.values` is the generated static list on the descriptor. Only such a
+    // program emits the probe: an own `values` property wins, otherwise the map method
+    // answers (a dict keeps its entries under "keys"/"vals", so it never has one).
+    function emitValuesRead(b, cur) {
+        if (!anyEnum) { return {b: b, v: callExt(b, "js_mcall", [cur, emitStr(b, "values"), callExt(b, "js_arr_new", [])])} }
+        var gv = callExt(b, "js_get", [cur, emitStr(b, "values")])
+        var mapB = curF.NewBlock("")
+        var haveB = curF.NewBlock("")
+        var mrgB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [gv, hUndef])), mapB, haveB)
+        var mv = callExt(mapB, "js_mcall", [cur, emitStr(mapB, "values"), callExt(mapB, "js_arr_new", [])])
+        mapB.NewBr(mrgB)
+        haveB.NewBr(mrgB)
+        return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(mv, mapB), llvm.ir.NewIncoming(gv, haveB)])}
+    }
+
     // ----- member chains: .method(args), .field, [index] -----
     core.indexExt = "js_pyget"
     foldCallMember = function(items) {
@@ -1302,14 +1491,16 @@ KwSuper     = "super" KwEnd ;
                     else if (s.name == "isEmpty") { var er = emitLength(b, cur); b = er.b; cur = callExt(b, "js_seq", [er.v, emitNum(b, 0)]) }
                     else if (s.name == "isNotEmpty") { var nr = emitLength(b, cur); b = nr.b; cur = callExt(b, "js_gt", [nr.v, emitNum(b, 0)]) }
                     else if (s.name == "keys") { cur = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])]) }
-                    else if (s.name == "values") { cur = callExt(b, "js_mcall", [cur, emitStr(b, "values"), callExt(b, "js_arr_new", [])]) }
+                    else if (s.name == "values") { var vr2 = emitValuesRead(b, cur); b = vr2.b; cur = vr2.v }
                     else { var gr = emitGetterRead(b, cur, s.name); b = gr.b; cur = gr.v }
                 } else if (s.kind == "bang") {
                     cur = cur // the postfix ! is a no-op (accepted, not implemented)
                 } else {
                     var ir = s.idx(b)
                     b = ir.b
-                    cur = callExt(b, "js_pyget", [cur, ir.v])
+                    var xg = emitIndexGet(b, cur, ir.v)
+                    b = xg.b
+                    cur = xg.v
                 }
             }
             if (nullBs.length > 0) {
@@ -1327,6 +1518,28 @@ KwSuper     = "super" KwEnd ;
     }
 
     // ----- cascade: t..m()..f = v evaluates the target once and returns it -----
+    // items = [{casc}, selector suffixes..., {cassign}?]
+    function makeCascadeSec(items) {
+        var sec = {nullaware: stripWs(items[0].casc) == "?..", path: [], assign: null}
+        var path = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].cassign != undefined) { sec.assign = items[i].cassign }
+            else { path.push(items[i]) }
+        }
+        sec.path = path
+        return sec
+    }
+    // One selector step of a cascade section, as a READ.
+    function emitCascSfx(b, cur, s) {
+        if (s.kind == "mcall") {
+            var argsV = callExt(b, "js_arr_new", [])
+            b = emitCallArgsInto(b, argsV, s.args)
+            return {b: b, v: callExt(b, "js_mcall", [cur, emitStr(b, s.name), argsV])}
+        }
+        if (s.kind == "field") { return emitGetterRead(b, cur, s.name) }
+        var ir = s.idx(b)
+        return emitIndexGet(ir.b, cur, ir.v)
+    }
     function makeCascade(items) {
         if (items.length == 1) { return items[0] }
         var targetT = items[0]
@@ -1335,17 +1548,52 @@ KwSuper     = "super" KwEnd ;
             var r = targetT(b)
             b = r.b
             var t = r.v
+            // Blocks a `?..` skipped from: the whole cascade is null there, so they all
+            // flow into one final phi, exactly like the ?. chain in foldCallMember.
+            var nullBs = []
             for (var i = 0; i < sections.length; i++) {
                 var s = sections[i]
-                if (s.kind == "ccall") {
-                    var argsV = callExt(b, "js_arr_new", [])
-                    b = emitCallArgsInto(b, argsV, s.args)
-                    callExt(b, "js_mcall", [t, emitStr(b, s.name), argsV])
-                } else {
-                    var rv = s.val(b)
-                    b = rv.b
-                    callExt(b, "js_set", [t, emitStr(b, s.name), rv.v])
+                if (s.nullaware) {
+                    var contB = curF.NewBlock("")
+                    var skipB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, emitIsNull(b, t)), skipB, contB)
+                    nullBs.push(skipB)
+                    b = contB
                 }
+                var path = s.path
+                var last = path.length - 1
+                var cur = t
+                if (s.assign == null) {
+                    for (var j = 0; j <= last; j++) {
+                        var sr = emitCascSfx(b, cur, path[j])
+                        b = sr.b
+                        cur = sr.v
+                    }
+                } else {
+                    for (var k = 0; k < last; k++) {
+                        var kr = emitCascSfx(b, cur, path[k])
+                        b = kr.b
+                        cur = kr.v
+                    }
+                    var vr = s.assign(b)
+                    b = vr.b
+                    if (path[last].kind == "index") {
+                        var ir2 = path[last].idx(b)
+                        b = emitIndexSet(ir2.b, cur, ir2.v, vr.v)
+                    } else {
+                        b = emitSetterWrite(b, cur, path[last].name, vr.v)
+                    }
+                }
+            }
+            if (nullBs.length > 0) {
+                var endB = curF.NewBlock("")
+                var inc = [llvm.ir.NewIncoming(t, b)]
+                b.NewBr(endB)
+                for (var q = 0; q < nullBs.length; q++) {
+                    nullBs[q].NewBr(endB)
+                    inc.push(llvm.ir.NewIncoming(hNull, nullBs[q]))
+                }
+                return {b: endB, v: endB.NewPhi(inc)}
             }
             return {b: b, v: t}
         }
@@ -1419,6 +1667,41 @@ KwSuper     = "super" KwEnd ;
             v = callExt(b, "js_bor", [v, callExt(b, "js_is_type", [recv, emitStr(b, classes[i])])])
         }
         return v
+    }
+    // ----- user-declared operators -----
+    // `a + b`, `-a`, `a[i]` and `a[i] = v` take the class's `operator X` when the LEFT
+    // operand is an instance of a class that declares one, and the built-in path
+    // otherwise. Which classes declare which operator is collected at walk time into
+    // operatorNames, so a program that declares none emits exactly the IR it did before
+    // (operatorNames[key] is undefined and the whole branch is skipped).
+    //
+    // The fallback is a THUNK of the same {b, v} shape an expression emitter has, not a
+    // bare value, because some fallbacks branch themselves (record equality does), and
+    // the phi has to name the block the fallback actually ended in.
+    function emitOpDispatch(b, nm, recv, argVals, fallbackT) {
+        var classes = operatorNames["$" + nm]
+        if (classes == undefined) { return fallbackT(b) }
+        var opB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var mrgB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, emitDeclProbe(b, recv, classes)), opB, plainB)
+        var argsV = callExt(opB, "js_arr_new", [])
+        for (var i = 0; i < argVals.length; i++) { callExt(opB, "js_arr_push", [argsV, argVals[i]]) }
+        var ov = callExt(opB, "js_mcall", [recv, emitStr(opB, nm), argsV])
+        opB.NewBr(mrgB)
+        var pr = fallbackT(plainB)
+        pr.b.NewBr(mrgB)
+        return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(ov, opB), llvm.ir.NewIncoming(pr.v, pr.b)])}
+    }
+    // o[i] and o[i] = v, with `operator []` / `operator []=` folded in.
+    function emitIndexGet(b, obj, idx) {
+        return emitOpDispatch(b, "[]", obj, [idx],
+                              function(bb) { return {b: bb, v: callExt(bb, "js_pyget", [obj, idx])} })
+    }
+    function emitIndexSet(b, obj, idx, val) {
+        var r = emitOpDispatch(b, "[]=", obj, [idx, val],
+                               function(bb) { callExt(bb, "js_pyset", [obj, idx, val]); return {b: bb, v: val} })
+        return r.b
     }
     function initsOf(items) {
         var out = []
@@ -1884,6 +2167,54 @@ KwSuper     = "super" KwEnd ;
             return b
         }
     }
+    // ----- enums -----
+    // An enum reuses the whole class emitter: its members go through makeClassStmt, and
+    // the values are then built once, right after the descriptor, as canonical instances
+    // stored on it (so EnDir.east is an ordinary property read and `d == EnDir.east` is
+    // the identity comparison Dart specifies).
+    var anyEnum = false
+    function makeEnumValue(items) {
+        var v = {evname: "", eargs: []}
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].evname != undefined) { v.evname = items[i].evname }
+            else if (items[i].eargs != undefined) { v.eargs = items[i].eargs }
+        }
+        return v
+    }
+    function makeEnumStmt(items) {
+        anyEnum = true
+        var name = ""
+        var vals = []
+        var rest = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.evname != undefined) { vals.push(it); continue }
+            if (it.cname != undefined) { name = it.cname }
+            rest.push(it)
+        }
+        var clsT = makeClassStmt(rest)
+        return function(b) {
+            b = clsT(b)
+            var clsV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+            var valuesV = callExt(b, "js_arr_new", [])
+            for (var j = 0; j < vals.length; j++) {
+                var objV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+                var argsV = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [argsV, objV])
+                b = emitCallArgsInto(b, argsV, vals[j].eargs)
+                callExt(b, "js_call", [callExt(b, "js_get", [clsV, emitStr(b, "__ctor")]), hUndef, argsV])
+                callExt(b, "js_set", [objV, emitStr(b, "index"), emitNum(b, j)])
+                callExt(b, "js_set", [objV, emitStr(b, "name"), emitStr(b, vals[j].evname)])
+                callExt(b, "js_set", [clsV, emitStr(b, vals[j].evname), objV])
+                callExt(b, "js_arr_push", [valuesV, objV])
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, "values"), valuesV])
+            return b
+        }
+    }
     var curEmitClass = null
     // The bare name of a (possibly generic, possibly qualified) type: List<int> -> List.
     function baseName(t) {
@@ -2105,6 +2436,521 @@ KwSuper     = "super" KwEnd ;
             return {b: b, v: d}
         }
     }
+    // ----- records (Dart 3) -----
+    // A record compiles to an object carrying its fields as ordinary properties - the
+    // positional ones keyed "$1", "$2", ... - so `r.$1` and `r.name` are the SAME js_get
+    // every other field read is. Two extra slots make the rest of Dart's record semantics
+    // work without a new external:
+    //   __class -> a one-off descriptor whose __name is "Record", so js_is_type(v,
+    //              "Record") is a safe "is this a record" probe on a value of any type
+    //              (js_has aborts on a number, js_get on null - see the gotchas doc);
+    //   __f     -> the same fields as a DICT, which js_pyeq compares by value and
+    //              order-independently, which is exactly Dart's record equality
+    //              ((x: 1, y: 2) == (y: 2, x: 1) holds, (1, 2) == (2, 1) does not).
+    // anyRecord stays false for a program with no record literal, and then == and !=
+    // emit exactly the single js_seq / js_sne they always did.
+    var anyRecord = false
+    function popName2() { return pop().rn }
+    function makeRecord(items) {
+        anyRecord = true
+        return function(b) {
+            var o = callExt(b, "js_obj_new", [])
+            var d = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [d, emitStr(b, "__name"), emitStr(b, "Record")])
+            callExt(b, "js_set", [o, emitStr(b, "__class"), d])
+            var f = callExt(b, "js_dict_new", [])
+            callExt(b, "js_set", [o, emitStr(b, "__f"), f])
+            var pos = 0
+            for (var i = 0; i < items.length; i++) {
+                var nm = items[i].rname
+                if (nm == "") { pos = pos + 1; nm = "$" + pos }
+                var r = items[i].t(b)
+                b = r.b
+                callExt(b, "js_set", [o, emitStr(b, nm), r.v])
+                callExt(b, "js_pyset", [f, emitStr(b, nm), r.v])
+            }
+            return {b: b, v: o}
+        }
+    }
+    // Structural record equality, the fallback under a user `operator ==`. It has to
+    // thread the block (emitBin returns a bare value) because this is a branch and not a
+    // select: js_get on a number or null ABORTS, so the two __f reads may only be
+    // reached once both operands are known to be records.
+    function emitRecEq(b, l, r) {
+        if (!anyRecord) { return {b: b, v: callExt(b, "js_seq", [l, r])} }
+        var both = callExt(b, "js_band", [callExt(b, "js_is_type", [l, emitStr(b, "Record")]),
+                                          callExt(b, "js_is_type", [r, emitStr(b, "Record")])])
+        var recB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var mrgB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, both), recB, plainB)
+        var rv = callExt(recB, "js_pyeq", [callExt(recB, "js_get", [l, emitStr(recB, "__f")]),
+                                           callExt(recB, "js_get", [r, emitStr(recB, "__f")])])
+        recB.NewBr(mrgB)
+        var pv = callExt(plainB, "js_seq", [l, r])
+        plainB.NewBr(mrgB)
+        return {b: mrgB, v: mrgB.NewPhi([llvm.ir.NewIncoming(rv, recB), llvm.ir.NewIncoming(pv, plainB)])}
+    }
+    // Dart's == : a user `operator ==` on the left operand, else structural for records,
+    // else identity. != is the negation of the same question, exactly as Dart defines it.
+    function emitEq(b, op, l, r) {
+        if (!anyRecord && operatorNames["$=="] == undefined) { return {b: b, v: emitBin(b, op, l, r)} }
+        var res = emitOpDispatch(b, "==", l, [r], function(bb) { return emitRecEq(bb, l, r) })
+        if (op == "!=") { return {b: res.b, v: callExt(res.b, "js_not", [res.v])} }
+        return res
+    }
+    // foldBinary is overridden so that == / != reach emitEq and every other operator can
+    // reach a user-declared `operator X`; with neither declared this is the same single
+    // emitBin call compile-core.js makes.
+    foldBinary = function(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = items[i + 1](b)
+                b = rr.b
+                var op = items[i]
+                if (op == "==" || op == "!=") {
+                    var er = emitEq(b, op, v, rr.v)
+                    b = er.b
+                    v = er.v
+                } else {
+                    var lv = v
+                    var rv2 = rr.v
+                    var dr = emitOpDispatch(b, op, lv, [rv2],
+                                            function(bb) { return {b: bb, v: emitBin(bb, op, lv, rv2)} })
+                    b = dr.b
+                    v = dr.v
+                }
+            }
+            return {b: b, v: v}
+        }
+    }
+    // -x : a user `operator -()` with no argument when the operand is an instance of a
+    // class that declares one (the interpreter keys unary minus under "-" too), else the
+    // shared numeric negation.
+    var baseMakeNeg = makeNeg
+    makeNeg = function(t) {
+        var inner = baseMakeNeg(t)
+        return function(b) {
+            if (operatorNames["$-"] == undefined) { return inner(b) }
+            var r = t(b)
+            b = r.b
+            var ov = r.v
+            return emitOpDispatch(b, "-", ov, [],
+                                  function(bb) { return {b: bb, v: intWrap(bb, callExt(bb, "js_neg", [ov]))} })
+        }
+    }
+    // ----- patterns (Dart 3) -----
+    // The grammar builds one descriptor tree per pattern; a bare name arrives as
+    // {p:"idref"} because only the use site knows whether it declares, assigns or names a
+    // constant. resolvePat rewrites the tree for the context ("decl" / "assign" / "match")
+    // once, at build time - exactly as in the interpreter, and the two share the shapes.
+    function makeOrPat(items) {
+        if (items.length == 1) { return items[0] }
+        return {p: "or", alts: items}
+    }
+    function makeAndPat(items) {
+        if (items.length == 1) { return items[0] }
+        return {p: "and", alts: items}
+    }
+    function makeRelPat(items) { return {p: "rel", op: stripWs(items[0].relop), t: items[1]} }
+    function makePostPat(items) {
+        var pt = items[0]
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].post == "?") { pt = {p: "nullcheck", inner: pt} }
+            else if (items[i].post == "!") { pt = {p: "nullassert", inner: pt} }
+            else { pt = {p: "cast", inner: pt, ty: items[i].ty} }
+        }
+        return pt
+    }
+    function makeListPat(items) {
+        var elems = []
+        var restAt = -1
+        var restPat = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].prest === true) { restAt = elems.length; restPat = items[i].rpat }
+            else { elems.push(items[i].pelem) }
+        }
+        return {p: "list", elems: elems, restAt: restAt, restPat: restPat}
+    }
+    function makeRestPat(items) { return {prest: true, rpat: items.length > 0 ? items[0] : null} }
+    function makeMapPat(items) { return {p: "map", entries: items} }
+    function makeRecPat(items) { return {p: "rec", fields: items} }
+    function makeVarPat(items) { return {p: "bind", name: stripWs(items[items.length - 1].pvname)} }
+    function makeObjPat(items) { return {p: "obj", ty: items[0].otype, fields: items.slice(1)} }
+    // :var side  ==  side: var side  (the getter name comes from the bound variable).
+    function makeShortField(pat) {
+        var nm = ""
+        if (pat.p == "bind") { nm = pat.name }
+        else if (pat.p == "idref") { nm = pat.name }
+        else { fail("an object-pattern shorthand needs a variable pattern") }
+        return {pfname: nm, pfpat: pat}
+    }
+    function resolvePat(pat, mode) {
+        if (pat.p == "idref") {
+            if (pat.name == "_") { return {p: "wild"} }
+            if (mode == "decl") { return {p: "bind", name: pat.name} }
+            if (mode == "assign") { return {p: "setvar", name: pat.name} }
+            if (pat.name == "null") { return {p: "const", t: makeConst(null)} }
+            if (pat.name == "true") { return {p: "const", t: makeConst(true)} }
+            if (pat.name == "false") { return {p: "const", t: makeConst(false)} }
+            return {p: "const", t: makeVarRef(pat.name)}
+        }
+        if (pat.p == "bind" && pat.name == "_") { return {p: "wild"} }
+        if (pat.p == "or" || pat.p == "and") {
+            var alts = []
+            for (var i = 0; i < pat.alts.length; i++) { alts.push(resolvePat(pat.alts[i], mode)) }
+            return {p: pat.p, alts: alts}
+        }
+        if (pat.p == "nullcheck" || pat.p == "nullassert") { return {p: pat.p, inner: resolvePat(pat.inner, mode)} }
+        if (pat.p == "cast") { return {p: "cast", inner: resolvePat(pat.inner, mode), ty: pat.ty} }
+        if (pat.p == "list") {
+            var elems = []
+            for (var j = 0; j < pat.elems.length; j++) { elems.push(resolvePat(pat.elems[j], mode)) }
+            var rp = (pat.restPat != null) ? resolvePat(pat.restPat, mode) : null
+            return {p: "list", elems: elems, restAt: pat.restAt, restPat: rp}
+        }
+        if (pat.p == "map") {
+            var ents = []
+            for (var k = 0; k < pat.entries.length; k++) {
+                ents.push({mkey: pat.entries[k].mkey, mpat: resolvePat(pat.entries[k].mpat, mode)})
+            }
+            return {p: "map", entries: ents}
+        }
+        if (pat.p == "rec" || pat.p == "obj") {
+            var fs = []
+            for (var m = 0; m < pat.fields.length; m++) {
+                fs.push({pfname: pat.fields[m].pfname, pfpat: resolvePat(pat.fields[m].pfpat, mode)})
+            }
+            if (pat.p == "obj") { return {p: "obj", ty: pat.ty, fields: fs} }
+            return {p: "rec", fields: fs}
+        }
+        return pat
+    }
+
+    // Emit the match of `v` against `pat`, in block b. Every way of NOT matching branches
+    // to failB; the block returned is the one the match succeeded in. Bindings are plain
+    // js_scope_decl on the way through, so an alternative that failed halfway may have
+    // declared some of its names - which is what the interpreter does too, and Dart's
+    // scoping makes them unreachable either way.
+    function emitPat(b, pat, v, failB) {
+        var k = pat.p
+        if (k == "wild") { return b }
+        if (k == "bind") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.name), v]); return b }
+        if (k == "setvar") { callExt(b, "js_kset", [curScopeV, emitStr(b, pat.name), v]); return b }
+        if (k == "const") {
+            var cr = pat.t(b)
+            b = cr.b
+            var ce = emitEq(b, "==", cr.v, v)
+            b = ce.b
+            var okC = curF.NewBlock("")
+            b.NewCondBr(truthy(b, ce.v), okC, failB)
+            return okC
+        }
+        if (k == "rel") {
+            var rr = pat.t(b)
+            b = rr.b
+            var cv = hFalse
+            if (pat.op == "==" || pat.op == "!=") {
+                var re = emitEq(b, pat.op, v, rr.v)
+                b = re.b
+                cv = re.v
+            } else { cv = emitBin(b, pat.op, v, rr.v) }
+            var okR = curF.NewBlock("")
+            b.NewCondBr(truthy(b, cv), okR, failB)
+            return okR
+        }
+        if (k == "or") {
+            var okO = curF.NewBlock("")
+            for (var i = 0; i < pat.alts.length; i++) {
+                var lastAlt = (i == pat.alts.length - 1)
+                var nextA = lastAlt ? failB : curF.NewBlock("")
+                emitPat(b, pat.alts[i], v, nextA).NewBr(okO)
+                b = nextA
+            }
+            return okO
+        }
+        if (k == "and") {
+            for (var j = 0; j < pat.alts.length; j++) { b = emitPat(b, pat.alts[j], v, failB) }
+            return b
+        }
+        if (k == "nullcheck") {
+            var okN = curF.NewBlock("")
+            b.NewCondBr(truthy(b, emitIsNull(b, v)), failB, okN)
+            return emitPat(okN, pat.inner, v, failB)
+        }
+        if (k == "nullassert") {
+            var okA = curF.NewBlock("")
+            var badA = curF.NewBlock("")
+            b.NewCondBr(truthy(b, emitIsNull(b, v)), badA, okA)
+            callExt(badA, "js_throw", [emitStr(badA, "null check pattern matched a null value")])
+            badA.NewBr(okA)
+            return emitPat(okA, pat.inner, v, failB)
+        }
+        if (k == "cast") { return emitPat(b, pat.inner, v, failB) }
+        if (k == "rec") {
+            var okE = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [v, emitStr(b, "Record")])), okE, failB)
+            b = okE
+            var pos = 0
+            for (var f = 0; f < pat.fields.length; f++) {
+                var nm = pat.fields[f].pfname
+                if (nm == "") { pos = pos + 1; nm = "$" + pos }
+                b = emitPat(b, pat.fields[f].pfpat, callExt(b, "js_get", [v, emitStr(b, nm)]), failB)
+            }
+            return b
+        }
+        if (k == "list") {
+            var okL = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [v, emitStr(b, "List")])), okL, failB)
+            b = okL
+            var need = pat.elems.length
+            var lenV = callExt(b, "js_pylen", [v])
+            var okL2 = curF.NewBlock("")
+            if (pat.restAt < 0) {
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [lenV, emitNum(b, need)])), okL2, failB)
+                b = okL2
+                for (var e = 0; e < need; e++) {
+                    b = emitPat(b, pat.elems[e], callExt(b, "js_pyget", [v, emitNum(b, e)]), failB)
+                }
+                return b
+            }
+            // [a, ..., b] / [a, ...rest]: the elements before the rest count from the
+            // front, the ones after it from the back, and the rest takes what is left.
+            b.NewCondBr(truthy(b, callExt(b, "js_ge", [lenV, emitNum(b, need)])), okL2, failB)
+            b = okL2
+            var extra = callExt(b, "js_sub", [lenV, emitNum(b, need)])
+            for (var a = 0; a < pat.restAt; a++) {
+                b = emitPat(b, pat.elems[a], callExt(b, "js_pyget", [v, emitNum(b, a)]), failB)
+            }
+            if (pat.restPat != null) {
+                var slV = callExt(b, "js_pyslice", [v, emitNum(b, pat.restAt),
+                                                    callExt(b, "js_jadd", [emitNum(b, pat.restAt), extra])])
+                b = emitPat(b, pat.restPat, slV, failB)
+            }
+            for (var c2 = pat.restAt; c2 < need; c2++) {
+                b = emitPat(b, pat.elems[c2],
+                            callExt(b, "js_pyget", [v, callExt(b, "js_jadd", [emitNum(b, c2), extra])]), failB)
+            }
+            return b
+        }
+        if (k == "map") {
+            // js_is_type does not know a dict, so the key membership test IS the type
+            // test: js_pyin answers false for a key a list or a string does not hold.
+            for (var g = 0; g < pat.entries.length; g++) {
+                var kr = pat.entries[g].mkey(b)
+                b = kr.b
+                var okM = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_pyin", [kr.v, v])), okM, failB)
+                b = okM
+                b = emitPat(b, pat.entries[g].mpat, callExt(b, "js_pyget", [v, kr.v]), failB)
+            }
+            return b
+        }
+        if (k == "obj") {
+            var okB2 = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [v, emitStr(b, baseName(pat.ty))])), okB2, failB)
+            b = okB2
+            for (var o = 0; o < pat.fields.length; o++) {
+                var mr = emitGetterRead(b, v, pat.fields[o].pfname)
+                b = mr.b
+                b = emitPat(b, pat.fields[o].pfpat, mr.v, failB)
+            }
+            return b
+        }
+        fail("unknown pattern kind " + k)
+    }
+    // A pattern that MUST match (a declaration, an assignment, a for-in element): the
+    // failure block raises, and both paths meet in a fresh block so the emitted IR is
+    // well formed however few blocks emitPat itself created.
+    function emitPatOrDie(b, pat, v, msg) {
+        var failB = curF.NewBlock("")
+        var okB = emitPat(b, pat, v, failB)
+        var contB = curF.NewBlock("")
+        okB.NewBr(contB)
+        callExt(failB, "js_throw", [emitStr(failB, msg)])
+        failB.NewBr(contB)
+        return contB
+    }
+
+    // ----- pattern statements: declaration, assignment, for-in, if-case -----
+    function makePatDecl(items) {
+        var pat = resolvePat(items[0], "decl")
+        var init = items[1]
+        return function(b) {
+            var r = init(b)
+            return emitPatOrDie(r.b, pat, r.v, "pattern did not match the initialiser")
+        }
+    }
+    function makePatAssign(items) {
+        var pat = resolvePat(items[0], "assign")
+        var rhs = items[1]
+        return function(b) {
+            var r = rhs(b)
+            return emitPatOrDie(r.b, pat, r.v, "pattern assignment did not match")
+        }
+    }
+    // for (var (a, b) in pairs): the same loop makeForIn emits, with the element bound
+    // through a pattern instead of a single name.
+    function makeForInPat(items) {
+        var pat = resolvePat(items[0], "decl")
+        var iterT = items[1]
+        var bodyT = items[2]
+        return function(b) {
+            var lbl = takeLabel()
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            var ir = iterT(b)
+            b = ir.b
+            var itV = callExt(b, "js_pyiter", [ir.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0pit"), itV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0plen"), callExt(b, "js_pylen", [itV])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0pi"), callExt(b, "js_num_i", [handle(0)])])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0pi")])
+            var lC = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0plen")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, lC])), bodyB, exitB)
+            var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0pi")])
+            var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0pit")])
+            var elemV = callExt(bodyB, "js_pyget", [itB, iB])
+            var mB = emitPatOrDie(bodyB, pat, elemV, "for-in pattern did not match an element")
+            loopStack.push({cont: postB, brk: exitB, label: lbl})
+            bodyT(mB).NewBr(postB)
+            loopStack.pop()
+            var iP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, "0pi")])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, "0pi"),
+                                            callExt(postB, "js_add", [iP, callExt(postB, "js_num_i", [handle(1)])])])
+            postB.NewBr(headB)
+            curScopeV = saved
+            return exitB
+        }
+    }
+    // items = [subject, pattern, guard?, then, else?]
+    function makeIfCase(items) {
+        var subj = items[0]
+        var pat = resolvePat(items[1], "decl")
+        var idx = 2
+        var guard = null
+        if (items[idx] != undefined && items[idx].guard != undefined) { guard = items[idx].guard; idx = idx + 1 }
+        var thenT = items[idx]
+        var elseT = (idx + 1 < items.length) ? items[idx + 1] : null
+        return function(b) {
+            var r = subj(b)
+            b = r.b
+            var elseB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            var hitB = emitPat(b, pat, r.v, elseB)
+            if (guard != null) {
+                var gr = guard(hitB)
+                var gB = curF.NewBlock("")
+                gr.b.NewCondBr(truthy(gr.b, gr.v), gB, elseB)
+                hitB = gB
+            }
+            thenT(hitB).NewBr(endB)
+            var eb = (elseT != null) ? elseT(elseB) : elseB
+            eb.NewBr(endB)
+            return endB
+        }
+    }
+
+    // ----- switch statement and switch expression -----
+    function makeSwBody(items) { return {swbody: makeSeq(items), swempty: items.length == 0} }
+    function makeSwCase(items) {
+        var c = {pat: resolvePat(items[0], "decl"), guard: null, body: null, empty: true, isdef: false}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].guard != undefined) { c.guard = items[i].guard }
+            else { c.body = items[i].swbody; c.empty = items[i].swempty }
+        }
+        return c
+    }
+    function makeSwDefault(items) {
+        var c = {pat: null, guard: null, body: null, empty: true, isdef: true}
+        for (var i = 0; i < items.length; i++) { c.body = items[i].swbody; c.empty = items[i].swempty }
+        return c
+    }
+    // There is no fallthrough in Dart: a non-empty case body ends the switch, an EMPTY one
+    // shares the next case's body - which here means that body is EMITTED again on this
+    // case's path. break inside a case leaves the switch, so the switch pushes a loopStack
+    // entry whose brk is the exit block (and whose cont is the enclosing loop's, so a
+    // `continue` inside a switch inside a loop still reaches the loop).
+    function makeSwitch(items) {
+        var subj = items[0]
+        var cases = items.slice(1)
+        return function(b) {
+            var r = subj(b)
+            b = r.b
+            var v = r.v
+            var endB = curF.NewBlock("")
+            var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
+            loopStack.push({cont: outerCont, brk: endB, label: ""})
+            for (var i = 0; i < cases.length; i++) {
+                var c = cases[i]
+                var nextB = curF.NewBlock("")
+                var hitB = b
+                if (!c.isdef) { hitB = emitPat(b, c.pat, v, nextB) }
+                if (c.guard != null) {
+                    var gr = c.guard(hitB)
+                    var gB = curF.NewBlock("")
+                    gr.b.NewCondBr(truthy(gr.b, gr.v), gB, nextB)
+                    hitB = gB
+                }
+                var j = i
+                while (j < cases.length && cases[j].empty) { j = j + 1 }
+                var bodyEnd = (j < cases.length) ? cases[j].body(hitB) : hitB
+                bodyEnd.NewBr(endB)
+                if (c.isdef) { nextB.NewBr(endB) }
+                b = nextB
+            }
+            loopStack.pop()
+            b.NewBr(endB)
+            return endB
+        }
+    }
+    function makeSwExprCase(items) {
+        var c = {pat: resolvePat(items[0], "decl"), guard: null, val: null}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].guard != undefined) { c.guard = items[i].guard }
+            else { c.val = items[i] }
+        }
+        return c
+    }
+    function makeSwitchExpr(items) {
+        var subj = items[0]
+        var cases = items.slice(1)
+        return function(b) {
+            var r = subj(b)
+            b = r.b
+            var v = r.v
+            var endB = curF.NewBlock("")
+            var inc = []
+            for (var i = 0; i < cases.length; i++) {
+                var nextB = curF.NewBlock("")
+                var hitB = emitPat(b, cases[i].pat, v, nextB)
+                if (cases[i].guard != null) {
+                    var gr = cases[i].guard(hitB)
+                    var gB = curF.NewBlock("")
+                    gr.b.NewCondBr(truthy(gr.b, gr.v), gB, nextB)
+                    hitB = gB
+                }
+                var vr = cases[i].val(hitB)
+                vr.b.NewBr(endB)
+                inc.push(llvm.ir.NewIncoming(vr.v, vr.b))
+                b = nextB
+            }
+            callExt(b, "js_throw", [emitStr(b, "no case of the switch expression matched")])
+            b.NewBr(endB)
+            inc.push(llvm.ir.NewIncoming(hNull, b))
+            return {b: endB, v: endB.NewPhi(inc)}
+        }
+    }
+
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
@@ -2159,7 +3005,7 @@ KwSuper     = "super" KwEnd ;
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
-            else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_pyget", [o, ri.v]) }
+            else { var ri = s.idx(b); var rg = emitIndexGet(ri.b, o, ri.v); b = rg.b; o = rg.v }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), field: true} }
@@ -2175,7 +3021,7 @@ KwSuper     = "super" KwEnd ;
             var p = emitRefPath(b, ref)
             b = p.b
             if (p.field) { return {b: b, v: callExt(b, "js_get", [p.obj, p.key])} }
-            return {b: b, v: callExt(b, "js_pyget", [p.obj, p.key])}
+            return emitIndexGet(b, p.obj, p.key)
         }
     }
     function makeAssign(items, pos) {
@@ -2224,8 +3070,12 @@ KwSuper     = "super" KwEnd ;
                     b = emitSetterWrite(b, p.obj, ref.path[ref.path.length - 1].key, v)
                     return {b: b, v: v}
                 } else {
-                    if (op != "=") { var oldm = callExt(b, "js_pyget", [p.obj, p.key]); v = emitBin(b, op, oldm, v) }
-                    callExt(b, "js_pyset", [p.obj, p.key, v])
+                    if (op != "=") {
+                        var og2 = emitIndexGet(b, p.obj, p.key)
+                        b = og2.b
+                        v = emitBin(b, op, og2.v, v)
+                    }
+                    b = emitIndexSet(b, p.obj, p.key, v)
                 }
             }
             return {b: b, v: v}

@@ -40,7 +40,7 @@ programs are self checking: they return 0 on success.") ;
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { Include | PPLine | EnumDef | UnionDef | TypedefDecl | GFloatDecl
+Program     = { Include | PPLine | StaticAssert | EnumDef | UnionDef | TypedefDecl | GFloatDecl
               | StructDef | StructGDecl | FuncDef | Proto | GAggDecl | GlobalDecl } ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
@@ -126,12 +126,12 @@ FieldLine   <~~ push(makeFieldLine(takeAll())) ~~>
 FieldType   = TypeInt <~~ push({bty: "int"}) ~~>
             | EnumRef <~~ push({bty: "int"}) ~~>
             | KwStruct Id <~~ push({bty: up.in}) ~~> ;
-FDecl       = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ;
+FDecl       = [ Stars ] Id <~~ push(up.in) ~~> ;
 
 // A function prototype (int putchar(int c);) is accepted and ignored: the callees
 // are resolved by name anyway. It keeps the test programs valid for a real C compiler.
 Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
-            = TypeInt [ "*" ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
+            = TypeInt [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
 
 // The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
 FuncDef     <~~ defineFunction() ~~>
@@ -151,7 +151,7 @@ ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~> ;
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
             = BaseInt GDeclarator { "," GDeclarator } ";" ;
 GDeclarator <~~ push(makeGDecl(takeAll())) ~~>
-            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~>
               [ ArraySize | "=" Number <~~ push({init: pop()}) ~~> ] ;
 ArraySize   <~~ push({size: pop()}) ~~>
             = "[" Number "]" ;
@@ -160,7 +160,7 @@ ArraySize   <~~ push({size: pop()}) ~~>
 StructGDecl <~~ defineStructGlobals(takeAll()) ~~>
             = KwStruct Id <~~ push(up.in) ~~> SGDecl { "," SGDecl } ";" ;
 SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
-            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> [ ArraySize ] ;
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArraySize ] ;
 
 // Aggregate '= { ... }' initializers and multi-dimensional arrays are accepted and
 // reported as not implemented (the flat one-word memory has no aggregate init and no
@@ -169,7 +169,7 @@ SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
 // the genuine declarators. The declarator, dimensions and '{ ... }' body are all
 // skipped; takeAll() drops whatever the dimension sizes pushed. GAggDecl is top-level.
 GAggDecl    <~~ takeAll(); notImpl("aggregate initializer", up.pos) ~~>
-            = AggBase { "*" } Id AggForm ";" ;
+            = AggBase { PStars } Id AggForm ";" ;
 AggBase     = BaseInt | KwStruct Id ;
 AggForm     = EmptyArr [ "=" SkipBlock ]
             | ArraySize ArraySize { ArraySize } [ "=" SkipBlock ]
@@ -177,29 +177,55 @@ AggForm     = EmptyArr [ "=" SkipBlock ]
             | "=" SkipBlock ;
 EmptyArr    = "[" "]" ;
 
-// A run of one or more '*' collapses to a single pointer level (the machine has no
-// multi level pointers); two or more is reported as not implemented but still parses.
-Stars       <~~ push(makeStars(up.in, up.pos)) ~~> = "*" { "*" } ;
+// A '*' run in a position that pushes nothing (prototypes, casts, sizeof names).
+PStars      = "*" { PtrQual | "*" } ;
+
+// A run of one or more '*' in a declarator, with the pointer qualifiers that may sit
+// between them. Every level is one word holding an address, so int** nests freely.
+Stars       <~~ push(makeStars(up.in, up.pos)) ~~> = "*" { PtrQual | "*" } ;
+// const/volatile/restrict/_Atomic may follow a '*' (int *const p, int *restrict q).
+PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" KwEnd ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
-            | AggDecl | StructDecl | Decl | LFloatDecl | Goto | PPStmt | Label | Empty | ExprStmt ;
+            | AssertStmt | BoolDecl | LStructDef | StaticDecl | AggDecl | StructDecl | Decl | LFloatDecl
+            | Goto | PPStmt | Label | Empty | ExprStmt ;
+
+// A struct definition inside a function body. The layout is registered exactly like a
+// top-level one (the tag runs at build time), and the statement itself does nothing.
+LStructDef  <~~ defineStruct(takeAll()); push(function() {}) ~~>
+            = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
+
+// A static local: the storage is allocated ONCE and survives across calls, unlike an
+// ordinary local. At the top level 'static' is just a linkage word on a global and is
+// parsed by TypeInt, so this form only ever claims a statement.
+StaticDecl  <~~ push(makeSeq(takeAll())) ~~>
+            = KwStatic BaseInt SInitDecl { "," SInitDecl } ";" ;
+SInitDecl   <~~ push(makeStaticDecl(takeAll())) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArraySize | InferArr ] [ "=" DInit ] ;
 
 // Local aggregate / multi-dimensional / brace-initialized declarations: the statement
 // form of GAggDecl (see there). Placed before StructDecl and Decl so it claims only
 // the unsupported shapes and leaves genuine 'int a[3];' / 'struct P p;' to them.
 AggDecl     <~~ takeAll(); push(notImplStmt("aggregate initializer", up.pos)) ~~>
-            = AggBase { "*" } Id AggForm ";" ;
+            = AggBase { PStars } Id LAggForm ";" ;
+// The LOCAL shapes still unsupported: two or more array dimensions, and a brace
+// initializer on something that is not a one-dimensional array (a struct or a scalar).
+// A one-dimensional 'int a[3] = { ... }' / 'int a[] = { ... }' is a genuine Decl.
+LAggForm    = ArraySize ArraySize { ArraySize } [ "=" SkipBlock ]
+            | EmptyArr
+            | "=" SkipBlock ;
 
-// goto is accepted and reported as not implemented (the structured lowering has no
-// arbitrary jumps); a plain label passes its statement straight through, so labelled
-// code that is not jumped to still runs.
-Goto        <~~ push(notImplStmt("goto", up.pos)) ~~>
-            = KwGoto Id ";" ;
+// goto jumps to a label of an enclosing statement SEQUENCE: the goto yields a signal
+// (interpreter) resp. branches to the label's basic block (compiler), which covers
+// forward jumps, backward jumps and jumps out of nested loops.
+Goto        <~~ push(makeGoto(pop())) ~~>
+            = KwGoto Id <~~ push(up.in) ~~> ";" ;
 // A label must not be 'case' or 'default': those are switch labels and must be left
 // for the enclosing switch (a case body is a { Statement } run, so without this guard
 // a label would swallow the following 'default:' clause).
-Label       = NotSwitchKw Id ":" Statement ;
+Label       <~~ push(makeLabel(takeAll())) ~~>
+            = NotSwitchKw Id <~~ push(up.in) ~~> ":" Statement ;
 NotSwitchKw = :script(~~
     (function() {
         var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
@@ -231,7 +257,7 @@ LFloatDecl  <~~ push(notImplStmt("floating-point declaration", up.pos)) ~~>
 StructDecl  <~~ push(makeStructDecl(takeAll())) ~~>
             = KwStruct Id <~~ push(up.in) ~~> SDeclarator { "," SDeclarator } ";" ;
 SDeclarator <~~ push(makeSDecl(takeAll())) ~~>
-            = [ "*" <~~ push("*") ~~> ] Id <~~ push(up.in) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~>
               [ ArraySize | "=" AssignExpr ] ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
@@ -275,7 +301,17 @@ DeclCore    <~~ push(makeSeq(takeAll())) ~~>
             = BaseInt InitDecl { "," InitDecl } ;
 InitDecl    <~~ push(makeDecl(takeAll())) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArraySize | "=" AssignExpr ] ;
+              [ ArraySize | InferArr ] [ "=" DInit ] ;
+// 'int a[] = { ... }': the size comes from the initializer (-1 asks for that).
+InferArr    <~~ push({size: -1}) ~~> = "[" "]" ;
+// A declaration initializer: a brace list, or one ordinary expression.
+DInit       = BraceInit | AssignExpr ;
+// A brace initializer collects its items; a trailing comma is allowed.
+BraceInit   <~~ push({list: takeAll()}) ~~>
+            = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
+DItem       <~~ push(makeDItem(takeAll())) ~~> = [ ArrDesig ] DInit ;
+// The array designator '[2] = value'; the struct form '.f = value' is not yet lowered.
+ArrDesig    <~~ push({at: pop()}) ~~> = "[" Number "]" "=" ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -346,7 +382,9 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 
 // Prefix operators. ++/-- work on lvalues; & takes the address of an lvalue;
 // * dereferences (as an expression it loads the pointed to value).
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | Cast | PostfixExpr ;
+// AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
+// function named _Alignof, and the general call seed would claim it first.
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | AlignOf | Cast | PostfixExpr ;
 
 // A cast '(Type)expr' is accepted and reported as not implemented (the machine models
 // one numeric type and uniform pointers, so a cast cannot change a value). CastType
@@ -354,20 +392,35 @@ UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | Cas
 // and only '(int)x' / '(struct P *)p' are taken as casts.
 Cast        <~~ pop(); push(cNIExpr("cast expression", up.pos)) ~~>
             = "(" CastType ")" UnaryExpr ;
-CastType    = ( TypeInt | KwStruct Id | EnumRef ) { "*" } ;
+CastType    = ( TypeInt | KwStruct Id | EnumRef ) { PStars } ;
 
 // sizeof(type): a compile-time constant. Scalars are 4 bytes, any pointer 8; a
 // struct value or a sizeof over an expression is reported as not implemented.
 Sizeof      = KwSizeof ( SizeofType | SizeofExpr ) ;
 SizeofType  <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
             = "(" SizeName ")" ;
-SizeofExpr  <~~ pop(); push(cNIExpr("sizeof expression", up.pos)) ~~>
+// sizeof over an EXPRESSION: the machine has one integer value type, so the answer
+// is the size of int; an array or struct operand is not distinguished from it.
+SizeofExpr  <~~ pop(); push(makeInt(4)) ~~>
             = UnaryExpr ;
+// _Alignof(type): for the scalar types this machine models, the alignment equals the
+// size, and a pointer aligns to 8 like it is sized.
+AlignOf     <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
+            = KwAlignof "(" SizeName ")" ;
 SizeName    <~~ push(makeSizeName(takeAll())) ~~>
-            = SizeBase { "*" <~~ push("*") ~~> } ;
-SizeBase    = TypeInt <~~ push({kind: "int"}) ~~>
-            | EnumRef <~~ push({kind: "int"}) ~~>
+            = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } ;
+SizeBase    = ScalarName
+            | EnumRef <~~ push({kind: "int", w: 4}) ~~>
             | KwStruct Id <~~ push({kind: "struct"}) ~~> ;
+// A scalar type name inside sizeof / _Alignof, kept keyword by keyword so the width
+// survives: char and _Bool are 1, short 2, any long (and double) 8, the rest 4.
+ScalarName  <~~ push(makeScalarName(takeAll())) ~~>
+            = ScalarTok { ScalarTok } ;
+ScalarTok   <~~ push(up.in) ~~> = ScalarKw ;
+ScalarKw    = "char" KwEnd | "short" KwEnd | "int" KwEnd | "long" KwEnd
+            | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
+            | "float" KwEnd | "double" KwEnd | "_Bool" KwEnd
+            | "const" KwEnd | "volatile" KwEnd ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Lvalue ;
 AddrOf      <~~ push(pop() /* The lvalue thunk already yields the address. */) ~~>
@@ -399,18 +452,26 @@ PlaceRef    <~~ push(makeLoad(makeVarPlace(takeAll()))) ~~>
             = Id <~~ push(up.in) ~~> PlaceSfx { PlaceSfx } ;
 NumberLit   <~~ push(makeInt(pop())) ~~>
             = Number ;
-CharLit     = "'" :whitespace() CChar <~~ push(makeInt(charCode(unescapeC(up.in)))) ~~> "'" :whitespace(Whitespace) ;
-CChar       = "\\" "\x20"..b"\x7e" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" ;
+CharLit     = "'" :whitespace() CChar <~~ push(makeInt(cCharCode(up.in))) ~~> "'" :whitespace(Whitespace) ;
+// One character constant body: a hex escape (backslash x plus hex digits), an octal
+// escape (backslash plus one to three octal digits), a simple escape, or a plain
+// character. The hex and octal forms come first so their digits are not cut short.
+CChar       = "\\" "x" HexDig { HexDig } | "\\" OctDig [ OctDig [ OctDig ] ]
+            | "\\" "\x20"..b"\x7e" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7e" ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
 
 // A hexadecimal (0x...) or decimal integer literal with optional C integer suffixes
 // (u/U/l/L in any combination). parseInt reads the 0x prefix and stops at the suffix
 // letters, so hex and suffixed literals both yield the right 32-bit value.
-Number      <~~ push(parseInt(up.in)) ~~>
+Number      <~~ push(parseCInt(up.in)) ~~>
             = ( "0x" | "0X" ) :whitespace() HexDig { HexDig } { IntSfx } :whitespace(Whitespace)
+            | ( "0b" | "0B" ) :whitespace() BinDig { BinDig } { IntSfx } :whitespace(Whitespace)
+            | "0" :whitespace() OctDig { OctDig } { IntSfx } :whitespace(Whitespace)
             | ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } { IntSfx } :whitespace(Whitespace) ;
 HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
+OctDig      = "0"..."7" ;
+BinDig      = "0" | "1" ;
 IntSfx      = "u" | "U" | "l" | "L" ;
 
 // The scalar integer type: any run of int-family keywords and qualifiers, all of
@@ -421,7 +482,9 @@ IntSfx      = "u" | "U" | "l" | "L" ;
 // _Atomic/restrict qualifiers are likewise parsed and ignored; _Bool and _Complex
 // collapse to int; __attribute__((...)) specifiers are skipped. Pushes nothing.
 TypeInt     = TypeElem { TypeElem } ;
-TypeElem    = TypeTok | Attr ;
+TypeElem    = TypeTok | Attr | AlignAs ;
+// _Alignas(8) / _Alignas(int): parsed and ignored (the layout is fixed).
+AlignAs     = "_Alignas" KwEnd SkipParen ;
 TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
             | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
             | "const" KwEnd | "volatile" KwEnd
@@ -433,11 +496,28 @@ BaseInt     = TypeInt | EnumRef ;
 EnumRef     = KwEnum Id ;
 
 KwStruct    = "struct" KwEnd ;
+KwStatic    = "static" KwEnd ;
 KwEnum      = "enum" KwEnd ;
 KwUnion     = "union" KwEnd ;
 KwTypedef   = "typedef" KwEnd ;
 KwGoto      = "goto" KwEnd ;
+// _Static_assert(constant-expression, "message"); - accepted and skipped at both the
+// top level and inside a function body. The condition is not evaluated: it is a
+// compile-time diagnostic, and this front end reports no diagnostics of its own.
+StaticAssert = KwStaticAs SkipParen ";" ;
+AssertStmt  <~~ push(function() {}) ~~> = StaticAssert ;
+
+// _Bool declarations get their own form so an initializer is normalized to 0 or 1,
+// which is what makes '_Bool two = 2;' hold 1 (TypeInt alone collapses _Bool to int).
+BoolDecl    <~~ push(makeSeq(takeAll())) ~~>
+            = KwBool BInitDecl { "," BInitDecl } ";" ;
+BInitDecl   <~~ push(makeBoolDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+
 KwSizeof    = "sizeof" KwEnd ;
+KwAlignof   = "_Alignof" KwEnd ;
+KwStaticAs  = "_Static_assert" KwEnd ;
+KwBool      = "_Bool" KwEnd ;
 KwFloating  = "float" KwEnd | "double" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
@@ -460,15 +540,57 @@ KwDefault   = "default" KwEnd ;
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
-    function charCode(s) { return s.charCodeAt(0) }
-    function unescapeC(s) {
-        if (s.charCodeAt(0) != 92) return s
+    // The digit value of one character in base 16 (also covers bases 2, 8 and 10).
+    function digVal(cc) {
+        if (cc >= 48 && cc <= 57) return cc - 48
+        if (cc >= 97 && cc <= 102) return cc - 87
+        if (cc >= 65 && cc <= 70) return cc - 55
+        return -1
+    }
+    // A C integer constant: 0x/0X hex, 0b/0B binary, a leading 0 octal, or decimal,
+    // with any run of u/U/l/L suffix letters. Read as a 32-bit two's complement value.
+    function parseCInt(s) {
+        var base = 10
+        var i = 0
+        if (s.length > 1 && s.charCodeAt(0) == 48) {
+            var c1 = s.charCodeAt(1)
+            if (c1 == 120 || c1 == 88) { base = 16; i = 2 }
+            else if (c1 == 98 || c1 == 66) { base = 2; i = 2 }
+            else { base = 8; i = 1 }
+        }
+        var v = 0
+        for (; i < s.length; i++) {
+            var d = digVal(s.charCodeAt(i))
+            if (d < 0 || d >= base) break   // The u/U/l/L suffix run ends the digits.
+            v = v * base + d
+        }
+        return v | 0
+    }
+    // The value of one character-constant body, including the C escape sequences:
+    // backslash x with hex digits, backslash with up to three octal digits, and the
+    // simple escapes n t r v f a b 0, backslash, quote and double quote.
+    function cCharCode(s) {
+        if (s.charCodeAt(0) != 92) return s.charCodeAt(0)
         var e = s.charCodeAt(1)
-        if (e == 110) return "\n"
-        if (e == 116) return "\t"
-        if (e == 114) return "\r"
-        if (e == 48) return String.fromCharCode(0)
-        return String.fromCharCode(e) // \\ \' and everything else: the char itself.
+        if (e == 120 || e == 88) {
+            var hv = 0
+            for (var i = 2; i < s.length; i++) hv = hv * 16 + digVal(s.charCodeAt(i))
+            return hv & 255
+        }
+        if (e >= 48 && e <= 55) {
+            var ov = 0
+            for (var j = 1; j < s.length; j++) ov = ov * 8 + digVal(s.charCodeAt(j))
+            return ov & 255
+        }
+        if (e == 110) return 10
+        if (e == 116) return 9
+        if (e == 114) return 13
+        if (e == 118) return 11
+        if (e == 102) return 12
+        if (e == 97) return 7
+        if (e == 98) return 8
+        if (e == 101) return 27
+        return e   // backslash, single quote, double quote, question mark: itself.
     }
 
     // ----- The machine: one flat, word addressed memory -----
@@ -513,14 +635,16 @@ KwDefault   = "default" KwEnd ;
     // A C-appropriate placeholder for an unlowered expression: yields a constant 0
     // (the shared notImplExpr returns undefined, which is not a valid C int value).
     function cNIExpr(construct, pos) { notImpl(construct, pos); return function() { return 0 } }
-    // A run of '*' collapses to one pointer level; two or more is a multi-level
-    // pointer, which the single-word pointer model cannot represent - reported as not
-    // implemented but still parsed (the declarator keeps a single pointer level).
+    // A '*' run in a declarator: {ptr: levels}. Every level is one word holding an
+    // address, so int** is an ordinary cell whose value is the address of an int cell.
     function makeStars(s, pos) {
         var n = 0
         for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) == 42) n++ }
-        if (n > 1) notImpl("multi-level pointer", pos)
-        return "*"
+        return {ptr: n}
+    }
+    // The declarator's leading '*' run, if any: 0 when the item is already the name.
+    function starsOf(item) {
+        return (item != undefined && item.ptr != undefined) ? item.ptr : 0
     }
     // enum: sequential values from 0, or continuing after an explicit '= n'.
     function makeEnumVal(items) { return items.length > 1 ? -items[1] : items[0] }
@@ -546,24 +670,57 @@ KwDefault   = "default" KwEnd ;
             return v
         }
     }
+    // A scalar type name, keyword by keyword -> {kind:"int", w: byte width}.
+    function makeScalarName(items) {
+        var w = 4
+        var nlong = 0
+        for (var i = 0; i < items.length; i++) {
+            var t = items[i]
+            if (t == "long") nlong = nlong + 1
+            else if (t == "char" || t == "_Bool" || t == "void") w = 1
+            else if (t == "short") w = 2
+            else if (t == "double") w = 8
+        }
+        if (nlong > 0) w = 8   // LP64: long AND long long are 8, matching the
+                               // 8-byte pointers this model already pins, and cc
+                               // on a 64-bit host (ul=8 l=8 ll=8 ptr=8 int=4).
+        return {kind: "int", w: w}
+    }
+    // A _Bool declarator: the initializer is normalized to 0 or 1.
+    function makeBoolDecl(items) {
+        var name = items[0]
+        var opt = items[1]
+        return function() {
+            var a = alloc(1)
+            if (opt != undefined) mem[a] = (opt() != 0) ? 1 : 0
+            declVar(name, a, false, ctInt)
+        }
+    }
     // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
     // into a constant thunk (pointer 8, scalar/enum 4) or a notImpl for a struct value.
-    function makeSizeName(items) { return {kind: items[0].kind, ptr: items.length > 1} }
+    function makeSizeName(items) { return {kind: items[0].kind, w: items[0].w, ptr: items.length > 1} }
     function makeSizeof(items, pos) {
         var d = items[0]
         if (d.ptr) return function() { return 8 }
         if (d.kind == "struct") return cNIExpr("sizeof of a struct value", pos)
-        return function() { return 4 }
+        return function() { return d.w }
     }
 
     // ----- C types and struct layouts -----
-    // A ct descriptor is {k:"int"} | {k:"ptr", to:"int"|structName} | {k:"struct", s:name}.
+    // A ct descriptor is {k:"int"} | {k:"ptr", p:ct} | {k:"struct", s:name}; the
+    // pointee of a pointer is a ct in turn, so int** is ptr(ptr(int)) and nests freely.
     // structs[name] = {size: words, fields: {fname: {off, ct}}}; fields lie back to
     // back, ints and pointers take one word each (matching the compiled layout).
     var ctInt = {k: "int"}
     var structs = {}
     function ctSize(ct) { return ct.k == "struct" ? structOf(ct.s).size : 1 }
-    function pointeeCt(ct) { return ct.to == "int" ? ctInt : {k: "struct", s: ct.to} }
+    function ctStruct(sname) { return {k: "struct", s: sname} }
+    // n levels of pointer around a base ct (0 levels yields the base itself).
+    function ptrTo(n, base) {
+        var ct = base
+        for (var i = 0; i < n; i++) ct = {k: "ptr", p: ct}
+        return ct
+    }
     function structOf(sname) {
         var st = hasOwn(structs, sname) ? structs[sname] : undefined
         if (st == undefined) fail("struct not defined: " + sname)
@@ -575,15 +732,16 @@ KwDefault   = "default" KwEnd ;
         if (f == undefined) fail("struct " + sname + " has no field " + fname)
         return f
     }
-    // FieldLine items = [{bty}, "*"?, name, "*"?, name...] -> {fields: [{name, bty, star}...]}.
+    // FieldLine items = [{bty}, {ptr}?, name, {ptr}?, name...] -> {fields: [{name, bty,
+    // star}...]} where star is the pointer level (0 for a plain field).
     function makeFieldLine(items) {
         var bty = items[0].bty
         var fields = []
-        var star = false
+        var star = 0
         for (var i = 1; i < items.length; i++) {
-            if (items[i] == "*") { star = true; continue }
+            if (items[i] != undefined && items[i].ptr != undefined) { star = items[i].ptr; continue }
             fields.push({name: items[i], bty: bty, star: star})
-            star = false
+            star = 0
         }
         return {fields: fields}
     }
@@ -598,9 +756,9 @@ KwDefault   = "default" KwEnd ;
             for (var j = 0; j < fl.length; j++) {
                 var f = fl[j]
                 var ct
-                if (f.star) { ct = {k: "ptr", to: f.bty} }           // May point at any (even later) struct.
-                else if (f.bty == "int") { ct = ctInt }
-                else { structOf(f.bty); ct = {k: "struct", s: f.bty} }
+                var base = (f.bty == "int") ? ctInt : ctStruct(f.bty)
+                if (f.star > 0) { ct = ptrTo(f.star, base) }         // May point at any (even later) struct.
+                else { if (f.bty != "int") structOf(f.bty); ct = base }
                 if (hasOwn(st.fields, f.name)) fail("duplicate field " + f.name + " in struct " + name)
                 st.fields[f.name] = {off: st.size, ct: ct}
                 st.size += ctSize(ct)
@@ -632,6 +790,40 @@ KwDefault   = "default" KwEnd ;
         var r = f.body()
         scopes = callerScopes
         return (r != undefined && r.isRet) ? r.v : 0
+    }
+
+    // ----- goto and labels -----
+    // A labelled statement is pushed as {lbl, t} instead of a bare thunk, so the
+    // enclosing statement SEQUENCE can index its labels. A goto returns a signal that
+    // every enclosing construct passes upward (exactly like a return) until a sequence
+    // that knows the label catches it and resumes there - which covers forward jumps,
+    // backward jumps and jumps out of nested loops alike.
+    function makeLabel(items) { return {lbl: items[0], t: items[1]} }
+    function makeGoto(name) { return function() { return {isGoto: true, label: name} } }
+    makeSeq = function (items) {
+        var stmts = []
+        var labels = {}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it != undefined && typeof it != "function" && it.lbl != undefined) {
+                labels[it.lbl] = stmts.length
+                stmts.push(it.t)
+            } else {
+                stmts.push(it)
+            }
+        }
+        return function() {
+            var k = 0
+            while (k < stmts.length) {
+                var r = stmts[k]()
+                if (r != undefined) {
+                    if (r.isGoto == true && hasOwn(labels, r.label)) { k = labels[r.label]; continue }
+                    return r
+                }
+                k = k + 1
+            }
+            return undefined
+        }
     }
 
     // ----- Expression thunks: function() -> 32 bit int. Lvalue thunks -> address. -----
@@ -666,7 +858,7 @@ KwDefault   = "default" KwEnd ;
                 if (s.idx != undefined) {
                     var idx = s.idx()
                     if (arr) { addr = addr + idx * ctSize(ct) }
-                    else if (ct.k == "ptr") { ct = pointeeCt(ct); addr = load(addr) + idx * ctSize(ct) }
+                    else if (ct.k == "ptr") { ct = ct.p; addr = load(addr) + idx * ctSize(ct) }
                     else fail("indexing needs an array or a pointer: " + name)
                 } else if (s.fld != undefined) {
                     if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
@@ -674,8 +866,8 @@ KwDefault   = "default" KwEnd ;
                     addr += f.off
                     ct = f.ct
                 } else {
-                    if (ct.k != "ptr" || ct.to == "int") fail("'->' needs a struct pointer: ->" + s.arw)
-                    var f2 = fieldOf(ct.to, s.arw)
+                    if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
+                    var f2 = fieldOf(ct.p.s, s.arw)
                     addr = load(addr) + f2.off
                     ct = f2.ct
                 }
@@ -776,29 +968,84 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // items = ["*"?] name [{size}|initThunk] -> declaration thunk.
+    // One brace-initializer item: an optional '[i] =' designator plus its value.
+    function makeDItem(items) {
+        if (items.length > 1) return {at: items[0].at, v: items[1]}
+        return {v: items[0]}
+    }
+    // A brace list -> a dense array of value thunks, honouring '[i] =' designators.
+    // A hole (a skipped index, or a shorter list than the array) stays undefined and
+    // is left at the zero the fresh memory already holds.
+    function spreadInit(list, pos) {
+        var out = []
+        var at = 0
+        for (var i = 0; i < list.length; i++) {
+            var it = list[i]
+            if (it.at != undefined) at = it.at | 0
+            while (out.length < at) out.push(undefined)
+            var v = it.v
+            if (typeof v != "function") { notImpl("nested aggregate initializer", pos); v = undefined }
+            if (out.length == at) out.push(v)
+            else out[at] = v
+            at = at + 1
+        }
+        return out
+    }
+    // items = [{ptr}?, name, {size}?, init?] -> declaration thunk. init is either an
+    // expression thunk or {list} for a brace initializer; {size} marks an array, with
+    // -1 asking for the size to be taken from the initializer.
     function makeDecl(items) {
         var i = 0
-        var isPtr = false
-        if (items[i] == "*") { isPtr = true; i++ } // A pointer is an int sized cell holding an address.
+        var nstar = starsOf(items[i]) // A pointer is a one word cell holding an address.
+        if (nstar > 0) i++
         var name = items[i]
-        var opt = items[i + 1]
-        var ct = isPtr ? {k: "ptr", to: "int"} : ctInt
+        i++
+        var dim = -2                  // -2: not an array at all.
+        if (items[i] != undefined && items[i].size != undefined) { dim = items[i].size | 0; i++ }
+        var opt = items[i]
+        var ct = ptrTo(nstar, ctInt)
+        if (dim > -2) {
+            var list = (opt != undefined && opt.list != undefined) ? opt.list : undefined
+            if (list == undefined && opt != undefined) fail("an array needs a brace initializer: " + name)
+            return function() {
+                var vals = (list != undefined) ? spreadInit(list, 0) : []
+                var n = dim >= 0 ? dim : vals.length
+                if (n < vals.length) n = vals.length
+                var base = alloc(n)   // Fresh memory is zeroed, so holes stay 0.
+                for (var k = 0; k < vals.length; k++) {
+                    if (vals[k] != undefined) mem[base + k] = vals[k]() | 0
+                }
+                declVar(name, base, true, ct)
+            }
+        }
         return function() {
-            if (opt != undefined && opt.size != undefined) {
-                declVar(name, alloc(opt.size), true, ct)
+            var a = alloc(1)
+            if (opt != undefined) mem[a] = opt() | 0
+            declVar(name, a, false, ct)
+        }
+    }
+    // A static local: makeDecl's thunk runs ONCE (allocating and initializing the cell);
+    // every later execution only re-binds that same cell into the fresh scope.
+    function makeStaticDecl(items) {
+        var inner = makeDecl(items)
+        var i = 0
+        if (starsOf(items[i]) > 0) i++
+        var name = items[i]
+        var cell = undefined
+        return function() {
+            if (cell == undefined) {
+                inner()
+                cell = lookupVar(name)
             } else {
-                var a = alloc(1)
-                if (opt != undefined) mem[a] = opt() | 0
-                declVar(name, a, false, ct)
+                declVar(name, cell.addr, cell.arr, cell.ct)
             }
         }
     }
     // SDeclarator/SGDecl items = ["*"?] name [{size}|initThunk] -> a plain descriptor.
     function makeSDecl(items) {
         var i = 0
-        var star = false
-        if (items[i] == "*") { star = true; i++ }
+        var star = starsOf(items[i])
+        if (star > 0) i++
         var name = items[i]
         var opt = items[i + 1]
         if (opt != undefined && opt.size != undefined) return {name: name, star: star, size: opt.size}
@@ -806,15 +1053,15 @@ KwDefault   = "default" KwEnd ;
     }
     // One declared struct entity: struct S v / struct S *p (= expr) / struct S a[N].
     function declStructVar(sname, d) {
-        if (d.star) {
+        if (d.star > 0) {
             var a = alloc(1)
             if (d.init != undefined) mem[a] = d.init() | 0
-            declVar(d.name, a, false, {k: "ptr", to: sname})
+            declVar(d.name, a, false, ptrTo(d.star, ctStruct(sname)))
         } else if (d.size != undefined) {
-            declVar(d.name, alloc(d.size * structOf(sname).size), true, {k: "struct", s: sname})
+            declVar(d.name, alloc(d.size * structOf(sname).size), true, ctStruct(sname))
         } else {
             if (d.init != undefined) fail("struct initializers are not supported: " + d.name)
-            declVar(d.name, alloc(structOf(sname).size), false, {k: "struct", s: sname})
+            declVar(d.name, alloc(structOf(sname).size), false, ctStruct(sname))
         }
     }
     // StructDecl items = [structName, descriptor...] -> declaration thunk.
@@ -908,20 +1155,20 @@ KwDefault   = "default" KwEnd ;
         var i = 0
         var sname
         if (items[i] != undefined && items[i].sname != undefined) { sname = items[i].sname; i++ }
-        var ptr = false
-        if (items[i] == "*") { ptr = true; i++ }
-        if (sname != undefined && !ptr) fail("struct parameters must be pointers (struct " + sname + " *)")
-        var ct = ptr ? {k: "ptr", to: (sname != undefined ? sname : "int")} : ctInt
-        return {name: items[i], ptr: ptr, ct: ct}
+        var ptr = starsOf(items[i])
+        if (ptr > 0) i++
+        if (sname != undefined && ptr == 0) fail("struct parameters must be pointers (struct " + sname + " *)")
+        var ct = ptrTo(ptr, sname != undefined ? ctStruct(sname) : ctInt)
+        return {name: items[i], ptr: ptr > 0, ct: ct}
     }
     // Global declarator: ["*"?] name [{size}|{init: n}] -> registered immediately.
     function makeGDecl(items) {
         var i = 0
-        var isPtr = false
-        if (items[i] == "*") { isPtr = true; i++ }
+        var nstar = starsOf(items[i])
+        if (nstar > 0) i++
         var name = items[i]
         var opt = items[i + 1]
-        var ct = isPtr ? {k: "ptr", to: "int"} : ctInt
+        var ct = ptrTo(nstar, ctInt)
         if (opt != undefined && opt.size != undefined) {
             declVar(name, alloc(opt.size), true, ct)
         } else {

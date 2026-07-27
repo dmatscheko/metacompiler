@@ -50,7 +50,7 @@ Top level self checking programs count failures and end with exit(failures).") ;
 Program     = { TopItem } ;
 TopItem     = FunTop | TypeTop | UnsupTop | TopStmt ;
 FunTop      <~~ registerFun(pop()) ~~> = [ Modifiers ] FunDecl ;
-TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | EnumDecl ) ;
+TypeTop     <~~ var t = pop(); t() ~~> = [ Modifiers ] ( StructDecl | ClassDecl | EnumDecl ) ;
 UnsupTop    = [ Modifiers ] UnsupDecl ;
 TopStmt     <~~ var t = pop(); t() ~~> = Statement ;
 
@@ -65,7 +65,15 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
 
 // func name(label param: Type, ...) -> Ret { ... }
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" Type ] [ GenWhere ] Block ;
+            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
+
+// A function/method/init body. Swift returns the value of a body that is a SINGLE
+// expression without writing `return`, so the one-expression form is tried first;
+// anything else is an ordinary block. ExprBody is ordered first on purpose - a body
+// that starts with a declaration or a `return` fails it immediately.
+FnBody      = ExprBody | Block ;
+ExprBody    <~~ push(makeExprBody(pop())) ~~>
+            = "{" Expression "}" ;
 FnEffects   = { ( "throws" | "rethrows" | "async" ) KwEnd } ;
 // A generic constraint clause on a function/type: where T: P, U == V (ignored).
 GenWhere    = KwWhere GenConstraint { "," GenConstraint } ;
@@ -75,41 +83,48 @@ ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ Param { "," Param } ] ")" ;
 // A parameter is [externalLabel] internalName : Type; the last identifier is
 // the bound name (Swift's _ label is just an identifier here).
-Param       <~~ push(paramName(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ Id <~~ push(up.in) ~~> ] ":" [ "inout" KwEnd ] { ParamAttr } Type [ "..." ] [ "=" DiscardExpr ] ;
+// With two identifiers the first is the ARGUMENT LABEL and the second the bound
+// name; with one, the label and the name are the same. The label `_` means "no
+// label". The declared type is kept as text, for picking between overloads.
+Param       <~~ push(makeParam(takeAll())) ~~>
+            = Id <~~ push({pid: up.in}) ~~> [ Id <~~ push({pid: up.in}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
+ParamInout  <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
+ParamType   <~~ push({ptype: up.in}) ~~> = Type ;
+ParamVariadic <~~ push({pvar: 1}) ~~> = "..." ;
+ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
 // Parameter/type attributes (@escaping, @autoclosure) take no argument list here,
 // so no SkipParen: the ( ... ) that follows belongs to a function type.
-ParamAttr   = "@" Id { "." Id } ;
+ParamAttr   = "@" Id <~~ push({pattr: up.in}) ~~> { "." Id } ;
 
 // class / struct with stored properties, methods and an explicit init.
-StructDecl  <~~ buildClass(takeAll()) ~~>
+StructDecl  <~~ push(makeClassStmt(takeAll())) ~~>
             = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
-ClassDecl   <~~ buildClass(takeAll()) ~~>
+ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
 TypeList    = Type { "," Type } ;
 
 Member      = [ Modifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
-            = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] Block ;
+            = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
 // deinit and subscript are accepted structurally, not implemented.
-DeinitDecl  <~~ notImpl("deinitializer", up.pos) ~~>
+DeinitDecl  <~~ notImpl("deinitializer", up.pos); push({}) ~~>
             = KwDeinit SkipBlock ;
-SubscriptDecl <~~ notImpl("subscript", up.pos) ~~>
+SubscriptDecl <~~ notImpl("subscript", up.pos); push({}) ~~>
             = KwSubscript [ SkipAngle ] SkipParen [ "->" Type ] SkipBlock ;
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" Type ] [ GenWhere ] Block ;
+            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] [ ";" ] ;
 // Computed properties and stored properties with willSet/didSet observers.
-ComputedProp <~~ notImpl("computed property or property observer", up.pos) ~~>
+ComputedProp <~~ notImpl("computed property or property observer", up.pos); push({}) ~~>
             = ( "let" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] SkipBlock ;
 
 // A plain enum of bare cases becomes named constants (Direction.north = "north").
 EnumDecl    = PlainEnum | ComplexEnum ;
-PlainEnum   <~~ buildEnum(takeAll()) ~~>
+PlainEnum   <~~ push(makeEnumStmt(takeAll())) ~~>
             = KwEnum Id <~~ push(up.in) ~~> "{" { SimpleCase } "}" ;
 SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: up.in}) ~~> } [ ";" ] ;
-ComplexEnum <~~ notImpl("enum with raw or associated values", up.pos) ~~>
+ComplexEnum <~~ push(notImplStmt("enum with raw or associated values", up.pos)) ~~>
             = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
 
 // protocol / extension / typealias: accepted structurally, not implemented.
@@ -133,11 +148,33 @@ TypeAliasDecl <~~ notImpl("typealias", up.pos) ~~>
             = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
-// implicitly unwrapped T!, tuples/function types (A, B) -> C, dotted and generic.
-Type        = TypeCore { "?" | "!" } ;
+// implicitly unwrapped T!, tuples/function types (A, B) -> C, dotted and generic,
+// opaque/existential `some P` / `any P`, and compositions P & Q. The `&` of a
+// composition is spelled ( "&" !"&" ) so `x is T && y` is not read as `T & (&y)`.
+Type        = TypeMod TypeSuffixed { TypeAmp TypeMod TypeSuffixed } ;
+TypeSuffixed = TypeCore { "?" | "!" } ;
+TypeAmp     = "&" !"&" ;
+TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" ) KwEnd } ;
 TypeCore    = "[" Type [ ":" Type ] "]"
-            | "(" [ Type { "," Type } ] ")" [ "->" Type ]
+            | "(" [ TupleTypeElem { "," TupleTypeElem } ] ")" [ TypeEffects ] [ "->" Type ]
             | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+TupleTypeElem = [ TupleTypeLabel ] { ParamAttr } Type [ "..." ] ;
+TupleTypeLabel = Id [ Id ] ":" ;
+
+// The element names of a tuple live in its TYPE, not in the literal: for
+//     let pair: (n: String, v: Int) = ("k", 9)
+// pair.n has to work. AnnType is Type with that one extra job - when the
+// annotation is a tuple type whose first element is labelled it pushes the label
+// list, and the declaration (or the function return) copies those names onto the
+// value. NotArrow declines a function type, whose parameter labels name nothing.
+AnnType     = LabelledTupleType | Type ;
+LabelledTupleType <~~ push({tlabels: takeAll()}) ~~>
+            = "(" LtNamed { "," LtElem } ")" NotArrow ;
+LtElem      = LtNamed | LtAnon ;
+LtNamed     = Id <~~ push(up.in) ~~> ":" Type ;
+LtAnon      <~~ push("") ~~> = Type ;
+NotArrow    = !"->" ;
+TypeEffects = { ( "async" | "throws" | "rethrows" ) KwEnd } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // do/throw are genuinely executed (try/catch via excTry, throw via excThrow); the
@@ -145,13 +182,31 @@ TypeCore    = "[" Type [ ":" Type ] "]"
 // route to notImplStmt (a warning under -warn-unsupported).
 Statement   = Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
-            | Continue | Fallthrough | Do | Defer | Empty | ExprStmt ;
+            | Continue | Fallthrough | Do | Defer | Empty | TupleAssign
+            | TrailCallStmt | ExprStmt ;
+
+// `keep11 { 20 }` - a call of a plain function written with one trailing closure and
+// no parentheses. It is a STATEMENT form rather than an expression form on purpose:
+// as an expression, `cond { ... }` would swallow the block of `if cond { ... }`, and
+// PEG never goes back to re-read the condition. Every keyword-led statement is
+// matched before this rule, so only a bare `name { ... }` reaches it.
+TrailCallStmt <~~ push(exprToStmt(pop())) ~~> = TrailCall [ ";" ] ;
+TrailCall   <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> TrailArg { LabTrail } ;
+
+// A loop (or switch) label: `outer: for ... { ... break outer }`. It is part of the
+// loop production rather than a statement of its own, so the builder sees its own
+// label and a labelled break/continue can name the loop it leaves.
+LoopLabel   = Id <~~ push({lbl: up.in}) ~~> ":" ;
 
 // A nested function or nested type declaration inside a body.
-LocalFunc   <~~ push(notImplStmt("nested function", up.pos)) ~~>
-            = KwFunc Id [ SkipAngle ] SkipParen [ FnEffects ] [ "->" Type ] [ GenWhere ] SkipBlock ;
-LocalType   <~~ push(notImplStmt("nested type declaration", up.pos)) ~~>
-            = ( KwStruct | KwClass | KwEnum ) Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
+// A nested function declaration inside a body: a closure over the enclosing scope
+// bound to its own name (so it can recurse and can capture surrounding locals).
+LocalFunc   <~~ push(makeLocalFunStmt(pop())) ~~>
+            = [ Modifiers ] FunDecl ;
+// A nested type declaration inside a body - the same struct/class/enum productions
+// as at the top level, run as a statement of the enclosing body.
+LocalType   = StructDecl | ClassDecl | EnumDecl ;
 
 // do { STMTS } catch [pattern] { STMTS } [catch ...]: genuine try/catch (Swift has
 // NO finally). throw raises a value that unwinds to the nearest catch; the first
@@ -207,27 +262,42 @@ Wildcard    = "_" KwEnd ;
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
-Decl        <~~ push(makeDecl(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+Decl        = DeclTuple | DeclPlain ;
+DeclPlain   <~~ push(makeDecl(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] "=" Expression [ ";" ] ;
+// let (a, _, c) = someTuple - a tuple-pattern declaration; _ discards its element.
+DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
+TupNames    <~~ push({tnames: takeAll()}) ~~>
+            = "(" TupName { "," TupName } ")" ;
+TupName     <~~ push(up.in) ~~> = Wildcard | Id ;
+// (x, y) = (y, x) - assignment through a tuple pattern (a swap, typically).
+TupleAssign <~~ push(makeTupleAssign(takeAll())) ~~>
+            = TupNames "=" Expression [ ";" ] ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf Expression Block [ KwElse ElseBody ] ;
 ElseBody    = Block | If ;
 
-While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = KwWhile Expression Block ;
+While       <~~ push(makeWhileL(takeAll())) ~~>
+            = [ LoopLabel ] KwWhile Expression Block ;
 
-Repeat      <~~ push(makeDo(pop(), pop())) ~~>
-            = KwRepeat Block KwWhile Expression [ ";" ] ;
+Repeat      <~~ push(makeRepeat(takeAll())) ~~>
+            = [ LoopLabel ] KwRepeat Block KwWhile Expression [ ";" ] ;
 
 // for x in 1...5 / 1..<5, and for x in array. The range form is tried first.
 For         = ForRange | ForList ;
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = KwFor Id <~~ push(up.in) ~~> KwIn Expression RangeOp Expression Block ;
+            = [ LoopLabel ] KwFor ForPat KwIn Expression RangeOp Expression [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
-ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
-            = KwFor Id <~~ push(up.in) ~~> KwIn Expression Block ;
+ForList     <~~ push(makeForList(takeAll())) ~~>
+            = [ LoopLabel ] KwFor ForPat KwIn Expression [ ForWhere ] Block ;
+// The loop variable: a name, _ , or a tuple pattern (for (k, v) in aDictionary).
+ForPat      = TupNames | ForName ;
+ForName     <~~ push({fname: up.in}) ~~> = Wildcard | Id ;
+// for x in xs where COND { ... }: the body runs only for the elements that pass.
+ForWhere    <~~ push({fwhere: pop()}) ~~> = KwWhere Expression ;
 
 // guard COND else { ... }: if COND is false the else block runs (and normally
 // exits via return/break/continue, which propagates); otherwise control falls
@@ -241,7 +311,7 @@ Guard       <~~ push(makeGuard(takeAll())) ~~>
 // builder groups the statements under the label they follow. A bare break ends the
 // case; return/continue propagate to the function/enclosing loop.
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
-            = KwSwitch SwitchSubj "{" { CaseLabel | Statement } "}" ;
+            = [ LoopLabel ] KwSwitch SwitchSubj "{" { CaseLabel | Statement } "}" ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = Expression ;
 CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
@@ -250,8 +320,23 @@ CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
-Break       <~~ push(makeBreak()) ~~>    = KwBreak [ ";" ] ;
-Continue    <~~ push(makeContinue()) ~~> = KwContinue [ ";" ] ;
+Break       <~~ push(makeBreakL(takeAll())) ~~>    = KwBreak [ SameLine BreakLbl ] [ ";" ] ;
+Continue    <~~ push(makeContinueL(takeAll())) ~~> = KwContinue [ SameLine BreakLbl ] [ ";" ] ;
+BreakLbl    <~~ push({lbl: up.in}) ~~> = Id ;
+
+// A zero-width guard that fails at end of line (a newline or a // comment before the
+// next token): the label of `break outer` must start on the SAME line, otherwise a
+// bare `break` followed by a statement would swallow that statement's first name.
+SameLine    = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        return (cc === 10 || cc === 13 || cc < 0 || (cc === 47 && c.peek(i + 1) === 47))
+            ? abnf.newToken("\x01newline-follows", 0)
+            : undefined
+    })()
+~~) ;
 Empty       <~~ push(function() {}) ~~>  = ";" ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
@@ -306,44 +391,85 @@ Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
 
 // obj.m(args), obj.field, arr[i] - and a trailing closure becomes the last arg.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { MethodSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+// t.0 / t.1: a tuple element read. A tuple is an object whose elements live under
+// the property names "0", "1", ... (and additionally under their label when the
+// element has one), so an element read is an ordinary field read.
+TupleSfx    = "." TupleIdx ;
+TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
+            = "0"..."9" { "0"..."9" } ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ Closure ] | Closure ;
+// f(args) applied to whatever the chain produced so far - a closure out of an array
+// (queued[0]()), a function returned by a function, a computed member. The opening
+// paren has to be ADJACENT: `print(x)` on one line and `(a, b) = (b, a)` on the
+// next must stay two statements, not a call of the first one's result.
+CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
+            = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" ;
+NoSpaceParen = :script(~~
+    (function() {
+        return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
+    })()
+~~) ;
+MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ TrailArg { LabTrail } ] | TrailArg { LabTrail } ;
+// A trailing closure is the callee's last argument; the second and further ones
+// carry their argument label (Swift 5.3 multiple trailing closures).
+TrailArg    <~~ push(makeTrailArg(pop())) ~~> = Closure ;
+LabTrail    <~~ push(makeLabTrail(takeAll())) ~~>
+            = Id <~~ push({alabel: up.in}) ~~> ":" Closure ;
 
 // Argument labels are parsed and dropped; arguments bind positionally.
-CallArg     = [ ArgLabel ] Expression ;
-ArgLabel    = Id ":" ;
+// An argument carries its label (matched against the parameter labels of the
+// callee, so a call may leave defaulted parameters out) and, for &x, the name it
+// passes by reference.
+CallArg     <~~ push(makeCallArg(takeAll())) ~~>
+            = [ ArgLabel ] ( InoutArg | Expression ) ;
+ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
+// &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
+// character of a && operator.
+InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
 Primary     = Paren | Template | FloatLit | IntLit | True | False | Nil
-            | Closure | DictLit | ArrayLit | Shorthand | Call | VarRef ;
+            | Closure | DictLit | ArrayLit | Shorthand | MultiTrail | Call | VarRef ;
 
 // ( e ) is a pass-through; ( e, e, ... ) is a tuple, recognized and routed to
 // notImplExpr. Element labels (x: e) are accepted and dropped.
 Paren       <~~ push(makeParen(takeAll(), up.pos)) ~~>
             = "(" TupleElem { "," TupleElem } ")" ;
-TupleElem   = [ Id ":" ] Expression ;
+TupleElem   <~~ push(makeTupleElem(takeAll())) ~~>
+            = [ TupleLabel ] Expression ;
+TupleLabel  = Id <~~ push({tlabel: up.in}) ~~> ":" ;
 // Floating-point literals (3.14): recognized, routed to notImplExpr (the runtime
 // is 32-bit integer only). Tried before IntLit; a plain integer or a range (1...5)
 // still parses as IntLit because a fractional digit is required.
 FloatLit    <~~ push(notImplExpr("floating-point literal", up.pos)) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "." "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 // Closure shorthand arguments ($0, $1, ...): recognized, routed to notImplExpr.
-Shorthand   <~~ push(notImplExpr("closure shorthand argument", up.pos)) ~~>
-            = "$" :whitespace() "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
+// Closure shorthand arguments ($0, $1, ...): a closure without a signature binds
+// its arguments under exactly these names, so the shorthand is an ordinary read.
+Shorthand   = "$" :whitespace() ShortIdx :whitespace(Whitespace) ;
+ShortIdx    <~~ push(makeVarRef("$" + up.in)) ~~>
+            = "0"..."9" { "0"..."9" } ;
 
 // A closure: { x in x * 2 } or { (a: Int, b: Int) -> Int in a + b } or, with no
 // signature, { doThing() }. Its value is the last expression; a real closure
 // over the defining scope.
 Closure     <~~ push(makeClosure(takeAll())) ~~>
             = "{" [ ClosureSig ] { LamStmt } "}" ;
-ClosureSig  <~~ push({cparams: takeAll()}) ~~>
-            = "(" [ ClParam { "," ClParam } ] ")" [ "->" Type ] KwIn
-            | ClParam { "," ClParam } KwIn ;
+ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
+            = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" Type ] KwIn
+            | [ CaptureList ] ClParam { "," ClParam } KwIn
+            | CaptureList KwIn ;
 ClParam     = Id <~~ push(up.in) ~~> [ ":" Type ] ;
+// { [x, weak y] in ... }: a capture list snapshots the named variables at the
+// moment the closure is created.
+CaptureList <~~ push({caps: takeAll()}) ~~>
+            = "[" [ CapItem { "," CapItem } ] "]" ;
+CapItem     = [ CapMode ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
+CapMode     = ( "weak" | "unowned" ) KwEnd ;
 LamStmt     = LamCtrl | LamExpr ;
 LamCtrl     <~~ push({stmt: pop()}) ~~>
             = Decl | While | Repeat | For | Return | Break | Continue | If ;
@@ -360,7 +486,12 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
 
 // f(args): a global function or a struct/class constructor (calls init).
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" ;
+            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ TrailArg { LabTrail } ] ;
+// f { ... } label: { ... }: a call written with two or more trailing closures and no
+// parentheses. Only the MULTI-closure form is accepted without parentheses - a bare
+// `name { ... }` would make `if cond { ... }` parse as a call of cond.
+MultiTrail  <~~ push(makeCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> TrailArg LabTrail { LabTrail } ;
 
 // String interpolation: "sum = \(a + b)".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
@@ -566,10 +697,104 @@ KwContinue  = "continue" KwEnd ;
         return notImplExpr("type cast (as / is)", pos)
     }
 
-    // ( e ) passes the single operand through; a tuple ( e, e, ... ) is not implemented.
+    // ----- Tuples -----
+    // A tuple is a plain object carrying its elements under the property names
+    // "0", "1", ... plus, for a labelled element, under its label - so t.0 and
+    // t.lo are both ordinary field reads and no new runtime type is needed.
+    // __tuple holds the arity (a tuple of one element never occurs: ( e ) is
+    // a parenthesized expression in Swift, not a one-tuple).
+    function makeTupleElem(items) {
+        if (items.length > 1) { return {lbl: items[0].tlabel, t: items[1]} }
+        return {lbl: null, t: items[0]}
+    }
+    function newTupleVal(vals) {
+        var t = {__tuple: vals.length}
+        for (var i = 0; i < vals.length; i++) { scopePut(t, "" + i, vals[i]) }
+        return t
+    }
+    function tupleAt(v, i) {
+        if (v === null || v === undefined) { fail("tuple element of nil") }
+        if (Array.isArray(v)) { return v[i] }
+        return hasOwn(v, "" + i) ? v["" + i] : undefined
+    }
+    // ( e ) passes the single unlabelled operand through; anything else is a tuple.
     function makeParen(items, pos) {
-        if (items.length == 1) { return items[0] }
-        return notImplExpr("tuple", pos)
+        if (items.length == 1 && items[0].lbl == null) { return items[0].t }
+        return function() {
+            var t = {__tuple: items.length}
+            for (var i = 0; i < items.length; i++) {
+                var v = items[i].t()
+                scopePut(t, "" + i, v)
+                if (items[i].lbl != null) { scopePut(t, items[i].lbl, v) }
+            }
+            return t
+        }
+    }
+    // let (a, _, c) = t  /  (x, y) = (y, x): bind or assign element by element.
+    function makeDeclTuple(items) {
+        var names = items[0].tnames
+        var init = items[1]
+        return function() {
+            var v = init()
+            for (var i = 0; i < names.length; i++) {
+                if (names[i] != "_") { declVar(names[i], tupleAt(v, i)) }
+            }
+        }
+    }
+    function makeTupleAssign(items) {
+        var names = items[0].tnames
+        var init = items[1]
+        return function() {
+            var v = init()
+            for (var i = 0; i < names.length; i++) {
+                if (names[i] != "_") { setVar(names[i], tupleAt(v, i)) }
+            }
+        }
+    }
+
+    // A body that is a single expression returns that expression's value.
+    function makeExprBody(t) {
+        return function() { return {isRet: true, v: t()} }
+    }
+
+    // ----- Loop control with labels -----
+    // break/continue carry an optional label; a loop consumes a signal that is
+    // unlabelled or names IT, and propagates anything else outward. loopAct
+    // answers 0 = fell through, 1 = break here, 2 = continue here, 3 = propagate.
+    function loopAct(r, lbl) {
+        if (r == undefined) { return 0 }
+        if (r.sig == undefined) { return 3 }
+        if (r.lbl == undefined || r.lbl === lbl) { return r.sig == "break" ? 1 : 2 }
+        return 3
+    }
+    function makeBreakL(items) {
+        if (items.length == 0) { return makeBreak() }
+        var lbl = items[0].lbl
+        return function() { return {sig: "break", lbl: lbl} }
+    }
+    function makeContinueL(items) {
+        if (items.length == 0) { return makeContinue() }
+        var lbl = items[0].lbl
+        return function() { return {sig: "continue", lbl: lbl} }
+    }
+    // The optional leading LoopLabel item of a loop production.
+    function itemLbl(items) {
+        if (items.length > 0 && items[0] != undefined && items[0].lbl != undefined) { return items[0].lbl }
+        return null
+    }
+    function itemsAfterLbl(items) {
+        if (itemLbl(items) != null) { return items.slice(1) }
+        return items
+    }
+    // Binds one iteration value to the loop pattern (a name, _ or a tuple pattern).
+    function bindForPat(pat, v) {
+        if (pat.tnames != undefined) {
+            for (var i = 0; i < pat.tnames.length; i++) {
+                if (pat.tnames[i] != "_") { declVar(pat.tnames[i], tupleAt(v, i)) }
+            }
+            return
+        }
+        if (pat.fname != "_") { declVar(pat.fname, v) }
     }
 
     // items = [cond] or [cond, then, else] -> the ternary conditional.
@@ -606,19 +831,52 @@ KwContinue  = "continue" KwEnd ;
         }
     }
 
-    // Closure items = [{cparams}?, {stmt}|{expr}...]; the body's value is the last
-    // expression. Captures the scope chain (a real closure). Without a signature
-    // it binds no names (Swift shorthand $0 is not supported).
+    // The closure signature: an optional capture list and the parameter names.
+    function makeClosureSig(items) {
+        var caps = []
+        var names = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { names.push(items[i]) }
+            else if (items[i].caps != undefined) { caps = items[i].caps }
+        }
+        return {csig: true, caps: caps, cparams: names}
+    }
+    // An @autoclosure argument is passed as a zero-argument closure over the caller's
+    // scope, so the expression only runs if the callee actually calls it.
+    function autoWrap(t) {
+        return function() {
+            var captured = scopes.slice(0)
+            return function() {
+                var saved = scopes
+                scopes = captured.slice(0)
+                var v = t()
+                scopes = saved
+                return v
+            }
+        }
+    }
+    // Closure items = [{csig}?, {stmt}|{expr}...]; the body's value is the last
+    // expression. Captures the scope chain (a real closure). A capture list
+    // snapshots its names at creation; a closure with no parameter names binds its
+    // arguments under the shorthand names $0..$3.
     function makeClosure(items) {
         var params = []
+        var caps = []
         var start = 0
-        if (items.length > 0 && items[0] != undefined && items[0].cparams != undefined) {
+        if (items.length > 0 && items[0] != undefined && items[0].csig != undefined) {
             params = items[0].cparams
+            caps = items[0].caps
             start = 1
         }
         var body = items.slice(start)
+        var noSig = params.length == 0
         return function() {
             var captured = scopes.slice(0)
+            if (caps.length > 0) {
+                var snap = {}
+                for (var ci = 0; ci < caps.length; ci++) { scopePut(snap, caps[ci], getVar(caps[ci])) }
+                captured.push(snap)
+            }
             return function() {
                 var args = arguments
                 var saved = scopes
@@ -626,6 +884,9 @@ KwContinue  = "continue" KwEnd ;
                 scopes.push({})
                 for (var i = 0; i < params.length; i++) {
                     declVar(params[i], i < args.length ? args[i] : undefined)
+                }
+                if (noSig) {
+                    for (var sh = 0; sh < 4; sh++) { declVar("$" + sh, sh < args.length ? args[sh] : undefined) }
                 }
                 var last = anytype // A block's value hops types across items.
                 last = undefined
@@ -635,7 +896,11 @@ KwContinue  = "continue" KwEnd ;
                     } else {
                         last = undefined
                         var r = body[k].stmt()
-                        if (r != undefined) { last = r; break }
+                        if (r != undefined) {
+                            // An explicit `return` inside the closure body carries the value.
+                            last = (r.isRet != undefined) ? r.v : r
+                            break
+                        }
                     }
                 }
                 scopes = saved
@@ -644,23 +909,181 @@ KwContinue  = "continue" KwEnd ;
         }
     }
 
+    // ----- Calls: argument labels, default values, variadics and inout -----
+    // A call site knows the callee's parameter list whenever the callee was declared
+    // earlier in the walk (sigReg, filled by every func/init as it is built), so the
+    // arguments a call LEAVES OUT because they are defaulted are filled in here, by
+    // matching each argument's label against the parameter labels in order. Swift
+    // requires arguments in declaration order, so this is a single forward pass.
+    // Without a signature (a call through a function value, or a callee declared
+    // further down) the arguments stay positional and the callee fills the trailing
+    // defaults itself.
+    var sigReg = {}
+    function regSig(name, params) { scopePut(sigReg, "$" + name, params) }
+    function lookupSig(name) { return hasOwn(sigReg, "$" + name) ? sigReg["$" + name] : null }
+
+    function makeParam(items) {
+        var ids = []
+        var type = ""
+        var isVar = false
+        var isInout = false
+        var isAuto = false
+        var hasDflt = false
+        var dflt = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.pid != undefined) { ids.push(it.pid) }
+            else if (it.ptype != undefined) { type = stripWs(it.ptype) }
+            else if (it.pvar != undefined) { isVar = true }
+            else if (it.pinout != undefined) { isInout = true }
+            else if (it.pdflt != undefined) { hasDflt = true; dflt = it.pdflt }
+            else if (it.pattr != undefined && it.pattr == "autoclosure") { isAuto = true }
+        }
+        var name = ids[ids.length - 1]
+        var label = ids.length > 1 ? ids[0] : name
+        if (label == "_") { label = "" }
+        return {name: name, label: label, type: type, variadic: isVar, auto: isAuto,
+                inout: isInout, hasDefault: hasDflt, dflt: dflt}
+    }
+    // An argument: {lbl, t} for a value, {lbl, ref} for &x, {lbl, dflt} for a
+    // default the call site filled in.
+    function makeCallArg(items) {
+        var lbl = null
+        var t = null
+        var ref = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { t = it }
+            else if (it.alabel != undefined) { lbl = it.alabel }
+            else if (it.aref != undefined) { ref = it.aref }
+        }
+        return {lbl: lbl, t: t, ref: ref, dflt: null}
+    }
+    function makeTrailArg(t) { return {lbl: null, t: t, ref: null, dflt: null} }
+    function makeLabTrail(items) { return {lbl: items[0].alabel, t: items[1], ref: null, dflt: null} }
+
+    function planArgs(name, recs) {
+        var params = lookupSig(name)
+        if (params == null) { return recs }
+        var out = []
+        var ai = 0
+        for (var p = 0; p < params.length; p++) {
+            var prm = params[p]
+            if (prm.variadic) { break }
+            var take = false
+            if (ai < recs.length) {
+                var l = recs[ai].lbl
+                take = (l == null || l == "" || l == prm.label)
+            }
+            if (take) {
+                var rec = recs[ai]
+                if (prm.auto && rec.t != null) { rec = {lbl: rec.lbl, t: autoWrap(rec.t), ref: null, dflt: null} }
+                out.push(rec)
+                ai++
+            }
+            else if (prm.hasDefault) { out.push({lbl: null, t: null, ref: null, dflt: prm.dflt}) }
+        }
+        while (ai < recs.length) { out.push(recs[ai]); ai++ }
+        return out
+    }
+    // Evaluates a planned argument list. An &x argument becomes a one-slot box the
+    // callee writes back into; writeBacks copies the boxes home after the call.
+    function evalArgs(recs) {
+        var argv = []
+        var boxes = []
+        for (var i = 0; i < recs.length; i++) {
+            if (recs[i].ref != null) {
+                var box = {__ref: 1, v: getVar(recs[i].ref)}
+                argv.push(box)
+                boxes.push({name: recs[i].ref, box: box})
+            } else if (recs[i].dflt != null) {
+                argv.push(recs[i].dflt())
+            } else {
+                argv.push(recs[i].t())
+            }
+        }
+        return {argv: argv, boxes: boxes}
+    }
+    function writeBacks(boxes) {
+        for (var i = 0; i < boxes.length; i++) { setVar(boxes[i].name, boxes[i].box.v) }
+    }
+    // The callee side: bind the positional arguments to the parameters, collecting a
+    // variadic tail into an array, filling in the defaults of the parameters no
+    // argument reached, and unwrapping an inout box (remembered for the write-back).
+    function swBindArgs(params, args) {
+        var vals = []
+        var boxes = []
+        var ai = 0
+        for (var p = 0; p < params.length; p++) {
+            var prm = params[p]
+            if (prm.variadic) {
+                var rest = []
+                while (ai < args.length) { rest.push(args[ai]); ai++ }
+                vals.push(rest)
+                continue
+            }
+            var v = anytype
+            if (ai < args.length) { v = args[ai]; ai++ }
+            else if (prm.hasDefault) { v = prm.dflt() }
+            else { v = undefined }
+            if (prm.inout && v !== null && v !== undefined && typeof v == "object" && v.__ref != undefined) {
+                boxes.push({name: prm.name, box: v})
+                v = v.v
+            }
+            vals.push(v)
+        }
+        return {vals: vals, boxes: boxes}
+    }
+
     // f(args): a global function or a class/struct constructor (runs __ctor then init).
     function makeCall(items) {
         var name = items[0]
-        var args = items.slice(1)
+        var recs = planArgs(name, items.slice(1))
         return function() {
-            var argv = []
-            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            var ea = evalArgs(recs)
+            var argv = ea.argv
             var f = getVar(name)
-            if (f != undefined && f.__isclass === true) {
+            if (f != undefined && f !== null && f.__isclass === true) {
                 var obj = {__class: f}
                 if (typeof f.__ctor == "function") { f.__ctor(obj) }
                 var init = f["init"]
                 if (typeof init == "function") { init.apply(undefined, concat2impl([obj], argv)) }
+                writeBacks(ea.boxes)
                 return obj
             }
             if (typeof f != "function") { fail("call of a non function: " + name) }
-            return f.apply(undefined, argv)
+            var r = f.apply(undefined, argv)
+            writeBacks(ea.boxes)
+            return r
+        }
+    }
+    // The member-chain fold, with argument records instead of bare thunks.
+    foldCallMember = function(items) {
+        if (items.length == 1) { return items[0] }
+        var primary = items[0]
+        var suffixes = items.slice(1)
+        return function() {
+            var cur = anytype
+            cur = primary()
+            for (var i = 0; i < suffixes.length; i++) {
+                var s = suffixes[i]
+                if (s.kind == "mcall") {
+                    var ea = evalArgs(s.args)
+                    cur = mcall(cur, s.name, ea.argv)
+                    writeBacks(ea.boxes)
+                } else if (s.kind == "call") {
+                    var eac = evalArgs(s.args)
+                    if (typeof cur != "function") { fail("call of a non-function value") }
+                    cur = cur.apply(undefined, eac.argv)
+                    writeBacks(eac.boxes)
+                } else if (s.kind == "field") {
+                    if (cur === undefined || cur === null) { fail("field ." + s.name + " of nil") }
+                    cur = core.getField(cur, s.name)
+                } else {
+                    cur = core.getIndex(cur, s.idx())
+                }
+            }
+            return cur
         }
     }
 
@@ -698,64 +1121,116 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Statement thunks -----
 
+    // items = [name, {tlabels}?, initThunk]
     function makeDecl(items) {
         var name = items[0]
-        var init = items[1]
-        return function() { declVar(name, init()) }
+        var labels = null
+        var k = 1
+        if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
+        var init = items[k]
+        if (labels == null) { return function() { declVar(name, init()) } }
+        return function() { declVar(name, relabelTuple(init(), labels)) }
     }
-    function makeDo(condT, bodyT) {
+    // Copies the element names of a tuple TYPE onto a tuple value.
+    function relabelTuple(v, labels) {
+        if (v === null || v === undefined) { return v }
+        if (typeof v != "object") { return v }
+        if (v.__tuple == undefined) { return v }
+        for (var i = 0; i < labels.length; i++) {
+            if (labels[i] != "" && !hasOwn(v, labels[i])) { scopePut(v, labels[i], tupleAt(v, i)) }
+        }
+        return v
+    }
+    // items = [{lbl}?, condT, bodyT]
+    function makeWhileL(items) {
+        var lbl = itemLbl(items)
+        var rest = itemsAfterLbl(items)
+        var condT = rest[0]
+        var bodyT = rest[1]
+        return function() {
+            while (core.test(condT())) {
+                var r = bodyT()
+                var a = loopAct(r, lbl)
+                if (a == 1) { break }
+                if (a == 3) { return r }
+            }
+        }
+    }
+    // items = [{lbl}?, bodyT, condT] - repeat { ... } while COND
+    function makeRepeat(items) {
+        var lbl = itemLbl(items)
+        var rest = itemsAfterLbl(items)
+        var bodyT = rest[0]
+        var condT = rest[1]
         return function() {
             do {
                 var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) { break }
-                    if (r !== CONT) { return r }
-                }
-            } while (condT())
+                var a = loopAct(r, lbl)
+                if (a == 1) { break }
+                if (a == 3) { return r }
+            } while (core.test(condT()))
         }
     }
-    // items = [name, fromT, {rop}, toT, bodyT]. ..< excludes the upper bound.
+    // items = [{lbl}?, pat, fromT, {rop}, toT, {fwhere}?, bodyT]. ..< excludes the bound.
     function makeForRange(items) {
-        var name = items[0]
-        var fromT = items[1]
-        var rop = items[2].rop
-        var toT = items[3]
-        var bodyT = items[4]
+        var lbl = itemLbl(items)
+        var rest = itemsAfterLbl(items)
+        var pat = rest[0]
+        var fromT = rest[1]
+        var rop = rest[2].rop
+        var toT = rest[3]
+        var k = 4
+        var whereT = null
+        if (rest[k] != undefined && rest[k].fwhere != undefined) { whereT = rest[k].fwhere; k++ }
+        var bodyT = rest[k]
         return function() {
             var res = undefined
-            scopes.push({})
-            declVar(name, 0)
             var from = fromT()
             var last = toT()
             if (rop == "..<") { last = (last - 1) | 0 }
             for (var i = from; i <= last; i++) {
-                setVar(name, i)
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) { break }
-                    if (r !== CONT) { res = r; break }
-                }
+                scopes.push({})
+                bindForPat(pat, i)
+                var r = undefined
+                if (whereT == null || core.test(whereT())) { r = bodyT() }
+                scopes.pop()
+                var a = loopAct(r, lbl)
+                if (a == 1) { break }
+                if (a == 3) { res = r; break }
             }
-            scopes.pop()
             return res
         }
     }
-    function makeForList(bodyT, listT, name) {
+    // items = [{lbl}?, pat, listT, {fwhere}?, bodyT]. Iterating a dictionary with a
+    // tuple pattern yields (key, value) pairs; with a plain name it yields the keys.
+    function makeForList(items) {
+        var lbl = itemLbl(items)
+        var rest = itemsAfterLbl(items)
+        var pat = rest[0]
+        var listT = rest[1]
+        var k = 2
+        var whereT = null
+        if (rest[k] != undefined && rest[k].fwhere != undefined) { whereT = rest[k].fwhere; k++ }
+        var bodyT = rest[k]
+        var wantPair = pat.tnames != undefined
         return function() {
             var arr = listT()
             var res = undefined
-            scopes.push({})
-            declVar(name, undefined)
+            var isD = isDict(arr)
             var n = swlen(arr)
             for (var i = 0; i < n; i++) {
-                setVar(name, isDict(arr) ? arr.keys[i] : arr[i])
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) { break }
-                    if (r !== CONT) { res = r; break }
-                }
+                var el = anytype
+                if (isD) { el = wantPair ? newTupleVal([arr.keys[i], arr.vals[i]]) : arr.keys[i] }
+                else { el = arr[i] }
+                scopes.push({})
+                bindForPat(pat, el)
+                var r = undefined
+                if (whereT == null || core.test(whereT())) { r = bodyT() }
+                scopes.pop()
+                var a = loopAct(r, lbl)
+                if (a == 1) { break }
+                if (a == 3) { res = r; break }
             }
-            scopes.pop()
             return res
         }
     }
@@ -789,10 +1264,13 @@ KwContinue  = "continue" KwEnd ;
         var subj = null
         var cases = []
         var cur = null
+        var swLbl = itemLbl(items)
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (typeof it == "function") {
                 if (cur != null) { cur.body.push(it) }
+            } else if (it.lbl != undefined) {
+                continue
             } else if (it.subj != undefined) {
                 subj = it.subj
             } else {
@@ -816,8 +1294,9 @@ KwContinue  = "continue" KwEnd ;
             var body = cases[hit].body
             for (var j = 0; j < body.length; j++) {
                 var r = body[j]()
-                if (r === BRK) { return undefined }
-                if (r != undefined) { return r }
+                var a = loopAct(r, swLbl)
+                if (a == 1) { return undefined }
+                if (a != 0) { return r }
             }
             return undefined
         }
@@ -825,36 +1304,107 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Functions, methods and classes -----
 
-    function paramName(items) { return items[items.length - 1] }
+    // A declared tuple return type names the elements of the returned value.
+    function relabelRet(f, v) {
+        if (f.rlabels == undefined || f.rlabels == null) { return v }
+        return relabelTuple(v, f.rlabels)
+    }
+    // items = [name, {params}, {tlabels}?, bodyThunk]
     function makeFun(items) {
-        return {name: items[0], params: items[1].params, body: items[2]}
+        var k = 2
+        var labels = null
+        if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
+        return {name: items[0], params: items[1].params, body: items[k], rlabels: labels}
     }
     function makeInit(items) {
         return {name: "init", params: items[0].params, body: items[1]}
     }
-    function registerFun(f) { globalScope[f.name] = makeFunClosure(f) }
-    function makeFunClosure(f) {
+    // Registering a function also records its signature for the call sites below it.
+    // A second function of the same name is an OVERLOAD: the name then resolves to a
+    // dispatcher that picks, at call time, the first candidate whose declared
+    // parameter types accept the actual arguments.
+    var funcOverloads = {}
+    function registerFun(f) {
+        regSig(f.name, f.params)
+        var key = "$" + f.name
+        var lst = hasOwn(funcOverloads, key) ? funcOverloads[key] : null
+        if (lst == null) { lst = []; scopePut(funcOverloads, key, lst) }
+        lst.push({f: f, fn: makeFunClosure(f)})
+        if (lst.length == 1) { globalScope[f.name] = lst[0].fn }
+        else { globalScope[f.name] = makeOverloadClosure(lst) }
+    }
+    function overloadFits(params, args) {
+        var req = 0
+        var varia = false
+        for (var i = 0; i < params.length; i++) {
+            if (params[i].variadic) { varia = true }
+            else if (!params[i].hasDefault) { req++ }
+        }
+        if (args.length < req) { return false }
+        if (!varia && args.length > params.length) { return false }
+        for (var j = 0; j < args.length && j < params.length; j++) {
+            if (params[j].type == "" || params[j].variadic) { continue }
+            if (!rtIsType(args[j], params[j].type)) { return false }
+        }
+        return true
+    }
+    function makeOverloadClosure(lst) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
-            return invokeBody(f.params, f.body, undefined, "self", args)
+            var pick = lst[0].fn
+            for (var k = 0; k < lst.length; k++) {
+                if (overloadFits(lst[k].f.params, args)) { pick = lst[k].fn; break }
+            }
+            return pick.apply(undefined, args)
+        }
+    }
+    // A function value: binds its parameters in a fresh frame over the global scope.
+    // chain is the captured scope chain of a NESTED function (a closure over its
+    // defining scope); a top-level function passes null and starts from the globals.
+    function makeFunBody(f, chain, self) {
+        var args = []
+        var raw = arguments
+        for (var i = 3; i < raw.length; i++) { args.push(raw[i]) }
+        var bnd = swBindArgs(f.params, args)
+        var saved = scopes
+        if (chain == null) { scopes = [globalScope, {}] }
+        else { scopes = chain.slice(0); scopes.push({}) }
+        if (self !== undefined) {
+            declVar("this", self)
+            declVar("self", self)
+        }
+        for (var j = 0; j < f.params.length; j++) { declVar(f.params[j].name, bnd.vals[j]) }
+        var r = f.body()
+        for (var k = 0; k < bnd.boxes.length; k++) { bnd.boxes[k].box.v = getVar(bnd.boxes[k].name) }
+        scopes = saved
+        return relabelRet(f, (r != undefined && r.isRet) ? r.v : undefined)
+    }
+    function makeFunClosure(f) {
+        return function() {
+            var call = [f, null, undefined]
+            for (var i = 0; i < arguments.length; i++) { call.push(arguments[i]) }
+            return makeFunBody.apply(undefined, call)
+        }
+    }
+    // A nested function: the same, over the scope chain it was declared in, so it
+    // captures the surrounding locals and can call itself.
+    function makeLocalFunStmt(f) {
+        regSig(f.name, f.params)
+        return function() {
+            var captured = scopes.slice(0)
+            declVar(f.name, function() {
+                var call = [f, captured, undefined]
+                for (var i = 0; i < arguments.length; i++) { call.push(arguments[i]) }
+                return makeFunBody.apply(undefined, call)
+            })
         }
     }
     function makeMethodClosure(f) {
         return function() {
-            var self = arguments[0]
-            var args = []
-            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
-            var saved = scopes
-            scopes = [globalScope, {}]
-            declVar("this", self)
-            declVar("self", self)
-            for (var j = 0; j < f.params.length; j++) {
-                declVar(f.params[j], j < args.length ? args[j] : undefined)
-            }
-            var r = f.body()
-            scopes = saved
-            return (r != undefined && r.isRet) ? r.v : undefined
+            var call = [f, null, arguments[0]]
+            for (var i = 1; i < arguments.length; i++) { call.push(arguments[i]) }
+            return makeFunBody.apply(undefined, call)
         }
     }
     function makeProp(items) {
@@ -862,39 +1412,49 @@ KwContinue  = "continue" KwEnd ;
         return {prop: items[0], hasInit: false, init: null}
     }
 
-    // items = [name, ({prop}|{method})...]
-    function buildClass(items) {
+    // items = [name, ({prop}|{method})...] -> a statement that registers the type in
+    // the scope it is declared in (so a nested type is local to its body).
+    function makeClassStmt(items) {
         var name = items[0]
         var props = []
         var methods = []
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
             if (it.prop != undefined && it.hasInit) { props.push(it) }
-            if (it.method != undefined) { methods.push(it.method) }
+            if (it.method != undefined) {
+                methods.push(it.method)
+                if (it.method.name == "init") { regSig(name, it.method.params) }
+            }
         }
-        var cls = {__isclass: true, __name: name}
-        // __ctor sets the default valued stored properties on a fresh instance,
-        // before init runs.
-        cls.__ctor = function(self) {
-            var saved = scopes
-            scopes = [globalScope, {}]
-            declVar("this", self)
-            declVar("self", self)
-            for (var p = 0; p < props.length; p++) { self[props[p].prop] = props[p].init() }
-            scopes = saved
+        return function() {
+            var cls = {__isclass: true, __name: name}
+            // __ctor sets the default valued stored properties on a fresh instance,
+            // before init runs.
+            cls.__ctor = function(self) {
+                var saved = scopes
+                scopes = [globalScope, {}]
+                declVar("this", self)
+                declVar("self", self)
+                for (var p = 0; p < props.length; p++) { self[props[p].prop] = props[p].init() }
+                scopes = saved
+            }
+            for (var m2 = 0; m2 < methods.length; m2++) {
+                scopePut(cls, methods[m2].name, makeMethodClosure(methods[m2]))
+            }
+            declVar(name, cls)
         }
-        for (var m2 = 0; m2 < methods.length; m2++) {
-            cls[methods[m2].name] = makeMethodClosure(methods[m2])
-        }
-        globalScope[name] = cls
     }
 
     // items = [name, {ecase}...] -> an object of name -> caseName constants.
-    function buildEnum(items) {
+    function makeEnumStmt(items) {
         var name = items[0]
-        var e = {__enum: true, __name: name}
-        for (var i = 1; i < items.length; i++) { e[items[i].ecase] = items[i].ecase }
-        globalScope[name] = e
+        var cases = []
+        for (var i = 1; i < items.length; i++) { cases.push(items[i].ecase) }
+        return function() {
+            var e = {__enum: true, __name: name}
+            for (var k = 0; k < cases.length; k++) { scopePut(e, cases[k], cases[k]) }
+            declVar(name, e)
+        }
     }
 
     function findThis() {

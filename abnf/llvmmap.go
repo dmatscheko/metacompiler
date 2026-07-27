@@ -1248,6 +1248,7 @@ type dinst struct {
 	x, y, z int32                      // Operands (z is the false value of a select).
 	size    uint64                     // Byte size of a load / store, element size of an alloca or gep.
 	args    []int32                    // Call arguments, or the indices of a gep.
+	argw    []uint8                    // Bit width of each gep index, for sign extension.
 	incs    []dphiInc                  // The incoming values of a non-leading phi.
 	callee  *ir.Func                   // The called function.
 	fn      func(args []uint64) uint64 // An extern callee's handler, bound on first execution.
@@ -1523,6 +1524,14 @@ func (ma *machine) decodeInst(inst ir.Instruction, dst int32, opnd func(value.Va
 		d.op, d.x, d.size, d.gep = dOpGep, opnd(inst.Src), ma.sizeOf(inst.ElemType), inst
 		for _, index := range inst.Indices {
 			d.args = append(d.args, opnd(index))
+			// Remember how wide the index was computed, so the interpreter can
+			// sign-extend it below: a gep index is SIGNED, and '*(e - 1)'
+			// naturally emits a negative i32.
+			w := uint8(64)
+			if it, ok := index.Type().(*types.IntType); ok && it.BitSize < 64 {
+				w = uint8(it.BitSize)
+			}
+			d.argw = append(d.argw, w)
 		}
 	case *ir.InstAdd:
 		return binary(dOpAdd, inst.X, inst.Y)
@@ -1761,6 +1770,20 @@ func (ma *machine) sizeOfUncached(t types.Type) uint64 {
 // gepStep resolves one inner getelementptr index: it returns the byte offset of
 // the selected element and the type to continue with. Arrays step by the element
 // size, struct indices select a field (packed layout, see sizeOf).
+// sextIdx sign-extends a gep index that was computed at bits wide to 64 bits.
+// Registers hold values zero-extended, so a negative index arrives with its
+// high bits clear; without this the subsequent unsigned multiply produces a
+// wild offset rather than a step backwards.
+func sextIdx(v uint64, bits uint8) uint64 {
+	if bits == 0 || bits >= 64 {
+		return v
+	}
+	if v&(1<<(bits-1)) != 0 {
+		return v | ^uint64(0)<<bits
+	}
+	return v
+}
+
 func (ma *machine) gepStep(t types.Type, idx uint64) (uint64, types.Type) {
 	switch t := t.(type) {
 	case *types.ArrayType:
@@ -2093,10 +2116,16 @@ func (ma *machine) exec(fr *frame, in *dinst, prev int32) {
 	case dOpGep:
 		// The first index scales by the whole element type, the following ones step
 		// into arrays and structs.
-		off := fr.rd(in.x) + fr.rd(in.args[0])*in.size
+		//
+		// Every index is SIGNED, and registers hold values zero-extended to 64 bits,
+		// so an i32 -1 sits here as 0x00000000ffffffff. Scaling that unsigned walks
+		// off into a wild address instead of stepping one element back - which is
+		// what '*(e - 1)' does in C, and what any language with a negative index
+		// does. Sign-extending first makes the uint64 arithmetic wrap correctly.
+		off := fr.rd(in.x) + sextIdx(fr.rd(in.args[0]), in.argw[0])*in.size
 		t := in.gep.ElemType
-		for _, index := range in.args[1:] {
-			d, next := ma.gepStep(t, fr.rd(index))
+		for k, index := range in.args[1:] {
+			d, next := ma.gepStep(t, sextIdx(fr.rd(index), in.argw[k+1]))
 			off += d
 			t = next
 		}
