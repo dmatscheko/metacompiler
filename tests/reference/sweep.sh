@@ -29,7 +29,8 @@
 # Each corpus file carries an expectation, taken from that suite's own
 # conventions (test262 fail/, go's // errorcheck first line, swift's
 # expected-error markers, dart's [analyzer]/[cfe] markers, kotlin's
-# _ERR/Recovery PSI data, OpenJDK's @compile/fail):
+# _ERR/Recovery PSI data, OpenJDK's @compile/fail and its javac/diags/examples
+# '// key: compiler.err.*' lines):
 #
 #   parse       must parse. Anything else is a gap in our grammar.
 #   reject      must NOT parse (test262 fail/ - genuine syntax errors).
@@ -510,7 +511,186 @@ expectations_for() {
                 | sort > "$neg" ;;
         swift)  grep -rl 'expected-error' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg" ;;
         dart)   grep -rl -e '\[analyzer\]' -e '\[cfe\]' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg" ;;
-        java)   grep -rl '@compile/fail' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg" ;;
+        java)
+            # OpenJDK's suite has TWO negative conventions, and only one of them
+            # was being read.
+            #
+            # (1) '@compile/fail' in a jtreg header - the file must not COMPILE.
+            #     Mostly semantic (type errors, bad references), so it keeps the
+            #     informational 'reject?', exactly like go/swift/dart.
+            #
+            # (2) javac/diags/examples/ is a directory of DIAGNOSTIC examples,
+            #     one minimal file per compiler message, keyed by a
+            #         // key: compiler.err.<something>
+            #     line instead of by @compile/fail. Many of those messages come
+            #     out of the SCANNER or the PARSER - the file is 'int i = =3;',
+            #     'if (true) }', 'String s = "abc;' - i.e. input javac itself
+            #     cannot parse. Under the old rule all 915 of them were 'parse',
+            #     so refusing them counted as OUR bug.
+            #
+            # The key list below is derived from the corpus, not from our misses.
+            # Every one of the 915 example files was run through
+            #     javac -XDrawDiagnostics -proc:none -XDshould-stop.ifNoError=PARSE
+            # which stops the compile immediately after parsing, so anything it
+            # still prints is by construction a scanner/parser diagnostic. A key
+            # is listed here only when EVERY example file carrying it produced
+            # that same key at parse stage - the probe ran over all files,
+            # including the ones we already parse happily, so the rule was free
+            # to cost us files, and it did: of the 90 files it moves to 'reject'
+            # we were already refusing 43 (previously scored as our failures) and
+            # we WRONGLY ACCEPT the other 47, which this expectation now
+            # correctly counts against us. Both halves are the point.
+            #
+            # These carry the HARD 'reject', not 'reject?'. The reasoning is the
+            # same as for kotlin's PsiErrorElement and test262's fail/: the
+            # signal is exact and purely syntactic - it is the reference parser
+            # reporting that it could not parse this text - so we are scored on
+            # actually refusing it. '@compile/fail' stays 'reject?' because it
+            # says nothing about WHICH phase failed.
+            #
+            # Deliberately EXCLUDED, and why - do not add them back without
+            # re-running the probe:
+            #   compiler.err.feature.not.supported.in.source[.plural],
+            #   compiler.err.preview.feature.disabled.plural,
+            #   compiler.err.option.removed.source/target,
+            #   compiler.err.bad.file.name,
+            #   compiler.err.implicit.class.should.not.have.package.declaration
+            #       javac's parser does emit these, but they are SOURCE-LEVEL
+            #       GATES, not syntax: Records.java carries '--release 15' so
+            #       that a perfectly well-formed record declaration is refused.
+            #       That is a statement about javac's -source flag, not about
+            #       the language, and we target modern Java - we must parse them.
+            #   compiler.err.invalid.permits.clause
+            #       a compound diagnostic: 1 of the 7 files carrying it fails in
+            #       the parser ('permits' on a non-sealed class), the other 6
+            #       fail in Attr (duplicate type, supertype, type variable...).
+            #       The err key alone cannot tell them apart, so the whole key
+            #       is out.
+            #   compiler.err.expected.module
+            #       2 files; ExpectedModule.java ('open class X { }') is a parse
+            #       error but ModuleInfoWithoutModule/ModuleInfoWithoutModule.java
+            #       is an EMPTY compilation unit that javac parses fine - it only
+            #       fails when the harness compiles it as a module-info.
+            #   ProcessorWrongType/ProcessorWrongType.java
+            #       body is 'clas ProcessorWrongType { }' and javac reports
+            #       compiler.err.expected4 at parse stage - but its declared key
+            #       is the semantic compiler.err.proc.processor.wrong.type. It
+            #       is left as 'parse' on purpose: naming individual files we
+            #       happen to refuse is how a rule starts flattering the grammar.
+            # Cost of those exclusions: 2 files (ExpectedModule, ProcessorWrongType)
+            # that we correctly refuse are still scored as must-parse failures.
+            #
+            # CAUTION, learned the hard way on other corpora (see bash below): a
+            # toolchain is only an oracle at the RIGHT VERSION. This list was
+            # built with OpenJDK javac 24.0.2. `/usr/bin/ruby` 2.6 and `luac` 5.5
+            # each manufactured false findings when used the same way, because
+            # they predated (or postdated) the language their corpus targets.
+            # Re-run the probe, do not hand-edit, if javac here ever changes.
+            cat > "$TMP/java.diagkeys" <<'JAVA_DIAG_KEYS'
+compiler.err.annotation.missing.element.value
+compiler.err.array.and.receiver
+compiler.err.array.dimension.missing
+compiler.err.assert.as.identifier
+compiler.err.bad.initializer
+compiler.err.cannot.create.array.with.diamond
+compiler.err.cannot.create.array.with.type.arguments
+compiler.err.catch.without.try
+compiler.err.class.method.or.field.expected
+compiler.err.class.not.allowed
+compiler.err.default.label.not.allowed
+compiler.err.dot.class.expected
+compiler.err.else.without.if
+compiler.err.empty.char.lit
+compiler.err.enum.as.identifier
+compiler.err.enum.cant.be.generic
+compiler.err.enum.constant.expected
+compiler.err.enum.constant.not.expected
+compiler.err.expected
+compiler.err.expected.module.or.open
+compiler.err.expected.str
+compiler.err.expected2
+compiler.err.expected3
+compiler.err.expected4
+compiler.err.extraneous.semicolon
+compiler.err.finally.without.try
+compiler.err.fp.number.too.large
+compiler.err.fp.number.too.small
+compiler.err.guard.not.allowed
+compiler.err.illegal.array.creation.both.dimension.and.initialization
+compiler.err.illegal.char
+compiler.err.illegal.digit.in.binary.literal
+compiler.err.illegal.digit.in.octal.literal
+compiler.err.illegal.dot
+compiler.err.illegal.esc.char
+compiler.err.illegal.line.end.in.char.lit
+compiler.err.illegal.nonascii.digit
+compiler.err.illegal.start.of.expr
+compiler.err.illegal.start.of.stmt
+compiler.err.illegal.start.of.type
+compiler.err.illegal.text.block.open
+compiler.err.illegal.underscore
+compiler.err.illegal.unicode.esc
+compiler.err.initializer.not.allowed
+compiler.err.instance.initializer.not.allowed.in.records
+compiler.err.int.number.too.large
+compiler.err.invalid.binary.number
+compiler.err.invalid.hex.number
+compiler.err.invalid.lambda.parameter.declaration
+compiler.err.invalid.meth.decl.ret.type.req
+compiler.err.invalid.module.directive
+compiler.err.invalid.yield
+compiler.err.local.enum
+compiler.err.malformed.fp.lit
+compiler.err.no.annotations.on.dot.class
+compiler.err.not.stmt
+compiler.err.orphaned
+compiler.err.premature.eof
+compiler.err.record.cannot.declare.instance.fields
+compiler.err.record.cant.declare.field.modifiers
+compiler.err.record.component.and.old.array.syntax
+compiler.err.record.patterns.annotations.not.allowed
+compiler.err.repeated.modifier
+compiler.err.restricted.type.not.allowed
+compiler.err.restricted.type.not.allowed.array
+compiler.err.restricted.type.not.allowed.compound
+compiler.err.restricted.type.not.allowed.here
+compiler.err.sealed.or.non.sealed.local.classes.not.allowed
+compiler.err.statement.not.expected
+compiler.err.switch.case.unexpected.statement
+compiler.err.this.as.identifier
+compiler.err.try.with.resources.expr.needs.var
+compiler.err.try.without.catch.finally.or.resource.decls
+compiler.err.unclosed.char.lit
+compiler.err.unclosed.comment
+compiler.err.unclosed.str.lit
+compiler.err.unclosed.text.block
+compiler.err.underscore.as.identifier
+compiler.err.use.of.underscore.not.allowed
+compiler.err.use.of.underscore.not.allowed.non.variable
+compiler.err.use.of.underscore.not.allowed.with.brackets
+compiler.err.varargs.and.old.array.syntax
+compiler.err.varargs.and.receiver
+compiler.err.varargs.must.be.last
+compiler.err.variable.not.allowed
+compiler.err.wrong.receiver
+JAVA_DIAG_KEYS
+            # A key line may be indented (TextBlock*.java write ' // key: ...'),
+            # and must match the WHOLE key - 'compiler.err.expected' must not
+            # swallow 'compiler.err.expected.module'.
+            sed 's/\./\\./g
+                 s@^@^[[:space:]]*//[[:space:]]*key:[[:space:]]*@
+                 s@$@[[:space:]]*$@' "$TMP/java.diagkeys" > "$TMP/java.diagre"
+            : > "$TMP/java.hard"
+            if [ -d "$dir/javac/diags/examples" ]; then
+                grep -rlE -f "$TMP/java.diagre" "$dir/javac/diags/examples" \
+                     --include="*.$ext" 2>/dev/null | sort > "$TMP/java.hard" || : > "$TMP/java.hard"
+            fi
+            grep -rl '@compile/fail' "$dir" --include="*.$ext" 2>/dev/null | sort > "$neg"
+            awk -v hard="$TMP/java.hard" -v soft="$neg" '
+                BEGIN { while ((getline l < hard) > 0) h[l] = 1
+                        while ((getline l < soft) > 0) s[l] = 1 }
+                { print ($0 in h ? "reject|" : ($0 in s ? "reject?|" : "parse|")) $0 }' "$all"
+            return ;;
         kotlin)
             # Kotlin ships the EXPECTED PSI TREE next to every input, as a .txt
             # companion, and that is the exact signal: a PsiErrorElement in the
