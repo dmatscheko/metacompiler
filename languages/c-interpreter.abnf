@@ -13,10 +13,13 @@ ternary operator, || and && with real C short circuit evaluation, the bitwise op
 | ^ & << >> and unary - ! ~, char literals ('A', '\n'), comparisons, function calls and
 recursion, switch with real C fallthrough (stacked case labels, default, break), and
 putchar()/getchar(). int is 32 bit, / and % truncate towards zero.
-Not in the subset: struct assignment/initializers, struct values as parameters or
-return types, (*p).f on struct pointers (use p->f), pointer arithmetic on struct
-pointers (index them instead), typedef, sizeof, strings, casts, and multi level
-pointers (int**).
+unions (every member at offset 0, sizeof the widest one), bit fields and anonymous
+struct/union members, brace initializers for structs and unions with .field designators,
+and tag definitions that also declare objects (struct S { int x; } s;).
+Not in the subset: struct assignment, struct values as parameters or return types,
+(*p).f on struct pointers (use p->f), pointer arithmetic on struct pointers (index them
+instead), typedef, strings, casts, floating point, multi-dimensional arrays, function
+pointers and compound literals.
 
 The interpreter uses one flat, word addressed memory array: every variable lives at an
 address, scopes map names to addresses, and pointers are plain indexes; every int,
@@ -42,7 +45,8 @@ programs are self checking: they return 0 on success.") ;
 
 Program     = { Include | PPLine | StaticAssert | EnumDef | UnionDef | UnionGDecl | UnionSkip
               | TypedefDecl | GFloatDecl
-              | StructDef | StructGDecl | FuncDef | Proto | GAggDecl | GlobalDecl } ;
+              | StructDef | GStructDefDecl | GUnionDefDecl | StructGDecl
+              | FuncDef | Proto | GAggDecl | GlobalDecl } ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
 // #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
@@ -131,13 +135,28 @@ HdrChar     = "\x20"..."\x21" | "\x23"..."\x3b" | "\x3d" | "\x3f"..."\x7e" ;
 // that is how linked lists work).
 StructDef   <~~ defineStruct(takeAll()) ~~>
             = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
-FieldLine   <~~ push(makeFieldLine(takeAll())) ~~>
-            = FieldType FDecl { "," FDecl } ";" ;
-FieldType   = TypeInt <~~ push({bty: "int"}) ~~>
+// A member line is either an ANONYMOUS struct/union member (C11 6.7.2.1p13: its
+// members are addressed as members of the enclosing tag) or an ordinary declarator
+// list, whose declarators may carry a ':width' bit-field size.
+FieldLine   = AnonMember | PlainField ;
+PlainField  <~~ push(makeFieldLine(takeAll())) ~~>
+            = FieldType ( AnonBits | FDecl { "," FDecl } ) ";" ;
+AnonMember  <~~ push(makeAnonMember(takeAll())) ~~>
+            = AnonKind "{" { FieldLine } "}" ";" ;
+AnonKind    = KwUnion <~~ push({anon: true, u: true}) ~~>
+            | KwStruct <~~ push({anon: true, u: false}) ~~> ;
+// The base type text is kept so that an UNSIGNED bit field can wrap where a signed
+// one sign-extends; everything else about the width still collapses to the int model.
+FieldType   = TypeInt <~~ push({bty: "int", raw: up.in}) ~~>
             | EnumRef <~~ push({bty: "int"}) ~~>
             | KwStruct Id <~~ push({bty: up.in}) ~~>
             | KwUnion Id <~~ push({bty: uKey(up.in)}) ~~> ;
-FDecl       = [ Stars ] Id <~~ push(up.in) ~~> ;
+FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ BitWidth ] ;
+// 'unsigned a : 3' - the declared width in bits.
+BitWidth    <~~ push({bits: pop()}) ~~> = ":" Number ;
+// An UNNAMED bit field ('int : 3;', 'int : 0;') is pure padding: it is parsed, and
+// reserves a slot of its own so the named members around it keep their order.
+AnonBits    <~~ push({padBits: pop()}) ~~> = ":" Number ;
 
 // A function prototype (int putchar(int c);) is accepted and ignored: the callees
 // are resolved by name anyway. It keeps the test programs valid for a real C compiler.
@@ -152,10 +171,20 @@ FuncDef     <~~ defineFunction() ~~>
 // parameter with '*' (void *p); a bare '(void)' has no declarator, so Param fails
 // on the missing name and the '(void)' fallback matches. A trailing '...' (a
 // variadic function) is accepted and ignored: only its named parameters are tracked.
+// VoidOnly comes FIRST and declines a following '*', so a bare '(void)' is the empty
+// parameter list while '(void *p)' falls through to a real parameter. (A PEG never
+// retries a committed alternative, so the two forms cannot be told apart by order
+// alone - the negative lookahead is what decides.) A parameter may be UNNAMED, which
+// is the normal shape of a prototype: int printf(const char *, ...);
 ParamList   <~~ push(takeAll()) ~~>
-            = "(" [ ( Param { "," Param } [ "," "..." ] | "void" KwEnd | "..." ) ] ")" ;
+            = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
+VoidOnly    = "void" KwEnd !"*" ;
+ParamItem   = Param | ParamAbs ;
 Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] Id <~~ push(up.in) ~~> ;
+// An abstract (unnamed) parameter: only its type matters, and nothing can read it.
+ParamAbs    <~~ push(makeParam(takeAll())) ~~>
+            = ParamType [ Stars ] ;
 ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~>
             | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
@@ -203,14 +232,17 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // initializer is genuinely lowered now, and only the shapes those two decline (two or
 // more array dimensions, a braced scalar) still fall through to the AggDecl notImpl.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
-            | AssertStmt | BoolDecl | LStructDef | LUnionDef | StaticDecl
-            | StructDecl | UnionDecl | AggDecl | Decl | LFloatDecl
+            | AssertStmt | BoolDecl | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
+            | StaticDecl | StructDecl | UnionDecl | AggDecl | Decl | LFloatDecl
             | Goto | PPStmt | Label | Empty | ExprStmt ;
 
 // A struct definition inside a function body. The layout is registered exactly like a
 // top-level one (the tag runs at build time), and the statement itself does nothing.
 LStructDef  <~~ defineStruct(takeAll()); push(function() {}) ~~>
             = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
+// A tag definition that also declares locals, and its union twin.
+StructDefDecl <~~ push(makeStructDecl(tagDefDecl(takeAll(), false))) ~~> = StructDefBody ;
+UnionDefDecl  <~~ push(makeStructDecl(tagDefDecl(takeAll(), true))) ~~>  = UnionDefBody ;
 // The same for a union definition inside a function body.
 LUnionDef   <~~ defineUnion(takeAll()); push(function() {}) ~~>
             = KwUnion Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" ";" ;
@@ -355,7 +387,10 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 
 // An lvalue thunk evaluates to an address. A place is a variable followed by any
 // mix of indexing and struct member steps: a[i], p.x, r.min.y, head->next->value.
-Lvalue      = Deref | VarPlace ;
+// A parenthesized lvalue: '&(s.b)', '*(p)'. It takes no suffix chain of its own -
+// '(*p).f' still wants 'p->f' - but it makes every place form parenthesizable.
+Lvalue      = Deref | ParenPlace | VarPlace ;
+ParenPlace  = "(" Lvalue ")" ;
 Deref       <~~ push(makeDerefPlace(pop())) ~~>
             = "*" UnaryExpr ;
 VarPlace    <~~ push(makeVarPlace(takeAll())) ~~>
@@ -449,7 +484,7 @@ ScalarKw    = "char" KwEnd | "short" KwEnd | "int" KwEnd | "long" KwEnd
             | "const" KwEnd | "volatile" KwEnd ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Lvalue ;
-AddrOf      <~~ push(pop() /* The lvalue thunk already yields the address. */) ~~>
+AddrOf      <~~ push(makeAddrOf(pop())) ~~>
             = "&" Lvalue ;
 DerefLoad   <~~ push(makeLoad(makeDerefPlace(pop()))) ~~>
             = "*" UnaryExpr ;
@@ -520,6 +555,19 @@ TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
 // A declaration base type: a scalar, or an enum tag used as an int. Pushes nothing.
 BaseInt     = TypeInt | EnumRef ;
 EnumRef     = KwEnum Id ;
+
+
+// 'struct S { int x; } s, *p;' / 'union { int i; } u;' - a tag DEFINITION that also
+// declares objects. The tag may be omitted, in which case the layout gets a synthetic
+// name that no other declaration can spell. The shared *Body productions carry the
+// syntax; the four wrappers differ only in whether the objects become locals or
+// globals, and whether the tag is a struct or a union.
+StructDefBody = KwStruct [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
+                SDeclarator { "," SDeclarator } ";" ;
+UnionDefBody  = KwUnion [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
+                SDeclarator { "," SDeclarator } ";" ;
+GStructDefDecl <~~ defineStructGlobals(tagDefDecl(takeAll(), false)) ~~> = StructDefBody ;
+GUnionDefDecl  <~~ defineStructGlobals(tagDefDecl(takeAll(), true)) ~~>  = UnionDefBody ;
 
 KwStruct    = "struct" KwEnd ;
 KwStatic    = "static" KwEnd ;
@@ -775,19 +823,37 @@ KwDefault   = "default" KwEnd ;
         if (f == undefined) fail(tagName(sname) + " has no field " + fname)
         return f
     }
-    // FieldLine items = [{bty}, {ptr}?, name, {ptr}?, name...] -> {fields: [{name, bty,
-    // star}...]} where star is the pointer level (0 for a plain field).
+    // A type-specifier run that contains 'unsigned': its bit fields WRAP where a signed
+    // one sign-extends. (Plain 'int x : n' is signed here, like the reference compiler.)
+    function isUnsignedTy(raw) { return raw != undefined && raw.indexOf("unsigned") >= 0 }
+    // PlainField items = [{bty, raw}, {ptr}?, name, {bits}?, ...] -> {fields: [{name,
+    // bty, star, bits?, uns}...]} where star is the pointer level (0 for a plain field)
+    // and bits the declared bit-field width. An unnamed ':n' member is pure padding: it
+    // is laid out (so the members around it keep their order) but never named.
     function makeFieldLine(items) {
         var bty = items[0].bty
+        var uns = isUnsignedTy(items[0].raw)
         var fields = []
         var star = 0
         for (var i = 1; i < items.length; i++) {
-            if (items[i] != undefined && items[i].ptr != undefined) { star = items[i].ptr; continue }
-            fields.push({name: items[i], bty: bty, star: star})
+            var it = items[i]
+            if (it != undefined && it.padBits != undefined) {
+                fields.push({name: "", bty: bty, star: 0, bits: it.padBits | 0, uns: uns, pad: true})
+                continue
+            }
+            if (it != undefined && it.ptr != undefined) { star = it.ptr; continue }
+            if (it != undefined && it.bits != undefined) {
+                fields[fields.length - 1].bits = it.bits | 0
+                continue
+            }
+            fields.push({name: it, bty: bty, star: star, uns: uns})
             star = 0
         }
         return {fields: fields}
     }
+    // An anonymous struct/union member: its own member groups, spliced into the
+    // enclosing tag at the offset the member itself occupies.
+    function makeAnonMember(items) { return {anonFields: items.slice(1), isUnion: items[0].u} }
     // StructDef items = [name, {fields}...]. Nested struct/union values need a complete
     // (already defined) tag; pointer fields may point at the struct itself.
     // A UNION lays every member at offset 0 and takes the MAXIMUM size instead of the
@@ -797,29 +863,102 @@ KwDefault   = "default" KwEnd ;
         var name = items[0]
         if (hasOwn(structs, name)) fail(tagName(name) + " defined twice")
         var st = {size: 0, bytes: 0, fields: {}, order: [], isUnion: isUnion}
-        for (var i = 1; i < items.length; i++) {
-            var fl = items[i].fields
-            for (var j = 0; j < fl.length; j++) {
-                var f = fl[j]
-                var ct
-                var base = (f.bty == "int") ? ctInt : ctStruct(f.bty)
-                if (f.star > 0) { ct = ptrTo(f.star, base) }         // May point at any (even later) struct.
-                else { if (f.bty != "int") structOf(f.bty); ct = base }
-                if (hasOwn(st.fields, f.name)) fail("duplicate field " + f.name + " in " + tagName(name))
-                var w = ctSize(ct)
-                var by = ctBytes(ct)
-                st.fields[f.name] = {off: isUnion ? 0 : st.size, ct: ct}
-                st.order.push(f.name)
-                if (isUnion) {
-                    if (w > st.size) st.size = w
-                    if (by > st.bytes) st.bytes = by
-                } else {
-                    st.size += w
-                    st.bytes += by
+        var r = layoutGroups(st, items.slice(1), 0, isUnion, name)
+        st.size = r.size
+        st.bytes = r.bytes
+        structs[name] = st
+    }
+    // The C type of one declared member. A POINTER field may point at any (even a
+    // later) struct; a member of struct/union VALUE type needs a complete tag.
+    function fieldCt(f) {
+        var base = (f.bty == "int") ? ctInt : ctStruct(f.bty)
+        if (f.star > 0) return ptrTo(f.star, base)
+        if (f.bty != "int") structOf(f.bty)
+        return base
+    }
+    // Lay a run of member GROUPS - ordinary declarator lines and anonymous struct/union
+    // members - into st, starting at word offset `base`, and return the words and bytes
+    // they occupy. In a union every group starts at `base` and the size is the MAXIMUM;
+    // in a struct they follow each other and the size is the sum. An anonymous member
+    // recurses with its OWN kind, which is what puts its members into the enclosing
+    // tag's namespace at its own offset.
+    function layoutGroups(st, groups, base, isUnion, name) {
+        var size = 0
+        var bytes = 0
+        for (var i = 0; i < groups.length; i++) {
+            var g = groups[i]
+            var off = isUnion ? base : base + size
+            var w = 0
+            var by = 0
+            if (g.anonFields != undefined) {
+                var r = layoutGroups(st, g.anonFields, off, g.isUnion, name)
+                w = r.size
+                by = r.bytes
+            } else {
+                var fl = g.fields
+                for (var j = 0; j < fl.length; j++) {
+                    var f = fl[j]
+                    var ct = fieldCt(f)
+                    var fo = isUnion ? off : off + w
+                    if (f.pad != true) {
+                        if (hasOwn(st.fields, f.name)) fail("duplicate field " + f.name + " in " + tagName(name))
+                        var bf = undefined
+                        if (f.bits != undefined) { bf = {w: f.bits | 0, sign: f.uns != true} }
+                        st.fields[f.name] = {off: fo, ct: ct, bf: bf}
+                        st.order.push(f.name)
+                    }
+                    var fw = ctSize(ct)
+                    var fb = ctBytes(ct)
+                    if (isUnion) {
+                        if (fw > w) w = fw
+                        if (fb > by) by = fb
+                    } else {
+                        w = w + fw
+                        by = by + fb
+                    }
                 }
             }
+            if (isUnion) {
+                if (w > size) size = w
+                if (by > bytes) bytes = by
+            } else {
+                size = size + w
+                bytes = bytes + by
+            }
         }
-        structs[name] = st
+        return {size: size, bytes: bytes}
+    }
+    // A bit field holds only its declared width: an unsigned one WRAPS, a signed one
+    // sign-extends. Normalizing on every STORE keeps reads plain loads.
+    function bfNorm(bf, v) {
+        if (bf == undefined) return v | 0
+        var w = bf.w
+        if (w <= 0 || w >= 32) return v | 0
+        if (bf.sign) return (v << (32 - w)) >> (32 - w)
+        return v & ((1 << w) - 1)
+    }
+    // An omitted tag ('struct { int x; } s;') still needs a layout, so it gets a
+    // synthetic name; the '$' keeps it unspellable from C source.
+    var anonSeq = 0
+    function anonTagName() { anonSeq = anonSeq + 1; return "$anon" + anonSeq }
+    // Split the items of a 'struct S { ... } a, *b;' into the tag definition and the
+    // declarator list, register the layout, and return the [key, descriptor...] list
+    // that makeStructDecl / defineStructGlobals expect.
+    function tagDefDecl(items, isUnion) {
+        var key = anonTagName()
+        if (items.length > 0 && items[0].tag != undefined) {
+            key = isUnion ? uKey(items[0].tag) : items[0].tag
+        }
+        var tagItems = [key]
+        var declItems = [key]
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.tag != undefined) { continue }
+            if (it.name != undefined) { declItems.push(it) }
+            else { tagItems.push(it) }
+        }
+        defineTag(tagItems, isUnion)
+        return declItems
     }
     function defineStruct(items) { defineTag(items, false) }
     function defineUnion(items) { defineTag(items, true) }
@@ -930,13 +1069,15 @@ KwDefault   = "default" KwEnd ;
             var v = findVar(name)
             if (path.length == 0) {
                 if (v.arr) fail("an array is not assignable: " + name)
-                return v.addr
+                return {a: v.addr}
             }
             var addr = v.addr
             var ct = v.ct != undefined ? v.ct : ctInt
             var arr = v.arr
+            var bf = undefined   // Set when the LAST step selected a bit field.
             for (var i = 0; i < path.length; i++) {
                 var s = path[i]
+                bf = undefined
                 if (s.idx != undefined) {
                     var idx = s.idx()
                     if (arr) { addr = addr + idx * ctSize(ct) }
@@ -947,19 +1088,23 @@ KwDefault   = "default" KwEnd ;
                     var f = fieldOf(ct.s, s.fld)
                     addr += f.off
                     ct = f.ct
+                    bf = f.bf
                 } else {
                     if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
                     var f2 = fieldOf(ct.p.s, s.arw)
                     addr = load(addr) + f2.off
                     ct = f2.ct
+                    bf = f2.bf
                 }
                 arr = false
             }
-            return addr
+            return {a: addr, bf: bf}
         }
     }
-    function makeDerefPlace(t) { return function() { return t() } }
-    function makeLoad(placeT) { return function() { return load(placeT()) } }
+    // Every lvalue thunk answers {a: address, bf: bit-field descriptor or undefined}.
+    function makeDerefPlace(t) { return function() { return {a: t()} } }
+    function makeAddrOf(placeT) { return function() { return placeT().a } }
+    function makeLoad(placeT) { return function() { return load(placeT().a) } }
     makeNot = function(t) { return function() { return t() == 0 ? 1 : 0 } }
     function makeBitNot(t) { return function() { return ~t() } }
 
@@ -1015,25 +1160,25 @@ KwDefault   = "default" KwEnd ;
         var op = items[1]
         var valT = items[2]
         return function() {
-            var addr = placeT()
+            var p = placeT()
             var v = valT()
-            if (op != "=") v = applyOp(op, load(addr), v)
-            return store(addr, v)
+            if (op != "=") v = applyOp(op, load(p.a), v)
+            return store(p.a, bfNorm(p.bf, v))
         }
     }
     function makePreIncDec(placeT, op) {
         var d = (op == "++") ? 1 : -1
         return function() {
-            var addr = placeT()
-            return store(addr, load(addr) + d)
+            var p = placeT()
+            return store(p.a, bfNorm(p.bf, load(p.a) + d))
         }
     }
     function makePostIncDec(op, placeT) {
         var d = (op == "++") ? 1 : -1
         return function() {
-            var addr = placeT()
-            var old = load(addr)
-            store(addr, old + d)
+            var p = placeT()
+            var old = load(p.a)
+            store(p.a, bfNorm(p.bf, old + d))
             return old
         }
     }
@@ -1241,6 +1386,7 @@ KwDefault   = "default" KwEnd ;
     }
     // ----- Top level -----
 
+    var unnamedSeq = 0
     // Param items = [{sname}?, "*"?, name]: int, int*, or a struct pointer.
     function makeParam(items) {
         var i = 0
@@ -1250,7 +1396,11 @@ KwDefault   = "default" KwEnd ;
         if (ptr > 0) i++
         if (sname != undefined && ptr == 0) fail("struct parameters must be pointers (struct " + sname + " *)")
         var ct = ptrTo(ptr, sname != undefined ? ctStruct(sname) : ctInt)
-        return {name: items[i], ptr: ptr > 0, ct: ct}
+        // An abstract parameter has no name: give it one nothing can spell, so that it
+        // still occupies its argument slot.
+        var pname = items[i]
+        if (pname == undefined) { unnamedSeq = unnamedSeq + 1; pname = "$arg" + unnamedSeq }
+        return {name: pname, ptr: ptr > 0, ct: ct}
     }
     // Global declarator: ["*"?] name [{size}|{init: n}] -> registered immediately.
     function makeGDecl(items) {

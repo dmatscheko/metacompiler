@@ -66,7 +66,7 @@ ReturnType  = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName ] [ KwImplements ImplList ] "{" { Member } "}" ;
+            = { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ] [ KwImplements ImplList ] "{" { Member } "}" ;
 ClassMod    = ( "abstract" | "final" | "readonly" ) KwEnd ;
 ExtName     = [ "\\" ] Id { "\\" Id } ;
 ImplList    = ExtName { "," ExtName } ;
@@ -108,10 +108,14 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x
 // ignored; string literals inside are matched first so their parens never miscount.
 SkipParen   = "(" { SkipDq | SkipSq | SkipParen | SkipPOther } ")" ;
 SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
-// A property declaration 'public $x;' or 'public int $x = e;' is accepted; a type
-// hint and the initializer are dropped (properties are created on first assignment).
-PropDecl    <~~ takeAll(); push({prop: true}) ~~>
-            = { Modifier } [ TypeHint ] DollarName [ "=" Expression ] ";" ;
+// A property declaration 'public $x;' or 'public int $x = e;'. The type hint is
+// dropped (dynamic), but the DEFAULT VALUE is kept: makeNew replays the declared
+// defaults down the inheritance chain, so "$o->val" reads 7 before anything is
+// assigned. A 'static' property has no runtime model here and is dropped, which
+// is why the modifier text is captured rather than skipped.
+PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
+            = { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ";" ;
+PropMod     <~~ push({mod: up.in}) ~~> = Modifier ;
 Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd ;
 
 // Body of a control structure / function: braces around a statement sequence.
@@ -201,13 +205,19 @@ Continue    <~~ push(makeContinue(takeAll())) ~~>
             = KwContinue [ Expression ] ";" ;
 
 // Every expression pushes exactly one thunk: function(block) -> {b, v}.
-Expression  = DestructAssign | Assignment | Ternary ;
+Expression  = RefAssign | DestructAssign | Assignment | Ternary ;
+
+// $b = &$a : both names then share ONE storage cell. There is no reference cell in
+// this compiler's value model, so the form is recognized and routed to
+// notImplemented rather than silently compiled as a copy.
+RefAssign   <~~ takeAll(); push(notImplExpr("reference assignment", up.pos)) ~~>
+            = Target PlainEq "&" !"&" Target ;
 
 // list($a, $b) = e  /  [$a, $b] = e  -- positional destructuring of an indexed
 // array into a list of assignment targets (tried before a plain expression so a
 // bracketed target list is not mistaken for an array literal).
 DestructAssign <~~ push(makeDestructure(takeAll())) ~~>
-            = DestructLhs "=" !"=" Expression ;
+            = DestructLhs PlainEq Expression ;
 DestructLhs = KwList "(" DTarget { "," DTarget } ")"
             | "[" DTarget { "," DTarget } "]" ;
 DTarget     <~~ push({dt: pop()}) ~~>
@@ -224,7 +234,13 @@ Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
 
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target AssignOp <~~ push(up.in) ~~> Expression ;
-AssignOp    = "+=" | "-=" | "*=" | "/=" | "%=" | ".=" | ( "=" !"=" ) ;
+// Longest first (ordered choice): '**=' before '*=', '<<=' before '<='. The plain
+// '=' declines '==' (a comparison) and '=>' (an array key), neither of which is an
+// assignment - without the lookaheads it matches their first character and the rest
+// of the sequence then fails somewhere else entirely.
+AssignOp    = "**=" | "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%=" | ".="
+            | "&=" | "|=" | "^=" | PlainEq ;
+PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { ArrowField | TIndex | TAppend } ;
 TargetHead  = DollarName <~~ push({var: pop()}) ~~> ;
@@ -238,22 +254,56 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { OrOp AndExpr } ;
 OrOp        = "||" | ( "or" KwEnd ) ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = NotExpr { AndOp NotExpr } ;
+            = BitOrExpr { AndOp BitOrExpr } ;
 AndOp       = "&&" | ( "and" KwEnd ) ;
-NotExpr     = NotOp | EqExpr ;
-NotOp       <~~ push(makeNot(pop())) ~~>
-            = "!" NotExpr ;
 
+// The binary operator ladder, in PHP's own precedence order (loosest first):
+//   ||  &&  |  ^  &  == != === !== <=>  < <= > >=  .  << >>  + -  * / %  **
+// Note that since PHP 8 the concatenation '.' binds LOOSER than the shifts and the
+// additive operators, which is why it has its own level rather than sitting next
+// to '+'. The single-character bitwise operators decline their doubled forms
+// ('&' !'&'), or 'a && b' parses as 'a & (&b)' - a wrong tree, not an error.
+// Mirrors the same ladder in php-interpreter.abnf.
+BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = BitXorExpr { SingleBar <~~ push(up.in) ~~> BitXorExpr } ;
+SingleBar   = "|" !"|" ;
+BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = BitAndExpr { "^" <~~ push(up.in) ~~> BitAndExpr } ;
+BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = EqExpr { SingleAmp <~~ push(up.in) ~~> EqExpr } ;
+SingleAmp   = "&" !"&" ;
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "!==" | "==" | "!=" | "<=>" | "<>" ) <~~ push(up.in) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = AddExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> AddExpr } ;
+            = ConcatExpr { RelOp <~~ push(up.in) ~~> ConcatExpr } ;
+RelOp       = LeNotSpaceship | ">=" | SingleLt | SingleGt ;
+LeNotSpaceship = "<=" !">" ;
+SingleLt    = "<" !"<" ;
+SingleGt    = ">" !">" ;
+ConcatExpr  <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { DotOp <~~ push(up.in) ~~> ShiftExpr } ;
+DotOp       = "." !"=" ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" | "." ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | PostfixExpr ;
+UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | BitNot | NotOp
+            | ThrowExpr | PowExpr ;
+NotOp       <~~ push(makeNot(pop())) ~~>
+            = "!" UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~>
+            = "~" UnaryExpr ;
+// '**' is RIGHT associative (2 ** 3 ** 2 is 512, not 64) and binds tighter than
+// every prefix operator on its left but looser than the one on its right, so its
+// right operand is a full UnaryExpr ('2 ** -1').
+PowExpr     <~~ push(foldPow(takeAll())) ~~>
+            = PostfixExpr [ "**" UnaryExpr ] ;
+// throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
+ThrowExpr   <~~ push(makeThrowExpr(pop())) ~~>
+            = KwThrow Expression ;
 // (int)$x / (string)$y / (array)$z ...: a type cast, recognized and routed to
 // notImplemented. The operand is parsed then dropped. A parenthesized group '($x)'
 // is not a cast (the inner is not a cast keyword) and falls through to Primary.
@@ -295,7 +345,7 @@ StaticSfx   <~~ push(makeStatic(takeAll(), up.pos)) ~~>
 Primary     = "(" Expression ")"
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
             | IncludeExpr
-            | DqStr | SqStr | PhpFloat | IntLit
+            | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
             | VarRef | StaticExpr | Call | ConstRef ;
 
@@ -365,11 +415,30 @@ Call        <~~ push(makeCall(takeAll())) ~~>
 // "35". The leading-dot form ('.5') is PHP's too. Mirrors PhpFloat in the
 // interpreter grammar; the underscore separators PHP 7.4 allows are stripped in
 // phpFloatLit.
+// The longer / prefixed forms come FIRST (ordered choice), and PhpFloat leads because
+// '5.' and '1_0.2_5' start exactly like an integer. A leading zero followed by octal
+// digits is the legacy octal form (017 == 15); '0o17' is the PHP 8.1 spelling of the
+// same thing. '_' separators are stripped by the builders. Mirrors NumLit in the
+// interpreter grammar.
+NumLit      = PhpFloat | PhpHex | PhpBin | PhpOct | PhpLegOct | PhpInt ;
 PhpFloat    <~~ push(makeConst(phpFloatLit(up.in))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ ExpPart ] :whitespace(Whitespace)
             | "0"..."9" :whitespace() { "0"..."9" | "_" } FloatTail :whitespace(Whitespace) ;
 FloatTail   = "." { "0"..."9" | "_" } [ ExpPart ] | ExpPart ;
 ExpPart     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+PhpHex      <~~ push(makeConst(phpRadixLit(up.in, 16))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() HexDig { HexDig | "_" } :whitespace(Whitespace) ;
+HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
+PhpBin      <~~ push(makeConst(phpRadixLit(up.in, 2))) ~~>
+            = "0" ( "b" | "B" ) :whitespace() BinDig { BinDig | "_" } :whitespace(Whitespace) ;
+BinDig      = "0" | "1" ;
+PhpOct      <~~ push(makeConst(phpRadixLit(up.in, 8))) ~~>
+            = "0" ( "o" | "O" ) :whitespace() OctDig { OctDig | "_" } :whitespace(Whitespace) ;
+OctDig      = "0"..."7" ;
+PhpLegOct   <~~ push(makeConst(phpLegOctLit(up.in))) ~~>
+            = "0" :whitespace() OctDig { OctDig | "_" } :whitespace(Whitespace) ;
+PhpInt      <~~ push(makeConst(phpIntLit(up.in))) ~~>
+            = "0"..."9" :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
             = DollarName ;
@@ -388,20 +457,140 @@ DqStr       <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplBraceExpr | TplVar | TplChunk | TplSpecial } '"' :whitespace(Whitespace) ;
 TplBraceExpr <~~ push({e: pop()}) ~~>
             = "{" :whitespace(Whitespace) Expression "}" ;
-TplVar      <~~ push({e: makeVarRef(up.in)}) ~~>
+// The simple interpolation form: '$name', optionally followed by ONE '[key]' or
+// '->prop' step (PHP's "simple" syntax - anything richer needs the '{$...}' form).
+// The index key is an integer, a BARE word (taken as a string: "$map[key]") or
+// another variable; it is captured as text and classified by makeTplVar.
+TplVar      <~~ push({e: makeTplVar(takeAll())}) ~~>
+            = TplName [ TplIdx | TplProp ] ;
+TplName     <~~ push({tvar: up.in}) ~~>
             = "$" TplId ;
+TplIdx      = "[" TplKey "]" ;
+TplKey      <~~ push({tidx: up.in}) ~~>
+            = TplNum | TplDollar | TplId ;
+TplNum      = [ "-" ] "0"..."9" { "0"..."9" } ;
+TplDollar   = "$" TplId ;
+TplProp     <~~ push({tprop: up.in}) ~~>
+            = "->" TplId ;
 TplId       = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
-TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+TplChunk    <~~ push({s: unescapeDq(up.in)}) ~~>
             = TplC { TplC } ;
 TplC        = TplEsc | TplPlain ;
-TplEsc      = "\\" "\x20"..b"\x7e" ;
-TplPlain    = "\x20"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\x7a" | "\x7c"..."\U0010ffff" | @"\t" ;
+// '\u{...}' has to be recognized as ONE escape: the brace form is tried before the
+// generic backslash escape, otherwise the '{48}' of "\u{48}" is read as a '{expr}'
+// interpolation and the string silently gains two characters.
+TplUniEsc   = "\\" "u" "{" HexDig { HexDig } "}" ;
+// PHP's escape set: an UNKNOWN escape keeps both characters ("\q" is two bytes),
+// which unescapeDq implements; the grammar only has to keep the backslash pair
+// together so a '\"' does not end the string.
+TplEsc      = TplUniEsc | "\\" "\x00"..."\U0010ffff" ;
+TplPlain    = "\x20"..."\x21" | "\x23" | "\x25"..."\x5b" | "\x5d"..."\x7a" | "\x7c"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
 TplSpecial  <~~ push({s: up.in}) ~~>
             = "$" | "{" ;
 
-SqStr       = "'" :whitespace() { SqEsc | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
+// In a single-quoted string only \' and \\ are escapes; every OTHER backslash is a
+// literal backslash ('a\nb' is four bytes), which is what SqBack accepts - after
+// SqEsc, so the two real escapes still win.
+SqStr       = "'" :whitespace() { SqEsc | SqBack | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
-SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
+SqBack      = "\\" ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
+
+// A heredoc / nowdoc. The body lives on the lines AFTER the marker, so it cannot be
+// written as ordinary productions: HdScan is a :script lexer that returns the marker
+// line, the body and the terminator line as ONE token, and makeHeredoc splits that
+// text apart again (terminator-indent strip, escapes and interpolation unless the
+// marker was single-quoted). Modelled on the Ruby grammar's heredoc lexer.
+HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+            = HdScan :whitespace(Whitespace) ;
+HdScan = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noheredoc", 0)
+        // Whitespace is not skipped before a script, so step over it here.
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        var start = i
+        if (c.peek(i) !== 60 || c.peek(i + 1) !== 60 || c.peek(i + 2) !== 60) { return no }
+        i = i + 3
+        var sp = c.peek(i)
+        while (sp === 32 || sp === 9) { i = i + 1; sp = c.peek(i) }
+        var quote = 0
+        var q = c.peek(i)
+        if (q === 39 || q === 34) { quote = q; i = i + 1 }
+        var f = c.peek(i)
+        if (!((f >= 65 && f <= 90) || (f >= 97 && f <= 122) || f === 95)) { return no }
+        var id = ""
+        var ch = f
+        while ((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95) {
+            id = id + String.fromCharCode(ch)
+            i = i + 1
+            ch = c.peek(i)
+        }
+        if (quote !== 0) {
+            if (c.peek(i) !== quote) { return no }
+            i = i + 1
+        }
+        var j = i
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd !== 10) { return no }
+        j = j + 1
+        // Walk whole lines until one is the (possibly indented) terminator marker,
+        // and stop right after the marker itself - PHP allows ';' or ',' to follow.
+        var end = -1
+        var guard = 0
+        while (guard < 1000000) {
+            guard = guard + 1
+            var k = j
+            var b = c.peek(k)
+            if (b === -1) { return no }
+            while (b === 32 || b === 9) { k = k + 1; b = c.peek(k) }
+            var m = 0
+            while (m < id.length && c.peek(k + m) === id.charCodeAt(m)) { m = m + 1 }
+            var after = c.peek(k + m)
+            var idChar = (after >= 48 && after <= 57) || (after >= 65 && after <= 90)
+                      || (after >= 97 && after <= 122) || after === 95
+            if (m === id.length && !idChar) { end = k + m; break }
+            while (b !== 10 && b !== -1) { k = k + 1; b = c.peek(k) }
+            if (b === -1) { return no }
+            j = k + 1
+        }
+        if (end < 0) { return no }
+        // Rebuild the exact source slice as a token; c.peek answers BYTES, so the
+        // UTF-8 has to be decoded here or a non-ASCII body would never match.
+        var out = ""
+        var p = start
+        while (p < end) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return no
+        }
+        return abnf.newToken(out, 0)
+    })()
+~~) ;
 
 // A Name that is not a reserved word. The negative lookahead runs at PARSE time.
 Name        = NotKw Id ;
@@ -494,16 +683,192 @@ KwInstanceof = "instanceof" KwEnd ;
     // A float literal's text, with PHP 7.4 underscore separators (and any whitespace
     // the token carries) stripped before parseFloat. Floats are plain numbers here -
     // unlike the interpreter, which boxes them so 1.0 !== 1 stays observable.
-    function phpFloatLit(t) {
+    function stripUnd(t) {
         var out = ""
         for (var i = 0; i < t.length; i++) {
             var ch = t.charAt(i)
             if (ch != "_" && ch != " " && ch != "\t" && ch != "\r" && ch != "\n") { out += ch }
         }
-        return parseFloat(out)
+        return out
+    }
+    function phpFloatLit(t) { return parseFloat(stripUnd(t)) }
+    function phpIntLit(t) { return parseInt(stripUnd(t), 10) }
+    function phpRadixLit(t, radix) { return parseInt(stripUnd(t).substring(2), radix) }
+    function phpLegOctLit(t) { return parseInt(stripUnd(t), 8) }
+
+    // ----- heredoc / nowdoc -----
+    // HdScan handed over the WHOLE literal as one token: the '<<<MARK' line, the body
+    // lines and the terminator. The terminator's own indentation is removed from every
+    // body line (PHP 7.3+) and the newline in front of the terminator is dropped.
+    function makeHeredoc(text) {
+        var i = 3
+        while (i < text.length && (text.charAt(i) == " " || text.charAt(i) == "\t")) { i++ }
+        var quote = ""
+        if (text.charAt(i) == "'" || text.charAt(i) == "\"") { quote = text.charAt(i) }
+        var nl = -1
+        for (var a = 0; a < text.length; a++) { if (text.charAt(a) == "\n") { nl = a; break } }
+        var rest = nl < 0 ? "" : text.substring(nl + 1)
+        // The scanner stopped right after the terminator marker, so the last line of
+        // `rest` is that terminator: its indentation is the strip width.
+        var lastNl = -1
+        for (var b = rest.length - 1; b >= 0; b--) { if (rest.charAt(b) == "\n") { lastNl = b; break } }
+        var termLine = lastNl < 0 ? rest : rest.substring(lastNl + 1)
+        var indent = 0
+        while (indent < termLine.length && (termLine.charAt(indent) == " " || termLine.charAt(indent) == "\t")) { indent++ }
+        var body = lastNl < 0 ? "" : rest.substring(0, lastNl)
+        if (indent > 0) { body = stripHdIndent(body, indent) }
+        if (quote == "'") { return makeConst(body) }
+        return makeTemplate(hdParts(body))
+    }
+    function nlAt(s, from) {
+        for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
+        return -1
+    }
+    function stripHdIndent(body, n) {
+        var out = ""
+        var j = 0
+        while (j <= body.length) {
+            var e = nlAt(body, j)
+            var hasNl = e >= 0
+            if (e < 0) { e = body.length }
+            var take = j + n < e ? j + n : e
+            out += body.substring(take, e)
+            if (hasNl) { out += "\n" } else { break }
+            j = e + 1
+        }
+        return out
+    }
+    // Split an interpolating heredoc body into the {s}/{e} pieces makeTemplate wants.
+    // '{$expr}' is parsed with the grammar itself, from the Expression production -
+    // the same door include/require uses to pull in another file.
+    function hdParts(body) {
+        var parts = []
+        var lit = ""
+        var i = 0
+        while (i < body.length) {
+            var ch = body.charAt(i)
+            if (ch == "\\" && i + 1 < body.length) { lit += ch + body.charAt(i + 1); i += 2; continue }
+            if (ch == "{" && i + 1 < body.length && body.charAt(i + 1) == "$") {
+                var depth = 0
+                var j = i
+                while (j < body.length) {
+                    if (body.charAt(j) == "{") { depth++ }
+                    else if (body.charAt(j) == "}") { depth--; if (depth == 0) { break } }
+                    j++
+                }
+                if (j < body.length) {
+                    if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                    parts.push({e: compileSnippet(body.substring(i + 1, j))})
+                    i = j + 1
+                    continue
+                }
+            }
+            if (ch == "$" && i + 1 < body.length && isNameStart(body.charAt(i + 1))) {
+                var k = i + 1
+                while (k < body.length && isNameChar(body.charAt(k))) { k++ }
+                var expr = body.substring(i, k)
+                // one optional '[key]' or '->prop' step, like the string form
+                if (k < body.length && body.charAt(k) == "[") {
+                    var e2 = k
+                    while (e2 < body.length && body.charAt(e2) != "]") { e2++ }
+                    if (e2 < body.length) {
+                        var inner = body.substring(k + 1, e2)
+                        if (inner.length > 0 && inner.charAt(0) != "$" && !isCanonInt(inner)) { inner = "'" + inner + "'" }
+                        expr = expr + "[" + inner + "]"
+                        k = e2 + 1
+                    }
+                } else if (k + 2 < body.length && body.charAt(k) == "-" && body.charAt(k + 1) == ">" && isNameStart(body.charAt(k + 2))) {
+                    var p2 = k + 2
+                    while (p2 < body.length && isNameChar(body.charAt(p2))) { p2++ }
+                    expr = expr + body.substring(k, p2)
+                    k = p2
+                }
+                if (lit != "") { parts.push({s: unescapeDq(lit)}); lit = "" }
+                parts.push({e: compileSnippet(expr)})
+                i = k
+                continue
+            }
+            lit += ch
+            i++
+        }
+        if (lit != "") { parts.push({s: unescapeDq(lit)}) }
+        return parts
+    }
+    function isNameStart(ch) { return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_" }
+    function isNameChar(ch) { return isNameStart(ch) || (ch >= "0" && ch <= "9") }
+    function compileSnippet(src) {
+        var frag = c.parseFrom(c.agrammar, src, "Expression")
+        return c.compile(frag).stack[0]
     }
 
     // ----- string helpers -----
+    // The double-quoted / heredoc escape set. PHP keeps an UNKNOWN escape as BOTH
+    // characters ("\q" is a backslash and a q, two bytes), which is why there is no
+    // default branch that drops the backslash.
+    function unescapeDq(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92 || i + 1 >= s.length) { out += String.fromCharCode(c); i++; continue }
+            var e = s.charAt(i + 1)
+            if (e == "n") { out += "\n"; i += 2; continue }
+            if (e == "t") { out += "\t"; i += 2; continue }
+            if (e == "r") { out += "\r"; i += 2; continue }
+            if (e == "v") { out += String.fromCharCode(11); i += 2; continue }
+            if (e == "e") { out += String.fromCharCode(27); i += 2; continue }
+            if (e == "f") { out += String.fromCharCode(12); i += 2; continue }
+            if (e == "\\") { out += "\\"; i += 2; continue }
+            if (e == "$") { out += "$"; i += 2; continue }
+            if (e == "\"") { out += "\""; i += 2; continue }
+            if (e >= "0" && e <= "7") {
+                var v = 0
+                var n = 0
+                var j = i + 1
+                while (n < 3 && j < s.length && s.charAt(j) >= "0" && s.charAt(j) <= "7") {
+                    v = v * 8 + (s.charCodeAt(j) - 48)
+                    j++
+                    n++
+                }
+                out += String.fromCharCode(v % 256)
+                i = j
+                continue
+            }
+            if (e == "x") {
+                var hv = 0
+                var hn = 0
+                var hj = i + 2
+                while (hn < 2 && hj < s.length && isHexCh(s.charAt(hj))) { hv = hv * 16 + hexVal(s.charAt(hj)); hj++; hn++ }
+                if (hn > 0) { out += String.fromCharCode(hv); i = hj; continue }
+            }
+            if (e == "u" && i + 2 < s.length && s.charAt(i + 2) == "{") {
+                var uv = 0
+                var uj = i + 3
+                var un = 0
+                while (uj < s.length && isHexCh(s.charAt(uj))) { uv = uv * 16 + hexVal(s.charAt(uj)); uj++; un++ }
+                if (un > 0 && uj < s.length && s.charAt(uj) == "}") {
+                    out += codePointStr(uv)
+                    i = uj + 1
+                    continue
+                }
+            }
+            out += "\\" + e
+            i += 2
+        }
+        return out
+    }
+    function isHexCh(ch) { return (ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f") || (ch >= "A" && ch <= "F") }
+    function hexVal(ch) {
+        var cc = ch.charCodeAt(0)
+        if (cc >= 48 && cc <= 57) { return cc - 48 }
+        if (cc >= 97) { return cc - 87 }
+        return cc - 55
+    }
+    function codePointStr(cp) {
+        if (cp < 65536) { return String.fromCharCode(cp) }
+        var off = cp - 65536
+        return String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+    }
     function unescapeSq(s) {
         var out = ""
         var i = 0
@@ -820,13 +1185,74 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: r.b, v: callExt(r.b, "js_neg", [r.v])}
         }
     }
+    // The rest of PHP's binary ladder. The bitwise / shift externals already exist in
+    // the handle runtime; '<>' is PHP's other spelling of '!='.
+    binExt["&"] = "js_band"
+    binExt["|"] = "js_bor"
+    binExt["^"] = "js_bxor"
+    binExt["<<"] = "js_shl"
+    binExt[">>"] = "js_shr"
+    binExt["<>"] = "js_sne"
+    binExt["&="] = "js_band"
+    binExt["|="] = "js_bor"
+    binExt["^="] = "js_bxor"
+    binExt["<<="] = "js_shl"
+    binExt[">>="] = "js_shr"
     emitBin = function(b, op, l, r) {
         if (op == "." || op == ".=") {
             return callExt(b, "js_jadd", [callExt(b, "js_jadd", [emitStr(b, ""), l]), r])
         }
+        // '**' has no external of its own; it is Math.pow, which the handle runtime
+        // already carries (buildMain binds Math into phpmain's scope).
+        if (op == "**" || op == "**=") {
+            var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
+            var powV = callExt(b, "js_get", [mathV, emitStr(b, "pow")])
+            return callExt(b, "js_call", [powV, hUndef, argList(b, [l, r])])
+        }
+        // '<=>' as (l > r) - (l < r): the two comparisons are booleans, and the
+        // subtraction coerces them, so the result is exactly -1 / 0 / 1.
+        if (op == "<=>") {
+            return callExt(b, "js_sub", [callExt(b, "js_gt", [l, r]), callExt(b, "js_lt", [l, r])])
+        }
+        // '$a ??= $b' keeps $a when it is set and not null. The right-hand side is
+        // already evaluated at this point, so - unlike PHP - it is not short-circuited;
+        // a side-effecting right operand of '??=' therefore still runs.
+        if (op == "??=") {
+            return b.NewSelect(truthy(b, callExt(b, "js_seq", [l, hNull])), r,
+                               b.NewSelect(truthy(b, callExt(b, "js_seq", [l, hUndef])), r, l))
+        }
         var v = callExt(b, binExt[op], [l, r])
         if (wraps[op] == 1) { v = intWrap(b, v) }
         return v
+    }
+    // 2 ** 3 ** 2 == 512: the parse is already right-associative (the right operand is
+    // a full UnaryExpr), so the fold only has to apply the operator when one is there.
+    function foldPow(items) {
+        if (items.length == 1) { return items[0] }
+        var base = items[0]
+        var exp = items[1]
+        return function(b) {
+            var rl = base(b)
+            var rr = exp(rl.b)
+            return {b: rr.b, v: emitBin(rr.b, "**", rl.v, rr.v)}
+        }
+    }
+    // ~x is x XOR -1 (two's complement), which needs no external of its own.
+    function makeBitNot(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_bxor", [r.v, emitNum(r.b, -1)])}
+        }
+    }
+    // throw as an EXPRESSION (PHP 8): it never produces a value, so the block it ends
+    // is dead exactly like the throw statement's.
+    function makeThrowExpr(e) {
+        return function(b) {
+            var r = e(b)
+            callExt(r.b, "js_throw", [r.v])
+            r.b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            return {b: deadBlock(), v: hUndef}
+        }
     }
 
     // ----- arrays and associative arrays -----
@@ -871,6 +1297,53 @@ KwInstanceof = "instanceof" KwEnd ;
             }
             return {b: b, v: v}
         }
+    }
+
+    // "$name", "$a[0]", "$map[key]", "$o->prop": PHP's simple interpolation form. The
+    // index text is classified here, exactly as php-interpreter.abnf's makeTplVar does:
+    // a leading '$' is another variable, a canonical integer is an int key, anything
+    // else is a BARE word taken as a string key (that is what "$map[key]" means).
+    function makeTplVar(items) {
+        var name = ""
+        var idx = null
+        var prop = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tvar != undefined) { name = items[i].tvar }
+            else if (items[i].tidx != undefined) { idx = items[i].tidx }
+            else if (items[i].tprop != undefined) { prop = items[i].tprop }
+        }
+        if (idx != null) {
+            var itxt = idx
+            return function(b) {
+                var ov = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+                var kv = anytype
+                if (itxt.charAt(0) == "$") { kv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, itxt)]) }
+                else if (isCanonInt(itxt)) { kv = emitNum(b, parseInt(itxt, 10)) }
+                else { kv = emitStr(b, itxt) }
+                return {b: b, v: callExt(b, "js_pyget", [ov, kv])}
+            }
+        }
+        if (prop != null) {
+            var pn = prop.substring(2)
+            return function(b) {
+                var ov = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+                return {b: b, v: callExt(b, "js_get", [ov, emitStr(b, pn)])}
+            }
+        }
+        return makeVarRef(name)
+    }
+    // A canonical decimal integer: no leading zero, an optional '-'. PHP's array keys
+    // only fold a string to an int in that exact form ("01" stays a string key).
+    function isCanonInt(s) {
+        if (s.length == 0) { return false }
+        var i = 0
+        if (s.charAt(0) == "-") { if (s.length == 1) { return false }; i = 1 }
+        if (s.charAt(i) == "0" && s.length > i + 1) { return false }
+        for (var j = i; j < s.length; j++) {
+            var ch = s.charAt(j)
+            if (ch < "0" || ch > "9") { return false }
+        }
+        return true
     }
 
     // ----- member chains: ->method(args), ->field, [index], (call), ::static -----
@@ -941,6 +1414,29 @@ KwInstanceof = "instanceof" KwEnd ;
     }
 
     // ----- new C(...) -----
+    // Declared defaults are replayed base class FIRST, so a redeclared property in the
+    // subclass wins - PHP's rule. The chain is walked at compile time (classSuper), and a
+    // cycle or an unknown base simply stops the walk.
+    function emitPropDefaults(b, objV, name) {
+        var chain = []
+        var cur = name
+        var guard = 0
+        while (cur != "" && cur != undefined && guard < 64) {
+            if (classProps["$" + cur] == undefined) { break }
+            chain.push(cur)
+            cur = classSuper["$" + cur]
+            guard++
+        }
+        for (var i = chain.length - 1; i >= 0; i--) {
+            var ps = classProps["$" + chain[i]]
+            for (var k = 0; k < ps.length; k++) {
+                var pv = hNull
+                if (ps[k].init != null) { var r = ps[k].init(b); b = r.b; pv = r.v }
+                callExt(b, "js_set", [objV, emitStr(b, ps[k].name), pv])
+            }
+        }
+        return b
+    }
     function makeNew(items) {
         var name = items[0].cls
         var args = items.slice(1)
@@ -948,6 +1444,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            b = emitPropDefaults(b, objV, name)
             var argsV = callExt(b, "js_arr_new", [])
             callExt(b, "js_arr_push", [argsV, objV])
             for (var k = 0; k < args.length; k++) {
@@ -1147,27 +1644,70 @@ KwInstanceof = "instanceof" KwEnd ;
             return b
         }
     }
+    // A property declaration reduced to {name, init}: the name without its '$' (that is
+    // the key "$this->x" reads) and the default-value thunk, or null for a bare 'public
+    // $x;' and for every 'static' property (no static model here).
+    function makeProp(items) {
+        var isStatic = false
+        var pname = ""
+        var init = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].mod != undefined) {
+                if (hasWord(items[i].mod, "static")) { isStatic = true }
+            }
+            else if (typeof items[i] == "string") { pname = items[i].substring(1) }
+            else { init = items[i] }
+        }
+        if (isStatic || pname == "") { return null }
+        return {name: pname, init: init}
+    }
+    function hasWord(s, w) {
+        for (var i = 0; i + w.length <= s.length; i++) {
+            if (s.substring(i, i + w.length) == w) { return true }
+        }
+        return false
+    }
+    // Declared instance-property defaults, by class, plus the extends edge. Both maps are
+    // filled while the tags run and read back at EMIT time (buildMain is the Program tag,
+    // so every class in the program is already recorded when the first `new` is emitted),
+    // which is what lets makeNew replay a base class's defaults without a runtime walk.
+    var classProps = {}
+    var classSuper = {}
     function makeClassStmt(items) {
         var name = items[0]
         var methods = []
+        var props = []
         var hasCtor = false
+        var ext = ""
         for (var i = 1; i < items.length; i++) {
             if (items[i].method != undefined) {
                 methods.push(items[i].method)
                 if (items[i].method.name == "__construct") { hasCtor = true }
             }
+            else if (items[i].ext != undefined) { ext = lastSeg(items[i].ext) }
+            else if (items[i].propdecl != undefined && items[i].propdecl != null) {
+                props.push(items[i].propdecl)
+            }
         }
+        classProps["$" + name] = props
+        classSuper["$" + name] = ext
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            // Single inheritance: the __super chain is what the runtime's method
+            // dispatch (js_mcall / memberCall) walks, so `extends E` is one property.
+            if (ext != "") {
+                callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, ext)])])
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name),
                                       callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
-            if (!hasCtor) {
+            if (!hasCtor && ext == "") {
                 var emptyBody = function(bb) { return bb }
                 var iidx = emitFunc([], emptyBody, true)
                 callExt(b, "js_set", [clsV, emitStr(b, "__construct"),
@@ -1206,6 +1746,77 @@ KwInstanceof = "instanceof" KwEnd ;
         c.popSource()
         return true
     }
+    // ----- the built-in exception hierarchy -----
+    // A namespace-qualified name (\RuntimeException, App\Boom) resolves on its last
+    // segment, which is how the flat, global name model here can see \Exception at all.
+    function lastSeg(s) {
+        var out = s
+        for (var i = 0; i < s.length; i++) {
+            if (s.charCodeAt(i) == 92) { out = s.substring(i + 1) }
+        }
+        return out
+    }
+    // php-interpreter.abnf declares this same set with declBuiltinClass, and the two must
+    // agree: real PHP 8 refuses to throw an object that does not implement Throwable, so a
+    // program that throws anything at all needs `new Exception(...)` to resolve. Only the
+    // two roots carry the methods; every derived class reaches them over __super, which is
+    // the chain the runtime's own dispatch walks.
+    var excRoots = ["Exception", "Error"]
+    var excDerived = [["RuntimeException", "Exception"], ["LogicException", "Exception"],
+                      ["InvalidArgumentException", "LogicException"], ["TypeError", "Error"],
+                      ["ValueError", "Error"], ["DivisionByZeroError", "Error"]]
+    // $this->name = args[idx] when that argument was passed, else the default. PHP's
+    // Exception::__construct($message = "", $code = 0), written out as a branch because
+    // the parameter binding here has no default-value model.
+    function emitExcArg(b, idx, name, dflt) {
+        var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$this")])
+        var argV = callExt(b, "js_arg", [curF.Params[1], handle(idx)])
+        var gotB = curF.NewBlock("")
+        var defB = curF.NewBlock("")
+        var endB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_ne", [argV, hUndef])), gotB, defB)
+        callExt(gotB, "js_set", [thisV, emitStr(gotB, name), argV])
+        gotB.NewBr(endB)
+        callExt(defB, "js_set", [thisV, emitStr(defB, name), dflt(defB)])
+        defB.NewBr(endB)
+        return endB
+    }
+    function emitExcClass(b, name, superName) {
+        var clsV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+        if (superName != "") {
+            callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
+        } else {
+            var ctor = emitFunc([], function(bb) {
+                bb = emitExcArg(bb, 1, "message", function(x) { return emitStr(x, "") })
+                bb = emitExcArg(bb, 2, "code", function(x) { return emitNum(x, 0) })
+                return bb
+            }, true)
+            callExt(b, "js_set", [clsV, emitStr(b, "__construct"),
+                                  callExt(b, "js_closure", [handle(ctor), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "getMessage"),
+                                  callExt(b, "js_closure", [handle(emitExcGetter("message")), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "getCode"),
+                                  callExt(b, "js_closure", [handle(emitExcGetter("code")), curScopeV])])
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+        return b
+    }
+    function emitExcGetter(prop) {
+        return emitFunc([], function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$this")])
+            return retStmt(bb, callExt(bb, "js_get", [thisV, emitStr(bb, prop)]))
+        }, true)
+    }
+    function emitExcClasses(b) {
+        for (var i = 0; i < excRoots.length; i++) { b = emitExcClass(b, excRoots[i], "") }
+        for (var j = 0; j < excDerived.length; j++) {
+            b = emitExcClass(b, excDerived[j][0], excDerived[j][1])
+        }
+        return b
+    }
     function buildMain(items) {
         // The walk of an imported file ends here too: stash its top-level thunks for the
         // real phpmain instead of emitting a second one.
@@ -1221,6 +1832,7 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
+        b = emitExcClasses(b) // Exception / Error and their subclasses
         b = emitImported(b)   // imported files' items, each under its own source
         b = makeSeq(items)(b)
         b.NewRet(handle(0))

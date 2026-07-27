@@ -336,7 +336,9 @@ function finBreaksLoop() {
 }
 check("break-in-finally", finBreaksLoop(), "aa");
 
-class Boom {
+// Must extend Exception: real PHP 8 refuses to throw an object that does not
+// implement Throwable ("Cannot throw objects that do not implement Throwable").
+class Boom extends Exception {
     public $code;
     public function __construct($c) {
         $this->code = $c;
@@ -378,11 +380,13 @@ try {
 check("catch-binding", $caught, 5);
 check("throw-not-taken", risky(2), 4);
 
+// PHP can only throw Throwable objects - 'throw "plain";' is a fatal error, not
+// a value throw. The message is what carries the payload.
 $strCaught = "";
 try {
-    throw "plain";                               // any value can be thrown
+    throw new Exception("plain");
 } catch (Exception $e) {
-    $strCaught = $e;
+    $strCaught = $e->getMessage();
 }
 check("throw-string", $strCaught, "plain");
 
@@ -462,15 +466,17 @@ try {
 }
 check("catch-no-var", $noVar, 42);
 
+// Again: only Throwable objects can be thrown, so the derived value rides in a
+// new exception's message rather than being thrown as a bare string.
 function rethrower() {
     try {
         try {
-            throw "deep";
+            throw new Exception("deep");
         } catch (Exception $e) {
-            throw $e . "er";                     // rethrow a derived value
+            throw new Exception($e->getMessage() . "er");
         }
     } catch (Exception $e2) {
-        return $e2;
+        return $e2->getMessage();
     }
 }
 check("rethrow", rethrower(), "deeper");

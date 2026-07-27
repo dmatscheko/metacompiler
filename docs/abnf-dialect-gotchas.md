@@ -287,6 +287,38 @@ Adding `class` to a `Modifier` production (to allow Swift's `class var`) broke
 declaration out of the shared modifier list, and give members their own
 modifier production instead.
 
+## A top level that EXECUTES as it walks cannot host a conditional branch
+
+Conditional compilation (`#if` / `#else` / `#endif`, and any construct that parses
+several alternative bodies and keeps one) needs every branch to be *collected*,
+not run. In an interpreter grammar whose top level is written as
+
+    TopItem <~~ var t = pop(); t() ~~> = Statement ;
+
+the thunk fires from the TAG, during the walk — so a `#if` whose branches are
+`{ TopItem }` executes EVERY branch, and the symptom is not a parse error but a
+program that runs its `#else` body as well as its `#if` body. The fix is one
+level of indirection: make each item PUSH its thunk (a top-level function
+declaration pushes `function () { registerFun(f) }` rather than registering on
+the spot), and give the item list one wrapper production that runs what it
+finds. The branch rule can then collect `takeAll()` and the selecting tag splices
+only the live branch's items back with repeated `push()`.
+
+Compiler grammars in this tree are already in that shape — `Program <~~
+buildMain(takeAll()) ~~>` — so the same feature is a pure addition there. The
+splice-by-repeated-push trick works wherever the enclosing rule reads its items
+with `takeAll()` (block, class body, switch body, closure body); it does NOT work
+under a rule that pops exactly one, such as the compiler's
+`Statement <~~ push(stmtPos(pop())) ~~>`, which is why a statement-level `#if`
+belongs in the ITEM LIST of `Block` and `Switch` rather than among the
+alternatives of `Statement`.
+
+Two smaller traps from the same work: `"#else"` matches the front of `"#elseif"`
+(order `#elseif` first, or the leftover `if` is read as an if statement), and the
+condition has to be consumed under `:whitespace()` — with the normal whitespace
+rule in force, a `{ AnyCharButNewline }` run still skips the newline in front of
+each character and swallows the rest of the file.
+
 ## Tagging a sub-rule changes how many items its PARENT pops
 
 A rule that contains an untagged sub-rule is quietly relying on that sub-rule
@@ -305,3 +337,33 @@ Related, in the compiler grammars: `Statement` wraps every thunk in `stmtPos`
 for `-trace`/`-cfgraph`. A statement production that pushes a RECORD rather than
 a function must override `stmtPos` to pass non-functions through, or the record
 is wrapped into a function and the feature silently stops working.
+
+## A bare `return` swallows the next line (the missing ASI restricted production)
+
+`if (cond) return` followed by a statement on the next line does not do what it
+says. In real JavaScript `return` is a RESTRICTED PRODUCTION: no line terminator
+may sit between it and its expression, so a newline forces the semicolon. The
+grammars here spell it `Return = KwReturn [ Expression ] [ ";" ]` with no such
+restriction, so
+
+    if (x) return
+    log = "after"
+
+parses as `return (log = "after")` — the assignment is performed AND returned.
+
+Measured against node, which prints `undefined|after`:
+
+    js-interpreter          after|
+    typescript-interpreter  after|
+    metajs-interpreter      after|
+
+This is why it presents as a FROZEN-ONLY bug in tag scripts. Under goja a tag
+script is parsed by real JavaScript and gets correct ASI; under `-frozen` it is
+parsed by the a-grammar frozen from metajs, which has this rule — so the two
+engines genuinely disagree. It surfaced in `c-to-llvm-ir.abnf` as a
+`hasOwn(fields, name)` answering TRUE for a name never added, and a two-field
+struct failing with "duplicate field x", behind a green goja run.
+
+Until the rule carries a no-line-break guard, brace every value-less early
+return: `if (cond) { return }`. `if (cond) return value` is unaffected, which is
+why the valued form is used all over this tree without trouble.

@@ -3,8 +3,9 @@
 IR interpreter and the MetaJS handle runtime (llvm.RunJS).
 
 The subset: top level code that runs in source order (declare before use, no
-hoisting), let/var declarations with an optional type annotation (types are
-parsed and ignored, let is not enforced), functions with LABELLED parameters
+hoisting), let/var declarations with an optional type annotation and an
+optional initializer (types are parsed and ignored, let is not enforced, and an
+uninitialized declaration starts as nil), functions with LABELLED parameters
 (func greet(name: String, from town: String) -> String, called greet(name: x,
 from: y)), default parameter values, variadic parameters, inout parameters,
 @autoclosure, overloading by parameter type, nested functions and nested types,
@@ -43,6 +44,16 @@ first catch wins, an unbound catch binds `error`). defer compiles the rest of
 its block into a js_try whose FINALLY closure is the defer body, so it runs on
 the normal path, on a return and on a throw, and nested defers unwind LIFO.
 The whole program becomes jsmain(env, args) executed in order.
+Conditional compilation (#if / #elseif / #else / #endif, at top level, in a
+block, in a type body, in a closure body and around the cases of a switch) is
+STRUCTURAL: the condition is read as raw text to the end of its line and never
+evaluated, every branch is parsed like ordinary code, and only the first branch
+whose condition is not literally false (or 0) is emitted - which for a real
+condition such as os(macOS), canImport(Foundation) or swift(>=5.7) is always the
+first branch. A declaration made under #if stays visible after the #endif.
+#available and #unavailable compile to true and false; #sourceLocation /
+#error / #warning / #assert are accepted and ignored, and a leading hashbang
+line is skipped.
 
 Not in the subset (accepted structurally and reported as not implemented under
 -warn-unsupported, or simply not parsed): floating point (the runtime is 32-bit
@@ -72,11 +83,68 @@ swift-interpreter.abnf.") ;
 
 // Top level items become statements of jsmain, emitted in source order.
 Program     <~~ buildMain(takeAll()) ~~>
-            = { FunTop | TypeTop | UnsupTop | TopStmt } ;
+            = [ Hashbang ] { TopItem } ;
+TopItem     = PoundIfTop | FunTop | TypeTop | UnsupTop | TopStmt ;
 FunTop      <~~ push(makeFunStmt(pop())) ~~> = [ Modifiers ] FunDecl ;
 TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
 UnsupTop    = [ Modifiers ] UnsupDecl ;
 TopStmt     = Statement ;
+
+// ----- #if / #elseif / #else / #endif conditional compilation -----
+// Structural only: the condition is consumed as raw text to the end of its line
+// and NOT evaluated. Every branch is parsed like ordinary code (so an unlowered
+// construct in an inactive branch is still reported), and exactly one branch is
+// emitted: the first whose condition is not the literal `false` / `0`, which for
+// a real condition like os(macOS) or canImport(Foo) is always the FIRST branch.
+// The kept branch's items are spliced into the enclosing list, so a declaration
+// made under #if is visible after the #endif, as in Swift.
+PoundIfTop  <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+            = PoundIf PoundCond PoundBodyTop { PoundElseIf PoundCond PoundBodyTop }
+              [ PoundElse PoundBodyTop ] PoundEndif ;
+PoundBodyTop <~~ push({branch: takeAll()}) ~~> = { TopItem } ;
+// A statement-level #if lives in the item list of a block (and of a switch body),
+// not in Statement itself, because it can contribute more than one statement -
+// and because Statement wraps exactly one popped thunk in stmtPos.
+PoundIfStmt <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+            = PoundIf PoundCond PoundBodyStmt { PoundElseIf PoundCond PoundBodyStmt }
+              [ PoundElse PoundBodyStmt ] PoundEndif ;
+PoundBodyStmt <~~ push({branch: takeAll()}) ~~> = { PoundIfStmt | Statement } ;
+PoundIfMember <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+            = PoundIf PoundCond PoundBodyMember { PoundElseIf PoundCond PoundBodyMember }
+              [ PoundElse PoundBodyMember ] PoundEndif ;
+PoundBodyMember <~~ push({branch: takeAll()}) ~~> = { Member } ;
+// A #if around case labels of a switch: its branches hold labels AND statements.
+PoundIfCase <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+            = PoundIf PoundCond PoundBodyCase { PoundElseIf PoundCond PoundBodyCase }
+              [ PoundElse PoundBodyCase ] PoundEndif ;
+PoundBodyCase <~~ push({branch: takeAll()}) ~~> = { PoundIfCase | CaseLabel | Statement } ;
+// A #if inside a closure body, whose items are the {stmt} / {expr} lambda records.
+PoundIfLam  <~~ var xs = poundPick(takeAll()); for (var i = 0; i < xs.length; i++) { push(xs[i]) } ~~>
+            = PoundIf PoundCond PoundBodyLam { PoundElseIf PoundCond PoundBodyLam }
+              [ PoundElse PoundBodyLam ] PoundEndif ;
+PoundBodyLam <~~ push({branch: takeAll()}) ~~> = { PoundIfLam | LamStmt } ;
+// #elseif is spelled before #else on purpose: as a PEG, "#else" would match the
+// prefix of "#elseif" and leave a stray `if` to be read as an if statement.
+PoundIf     = "#if" ;
+PoundElseIf = "#elseif" ;
+PoundElse   <~~ push({pcond: "1"}) ~~> = "#else" ;
+PoundEndif  = "#endif" ;
+// The condition: every byte up to (not including) the end of the line, with
+// whitespace skipping switched off so the run cannot cross the line break.
+PoundCond   <~~ push({pcond: up.in}) ~~>
+            = :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
+PoundCondChar = "\x00"..."\x09" | "\x0b" | "\x0c" | "\x0e"..."\U0010ffff" ;
+
+// #sourceLocation(...) / #error(...) / #warning(...): accepted and ignored.
+PoundDirective <~~ push(function(b) { return b }) ~~>
+            = PoundDirName SkipParen ;
+PoundDirName = "#sourceLocation" | "#error" | "#warning" | "#assert" ;
+// The same directives written inside a type body; the class builder ignores the
+// empty member record they push, exactly as it ignores deinit's.
+MemberDirective <~~ push({}) ~~> = PoundDirName SkipParen ;
+// A #! line is only a hashbang on the FIRST line of the file, which is where
+// Program matches it.
+Hashbang    = "#!" :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
 
 // Declaration modifiers and attributes (@objc, @available(...), @escaping) are
 // parsed and ignored.
@@ -141,7 +209,7 @@ TypeList    = Type { "," Type } ;
 // A nested type is matched BEFORE the modifier-led members, so the `class` of
 // `class Inner {}` is read as the declaration keyword and the `class` of
 // `class var kind` as a modifier (ClassDecl fails on the `var` that follows).
-Member      = MemberType | [ MemberModifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+Member      = PoundIfMember | MemberDirective | MemberType | [ MemberModifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
 // The nested declaration's own statement is dropped: a nested type is accepted
 // structurally, not yet reachable as Outer.Inner.
 MemberType  <~~ pop(); push({}) ~~>
@@ -242,7 +310,8 @@ TypeEffects = { ( "async" | "throws" | "rethrows" ) KwEnd } ;
 // Cplx* / Local* / defer / fallthrough forms are recognized but not lowered - they
 // route to notImplStmt (a warning under -warn-unsupported).
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
+            = PoundDirective
+            | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
             | Continue | Fallthrough | Do | Defer | Empty | TupleAssign
             | TrailCallStmt | ExprStmt ;
@@ -352,11 +421,11 @@ PatArgLabel = Id ":" ;
 Wildcard    = "_" KwEnd ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
-            = "{" { Statement } "}" ;
+            = "{" { PoundIfStmt | Statement } "}" ;
 
 Decl        = DeclTuple | DeclPlain ;
 DeclPlain   <~~ push(makeDecl(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] "=" Expression [ ";" ] ;
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] [ ";" ] ;
 // let (a, _, c) = someTuple - a tuple-pattern declaration; _ discards its element.
 DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
@@ -405,7 +474,7 @@ Guard       <~~ push(makeGuard(takeAll())) ~~>
 // identifier); the builder groups statements under the label they follow. break in
 // a case leaves the switch (loop stack), continue reaches the enclosing loop.
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
-            = [ LoopLabel ] KwSwitch SwitchSubj "{" { CaseLabel | Statement } "}" ;
+            = [ LoopLabel ] KwSwitch SwitchSubj "{" { PoundIfCase | CaseLabel | Statement } "}" ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = Expression ;
 CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
@@ -539,7 +608,21 @@ ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
 InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
 Primary     = Paren | Template | FloatLit | IntLit | True | False | Nil
-            | Closure | DictLit | ArrayLit | Shorthand | MultiTrail | Call | VarRef ;
+            | PoundExpr | Closure | DictLit | ArrayLit | Shorthand | MultiTrail | Call | VarRef ;
+
+// The # expression literals. #available / #unavailable answer a constant (this
+// runtime has no platform to compare against, and the guarded code is the code
+// we want to run); the rest are recognized and reported as not implemented.
+// Longest first: "#file" would otherwise match the front of "#fileID".
+PoundExpr   = PoundAvail | PoundUnavail | PoundCallLit | PoundBareLit ;
+PoundAvail  <~~ push(makeConst(true)) ~~>  = "#available" SkipParen ;
+PoundUnavail <~~ push(makeConst(false)) ~~> = "#unavailable" SkipParen ;
+PoundCallLit <~~ push(notImplExpr("# expression", up.pos)) ~~>
+            = ( "#selector" | "#keyPath" | "#colorLiteral" | "#imageLiteral"
+              | "#fileLiteral" | "#externalMacro" ) SkipParen ;
+PoundBareLit <~~ push(notImplExpr("# literal", up.pos)) ~~>
+            = ( "#fileID" | "#filePath" | "#file" | "#function" | "#line"
+              | "#column" | "#dsohandle" ) KwEnd ;
 
 // ( e ) is a pass-through; ( e, e, ... ) is a tuple, recognized and routed to
 // notImplExpr. Element labels (x: e) are accepted and dropped.
@@ -561,7 +644,7 @@ ShortIdx    <~~ push(makeVarRef("$" + up.in)) ~~>
             = "0"..."9" { "0"..."9" } ;
 
 Closure     <~~ push(makeClosure(takeAll())) ~~>
-            = "{" [ ClosureSig ] { LamStmt } "}" ;
+            = "{" [ ClosureSig ] { PoundIfLam | LamStmt } "}" ;
 ClosureSig  <~~ push(makeClosureSig(takeAll())) ~~>
             = [ CaptureList ] "(" [ ClParam { "," ClParam } ] ")" [ FnEffects ] [ "->" Type ] KwIn
             | [ CaptureList ] ClParam { "," ClParam } KwIn
@@ -1583,6 +1666,15 @@ KwContinue  = "continue" KwEnd ;
         var k = 1
         if (items[k] != undefined && items[k].tlabels != undefined) { labels = items[k].tlabels; k++ }
         var init = items[k]
+        // `let v: Int` with no initializer declares the name as nil; the value
+        // arrives by a later assignment (Swift's definite-initialization rule is
+        // a type-checker job, and this front end does not enforce it).
+        if (init == undefined) {
+            return function(b) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hNull])
+                return b
+            }
+        }
         return function(b) {
             var r = init(b)
             b = r.b
@@ -2028,6 +2120,24 @@ KwContinue  = "continue" KwEnd ;
     // is shared, and every declaration statement re-declares the dispatcher, so by
     // the time any call runs the name refers to the complete set.
     var funcOverloads = {}
+    // #if branch selection. items alternates {pcond} and {branch}; the answer is
+    // the item list of the first branch whose condition is not statically false.
+    // Nothing here evaluates os(...) / canImport(...) / swift(>=...): an ordinary
+    // condition is treated as live, so the first branch wins.
+    function poundLive(s) {
+        var t = stripWs(s)
+        if (t == "false") { return false }
+        if (t == "0") { return false }
+        return true
+    }
+    function poundPick(items) {
+        var i = 0
+        while (i + 1 < items.length) {
+            if (poundLive(items[i].pcond)) { return items[i + 1].branch }
+            i = i + 2
+        }
+        return []
+    }
     function makeFunStmt(f) {
         regSig(f.name, f.params)
         var key = "$" + f.name

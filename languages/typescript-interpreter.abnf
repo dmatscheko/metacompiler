@@ -286,7 +286,11 @@ ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 
 // [] or [exprThunk].
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ Expression ] [ ";" ] ;
+            // 'return' is a RESTRICTED PRODUCTION: no line terminator may sit between it
+            // and its expression, so a newline forces the semicolon. Without the guard,
+            // 'if (x) return' + 'log = 1' on the next line parses as 'return (log = 1)',
+            // which performs the assignment AND returns it. node says undefined.
+            = KwReturn [ NoLineBreak Expression ] [ ";" ] ;
 
 // 'break' / 'continue', with or without a label. The label must be on the SAME line -
 // automatic semicolon insertion ends the statement at the line break - which is what the

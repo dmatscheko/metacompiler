@@ -22,9 +22,20 @@ strings are byte strings (strlen counts UTF-8 bytes), '/' yields an int only whe
 division is exact, '.' concatenates, and ==/===/<=>/< follow the PHP 8 comparison
 rules (0 == \"a\" is false).
 
-Not covered yet (routed to notImplemented): static and class-constant access (::),
-inheritance and interfaces, traits, enums, generators, switch, goto, the alternative
-control-structure syntax, static local variables and global constants.
+Classes are covered in full: inheritance and interfaces, class constants (typed and
+self-referential), static properties and methods, self:: / static:: / parent:: with
+late static binding, constructor property promotion, anonymous classes, traits with
+insteadof and as, enums (pure and backed, with cases()/from()/tryFrom()), the magic
+methods (__get __set __isset __call __callStatic __invoke __toString __clone), and
+Foo::class. Also covered: switch with fallthrough, do-while, the alternative
+colon/endXXX control syntax, break N / continue N, goto within a statement list,
+static local variables, global constants and the magic __FUNCTION__ / __CLASS__.
+
+Generators are covered with one deliberate deviation: there are no coroutines in this
+value model, so a generator's body runs to COMPLETION on the first iteration and the
+yielded key/value pairs are then walked. Creation stays lazy and every side effect
+happens exactly once, in order; what is lost is streaming, so an unbounded generator
+does not terminate.
 
 The program runs top to bottom; a self checking program ends with exit(failures).") ;
 
@@ -3422,11 +3433,6 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (types[i] == "Throwable") { return true }
             if (phpIsA(v, types[i])) { return true }
         }
-        // A value that is not part of the Throwable hierarchy at all cannot be
-        // discriminated by type, so every clause accepts it (the behavior this
-        // grammar had before typed catch, and the only sensible reading of a
-        // program that throws a plain object - which real PHP rejects outright).
-        if (!isObj(v) || !classIs(v.__class, "Throwable")) { return true }
         return false
     }
     // The engine's exception hierarchy, far enough for user classes to extend it.

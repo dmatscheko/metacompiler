@@ -22,7 +22,11 @@ function check($name, $got, $want) {
     }
 }
 
-class Boom {
+// Real PHP 8 refuses to throw an object that does not implement Throwable
+// ("Cannot throw objects that do not implement Throwable"), so this has to
+// extend Exception - otherwise the file cannot run under any correct PHP, and
+// the grammar has to keep a fudge that makes every catch clause accept it.
+class Boom extends Exception {
     public $code;
     public function __construct($c) {
         $this->code = $c;
