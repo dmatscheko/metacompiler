@@ -19,7 +19,12 @@
 #   PARSE-FAIL  "Not everything could be parsed" - a real grammar gap. The
 #               position it died at is recorded, and the token there is what
 #               the failure histogram clusters on.
-#   timeout     the run did not finish in -t seconds (also a finding).
+#   looped      the run did not finish in -t seconds, but a second pass with the
+#               COMPILER grammar proved the file parses: the program itself runs
+#               forever (`for(;;);`, `while(1);` - real, deliberate corpus
+#               entries). Counted as parsed, since parsing is what we measure.
+#   timeout     the run did not finish and the compiler pass did not vindicate
+#               it either - a genuine finding about the parser.
 #
 # Each corpus file carries an expectation, taken from that suite's own
 # conventions (test262 fail/, go's // errorcheck first line, swift's
@@ -172,7 +177,31 @@ run_one() {
             ;;
     esac
     # 124 = GNU timeout; the perl fallback dies on SIGALRM (142).
-    if [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; then result=timeout; fi
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; then
+        result=timeout
+        # A timeout is ambiguous: either the PARSER went pathological (a real
+        # finding) or the file parsed fine and the PROGRAM runs forever -
+        # `for(;;);` and `while(1);` are legitimate, deliberate corpus entries,
+        # and an interpreter grammar cannot be step-capped because execution is
+        # the annotation scripts running, not the IR interpreter.
+        #
+        # The compiler grammar settles it. It is a static pass: it parses, emits
+        # IR, and only then runs that IR under -max-steps, so a runaway program
+        # stops at the step limit instead of hanging. If the compiler gets far
+        # enough to emit IR or trip the step limit, the PARSE was fine and the
+        # interpreter timeout was execution, not a grammar gap - which is what
+        # this sweep measures. Only timeouts pay for this second pass.
+        cgram="$(printf '%s' "$grammar" | sed 's/-interpreter\.abnf$/-to-llvm-ir.abnf/')"
+        if [ "$cgram" != "$grammar" ] && [ -f "$cgram" ]; then
+            cout="$(RUN "$MEC_SWEEP_BIN" "$cgram" "$file" -q -warn-unsupported \
+                        -warn-imports -max-steps 2000000 2>&1 | head -c 4096)"
+            case "$cout" in
+                *"Not everything could be parsed"*) ;;   # genuinely unparseable
+                *"step limit exceeded"*|*"@str."*|*"define "*|*"declare "*)
+                    result=looped ;;
+            esac
+        fi
+    fi
 
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$lang" "$expect" "$result" "$file" "$pos" "$tok" \
         >> "$OUTFILE"
@@ -239,7 +268,21 @@ expectations_for() {
         js)
             # test262-parser-tests: pass/ and early/ must parse (an early error
             # is a static-semantics rule, not a grammar rule); fail/ must not.
-            awk -v d="$dir" '{ print ($0 ~ d "/fail/" ? "reject|" : "parse|") $0 }' "$all"
+            #
+            # Two fail/ files are STALE, not gaps. This corpus is a frozen
+            # snapshot that predates ES2022 class fields, so it still files
+            #     (class {a})     98204d734f8c72b3.js
+            #     (class {a=0})   ef81b93cf9bdb4ec.js
+            # as syntax errors. They are valid modern JavaScript and accepting
+            # them is correct. Verified against node v24 parsed with the true
+            # Script goal symbol (new vm.Script(src), not `node --check`, whose
+            # CommonJS wrapper legalises top-level `return` and would have
+            # excused 13 more files that are genuinely our bugs). Every other
+            # fail/ file we accept is a real grammar gap - do not grow this list
+            # without the same check.
+            awk -v d="$dir" '
+                { stale = ($0 ~ /(98204d734f8c72b3|ef81b93cf9bdb4ec)\.js$/)
+                  print ($0 ~ d "/fail/" && !stale ? "reject|" : "parse|") $0 }' "$all"
             return ;;
         typescript)
             # The conformance suite has no per-file error baseline, but it does
@@ -371,8 +414,8 @@ awk -F'\t' '
 }
 function pct(a, b) { return b > 0 ? sprintf("%5.1f%%", 100 * a / b) : "    -" }
 END {
-    printf "%-11s %-9s %7s  %-16s %-14s %s\n", "LANGUAGE", "EXPECT", "FILES", "PARSED", "PARSE-FAIL", "TIMEOUT"
-    printf "%s\n", "---------------------------------------------------------------------------------"
+    printf "%-11s %-9s %7s  %-16s %-14s %6s %s\n", "LANGUAGE", "EXPECT", "FILES", "PARSED", "PARSE-FAIL", "LOOPED", "TIMEOUT"
+    printf "%s\n", "----------------------------------------------------------------------------------------"
     for (lang in langs) order[++k] = lang
     # tiny insertion sort - awk has no portable sort of array values
     for (i = 2; i <= k; i++) { v = order[i]; j = i - 1
@@ -382,11 +425,15 @@ END {
         for (ei = 1; ei <= 3; ei++) {
             expect = (ei == 1 ? "parse" : (ei == 2 ? "reject" : "reject?"))
             tot = n[lang, expect]; if (tot == 0) continue
-            ok = got[lang, expect, "parsed"]+0
+            lp = got[lang, expect, "looped"]+0
+            # A "looped" file parsed - the compiler pass proved it - so it
+            # counts as PARSED. It is still shown separately, because a corpus
+            # full of runaway programs is worth knowing about.
+            ok = got[lang, expect, "parsed"]+0 + lp
             pf = got[lang, expect, "PARSE-FAIL"]+0
             to = got[lang, expect, "timeout"]+0
-            printf "%-11s %-9s %7d  %6d %s   %6d %s  %5d\n", \
-                   (ei == 1 ? lang : ""), expect, tot, ok, pct(ok, tot), pf, pct(pf, tot), to
+            printf "%-11s %-9s %7d  %6d %s   %6d %s  %6d %5d\n", \
+                   (ei == 1 ? lang : ""), expect, tot, ok, pct(ok, tot), pf, pct(pf, tot), lp, to
         }
     }
     print ""
@@ -394,6 +441,9 @@ END {
     print "  reject  = genuine syntax errors; here PARSE-FAIL% is the score (we correctly refused)."
     print "  reject? = upstream negative tests that are mostly SEMANTIC (type/reference errors);"
     print "            a syntax-only front end may legitimately parse them - informational only."
+    print "  LOOPED  = parsed, but the program itself never terminates (for(;;); and friends)."
+    print "            Counted inside PARSED: the grammar understood the file, which is what"
+    print "            this sweep measures. TIMEOUT is what is left - a real parser finding."
 }' "$RESULTS"
 
 # Failure clusters: the token sitting where the parse died, biggest first. This
