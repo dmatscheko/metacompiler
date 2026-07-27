@@ -17,10 +17,13 @@
 //   - main() returns the failure count (exit 0 == full support, verified)
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
-// module import/export, `with`, eval/Function, the standard library (Symbol,
-// Proxy, Promise combinators, JSON, RegExp methods, ...). Async/generator
-// SYNTAX is covered; where running it needs an event loop, functions are only
-// defined and type-checked, never awaited.
+// cross-module import linkage, `with`, eval/Function, the standard library
+// (Symbol, Proxy, Promise combinators, JSON, RegExp methods, ...).
+// Async/generator SYNTAX is covered; where running it needs an event loop,
+// functions are only defined and type-checked, never awaited.
+// `export` IS covered (section 34): an import here runs the referenced file
+// into the shared global scope, so an export is a transparent prefix on its
+// declaration and the specifier forms are no-ops.
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the ECMAScript 2022 specification grammar with the
@@ -688,6 +691,136 @@ function s28() {
     check("nm9", (0.5).toString(2) === "0.1")
 }
 
+// ===== SECTION 29: super as a property =====
+class S29Base {
+    constructor() { this.tag = "base" }
+    get label() { return "B:" + this.tag }
+    get box() { return this.boxv }
+    set label(v) { this.tag = v }
+    kind() { return "base" }
+}
+class S29Sub extends S29Base {
+    constructor() { super(); this.own = 1 }
+    readGet() { return super.label }
+    readComputed(k) { return super[k]() }
+    writeSetter() { super.label = "set"; return this.tag }
+    writePlain() { super.fresh = 5; return this.fresh }
+    compound() { super.n = 3; return super.n }
+    viaPath() { this.boxv = { v: 0 }; super.box.v = 9; return this.boxv.v }
+    destruct() { [super.d] = [11]; return this.d }
+    destructObj() { ({ q: super.e } = { q: 12 }); return this.e }
+    kind() { return "sub<" + super.kind() + ">" }
+}
+function s29() {
+    var s = new S29Sub()
+    check("sup1", s.readGet() === "B:base")
+    check("sup2", s.readComputed("kind") === "base")
+    check("sup3", s.writeSetter() === "set")
+    check("sup4", s.writePlain() === 5)
+    // 'super.n = 3' stores on the RECEIVER; 'super.n' then reads the class chain, which
+    // has no n at all - so the read is undefined, exactly as in node.
+    check("sup5", s.compound() === undefined)
+    check("sup6", s.viaPath() === 9)
+    check("sup7", s.destruct() === 11)
+    check("sup8", s.destructObj() === 12)
+    check("sup9", s.kind() === "sub<base>")
+}
+
+// ===== SECTION 30: the general new forms =====
+class S30C { constructor(x) { this.x = x === undefined ? -1 : x } }
+function S30F() { this.p = 9 }
+var s30ns = { inner: { C: S30C } }
+var s30arr = [S30F]
+function s30mk() { return S30F }
+function s30() {
+    check("new1", new s30ns.inner.C(3).x === 3)
+    check("new2", new S30C().x === -1)
+    check("new3", new S30F().p === 9)
+    check("new4", new (s30mk())().p === 9)
+    check("new5", new s30arr[0]().p === 9)
+    check("new6", (new (class { constructor() { this.z = 8 } })()).z === 8)
+    check("new7", new S30C(2).x + new s30ns.inner.C(5).x === 7)
+    check("new8", new s30ns.inner.C(4) instanceof S30C)
+}
+
+// ===== SECTION 31: a class heritage EXPRESSION =====
+class S31Base { constructor() { this.b = 1 } hi() { return "base" } }
+function s31mixin(B) { return class extends B { hi() { return "mix+" + super.hi() } } }
+class S31M extends s31mixin(S31Base) { hi() { return "M+" + super.hi() } }
+var s31holder = { K: S31Base }
+class S31N extends s31holder.K { }
+function s31() {
+    var m = new S31M()
+    check("her1", m.hi() === "M+mix+base")
+    check("her2", m.b === 1)
+    var n = new S31N()
+    check("her3", n.b === 1)
+    check("her4", n.hi() === "base")
+    var Q = class extends (S31Base) { hi() { return "q" } }
+    check("her5", new Q().hi() === "q")
+    check("her6", new Q().b === 1)
+    check("her7", n instanceof S31Base)
+}
+
+// ===== SECTION 32: a member path as the for-of target =====
+function s32() {
+    var o = { a: 0, b: 0 }
+    var out = ""
+    for (o.a of [1, 2, 3]) { out = out + o.a }
+    check("fom1", out === "123")
+    var arr = [0, 0]
+    for (arr[1] of ["x", "y"]) { out = out + arr[1] }
+    check("fom2", out === "123xy")
+    var p = { k: 0 }
+    for ([p.k] of [[7], [8]]) { out = out + p.k }
+    check("fom3", out === "123xy78")
+    function box() { return o }
+    for (box().b of [5, 6]) { out = out + o.b }
+    check("fom4", out === "123xy7856")
+    var nest = { m: { n: 0 } }
+    for (nest.m.n of [4]) { check("fom5", nest.m.n === 4) }
+}
+
+// ===== SECTION 33: a destructuring catch parameter =====
+function s33() {
+    var r = ""
+    try { throw [1, 2, 3] } catch ([a, ...b]) { r = a + ":" + b.length + ":" + b[1] }
+    check("cat1", r === "1:2:3")
+    try { throw { m: "msg", c: 5 } } catch ({ m, c: code }) { r = m + code }
+    check("cat2", r === "msg5")
+    try { throw [] } catch ([x = 9]) { r = x }
+    check("cat3", r === 9)
+    try { throw { a: { b: 7 } } } catch ({ a: { b } }) { r = b }
+    check("cat4", r === 7)
+    try { throw "plain" } catch (e) { r = e }
+    check("cat5", r === "plain")
+    try { throw "bare" } catch { r = "nobind" }
+    check("cat6", r === "nobind")
+}
+
+// ===== SECTION 34: export, and the debugger no-op =====
+export const S34K = 7
+export function s34f(x) { return x * 2 }
+export class S34C { constructor() { this.v = 3 } }
+var s34side = 0
+export { s34side as s34sideOut }
+export { S34K as s34alias }
+export default class S34D { m() { return "d" } }
+export function s34mark() { s34side = 42; return s34side }
+
+function s34() {
+    check("exp1", S34K === 7)
+    check("exp2", s34f(4) === 8)
+    check("exp3", new S34C().v === 3)
+    check("exp4", s34mark() === 42)
+    check("exp5", new S34D().m() === "d")
+    var n = 0
+    debugger
+    n = n + 1
+    debugger;
+    check("dbg1", n === 1)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -719,6 +852,12 @@ function main() {
     s26() // SECTION-CALL 26
     s27() // SECTION-CALL 27
     s28() // SECTION-CALL 28
+    s29() // SECTION-CALL 29
+    s30() // SECTION-CALL 30
+    s31() // SECTION-CALL 31
+    s32() // SECTION-CALL 32
+    s33() // SECTION-CALL 33
+    s34() // SECTION-CALL 34
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

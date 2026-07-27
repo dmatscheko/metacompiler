@@ -75,11 +75,9 @@ WHAT IS GENUINELY LOWERED beyond JavaScript:
                 keyword erased.
 
 WHAT IS ACCEPTED BUT NOT LOWERED (each aborts with a file:line message, or warns and is
-skipped under -warn-unsupported): a super PROPERTY as a value or an assignment target,
-the general `new` forms (a member-path or parenthesized callee, a nested new, no argument
-list), a class heritage that is not a plain name, for-in/of over a member path, `with`,
-and the value-less export forms ('export {..}', 'export * from', 'export =',
-'export default <expr>'). Deliberate semantic simplifications, because the runtime has no
+skipped under -warn-unsupported): `with`, a logical assignment (&&= ||= ??=) to a bare
+super property, and the assign-nowhere heads the spec calls early errors ('0 = 0',
+'for (0 of 0)'). Deliberate semantic simplifications, because the runtime has no
 model for them: `await` is the identity (there is no promise type and no job queue, so an
 async function is an ordinary function that returns its value), a regular expression is
 matched by the shared engine (abnf/jsrtregex.go plus abnf/jsrtregexjs.go), which is one
@@ -574,9 +572,16 @@ AssignOp    = "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^
 // Assigning THROUGH super - 'super.b = 1', 'super[1] = 2', 'super.c[1] = 2' - inside a
 // method. Target starts at 'NotReserved Id', which refuses the reserved word 'super',
 // so the assignment form cannot come from Target the way every other path does; it is
-// spelled out here on top of the SuperProp value form. Accepted, not lowered.
-SuperAssign <~~ takeAll(); push(notImplExpr("super property assignment", up.pos)) ~~>
-            = SuperProp { TargetSuffix } AssignOp AssignExpr ;
+// spelled out here from the same SuperKey the value form uses.
+//
+// Two shapes come out of it. With no further suffix the store IS the super store, and
+// js_supset performs it: a setter found on the __super chain is invoked with 'this',
+// and otherwise the own property lands on the receiver (which is what [[Set]] with a
+// receiver does). With suffixes - 'super.c[1] = 2' - only the BASE is a super read, and
+// the rest is an ordinary member path, so the whole thing is handed to the normal
+// assignment builder as a ref whose base thunk is the super read.
+SuperAssign <~~ push(makeSuperAssign(takeAll(), up.pos)) ~~>
+            = KwSuper SuperKey { TargetSuffix } AssignOp <~~ push(up.in) ~~> AssignExpr ;
 
 // 'yield e' suspends the running generator and hands e to the pending next(); the
 // expression evaluates to whatever the following next(x) sends back in. 'yield* e'
@@ -783,14 +788,26 @@ NewExpr     <~~ push(makeNew(takeAll())) ~~>
 
 // The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
 // argument list at all - are ACCEPTED but not lowered (makeNew only knows 'new C(args)').
-NewWidened  <~~ takeAll(); push(notImplExpr("new expression", up.pos)) ~~>
+NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
             = KwNew NewCallee [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
-NewCallee   = NewTarget | NewWidened | SuperProp | "(" Expression ")" | VarRef { DotSuffix | IndexSuffix } ;
+// The suffix chain belongs to the CALLEE ('new a.b.C()' constructs a.b.C), and it must
+// not contain a call: 'new f()' is the construction, not a call of f whose result is
+// constructed. Every seed therefore shares one member-only chain.
+NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
+            = NewSeed { DotSuffix | IndexSuffix } ;
+NewSeed     = NewTarget | NewWidened | SuperProp | "(" Expression ")" | VarRef ;
 
 // super.x / super[i] as a VALUE (SuperCall above covers the call forms): accepted,
 // not lowered. Any further suffixes come from the enclosing CallMember.
-SuperProp   <~~ takeAll(); push(notImplExpr("super property", up.pos)) ~~>
-            = KwSuper ( "." Id | "[" Expression "]" ) ;
+SuperProp   <~~ push(makeSuperProp(pop())) ~~>
+            = KwSuper SuperKey ;
+// The key of a super property, as a value thunk wrapped in a marker so that the
+// assignment and destructuring-target forms can pick it out of takeAll().
+SuperKey    = SuperKeyDot | SuperKeyIdx ;
+SuperKeyDot <~~ push({skey: pop()}) ~~>
+            = "." Id <~~ push(makeConst(idName(up.in))) ~~> ;
+SuperKeyIdx <~~ push({skey: pop()}) ~~>
+            = "[" Expression "]" ;
 
 // new.target, async arrows, async/generator function expressions and class expressions
 // are all accepted but not lowered.
@@ -832,8 +849,8 @@ ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
             = NotBindName Id ;
 // A class expression with a heritage EXPRESSION ('class extends f() {}'): only the
 // 'extends Name' form can be lowered, so this stays accepted-but-not-implemented.
-ClassExprWidened <~~ takeAll(); push(notImplExpr("class expression heritage", up.pos)) ~~>
-            = [ "abstract" KwEnd ] KwClass [ NotBindName Id ] [ TypeParams ] KwExtends ClassHeritage
+ClassExprWidened <~~ push(makeClassExpr(takeAll())) ~~>
+            = [ "abstract" KwEnd ] KwClass ClassAnonName [ ClassExprName ] [ TypeParams ] KwExtends ClassExt
               [ KwImplements TypeList ] "{" { ClassMember } "}" ;
 
 // The optional name of a function expression is accepted but not bound.
@@ -951,12 +968,19 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // because an optional keeps what it matched: in 'for (let in a)' - a loop over the
 // ordinary variable named 'let' - KwVar would swallow the 'let' and leave no name.
 ForOf       = ForOfPat | ForOfName | ForOfPath | ForOfNoRef ;
+ForOfPat    = ForOfPatDecl | ForOfPatAssign ;
 // A destructuring loop target: 'for (var [k, v] of pairs)'. The element is matched against
 // the pattern once per iteration, binding its leaves in the loop's own scope.
 // With 'var' the target is a BINDING pattern, without it an ASSIGNMENT pattern - so
 // 'for (var [a] of xs)' declares a while 'for ([o.a] of xs)' writes through a member.
-ForOfPat    <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor [ KwAwait ] "(" ( KwVar DPattern | APattern ) [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
+// The two are separate productions because makeForOf has to know WHICH: the leaves of
+// the assignment form are written, not declared, and the member leaf only exists there.
+ForOfPatDecl <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor [ KwAwait ] "(" KwVar DPattern [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
+ForOfPatAssign <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor [ KwAwait ] "(" ForOfAPat [ TypeAnnot ] ForOfOp Expression ")" NestedStatement ;
+ForOfAPat   <~~ push({apat: pop()}) ~~>
+            = APattern ;
 // 'for await (x of xs)' iterates the same way: without a job queue an async iterable is
 // just an iterable (see Await).
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
@@ -972,11 +996,15 @@ ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // The widened member-path target. At least one suffix is required, otherwise this would
 // be a second, unlowered spelling of the plain-name loop ForOfName already handles.
-ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over a member path", up.pos)) ~~>
+// There is nothing to BIND here, so the target becomes the very same one-leaf assignment
+// pattern '[a.b]' would produce and takes the same write path. TargetTail rather than a
+// plain suffix repetition: the path must END in a member, so 'for (a.b() of xs)' stays
+// the syntax error it is instead of reaching emitRefPath with a call as its last element.
+ForOfPath   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor "(" ForOfPathHead Expression ")" NestedStatement ;
-ForOfPathHead = NotLet ForOfTarget ( KwOf | KwIn ) | ForOfTarget KwIn ;
-ForOfTarget = NotReserved Id ForOfSuffix { ForOfSuffix } ;
-ForOfSuffix = CallSuffix | DotSuffix | IndexSuffix ;
+ForOfPathHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
+ForOfTarget <~~ push(makeForOfTarget(takeAll(), up.pos)) ~~>
+            = NotReserved Id <~~ push(idName(up.in)) ~~> TargetSuffix { TargetSuffix } ;
 // A for-in/of whose loop target is not a reference at all: 'for (0 of 0)',
 // 'for ([0] in 0)', 'for ({a: 0} of 0)'. Like AssignNoRef these PARSE in the spec and are
 // early errors, so they are accepted here and abort at compile time. Also like AssignNoRef
@@ -1063,8 +1091,15 @@ APatElem    <~~ push(withDefault(takeAll())) ~~>
             = APattern [ "=" WExpr ] ;
 ATargetElem <~~ push(withDefault(takeAll())) ~~>
             = ATargetRef [ "=" WExpr ] ;
-ATargetRef  <~~ push({dtype: "target", ref: pop()}) ~~>
+ATargetRef  = ATargetSuper | ATargetPlain ;
+ATargetPlain <~~ push({dtype: "target", ref: pop()}) ~~>
             = TargetParen | TargetSuffixed ;
+// A super PROPERTY as a destructuring target: 'class a extends b { c() { [super.d] = e } }'
+// and '({d: super[e]} = f)' are valid JavaScript. TargetSuffixed starts at 'NotReserved
+// Id', which refuses the reserved word 'super', so the shape needs its own production -
+// exactly the way SuperAssign needs one on top of the SuperProp value form.
+ATargetSuper <~~ push(makeSuperTarget(takeAll())) ~~>
+            = KwSuper SuperKey { DotSuffix | IndexSuffix } ;
 // A name with at least one member suffix - the shape that distinguishes a target element
 // from the plain binding name behind it.
 TargetSuffixed <~~ push(makeTargetRef(takeAll())) ~~>
@@ -1120,13 +1155,22 @@ ClassCore   = [ "abstract" KwEnd ] KwClass NotBindName Id <~~ push({cname: idNam
 // so a class with any other heritage is ACCEPTED here and routed to notImplemented -
 // which means the class is not defined, not that the file is rejected. Tried after
 // ClassDecl so the lowered form always wins.
-ClassDeclWidened <~~ takeAll(); push(notImplStmt("class heritage expression", up.pos)) ~~>
-            = [ "abstract" KwEnd ] KwClass NotBindName Id [ TypeParams ] KwExtends ClassHeritage
+ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
+            = [ "abstract" KwEnd ] KwClass NotBindName Id <~~ push({cname: idName(up.in)}); curClassName = idName(up.in) ~~>
+              [ TypeParams ] KwExtends ClassExt
               [ KwImplements TypeList ] "{" { ClassMember } "}" ;
 // CallMember rather than Expression: 'class a extends b, c {}' is a syntax error, and
 // stopping at the call/member level is what keeps the '{' of the body out of the
 // heritage expression.
 ClassHeritage = CallMember [ TypeArgs ] ;
+// The heritage as a value thunk (see ClassDeclWidened / ClassExprWidened): evaluated once
+// where the class is built and stashed in a synthetic scope slot, so that everything
+// downstream - including the implicit super() of a default constructor - keeps resolving
+// the parent by name. A separate production rather than an alternative inside ClassDecl,
+// because an inline group commits like an ordered choice: 'extends a.b' would match the
+// name 'a' and then die on the '.'.
+ClassExt    <~~ push({extT: pop()}) ~~>
+            = ClassHeritage ;
 
 // The members: a constructor, methods, fields, accessors, static blocks, private and
 // computed members. They are tried longest-form first, so that 'constructor', a method's
@@ -1322,20 +1366,26 @@ ExportBody  = AmbientDecl | NamespaceDecl | Interface | TypeAlias | EnumDecl | D
             | ClassDecl | ClassDeclWidened | AsyncFuncDecl | GenFuncDecl | FuncOverload | FuncDecl
             | Destructure | VarDecl
             | ExportAll | ExportNamed | ExportAssign | ExportDefaultExpr ;
-ExportAll   <~~ takeAll(); push(notImplStmt("re-export (export *)", up.pos)) ~~>
+// The specifier forms only name things that are already declared - an import emits the
+// referenced file into the shared global scope - so they emit nothing at all. 'export ='
+// and 'export default <expr>' bind nothing either, but their expression IS emitted, so
+// its side effects happen.
+ExportAll   <~~ takeAll(); push(function(b) { return b }) ~~>
             = "*" [ KwAs Id ] KwFrom StringLit [ ";" ] ;
-ExportNamed <~~ takeAll(); push(notImplStmt("export clause", up.pos)) ~~>
+ExportNamed <~~ takeAll(); push(function(b) { return b }) ~~>
             = [ KwType ] "{" [ ExportSpec { "," ExportSpec } [ "," ] ] "}" [ KwFrom StringLit ] [ ";" ] ;
 ExportSpec  = [ KwType ] ( Id | StringLit ) [ KwAs ( Id | StringLit ) ] ;
-ExportAssign <~~ takeAll(); push(notImplStmt("export assignment (export =)", up.pos)) ~~>
+ExportAssign <~~ push(makeExportDefault(pop())) ~~>
             = "=" AssignExpr [ ";" ] ;
-ExportDefaultExpr <~~ takeAll(); push(notImplStmt("export default expression", up.pos)) ~~>
+ExportDefaultExpr <~~ push(makeExportDefault(pop())) ~~>
             = AssignExpr [ ";" ] ;
 
-// with, debugger, and async/generator function declarations: accepted, not lowered.
+// with and the async/generator function declarations: accepted, not lowered.
 With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
             = KwWith "(" Expression ")" NestedStatement ;
-Debugger    <~~ push(notImplStmt("debugger statement", up.pos)) ~~>
+// 'debugger' IS implemented: with no debugger attached the spec makes it a no-op,
+// which is exactly what the interpreter half does, so it lowers to nothing at all.
+Debugger    <~~ push(function(b) { return b }) ~~>
             = KwDebugger [ ";" ] ;
 // The declaration forms of the same three: async, async generator and generator.
 AsyncFuncDecl = AsyncGenDecl | AsyncPlainDecl ;
@@ -3468,12 +3518,17 @@ NotFuncHead = :script(~~
     // deterministic, __-prefixed slots skipped), and the same index loop walks that key
     // array, binding name to each key string.
     function makeForOf(items, pos) {
-        var name = items[0]
+        var name = anytype // A name string, or a pattern node.
+        name = items[0]
         var iterT = items[2]
         var bodyT = items[3]
         var isIn = items[1] == "in"
         // The target is either a plain name (a string) or a destructuring pattern node.
         var isPat = typeof name != "string"
+        // An ASSIGNMENT pattern ('for ([o.a] of xs)', 'for (a.b of xs)') writes its leaves
+        // instead of declaring them, which is also the only mode a member leaf works in.
+        var patExt = "js_scope_decl"
+        if (isPat && name.apat != undefined) { patExt = "js_scope_set_or_create"; name = name.apat }
         return function(b) {
             var lbl = takeLabel()
             var saved = curScopeV
@@ -3502,7 +3557,7 @@ NotFuncHead = :script(~~
             var elemV = callExt(bodyB, "js_get", [itB, iB])
             // A pattern target is re-bound per iteration (its leaves are fresh
             // declarations in the loop scope); a plain name reuses its single slot.
-            if (isPat) { bodyB = bindPattern(bodyB, name, elemV, "js_scope_decl") }
+            if (isPat) { bodyB = bindPattern(bodyB, name, elemV, patExt) }
             else { callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), elemV]) }
             loopStack.push({cont: postB, brk: exitB})
             if (lbl != "") { bindLabelCont(lbl, postB) }
@@ -3577,6 +3632,17 @@ NotFuncHead = :script(~~
     }
     function bindPattern(b, pat, valueH, declExt) {
         if (pat.dtype == "hole") { return b }
+        // A super-property leaf ('[super.d] = e'): the store goes through js_supset, which
+        // is a place only an ASSIGNMENT pattern has - 'var [super.d] = e' is a syntax error
+        // in the spec and the declExt test below says the same thing for the member leaf.
+        if (pat.dtype == "supertarget") {
+            if (declExt != "js_scope_set_or_create") {
+                notImpl("destructuring binding with a super target", 0)
+                return b
+            }
+            var st = applyDefault(b, pat, valueH)
+            return emitSuperStore(st.b, pat.sdef, pat.skey, st.v)
+        }
         if (pat.dtype == "target") {
             // A member target is only a target in an ASSIGNMENT pattern; in a binding one
             // ('var [a.b] = c', 'function f([a.b])') there is nothing to declare.
@@ -3752,6 +3818,7 @@ NotFuncHead = :script(~~
     // and the counter that names an anonymous class expression.
     var curClassName = ""
     var classSeq = 0
+    var heritageSeq = 0
 
     // A private name '#x' is stored under the mangled key '__#x'. The '__' prefix is the
     // runtime's marker for an internal slot, which js_keys skips - so a private field stays
@@ -3911,13 +3978,23 @@ NotFuncHead = :script(~~
     // Sort the parsed members and remember the name and the parent. Shared by the
     // declaration and the expression form.
     function makeClassInfo(items) {
-        var info = {name: "", superName: null, fields: [], statics: [], methods: [],
+        var info = {name: "", superName: null, extT: null, fields: [], statics: [], methods: [],
                     accessors: [], sblocks: [], ctor: null}
         for (var i = 0; i < items.length; i++) {
             var m = items[i]
             if (m == undefined || m.skip != undefined) { continue }
             if (m.cname != undefined) { info.name = m.cname; continue }
             if (m.ext != undefined) { info.superName = m.ext; continue }
+            // A heritage EXPRESSION. The value is bound to a synthetic scope name here, at
+            // BUILD time, so that emitClass and emitClassFunc keep resolving the parent by
+            // name exactly as they do for 'extends Name'. The '0' prefix is the same trick
+            // ClassAnonName uses: no source identifier can collide with it.
+            if (m.extT != undefined) {
+                heritageSeq = heritageSeq + 1
+                info.extT = m.extT
+                info.superName = "0heritage" + heritageSeq
+                continue
+            }
             if (m.kind == "ctor") { info.ctor = m }
             else if (m.kind == "sblock") { info.sblocks.push(m) }
             else if (m.kind == "accessor") { info.accessors.push(m) }
@@ -3931,6 +4008,13 @@ NotFuncHead = :script(~~
     // fields, the constructor, the methods and the accessors, and finally run the static
     // blocks (with 'this' bound to the class, which is what a static block's this is).
     function emitClass(b, info) {
+        // A heritage expression is evaluated FIRST, before anything of the class exists,
+        // and bound to the synthetic name makeClassInfo reserved for it.
+        if (info.extT != null) {
+            var hr = info.extT(b)
+            b = hr.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.superName), hr.v])
+        }
         var clsV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
         callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, info.name)])
@@ -4030,8 +4114,21 @@ NotFuncHead = :script(~~
                 return {b: b, v: callExt(b, "js_jsxregexp", [rargs])}
             }
         }
+        return makeNewFrom(function(b) {
+            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])}
+        }, argThunks)
+    }
+    // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the
+    // argument list may be absent entirely ('new C'), which is the same as an empty one.
+    function makeNewGeneral(items) {
+        return makeNewFrom(items[0], items.slice(1))
+    }
+    // The construction itself, shared by both forms.
+    function makeNewFrom(calleeT, argThunks) {
         return function(b) {
-            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+            var cr = calleeT(b)
+            b = cr.b
+            var clsV = cr.v
             var argsV = callExt(b, "js_arr_new", [])
             b = pushArgs(b, argsV, argThunks)
             var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [clsV]), emitStr(b, "function")]))
@@ -4088,6 +4185,96 @@ NotFuncHead = :script(~~
             b = pushArgs(b, argsV, argThunks)
             return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
         }
+    }
+
+    // ----- super as a PROPERTY -----
+    // The three property forms (a read, a store, a destructuring target) all need the
+    // same pair: the class the lookup starts AT - the __super of the defining class,
+    // which is resolved by name at run time exactly as super() and super.m() resolve it -
+    // and the receiver, which travels separately so a getter/setter sees the right 'this'.
+    function emitSuperBase(b, defName) {
+        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, defName)])
+        return {sup: callExt(b, "js_get", [clsV, emitStr(b, "__super")]),
+                self: callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])}
+    }
+    function emitSuperStore(b, defName, keyT, valueH) {
+        var kr = keyT(b)
+        var sb = emitSuperBase(kr.b, defName)
+        callExt(kr.b, "js_supset", [sb.sup, sb.self, kr.v, valueH])
+        return kr.b
+    }
+    // 'super.x' / 'super[i]' as a value.
+    function makeSuperProp(item) {
+        var keyT = item.skey
+        var defName = curClassName
+        return function(b) {
+            var kr = keyT(b)
+            var sb = emitSuperBase(kr.b, defName)
+            return {b: kr.b, v: callExt(kr.b, "js_supget", [sb.sup, sb.self, kr.v])}
+        }
+    }
+    // items = [{skey}, ...targetSuffixes, opString, valueThunk]. With suffixes the store is
+    // an ordinary member store on a base that happens to be a super read, so the normal
+    // assignment builder does all of it. Without them the store itself goes through super.
+    function makeSuperAssign(items, pos) {
+        var n = items.length
+        var valT = items[n - 1]
+        var op = items[n - 2]
+        var path = items.slice(1, n - 2)
+        var keyT = items[0].skey
+        var defName = curClassName
+        if (path.length > 0) {
+            // 'super.a() = 1' is an early error in the spec; the grammar's suffix list
+            // cannot refuse it, so it is refused here rather than emitted as a wrong store.
+            if (path[path.length - 1].kind != "member") {
+                return notImplExpr("assignment to a super call result", pos)
+            }
+            return makeAnyAssign([{base: makeSuperProp(items[0]), path: path}, op, valT])
+        }
+        if (op == "&&=" || op == "||=" || op == "??=") {
+            return notImplExpr("logical assignment to a super property", pos)
+        }
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            var v = r.v
+            var kr = keyT(b)
+            b = kr.b
+            var sb = emitSuperBase(b, defName)
+            if (op != "=") {
+                v = emitBinOp(b, op, callExt(b, "js_supget", [sb.sup, sb.self, kr.v]), v)
+            }
+            callExt(b, "js_supset", [sb.sup, sb.self, kr.v, v])
+            return {b: b, v: v}
+        }
+    }
+    // The member-path target of a for-in/of. The path must END in a member, and this
+    // grammar's TargetSuffix run cannot say so, so 'for (a.b() of xs)' - an early error in
+    // the spec - is refused here rather than reaching emitRefPath with a call as its last
+    // element.
+    function makeForOfTarget(items, pos) {
+        var ref = makeTargetRef(items)
+        if (ref.path[ref.path.length - 1].kind != "member") {
+            notImpl("for-in/of over a call result", pos)
+            return {apat: {dtype: "hole"}}
+        }
+        return {apat: {dtype: "target", ref: ref}}
+    }
+    // The destructuring-target form of a super property (see ATargetSuper). A bare
+    // 'super.d' is its own leaf kind, which bindPattern stores through js_supset; with
+    // further suffixes ('[super.d[0]] = e') only the base is a super read and the rest is
+    // an ordinary member path, so it degrades to the leaf every other member target uses.
+    function makeSuperTarget(items) {
+        var path = items.slice(1)
+        if (path.length > 0) {
+            return {dtype: "target", ref: {base: makeSuperProp(items[0]), path: path}}
+        }
+        return {dtype: "supertarget", skey: items[0].skey, sdef: curClassName}
+    }
+    // 'export default <expression>' / 'export = <expression>': the value is not bound
+    // anywhere, but the expression is emitted, so its side effects happen.
+    function makeExportDefault(t) {
+        return function(b) { return t(b).b }
     }
 
     // ================= TypeScript-only lowering =================

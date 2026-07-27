@@ -24,7 +24,7 @@
 // point is that the grammar must parse it and the compiler must accept it.
 //
 // Deliberately out of scope (not syntax, or unrunnable in this harness):
-// import/export modules, triple-slash directives, JSX, ambient declarations
+// cross-module import linkage, triple-slash directives, JSX, ambient declarations
 // ('declare', except the single println shim in SECTION 20 that makes this
 // file typecheck standalone under tsc), and the standard library (only the
 // lib types that async/generator signatures force: Promise, Generator).
@@ -621,6 +621,142 @@ function s22(): void {
     check("val18", String([1, 2, 3].slice(-2)) === "2,3" && String("a,b".split(",")) === "a,b");
 }
 
+// ===== SECTION 23: super as a property =====
+class S23Base {
+    tag: string;
+    boxv: any;
+    n: any;
+    fresh: any;
+    d: any;
+    e: any;
+    constructor() { this.tag = "base"; }
+    get label(): string { return "B:" + this.tag; }
+    set label(v: string) { this.tag = v; }
+    get box(): any { return this.boxv; }
+    kind(): string { return "base"; }
+}
+class S23Sub extends S23Base {
+    own: number;
+    constructor() { super(); this.own = 1; }
+    readGet(): string { return super.label; }
+    readComputed(k: string): string { return (super[k] as any).call(this); }
+    writeSetter(): string { super.label = "set"; return this.tag; }
+    writePlain(): any { super.fresh = 5; return this.fresh; }
+    compound(): any { super.n = 3; return super.n; }
+    viaPath(): any { this.boxv = { v: 0 }; super.box.v = 9; return this.boxv.v; }
+    destruct(): any { [super.d] = [11]; return this.d; }
+    destructObj(): any { ({ q: super.e } = { q: 12 }); return this.e; }
+    kind(): string { return "sub<" + super.kind() + ">"; }
+}
+function s23(): void {
+    const s = new S23Sub();
+    check("sup1", s.readGet() === "B:base");
+    check("sup2", s.readComputed("kind") === "base");
+    check("sup3", s.writeSetter() === "set");
+    check("sup4", s.writePlain() === 5);
+    // 'super.n = 3' stores on the RECEIVER; 'super.n' then reads the class chain, which
+    // has no n at all - so the read is undefined, exactly as in node.
+    check("sup5", s.compound() === undefined);
+    check("sup6", s.viaPath() === 9);
+    check("sup7", s.destruct() === 11);
+    check("sup8", s.destructObj() === 12);
+    check("sup9", s.kind() === "sub<base>");
+}
+
+// ===== SECTION 24: the general new forms =====
+class S24C { x: number; constructor(x?: number) { this.x = x === undefined ? -1 : x; } }
+function S24F(this: any): void { this.p = 9; }
+const s24ns = { inner: { C: S24C } };
+const s24arr: any[] = [S24F];
+function s24mk(): any { return S24F; }
+function s24(): void {
+    check("new1", new s24ns.inner.C(3).x === 3);
+    check("new2", new S24C().x === -1);
+    check("new3", new (S24F as any)().p === 9);
+    check("new4", new (s24mk())().p === 9);
+    check("new5", new s24arr[0]().p === 9);
+    check("new6", (new (class { z: number; constructor() { this.z = 8; } })()).z === 8);
+    check("new7", new S24C(2).x + new s24ns.inner.C(5).x === 7);
+    check("new8", new s24ns.inner.C(4) instanceof S24C);
+}
+
+// ===== SECTION 25: a class heritage EXPRESSION =====
+class S25Base { b: number; constructor() { this.b = 1; } hi(): string { return "base"; } }
+function s25mixin(B: any): any { return class extends B { hi(): string { return "mix+" + super.hi(); } }; }
+class S25M extends s25mixin(S25Base) { hi(): string { return "M+" + super.hi(); } }
+const s25holder = { K: S25Base };
+class S25N extends s25holder.K { }
+function s25(): void {
+    const m = new S25M();
+    check("her1", m.hi() === "M+mix+base");
+    check("her2", (m as any).b === 1);
+    const n = new S25N();
+    check("her3", n.b === 1);
+    check("her4", n.hi() === "base");
+    const Q = class extends (S25Base) { hi(): string { return "q"; } };
+    check("her5", new Q().hi() === "q");
+    check("her6", new Q().b === 1);
+    check("her7", n instanceof S25Base);
+}
+
+// ===== SECTION 26: a member path as the for-of target =====
+function s26(): void {
+    const o: any = { a: 0, b: 0 };
+    let out = "";
+    for (o.a of [1, 2, 3]) { out = out + o.a; }
+    check("fom1", out === "123");
+    const arr: any[] = [0, 0];
+    for (arr[1] of ["x", "y"]) { out = out + arr[1]; }
+    check("fom2", out === "123xy");
+    const p: any = { k: 0 };
+    for ([p.k] of [[7], [8]]) { out = out + p.k; }
+    check("fom3", out === "123xy78");
+    function box(): any { return o; }
+    for (box().b of [5, 6]) { out = out + o.b; }
+    check("fom4", out === "123xy7856");
+    const nest: any = { m: { n: 0 } };
+    for (nest.m.n of [4]) { check("fom5", nest.m.n === 4); }
+}
+
+// ===== SECTION 27: a destructuring catch parameter =====
+function s27(): void {
+    let r: any = "";
+    try { throw [1, 2, 3]; } catch ([a, ...b]) { r = a + ":" + b.length + ":" + b[1]; }
+    check("cat1", r === "1:2:3");
+    try { throw { m: "msg", c: 5 }; } catch ({ m, c: code }) { r = m + code; }
+    check("cat2", r === "msg5");
+    try { throw []; } catch ([x = 9]) { r = x; }
+    check("cat3", r === 9);
+    try { throw { a: { b: 7 } }; } catch ({ a: { b } }) { r = b; }
+    check("cat4", r === 7);
+    try { throw "plain"; } catch (e) { r = e; }
+    check("cat5", r === "plain");
+    try { throw "bare"; } catch { r = "nobind"; }
+    check("cat6", r === "nobind");
+}
+
+// ===== SECTION 28: export, and the debugger no-op =====
+export const S28K: number = 7;
+export function s28f(x: number): number { return x * 2; }
+export class S28C { v: number; constructor() { this.v = 3; } }
+let s28side = 0;
+export { s28side as s28sideOut };
+export { S28K as s28alias };
+export default class S28D { m(): string { return "d"; } }
+export function s28mark(): number { s28side = 42; return s28side; }
+function s28(): void {
+    check("exp1", S28K === 7);
+    check("exp2", s28f(4) === 8);
+    check("exp3", new S28C().v === 3);
+    check("exp4", s28mark() === 42);
+    check("exp5", new S28D().m() === "d");
+    let n = 0;
+    debugger
+    n = n + 1;
+    debugger;
+    check("dbg1", n === 1);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -646,6 +782,12 @@ function main(): number {
     s20(); // SECTION-CALL 20
     s21(); // SECTION-CALL 21
     s22(); // SECTION-CALL 22
+    s23(); // SECTION-CALL 23
+    s24(); // SECTION-CALL 24
+    s25(); // SECTION-CALL 25
+    s26(); // SECTION-CALL 26
+    s27(); // SECTION-CALL 27
+    s28(); // SECTION-CALL 28
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

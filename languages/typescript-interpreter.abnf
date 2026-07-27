@@ -88,8 +88,8 @@ assignment, prefix and postfix ++/--, the ternary and comma operators, || && and
 < > <= >= in instanceof + - * / % ** | ^ & << >> >>> and unary - + ! ~ typeof void delete.
 
 Deliberately out of the subset (ACCEPTED and reported under -warn-unsupported, so the file
-is not rejected): 'with', a class heritage that is not a plain name, super as a value,
-the general 'new' forms, and a destructuring catch binding.
+is not rejected): 'with', and a for-in/of head that is not a reference at all
+('for (0 of 0)' - an early error in the spec, which this grammar has no pass for).
 Prototypes and the standard library beyond the methods listed above are not modelled.
 
 Every tag composes a small JS closure (a 'thunk') out of the thunks of its children.
@@ -413,11 +413,17 @@ LogicalAssign <~~ push(makeLogicalAssign(takeAll())) ~~>
 // Assigning THROUGH super - 'super.b = 1', 'super[1] = 2', 'super.c[1] = 2' - inside a
 // method. Target starts at 'NotReserved Id', which refuses the reserved word 'super',
 // so the assignment form cannot come from Target the way every other path does; it is
-// spelled out here on top of the SuperProp value form. Accepted, not lowered.
-SuperAssign <~~ takeAll(); push(notImplExpr("super property assignment", up.pos)) ~~>
-            = SuperProp { CallSuffix | DotSuffix | IndexSuffix }
+// spelled out here from the same SuperKey the value form uses.
+//
+// With no further suffix the store IS the super store: a setter found on the __super
+// chain of the DEFINING class runs with 'this', and otherwise the own property lands on
+// the receiver, which is what [[Set]] with a receiver does. With suffixes only the base
+// is a super read and the rest is an ordinary member path, so it degrades to exactly the
+// reference LhsAssign builds ({prim, path}).
+SuperAssign <~~ push(makeSuperAssign(takeAll(), up.pos)) ~~>
+            = KwSuper SuperKey { CallSuffix | DotSuffix | IndexSuffix }
               ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
-              | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) AssignExpr ;
+              | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
 // 'yield e' suspends the generator and hands e out; 'yield* xs' DELEGATES, yielding
 // every element of xs one at a time. The value of a yield expression is what the next
@@ -649,20 +655,36 @@ TypeAssertion = "<" Type ">" UnaryExpr ;
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
             = KwNew NotReserved Id <~~ push({cls: up.in}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
-// The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
-// argument list at all - are ACCEPTED but not lowered (makeNew only knows 'new C(args)').
-NewWidened  <~~ takeAll(); push(notImplExpr("new expression", up.pos)) ~~>
+// The general 'new' forms: a member-path or parenthesized callee ('new a.b.C()',
+// 'new (mk())()'), a nested 'new', and 'new C' with no argument list at all. The callee
+// is an arbitrary VALUE here rather than a name, which is the only thing that separates
+// this from NewExpr above - so makeNewFrom does the whole construction for both, and
+// NewExpr is kept only because a bare name resolves without evaluating a thunk (and can
+// name the class in its failure message).
+NewWidened  <~~ push(makeNewGeneral(takeAll())) ~~>
             = KwNew NewCallee [ TypeArgs ] [ "(" [ Arg { "," Arg } [ "," ] ] ")" ] ;
 // The callee of a 'new': anything a member expression can start with. 'new ["b"]' and
 // 'new function(){}' are as legal as 'new a.b()', so the literal and function forms
-// belong here too.
-NewCallee   = NewTarget | NewWidened | SuperProp | ImportCall | "(" Expression ")" | FunctionExpr | ClassExpr
-            | TemplateLit | ArrayLit | ObjectLit | VarRef { DotSuffix | IndexSuffix } ;
+// belong here too. The suffix chain belongs to the CALLEE and must not contain a call:
+// 'new f()' constructs f, it does not construct the result of calling f.
+NewCallee   <~~ push(foldCallMember(takeAll())) ~~>
+            = NewSeed { DotSuffix | IndexSuffix } ;
+NewSeed     = NewTarget | NewWidened | SuperProp | ImportCall | "(" Expression ")" | FunctionExpr | ClassExpr
+            | TemplateLit | ArrayLit | ObjectLit | VarRef ;
 
-// super.x / super[i] as a VALUE (SuperCall above covers the call forms): accepted,
-// not lowered. Any further suffixes come from the enclosing CallMember.
-SuperProp   <~~ takeAll(); push(notImplExpr("super property", up.pos)) ~~>
-            = KwSuper ( "." Id | "[" Expression "]" ) ;
+// super.x / super[i] as a VALUE (SuperCall above covers the call forms). The lookup
+// starts at the superclass of the DEFINING class - the __class__ the class body binds,
+// exactly as super() and super.m() resolve it - and walks __super from there, invoking a
+// getter with 'this'. Any further suffixes come from the enclosing CallMember.
+SuperProp   <~~ push(makeSuperProp(pop())) ~~>
+            = KwSuper SuperKey ;
+// The key of a super property, as a value thunk wrapped in a marker so that the
+// assignment and destructuring-target forms can pick it out of takeAll().
+SuperKey    = SuperKeyDot | SuperKeyIdx ;
+SuperKeyDot <~~ push({skey: pop()}) ~~>
+            = "." Id <~~ push(makeConst(up.in)) ~~> ;
+SuperKeyIdx <~~ push({skey: pop()}) ~~>
+            = "[" Expression "]" ;
 
 // There is no event loop in this interpreter, so an ASYNC function is an ordinary
 // function that runs to completion synchronously and 'await' is the identity on its
@@ -693,12 +715,12 @@ ClassExpr   <~~ push(makeClassExprValue(takeAll())) ~~>
               "{" { ClassMember } "}" ;
 ClassExprName <~~ push({cname: up.in}) ~~>
             = NotBindName Id ;
-// Only 'extends Name' can be lowered (the parent is resolved by name), so a class
-// expression with any other heritage is ACCEPTED and routed to notImplemented - the same
-// split ClassDecl / ClassDeclWidened makes for the declaration form. Tried after
-// ClassExpr, so the lowered shape always wins.
-ClassExprWidened <~~ takeAll(); push(notImplExpr("class heritage expression", up.pos)) ~~>
-            = ClassDecorators [ KwAbstract ] KwClass [ NotBindName Id ] [ TypeParams ] KwExtends ClassHeritage [ TypeArgs ]
+// A class expression whose heritage is an EXPRESSION ('class extends mixin(Base) {}').
+// Same builder as ClassExpr: the only difference is that the parent arrives as a value
+// thunk, evaluated once when the class is built, instead of as a name. Tried after
+// ClassExpr, so the plain 'extends Name' shape always wins.
+ClassExprWidened <~~ push(makeClassValue(takeAll())) ~~>
+            = ClassDecorators [ KwAbstract ] KwClass [ ClassExprName ] [ TypeParams ] KwExtends ClassExt [ TypeArgs ]
               [ KwImplements TypeList ] "{" { ClassMember } "}" ;
 
 // The optional name of a function expression is accepted but not bound.
@@ -828,9 +850,13 @@ TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
 // 'for await (x of xs)' is the async iteration form. Without an event loop each element
 // is already settled, so awaiting it is the identity and the loop is the ordinary for-of
 // (see makeAwait); the keyword is therefore simply allowed in the header.
-ForOf       = ForOfPattern | ForOfName | ForOfPath ;
+ForOf       = ForOfPattern | ForOfAPattern | ForOfName | ForOfMember | ForOfPath ;
 ForOfPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" [ KwVar ] DPattern ForOfOp Expression ")" NestedStatement ;
+// The ASSIGNMENT-pattern form: 'for ([o.a] of xs)' writes through places that already
+// exist, so its leaves may be member targets, which a binding DPattern may not have.
+ForOfAPattern <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" APattern ForOfOp Expression ")" NestedStatement ;
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
             = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" ForOfHead Expression ")" NestedStatement ;
 // The head pushes the loop name and then the operator. A target that starts with 'let'
@@ -846,11 +872,19 @@ ForOfInit   <~~ pop() ~~> = "=" AssignExpr ;
 ForOfBare   = NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
+// A MEMBER PATH as the loop target: 'for (a.b of xs)', 'for (a(x)[1] in d)'. There is
+// nothing to bind, so the target becomes the one-leaf reference '[a.b]' would produce and
+// takes the same write path. LhsSuffixes is what makes the path end in a member, so
+// 'for (f() of xs)' stays the syntax error it is and falls through to ForOfPath.
+ForOfMember <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor <~~ push({label: takeLabel()}) ~~> [ KwAwait ] "(" ForOfMemberHead Expression ")" NestedStatement ;
+ForOfMemberHead = NotLet ForOfTarget ForOfOp | ForOfTarget ForInOp ;
+ForOfTarget <~~ push({dtype: "ref", ref: makeTargetRef(takeAll())}) ~~>
+            = NotReserved Id <~~ push(up.in) ~~> LhsSuffixes ;
 // The widened loop target: any LeftHandSideExpression, which is what the spec actually
-// puts there - 'for (a.b in c)', 'for (a(x)[1] of d)', and the assign-nowhere shapes
-// 'for (0 of 0)' and 'for ([0] in 0)' that must PARSE and only then fail static
-// semantics. There is no name to bind, so the loop is accepted and not lowered. Tried
-// after ForOfPattern and ForOfName, which lower the shapes they understand.
+// puts there - the assign-nowhere shapes 'for (0 of 0)' and 'for ([0] in 0)' that must
+// PARSE and only then fail static semantics. There is no place to write, so the loop is
+// accepted and not lowered. Tried after every form that lowers.
 ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over an expression target", up.pos)) ~~>
             = KwFor [ KwAwait ] "(" ForOfPathHead Expression ")" NestedStatement ;
 ForOfPathHead = NotLet CallMember ( KwOf | KwIn ) | CallMember KwIn ;
@@ -945,8 +979,17 @@ AElemTarget <~~ push(withDefault(takeAll())) ~~>
 ATarget     = APattern | ATargetRef ;
 // The leaf. A bare name is just a Target with an empty path, which bindPatternMode
 // assigns to exactly like a name leaf - so the one production covers both.
-ATargetRef  <~~ push({dtype: "ref", ref: pop()}) ~~>
+ATargetRef  = ATargetSuper | ATargetPlain ;
+ATargetPlain <~~ push({dtype: "ref", ref: pop()}) ~~>
             = Target ;
+// A super PROPERTY as a destructuring target: 'class a extends b { c() { [super.d] = e } }'
+// and '({d: super[e]} = f)' are valid JavaScript. Target starts at 'NotReserved Id', which
+// refuses the reserved word 'super', so the shape needs its own production - exactly the
+// way SuperAssign needs one on top of the SuperProp value form. makeSuperTarget produces
+// the same two shapes SuperAssign does: a bare 'super.d' leaf writes through the super
+// chain, while 'super.d[0]' is an ordinary member path whose BASE is a super read.
+ATargetSuper <~~ push(makeSuperTarget(takeAll())) ~~>
+            = KwSuper SuperKey { DotSuffix | IndexSuffix } ;
 
 // A default value and a computed key are an AssignExpr WITHOUT the yield form: a
 // pattern is a binding position, and '{x: y = yield 3}' is a syntax error there even
@@ -961,12 +1004,18 @@ TryStmt     <~~ push(excTry(takeAll())) ~~>
             = KwTry TryBody ( CatchClause [ FinallyClause ] | FinallyClause ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
-CatchClause <~~ push(excCatch(takeAll())) ~~>
-            = KwCatch [ "(" ( NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] | CatchPattern [ TypeAnnot ] ) ")" ] Block ;
-// A destructuring catch binding is accepted but not lowered: excCatch binds ONE name to
-// the thrown value, so a pattern has no place to go there. It pushes a placeholder name
-// (which no source identifier can spell) to keep the clause the shape excCatch expects.
-CatchPattern <~~ takeAll(); push("(pattern)"); notImpl("destructuring catch binding", up.pos) ~~>
+CatchClause = CatchNamed | CatchDestruct | CatchBare ;
+CatchNamed  <~~ push(excCatch(takeAll())) ~~>
+            = KwCatch "(" NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] ")" Block ;
+CatchBare   <~~ push(excCatch(takeAll())) ~~>
+            = KwCatch Block ;
+// A destructuring catch binding ('catch ([a, ...b])'). excCatch binds exactly ONE name,
+// so the pattern travels as a BINDER FUNCTION instead (excCatchBind): interp-core calls
+// it in the freshly pushed catch scope, where bindPattern declares every leaf. Keeping
+// the pattern machinery on this side is what lets the shared file stay ignorant of it.
+CatchDestruct <~~ push(excCatchBind(takeAll())) ~~>
+            = KwCatch "(" CatchPattern [ TypeAnnot ] ")" Block ;
+CatchPattern <~~ push(makeCatchBinder(pop())) ~~>
             = DPattern ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
@@ -1004,14 +1053,18 @@ Decorator   <~~ push(foldCallMember(takeAll())) ~~>
             = "@" ( "(" Expression ")" | VarRef ) { DotSuffix } [ TypeArgs ] [ CallSuffix ] ;
 
 // The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
-// 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. Only the
-// 'extends Name' form above can be lowered (makeClassStmt resolves the parent by name),
-// so a class with any other heritage is ACCEPTED here and routed to notImplemented -
-// which means the class is not defined, not that the file is rejected. Tried after
-// ClassDecl so the lowered form always wins.
-ClassDeclWidened <~~ takeAll(); push(notImplStmt("class heritage expression", up.pos)) ~~>
-            = ClassDecorators [ KwAbstract ] KwClass NotBindName Id [ TypeParams ] KwExtends ClassHeritage [ TypeArgs ]
+// 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. The plain
+// 'extends Name' form above resolves the parent by NAME; every other shape arrives here
+// as a value thunk, evaluated exactly once when the class is built. It is a separate
+// production rather than an alternative inside ClassDecl because an inline group commits
+// like an ordered choice - 'extends a.b' would match the name 'a' and then die on the
+// '.', never reaching the expression alternative. Tried after ClassDecl.
+ClassDeclWidened <~~ push(makeClassStmt(takeAll())) ~~>
+            = ClassDecorators [ KwAbstract ] KwClass NotBindName Id <~~ push({cname: up.in}) ~~>
+              [ TypeParams ] KwExtends ClassExt [ TypeArgs ]
               [ KwImplements TypeList ] "{" { ClassMember } "}" ;
+ClassExt    <~~ push({extT: pop()}) ~~>
+            = ClassHeritage ;
 // CallMember rather than Expression: 'class a extends b, c {}' is a syntax error, and
 // stopping at the call/member level is what keeps the '{' of the body out of the
 // heritage expression.
@@ -1214,13 +1267,17 @@ ExportBody  = Statement ;
 // 'export default <decl>' still declares; 'export default <expr>' has no name to bind and
 // is accepted but not lowered.
 ExportDefault = ClassDecl | ClassDeclWidened | AsyncFuncDecl | GenFuncDecl | FuncDecl | FuncOverload | InterfaceDecl | ExportDefaultExpr ;
-ExportDefaultExpr <~~ takeAll(); push(notImplStmt("export default expression", up.pos)) ~~>
+// 'export default <expression>' and 'export = <expression>' bind nothing (there is no
+// default-import binding in this module model), but the expression is EVALUATED, so its
+// side effects happen. The specifier forms only name things that are already declared -
+// an import runs the referenced file into the shared global scope - so they are no-ops.
+ExportDefaultExpr <~~ push(makeExportDefault(pop())) ~~>
             = AssignExpr [ ";" ] ;
-ExportAll   <~~ takeAll(); push(notImplStmt("re-export (export *)", up.pos)) ~~>
+ExportAll   <~~ takeAll(); push(function() { return undefined }) ~~>
             = "*" [ KwAs SpecName ] KwFrom ModPath [ ImportAttrs ] [ ";" ] ;
-ExportNamed <~~ takeAll(); push(notImplStmt("export clause", up.pos)) ~~>
+ExportNamed <~~ takeAll(); push(function() { return undefined }) ~~>
             = [ KwType ] "{" [ ExportSpec { "," ExportSpec } [ "," ] ] "}" [ KwFrom ModPath [ ImportAttrs ] ] [ ";" ] ;
-ExportAssign <~~ takeAll(); push(notImplStmt("export assignment (export =)", up.pos)) ~~>
+ExportAssign <~~ push(makeExportDefault(pop())) ~~>
             = "=" AssignExpr [ ";" ] ;
 // The LOCAL name of an export specifier is a reference to a binding, so it is guarded
 // like every other reference position: 'export { if }' and 'export { default }' name no
@@ -4167,6 +4224,14 @@ NotFuncHead = :script(~~
             }
             return
         }
+        // A super-property leaf ('[super.d] = e'): the write goes through the super chain,
+        // which is a place only an ASSIGNMENT pattern has - 'var [super.d] = e' is a
+        // syntax error in the spec, so a declaring walk refuses it.
+        if (pat.dtype == "supertarget") {
+            if (decl) { fail("destructuring binding with a super target") }
+            superSet(pat.skey(), v)
+            return
+        }
         if (v == undefined || v == null) fail("cannot destructure " + v)
         if (pat.dtype == "arr") {
             for (var i = 0; i < pat.elems.length; i++) { bindPatternMode(pat.elems[i], v[i], decl) }
@@ -4257,7 +4322,7 @@ NotFuncHead = :script(~~
 
     // A constructor closure: binds this = arguments[0], runs (for a default subclass ctor)
     // the implicit no-argument super, then the field initializers, then the body.
-    function makeCtorClosure(params, bodyT, fields, defScopes, superName, isDefault) {
+    function makeCtorClosure(params, bodyT, fields, defScopes, hasSuper, isDefault) {
         var env = defScopes.slice()
         return function() {
             var self = arguments[0]
@@ -4279,8 +4344,11 @@ NotFuncHead = :script(~~
                 scopePut(self, pp.pname, sc[pp.pname])
                 trackKey(self, pp.pname)
             }
-            if (isDefault && superName != null) {
-                var supCls = getVar(superName)
+            // The implicit 'super()' of a default constructor. The parent is read off the
+            // DEFINING class rather than resolved by name, which is what lets a heritage
+            // EXPRESSION ('class extends mixin(B) {}') have a default constructor too.
+            if (isDefault && hasSuper) {
+                var supCls = getVar("__class__").__super
                 supCls.__ctor.apply(undefined, [self])
             }
             for (var k = 0; k < fields.length; k++) {
@@ -4390,11 +4458,13 @@ NotFuncHead = :script(~~
     function makeClassValue(items) {
         var name = ""
         var superName = null
+        var superT = null // A heritage EXPRESSION, evaluated once per class build.
         var members = []
         for (var i = 0; i < items.length; i++) {
             if (items[i] == undefined) { continue }
             if (items[i].cname != undefined) { name = items[i].cname }
             else if (items[i].ext != undefined) { superName = items[i].ext }
+            else if (items[i].extT != undefined) { superT = items[i].extT }
             else if (items[i].cdecs != undefined) { continue } // The class decorators: makeClassStmt's business.
             else if (items[i].skip != undefined) { continue }
             else { members.push(items[i]) }
@@ -4417,7 +4487,12 @@ NotFuncHead = :script(~~
             var cls = {}
             cls["__isclass"] = true
             cls["__name"] = name
-            if (superName != null) {
+            if (superT != null) {
+                var supv = anytype // A heritage expression yields a class descriptor.
+                supv = superT()
+                if (supv == undefined || supv == null || !supv.__isclass) fail("class heritage is not a class")
+                cls["__super"] = supv
+            } else if (superName != null) {
                 var sup = getVar(superName)
                 if (sup == undefined || !sup.__isclass) fail("unknown superclass: " + superName)
                 cls["__super"] = sup
@@ -4439,9 +4514,9 @@ NotFuncHead = :script(~~
                 addAccessor(cls, aa.acc, memberKey(aa), makeClosure(aa.params, aa.body, mscopes))
             }
             if (ctorInfo != null) {
-                cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, superName, false)
+                cls["__ctor"] = makeCtorClosure(ctorInfo.params, ctorInfo.body, fields, mscopes, false, false)
             } else {
-                cls["__ctor"] = makeCtorClosure([], null, fields, mscopes, superName, true)
+                cls["__ctor"] = makeCtorClosure([], null, fields, mscopes, hasOwn(cls, "__super"), true)
             }
             // The static initializers run now, with the methods already in place (a static
             // block may call them) and 'this' bound to the class.
@@ -4529,9 +4604,18 @@ NotFuncHead = :script(~~
     // __ctor(instance, args...).
     function makeNew(items) {
         var clsName = items[0].cls
-        var argThunks = items.slice(1)
+        return makeNewFrom(function() { return getVar(clsName) }, items.slice(1), clsName)
+    }
+    // The general 'new' (NewWidened): the callee is an arbitrary value thunk, and the
+    // argument list may be absent entirely ('new C'), which is the same as an empty one.
+    function makeNewGeneral(items) {
+        return makeNewFrom(items[0], items.slice(1), "expression")
+    }
+    // The construction itself, shared by both forms. clsName is only for the message.
+    function makeNewFrom(calleeT, argThunks, clsName) {
         return function() {
-            var cls = getVar(clsName)
+            var cls = anytype // A callee is a class descriptor or a constructor function.
+            cls = calleeT()
             var argv = evalArgs(argThunks)
             // A CONSTRUCTOR FUNCTION - the pre-class way of writing a class, and still
             // the shape 'new.target' exists for. The fresh object goes in through the
@@ -4572,6 +4656,113 @@ NotFuncHead = :script(~~
         ctorDescriptorFns.push(fn)
         ctorDescriptors.push(d)
         return d
+    }
+
+    // ----- super as a PROPERTY -----
+    // 'super.x' starts its lookup at the superclass of the DEFINING class - __class__,
+    // which the class body binds and which is what makes an anonymous class expression
+    // work - and walks __super from there, so a subclass override never shadows what
+    // super.x means. A getter/setter found on the way runs with the real receiver.
+    function superClass() {
+        var cls = getVar("__class__")
+        if (cls == undefined || cls == null) fail("super outside a class")
+        var sup = cls.__super
+        if (sup == undefined) fail("super property with no superclass")
+        return sup
+    }
+    function superGet(k) {
+        var self = getVar("this")
+        for (var cl = superClass(); cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], "get:" + k)) {
+                return callWithThis(cl["__acc"]["get:" + k], self, [])
+            }
+            if (hasOwn(cl, k)) { return cl[k] }
+        }
+        // Nothing on the class chain is UNDEFINED, and deliberately not a read of the
+        // receiver: node prints NaN for 'super.zz += 4' after 'super.zz = 3' (the store
+        // lands on the receiver, the read does not see it).
+        return undefined
+    }
+    function superSet(k, v) {
+        var self = getVar("this")
+        for (var cl = superClass(); cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, "__acc") && hasOwn(cl["__acc"], "set:" + k)) {
+                callWithThis(cl["__acc"]["set:" + k], self, [v])
+                return
+            }
+            if (hasOwn(cl, k)) { break }
+        }
+        // No setter on the super chain: 'super.x = v' performs an ordinary [[Set]] whose
+        // RECEIVER is 'this', so the own property lands there. scopePut rather than
+        // setMember, because the receiver's OWN class may declare a setter for the same
+        // name and [[Set]] started above it.
+        scopePut(self, k, v)
+        trackKey(self, k)
+    }
+    function makeSuperProp(item) {
+        var keyT = item.skey
+        return function() { return superGet(keyT()) }
+    }
+    // The destructuring-target form of a super property (see ATargetSuper). A bare
+    // 'super.d' is its own leaf kind; with further suffixes only the base is a super read
+    // and the rest is an ordinary member path, so it degrades to the "ref" leaf.
+    function makeSuperTarget(items) {
+        var path = items.slice(1)
+        if (path.length > 0) {
+            return {dtype: "ref", ref: {prim: makeSuperProp(items[0]), path: path}}
+        }
+        return {dtype: "supertarget", skey: items[0].skey}
+    }
+    // items = [{skey}, ...suffixes, opString, valueThunk]. With suffixes the store is an
+    // ordinary member store on a base that happens to be a super read, so it is exactly
+    // the {prim, path} reference LhsAssign builds; without them the store goes through
+    // the super chain.
+    function makeSuperAssign(items, pos) {
+        var n = items.length
+        var valT = items[n - 1]
+        var op = items[n - 2]
+        var path = items.slice(1, n - 2)
+        var keyT = items[0].skey
+        if (path.length > 0) {
+            var ref = {prim: makeSuperProp(items[0]), path: path}
+            if (op == "&&=" || op == "||=" || op == "??=") { return makeLogicalAssign([ref, op, valT]) }
+            return makeAssign([ref, op, valT])
+        }
+        if (op == "&&=" || op == "||=" || op == "??=") {
+            return function() {
+                var cur = anytype
+                cur = superGet(keyT())
+                var assign = false
+                if (op == "&&=") { assign = cur ? true : false }
+                else if (op == "||=") { assign = cur ? false : true }
+                else { assign = (cur === null || cur === undefined) }
+                if (!assign) { return cur }
+                var nv = anytype
+                nv = valT()
+                superSet(keyT(), nv)
+                return nv
+            }
+        }
+        return function() {
+            var v = anytype // A compound assignment may change the value's type.
+            v = valT()
+            var k = anytype // A computed key is an arbitrary value.
+            k = keyT()
+            if (op != "=") { v = applyOp(op, superGet(k), v) }
+            superSet(k, v)
+            return v
+        }
+    }
+    // The binder a destructuring catch parameter hands to excCatchBind: it declares the
+    // pattern's leaves in whatever scope is current when interp-core calls it, which is
+    // the catch clause's own freshly pushed scope.
+    function makeCatchBinder(pat) {
+        return function(v) { bindPattern(pat, v) }
+    }
+    // 'export default <expression>' / 'export = <expression>': the value is not bound
+    // anywhere, but the expression runs, so 'export default register()' still registers.
+    function makeExportDefault(t) {
+        return function() { t(); return undefined }
     }
 
     // super(args): delegate to the parent constructor. super.m(args): dispatch m on the
