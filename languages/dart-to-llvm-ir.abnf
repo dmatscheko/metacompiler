@@ -484,8 +484,8 @@ VarLateTyped      = KwLate Type         DeclTail ;
 VarKwDecl     = KwVar         DeclTail ;
 VarFinalTyped = KwFinal Type  DeclTail ;
 VarFinal      = KwFinal       DeclTail ;
-VarConstTyped = KwConst Type  DeclTail ;
-VarConst      = KwConst       DeclTail ;
+VarConstTyped <~~ push(constifyStmt(pop())) ~~> = KwConst Type  DeclTail ;
+VarConst      <~~ push(constifyStmt(pop())) ~~> = KwConst       DeclTail ;
 VarTyped      = Type          DeclTail ;
 DeclTail    <~~ push(makeSeq(takeAll())) ~~>
             = Declarator { "," Declarator } ";" ;
@@ -1924,9 +1924,13 @@ KwSuper     = "super" KwEnd ;
                     continue
                 }
                 if (s.kind == "mcall") {
-                    // contains / containsKey are membership tests on a Set, List, String
-                    // or Map's keys, which is exactly js_pyin (with the operands swapped).
-                    if (s.name == "containsKey" || s.name == "contains") {
+                    // x.toString() is Object.toString() unless the class overrides it,
+                    // and js_mcall knows neither: it aborted with "method call
+                    // 'toString' on a number". js_dartstr answers both (a user override
+                    // wins there), and it is the same rendering print uses.
+                    if (s.name == "toString" && s.args.length == 0) {
+                        cur = callExt(b, "js_dartstr", [cur])
+                    } else if (s.name == "containsKey" || s.name == "contains") {
                         var ar = s.args[0](b)
                         b = ar.b
                         // js_pyin knows lists, strings and dict keys but not SETS, so a
@@ -2428,28 +2432,13 @@ KwSuper     = "super" KwEnd ;
             }
         }
         b = emitParamBinds(b, params, isNamed ? 0 : 1, thisV, ctorDesc.factory)
-        // A const constructor canonicalizes: identical arguments yield the SAME instance,
-        // so `identical(k, const C.fix(2, 3))` holds. The cache is the 0consts dict of the
-        // class scope this closure was created in; the key is the constructor name and the
-        // string form of every positional argument.
-        var cacheB = null
-        var cacheV = anytype
-        var keyV = anytype
-        if (ctorDesc.isconst === true && isNamed && !ctorDesc.factory) {
-            cacheV = callExt(b, "js_kget", [curScopeV, emitStr(b, "0consts")])
-            keyV = emitStr(b, ctorDesc.name)
-            for (var ki = 0; ki < params.length; ki++) {
-                var pn2 = params[ki].thisf != undefined ? params[ki].thisf : params[ki].pname
-                keyV = callExt(b, "js_jadd", [callExt(b, "js_jadd", [keyV, emitStr(b, "|")]),
-                                              callExt(b, "js_kget", [curScopeV, emitStr(b, pn2)])])
-            }
-            var hitB = curF.NewBlock("")
-            var missB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_pyin", [keyV, cacheV])), hitB, missB)
-            hitB.NewRet(callExt(hitB, "js_pyget", [cacheV, keyV]))
-            b = missB
-            cacheB = missB
-        }
+        // A const constructor used to canonicalize HERE, against a per-class 0consts
+        // cache keyed by the constructor name and its arguments. That could only ever
+        // work for a NAMED constructor - the unnamed __ctor is handed a fresh instance
+        // by the creation site and cannot return a different one - and it fired whether
+        // or not `const` was written. Canonicalization now happens at the const
+        // expression itself (see constify / js_dartcanon), which covers both kinds and
+        // matches Dart's class-and-fields rule.
         // Initializer list: asserts, then field initialisers; a `: this(...)` redirect or
         // a `: super(...)` call chains to the other constructor.
         var superArgs = null
@@ -2491,7 +2480,6 @@ KwSuper     = "super" KwEnd ;
             }
         }
         if (bodyStmt != null) { b = bodyStmt(b) }
-        if (cacheB != null) { callExt(b, "js_pyset", [cacheV, keyV, thisV]) }
         if (isNamed && !ctorDesc.factory) { b.NewRet(thisV) } else { b.NewRet(hUndef) }
         curF = savedF
         curScopeV = savedScope
@@ -2643,12 +2631,9 @@ KwSuper     = "super" KwEnd ;
             if (superName != "") {
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"), callExt(b, "js_kget", [curScopeV, emitStr(b, superName)])])
             }
-            // The class's own members are emitted in a scope of their own that carries the
-            // canonical-const cache, so a const constructor can return the same instance
-            // for equal arguments (Dart canonicalizes const creations).
+            // The class's own members are emitted in a scope of their own.
             var savedScope = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0consts"), callExt(b, "js_dict_new", [])])
             var savedStatics = curStatics
             var savedStaticsCls = curStaticsCls
             var savedClass = curEmitClass
@@ -2796,6 +2781,11 @@ KwSuper     = "super" KwEnd ;
                 callExt(b, "js_call", [callExt(b, "js_get", [clsV, emitStr(b, "__ctor")]), hUndef, argsV])
                 callExt(b, "js_set", [objV, emitStr(b, "index"), emitNum(b, j)])
                 callExt(b, "js_set", [objV, emitStr(b, "name"), emitStr(b, vals[j].evname)])
+                // __enumName is what makes an enum value print as `Col.red`
+                // (enum_test.dart:62). It is a __-prefixed slot so that an ordinary
+                // class declaring a field called `name` is not mistaken for an enum,
+                // and so that js_keys does not copy it into a subclass descriptor.
+                callExt(b, "js_set", [objV, emitStr(b, "__enumName"), emitStr(b, vals[j].evname)])
                 callExt(b, "js_set", [clsV, emitStr(b, vals[j].evname), objV])
                 callExt(b, "js_arr_push", [valuesV, objV])
             }
@@ -2891,9 +2881,42 @@ KwSuper     = "super" KwEnd ;
     function makeDotShorthand(items, pos) {
         return notImplExpr("dot shorthand '." + items[0].dsname + "' (no context type)", pos)
     }
-    // const e : accepted; const CREATION is canonicalized inside the constructor itself
-    // (see the 0consts cache), so here it only passes the operand through.
-    function constify(t) { return t }
+    // ----- const canonicalization -----
+    // Dart canonicalizes a const value: two const expressions that denote the same
+    // class with equal FIELD VALUES denote the same object, so
+    // identical(const E(3), const E(3)) is true. The key is the class and the fields
+    // and NOT the constructor, because language/const/ct_const_test.dart:62 demands
+    //     Expect.equals(true, identical(const Point.X(5), const Point(5, 0)));
+    // - two different constructors, one canonical instance. js_dartcanon
+    // (abnf/jsrtdart.go) implements exactly that, over instances, lists, maps, sets
+    // and records alike, canonicalizing children first so a nested const is shared
+    // too. It passes every value it cannot make const (a number, a string, a
+    // closure) straight through, so `const local = tvTen + 1` costs one call and
+    // changes nothing.
+    //
+    // This replaces a per-constructor 0consts cache that lived INSIDE the emitted
+    // constructor: that one could only see NAMED constructors (the unnamed __ctor is
+    // handed a fresh instance by the creation site and cannot return another), so
+    // identical(const E(3), const E(3)) was false, and it fired whether or not
+    // `const` was written, which `new Point(1, 2)` must not do.
+    function constify(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_dartcanon", [r.v])}
+        }
+    }
+    // `const x = E(3);` is an implicit const CONTEXT: the initializer is const
+    // without the keyword. The declaration is a statement, so the depth is read back
+    // by makeDecl when it emits the initializer.
+    var constDepth = 0
+    function constifyStmt(t) {
+        return function(b) {
+            constDepth = constDepth + 1
+            var r = t(b)
+            constDepth = constDepth - 1
+            return r
+        }
+    }
 
     // ----- collections and templates -----
     // One element machinery serves list, set and map literals. An element descriptor is
@@ -3643,13 +3666,16 @@ KwSuper     = "super" KwEnd ;
             return {b: emitETSet(r.b, r.v, ty), v: r.v}
         }
     }
+    // '$x' / '${e}': an interpolated expression is converted with Dart's toString(),
+    // not with JavaScript's - js_jadd used to render a List as "1,2" and every
+    // instance as "[object Object]".
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
             for (var i = 0; i < items.length; i++) {
                 var pv = anytype
                 if (items[i].s != undefined) { pv = emitStr(b, items[i].s) }
-                else { var r = items[i].e(b); b = r.b; pv = r.v }
+                else { var r = items[i].e(b); b = r.b; pv = callExt(r.b, "js_dartstr", [r.v]) }
                 v = callExt(b, "js_jadd", [v, pv])
             }
             return {b: b, v: v}
@@ -3687,7 +3713,14 @@ KwSuper     = "super" KwEnd ;
         var name = items[0]
         return function(b) {
             var v = hNull
-            if (items.length > 1) { var r = items[1](b); b = r.b; v = r.v }
+            if (items.length > 1) {
+                var r = items[1](b)
+                b = r.b
+                v = r.v
+                // Inside `const x = ...` the initializer is a const expression even
+                // without the keyword, so it is canonicalized like an explicit one.
+                if (constDepth > 0) { v = callExt(b, "js_dartcanon", [v]) }
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
         }
@@ -4056,9 +4089,21 @@ KwSuper     = "super" KwEnd ;
         curF = f
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
-        // Dart print writes its argument followed by a newline (like println).
+        // Dart print writes x.toString() followed by a newline. It used to be bound to
+        // the shared println host function, which hands the RAW value to Go's %v - so
+        // `print(null)` said "<nil>", a List said "[1 2 3]", a Map said
+        // "map[__dict:true keys:[a] vals:[1]]" and an instance dumped its class
+        // descriptor with a Go POINTER ADDRESS in it (not reproducible between runs),
+        // while dart-interpreter.abnf printed Dart's own rendering. js_dartprint
+        // (abnf/jsrtdart.go) is the Dart twin of js_rputs / js_luaprint.
+        funcCount++
+        var prIdx = funcCount
+        var pf = m.NewFunc("jsf_" + prIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var pb = pf.NewBlock("entry")
+        callExt(pb, "js_dartprint", [callExt(pb, "js_arg", [pf.Params[1], handle(0)])])
+        pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"),
-                                     callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
+                                     callExt(b, "js_closure", [handle(prIdx), curScopeV])])
         if (anyTypedColl) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0etk"), callExt(b, "js_arr_new", [])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0etv"), callExt(b, "js_arr_new", [])])

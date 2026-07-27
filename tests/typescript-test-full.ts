@@ -586,6 +586,41 @@ function s21() {
     check("re53", !/\Qa.b\E/.test("a.b") && /\Qa.b\E/.test("Qa.bE"));
 }
 
+// ===== SECTION 22: JavaScript value semantics (rendering, ==, instanceof, methods) =====
+// The ratchet for the print/String rendering, ToPrimitive in == and the relational
+// operators, instanceof over a plain constructor, delete on an array element, the
+// Object statics and the String/Array/Number method surface. Every expected value
+// below was verified against node v24 (the same section runs green under node with
+// the type annotations stripped). Before this section the two halves and the two
+// ENGINES disagreed on all of it: the compiler printed Go's %v ("<nil>", "[1 2 3]",
+// "map[a:1]"), the interpreter leaked its hidden __keys slot out of Object.keys, and
+// under -frozen the interpreter had neither ToPrimitive nor a method surface.
+function Plain22(this: any): void { this.k = 1; }
+class Kls22 { }
+function s22(): void {
+    check("val1", String(null) === "null" && String(undefined) === "undefined");
+    check("val2", String([1, 2, 3]) === "1,2,3" && String([]) === "");
+    check("val3", String({ a: 1 }) === "[object Object]");
+    check("val4", String([1, null, 2]) === "1,,2"); // a null element joins as ""
+    check("val5", ([1] as any) == 1 && ([] as any) == false);
+    check("val6", ({} as any) == "[object Object]" && (null as any) == undefined);
+    check("val7", !((null as any) == 0) && !(NaN == NaN));
+    check("val8", ([2] as any) > 1 && ([2] as any) < 3 && 2 < ("10" as any));
+    const p: any = new Plain22();
+    check("val9", p instanceof Plain22 && p.k === 1);
+    check("val10", new Kls22() instanceof Kls22);
+    const arr: any[] = [1, 2, 3];
+    delete arr[1];
+    check("val11", arr.length === 3 && arr[1] === undefined);
+    check("val12", Object.keys({ a: 1, b: 2 }).length === 2 && Object.keys({ a: 1, b: 2 })[1] === "b");
+    check("val13", String(Object.entries({ a: 1 })) === "a,1");
+    check("val14", String(Object.values({ a: 1, b: 2 })) === "1,2");
+    check("val15", String([1, [2, [3]]].flat(2)) === "1,2,3" && "abc".padStart(5, "-") === "--abc");
+    check("val16", "abcabc".indexOf("b", 2) === 4 && (5).toFixed(2) === "5.00");
+    check("val17", String([1, 2].map(function (x: number, i: number) { return x + i; })) === "1,3");
+    check("val18", String([1, 2, 3].slice(-2)) === "2,3" && String("a,b".split(",")) === "a,b");
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -610,6 +645,7 @@ function main(): number {
     s19(); // SECTION-CALL 19
     s20(); // SECTION-CALL 20
     s21(); // SECTION-CALL 21
+    s22(); // SECTION-CALL 22
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

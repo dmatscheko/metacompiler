@@ -476,8 +476,8 @@ VarLateTyped      = KwLate Type         DeclTail ;
 VarKwDecl     = KwVar         DeclTail ;
 VarFinalTyped = KwFinal Type  DeclTail ;
 VarFinal      = KwFinal       DeclTail ;
-VarConstTyped <~~ push(constify(pop())) ~~> = KwConst Type  DeclTail ;
-VarConst      <~~ push(constify(pop())) ~~> = KwConst       DeclTail ;
+VarConstTyped <~~ push(constifyStmt(pop())) ~~> = KwConst Type  DeclTail ;
+VarConst      <~~ push(constifyStmt(pop())) ~~> = KwConst       DeclTail ;
 VarTyped      = Type          DeclTail ;
 DeclTail    <~~ push(makeSeq(takeAll())) ~~>
             = Declarator { "," Declarator } ";" ;
@@ -1237,12 +1237,71 @@ KwDeferred  = "deferred" KwEnd ;
     // print(x) writes x's string form followed by a newline (Dart print).
     hostGlobals["print"] = function(x) { println(dstr(x)) }
 
-    // ----- string rendering (agrees with the compiler's js_jadd / toString) -----
-    function dstr(v) {
+    // ----- string rendering: Dart's Object.toString() and its overrides -----
+    // This is the twin of js_dartstr / js_dartprint in abnf/jsrtdart.go (the compiler
+    // half's extern), and print, string interpolation and an explicit .toString() all
+    // go through it. Falling through to JavaScript's ToString - which is what this
+    // used to do - rendered a List as "1,2,3", and a Map, a Set and every instance as
+    // "[object Object]".
+    //
+    //   null            null                     Instance of 'E'   no user toString()
+    //   true / false    true / false             E                 a Type (a class)
+    //   [1, 2, 3]       a List                   Col.red           an enum value
+    //   {a: 1}          a Map                    (1, a)            a Record
+    //   {1, 2}          a Set                    Closure           a function
+    //
+    // A string inside a collection is NOT quoted: print(['a']) is [a].
+    // Citations, from tests/reference/dart/dart-language-tests:
+    //   language/regress/regress45642_test.dart:14   "should print: Instance of 'Foo'"
+    //   language/records/simple/literals_and_field_access_test.dart:121
+    //                                                x.toString() == "[1, 2, 3]"
+    //   language/enum/enum_test.dart:62              'Enum2.A' == Enum2.A.toString()
+    //   language/enum/enhanced_enums_basic_test.dart:143  a user toString() wins
+    function dstr(v) { return dstrIn(v, 0) }
+    function dstrIn(v, d) {
+        if (d > 64) { return "..." }
         if (v === null || v === undefined) { return "null" }
         if (v === true) { return "true" }
         if (v === false) { return "false" }
         if (typeof v == "string") { return v }
+        if (typeof v == "function") { return "Closure" }
+        if (Array.isArray(v)) {
+            var out = "["
+            for (var i = 0; i < v.length; i++) {
+                if (i > 0) { out = out + ", " }
+                out = out + dstrIn(v[i], d + 1)
+            }
+            return out + "]"
+        }
+        if (typeof v != "object") { return "" + v }
+        if (v.__isclass === true) { return v.__name }
+        if (isDict(v)) {
+            var isSet = hasOwn(v, "__set")
+            var o2 = "{"
+            for (var j = 0; j < v.keys.length; j++) {
+                if (j > 0) { o2 = o2 + ", " }
+                o2 = o2 + dstrIn(v.keys[j], d + 1)
+                if (!isSet) { o2 = o2 + ": " + dstrIn(v.vals[j], d + 1) }
+            }
+            return o2 + "}"
+        }
+        if (isRec(v)) {
+            var o3 = "("
+            for (var k = 0; k < v.keys.length; k++) {
+                if (k > 0) { o3 = o3 + ", " }
+                if (v.keys[k].charAt(0) != "$") { o3 = o3 + v.keys[k] + ": " }
+                o3 = o3 + dstrIn(v.vals[k], d + 1)
+            }
+            return o3 + ")"
+        }
+        if (v.__class != undefined) {
+            // A user toString() anywhere in the linearisation wins, for a plain class
+            // and for an enum alike.
+            var m = findMember(v.__class, "toString")
+            if (m != null) { return "" + m.fn.apply(undefined, [v]) }
+            if (v.__enumName != undefined) { return v.__class.__name + "." + v.__enumName }
+            return "Instance of '" + v.__class.__name + "'"
+        }
         return "" + v
     }
 
@@ -2111,6 +2170,10 @@ KwDeferred  = "deferred" KwEnd ;
 
     // ----- method dispatch (agrees with the compiler's js_mcall / memberCall) -----
     function mcall(target, name, args) {
+        // x.toString() is Object.toString() unless the class overrides it, and dstr
+        // answers both (an override wins there). Without this the call fell through
+        // to the extension lookup and failed with "method call 'toString' on 3".
+        if (name == "toString" && args.length == 0) { return dstr(target) }
         if (typeof target == "string") {
             if (name == "substring") { return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0]) }
             if (name == "indexOf") { return target.indexOf(args[0]) }
@@ -2476,22 +2539,31 @@ KwDeferred  = "deferred" KwEnd ;
         var cd = findCtor(cls, ctorName)
         if (cd == null) { fail("class " + cls.__name + " has no constructor " + ctorName) }
         if (cd.factory) { return cd.fn.apply(undefined, argv) }
-        var ck = ""
-        if (constDepth > 0) {
-            ck = "$" + constKey(cls, ctorName, argv)
-            if (hasOwn(constCache, ck)) { return constCache[ck] }
-        }
         var obj = {__class: cls}
-        if (ck != "") { constCache[ck] = obj }
         cd.fn.apply(undefined, concat2impl([obj], argv))
         return obj
     }
-    // Const construction: while constDepth > 0, construct() returns a canonical instance
-    // per (class, constructor, argument values), which is what makes `identical(k1, const
-    // Kn.fix(2, 3))` true.
-    var constDepth = 0
+    // ----- const canonicalization -----
+    // Dart canonicalizes a const value: two const expressions that denote the same class
+    // with equal FIELD VALUES denote the same object, so `identical(const E(3), const
+    // E(3))` is true. The key is the class and the fields and NOT the constructor,
+    // because language/const/ct_const_test.dart:62 demands
+    //     Expect.equals(true, identical(const Point.X(5), const Point(5, 0)));
+    // - two different constructors, one canonical instance. The same rule canonicalizes
+    // const collections: language/canonicalize/const_test.dart asserts
+    // identical(const <int>[1, 2], const <int>[1, 2]) and
+    // identical(const {"a": 1, "b": 2}, const {"a": 1, "b": 2}).
+    //
+    // This is the twin of js_dartcanon in abnf/jsrtdart.go. Children are canonicalized
+    // first, so a nested const creation is shared too and the parent's key is built out
+    // of values that are already canonical. A value the language cannot make const (a
+    // number, a string, a closure) is returned unchanged and never enters the cache.
     var constCache = {}
-    function constify(t) {
+    function constify(t) { return function() { return dcanon(t(), 0) } }
+    // `const x = E(3);` is an implicit const CONTEXT: the initializer is const without
+    // the keyword. The declaration is a statement, so the depth is read back by makeDecl.
+    var constDepth = 0
+    function constifyStmt(t) {
         return function() {
             constDepth = constDepth + 1
             var r = t()
@@ -2499,11 +2571,81 @@ KwDeferred  = "deferred" KwEnd ;
             return r
         }
     }
-    function constKey(cls, ctorName, argv) {
-        var k = cls.__name + "|" + ctorName
-        for (var i = 0; i < argv.length; i++) { k = k + "|" + dstr(argv[i]) }
-        return k
+    // Every field name of cls and of everything it inherits from, in the order
+    // initFields writes them.
+    function constFieldNames(cls) {
+        var out = []
+        var lin = cls.__lin
+        for (var i = lin.length - 1; i >= 0; i--) {
+            var fs = lin[i].__fields
+            for (var j = 0; j < fs.length; j++) { out.push(fs[j].field) }
+        }
+        return out
     }
+    function dcanon(v, d) {
+        if (d > 64) { return v }
+        if (v === null || v === undefined || typeof v != "object") { return v }
+        if (v.__isclass === true) { return v }
+        if (Array.isArray(v)) {
+            for (var i = 0; i < v.length; i++) { v[i] = dcanon(v[i], d + 1) }
+        } else if (isDict(v) || isRec(v)) {
+            for (var j = 0; j < v.keys.length; j++) {
+                v.keys[j] = dcanon(v.keys[j], d + 1)
+                v.vals[j] = dcanon(v.vals[j], d + 1)
+            }
+        } else if (v.__class != undefined) {
+            var fn = constFieldNames(v.__class)
+            for (var k = 0; k < fn.length; k++) { v[fn[k]] = dcanon(v[fn[k]], d + 1) }
+        } else { return v }
+        var key = "$" + ckey(v, 0)
+        if (hasOwn(constCache, key)) { return constCache[key] }
+        constCache[key] = v
+        return v
+    }
+    // The structural identity of a const value. It is never printed; it only has to
+    // separate values that are not identical and join values that are.
+    function ckey(v, d) {
+        if (d > 64) { return "!" }
+        if (v === null || v === undefined) { return "n" }
+        if (v === true) { return "b1" }
+        if (v === false) { return "b0" }
+        if (typeof v == "string") { return "s" + v.length + ":" + v }
+        if (typeof v == "number") { return "d" + v }
+        if (typeof v != "object") { return "x" + v }
+        if (v.__isclass === true) { return "T:" + v.__name }
+        var out = ""
+        var i = 0
+        if (Array.isArray(v)) {
+            out = "L("
+            for (i = 0; i < v.length; i++) { out = out + ckey(v[i], d + 1) + "," }
+            return out + ")"
+        }
+        if (isDict(v)) {
+            out = hasOwn(v, "__set") ? "S(" : "M("
+            for (i = 0; i < v.keys.length; i++) {
+                out = out + ckey(v.keys[i], d + 1) + "=>" + ckey(v.vals[i], d + 1) + ","
+            }
+            return out + ")"
+        }
+        if (isRec(v)) {
+            out = "R("
+            for (i = 0; i < v.keys.length; i++) {
+                out = out + v.keys[i] + "=" + ckey(v.vals[i], d + 1) + ","
+            }
+            return out + ")"
+        }
+        if (v.__class != undefined) {
+            var fn = constFieldNames(v.__class)
+            out = "C:" + v.__class.__name + "("
+            for (i = 0; i < fn.length; i++) { out = out + fn[i] + "=" + ckey(v[fn[i]], d + 1) + "," }
+            return out + ")"
+        }
+        // A value with no const identity of its own (a closure, a host object): give it
+        // a serial number, so two of them never compare equal.
+        if (v.__ckid == undefined) { ckidNext = ckidNext + 1; v.__ckid = ckidNext }
+        return "O" + v.__ckid
+    }
+    var ckidNext = 0
     function findCtor(cls, ctorName) {
         var key = "$" + ctorName
         if (hasOwn(cls.__ctors, key)) { return cls.__ctors[key] }
@@ -2728,6 +2870,11 @@ KwDeferred  = "deferred" KwEnd ;
             for (var e2 = 0; e2 < enumVals.length; e2++) {
                 var inst = construct(cls, "", evalArgs(enumVals[e2].eargs))
                 inst.index = e2
+                // `name` is Enum's own getter (Col.red.name == "red"); dart-to-llvm-ir
+                // already wrote it and this half answered null. __enumName is the same
+                // string under a __-prefixed key, which is what dstr reads - so a class
+                // that merely declares a field called `name` never renders as an enum.
+                inst.name = enumVals[e2].evname
                 inst.__enumName = enumVals[e2].evname
                 cls.__statics[enumVals[e2].evname] = inst
                 vals.push(inst)
@@ -3076,7 +3223,9 @@ KwDeferred  = "deferred" KwEnd ;
     function makeDecl(items) {
         var name = items[0]
         var init = items.length > 1 ? items[1] : makeConst(null)
-        return function() { declVar(name, init()) }
+        // Inside `const x = ...` the initializer is a const expression even without the
+        // keyword, so it is canonicalized like an explicit one.
+        return function() { declVar(name, (constDepth > 0) ? dcanon(init(), 0) : init()) }
     }
     // An assignment target is either a plain name or a CALL used as the seed of the
     // .field / [index] path (`E0(c0).m1 = 0`, `f(x)[0] = 1`). A seeded target has no

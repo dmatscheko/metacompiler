@@ -261,6 +261,19 @@ func loopContinueInDo() -> Int {
     return sum                       // 0+1+3+4 = 8
 }
 
+// ----- value description (print / String(describing:)) and value-type == -----
+// print used to hand the RAW runtime value to the shared println host function in
+// the compiler (`<nil>`, `[1 2 3]`, a Go map holding a POINTER address for an
+// instance) and to fall through to JavaScript's ToString in the interpreter
+// ("1,2,3", "[object Object]"). Every string below is what swift 6.1.2 prints.
+
+struct PtDesc { var x: Int; var y: String }
+struct MoneyDesc: CustomStringConvertible {
+    var cents: Int
+    var description: String { "$\(cents)" }
+}
+enum ShapeDesc { case dot; case line(Int, String); case at(n: Int) }
+
 // ----- one small combined pipeline: guard + switch + interpolation -----
 
 func transform(_ list: [Int]) -> String {
@@ -573,6 +586,32 @@ func main() {
     check("return-out-of-catch", returnFromDo(-1) == -1)
     check("break-out-of-do", loopBreakInDo() == 3)
     check("continue-out-of-do", loopContinueInDo() == 8)
+
+    // ----- value description and value-type equality -----
+    let noneD: Int? = nil
+    check("desc-nil", "\(noneD)" == "nil")
+    check("desc-array", "\([1, 2, 3])" == "[1, 2, 3]")
+    check("desc-nested", "\([[1, 2], [3]])" == "[[1, 2], [3]]")
+    let emptyD: [String] = []
+    check("desc-empty-array", "\(emptyD)" == "[]")
+    check("desc-dict", "\(["k": 1])" == "[\"k\": 1]")
+    let emptyM: [String: Int] = [:]
+    check("desc-empty-dict", "\(emptyM)" == "[:]")
+    check("desc-str-nested", "\(["s"])" == "[\"s\"]" && "\("plain")" == "plain")
+    check("desc-tuple", "\((1, "two"))" == "(1, \"two\")")
+    let labelled = (x: 1, y: "s")
+    check("desc-tuple-labels", "\(labelled)" == "(x: 1, y: \"s\")")
+    check("desc-struct", "\(PtDesc(x: 1, y: "hi"))" == "PtDesc(x: 1, y: \"hi\")")
+    check("desc-convertible", "\(MoneyDesc(cents: 7))" == "$7" && "\([MoneyDesc(cents: 7)])" == "[$7]")
+    check("desc-enum", "\(ShapeDesc.dot)" == "dot" && "\(ShapeDesc.line(2, "x"))" == "line(2, \"x\")")
+    check("desc-enum-label", "\(ShapeDesc.at(n: 5))" == "at(n: 5)")
+    check("eq-array", [1, 2] == [1, 2] && [1, 2] != [1, 3] && [[1]] == [[1]])
+    check("eq-dict", ["a": 1] == ["a": 1] && ["a": 1] != ["a": 2])
+    check("eq-tuple", (1, "a") == (1, "a") && (1, "a") != (2, "a"))
+    // print's separator:/terminator: labels used to be dropped and printed as two
+    // extra positional arguments. Real Swift writes "1-2-3\nt!\n" here.
+    print(1, 2, 3, separator: "-")
+    print("t", terminator: "!\n")
 
     // ----- combined pipeline -----
     check("combined-pipeline", transform([1, 2, -3]) == "o1e2x")

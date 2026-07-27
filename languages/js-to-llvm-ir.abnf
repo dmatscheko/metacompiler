@@ -3243,7 +3243,11 @@ NotFuncHead = :script(~~
                 var rr = items[i + 1](b)
                 b = rr.b
                 if (items[i] == "in") { v = callExt(b, "js_has", [rr.v, v]) }
-                else { v = callExt(b, "js_instanceof", [v, rr.v]) }
+                // js_jsinstanceof also answers a plain constructor FUNCTION on the
+                // right ('function F() {}; new F() instanceof F'), which the shared
+                // extern reported false for because it only knows class descriptors,
+                // and the Object / Array globals. It delegates for everything else.
+                else { v = callExt(b, "js_jsinstanceof", [v, rr.v]) }
             }
             return {b: b, v: v}
         }
@@ -3254,7 +3258,11 @@ NotFuncHead = :script(~~
         if (ref.path.length == 0) { return makeConst(false) }
         return function(b) {
             var p = emitRefPath(b, ref)
-            return {b: p.b, v: callExt(p.b, "js_del", [p.obj, p.key])}
+            // js_jsdel adds the ARRAY case: the shared js_del only knows objects, so
+            // 'delete a[1]' was a silent no-op and a[1] still read 2. The slot is
+            // blanked and the length left alone, which is what the interpreter half
+            // has always done.
+            return {b: p.b, v: callExt(p.b, "js_jsdel", [p.obj, p.key])}
         }
     }
     // 'void e': evaluate and discard.
@@ -3343,12 +3351,19 @@ NotFuncHead = :script(~~
         }
     }
 
-    binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
-                  "==": "js_eq", "!=": "js_ne", "===": "js_seq", "!==": "js_sne",
-                  "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge",
+    // js_jseq / js_jsne / js_jslt / js_jsgt / js_jsle / js_jsge are the shared
+    // operators plus the ToPrimitive step the abstract equality and relational
+    // comparisons need (abnf/jsrtjsprint.go). Without it an OBJECT operand never
+    // reached its primitive form, so `[1] == 1`, `[2] > 1` and `({}) == "[object
+    // Object]"` were all false in the compiler and true in node. Every one of them
+    // delegates to the shared extern for two primitive operands, which is every
+    // comparison a program that compares no objects makes.
+    binExt = {"+": "js_jsadd", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
+                  "==": "js_jseq", "!=": "js_jsne", "===": "js_seq", "!==": "js_sne",
+                  "<": "js_jslt", ">": "js_jsgt", "<=": "js_jsle", ">=": "js_jsge",
                   "|": "js_bor", "^": "js_bxor", "&": "js_band",
                   "<<": "js_shl", ">>": "js_shr", ">>>": "js_ushr",
-                  "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div", "%=": "js_mod",
+                  "+=": "js_jsadd", "-=": "js_sub", "*=": "js_mul", "/=": "js_div", "%=": "js_mod",
                   "&=": "js_band", "^=": "js_bxor", "|=": "js_bor",
                   "<<=": "js_shl", ">>=": "js_shr", ">>>=": "js_ushr"}
     wraps = {} // MetaJS numbers are not wrapped to 32 bit.
@@ -3572,7 +3587,12 @@ NotFuncHead = :script(~~
                         var callS = suffixes[i + 1]
                         var objV = cur
                         var keyV = kr.v
-                        var fV = callExt(b, "js_get", [objV, keyV])
+                        // js_jsmget is js_get with the String/Array method names
+                        // HIDDEN, so the call falls into the js_jsmcall arm below
+                        // rather than into the shared boundMethod path, whose
+                        // semantics differ (indexOf ignores its from-index, map's
+                        // callback gets no index, ...). Everything else delegates.
+                        var fV = callExt(b, "js_jsmget", [objV, keyV])
                         var argsV = callExt(b, "js_arr_new", [])
                         b = pushArgs(b, argsV, callS.args)
                         var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")]))
@@ -3587,7 +3607,9 @@ NotFuncHead = :script(~~
                         // that uses no regular expression behaves exactly as before.
                         var tv = callExt(thenB, "js_jsxcall", [fV, objV, argsV])
                         thenB.NewBr(mergeB)
-                        var ev = callExt(elseB, "js_jsxmcall", [objV, keyV, argsV])
+                        // js_jsmcall is js_jsxmcall plus JavaScript's String / Array /
+                        // Number / Object method surface (abnf/jsrtjsprint.go).
+                        var ev = callExt(elseB, "js_jsmcall", [objV, keyV, argsV])
                         elseB.NewBr(mergeB)
                         cur = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, elseB)])
                         b = mergeB
@@ -4541,8 +4563,14 @@ NotFuncHead = :script(~~
             var mergeB = curF.NewBlock("")
             b.NewCondBr(isFn, fnB, clsB)
             // The function form: 'this' is the new object, the arguments are unchanged.
-            var oF = callExt(fnB, "js_obj_new", [])
-            callExt(fnB, "js_call_new", [clsV, oF, argsV])
+            // js_jsctordesc files the synthetic class descriptor the instance needs to
+            // answer 'new F() instanceof F' with (the interpreter half's ctorDescriptor
+            // is the same table), and js_jsnewres implements [[Construct]]'s last step:
+            // an OBJECT the constructor returns wins over the fresh receiver.
+            var oF0 = callExt(fnB, "js_obj_new", [])
+            callExt(fnB, "js_set", [oF0, emitStr(fnB, "__class"), callExt(fnB, "js_jsctordesc", [clsV])])
+            var retF = callExt(fnB, "js_call_new", [clsV, oF0, argsV])
+            var oF = callExt(fnB, "js_jsnewres", [retF, oF0])
             fnB.NewBr(mergeB)
             // The class form: the constructor convention prepends the instance.
             var oC = callExt(clsB, "js_obj_new", [])
@@ -4857,6 +4885,24 @@ NotFuncHead = :script(~~
         // the way 'new RegExp' does. It is declared in the PROGRAM's own scope, not in the
         // runtime's root, so no other language's compiler can see the name.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "RegExp"), callExt(b, "js_jsxctor", [])])
+        // The Object global. The runtime root binds a bare object carrying only
+        // 'prototype', so Object.keys / values / entries / assign / fromEntries aborted
+        // with "unknown method 'keys'". js_jsobject answers a MARKED object that
+        // js_jsmcall recognizes (abnf/jsrtjsprint.go), declared in the program's own
+        // scope like RegExp above so no other language's compiler sees it.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Object"), callExt(b, "js_jsobject", [])])
+        // println / print with JAVASCRIPT's ToString. The runtime root binds the SHARED
+        // host functions, which hand the raw value to Go's %v - so println(null) printed
+        // "<nil>", println([1, 2, 3]) printed "[1 2 3]" and println({a: 1}) printed a Go
+        // map dump, while node's String() says "null", "1,2,3" and "[object Object]".
+        // Declaring them as program-scope bindings (rather than rewriting the call site)
+        // keeps shadowing honest: a program with a println of its own overwrites this.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "println"), callExt(b, "js_jsprintfn", [emitStr(b, "println")])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_jsprintfn", [emitStr(b, "print")])])
+        // The String global. The runtime root binds an OBJECT carrying fromCharCode, so
+        // a bare String(v) call aborted with "call of a non function value"; this is a
+        // real function, and String.fromCharCode still resolves through js_jsmcall.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "String"), callExt(b, "js_jsstringfn", [])])
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

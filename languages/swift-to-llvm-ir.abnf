@@ -1638,9 +1638,19 @@ KwContinue  = "continue" KwEnd ;
     // ( e ) passes the single unlabelled operand through; anything else is a tuple.
     function makeParen(items, pos) {
         if (items.length == 1 && items[0].lbl == null) { return items[0].t }
+        // The element labels in ORDER, for printing: `(x: 1, y: "s")` is what
+        // Swift prints for a labelled tuple, and the per-label properties below
+        // cannot say which slot a label belongs to (or in which order).
+        var anyLbl = false
+        var lbls = []
+        for (var q = 0; q < items.length; q++) {
+            lbls.push(items[q].lbl == null ? "" : items[q].lbl)
+            if (items[q].lbl != null) { anyLbl = true }
+        }
         return function(b) {
             var t = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [t, emitStr(b, "__tuple"), emitNum(b, items.length)])
+            if (anyLbl) { callExt(b, "js_set", [t, emitStr(b, "__tlabels"), emitStrArr(b, lbls)]) }
             for (var i = 0; i < items.length; i++) {
                 var r = items[i].t(b)
                 b = r.b
@@ -1650,14 +1660,25 @@ KwContinue  = "continue" KwEnd ;
             return {b: b, v: t}
         }
     }
+    // A [String] of literal names, for __tlabels / __labels.
+    function emitStrArr(b, names) {
+        var arr = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < names.length; i++) { callExt(b, "js_arr_push", [arr, emitStr(b, names[i])]) }
+        return arr
+    }
     // Copies the element names of a tuple TYPE onto a tuple value (the names of a
     // tuple live in its type, so `let p: (n: String, v: Int) = ("k", 9)` has to
     // make p.n work).
     function emitRelabel(b, v, labels) {
+        var any = false
         for (var i = 0; i < labels.length; i++) {
             if (labels[i] == "") { continue }
+            any = true
             callExt(b, "js_set", [v, emitStr(b, labels[i]), callExt(b, "js_get", [v, emitStr(b, "" + i)])])
         }
+        // The names a tuple TYPE gives its elements are printed too, so they join
+        // the ordered __tlabels the literal form records.
+        if (any) { callExt(b, "js_set", [v, emitStr(b, "__tlabels"), emitStrArr(b, labels)]) }
         return v
     }
     // let (a, _, c) = t  /  (x, y) = (y, x): bind or assign element by element.
@@ -2136,7 +2157,9 @@ KwContinue  = "continue" KwEnd ;
             b.NewCondBr(truthy(b, ka), t1, plain)
             t1.NewCondBr(truthy(t1, kb), t2, plain)
             t2.NewRet(callExt(t2, "js_seq", [ka, kb]))
-            plain.NewRet(callExt(plain, "js_seq", [ps[0], ps[1]]))
+            // The general path: js_sweq gives Array / Dictionary / tuple the
+            // element-by-element comparison Swift's value types have.
+            plain.NewRet(callExt(plain, "js_sweq", [ps[0], ps[1]]))
         })
     }
     // The string an associated value contributes to its case's __eqkey.
@@ -3019,6 +3042,32 @@ KwContinue  = "continue" KwEnd ;
     function makeCall(items) {
         var name = items[0]
         var args = planArgs(name, items.slice(1))
+        // Swift's print(_:separator:terminator:). It used to be bound to the shared
+        // `println` host function, which prints the RAW runtime value with Go's %v
+        // (`<nil>`, `[1 2 3]`, a map holding a Go pointer address for an instance)
+        // and which cannot see the two labelled arguments at all - so
+        // `print(1, 2, separator: "-")` printed `1 2 -`. js_swprint renders every
+        // argument with String(describing:) and honours both labels.
+        if (name == "print" && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            var pos = []
+            var sepT = null
+            var termT = null
+            for (var q = 0; q < args.length; q++) {
+                if (args[q].lbl == "separator") { sepT = args[q].t }
+                else if (args[q].lbl == "terminator") { termT = args[q].t }
+                else { pos.push(args[q]) }
+            }
+            return function(b) {
+                var ea = emitArgRecs(b, pos)
+                b = ea.b
+                var sepV = hUndef
+                if (sepT != null) { var rs = sepT(b); b = rs.b; sepV = rs.v }
+                var termV = hUndef
+                if (termT != null) { var rt2 = termT(b); b = rt2.b; termV = rt2.v }
+                callExt(b, "js_swprint", [ea.v, sepV, termV])
+                return {b: b, v: hUndef}
+            }
+        }
         return function(b) {
             // E(rawValue: r): the failable initializer every raw-value enum gets free.
             if (enumNames[name] == 1) {
@@ -3154,7 +3203,9 @@ KwContinue  = "continue" KwEnd ;
                 else {
                     var r = items[i].e(b)
                     b = r.b
-                    pv = r.v
+                    // "\(v)" is String(describing: v), not JavaScript's ToString:
+                    // an array interpolates as "[1, 2, 3]" and nil as "nil".
+                    pv = callExt(r.b, "js_swdesc", [r.v])
                 }
                 v = callExt(b, "js_jadd", [v, pv])
             }
@@ -4574,6 +4625,15 @@ KwContinue  = "continue" KwEnd ;
         var pnames = []
         for (var i = 0; i < n; i++) { pnames.push("$a" + i) }
         var cname = cs.cname
+        // The associated-value labels in order, so `b(n: 2)` prints its label the
+        // way Swift does (and the way swift-interpreter.abnf already recorded).
+        var alabels = []
+        var anyAL = false
+        for (var q = 0; q < n; q++) {
+            var cl = cs.cassoc[q].clabel
+            alabels.push(cl == undefined || cl == null ? "" : cl)
+            if (cl != undefined && cl != null && cl != "") { anyAL = true }
+        }
         var body = function(b) {
             var tblV = callExt(b, "js_kget", [curScopeV, emitStr(b, "$etbl$" + ename)])
             var vals = callExt(b, "js_arr_new", [])
@@ -4585,7 +4645,9 @@ KwContinue  = "continue" KwEnd ;
                 key = callExt(b, "js_jadd", [key, emitStr(b, ",")])
             }
             key = callExt(b, "js_jadd", [key, emitStr(b, ")")])
-            b.NewRet(emitCaseObj(b, ename, cname, hUndef, vals, tblV, key))
+            var cv = emitCaseObj(b, ename, cname, hUndef, vals, tblV, key)
+            if (anyAL) { callExt(b, "js_set", [cv, emitStr(b, "__labels"), emitStrArr(b, alabels)]) }
+            b.NewRet(cv)
             return deadBlock()
         }
         return emitFunc(pnames, body, false)
@@ -4666,7 +4728,10 @@ KwContinue  = "continue" KwEnd ;
             var eqPlain = function(bb, ll, rr) {
                 if (ll == undefined) { ll = l; rr = r }
                 if (hasRichEnum || hasUniStr) { return bb.NewCall(rtEq(), [ll, rr]) }
-                return coreEmitBin(bb, "==", ll, rr)
+                // js_sweq, not js_seq: Array, Dictionary and tuple are VALUE types
+                // in Swift and compare element by element, where js_seq compares
+                // them by identity and answered false for every one of them.
+                return callExt(bb, "js_sweq", [ll, rr])
             }
             var v = emitOverloadable(b, "==", l, r, eqPlain)
             if (op == "!=") { v = callExt(b, "js_not", [v]) }

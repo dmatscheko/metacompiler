@@ -1471,13 +1471,108 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Values: dictionaries, strings, indexing (js_pyget/js_pyset semantics) -----
     // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
-    function swstr(v) {
-        if (v === undefined) { return "" }
+    // String(describing:) - what print writes and what "\(v)" interpolates.
+    //
+    // This used to fall through to JavaScript's ToString, so an Array printed
+    // "1,2,3" and a Dictionary, a tuple, a struct and an enum case all printed
+    // "[object Object]", while swift-to-llvm-ir.abnf handed the raw value to the
+    // shared println and printed Go's %v form (`<nil>`, `[1 2 3]`, a map with a
+    // raw pointer address in it). Real Swift prints
+    //   nil / [1, 2, 3] / ["x": 1] / (x: 1, y: "s") / P(x: 1, y: 2) / a(1, "x")
+    // (verified against swift 6.1.2). The Go twin of this renderer is swRender in
+    // abnf/jsrtswift.go; ./test.sh --cross diffs the two, so they must stay in step.
+    //
+    // Deliberate simplifications, shared by both halves: a class instance prints
+    // as its BARE type name (real Swift qualifies it with the module, which this
+    // runtime has no concept of); a non-nil Optional prints as the wrapped value
+    // (there is no Optional box in this value model, so `Optional(3)` cannot be
+    // recovered without the declared type); and a Dictionary prints in INSERTION
+    // order (Swift's own order is unspecified).
+    function swstr(v) { return swRender(v, false, 0) }
+    // Swift quotes a String that appears INSIDE a collection, a tuple or a struct,
+    // and escapes it the way debugDescription does.
+    function swQuote(s) {
+        var out = "\""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i)
+            if (c == "\\") { out += "\\\\" }
+            else if (c == "\"") { out += "\\\"" }
+            else if (c == "\n") { out += "\\n" }
+            else if (c == "\t") { out += "\\t" }
+            else if (c == "\r") { out += "\\r" }
+            else { out += c }
+        }
+        return out + "\""
+    }
+    function swRender(v, nested, depth) {
+        if (depth > 32) { return "..." }
+        if (v === undefined) { return "nil" }
         if (v === null) { return "nil" }
         if (v === true) { return "true" }
         if (v === false) { return "false" }
-        if (typeof v == "string") { return v }
-        return "" + v
+        if (typeof v == "string") { return nested ? swQuote(v) : v }
+        if (typeof v != "object") { return "" + v }
+        if (Array.isArray(v)) {
+            var out = "["
+            for (var i = 0; i < v.length; i++) {
+                if (i > 0) { out += ", " }
+                out += swRender(v[i], true, depth + 1)
+            }
+            return out + "]"
+        }
+        // A user `description` (CustomStringConvertible) wins over every built-in
+        // rendering, exactly as it does in Swift.
+        var g = findAccessor(v, "__get_description")
+        if (g != null) { return swRender(g(v), false, depth + 1) }
+        if (hasOwn(v, "description") && typeof v["description"] != "function") {
+            return swRender(v["description"], false, depth + 1)
+        }
+        if (isDict(v)) {
+            if (v.keys.length == 0) { return "[:]" }
+            var dout = "["
+            for (var d = 0; d < v.keys.length; d++) {
+                if (d > 0) { dout += ", " }
+                dout += swRender(v.keys[d], true, depth + 1) + ": " + swRender(v.vals[d], true, depth + 1)
+            }
+            return dout + "]"
+        }
+        if (v.__tuple != undefined) {
+            var tl = v.__tlabels
+            var tout = "("
+            for (var t = 0; t < v.__tuple; t++) {
+                if (t > 0) { tout += ", " }
+                if (tl != undefined && tl != null && tl[t] != undefined && tl[t] != "") { tout += tl[t] + ": " }
+                tout += swRender(v["" + t], true, depth + 1)
+            }
+            return tout + ")"
+        }
+        if (v.__ecase === true) {
+            var vals = v.__vals
+            if (vals == undefined || vals == null || vals.length == 0) { return v.__ename }
+            var lb = v.__labels
+            var eout = v.__ename + "("
+            for (var e = 0; e < vals.length; e++) {
+                if (e > 0) { eout += ", " }
+                if (lb != undefined && lb != null && lb[e] != undefined && lb[e] != "") { eout += lb[e] + ": " }
+                eout += swRender(vals[e], true, depth + 1)
+            }
+            return eout + ")"
+        }
+        if (v.__isclass === true || v.__isenum === true) {
+            return v.__name == undefined ? "" + v : v.__name
+        }
+        var cls = v.__class
+        if (cls == undefined || cls === null || cls.__name == undefined) { return "" + v }
+        // A STRUCT prints memberwise - Swift synthesizes that reflection-based
+        // description for every struct; a class prints its type name.
+        if (cls.__struct !== true || cls.__fields == undefined || cls.__fields == null) { return cls.__name }
+        var fs = cls.__fields
+        var sout = cls.__name + "("
+        for (var f = 0; f < fs.length; f++) {
+            if (f > 0) { sout += ", " }
+            sout += fs[f] + ": " + swRender(hasOwn(v, fs[f]) ? v[fs[f]] : undefined, true, depth + 1)
+        }
+        return sout + ")"
     }
     // Int arithmetic is 32 bit and truncating; Double arithmetic is not. The value
     // model has ONE number type, so the two are told apart by the operands: an
@@ -1583,6 +1678,19 @@ KwContinue  = "continue" KwEnd ;
             out += swstr(args[i])
         }
         println(out)
+    }
+    // print(_:separator:terminator:). The two labelled arguments used to be
+    // dropped (they arrived positionally, so `print(1, 2, separator: "-")`
+    // printed `1 2 -`); makeCall splits them out and calls this instead.
+    function swPrintSep(argv, sep, term) {
+        var s = (sep === undefined || sep === null) ? " " : swstr(sep)
+        var t = (term === undefined || term === null) ? "\n" : swstr(term)
+        var out = ""
+        for (var i = 0; i < argv.length; i++) {
+            if (i > 0) { out += s }
+            out += swstr(argv[i])
+        }
+        if (t == "\n") { println(out) } else { print(out + t) }
     }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
@@ -1741,8 +1849,18 @@ KwContinue  = "continue" KwEnd ;
     // ( e ) passes the single unlabelled operand through; anything else is a tuple.
     function makeParen(items, pos) {
         if (items.length == 1 && items[0].lbl == null) { return items[0].t }
+        // The element labels in ORDER, for printing: Swift prints a labelled
+        // tuple as `(x: 1, y: "s")`, and the per-label properties below cannot
+        // say which slot a label belongs to (or in which order).
+        var anyLbl = false
+        var lbls = []
+        for (var q = 0; q < items.length; q++) {
+            lbls.push(items[q].lbl == null ? "" : items[q].lbl)
+            if (items[q].lbl != null) { anyLbl = true }
+        }
         return function() {
             var t = {__tuple: items.length}
+            if (anyLbl) { scopePut(t, "__tlabels", lbls) }
             for (var i = 0; i < items.length; i++) {
                 var v = items[i].t()
                 scopePut(t, "" + i, v)
@@ -2393,6 +2511,26 @@ KwContinue  = "continue" KwEnd ;
     function makeCall(items) {
         var name = items[0]
         var recs = planArgs(name, items.slice(1))
+        // print(_:separator:terminator:) - the labels have to be split out here,
+        // because a host function only sees positional arguments.
+        if (name == "print" && lookupSig(name) == null) {
+            var pos = []
+            var sepT = null
+            var termT = null
+            for (var q = 0; q < recs.length; q++) {
+                if (recs[q].lbl == "separator") { sepT = recs[q].t }
+                else if (recs[q].lbl == "terminator") { termT = recs[q].t }
+                else { pos.push(recs[q]) }
+            }
+            if (sepT != null || termT != null) {
+                return function() {
+                    var ea = evalArgs(pos)
+                    swPrintSep(ea.argv, sepT == null ? undefined : sepT(), termT == null ? undefined : termT())
+                    writeBacks(ea.boxes)
+                    return undefined
+                }
+            }
+        }
         return function() {
             var ea = evalArgs(recs)
             var argv = ea.argv
@@ -2518,9 +2656,14 @@ KwContinue  = "continue" KwEnd ;
         if (v === null || v === undefined) { return v }
         if (typeof v != "object") { return v }
         if (v.__tuple == undefined) { return v }
+        var any = false
         for (var i = 0; i < labels.length; i++) {
-            if (labels[i] != "" && !hasOwn(v, labels[i])) { scopePut(v, labels[i], tupleAt(v, i)) }
+            if (labels[i] == "") { continue }
+            any = true
+            if (!hasOwn(v, labels[i])) { scopePut(v, labels[i], tupleAt(v, i)) }
         }
+        // The names a tuple TYPE gives its elements are printed too.
+        if (any) { scopePut(v, "__tlabels", labels) }
         return v
     }
     // items = [{lbl}?, condT, bodyT]
@@ -3504,8 +3647,46 @@ KwContinue  = "continue" KwEnd ;
         }
         return null
     }
-    function swEq(l, r) {
+    // Swift's ==. Array, Dictionary and tuple are VALUE types, so they compare
+    // element by element; this used to fall through to `l === r`, which compares
+    // them by identity - so `[1, 2] == [1, 2]` was always false in BOTH halves.
+    // The Go twin is swEqualDepth in abnf/jsrtswift.go.
+    function swEq(l, r) { return swEqD(l, r, 0) }
+    function swEqD(l, r, depth) {
+        if (depth > 32) { return false }
         if (typeof l == "string" && typeof r == "string") { return swStrEq(l, r) }
+        if (Array.isArray(l) || Array.isArray(r)) {
+            if (!Array.isArray(l) || !Array.isArray(r) || l.length != r.length) { return false }
+            for (var i = 0; i < l.length; i++) { if (!swEqD(l[i], r[i], depth + 1)) { return false } }
+            return true
+        }
+        if (l !== null && l !== undefined && r !== null && r !== undefined
+            && typeof l == "object" && typeof r == "object") {
+            if (l === r) { return true }
+            if (isDict(l) || isDict(r)) {
+                if (!isDict(l) || !isDict(r) || l.keys.length != r.keys.length) { return false }
+                // A Dictionary is unordered: every entry of the left must match
+                // some entry of the right.
+                for (var d = 0; d < l.keys.length; d++) {
+                    var found = false
+                    for (var e = 0; e < r.keys.length; e++) {
+                        if (swEqD(l.keys[d], r.keys[e], depth + 1) && swEqD(l.vals[d], r.vals[e], depth + 1)) {
+                            found = true
+                            break
+                        }
+                    }
+                    if (!found) { return false }
+                }
+                return true
+            }
+            if (l.__tuple != undefined || r.__tuple != undefined) {
+                if (l.__tuple != r.__tuple) { return false }
+                for (var t = 0; t < l.__tuple; t++) {
+                    if (!swEqD(l["" + t], r["" + t], depth + 1)) { return false }
+                }
+                return true
+            }
+        }
         if (isCaseVal(l) && isCaseVal(r)) {
             if (l.__ename !== r.__ename) { return false }
             var a = l.__vals

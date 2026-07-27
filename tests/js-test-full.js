@@ -508,6 +508,186 @@ function s21() {
     check("agr6", -Infinity < -1e308)
     check("agr7", typeof undefined === "undefined")
 }
+// ===== SECTION 22: value rendering (String / ToString) =====
+// The two halves used to hand the raw value to the shared println host function, so
+// Go's %v reached stdout: "<nil>" for null, "[1 2 3]" for an array and a map dump for
+// an object, where node's String() says "null", "1,2,3" and "[object Object]". Values
+// are node v24's. The println lines at the end ratchet the PRINT path itself, which no
+// check() can reach; node's console.log uses its own inspect format, so only the
+// check() assertions are settled against node.
+function s22() {
+    class Tagged { constructor(n) { this.n = n } toString() { return "T(" + this.n + ")" } }
+    check("str1", String(null) === "null" && String(undefined) === "undefined")
+    check("str2", String(true) === "true" && String(1.5) === "1.5")
+    check("str3", String([1, 2, 3]) === "1,2,3")
+    check("str4", String([1, [2, 3]]) === "1,2,3")
+    check("str5", String([1, null, undefined, 2]) === "1,,,2")
+    check("str6", String({}) === "[object Object]")
+    check("str7", String({ a: 1 }) === "[object Object]")
+    check("str8", String(new Tagged(4)) === "T(4)")
+    check("str9", ("" + new Tagged(5)) === "T(5)")
+    check("str10", String("x") === "x" && String([]) === "")
+    check("str11", String.fromCharCode(65, 66) === "AB")
+    println(null, undefined, [1, 2, 3], { a: 1 }, "end")
+    println(1, "x", true, [1, [2, 3]], new Tagged(6))
+}
+
+// ===== SECTION 23: ToPrimitive in ==, the relational operators and + =====
+// The compiler half compared an OBJECT operand without ever taking its primitive
+// form, so [1] == 1 and [2] > 1 were false. Values are node v24's.
+function s23() {
+    class Tagged { constructor(n) { this.n = n } toString() { return "T(" + this.n + ")" } }
+    check("prim1", [1] == 1)
+    check("prim2", [] == false)
+    check("prim3", [2] > 1)
+    check("prim4", [1] <= 1 && [1] >= 1)
+    check("prim5", ({}) == "[object Object]")
+    check("prim6", null == undefined)
+    check("prim7", !(null == 0))
+    check("prim8", !(NaN == NaN))
+    check("prim9", [] == "")
+    check("prim10", ([1, 2] + [3]) === "1,23")
+    check("prim11", ("x" + {}) === "x[object Object]")
+    check("prim12", (1 + [2]) === "12")
+    var box = { valueOf: function () { return 42 } }
+    check("prim13", box == 42 && box > 41 && (box + 1) === 43)
+    check("prim14", ("" + new Tagged(7)) === "T(7)")
+    var a1 = [1]
+    var a2 = [1]
+    check("prim15", !(a1 == a2) && a1 == a1)
+}
+
+// ===== SECTION 24: new, instanceof and delete =====
+// 'new F() instanceof F' was false in the compiler for a plain constructor FUNCTION
+// (only class descriptors carried an instanceof chain), an object RETURNED by a
+// constructor was discarded, and 'delete a[1]' was a silent no-op.
+// NOTE: 'i in arr' stays TRUE after 'delete arr[i]' in both halves, where node says
+// false. A real hole needs per-slot state on the array, and the interpreter half's
+// arrays are host arrays that cannot carry any (the -frozen runtime rejects a
+// non-index key on an array outright), so the two halves agree on blanking the slot.
+function s24() {
+    function Pt(x) { this.x = x }
+    function Ret() { return { made: true } }
+    class Tagged { constructor(n) { this.n = n } }
+    var p = new Pt(3)
+    check("new1", p.x === 3)
+    check("new2", p instanceof Pt)
+    check("new3", p instanceof Object)
+    check("new4", !(p instanceof Tagged))
+    check("new5", new Ret().made === true)
+    check("new6", new Tagged(1) instanceof Tagged)
+    check("new7", [] instanceof Array && !([] instanceof Pt))
+    var arr = [1, 2, 3]
+    delete arr[1]
+    check("del1", arr.length === 3)
+    check("del2", arr[1] === undefined)
+    check("del3", arr.join(",") === "1,,3")
+    var o = { a: 1, b: 2 }
+    delete o.a
+    check("del4", !("a" in o) && ("b" in o))
+}
+
+// ===== SECTION 25: the Object statics =====
+// Object.keys / entries / values leaked the interpreter's hidden __keys bookkeeping
+// slot ("a b __keys") and aborted outright in the compiler ("unknown method 'keys'").
+function s25() {
+    class Tagged { constructor(n) { this.n = n } }
+    var o = { a: 1, b: 2 }
+    check("obj1", Object.keys(o).join("|") === "a|b")
+    check("obj2", Object.values(o).join("|") === "1|2")
+    check("obj3", Object.entries(o).map(function (e) { return e[0] + "=" + e[1] }).join("|") === "a=1|b=2")
+    var t = new Tagged(1)
+    check("obj4", Object.keys(t).join("|") === "n")
+    check("obj5", Object.keys([7, 8]).join("|") === "0|1")
+    var d = Object.assign({ z: 0 }, { a: 1 }, { b: 2 })
+    check("obj6", d.z === 0 && d.a === 1 && d.b === 2)
+    check("obj7", Object.fromEntries([["k", 1], ["l", 2]]).l === 2)
+    check("obj8", Object.freeze(o) === o)
+}
+
+// ===== SECTION 26: the String methods =====
+// Everything here was missing from the compiler half outright, or implemented with
+// the shared runtime's Java-flavoured semantics (indexOf ignoring its from-index,
+// split taking no limit). Values are node v24's.
+function s26() {
+    check("sm1", "abcabc".indexOf("b", 2) === 4)
+    check("sm2", "abcabc".lastIndexOf("b") === 4)
+    check("sm3", "abc".includes("bc") && !"abc".includes("cb"))
+    check("sm4", "abc".startsWith("ab") && "abc".startsWith("bc", 1))
+    check("sm5", "abc".endsWith("bc") && "abc".endsWith("ab", 2))
+    check("sm6", "a".padStart(3, "xy") === "xya" && "a".padEnd(3, "xy") === "axy")
+    check("sm7", "ab".repeat(3) === "ababab" && "ab".repeat(0) === "")
+    check("sm8", "  a  ".trimStart() === "a  " && "  a  ".trimEnd() === "  a")
+    check("sm9", "abc".at(-1) === "c" && "abc".at(0) === "a" && "abc".at(9) === undefined)
+    check("sm10", "a-b-c".replaceAll("-", "+") === "a+b+c")
+    check("sm11", "a-b-c".replace("-", "+") === "a+b-c")
+    check("sm12", "abc".concat("d", "e") === "abcde")
+    check("sm13", "a,b,,c".split(",").join("|") === "a|b||c")
+    check("sm14", "abc".split("").length === 3)
+    check("sm15", "a,b,c".split(",", 2).join("|") === "a|b")
+    check("sm16", "abc".slice(-2) === "bc" && "abc".substring(1, 2) === "b")
+    check("sm17", "abcd".substr(1, 2) === "bc")
+    check("sm18", "abc".localeCompare("abd") === -1 && "abc".localeCompare("abc") === 0)
+    check("sm19", "abc".codePointAt(1) === 98)
+    check("sm20", "aXbXc".replace("X", "[$&]") === "a[X]bXc")
+    check("sm21", "abc".toUpperCase() === "ABC" && "ABC".toLowerCase() === "abc")
+    check("sm22", "aa".replace("a", function (m, i) { return m + i }) === "a0a")
+}
+
+// ===== SECTION 27: the Array methods =====
+// map/filter/forEach existed in the shared runtime with KOTLIN's signature (the
+// callback got no index); everything else was missing. Values are node v24's.
+function s27() {
+    var a = [1, 2, 3]
+    check("am1", a.map(function (x, i) { return x * 10 + i }).join("|") === "10|21|32")
+    check("am2", a.filter(function (x, i) { return i > 0 }).join("|") === "2|3")
+    check("am3", a.reduce(function (s, x) { return s + x }, 0) === 6)
+    check("am4", a.reduce(function (s, x) { return s + x }) === 6)
+    check("am5", a.reduceRight(function (s, x) { return s + "" + x }) === "321")
+    check("am6", a.some(function (x) { return x > 2 }) && !a.some(function (x) { return x > 9 }))
+    check("am7", a.every(function (x) { return x > 0 }) && !a.every(function (x) { return x > 1 }))
+    check("am8", a.find(function (x) { return x > 1 }) === 2)
+    check("am9", a.findIndex(function (x) { return x > 1 }) === 1)
+    check("am10", a.findLast(function (x) { return x < 3 }) === 2)
+    check("am11", a.findLastIndex(function (x) { return x < 3 }) === 1)
+    check("am12", a.includes(2) && !a.includes(9))
+    check("am13", a.lastIndexOf(3) === 2 && a.indexOf(9) === -1)
+    check("am14", a.at(-1) === 3 && a.at(5) === undefined)
+    check("am15", [1, [2, [3]]].flat().join("|") === "1|2|3")
+    check("am16", [1, [2, [3]]].flat(2).join("|") === "1|2|3")
+    check("am17", a.flatMap(function (x) { return [x, x] }).join("|") === "1|1|2|2|3|3")
+    var f = [1, 2, 3, 4]
+    check("am18", f.fill(0, 1, 3).join("|") === "1|0|0|4")
+    var g = [1, 2, 3, 4]
+    check("am19", g.splice(1, 2).join("|") === "2|3" && g.join("|") === "1|4")
+    var h = [3, 1, 2]
+    check("am20", h.sort().join("|") === "1|2|3")
+    check("am21", [10, 9].sort().join("|") === "10|9")
+    check("am22", [10, 9].sort(function (x, y) { return x - y }).join("|") === "9|10")
+    check("am23", [1, 2].concat([3], 4).join("|") === "1|2|3|4")
+    check("am24", [1, 2].toString() === "1,2")
+    check("am25", [1, 2, 3].slice(1, -1).join("|") === "2")
+    var r = [1, 2, 3]
+    check("am26", r.reverse().join("|") === "3|2|1" && r[0] === 3)
+    check("am27", [1, null, undefined, 2].join("-") === "1---2")
+}
+
+// ===== SECTION 28: the Number methods =====
+// toFixed and toString(radix) had no implementation at all in either half's runtime.
+// Values are node v24's; note that (1.005).toFixed(2) is "1.00" because the exact
+// binary value of 1.005 is below it.
+function s28() {
+    check("nm1", (1.2345).toFixed(2) === "1.23")
+    check("nm2", (2.5).toFixed(0) === "3")
+    check("nm3", (1.005).toFixed(2) === "1.00")
+    check("nm4", (-1.5).toFixed(0) === "-2")
+    check("nm5", (3).toFixed(0) === "3" && (3).toFixed(2) === "3.00")
+    check("nm6", (255).toString(16) === "ff")
+    check("nm7", (10).toString(2) === "1010")
+    check("nm8", (255).toString() === "255" && (255).toString(10) === "255")
+    check("nm9", (0.5).toString(2) === "0.1")
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -532,6 +712,13 @@ function main() {
     s19() // SECTION-CALL 19
     s20() // SECTION-CALL 20
     s21() // SECTION-CALL 21
+    s22() // SECTION-CALL 22
+    s23() // SECTION-CALL 23
+    s24() // SECTION-CALL 24
+    s25() // SECTION-CALL 25
+    s26() // SECTION-CALL 26
+    s27() // SECTION-CALL 27
+    s28() // SECTION-CALL 28
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

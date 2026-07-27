@@ -684,10 +684,9 @@ String exPick(int v) {
 }
 String exConstPat(Object o) {
   switch (o) {
-    // The const-creation pattern must PARSE and must not match a non-instance. What it
-    // does against `const ExVal(3)` itself is not asserted here: the compiler half does
-    // not canonicalize const instances yet (identical(const E(3), const E(3)) is false
-    // there and true in the interpreter), which is a semantic gap, not a syntax one.
+    // A const-creation pattern is a CONSTANT pattern: it matches when the value equals
+    // the constant, and `const ExVal(3)` is the canonical instance, so the matched
+    // value has to be that same object.
     case const ExVal(3):
       return "three";
     case 3:
@@ -700,10 +699,76 @@ void s28() {
   check("ex1", 4.exDoubled == 8);
   check("ex2", [1, 2, 3].exSecond == 2 && <int>[1].exSecond == null);
   check("ex3", exPick(1) == "one" && exPick(2) == "two" && exPick(5) == "other");
-  check("ex4", exConstPat(3) == "int-three" && exConstPat("x") == "no");
+  check("ex4", exConstPat(const ExVal(3)) == "three" && exConstPat(3) == "int-three"
+      && exConstPat("x") == "no");
   var dollar$name = 1;
   var $lead = 2;
   check("ex5", dollar$name + $lead == 3);
+}
+
+// ===== SECTION 29: toString rendering and const canonicalization =====
+// Dart's Object.toString() (which print and string interpolation both go through)
+// and the canonicalization of const values. Two grammars can agree on the whole
+// syntax of a program and still print different things: the compiler half used to
+// hand raw values to the host print, so `print(null)` said "<nil>", a List said
+// "[1 2 3]" and an instance dumped its class descriptor with a Go pointer address
+// in it. The expected answers here come from the vendored corpus:
+//   language/regress/regress45642_test.dart:14   "should print: Instance of 'Foo'"
+//   language/records/simple/literals_and_field_access_test.dart:121
+//                                                x.toString() == "[1, 2, 3]"
+//   language/enum/enum_test.dart:62              'Enum2.A' == Enum2.A.toString()
+//   language/enum/enhanced_enums_basic_test.dart:143  a user toString() wins
+//   language/const/ct_const_test.dart:62
+//       identical(const Point.X(5), const Point(5, 0))  - two DIFFERENT constructors
+//   language/canonicalize/const_test.dart        const C1(), const lists and maps
+class TsPlain {
+  final int n;
+  const TsPlain(this.n);
+}
+class TsOver {
+  final int n;
+  const TsOver(this.n);
+  String toString() => "TsOver($n)";
+}
+class TsPoint {
+  final int x;
+  final int y;
+  const TsPoint(this.x, this.y);
+  const TsPoint.axis(int v) : x = v, y = 0;
+}
+enum TsCol { red, green }
+void s29() {
+  Object? nil;
+  check("ts1", "$nil" == "null" && [1, 2, 3].toString() == "[1, 2, 3]");
+  check("ts2", "${<String, int>{'a': 1, 'b': 2}}" == "{a: 1, b: 2}");
+  check("ts3", "${<int>{1, 2}}" == "{1, 2}");
+  // No user toString(): the class name, quoted, after "Instance of".
+  check("ts4", const TsPlain(3).toString() == "Instance of 'TsPlain'");
+  // A user toString() wins, for an explicit call and for interpolation alike.
+  check("ts5", const TsOver(3).toString() == "TsOver(3)" && "${const TsOver(4)}" == "TsOver(4)");
+  // A string inside a collection is NOT quoted, and nesting renders recursively.
+  check("ts6", ["a", ["b", 1]].toString() == "[a, [b, 1]]");
+  check("ts7", {'k': [1, 2]}.toString() == "{k: [1, 2]}");
+  check("ts8", TsCol.red.toString() == "TsCol.red" && TsCol.red.name == "red");
+  check("ts9", "${(1, 'a')}" == "(1, a)" && "${(x: 1, y: 2)}" == "(x: 1, y: 2)");
+  check("ts10", 3.toString() == "3" && true.toString() == "true" && "s".toString() == "s");
+  check("ts11", "$TsPlain" == "TsPlain"); // a Type prints as its name
+  // print() itself, so the rendering is pinned on stdout and not only through
+  // toString(): --full demands byte-identical output from both script engines and
+  // --cross diffs the two halves of the pair on it.
+  print([1, 2, 3]);
+  print(const TsPlain(3));
+  print(TsCol.green);
+  // Canonicalization: the class and the FIELD VALUES decide, not the constructor.
+  check("ts12", identical(const TsPlain(3), const TsPlain(3)));
+  check("ts13", !identical(const TsPlain(3), const TsPlain(4)));
+  check("ts14", identical(const TsPoint.axis(5), const TsPoint(5, 0)));
+  const p = TsPlain(7); // an implicit const context: no keyword on the creation
+  check("ts15", identical(p, const TsPlain(7)));
+  check("ts16", identical(const [1, 2], const [1, 2]) && !identical(const [2, 1], const [1, 2]));
+  check("ts17", identical(const {'a': 1}, const {'a': 1}));
+  // A NON-const creation of a class that has a const constructor is a fresh object.
+  check("ts18", !identical(TsPlain(9), TsPlain(9)));
 }
 
 // ===== END SECTIONS =====
@@ -737,6 +802,7 @@ int main() {
   s26(); // SECTION-CALL 26
   s27(); // SECTION-CALL 27
   s28(); // SECTION-CALL 28
+  s29(); // SECTION-CALL 29
   print("full: $checks checks, $fails failures");
   return fails;
 }

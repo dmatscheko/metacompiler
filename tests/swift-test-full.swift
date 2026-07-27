@@ -734,6 +734,64 @@ func s22() {
     check("mis6", true) // async funcs + actor are define-only in this harness
 }
 
+// ===== SECTION 23: value description and value-type equality =====
+// The ratchet for the print/String(describing:) rendering and for == over the
+// three VALUE types. Every expected string here was verified against swift
+// 6.1.2 on this machine (the section runs green under `swift <file>`), except
+// where a comment says otherwise.
+struct Point23 { var x: Int; var y: String }
+struct Money23: CustomStringConvertible {
+    var cents: Int
+    var description: String { "$\(cents)" }
+}
+enum Shape23 { case dot; case line(Int, String); case at(n: Int) }
+enum Tag23: String { case red = "RED" }
+func s23() {
+    let nothing: Int? = nil
+    check("dsc1", "\(nothing)" == "nil")
+    check("dsc2", "\([1, 2, 3])" == "[1, 2, 3]")
+    check("dsc3", "\([[1, 2], [3]])" == "[[1, 2], [3]]")
+    let empty: [String] = []
+    check("dsc4", "\(empty)" == "[]")
+    check("dsc5", "\(["k": 1])" == "[\"k\": 1]")
+    let emptyD: [String: Int] = [:]
+    check("dsc6", "\(emptyD)" == "[:]")
+    // A String nested in a collection is QUOTED and escaped; a top-level one is not.
+    check("dsc7", "\(["s"])" == "[\"s\"]")
+    check("dsc8", "\(["a\nb"])" == "[\"a\\nb\"]")
+    check("dsc9", "\((1, "two"))" == "(1, \"two\")")
+    let lt = (x: 1, y: "s")
+    check("dsc10", "\(lt)" == "(x: 1, y: \"s\")")
+    check("dsc11", "\(Point23(x: 1, y: "hi"))" == "Point23(x: 1, y: \"hi\")")
+    // CustomStringConvertible wins over the synthesized rendering, nested too.
+    check("dsc12", "\(Money23(cents: 7))" == "$7")
+    check("dsc13", "\([Money23(cents: 7)])" == "[$7]")
+    check("dsc14", "\(Shape23.dot)" == "dot")
+    check("dsc15", "\(Shape23.line(2, "x"))" == "line(2, \"x\")")
+    check("dsc16", "\(Shape23.at(n: 5))" == "at(n: 5)")
+    check("dsc17", "\(Tag23.red)" == "red") // a raw-value case prints its NAME
+    check("dsc18", "\(true) \(3)" == "true 3")
+    check("dsc19", "\("plain")" == "plain")
+    // Array, Dictionary and tuple are VALUE types: == compares element by element.
+    check("eqv1", [1, 2] == [1, 2] && [1, 2] != [1, 3])
+    check("eqv2", [[1], [2]] == [[1], [2]])
+    check("eqv3", ["a": 1] == ["a": 1] && ["a": 1] != ["a": 2])
+    check("eqv4", (1, "a") == (1, "a") && (1, "a") != (2, "a"))
+    check("eqv5", empty == [])
+    // print's separator: and terminator: labels (they used to be dropped and
+    // printed as two extra positional arguments). Asserted through stdout, which
+    // the matrix compares byte for byte between the two engines and --cross
+    // between the two halves. Real Swift writes "1-2-3\nt!\n" here.
+    print(1, 2, 3, separator: "-")
+    print("t", terminator: "!\n")
+    // NOT asserted, and deliberately: a struct nested in a collection is
+    // MODULE-QUALIFIED in real Swift ("[m.Point23(x: 1, ...)]") because the
+    // nested form is debugDescription; this runtime has no module concept and
+    // prints the bare name in both halves. Same reason a class instance prints
+    // its bare type name, and a non-nil Optional prints the wrapped value where
+    // Swift prints Optional(3) - there is no Optional box in this value model.
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -759,6 +817,7 @@ func main() {
     s20() // SECTION-CALL 20
     s21() // SECTION-CALL 21
     s22() // SECTION-CALL 22
+    s23() // SECTION-CALL 23
     print("full: \(checks) checks, \(fails) failures")
 }
 

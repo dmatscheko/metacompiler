@@ -2271,10 +2271,660 @@ NotFuncHead = :script(~~
 
     // The host names that a JS program can use. Everything resolves to the goja
     // natives, so e.g. Math.imul or the string/array methods behave exactly like in JS.
+    // ----- JavaScript's own value semantics -----
+    // This block is PORTED VERBATIM from languages/js-interpreter.abnf (TypeScript is
+    // JavaScript plus types, so the runtime semantics are the same ones), and
+    // abnf/jsrtjsprint.go is the Go twin both compiler halves reach through
+    // js_jsprintfn / js_jseq / js_jsmcall. The three files MUST be read together -
+    // the matrix compares each engine against itself and can never see them drift
+    // apart (docs/abnf-dialect-gotchas.md, "The matrix compares each engine against
+    // ITSELF").
+
+    function jsIsObjLike(v) { return v !== null && v !== undefined && typeof v == "object" }
+
+    // Runs o's own toString / valueOf, if it has one, and answers {v: result}. The two
+    // places a method can live take DIFFERENT calling conventions: a CLASS method sits
+    // on the __class descriptor and gets the receiver prepended, an object literal's
+    // method is an ordinary closure that reads 'this' from the receiver slot.
+    function jsCallMethod(o, name) {
+        for (var cl = o.__class; cl != undefined && cl != null; cl = cl.__super) {
+            if (hasOwn(cl, name) && typeof cl[name] == "function") { return {v: cl[name].apply(undefined, [o])} }
+        }
+        if (hasOwn(o, name) && typeof o[name] == "function") { return {v: callWithThis(o[name], o, [])} }
+        return null
+    }
+
+    // String(v), exactly as node v24 spells it: "null", "undefined", "1,2,3" for an
+    // array (a null / undefined element joining as ""), "[object Object]" for a plain
+    // object. A FUNCTION is the one value neither half can answer node's way (node
+    // prints the source text), so both print "[function]".
+    function jsStr(v) {
+        if (v === undefined) { return "undefined" }
+        if (v === null) { return "null" }
+        if (typeof v == "string") { return v }
+        if (typeof v == "function") { return "[function]" }
+        if (Array.isArray(v)) {
+            var out = ""
+            for (var i = 0; i < v.length; i++) {
+                if (i > 0) { out = out + "," }
+                var e = anytype
+                e = v[i]
+                if (e === undefined || e === null) { continue }
+                out = out + jsStr(e)
+            }
+            return out
+        }
+        if (typeof v == "object") {
+            var r = jsCallMethod(v, "toString")
+            if (r != null) { return "" + r.v }
+            return "[object Object]"
+        }
+        return "" + v
+    }
+
+    // ToPrimitive(v, default): valueOf first, then toString. This is the step the
+    // shared runtime's == and < were missing, which is why '[1] == 1' and '[2] > 1'
+    // were false under -frozen and true in node.
+    function jsToPrim(v) {
+        if (Array.isArray(v)) { return jsStr(v) }
+        if (jsIsObjLike(v)) {
+            var r = jsCallMethod(v, "valueOf")
+            if (r != null && !jsIsObjLike(r.v)) { return r.v }
+            return jsStr(v)
+        }
+        return v
+    }
+
+    // The abstract equality comparison. null == undefined is true and neither is equal
+    // to anything else; two objects compare by identity; an object against a primitive
+    // compares its primitive form.
+    function jsLooseEq(a, b) {
+        if (a === undefined || a === null || b === undefined || b === null) {
+            return (a === undefined || a === null) && (b === undefined || b === null)
+        }
+        var ao = jsIsObjLike(a)
+        var bo = jsIsObjLike(b)
+        if (ao && bo) { return a === b }
+        if (ao) { return jsLooseEq(jsToPrim(a), b) }
+        if (bo) { return jsLooseEq(a, jsToPrim(b)) }
+        return a == b
+    }
+
+    // ----- Small string/array helpers -----
+    // Written with charAt/substring/push only: the -frozen engine has no
+    // string.split, no array.join, no array.splice, and its indexOf IGNORES a
+    // from-index (see docs/abnf-dialect-gotchas.md).
+    function jsIsSpace(code) {
+        if (code == 32 || code == 9 || code == 10 || code == 13 || code == 11 || code == 12) { return true }
+        if (code == 160 || code == 5760 || code == 8232 || code == 8233) { return true }
+        if (code >= 8192 && code <= 8202) { return true }
+        if (code == 8239 || code == 8287 || code == 12288 || code == 65279) { return true }
+        return false
+    }
+    function jsTrim(s, left, right) {
+        var a = 0
+        var b = s.length
+        if (left) { while (a < b && jsIsSpace(s.charCodeAt(a))) { a = a + 1 } }
+        if (right) { while (b > a && jsIsSpace(s.charCodeAt(b - 1))) { b = b - 1 } }
+        return s.substring(a, b)
+    }
+    function jsIndexFrom(s, sub, from) {
+        var f = from
+        if (f < 0) { f = 0 }
+        if (f > s.length) { f = s.length }
+        var at = s.substring(f, s.length).indexOf(sub)
+        if (at < 0) { return -1 }
+        return at + f
+    }
+    function jsLastIndex(s, sub) {
+        var best = -1
+        for (var i = 0; i + sub.length <= s.length; i++) {
+            if (s.substring(i, i + sub.length) == sub) { best = i }
+        }
+        return best
+    }
+    function jsJoin(a, sep) {
+        var out = ""
+        for (var i = 0; i < a.length; i++) {
+            if (i > 0) { out = out + sep }
+            var e = anytype
+            e = a[i]
+            if (e === undefined || e === null) { continue }
+            out = out + jsStr(e)
+        }
+        return out
+    }
+    function jsSplit(s, sep, limit) {
+        var out = []
+        if (sep == "") {
+            for (var i = 0; i < s.length; i++) {
+                if (limit >= 0 && out.length >= limit) { return out }
+                out.push(s.charAt(i))
+            }
+            return out
+        }
+        var at = 0
+        while (true) {
+            var found = jsIndexFrom(s, sep, at)
+            if (found < 0) { break }
+            if (limit >= 0 && out.length >= limit) { return out }
+            out.push(s.substring(at, found))
+            at = found + sep.length
+        }
+        if (limit >= 0 && out.length >= limit) { return out }
+        out.push(s.substring(at, s.length))
+        return out
+    }
+    // The $ patterns of a replacement string: $$ a literal dollar, $& the match,
+    // $` the text before it, $' the text after it.
+    function jsExpandDollar(repl, match, before, after) {
+        if (repl.indexOf("$") < 0) { return repl }
+        var out = ""
+        var i = 0
+        while (i < repl.length) {
+            var c = repl.charAt(i)
+            if (c != "$" || i + 1 >= repl.length) { out = out + c; i = i + 1; continue }
+            var d = repl.charAt(i + 1)
+            if (d == "$") { out = out + "$" }
+            else if (d == "&") { out = out + match }
+            else if (d == "`") { out = out + before }
+            else if (d == "'") { out = out + after }
+            else { out = out + c; i = i + 1; continue }
+            i = i + 2
+        }
+        return out
+    }
+    // replace / replaceAll with a STRING pattern. limit is 1 for replace and -1 for
+    // replaceAll. repl is a replacement string or a function (match, offset, whole).
+    function jsReplace(s, pat, repl, limit) {
+        var isFn = typeof repl == "function"
+        if (pat == "") {
+            var head = isFn ? ("" + callWithThis(repl, undefined, ["", 0, s])) : jsExpandDollar(repl, "", "", s)
+            return head + s
+        }
+        var out = ""
+        var at = 0
+        var done = 0
+        while (true) {
+            if (limit >= 0 && done >= limit) { break }
+            var found = jsIndexFrom(s, pat, at)
+            if (found < 0) { break }
+            out = out + s.substring(at, found)
+            if (isFn) { out = out + ("" + callWithThis(repl, undefined, [pat, found, s])) }
+            else { out = out + jsExpandDollar(repl, pat, s.substring(0, found), s.substring(found + pat.length, s.length)) }
+            at = found + pat.length
+            done = done + 1
+        }
+        return out + s.substring(at, s.length)
+    }
+    // A relative index (slice / splice / fill): negative counts from the end, out of
+    // range clamps.
+    function jsRelIndex(v, len) {
+        var n = v - 0
+        if (n != n) { n = 0 }
+        n = (n < 0) ? Math.ceil(n) : Math.floor(n)
+        if (n < 0) { n = len + n; if (n < 0) { n = 0 } }
+        if (n > len) { n = len }
+        return n
+    }
+    function jsArgNum(args, i, dflt) {
+        if (i >= args.length || args[i] === undefined || args[i] === null) { return dflt }
+        return args[i] - 0
+    }
+    // A stable insertion sort, because V8's sort is stable and the compiler half uses
+    // sort.SliceStable: an unstable one would make the two halves disagree on ties.
+    // With no comparator every element compares as its STRING form and undefined sorts
+    // last, which is what Array#sort does.
+    function jsSortArr(a, cmp) {
+        var vals = []
+        var undefs = 0
+        for (var i = 0; i < a.length; i++) {
+            if (a[i] === undefined) { undefs = undefs + 1 } else { vals.push(a[i]) }
+        }
+        for (var j = 1; j < vals.length; j++) {
+            var cur = anytype
+            cur = vals[j]
+            var k = j - 1
+            while (k >= 0 && jsSortLess(cur, vals[k], cmp)) { vals[k + 1] = vals[k]; k = k - 1 }
+            vals[k + 1] = cur
+        }
+        for (var p = 0; p < vals.length; p++) { a[p] = vals[p] }
+        for (var q = vals.length; q < a.length; q++) { a[q] = undefined }
+        return a
+    }
+    function jsSortLess(x, y, cmp) {
+        if (typeof cmp == "function") { return (callWithThis(cmp, undefined, [x, y]) - 0) < 0 }
+        return jsStr(x) < jsStr(y)
+    }
+    function jsFlatten(out, elems, depth) {
+        for (var i = 0; i < elems.length; i++) {
+            if (Array.isArray(elems[i]) && depth > 0) { jsFlatten(out, elems[i], depth - 1); continue }
+            out.push(elems[i])
+        }
+    }
+    // Number#toFixed. The rounding is the one abnf/jsrtjsprint.go spells (scale by
+    // 10^digits, add a half, floor); on the exact binary value that IS node's answer,
+    // and the two halves have to agree with each other before either agrees with node.
+    function jsToFixed(x, digits) {
+        if (x != x) { return "NaN" }
+        var neg = x < 0
+        var v = neg ? -x : x
+        var scale = Math.pow(10, digits)
+        var n = Math.floor(v * scale + 0.5)
+        var s = "" + n
+        if (digits > 0) {
+            while (s.length <= digits) { s = "0" + s }
+            s = s.substring(0, s.length - digits) + "." + s.substring(s.length - digits, s.length)
+        }
+        if (neg && n != 0) { s = "-" + s }
+        return s
+    }
+    // Number#toString(radix).
+    function jsRadixStr(x, radix) {
+        if (x != x) { return "NaN" }
+        var digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        var sign = ""
+        var v = x
+        if (v < 0) { sign = "-"; v = -v }
+        var ip = Math.floor(v)
+        var frac = v - ip
+        var out = ""
+        if (ip == 0) { out = "0" }
+        while (ip >= 1) {
+            var d = ip - Math.floor(ip / radix) * radix
+            out = digits.charAt(d) + out
+            ip = Math.floor(ip / radix)
+        }
+        if (frac == 0) { return sign + out }
+        out = out + "."
+        for (var i = 0; i < 52 && frac > 0; i++) {
+            frac = frac * radix
+            var fd = Math.floor(frac)
+            out = out + digits.charAt(fd)
+            frac = frac - fd
+        }
+        while (out.length > 0 && out.charAt(out.length - 1) == "0") { out = out.substring(0, out.length - 1) }
+        if (out.charAt(out.length - 1) == ".") { out = out.substring(0, out.length - 1) }
+        return sign + out
+    }
+
+    // ----- The Object global -----
+    // The host Object is goja's (or, under -frozen, a bare object with a prototype
+    // slot), so Object.keys leaked the hidden __keys bookkeeping slot and
+    // Object.entries leaked ["__keys", [...]]. This one filters the __-prefixed
+    // internals, and answers the same key ORDER the compiler's js_jsmcall does.
+    var jsObjectGlobal = {"__jsobject": true, "prototype": Object.prototype}
+    function jsOwnKeys(v) {
+        var out = []
+        var ks = ownKeys(v)
+        for (var i = 0; i < ks.length; i++) { if (!isInternalKey(ks[i])) { out.push(ks[i]) } }
+        return out
+    }
+
+    // ----- The method surface -----
+    // Answers {v: result} for a call this table implements and null for everything
+    // else (an instance method, an object-literal method, a class static), which is
+    // what makes it safe to consult before the ordinary dispatch.
+    function jsBuiltin(target, name, args) {
+        if (target === undefined || target === null) { return null }
+        if (typeof name != "string") { return null }
+        if (target === jsObjectGlobal) { return jsObjectStatic(name, args) }
+        if (target === jsStringFn) {
+            if (name == "fromCharCode") {
+                var fs = ""
+                for (var fi = 0; fi < args.length; fi++) { fs = fs + String.fromCharCode(args[fi] - 0) }
+                return {v: fs}
+            }
+            return null
+        }
+        if (typeof target == "string") { return jsStringMethod(target, name, args) }
+        if (Array.isArray(target)) { return jsArrayMethod(target, name, args) }
+        if (typeof target == "number") { return jsNumberMethod(target, name, args) }
+        return null
+    }
+    function jsObjectStatic(name, args) {
+        var src = args[0]
+        if (name == "keys" || name == "getOwnPropertyNames") { return {v: jsOwnKeys(src)} }
+        if (name == "values") {
+            var vs = []
+            var kv = jsOwnKeys(src)
+            for (var i = 0; i < kv.length; i++) { vs.push(getMember(src, kv[i])) }
+            return {v: vs}
+        }
+        if (name == "entries") {
+            var es = []
+            var ke = jsOwnKeys(src)
+            for (var j = 0; j < ke.length; j++) { es.push([ke[j], getMember(src, ke[j])]) }
+            return {v: es}
+        }
+        if (name == "assign") {
+            for (var a = 1; a < args.length; a++) {
+                if (args[a] === undefined || args[a] === null) { continue }
+                var ka = jsOwnKeys(args[a])
+                for (var b = 0; b < ka.length; b++) { setMember(src, ka[b], getMember(args[a], ka[b])) }
+            }
+            return {v: src}
+        }
+        if (name == "fromEntries") {
+            var o = {}
+            o["__keys"] = []
+            if (Array.isArray(src)) {
+                for (var e = 0; e < src.length; e++) {
+                    var pair = src[e]
+                    if (!Array.isArray(pair) || pair.length == 0) { continue }
+                    setMember(o, jsStr(pair[0]), pair[1])
+                }
+            }
+            return {v: o}
+        }
+        if (name == "freeze" || name == "seal") { return {v: src} }
+        if (name == "is") { return {v: args[0] === args[1]} }
+        return null
+    }
+    function jsStringMethod(s, name, args) {
+        // A pattern argument belongs to the regular-expression surface, which
+        // foldCallMember consults before this table.
+        var n = s.length
+        if (name == "toString" || name == "valueOf") { return {v: s} }
+        if (name == "charAt") { var ca = Math.floor(jsArgNum(args, 0, 0)); return {v: (ca < 0 || ca >= n) ? "" : s.charAt(ca)} }
+        if (name == "charCodeAt") { var cc = Math.floor(jsArgNum(args, 0, 0)); return {v: (cc < 0 || cc >= n) ? (0 / 0) : s.charCodeAt(cc)} }
+        if (name == "at") {
+            var ai = Math.floor(jsArgNum(args, 0, 0))
+            if (ai < 0) { ai = ai + n }
+            return {v: (ai < 0 || ai >= n) ? undefined : s.substring(ai, ai + 1)}
+        }
+        if (name == "indexOf") { return {v: jsIndexFrom(s, jsStr(args[0]), Math.floor(jsArgNum(args, 1, 0)))} }
+        if (name == "lastIndexOf") { return {v: jsLastIndex(s, jsStr(args[0]))} }
+        if (name == "includes") { return {v: s.indexOf(jsStr(args[0])) >= 0} }
+        if (name == "startsWith") {
+            var sw = jsStr(args[0])
+            var sa = Math.floor(jsArgNum(args, 1, 0))
+            if (sa < 0) { sa = 0 }
+            return {v: sa + sw.length <= n && s.substring(sa, sa + sw.length) == sw}
+        }
+        if (name == "endsWith") {
+            var ew = jsStr(args[0])
+            var ee = Math.floor(jsArgNum(args, 1, n))
+            var es2 = ee - ew.length
+            return {v: es2 >= 0 && ee <= n && s.substring(es2, ee) == ew}
+        }
+        if (name == "slice") {
+            var b1 = jsRelIndex(jsArgNum(args, 0, 0), n)
+            var e1 = jsRelIndex(jsArgNum(args, 1, n), n)
+            return {v: (e1 > b1) ? s.substring(b1, e1) : ""}
+        }
+        if (name == "substring") {
+            var b2 = Math.floor(jsArgNum(args, 0, 0))
+            var e2 = Math.floor(jsArgNum(args, 1, n))
+            if (b2 != b2 || b2 < 0) { b2 = 0 }
+            if (b2 > n) { b2 = n }
+            if (e2 != e2 || e2 < 0) { e2 = 0 }
+            if (e2 > n) { e2 = n }
+            if (b2 > e2) { var t2 = b2; b2 = e2; e2 = t2 }
+            return {v: s.substring(b2, e2)}
+        }
+        if (name == "substr") {
+            var b3 = Math.floor(jsArgNum(args, 0, 0))
+            if (b3 < 0) { b3 = n + b3; if (b3 < 0) { b3 = 0 } }
+            if (b3 > n) { b3 = n }
+            var c3 = Math.floor(jsArgNum(args, 1, n - b3))
+            if (c3 < 0) { c3 = 0 }
+            if (b3 + c3 > n) { c3 = n - b3 }
+            return {v: s.substring(b3, b3 + c3)}
+        }
+        if (name == "split") {
+            if (args.length == 0 || args[0] === undefined || args[0] === null) {
+                var lim0 = Math.floor(jsArgNum(args, 1, -1))
+                return {v: (lim0 == 0) ? [] : [s]}
+            }
+            return {v: jsSplit(s, jsStr(args[0]), Math.floor(jsArgNum(args, 1, -1)))}
+        }
+        if (name == "toUpperCase") { return {v: s.toUpperCase()} }
+        if (name == "toLowerCase") { return {v: s.toLowerCase()} }
+        if (name == "trim") { return {v: jsTrim(s, true, true)} }
+        if (name == "trimStart") { return {v: jsTrim(s, true, false)} }
+        if (name == "trimEnd") { return {v: jsTrim(s, false, true)} }
+        if (name == "padStart" || name == "padEnd") {
+            var want = Math.floor(jsArgNum(args, 0, 0))
+            var fill = (args.length > 1 && args[1] !== undefined && args[1] !== null) ? jsStr(args[1]) : " "
+            if (want <= n || fill == "") { return {v: s} }
+            var pad = ""
+            while (pad.length < want - n) { pad = pad + fill }
+            pad = pad.substring(0, want - n)
+            return {v: (name == "padStart") ? (pad + s) : (s + pad)}
+        }
+        if (name == "repeat") {
+            var rn = Math.floor(jsArgNum(args, 0, 0))
+            if (rn < 0) { fail("Invalid count value: " + rn) }
+            var ro = ""
+            for (var ri = 0; ri < rn; ri++) { ro = ro + s }
+            return {v: ro}
+        }
+        if (name == "concat") {
+            var co = s
+            for (var ci = 0; ci < args.length; ci++) { co = co + jsStr(args[ci]) }
+            return {v: co}
+        }
+        if (name == "replace") { return {v: jsReplace(s, jsStr(args[0]), (typeof args[1] == "function") ? args[1] : jsStr(args[1]), 1)} }
+        if (name == "replaceAll") { return {v: jsReplace(s, jsStr(args[0]), (typeof args[1] == "function") ? args[1] : jsStr(args[1]), -1)} }
+        if (name == "localeCompare") {
+            var oc = jsStr(args[0])
+            if (s < oc) { return {v: -1} }
+            if (s > oc) { return {v: 1} }
+            return {v: 0}
+        }
+        return null
+    }
+    function jsArrayMethod(a, name, args) {
+        var n = a.length
+        var cb = args[0]
+        if (name == "toString") { return {v: jsJoin(a, ",")} }
+        if (name == "join") { return {v: jsJoin(a, (args.length > 0 && args[0] !== undefined && args[0] !== null) ? jsStr(args[0]) : ",")} }
+        if (name == "at") {
+            var ai = Math.floor(jsArgNum(args, 0, 0))
+            if (ai < 0) { ai = ai + n }
+            return {v: (ai < 0 || ai >= n) ? undefined : a[ai]}
+        }
+        if (name == "push") { for (var pi = 0; pi < args.length; pi++) { a.push(args[pi]) } return {v: a.length} }
+        if (name == "pop") { return {v: (n == 0) ? undefined : a.pop()} }
+        if (name == "shift") { return {v: (n == 0) ? undefined : a.shift()} }
+        if (name == "unshift") { for (var ui = args.length - 1; ui >= 0; ui--) { a.unshift(args[ui]) } return {v: a.length} }
+        if (name == "reverse") {
+            // One declarator and one update per for-header: the frozen engine's
+            // grammar has neither a comma declarator list nor a comma expression.
+            for (var lo = 0; lo < n - 1 - lo; lo = lo + 1) {
+                var hi = n - 1 - lo
+                var tmp = anytype
+                tmp = a[lo]
+                a[lo] = a[hi]
+                a[hi] = tmp
+            }
+            return {v: a}
+        }
+        if (name == "slice") {
+            var b1 = jsRelIndex(jsArgNum(args, 0, 0), n)
+            var e1 = jsRelIndex(jsArgNum(args, 1, n), n)
+            var out = []
+            for (var si = b1; si < e1; si++) { out.push(a[si]) }
+            return {v: out}
+        }
+        if (name == "splice") {
+            var st = (args.length > 0) ? jsRelIndex(jsArgNum(args, 0, 0), n) : n
+            var dc = (args.length > 1) ? Math.floor(jsArgNum(args, 1, 0)) : n - st
+            if (dc < 0) { dc = 0 }
+            if (st + dc > n) { dc = n - st }
+            var removed = []
+            for (var di = st; di < st + dc; di++) { removed.push(a[di]) }
+            var next = []
+            for (var k1 = 0; k1 < st; k1++) { next.push(a[k1]) }
+            for (var k2 = 2; k2 < args.length; k2++) { next.push(args[k2]) }
+            for (var k3 = st + dc; k3 < n; k3++) { next.push(a[k3]) }
+            while (a.length > 0) { a.pop() }
+            for (var k4 = 0; k4 < next.length; k4++) { a.push(next[k4]) }
+            return {v: removed}
+        }
+        if (name == "indexOf") {
+            var from = (args.length > 1) ? jsRelIndex(jsArgNum(args, 1, 0), n) : 0
+            for (var ii = from; ii < n; ii++) { if (a[ii] === cb) { return {v: ii} } }
+            return {v: -1}
+        }
+        if (name == "lastIndexOf") {
+            for (var li = n - 1; li >= 0; li--) { if (a[li] === cb) { return {v: li} } }
+            return {v: -1}
+        }
+        if (name == "includes") {
+            for (var ni = 0; ni < n; ni++) {
+                if (a[ni] === cb) { return {v: true} }
+                if (typeof a[ni] == "number" && typeof cb == "number" && a[ni] != a[ni] && cb != cb) { return {v: true} }
+            }
+            return {v: false}
+        }
+        if (name == "concat") {
+            var co = []
+            for (var c1 = 0; c1 < n; c1++) { co.push(a[c1]) }
+            for (var c2 = 0; c2 < args.length; c2++) {
+                if (Array.isArray(args[c2])) { for (var c3 = 0; c3 < args[c2].length; c3++) { co.push(args[c2][c3]) } }
+                else { co.push(args[c2]) }
+            }
+            return {v: co}
+        }
+        if (name == "sort") { return {v: jsSortArr(a, cb)} }
+        if (name == "map") {
+            var mo = []
+            for (var mi = 0; mi < n && mi < a.length; mi++) { mo.push(callWithThis(cb, args[1], [a[mi], mi, a])) }
+            return {v: mo}
+        }
+        if (name == "filter") {
+            var fo = []
+            for (var fi = 0; fi < n && fi < a.length; fi++) { if (callWithThis(cb, args[1], [a[fi], fi, a])) { fo.push(a[fi]) } }
+            return {v: fo}
+        }
+        if (name == "forEach") {
+            for (var ei = 0; ei < n && ei < a.length; ei++) { callWithThis(cb, args[1], [a[ei], ei, a]) }
+            return {v: undefined}
+        }
+        if (name == "some") {
+            for (var oi = 0; oi < n && oi < a.length; oi++) { if (callWithThis(cb, args[1], [a[oi], oi, a])) { return {v: true} } }
+            return {v: false}
+        }
+        if (name == "every") {
+            for (var vi = 0; vi < n && vi < a.length; vi++) { if (!callWithThis(cb, args[1], [a[vi], vi, a])) { return {v: false} } }
+            return {v: true}
+        }
+        if (name == "find") {
+            for (var di2 = 0; di2 < n && di2 < a.length; di2++) { if (callWithThis(cb, args[1], [a[di2], di2, a])) { return {v: a[di2]} } }
+            return {v: undefined}
+        }
+        if (name == "findIndex") {
+            for (var xi = 0; xi < n && xi < a.length; xi++) { if (callWithThis(cb, args[1], [a[xi], xi, a])) { return {v: xi} } }
+            return {v: -1}
+        }
+        if (name == "findLast") {
+            for (var yi = n - 1; yi >= 0; yi--) { if (callWithThis(cb, args[1], [a[yi], yi, a])) { return {v: a[yi]} } }
+            return {v: undefined}
+        }
+        if (name == "findLastIndex") {
+            for (var zi = n - 1; zi >= 0; zi--) { if (callWithThis(cb, args[1], [a[zi], zi, a])) { return {v: zi} } }
+            return {v: -1}
+        }
+        if (name == "reduce" || name == "reduceRight") {
+            var order = []
+            if (name == "reduce") { for (var r1 = 0; r1 < n; r1++) { order.push(r1) } }
+            else { for (var r2 = n - 1; r2 >= 0; r2--) { order.push(r2) } }
+            var at = 0
+            var acc = anytype
+            if (args.length > 1) { acc = args[1] }
+            else {
+                if (n == 0) { fail("Reduce of empty array with no initial value") }
+                acc = a[order[0]]
+                at = 1
+            }
+            while (at < order.length) {
+                acc = callWithThis(cb, undefined, [acc, a[order[at]], order[at], a])
+                at = at + 1
+            }
+            return {v: acc}
+        }
+        if (name == "flat") {
+            var depth = 1
+            if (args.length > 0 && args[0] !== undefined && args[0] !== null) {
+                var dv = args[0] - 0
+                depth = (dv == 1 / 0) ? 1073741824 : Math.floor(dv)
+            }
+            var flo = []
+            jsFlatten(flo, a, depth)
+            return {v: flo}
+        }
+        if (name == "flatMap") {
+            var fmo = []
+            for (var gi = 0; gi < n && gi < a.length; gi++) {
+                var gv = anytype
+                gv = callWithThis(cb, args[1], [a[gi], gi, a])
+                if (Array.isArray(gv)) { for (var gj = 0; gj < gv.length; gj++) { fmo.push(gv[gj]) } }
+                else { fmo.push(gv) }
+            }
+            return {v: fmo}
+        }
+        if (name == "fill") {
+            var fv = args[0]
+            var fb = (args.length > 1 && args[1] !== undefined && args[1] !== null) ? jsRelIndex(jsArgNum(args, 1, 0), n) : 0
+            var fe = (args.length > 2 && args[2] !== undefined && args[2] !== null) ? jsRelIndex(jsArgNum(args, 2, n), n) : n
+            for (var fj = fb; fj < fe; fj++) { a[fj] = fv }
+            return {v: a}
+        }
+        return null
+    }
+    function jsNumberMethod(x, name, args) {
+        if (name == "toFixed") { return {v: jsToFixed(x, Math.floor(jsArgNum(args, 0, 0)))} }
+        if (name == "valueOf") { return {v: x} }
+        if (name == "toString") {
+            var radix = Math.floor(jsArgNum(args, 0, 10))
+            if (radix == 10) { return {v: "" + x} }
+            if (radix < 2 || radix > 36) { fail("toString() radix must be between 2 and 36") }
+            return {v: jsRadixStr(x, radix)}
+        }
+        return null
+    }
+
+    // println(a, b) joins its arguments with a space, print(a, b) with nothing, and
+    // each argument is stringified on its own - which is what the host functions do
+    // for a run of strings.
+    function jsPrintln() {
+        var out = ""
+        for (var i = 0; i < arguments.length; i++) {
+            if (i > 0) { out = out + " " }
+            out = out + jsStr(arguments[i])
+        }
+        println(out)
+        return undefined
+    }
+    function jsPrint() {
+        var out = ""
+        for (var i = 0; i < arguments.length; i++) { out = out + jsStr(arguments[i]) }
+        print(out)
+        return undefined
+    }
+
+    // String(v) is JavaScript's ToString, which for an object means its own toString
+    // method. The host String is goja's constructor under goja and a bare OBJECT
+    // carrying fromCharCode under -frozen, so a String(v) call was engine-dependent.
+    // String.fromCharCode is answered by jsBuiltin (getMember finds no such member on
+    // a function value), the way js_jsmcall answers it in the compiler half.
+    function jsStringFn(v) {
+        if (arguments.length == 0) { return "" }
+        return jsStr(v)
+    }
+
     var hostGlobals = {
-        "println": println, "print": print, "printf": printf, "sprintf": sprintf,
-        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
-        "Object": Object, "Array": Array,
+        // println / print render every argument with JAVASCRIPT's ToString first. The
+        // shared host functions print Go's %v, so println(null) said "", println([1,2])
+        // said "1 2" and println({a:1}) dumped "map[__keys:[a] a:1]" - node says "null",
+        // "1,2" and "[object Object]". js_jsprintfn is the compiler twin.
+        "println": jsPrintln, "print": jsPrint, "printf": printf, "sprintf": sprintf,
+        "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": jsStringFn,
+        // Object is OURS, not the host's: the host's leaked the hidden __keys slot out
+        // of Object.keys / entries under goja and had no keys at all under -frozen.
+        "Object": jsObjectGlobal, "Array": Array,
         // NaN and Infinity are global BINDINGS in JavaScript; the compiler half has
         // always had them and this one raised "variable not defined".
         "NaN": 0 / 0, "Infinity": 1 / 0, "undefined": undefined,
@@ -3024,7 +3674,12 @@ NotFuncHead = :script(~~
         if (typeof v != "object") { return false }
         // A CONSTRUCTOR FUNCTION on the right: its instances carry the synthetic
         // descriptor makeNew filed for it, so the test is made on that descriptor.
-        var want = cls
+        // anytype, not `var want = cls`: under -frozen a slot takes the type of its
+        // FIRST value, so seeding it with the constructor function made the class
+        // descriptor assigned below fail with "has type function and cannot hold a
+        // object" (docs/abnf-dialect-gotchas.md, "var x = 0 types the slot").
+        var want = anytype
+        want = cls
         if (typeof cls == "function") {
             want = undefined
             for (var i = 0; i < ctorDescriptorFns.length; i++) {
@@ -4042,8 +4697,15 @@ NotFuncHead = :script(~~
         if (op == "*") return l * r
         if (op == "/") return l / r
         if (op == "%") return l % r
-        if (op == "==") return l == r
-        if (op == "!=") return l != r
+        // The abstract equality and relational comparisons, and '+', need ToPrimitive
+        // on an OBJECT operand; the host operators only have it under goja, so `[1] == 1`
+        // and `[2] > 1` were true under goja and false under -frozen. See jsStr above and
+        // abnf/jsrtjsprint.go (js_jseq / js_jslt) for the compiler twin.
+        if (op == "==") return jsLooseEq(l, r)
+        if (op == "!=") return !jsLooseEq(l, r)
+        if (op == "<" || op == ">" || op == "<=" || op == ">=" || op == "+") {
+            if (jsIsObjLike(l) || jsIsObjLike(r)) { return binOp(op, jsToPrim(l), jsToPrim(r)) }
+        }
         if (op == "===") return l === r
         if (op == "!==") return l !== r
         if (op == "<")  return l < r
@@ -4129,8 +4791,18 @@ NotFuncHead = :script(~~
                     // Answers null for every call that is none of its business, which is
                     // every call in a program that uses no regular expression.
                     var rxHit = rxDispatch(curThis, lastKey, argv)
+                    // JavaScript's own String / Array / Number / Object method
+                    // surface, spelled in this script rather than taken from the
+                    // script host: under goja the host is JavaScript and had it all,
+                    // under -frozen the host is the language-NEUTRAL metajs runtime
+                    // and had almost none of it. abnf/jsrtjsprint.go (js_jsmcall) is
+                    // the compiler twin.
+                    var bHit = anytype
+                    bHit = (rxHit != null) ? null : jsBuiltin(curThis, lastKey, argv)
                     if (rxHit != null) {
                         cur = rxHit.v
+                    } else if (bHit != null) {
+                        cur = bHit.v
                     } else if (typeof cur == "function") {
                         cur = callWithThis(cur, curThis, argv)
                     } else {
