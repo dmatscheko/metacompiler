@@ -182,6 +182,18 @@ b";                                                   // verbatim keeps the newl
             public S07Pt(int x, int y) { this.X = x; this.Y = y; }
             public void Deconstruct(out int x, out int y) { x = this.X; y = this.Y; }
         }
+        // A switch STATEMENT whose case labels are patterns (C# 7 and later).
+        static string S07Sw(object o)
+        {
+            switch (o)
+            {
+                case null: return "null";
+                case int n when n > 10: return "big" + n;
+                case int: return "int";
+                case string s: return "str" + s.Length;
+                default: return "other";
+            }
+        }
         static void S07()
         {
             object o = "abc";
@@ -203,6 +215,9 @@ b";                                                   // verbatim keeps the newl
             Program.Check("pat7", kind == "long-string");
             var pos = new S07Pt(3, 4);
             Program.Check("pat8", pos is S07Pt(3, _) p2 && p2.Y == 4); // positional pattern
+            Program.Check("pat9", Program.S07Sw(null) == "null" && Program.S07Sw(42) == "big42");
+            Program.Check("pat10", Program.S07Sw(3) == "int" && Program.S07Sw("ab") == "str2"
+                                   && Program.S07Sw(true) == "other");
         }
 
         // ===== SECTION 08: records =====
@@ -466,6 +481,9 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 19: iterators and async =====
         // await needs System.Threading.Tasks (out of scope), so async members are
         // definition-only and run synchronously (the CS1998 warning is accepted).
+        // An iterator block is LAZY: S19Endless never terminates on its own, so itr5 and
+        // itr6 only pass if the sequence is produced one value at a time rather than
+        // materialized at the call.
         static bool S19Ran = false;
         static IEnumerable<int> S19UpTo(int n)
         {
@@ -475,6 +493,11 @@ b";                                                   // verbatim keeps the newl
         {
             yield return "a";
             yield break;
+        }
+        static IEnumerable<int> S19Endless()
+        {
+            int i = 0;
+            while (true) { yield return i; i = i + 1; }
         }
         static async void S19Fire() { Program.S19Ran = true; }
         static void S19()
@@ -489,6 +512,16 @@ b";                                                   // verbatim keeps the newl
             Program.Check("itr3", it.MoveNext() && it.Current == 1);
             Program.S19Fire();
             Program.Check("itr4", Program.S19Ran);
+            int taken = 0;
+            foreach (var v in Program.S19Endless())   // an endless iterator, left early
+            {
+                if (v > 3) { break; }
+                taken += v;
+            }
+            Program.Check("itr5", taken == 6);        // 0 + 1 + 2 + 3
+            var ie = Program.S19Endless().GetEnumerator();
+            Program.Check("itr6", ie.MoveNext() && ie.Current == 0
+                                  && ie.MoveNext() && ie.Current == 1);
         }
 
         // ===== SECTION 20: using declarations and disposal =====

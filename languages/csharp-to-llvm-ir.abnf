@@ -42,27 +42,44 @@ operator and range slicing, delegate { ... } without a parameter list, unsafe bl
 implicitly typed and sized-with-initializer arrays, nested and indexed member
 initializers, and explicitly implemented properties.
 
-Also modelled: tuples (a tuple type, positional and named elements, value equality) and
-deconstruction ('var (a, b) = e', '(a, b) = e', a custom Deconstruct(out ...) and a
-record's positional members); the pattern grammar (constant, relational, type and
-declaration, var, discard, property, positional and list patterns, combined with and / or
-/ not) behind 'is' and behind the switch EXPRESSION with its 'when' guards; records
-('record R(int X);', 'record class', 'record struct') with value equality, deconstruction
-and the 'with' expression; delegates and events (method group conversion, anonymous
-methods, multicast '+=' / '-=' where the last result wins); and iterator blocks
-('yield return' / 'yield break') with foreach and GetEnumerator / MoveNext / Current.
+Also modelled: tuples (a tuple type, positional and named elements) and deconstruction
+('var (a, b) = e', '(a, b) = e', a custom Deconstruct(out ...) and a record's positional
+members); the pattern grammar (constant, relational, type and declaration, var, discard,
+property, positional and list patterns, combined with and / or / not) behind 'is', behind
+the switch EXPRESSION and behind the case labels of the switch STATEMENT, both with their
+'when' guards; records ('record R(int X);', 'record class', 'record struct') with
+deconstruction and the 'with' expression; delegates and events (method group conversion,
+anonymous methods, multicast '+=', and '-=' removing the last matching invocation, exactly
+as Delegate.Remove does); and LAZY iterator blocks ('yield return' / 'yield break') with
+foreach, GetEnumerator / MoveNext / Current - an endless iterator that a foreach breaks
+out of terminates.
+
+Records and tuples compare BY VALUE, member by member and recursively, so a record whose
+field is itself a record or a tuple compares by value too; every other class keeps
+reference equality, and a user-declared 'operator ==' still wins over both.
+
+Also modelled: an event that manages its own subscription list
+('event H E { add { ... } remove { ... } }'), whose accessors 'E += h' / 'E -= h' call with
+the handler itself.
 
 Widened surface (parsed so a whole C# file is accepted): generics, nullable and array type
 suffixes are parsed and dropped; modifier keywords are parsed and ignored. A delegate type
-declaration is accepted and dropped (a delegate value is the closure it names). LINQ query
-expressions are accepted and reported as not implemented; -warn-unsupported downgrades
-that to a warning so call graphs / CFGs / traces still work on partly understood files.
+declaration is accepted and dropped (a delegate value is the closure it names); so are a
+finalizer ('~X() { }' - nothing here collects), 'extern alias X;' and the 'X::Name' alias
+qualifier it enables. LINQ query expressions are accepted and reported as not implemented;
+-warn-unsupported downgrades that to a warning so call graphs / CFGs / traces still work on
+partly understood files.
 
-Not modelled exactly: an iterator block is materialized EAGERLY (the body runs once into a
-hidden accumulator), so an endless iterator does not terminate; removing a delegate from an
-invocation list drops every occurrence of it rather than only the last; async members run
-synchronously. Out and ref parameters are ordinary locals, read back only by a
-deconstruction.
+An iterator body is an ordinary IR function whose closure is wrapped by js_genfn, so it
+runs on its own goroutine and js_yield is a suspending handshake - these are REAL
+generators (the lowering languages/python-to-llvm-ir.abnf uses).
+
+Not modelled exactly: async members run synchronously (await is the identity on its
+operand), which is a documented approximation rather than a gap - the async machinery has
+no scheduler here. A bare type-name case label ('case IShape:', with no binding) is read as
+a constant, because telling a type from a constant needs name resolution; the binding form
+('case IShape s:') and every built-in type name are read as patterns. Out and ref
+parameters are ordinary locals, read back only by a deconstruction.
 
 Fields live directly on the instance object (js_get/js_set), methods become own IR
 functions jsf_N(env, args) with the instance prepended to the arguments, stored on the
@@ -96,9 +113,12 @@ Program     <~~ buildMain(takeAll()) ~~>
 // statement, so buildMain never sees it.
 Using       <~~ resolveImport(pop(), up.pos) ~~>
             = [ "global" KwEnd ] KwUsing [ "static" KwEnd ] [ Id "=" ] QualName ";" ;
-QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
+QualName    <~~ push(stripWs(up.in)) ~~> = Id [ "::" Id ] { "." Id } [ "." "*" ] ;
 
-TopDecl     = TopAttr | Namespace | FileNs | UnsupType | TypeDecl ;
+TopDecl     = ExternAlias | TopAttr | Namespace | FileNs | UnsupType | TypeDecl ;
+// 'extern alias X;': an assembly alias. There are no assemblies here, so it is parsed and
+// dropped; the 'X::Name' references it enables are read as plain qualified names.
+ExternAlias = "extern" KwEnd "alias" KwEnd Id ";" ;
 // The type declarations that are genuinely modelled.
 TypeDecl    = ClassDecl | EnumDecl ;
 
@@ -154,8 +174,12 @@ ClassName   <~~ push(up.in); classStack.push(curClassName); curClassName = up.in
 // A delegate declaration is legal at file scope AND in a class body; it is listed here
 // as well, so a nested one does not fall through to Method (which would then demand a
 // body).
-Member      = NestedType | NestedUnsup | DelegateDecl | OperatorDecl | Ctor | Method | AbstractMethod
-            | IndexerDecl | Property | Field ;
+Member      = NestedType | NestedUnsup | DelegateDecl | OperatorDecl | Finalizer | Ctor
+            | Method | AbstractMethod | IndexerDecl | Property | Field ;
+
+// A finalizer ('~X() { ... }'). There is no garbage collector to run it, so it is parsed
+// and dropped - it pushes nothing, and the class body simply skips it.
+Finalizer   = [ LeadMods ] "~" Id ParamList ( Block | ";" ) ;
 
 // An overloaded operator ('public static Vec operator +(Vec a, Vec b)', also the unary
 // forms) and a user conversion ('public static implicit operator Vec(int n)'). Both are
@@ -230,12 +254,19 @@ PropName    <~~ push({pname: csSimpleName(up.in)}) ~~>
             = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 PropAccs    <~~ push({accs: takeAll()}) ~~>
             = "{" { Accessor } "}" ;
-Accessor    = GetAcc | SetAcc ;
+Accessor    = GetAcc | SetAcc | AddAcc | RemoveAcc ;
 GetAcc      <~~ push(makeAccessor("get", takeAll())) ~~>
             = LeadMods "get" KwEnd AccBody ;
 SetAcc      <~~ push(makeAccessor("set", takeAll())) ~~>
             = LeadMods ( "set" | "init" ) KwEnd AccBody ;
 // An accessor without a body ('get;') is the automatic one.
+// The accessors of an EVENT that manages its own subscription list
+// ('event EventHandler E { add { ... } remove { ... } }'). They become '__add_E' /
+// '__remove_E' members, which 'E += h' / 'E -= h' call with the handler.
+AddAcc      <~~ push(makeAccessor("add", takeAll())) ~~>
+            = LeadMods "add" KwEnd AccBody ;
+RemoveAcc   <~~ push(makeAccessor("remove", takeAll())) ~~>
+            = LeadMods "remove" KwEnd AccBody ;
 AccBody     = ";" | Block | ArrowBody ;
 PropInit    <~~ push({pinit: pop()}) ~~>
             = "=" InitVal ";" ;
@@ -293,7 +324,9 @@ TupleType   = "(" TupTyElem "," TupTyElem { "," TupTyElem } ")" ;
 TupTyElem   = Type [ Id ] ;
 PrimType    = ( "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "byte" | "sbyte"
               | "double" | "float" | "decimal" | "bool" | "char" ) KwEnd ;
-UserType    = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+// 'A::B.C' - the namespace-alias qualifier of an 'extern alias' - reads like a dotted
+// name; only the last segment is kept anywhere, so the alias itself never matters.
+UserType    = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function(block) -> nextBlock.
 Statement   <~~ push(stmtPos(pop())) ~~>
@@ -371,8 +404,25 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { SwitchCase } "}" ;
 SwitchCase  = Case | Default ;
-Case        <~~ push(makeCase(takeAll())) ~~>
+// A case label is a PATTERN in C# 7 and later ('case int n when n > 0:', 'case > 5:',
+// 'case string s:'). The constant form is tried FIRST, because an enum member
+// ('case Color.Red:') reads as a type pattern otherwise and a PEG never goes back - and
+// because only a constant label is a target for 'goto case c;'.
+Case        = TypeKwCase | ConstCase | PatCase ;
+// 'case string:' / 'case int n:'. A bare built-in type name can never begin a constant
+// expression, so it has to be read as a type pattern before ConstCase gets to it - while
+// 'case int.MaxValue:' still falls through, because the '.' defeats this rule.
+TypeKwCase  <~~ push(makePatCase(takeAll())) ~~>
+            = KwCase TypeKwPat [ ArmGuard ] ":" { Statement } ;
+TypeKwPat   <~~ push(csPatType(takeAll())) ~~>
+            = TypeKw [ PatBind ] ;
+TypeKw      <~~ push({patty: stripWs(up.in)}) ~~>
+            = ( PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "dynamic" KwEnd )
+              { "*" | "[" { "," } "]" } [ "?" ] ;
+ConstCase   <~~ push(makeCase(takeAll())) ~~>
             = KwCase CondExpr ":" { Statement } ;
+PatCase     <~~ push(makePatCase(takeAll())) ~~>
+            = KwCase Pattern [ ArmGuard ] ":" { Statement } ;
 Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
@@ -2423,7 +2473,11 @@ KwLet       = "let" KwEnd ;
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
-                if (p.isField && csPropAcc[p.keyName] != undefined) {
+                if (p.isField && (op == "+=" || op == "-=") && csEvtAcc[p.keyName] != undefined) {
+                    // An event that manages its own subscription list: the accessor takes
+                    // the handler itself, not the combined delegate.
+                    b = emitEvtCall(b, p.obj, p.keyName, op, v)
+                } else if (p.isField && csPropAcc[p.keyName] != undefined) {
                     // A property with a set accessor body ('b.W = 5').
                     if (op != "=") { v = emitBin(b, op, emitPropGet(b, p.obj, p.keyName), v) }
                     b = emitPropSet(b, p.obj, p.keyName, v)
@@ -3242,8 +3296,30 @@ KwLet       = "let" KwEnd ;
             return exitB
         }
     }
-    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
-    function makeDefault(items) { return {isDefault: true, body: items} }
+    // A switch section. A constant label keeps its value thunk (only those are reachable
+    // by 'goto case c;'); a pattern label keeps the pattern and its optional 'when' guard.
+    function makeCase(items) {
+        var c = {isDefault: false, v: null, pat: null, guard: null, body: []}
+        c.v = items[0]
+        c.body = items.slice(1)
+        return c
+    }
+    function makePatCase(items) {
+        var c = {isDefault: false, v: null, pat: null, guard: null, body: []}
+        var body = []
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "function") { body.push(items[i]); continue }
+            if (items[i].guard != undefined) { c.guard = items[i].guard }
+        }
+        c.pat = items[0]
+        c.body = body
+        return c
+    }
+    function makeDefault(items) {
+        var c = {isDefault: true, v: null, pat: null, guard: null, body: []}
+        c.body = items
+        return c
+    }
     // The dispatch chain compares with js_seq (=== semantics: ints by value, strings by
     // content). Bodies fall through; break jumps to the exit, continue targets the loop.
     function makeSwitch(items) {
@@ -3274,10 +3350,25 @@ KwLet       = "let" KwEnd ;
             var sv = callExt(hb, "js_scope_get", [scopeV, emitStr(hb, vName)])
             for (var j = 0; j < cases.length; j++) {
                 if (cases[j].isDefault) { continue }
-                var rc = cases[j].v(hb)
-                hb = rc.b
                 var nextB = curF.NewBlock("")
-                hb.NewCondBr(truthy(hb, callExt(hb, "js_seq", [sv, rc.v])), bodyBs[j], nextB)
+                if (cases[j].pat != null) {
+                    var pr = emitPat(hb, cases[j].pat, sv)
+                    hb = pr.b
+                    if (cases[j].guard != null) {
+                        var gB = curF.NewBlock("")
+                        hb.NewCondBr(truthy(hb, pr.v), gB, nextB)
+                        var gr = cases[j].guard(gB)
+                        gr.b.NewCondBr(truthy(gr.b, gr.v), bodyBs[j], nextB)
+                    } else {
+                        hb.NewCondBr(truthy(hb, pr.v), bodyBs[j], nextB)
+                    }
+                } else {
+                    // The same equality the '==' operator uses, so a char label - and a
+                    // record or tuple one - compares by value rather than by identity.
+                    var rc = cases[j].v(hb)
+                    hb = rc.b
+                    hb.NewCondBr(truthy(hb, emitBin(hb, "==", sv, rc.v)), bodyBs[j], nextB)
+                }
                 hb = nextB
             }
             hb.NewBr(dfltB)
@@ -3297,6 +3388,7 @@ KwLet       = "let" KwEnd ;
         }
     }
     var csSwCount = 0
+
     // foreach (var x in coll): a hidden index variable in an own scope drives the loop.
     function makeForEach(bodyT, arrT, name) {
         return function(b) {
@@ -3674,6 +3766,10 @@ KwLet       = "let" KwEnd ;
     // or write of such a name emits the accessor call instead of js_get / js_set; every
     // other name keeps the plain member access, so existing IR is unchanged.
     var csPropAcc = {}
+    // Every EVENT that manages its own subscription list, name -> "static" | "instance".
+    // 'E += h' / 'E -= h' on such a name emit the accessor call with the handler itself
+    // instead of a delegate combination.
+    var csEvtAcc = {}
     // True as soon as the program declares an indexer, so an index step of a program that
     // declares none emits exactly the IR it did before.
     var csHasIndexer = false
@@ -3683,6 +3779,8 @@ KwLet       = "let" KwEnd ;
         var name = ""
         var getT = null
         var setT = null
+        var addT = null
+        var remT = null
         var auto = true
         var init = null
         for (var i = 2; i < items.length; i++) {
@@ -3695,15 +3793,20 @@ KwLet       = "let" KwEnd ;
                 for (var j = 0; j < accs.length; j++) {
                     if (accs[j].body == null) { continue }
                     auto = false
-                    if (accs[j].acc == "get") { getT = accs[j].body } else { setT = accs[j].body }
+                    if (accs[j].acc == "get") { getT = accs[j].body; continue }
+                    if (accs[j].acc == "add") { addT = accs[j].body; continue }
+                    if (accs[j].acc == "remove") { remT = accs[j].body; continue }
+                    setT = accs[j].body
                 }
             }
         }
         var isStatic = false
         for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
         if (auto) { return csAutoField(name, isStatic, init, ty) }
-        csPropAcc[name] = isStatic ? "static" : "instance"
-        return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT}
+        if (getT != null || setT != null) { csPropAcc[name] = isStatic ? "static" : "instance" }
+        if (addT != null || remT != null) { csEvtAcc[name] = isStatic ? "static" : "instance" }
+        return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT,
+                addT: addT, remT: remT}
     }
     // An automatic property IS a field: same record, so every field path (the instance
     // initializers, the static slot, the member table) applies to it unchanged.
@@ -3785,6 +3888,17 @@ KwLet       = "let" KwEnd ;
         callExt(stdB, "js_pyset", [cur, iv, val])
         stdB.NewBr(mergeB)
         return mergeB
+    }
+    function emitEvtCall(b, cur, name, op, v) {
+        var key = (op == "+=") ? "__add_" : "__remove_"
+        var argsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsV, v])
+        if (csEvtAcc[name] == "static") {
+            callExt(b, "js_call", [callExt(b, "js_get", [cur, emitStr(b, key + name)]), hUndef, argsV])
+            return b
+        }
+        callExt(b, "js_mcall", [cur, emitStr(b, key + name), argsV])
+        return b
     }
     function emitPropSet(b, cur, name, v) {
         var argsV = callExt(b, "js_arr_new", [])
@@ -4106,6 +4220,14 @@ KwLet       = "let" KwEnd ;
                 // A property with accessor bodies: '__get_X' / '__set_X' members, called
                 // like methods (emitPropGet / emitPropSet).
                 if (m2.kind == "prop") {
+                    if (m2.addT != null) {
+                        var ai = emitFunc(["value"], m2.addT, !m2.statik, null, undefined, false, csSetPI)
+                        callExt(b, "js_set", [clsV, emitStr(b, "__add_" + m2.name), callExt(b, "js_closure", [handle(ai), curScopeV])])
+                    }
+                    if (m2.remT != null) {
+                        var ri = emitFunc(["value"], m2.remT, !m2.statik, null, undefined, false, csSetPI)
+                        callExt(b, "js_set", [clsV, emitStr(b, "__remove_" + m2.name), callExt(b, "js_closure", [handle(ri), curScopeV])])
+                    }
                     if (m2.getT != null) {
                         var gi = emitFunc([], m2.getT, !m2.statik, null, undefined, false, csGetPI)
                         callExt(b, "js_set", [clsV, emitStr(b, "__get_" + m2.name),
