@@ -695,7 +695,7 @@
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen.c", "-q"]
         },
         {
-            "name": "C not-implemented surface SHOULD FAIL",
+            "name": "C widened surface (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/c-to-llvm-ir.abnf", "tests/c-test-widen-notimpl.c", "-q"]

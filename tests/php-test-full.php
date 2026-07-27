@@ -446,10 +446,14 @@ function s19() {
     $collected = "";
     foreach (s19bounded(100) as $v) { if ($v === 3) { break; } $collected .= $v; }
     check("gen5", $collected === "012");
+    $dele = "";
+    foreach (s19delegate() as $k => $v) { $dele .= $k . $v . ";"; }
+    check("gen6", $dele === "z0;a1;b2;"); // yield from forwards the inner KEYS
 }
 function s19nums() { yield 1; yield 2; yield from [3, 4]; yield 5; }
 function s19keyed() { yield "a" => 1; yield "b" => 2; }
 function s19bounded($limit) { $i = 0; while ($i < $limit) { yield $i; $i++; } }
+function s19delegate() { yield "z" => 0; yield from s19keyed(); }
 
 // ===== SECTION 20: references and copy semantics =====
 function s20() {
@@ -602,6 +606,67 @@ const S24_CALC = S24_TOP + 1;
 function s24counter() { static $n = 0; $n++; return $n; }
 function s24name() { return __FUNCTION__; }
 
+// ===== SECTION 25: reference cells, capture and late binding =====
+// The fine print of the three mechanisms sections 08/11/20 introduce: WHICH storage
+// cell a reference denotes, WHEN a closure freezes what it captures, and when a
+// static local's initializer runs. Every expectation below is the same under both
+// php grammars, which is the property this file exists to hold.
+function s25() {
+    // Two references to the SAME element share one cell, and an ordinary write to
+    // that element goes through it.
+    $a = [1, 2];
+    $x = &$a[0];
+    $y = &$a[0];
+    $y = 9;
+    check("cel1", $x === 9 && $a[0] === 9);
+    $b = [5];
+    $p = &$b[0];
+    $b[0] = 7;
+    check("cel2", $p === 7);
+    // A by-reference PARAMETER binds any assignable argument, not only a plain
+    // variable: an array element is a storage location too. (A reference to an object
+    // PROPERTY has no cell in either grammar and is deliberately out of scope.)
+    $arr = [3, 4];
+    s25bump($arr[1]);
+    $nest = ["k" => [1, 2]];
+    s25bump($nest["k"][0]);
+    $o = new S25Box();
+    check("cel3", $arr[1] === 8 && $nest["k"][0] === 2 && $o->v === 6);
+    // 'use ($k)' freezes the VALUE where the closure is created, even when another
+    // closure holds the same variable by reference; 'use (&$k)' stays live.
+    $k = 1;
+    $live = function () use (&$k) { $k = $k + 10; return $k; };
+    $frozen = function () use ($k) { return $k; };
+    $live();
+    check("cap1", $k === 11 && $frozen() === 1);
+    // A by-reference use survives being captured again by an inner closure.
+    $n = 0;
+    $mk = function () use (&$n) { return function () use (&$n) { $n = $n + 1; return $n; }; };
+    $f = $mk();
+    $f();
+    $f();
+    check("cap2", $n === 2);
+    // A static local's initializer runs on the FIRST CALL, not where the program
+    // starts, and each declaration site has storage of its own.
+    check("sta1", s25order() === "" && s25count() === 6 && s25order() === "init;");
+    check("sta2", s25count() === 7 && s25other() === 101 && s25count() === 8);
+    // A static explicitly set to null stays null; it is not re-initialized.
+    check("sta3", s25nulled() && s25nulled());
+    // Named arguments name the parameters of a METHOD and of a constructor.
+    $q = new S25Pair(c: 9, a: 1);
+    check("nam1", $q->s === "1-2-9");
+    check("nam2", $o->span(hi: 5, lo: 1) === 4 && $o->span(2, step: 3) === 24);
+}
+class S25Box { public $v = 6; public function span($lo, $hi = 10, $step = 1) { return ($hi - $lo) * $step; } }
+class S25Pair { public $s; public function __construct($a, $b = 2, $c = 3) { $this->s = $a . "-" . $b . "-" . $c; } }
+function s25bump(&$v) { $v = $v * 2; }
+$s25log = "";
+function s25order() { global $s25log; return $s25log; }
+function s25seed() { global $s25log; $s25log .= "init;"; return 5; }
+function s25count() { static $n = s25seed(); $n++; return $n; }
+function s25other() { static $n = 100; $n++; return $n; }
+function s25nulled() { static $z = 3; $z = null; return $z === null; }
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -631,6 +696,7 @@ function main() {
     s22(); // SECTION-CALL 22
     s23(); // SECTION-CALL 23
     s24(); // SECTION-CALL 24
+    s25(); // SECTION-CALL 25
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

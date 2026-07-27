@@ -284,10 +284,6 @@ SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whit
 SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
 SkipDqChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
-// A balanced ( ... ) run (switch/match subject, declare/while directive), parsed and
-// ignored; string literals inside are matched first so their parens never miscount.
-SkipParen   = "(" { SkipDq | SkipSq | SkipParen | SkipPOther } ")" ;
-SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // An attribute group '#[Foo(1), Bar]': balanced-skipped wherever PHP allows one.
 // Attributes carry no runtime meaning in this subset, so they are recognized and
 // dropped rather than routed to notImplemented.
@@ -304,17 +300,22 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 // shares its parent's single storage - PHP's rule.
 PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
             = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ( ";" | PropHooks ) ;
-// PHP 8.4 property hooks: 'public int $x { get => e; set { ... } }' (and the bodyless
-// 'get;' / 'set;' of an abstract or interface property). There is no hook model here,
-// so the block is parsed - by the real grammar, not a brace skip, so a '{' inside a
-// string cannot miscount - and then DROPPED with a notImplemented note; the property
-// itself stays an ordinary declared property.
-PropHooks   <~~ takeAll(); notImpl("property hooks", up.pos) ~~>
+// PHP 8.4 property hooks: 'public int $x = 1 { get => e; set { ... } }' (and the
+// bodyless 'get;' / 'set;' of an abstract or interface property, which declares a hook
+// without providing one). Each hook becomes an ordinary METHOD on the class -
+// __hget_<prop> / __hset_<prop> - and a read or write of that property name dispatches
+// to it, the same shape __get / __set already use. The property itself stays a
+// declared property and IS the backing store: inside its own hook '$this->x' reads and
+// writes that store directly instead of re-entering the hook, which is PHP's rule and
+// the only thing that keeps a backed hook from recursing forever.
+PropHooks   <~~ push({hooks: takeAll()}) ~~>
             = "{" { PropHook } "}" ;
-PropHook    = [ AttrGrp ] { PropMod } [ "&" ] HookName ( HookArrow | HookBlock | ";" ) ;
+PropHook    <~~ push(makeHook(takeAll())) ~~>
+            = [ AttrGrp ] { PropMod } [ "&" ] HookName <~~ push({hname: stripWs(up.in)}) ~~>
+              ( HookArrow | HookBlock | ";" ) ;
 HookName    = ( "get" | "set" ) KwEnd ;
-HookArrow   = [ ParamList ] "=>" Expression ";" ;
-HookBlock   = [ ParamList ] Block ;
+HookArrow   <~~ push({harrow: pop()}) ~~> = [ ParamList ] "=>" Expression ";" ;
+HookBlock   <~~ push({hblock: pop().body}) ~~> = [ ParamList ] Block ;
 
 PropMod     <~~ push({mod: up.in}) ~~> = Modifier ;
 // 'private(set)' / 'protected(set)' is PHP 8.4 asymmetric visibility: the setter is
@@ -390,8 +391,15 @@ FinallyClause <~~ push({finbody: pop().body}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression Semi ;
-Declare     <~~ takeAll(); push(notImplStmt("declare", up.pos)) ~~>
-            = KwDeclare SkipParen ( ";" | Block ) ;
+// declare(strict_types=1); / declare(ticks=1) { ... }. None of PHP's three directives
+// changes anything this subset models - there is no type coercion to tighten, no tick
+// handler and no alternate source encoding - so the declaration itself is a no-op and
+// the BRACED form simply emits its body where it stands. The one visible consequence:
+// under strict_types real PHP raises a TypeError for a mismatched argument, and this
+// subset does not check parameter types at all, so it accepts the call instead.
+Declare     <~~ push(makeDeclare(takeAll())) ~~>
+            = KwDeclare "(" DeclDirective { "," DeclDirective } [ "," ] ")" ( Semi | Block ) ;
+DeclDirective <~~ takeAll() ~~> = Id "=" Expression ;
 // const NAME = expr; -- a global constant. Constants live in the same flat name space
 // as classes and functions here (they carry no '$' sigil, so no PHP variable can
 // collide with one), which is what lets ConstRef resolve them with a plain scope read.
@@ -1310,6 +1318,13 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- global constants, static locals, magic constants ---------------------
     // Constants carry no '$' sigil, so they share the flat name space with classes and
     // functions and never collide with a PHP variable.
+    // The directives are dropped by DeclDirective, so anything left is the braced body.
+    function makeDeclare(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].body != undefined) { return items[i].body }
+        }
+        return function(b) { return b }
+    }
     function makeConstDecl(items) {
         var cs = []
         for (var i = 0; i < items.length; i++) { cs.push(items[i]) }
@@ -1996,25 +2011,7 @@ KwInstanceof = "instanceof" KwEnd ;
             if (fromT != null) {
                 var rf = fromT(b)
                 b = rf.b
-                hidCount++
-                var aName = "\x00yf" + hidCount
-                var iName = "\x00yi" + hidCount
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), rf.v])
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-                var headB = curF.NewBlock("")
-                var bodyB = curF.NewBlock("")
-                var exitB = curF.NewBlock("")
-                b.NewBr(headB)
-                var aH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-                var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-                headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, callExt(headB, "js_range_len", [aH])])), bodyB, exitB)
-                var aB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-                var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-                callExt(bodyB, "js_yield", [callExt(bodyB, "js_range_val", [aB, iB])])
-                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
-                                                intWrap(bodyB, callExt(bodyB, "js_jadd", [iB, emitNum(bodyB, 1)]))])
-                bodyB.NewBr(headB)
-                return {b: exitB, v: hNull}
+                return {b: emitYieldFrom(b, rf.v), v: hNull}
             }
             var v = hNull
             if (valT != null) { var rv = valT(b); b = rv.b; v = rv.v }
@@ -2042,6 +2039,87 @@ KwInstanceof = "instanceof" KwEnd ;
     // protocol (memberCall's *jsGenerator case), so this is an ordinary method call.
     function genNext(b, genV) {
         return callExt(b, "js_mcall", [genV, emitStr(b, "next"), callExt(b, "js_arr_new", [])])
+    }
+    // 'yield from SRC': every element of SRC is yielded in turn, WITH ITS OWN KEY -
+    // PHP forwards the inner keys, which is what makes a delegating generator
+    // indistinguishable from the one it delegates to. SRC may be an array or another
+    // GENERATOR, so the loop is the same dual walk foreach uses: an array by index, a
+    // generator through its next() handshake (so a delegated-to generator stays lazy).
+    // Deviation: the expression's own value (a sub-generator's return) is not
+    // propagated, exactly as in php-interpreter.abnf.
+    function emitYieldFrom(b, srcV) {
+        hidCount++
+        var itN = "\x00yi" + hidCount
+        var ixN = "\x00yx" + hidCount
+        var stN = "\x00ys" + hidCount
+        var gnN = "\x00yg" + hidCount
+        var lnN = "\x00yl" + hidCount
+        var isGen = callExt(b, "js_phisa", [srcV, emitStr(b, "Generator")])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itN), srcV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ixN), emitNum(b, 0)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stN), hUndef])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, lnN), emitNum(b, 0)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, gnN), isGen])
+        var startG = curF.NewBlock("")
+        var startA = curF.NewBlock("")
+        var headB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, isGen), startG, startA)
+        callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), genNext(startG, srcV)])
+        startG.NewBr(headB)
+        callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
+                                         callExt(startA, "js_range_len", [srcV])])
+        startA.NewBr(headB)
+        var bodyB = curF.NewBlock("")
+        var postB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        var gHead = curF.NewBlock("")
+        var aHead = curF.NewBlock("")
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, gnN)])), gHead, aHead)
+        var stH = callExt(gHead, "js_scope_get", [curScopeV, emitStr(gHead, stN)])
+        gHead.NewCondBr(truthy(gHead, callExt(gHead, "js_get", [stH, emitStr(gHead, "done")])), exitB, bodyB)
+        var iH = callExt(aHead, "js_scope_get", [curScopeV, emitStr(aHead, ixN)])
+        var lH = callExt(aHead, "js_scope_get", [curScopeV, emitStr(aHead, lnN)])
+        aHead.NewCondBr(truthy(aHead, callExt(aHead, "js_lt", [iH, lH])), bodyB, exitB)
+        var gBody = curF.NewBlock("")
+        var aBody = curF.NewBlock("")
+        var kvB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        var bindB = curF.NewBlock("")
+        bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, gnN)])), gBody, aBody)
+        var stB = callExt(gBody, "js_scope_get", [curScopeV, emitStr(gBody, stN)])
+        var rawV = callExt(gBody, "js_get", [stB, emitStr(gBody, "value")])
+        gBody.NewCondBr(truthy(gBody, callExt(gBody, "js_phisset", [rawV, emitStr(gBody, "__genkv")])), kvB, plainB)
+        var kvK = callExt(kvB, "js_get", [rawV, emitStr(kvB, "k")])
+        var kvV = callExt(kvB, "js_get", [rawV, emitStr(kvB, "v")])
+        kvB.NewBr(joinB)
+        var autoK = callExt(plainB, "js_scope_get", [curScopeV, emitStr(plainB, ixN)])
+        plainB.NewBr(joinB)
+        var gK = joinB.NewPhi([llvm.ir.NewIncoming(kvK, kvB), llvm.ir.NewIncoming(autoK, plainB)])
+        var gV = joinB.NewPhi([llvm.ir.NewIncoming(kvV, kvB), llvm.ir.NewIncoming(rawV, plainB)])
+        joinB.NewBr(bindB)
+        var itA = callExt(aBody, "js_scope_get", [curScopeV, emitStr(aBody, itN)])
+        var ixA = callExt(aBody, "js_scope_get", [curScopeV, emitStr(aBody, ixN)])
+        var aK = callExt(aBody, "js_range_key", [itA, ixA])
+        var aV = callExt(aBody, "js_range_val", [itA, ixA])
+        aBody.NewBr(bindB)
+        var keyV = bindB.NewPhi([llvm.ir.NewIncoming(gK, joinB), llvm.ir.NewIncoming(aK, aBody)])
+        var valV = bindB.NewPhi([llvm.ir.NewIncoming(gV, joinB), llvm.ir.NewIncoming(aV, aBody)])
+        var pair = callExt(bindB, "js_obj_new", [])
+        callExt(bindB, "js_set", [pair, emitStr(bindB, "__genkv"), hTrue])
+        callExt(bindB, "js_set", [pair, emitStr(bindB, "k"), keyV])
+        callExt(bindB, "js_set", [pair, emitStr(bindB, "v"), valV])
+        callExt(bindB, "js_yield", [pair])
+        bindB.NewBr(postB)
+        var ixP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, ixN)])
+        callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, ixN),
+                                        intWrap(postB, callExt(postB, "js_jadd", [ixP, emitNum(postB, 1)]))])
+        var gPost = curF.NewBlock("")
+        postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
+        var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
+        callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), genNext(gPost, itP)])
+        gPost.NewBr(headB)
+        return exitB
     }
     function makeForeachGen(iterT, keyName, valName, pat, body, byRef) {
         return function(b) {
@@ -2461,7 +2539,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var pn = prop.substring(2)
             return function(b) {
                 var rov = phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
-                return emitPropGet(rov.b, rov.v, emitStr(rov.b, pn))
+                return emitPropGet(rov.b, rov.v, emitStr(rov.b, pn), pn)
             }
         }
         return makeVarRef(name)
@@ -2552,7 +2630,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 } else if (s.kind == "dynfield") {
                     var rf = s.nameT(b)
                     b = rf.b
-                    var rdf = emitPropGet(b, cur, callExt(b, "js_phstr", [rf.v]))
+                    var rdf = emitPropGet(b, cur, callExt(b, "js_phstr", [rf.v]), null)
                     b = rdf.b
                     cur = rdf.v
                 } else if (s.kind == "mcall") {
@@ -2564,7 +2642,7 @@ KwInstanceof = "instanceof" KwEnd ;
                     b = rm.b
                     cur = rm.v
                 } else if (s.kind == "field") {
-                    var rg = emitPropGet(b, cur, emitStr(b, s.name))
+                    var rg = emitPropGet(b, cur, emitStr(b, s.name), s.name)
                     b = rg.b
                     cur = rg.v
                 } else if (s.kind == "call") {
@@ -2623,6 +2701,55 @@ KwInstanceof = "instanceof" KwEnd ;
         else if (name == "__call") { magicCall = true }
         else if (name == "__invoke") { magicInvoke = true }
     }
+    // ----- property hooks (PHP 8.4) ---------------------------------------------
+    // hookedProps holds every property name some class gives a hook, so a read or write
+    // of that NAME can be compiled with a dispatch in front of it and every other
+    // property keeps the plain js_get / js_set it always had.
+    // hookBacking is the property whose hook body is being emitted right now: inside it
+    // '$this->x' is the backing STORE, not another hook call, which is what stops a
+    // backed hook from recursing into itself.
+    var hookedProps = {}
+    var usesHooks = false
+    var hookBacking = ""
+    function noteHooked(name) { hookedProps["$" + name] = true; usesHooks = true }
+    function isHooked(name) {
+        if (!usesHooks || name == undefined || name == "") { return false }
+        if (name == hookBacking) { return false }
+        return hookedProps["$" + name] == true
+    }
+    // The hook methods of one declared property. A 'get' becomes __hget_<name> (no
+    // parameters), a 'set' becomes __hset_<name> (one, defaulting to PHP's implicit
+    // $value); the arrow forms are the one-expression spellings of 'return e' and
+    // 'store e'.
+    function emitHooks(b, clsV, clsName, prop) {
+        for (var i = 0; i < prop.hooks.length; i++) {
+            var h = prop.hooks[i]
+            if (h.hempty == true) { continue }
+            var isGet = h.hkind == "get"
+            var pname = h.hparam == null || h.hparam == undefined ? "$value" : h.hparam
+            var body = h.hbodyT
+            if (body == null) {
+                body = isGet ? makeBody([makeReturn([h.harrowT])])
+                             : makeBody([makeHookStore(prop.name, h.harrowT)])
+            }
+            var savedBacking = hookBacking
+            hookBacking = prop.name
+            var idx = emitFunc(isGet ? [] : [pname], body, true, false, clsName)
+            hookBacking = savedBacking
+            callExt(b, "js_set", [clsV, emitStr(b, (isGet ? "__hget_" : "__hset_") + prop.name),
+                                  closureV(b, idx, curScopeV)])
+        }
+        return b
+    }
+    // 'set => e': store e in the backing property, bypassing the hook.
+    function makeHookStore(name, valT) {
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            callExt(b, "js_set", [callExt(b, "js_phthis", [curScopeV]), emitStr(b, name), r.v])
+            return b
+        }
+    }
     // "is this an instance": js_phisset never aborts, and only an object built by `new`
     // carries __class.
     function emitIsObj(b, v) {
@@ -2654,8 +2781,27 @@ KwInstanceof = "instanceof" KwEnd ;
         nextB.NewBr(headB)
         return {b: exitB, v: callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, fName)])}
     }
-    // $o->p, with __get as the fallback for a property the instance does not have.
-    function emitPropGet(b, objV, keyV) {
+    // $o->p, with a property HOOK in front of it (when p is a hooked name anywhere in
+    // the program) and __get as the fallback for a property the instance does not have.
+    function emitPropGet(b, objV, keyV, name) {
+        if (isHooked(name)) {
+            var hn = emitStr(b, "__hget_" + name)
+            var hm = emitHasMethod(b, objV, hn)
+            b = hm.b
+            var hookB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, hm.v), hookB, plainB)
+            var hv = callExt(hookB, "js_mcall", [objV, hn, callExt(hookB, "js_arr_new", [])])
+            hookB.NewBr(joinB)
+            var pr = emitPropGetPlain(plainB, objV, keyV)
+            pr.b.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hv, hookB),
+                                               llvm.ir.NewIncoming(pr.v, pr.b)])}
+        }
+        return emitPropGetPlain(b, objV, keyV)
+    }
+    function emitPropGetPlain(b, objV, keyV) {
         if (!magicGet) { return {b: b, v: callExt(b, "js_get", [objV, keyV])} }
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
@@ -2675,8 +2821,24 @@ KwInstanceof = "instanceof" KwEnd ;
                                              llvm.ir.NewIncoming(magV, magB),
                                              llvm.ir.NewIncoming(rawV, rawB)])}
     }
-    // $o->p = v, with __set as the fallback for a property the instance does not have.
-    function emitPropSet(b, objV, keyV, valV) {
+    // $o->p = v, with the property's set HOOK in front of it and __set as the fallback.
+    function emitPropSet(b, objV, keyV, valV, name) {
+        if (isHooked(name)) {
+            var hn = emitStr(b, "__hset_" + name)
+            var hm = emitHasMethod(b, objV, hn)
+            b = hm.b
+            var hookB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, hm.v), hookB, plainB)
+            callExt(hookB, "js_mcall", [objV, hn, argList(hookB, [valV])])
+            hookB.NewBr(joinB)
+            emitPropSetPlain(plainB, objV, keyV, valV).NewBr(joinB)
+            return joinB
+        }
+        return emitPropSetPlain(b, objV, keyV, valV)
+    }
+    function emitPropSetPlain(b, objV, keyV, valV) {
         if (!magicSet) { callExt(b, "js_set", [objV, keyV, valV]); return b }
         var haveB = curF.NewBlock("")
         var missB = curF.NewBlock("")
@@ -3195,24 +3357,28 @@ KwInstanceof = "instanceof" KwEnd ;
         var o = rr.v
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
+            if (s.key != undefined) {
+                var rs = emitPropGet(b, o, emitStr(b, s.key), s.key)
+                b = rs.b
+                o = rs.v
+            }
             else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_phget", [o, ri.v]) }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.append === true) { return {b: b, obj: o, kind: "append"} }
-        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), kind: "field"} }
+        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), keyName: last.key, kind: "field"} }
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v, kind: "index"}
     }
     // Reading a slot can BRANCH (a property read falls back to __get), so it answers
     // the block to continue in as well as the value.
     function readRefSlot(b, p) {
-        if (p.kind == "field") { return emitPropGet(b, p.obj, p.key) }
+        if (p.kind == "field") { return emitPropGet(b, p.obj, p.key, p.keyName) }
         if (p.kind == "index") { return {b: b, v: callExt(b, "js_phget", [p.obj, p.key])} }
         return {b: b, v: hNull}
     }
     function writeRefSlot(b, p, v) {
-        if (p.kind == "field") { return emitPropSet(b, p.obj, p.key, v) }
+        if (p.kind == "field") { return emitPropSet(b, p.obj, p.key, v, p.keyName) }
         if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, v]); return b }
         callExt(b, "js_phpush", [p.obj, v])
         return b
@@ -3877,19 +4043,43 @@ KwInstanceof = "instanceof" KwEnd ;
     // A property declaration reduced to {name, init}: the name without its '$' (that is
     // the key "$this->x" reads) and the default-value thunk, or null for a bare 'public
     // $x;' and for every 'static' property (no static model here).
+    // One property hook, reduced to {kind, param, body}. 'get => e' is a body that
+    // RETURNS e; 'set => e' is a body that stores e in the backing property; a bodyless
+    // 'get;' / 'set;' declares nothing to run and is dropped.
+    function makeHook(items) {
+        var kind = ""
+        var param = null
+        var arrow = null
+        var block = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].hname != undefined) { kind = items[i].hname }
+            else if (items[i].harrow != undefined) { arrow = items[i].harrow }
+            else if (items[i].hblock != undefined) { block = items[i].hblock }
+            else if (items[i].param != undefined) { param = items[i].param }
+        }
+        if (arrow == null && block == null) { return {hkind: kind, hempty: true} }
+        return {hkind: kind, hparam: param, harrowT: arrow, hbodyT: block}
+    }
     function makeProp(items) {
         var isStatic = false
         var pname = ""
         var init = null
+        var hooks = []
         for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
             if (items[i].mod != undefined) {
                 if (hasWord(items[i].mod, "static")) { isStatic = true }
             }
+            else if (items[i].hooks != undefined) { hooks = items[i].hooks }
             else if (typeof items[i] == "string") { pname = items[i].substring(1) }
             else { init = items[i] }
         }
         if (pname == "") { return null }
-        return {name: pname, init: init, isStatic: isStatic}
+        for (var k = 0; k < hooks.length; k++) {
+            if (hooks[k].hempty != true) { noteHooked(pname) }
+        }
+        return {name: pname, init: init, isStatic: isStatic, hooks: hooks}
     }
     function hasWord(s, w) {
         for (var i = 0; i + w.length <= s.length; i++) {
@@ -4170,6 +4360,11 @@ KwInstanceof = "instanceof" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, "s:" + statics[s1].name), sv])
             }
             b = emitInitProps(b, clsV, name, ext, props)
+            for (var hp = 0; hp < props.length; hp++) {
+                if (props[hp].hooks != undefined && props[hp].hooks.length > 0) {
+                    b = emitHooks(b, clsV, name, props[hp])
+                }
+            }
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), closureV(b, idx, curScopeV)])

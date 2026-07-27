@@ -5547,6 +5547,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		"js_phget":   func(a []uint64) uint64 { return w(rt.phpArrGet(u(a[0]), u(a[1]))) },
 		"js_phisset": func(a []uint64) uint64 { return boolH(rt.phpArrHas(u(a[0]), u(a[1]))) },
+		// The storage cell of an array element, created on demand and REUSED: two
+		// references to the same element must share one cell (php-interpreter.abnf's
+		// arrCell). js_phget dereferences, so the compiler cannot read the raw slot
+		// back and find the cell itself.
+		"js_phcell": func(a []uint64) uint64 { return w(rt.phpElemCell(u(a[0]), u(a[1]))) },
+		// Read THROUGH a PHP reference cell: the value the cell holds, or the value
+		// itself when it is not one (see the reference model in jsrtphp.go). Every
+		// variable read in a program that writes a '&' anywhere passes through here,
+		// which is why it is one call: the compiler used to spell it as a three-block
+		// branch around js_phisset + js_get at each read site.
+		"js_phderef": func(a []uint64) uint64 { return w(phpDeref(u(a[0]))) },
 		"js_phunset": func(a []uint64) uint64 {
 			rt.phpArrUnset(u(a[0]), u(a[1]))
 			return 0
