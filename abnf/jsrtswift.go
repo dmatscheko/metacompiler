@@ -96,31 +96,154 @@ func init() {
 		w := rt.wrap
 		// One binary arithmetic or bitwise operator: (op, left, right). Two
 		// INTEGRAL operands go to the sized-integer layer of jsrtint.go, which
-		// evaluates at the result type's width and wraps to it; anything else
-		// (a fractional Double, a String, an Array) keeps the double / shared
-		// operator it had, because this value model has no float box and tells
-		// Int from Double by the operands. swift-interpreter.abnf implements the
-		// identical rule with szArith, and ./test.sh --cross diffs the two.
+		// evaluates at the result type's width and wraps to it; an operand that
+		// is a FLOAT BOX pulls the whole operation into floating point and the
+		// result is a box again (see the "Doubles" note below).
+		// swift-interpreter.abnf implements the identical rule with szArith and
+		// its {__flo} box, and ./test.sh --cross diffs the two.
 		m["js_swarith"] = func(a []uint64) uint64 {
 			op, l, r := rt.toString(u(a[0])), u(a[1]), u(a[2])
 			if swIsWhole(l) && swIsWhole(r) {
 				return w(rt.giArith(op, l, r))
 			}
 			if op == "+" {
-				return w(rt.jsAdd(l, r))
+				_, ls := l.(string)
+				_, rs := r.(string)
+				if ls || rs {
+					return rt.wrapStr(strConcat(rt.swDesc(l), rt.swDesc(r)))
+				}
+				// Array + Array is CONCATENATION in Swift, where the shared
+				// jsAdd coerced both to text and answered "1,23".
+				if la, ok := l.(*jsArray); ok {
+					if ra, ok2 := r.(*jsArray); ok2 {
+						out := make([]interface{}, 0, len(la.elems)+len(ra.elems))
+						out = append(out, la.elems...)
+						out = append(out, ra.elems...)
+						return w(&jsArray{elems: out})
+					}
+				}
 			}
 			x, y := swNum(rt, l), swNum(rt, r)
 			switch op {
+			case "+":
+				return w(swMkFlo(x + y))
 			case "-":
-				return rt.wrapNum(x - y)
+				return w(swMkFlo(x - y))
 			case "*":
-				return rt.wrapNum(x * y)
+				return w(swMkFlo(x * y))
 			case "/":
-				return rt.wrapNum(x / y)
+				return w(swMkFlo(x / y))
 			case "%":
-				return rt.wrapNum(math.Mod(x, y))
+				return w(swMkFlo(math.Mod(x, y)))
 			}
 			return w(rt.giArith(op, l, r))
+		}
+		// ----- Swift's Double: the boxed float (see the "Doubles" note below) -----
+		// A float literal, Double(x) and Float(x) all arrive here. A String
+		// source is FAILABLE, like Int("x").
+		m["js_swflo"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if s, ok := v.(string); ok {
+				if !swFloText(s) {
+					return jsHNull
+				}
+				f, err := strconv.ParseFloat(s, 64)
+				if err != nil {
+					return jsHNull
+				}
+				return w(swMkFlo(f))
+			}
+			if isNullish(v) {
+				rt.fail("Double conversion of nil")
+			}
+			if b, ok := v.(bool); ok {
+				if b {
+					return w(swMkFlo(1))
+				}
+				return w(swMkFlo(0))
+			}
+			return w(swMkFlo(swNum(rt, v)))
+		}
+		// String(x) / String(describing: x): the text print would have written.
+		m["js_swstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.swDesc(u(a[0]))) }
+		// abs/max/min, Double-aware: a boxed operand keeps its box (abs(-1.5) is
+		// 1.5, not the 1 an integer truncation gives) and compares by VALUE.
+		m["js_swabs"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if f, ok := v.(jsJFlo); ok {
+				return w(swMkFlo(math.Abs(f.f)))
+			}
+			if giIsInt(v) {
+				n := giVal(rt, v)
+				if n < 0 {
+					n = -n
+				}
+				wd, un := giWidthOf(v, v)
+				return w(giNorm(n, wd, un))
+			}
+			return rt.wrapNum(math.Abs(math.Trunc(rt.toNumber(v))))
+		}
+		swPick := func(want func(int) bool) func(a []uint64) uint64 {
+			return func(a []uint64) uint64 {
+				l, r := u(a[0]), u(a[1])
+				if swIsFlo(l) || swIsFlo(r) {
+					c := 0
+					if swNum(rt, l) < swNum(rt, r) {
+						c = -1
+					} else if swNum(rt, l) > swNum(rt, r) {
+						c = 1
+					}
+					if want(c) {
+						return a[0]
+					}
+					return a[1]
+				}
+				if giIsIntegral(l) && giIsIntegral(r) {
+					if want(rt.giCmp(l, r)) {
+						return a[0]
+					}
+					return a[1]
+				}
+				if want(rt.jsCompare(l, r)) {
+					return a[0]
+				}
+				return a[1]
+			}
+		}
+		m["js_swmax"] = swPick(func(c int) bool { return c > 0 })
+		m["js_swmin"] = swPick(func(c int) bool { return c < 0 })
+		// The Double methods this subset carries, in front of the runtime's own
+		// js_mcall (a float box is not a shape memberCall knows). Verified
+		// against swift 6.1.2: 2.0.rounded() is 2.0, 2.5.squareRoot() is
+		// 1.5811388300841898 and 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
+		baseMcall := m["js_mcall"]
+		m["js_swmcall"] = func(a []uint64) uint64 {
+			f, isFlo := u(a[0]).(jsJFlo)
+			if !isFlo {
+				return baseMcall(a)
+			}
+			name := rt.toString(u(a[1]))
+			args, _ := u(a[2]).(*jsArray)
+			arg0 := func() float64 {
+				if args == nil || len(args.elems) == 0 {
+					return 0
+				}
+				return swNum(rt, args.elems[0])
+			}
+			switch name {
+			case "rounded":
+				return w(swMkFlo(swRoundHalfAway(f.f)))
+			case "squareRoot":
+				return w(swMkFlo(math.Sqrt(f.f)))
+			case "truncatingRemainder":
+				return w(swMkFlo(math.Mod(f.f, arg0())))
+			case "isMultiple":
+				return boolH(math.Mod(f.f, arg0()) == 0)
+			case "description":
+				return rt.wrapStr(swFloStr(f.f))
+			}
+			rt.fail("unknown Double method: %s", name)
+			return 0
 		}
 		// Swift's SMART SHIFT: an over-shift answers 0 (or the sign, for a
 		// signed >>) and a NEGATIVE count shifts the other way - `256 >> -2` is
@@ -144,7 +267,9 @@ func init() {
 		m["js_swneg"] = func(a []uint64) uint64 {
 			v := u(a[0])
 			if !swIsWhole(v) {
-				return rt.wrapNum(-swNum(rt, v))
+				// A float negates as a float, so -0.0 keeps its sign and
+				// -1.0/0.0 is -inf.
+				return w(swMkFlo(-swNum(rt, v)))
 			}
 			wd, un := giWidthOf(v, v)
 			return w(giNorm(-giVal(rt, v), wd, un))
@@ -179,6 +304,21 @@ func init() {
 		rel := func(name string, want func(int) bool) {
 			m[name] = func(a []uint64) uint64 {
 				l, r := u(a[0]), u(a[1])
+				// A float box is an object to the shared comparison, so it has
+				// to be unboxed first: `1.5 < 2.0` between two boxes is not a
+				// numeric comparison at all.
+				if swIsFlo(l) || swIsFlo(r) {
+					x, y := swNum(rt, l), swNum(rt, r)
+					c := 0
+					if x < y {
+						c = -1
+					} else if x > y {
+						c = 1
+					} else if x != y {
+						return jsHFalse // a NaN operand: every ordering is false
+					}
+					return boolH(want(c))
+				}
 				if giIsInt(l) || giIsInt(r) {
 					if giIsIntegral(l) && giIsIntegral(r) {
 						return boolH(want(rt.giCmp(l, r)))
@@ -192,6 +332,24 @@ func init() {
 		// type switch in front of the read the grammar already emitted.
 		baseGet := m["js_get"]
 		m["js_swget"] = func(a []uint64) uint64 {
+			// The Double members. .isNaN / .isInfinite are the only way to spot
+			// the values a comparison cannot: NaN != NaN.
+			if f, ok := u(a[0]).(jsJFlo); ok {
+				switch rt.toString(u(a[1])) {
+				case "isNaN":
+					return boolH(math.IsNaN(f.f))
+				case "isInfinite":
+					return boolH(math.IsInf(f.f, 0))
+				case "isFinite":
+					return boolH(!math.IsNaN(f.f) && !math.IsInf(f.f, 0))
+				case "isZero":
+					return boolH(f.f == 0)
+				case "description":
+					return rt.wrapStr(swFloStr(f.f))
+				case "magnitude":
+					return w(swMkFlo(math.Abs(f.f)))
+				}
+			}
 			if b, ok := u(a[0]).(jsGInt); ok {
 				switch rt.toString(u(a[1])) {
 				case "description":
@@ -241,6 +399,164 @@ func init() {
 // Here + - * WRAP at the operand's width, exactly like &+ / &- / &*. The
 // divergence is confined to programs Swift would have killed outright, and is
 // documented rather than hidden.
+
+// ----------------------------------------------------------------------------
+// Doubles
+//
+// Swift's Double is a DIFFERENT type from Int, and the handle runtime models
+// every number as one JS double, so `7.0 / 2.0` arrived here with exactly the
+// operands `7 / 2` has and divided as integers (3, not 3.5). No dynamic rule can
+// repair that - 7.0 has no fraction to detect - so the type goes ON the value,
+// exactly as commit 636e326 did for Java/Kotlin/Go/C#. Swift reuses THAT box,
+// jsJFlo of jsrtjvm.go, which rt.truthy / rt.toNumber / rt.typeOf / rt.strictEq
+// already understand; only the RENDERING is Swift's own (swFloStr below), and
+// every Swift print path goes through swRender, so the box's style tag is never
+// consulted for a Swift value.
+//
+// Invariant, in both halves:
+//
+//	a plain number / a jsGInt  ==  an Int (or a sized integer type)
+//	a jsJFlo                   ==  a Double (or a Float)
+//
+// DELIBERATE SIMPLIFICATION, both halves: Float is an ALIAS of Double, i.e. it is
+// modelled at 64 bit precision. Every value both types hold exactly prints and
+// computes the same; a computation that LOSES precision does not - real swift
+// prints `Float(1) / Float(3)` as 0.33333334 and this prints 0.3333333333333333.
+// Modelling the 32 bit width honestly needs float32 rounding after every operator
+// AND a float32 shortest-round-trip renderer in the frozen JS subset, which has
+// neither toPrecision nor Math.fround. Aliasing was chosen over refusing `Float`
+// outright because a program that writes Float is asking for floating point.
+//
+// DELIBERATE SIMPLIFICATION, both halves: real Swift does not implicitly convert
+// between Int and Double (`x + 2.0` with `let x = 5` is a compile ERROR, and only
+// an untyped literal may take the other side's type). This front end has no type
+// checker, so a mixed operation evaluates in floating point - which is the right
+// answer for the literal case, `1 + 2.0 == 3.0` - instead of being rejected.
+
+func swMkFlo(f float64) jsJFlo { return jsJFlo{f: f} }
+
+func swIsFlo(v interface{}) bool { _, ok := v.(jsJFlo); return ok }
+
+// swIsNumeric reports whether a value takes part in numeric equality at all, so
+// that 1.0 == "x" is false rather than 1.0 == 0.
+func swIsNumeric(v interface{}) bool {
+	switch v.(type) {
+	case jsJFlo, jsGInt, float64:
+		return true
+	}
+	return false
+}
+
+// swRoundHalfAway is Double.rounded(), i.e. .toNearestOrAwayFromZero - which is
+// what Go's math.Round does, and NOT what a half-to-even or half-up rule gives:
+// (-2.5).rounded() is -3.
+func swRoundHalfAway(f float64) float64 { return math.Round(f) }
+
+// swFloStr is Swift's Double.description (SwiftDtoa): the shortest decimal that
+// round-trips, written as a plain decimal when the scientific exponent is in
+// -4 ... 15 and in computerized scientific notation - two digit minimum exponent,
+// always signed - outside it, with the integral case always carrying a ".0". So
+// 1e15 prints 1000000000000000.0 and 1e16 prints 1e+16. The infinities are
+// "inf"/"-inf" and the NaN is "nan". Every boundary here was read off swift 6.1.2
+// rather than remembered. The JS twin is swFloStr in swift-interpreter.abnf and
+// the two MUST stay in step, because ./test.sh --cross diffs them.
+func swFloStr(d float64) string {
+	if math.IsNaN(d) {
+		return "nan"
+	}
+	if math.IsInf(d, 1) {
+		return "inf"
+	}
+	if math.IsInf(d, -1) {
+		return "-inf"
+	}
+	neg := math.Signbit(d)
+	a := math.Abs(d)
+	s := swFloDigits(a)
+	if neg {
+		return "-" + s
+	}
+	return s
+}
+
+// swFloDigits renders a >= 0. strconv's 'e' form gives the shortest round-tripping
+// digit run and the scientific exponent directly, which is exactly the pair
+// SwiftDtoa formats from.
+func swFloDigits(a float64) string {
+	if a == 0 {
+		return "0.0"
+	}
+	s := strconv.FormatFloat(a, 'e', -1, 64)
+	i := strings.IndexByte(s, 'e')
+	mant, exp := s[:i], s[i+1:]
+	e10, _ := strconv.Atoi(exp)
+	digits := strings.Replace(mant, ".", "", 1)
+	if e10 < -4 || e10 >= 16 {
+		out := digits[:1]
+		if len(digits) > 1 {
+			out += "." + digits[1:]
+		}
+		sign := "+"
+		if e10 < 0 {
+			sign = "-"
+			e10 = -e10
+		}
+		if e10 < 10 {
+			return out + "e" + sign + "0" + strconv.Itoa(e10)
+		}
+		return out + "e" + sign + strconv.Itoa(e10)
+	}
+	pt := e10 + 1 // digits before the decimal point
+	if pt <= 0 {
+		return "0." + strings.Repeat("0", -pt) + digits
+	}
+	if pt >= len(digits) {
+		return digits + strings.Repeat("0", pt-len(digits)) + ".0"
+	}
+	return digits[:pt] + "." + digits[pt:]
+}
+
+// swFloText reports whether the WHOLE string is a decimal float, for the failable
+// Double("3.5"): swift answers nil for "3.5x", where a lenient parse stops at the
+// first bad character and answers 3.5.
+func swFloText(s string) bool {
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	d0 := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	seen := i > d0
+	if i < len(s) && s[i] == '.' {
+		i++
+		d1 := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i > d1 {
+			seen = true
+		}
+	}
+	if !seen {
+		return false
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		d2 := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i == d2 {
+			return false
+		}
+	}
+	return i == len(s)
+}
 
 // swIsWhole is the interpreter's swWhole: a sized-integer box, or a Double whose
 // value is a whole number.
@@ -343,6 +659,11 @@ func (rt *jsrt) swRender(v interface{}, nested bool, depth int) string {
 		// A sized integer prints as its DECIMAL text, not through a double:
 		// Int.max would otherwise render as 9.223372036854776e+18.
 		return giStr(t)
+	case jsJFlo:
+		// A Double prints through SWIFT's float rendering: 1.0 is "1.0" and the
+		// infinity is "inf", where the shared toString would answer the style of
+		// whichever language owns the box's tag.
+		return swFloStr(t.f)
 	case string:
 		if nested {
 			return swQuote(t)
@@ -534,6 +855,16 @@ func (rt *jsrt) swEqualDepth(l, r interface{}, depth int) bool {
 	}
 	if isNullish(l) || isNullish(r) {
 		return isNullish(l) && isNullish(r)
+	}
+	// A float box compares BY VALUE and ACROSS the box boundary: `1.0 == 1` holds
+	// in Swift (the untyped literal takes the Double type). It has to be spelled
+	// before the integer path, which would compare 1.5 against Int8(1) as the
+	// truncated 1.
+	if swIsFlo(l) || swIsFlo(r) {
+		if !swIsNumeric(l) || !swIsNumeric(r) {
+			return false
+		}
+		return swNum(rt, l) == swNum(rt, r)
 	}
 	// A sized-integer box is a value of its own, so two integers have to be
 	// compared BY VALUE here rather than falling through to strictEq, which

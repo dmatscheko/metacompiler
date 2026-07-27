@@ -850,6 +850,82 @@ func s24() {
     check("int26", (-5).magnitude == 5 && Int8(-100).magnitude == 100 && 7.description == "7")
 }
 
+// ===== SECTION 25: floating point =====
+// Swift's Double is a type of its own, not "an Int that happens to have a
+// fraction": 7.0 / 2.0 is 3.5 where 7 / 2 is 3, and a whole Double still prints
+// with its ".0". Every assertion below was run through the real `swift` 6.1.2
+// first and matches its output; the file as a whole is a valid Swift program, so
+// it can be re-checked with `swift tests/swift-test-full.swift` at any time.
+//
+// NOT asserted, and deliberately: Float is an ALIAS of Double here, so only
+// values both widths hold exactly are used (Float(1) / Float(3) is 0.33333334 in
+// real swift and 0.3333333333333333 here). And real Swift REJECTS a mixed
+// Int/Double expression unless a literal is involved, so only the literal forms
+// appear - both notes are spelled out in abnf/jsrtswift.go.
+struct Flo25 { var x: Double; var y: Int }
+func s25() {
+    // A float literal is a Double, so / is real division.
+    check("flo1", 7.0 / 2.0 == 3.5 && 1.0 / 4.0 == 0.25)
+    check("flo2", 2.5 * 1.5 == 3.75 && 1.5 + 1.0 == 2.5 && 1.5 - 2.0 == -0.5)
+    check("flo3", 7.0.truncatingRemainder(dividingBy: 2.0) == 1.0)
+    // description / interpolation: a whole Double keeps its ".0".
+    check("flo4", "\(1.0)" == "1.0" && "\(3.5)" == "3.5" && (1.0).description == "1.0")
+    check("flo5", "\(1e15)" == "1000000000000000.0" && "\(1e16)" == "1e+16")
+    check("flo6", "\(1e-4)" == "0.0001" && "\(1e-5)" == "1e-05")
+    check("flo7", "\(0.1 + 0.2)" == "0.30000000000000004" && "\(1.0 / 3.0)" == "0.3333333333333333")
+    // The infinities and the NaN - none of which existed before the box.
+    let inf = 1.0 / 0.0
+    let nan = 0.0 / 0.0
+    check("flo8", inf == Double.infinity && "\(inf)" == "inf" && "\(-inf)" == "-inf")
+    check("flo9", nan.isNaN && !(nan == nan) && "\(nan)" == "nan")
+    check("flo10", inf.isInfinite && !inf.isFinite && (1.0).isFinite && (0.0).isZero)
+    // -0.0 keeps its sign but equals +0.0.
+    check("flo11", "\(-0.0)" == "-0.0" && -0.0 == 0.0)
+    // Conversions both ways; Double(3) is 3.0, which is the whole point of a box.
+    check("flo12", Double(3) == 3.0 && "\(Double(3))" == "3.0" && Double(3) / 2 == 1.5)
+    check("flo13", Int(3.7) == 3 && Int(-3.7) == -3)
+    check("flo14", Double("3.5") == 3.5 && Double("x") == nil && Double("3.5x") == nil)
+    check("flo15", String(3.5) == "3.5" && String(3) == "3" && String(describing: 1.0) == "1.0")
+    // An untyped integer literal takes the Double type of the other operand.
+    check("flo16", 1 + 2.0 == 3.0 && 2.0 * 3 == 6.0 && 1.0 == 1)
+    // An annotated declaration is a Double even from an integer literal.
+    let d: Double = 3
+    check("flo17", d / 2 == 1.5 && "\(d)" == "3.0")
+    // Ordering, and a NaN which compares false every way.
+    check("flo18", 1.5 < 2.0 && 2.0 <= 2.0 && 3.0 > 2.5 && !(nan < 1.0) && !(nan >= 1.0))
+    // The stdlib helpers this subset carries.
+    check("flo19", abs(-1.5) == 1.5 && max(1.5, 2.0) == 2.0 && min(1.5, 2.0) == 1.5)
+    check("flo20", (2.5).squareRoot() == 1.5811388300841898 && (2.0).rounded() == 2.0)
+    check("flo21", (-2.5).rounded() == -3.0 && (2.5).rounded() == 3.0 && (1.5).magnitude == 1.5)
+    check("flo22", Double.pi == 3.141592653589793 && Double.zero == 0.0)
+    // A Double inside a collection prints and compares as a Double.
+    check("flo23", "\([1.5, 2.0])" == "[1.5, 2.0]" && [1.0, 2.0] == [1.0, 2.0])
+    let q = "\""
+    check("flo24", "\(["a": 1.5])" == "[" + q + "a" + q + ": 1.5]")
+    // Array + Array is CONCATENATION, where the untyped + gave the text "1,23".
+    check("flo25", [1, 2] + [3] == [1, 2, 3] && "\([1, 2] + [3])" == "[1, 2, 3]")
+    // A Double accumulator stays a Double across a loop.
+    var acc = 0.0
+    for _ in 1...3 { acc += 1.5 }
+    check("flo26", acc == 4.5 && "\(acc)" == "4.5")
+    // A struct field declared Double.
+    check("flo27", "\(Flo25(x: 1.5, y: 2))" == "Flo25(x: 1.5, y: 2)")
+    // Float is an alias of Double here; only values both widths hold exactly.
+    check("flo28", Float(1.5) + 1.5 == 3.0 && "\(Float(2.5))" == "2.5")
+    let f: Float = 3
+    check("flo29", f / 2 == 1.5 && "\(f)" == "3.0")
+    // A BOXED value as a Dictionary key: a Double and a sized integer are both
+    // objects in this value model, so a key had to be normalised to be found again.
+    var dm = [1.5: "h", 2.5: "j"]
+    dm[3.5] = "k"
+    check("flo30", dm[1.5] == "h" && dm[2.5] == "j" && dm[3.5] == "k" && dm.count == 3)
+    let im: [Int8: String] = [Int8(1): "x", Int8(2): "y"]
+    check("flo31", im[Int8(1)] == "x" && im[Int8(2)] == "y" && im.count == 2)
+    // 1.0 and 1 are the SAME key: equal values hash equal.
+    let one = [1.0: "a"]
+    check("flo32", one[1] == "a" && one[1.0] == "a")
+}
+
 // ===== END SECTIONS =====
 
 func main() {
@@ -877,6 +953,7 @@ func main() {
     s22() // SECTION-CALL 22
     s23() // SECTION-CALL 23
     s24() // SECTION-CALL 24
+    s25() // SECTION-CALL 25
     print("full: \(checks) checks, \(fails) failures")
 }
 

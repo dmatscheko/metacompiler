@@ -90,9 +90,11 @@ their declared precedence, operator overloading through `static func` on a type
 (one sw_ovl_N helper per operator, so emitBin never has to change the caller's
 block), the bitwise and overflow operators, and ranges as values.
 
-Int arithmetic is 32 bit and truncating, Double arithmetic is not, and the two are
-told apart by the OPERANDS. A compound assignment is lowered to a = a <op> b, so
-an overloaded + is what runs for +=.
+A number carries its own type: an Int is a plain value at its declared width (Int
+is 64 bit, Int8 ... UInt64 wrap at theirs) and a Double is a BOX, so 7.0 / 2.0 is
+3.5 where 7 / 2 is 3 and a whole Double still prints 3.0 rather than 3. Float is
+modelled as Double. A compound assignment is lowered to a = a <op> b, so an
+overloaded + is what runs for +=.
 
 Not in the subset (accepted structurally and reported as not implemented under
 -warn-unsupported, or simply not parsed): generics (parsed and ignored),
@@ -107,8 +109,44 @@ swift-interpreter.abnf.") ;
 // --- main rules
 
 // Shared token productions (languages/lib).
-:include("lib/cstyle-comments.abnf") ;
-:include("lib/ident.abnf") ;
+// Swift's whitespace, spelled HERE rather than taken from lib/cstyle-comments.abnf,
+// because Swift accepts more of it than C does. The real lexer treats a form feed
+// (0x0C) and a vertical tab (0x0B) as plain whitespace, and it accepts a
+// NON-BREAKING SPACE (U+00A0) and its Unicode relatives with a warning and a fix-it
+// rather than an error - `let x\u{a0}= 3` compiles. A NUL byte is the same story: it
+// warns "nul character embedded in middle of file" and lexes on. The lib file backs
+// ~15 grammars where most of that would be wrong, so the divergence lives here.
+// Everything else is the lib file verbatim.
+Whitespace  = { @+" \t\r\n\x0c\x0b\x00" | SwUniSpace | Comment } ;
+SwUniSpace  = "\u00a0" | "\u1680" | "\u2000"..."\u200a" | "\u202f" | "\u205f" | "\u3000" | "\ufeff" ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+// Swift's identifiers, spelled HERE rather than taken from lib/ident.abnf, because
+// Swift accepts far more than ASCII in a name: `case 😀` and `let π = 3` are both
+// ordinary declarations (Swift's rule is a Unicode category set close to XID_Start /
+// XID_Continue). The approximation below is "any scalar at U+00A1 or above except
+// the ones this grammar lexes as WHITESPACE" - the space characters have to be cut
+// out, or a non-breaking space after a name would be absorbed into it. KwEnd and
+// IdBacktick are the lib file verbatim.
+Id          = ( "a"..."z" | "A"..."Z" | "_" | IdUni ) :whitespace()
+              { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | IdUni } :whitespace(Whitespace) ;
+IdUni       = "\u00a1"..."\u167f" | "\u1681"..."\u1fff" | "\u200b"..."\u2027"
+            | "\u202a"..."\u202e" | "\u2030"..."\u205e" | "\u2060"..."\u2fff"
+            | "\u3001"..."\ufefe" | "\uff00"..."\U0010ffff" ;
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+IdBacktick  = "`" :whitespace() IdBtChar { IdBtChar } "`" :whitespace(Whitespace) ;
+IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
 
@@ -187,7 +225,7 @@ Hashbang    = "#!" :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
 // Declaration modifiers and attributes (@objc, @available(...), @escaping) are
 // parsed and ignored.
 Modifiers   = { Modifier | Attribute } ;
-Attribute   = "@" Id { "." Id } [ SkipParen ] ;
+Attribute   = "@" Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ SkipParen ] ;
 Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
               | "prefix" | "postfix" | "infix"
               | "final" | "static" | "mutating" | "nonmutating"
@@ -233,8 +271,13 @@ ParamList   <~~ push({params: takeAll()}) ~~>
 // name; with one, the label and the name are the same. The label `_` means "no
 // label". The declared type is kept as text, for picking between overloads.
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = Id <~~ push({pid: up.in}) ~~> [ Id <~~ push({pid: up.in}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
+            = { ParamLead } Id <~~ push({pid: up.in}) ~~> [ Id <~~ push({pid: up.in}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
 ParamInout  <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
+// A DECLARATION attribute in front of the parameter name - `func f(@_noImplicitCopy
+// _ x: K)`. It contributes nothing here, so it pushes nothing; its argument list (if
+// it has one) is adjacent, which is what keeps `@escaping (Int) -> Int` in the
+// parameter TYPE position from losing its function type to SkipParen.
+ParamLead   = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 ParamType   <~~ push({ptype: up.in}) ~~> = Type ;
 ParamVariadic <~~ push({pvar: 1}) ~~> = "..." ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
@@ -264,7 +307,10 @@ TypeList    = Type { "," Type } ;
 // A nested type is matched BEFORE the modifier-led members, so the `class` of
 // `class Inner {}` is read as the declaration keyword and the `class` of
 // `class var kind` as a modifier (ClassDecl fails on the `var` that follows).
-Member      = PoundIfMember | MemberDirective | MemberType | [ MemberModifiers ] ( CaseDecl | InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+Member      = PoundIfMember | MemberDirective | MemberSemi | MemberType | [ MemberModifiers ] ( CaseDecl | InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+// A stray `;` between members - `enum E { enum F { case x }; case a }`. It declares
+// nothing, so it pushes the same empty member record a #directive does.
+MemberSemi  <~~ push({}) ~~> = ";" ;
 // The nested declaration's own statement is dropped: a nested type is accepted
 // structurally, not yet reachable as Outer.Inner.
 MemberType  <~~ push({nested: pop()}) ~~>
@@ -384,7 +430,12 @@ TypeAliasDecl <~~ push(function(b) { return b }) ~~>
 // implicitly unwrapped T!, tuples/function types (A, B) -> C, dotted and generic,
 // opaque/existential `some P` / `any P`, and compositions P & Q. The `&` of a
 // composition is spelled ( "&" !"&" ) so `x is T && y` is not read as `T & (&y)`.
-Type        = TypeMod TypeSuffixed { TypeAmp TypeMod TypeSuffixed } ;
+Type        = { TypeAttr } TypeMod TypeSuffixed { TypeAmp TypeMod TypeSuffixed } ;
+// An attribute ON a type: `typealias F = @isolated(any) () -> ()`, `@Sendable () ->
+// ()`, `@convention(c) () -> ()`. Its argument list is ADJACENT in Swift, which is
+// what lets `@escaping (Int) -> Int` keep its function type - a SkipParen that
+// accepted the space would swallow the parameter list.
+TypeAttr    = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 // The optional / implicitly-unwrapped marker has to be ADJACENT to the type:
 // `x is T ? a : b` must keep its conditional, and `T?` never has a space in Swift.
 TypeSuffixed = TypeCore { NoSpace ( "?" | "!" ) } ;
@@ -400,7 +451,12 @@ NoSpace     = :script(~~
     })()
 ~~) ;
 TypeAmp     = "&" !"&" ;
-TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" ) KwEnd } ;
+// The ownership and existential modifiers are CONTEXTUAL keywords, so each one is
+// also a legal type NAME: `func zim(x: borrowing) {}` declares a parameter of a type
+// called `borrowing`. The lookahead is what tells them apart - a modifier is always
+// followed by the type it modifies, never by the token that ends one.
+TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" ) KwEnd NotTypeEnd } ;
+NotTypeEnd  = !")" !"," !"=" !">" !"{" ;
 TypeCore    = "[" Type [ ":" Type ] "]"
             | "(" [ TupleTypeElem { "," TupleTypeElem } ] ")" [ TypeEffects ] [ "->" Type ]
             | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
@@ -426,8 +482,12 @@ TypeEffects = { ( "async" | "throws" | "rethrows" ) KwEnd } ;
 // do/throw are genuinely lowered (try/catch via js_try, throw via js_throw); the
 // Cplx* / Local* / defer / fallthrough forms are recognized but not lowered - they
 // route to notImplStmt (a warning under -warn-unsupported).
+// A declaration STATEMENT carrying an attribute - `@_noImplicitCopy let y = x`
+// inside a body, `@A<Float> var test0: Int { ... }` at top level. It needs at
+// least one `@`, so it can never be confused with a bare expression statement.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = PoundDirective
+            = AttrDecl
+            | PoundDirective
             | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
             | Continue | Fallthrough | Do | Defer | Empty | TupleAssign
@@ -438,6 +498,8 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 // as an expression, `cond { ... }` would swallow the block of `if cond { ... }`, and
 // PEG never goes back to re-read the condition. Every keyword-led statement is
 // matched before this rule, so only a bare `name { ... }` reaches it.
+AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
+
 TrailCallStmt <~~ push(exprToStmt(pop())) ~~> = TrailCall [ ";" ] ;
 TrailCall   <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> TrailArg { LabTrail } ;
@@ -568,7 +630,8 @@ DeclBind    <~~ push(makeDecl(takeAll())) ~~>
 DeclAnnType = LabelledTupleType | IntAnnType | Type ;
 IntAnnType  <~~ push({itype: up.in}) ~~>
             = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
-              | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt" ) KwEnd
+              | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt"
+              | "Double" | "Float" ) KwEnd
               NotTypeSuffix ;
 // `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
 // bare integer type, so IntAnnType has to decline it and let the general Type read
@@ -882,13 +945,21 @@ LabTrail    <~~ push(makeLabTrail(takeAll())) ~~>
 // callee, so a call may leave defaulted parameters out) and, for &x, the name it
 // passes by reference.
 CallArg     <~~ push(makeCallArg(takeAll())) ~~>
-            = [ ArgLabel ] ( InoutArg | Expression ) ;
+            = [ ArgLabel ] ( InoutArg | Expression | OpRefArg ) ;
+// `(1..<3).reduce(0, +)`: an operator used as a VALUE. It is the LAST alternative
+// on purpose - `f(-1)` is an expression, and only a run of operator characters that
+// no expression could read reaches this rule. Building the function it denotes is a
+// separate job (the operator table is per-type), so it reports not-implemented at
+// RUN time and the file parses.
+OpRefArg    <~~ push(notImplExpr("an operator used as a value", up.pos)) ~~>
+            = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
+OpRefChar   = @+"+-*/%<>=!&|^~?" ;
 ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
 // &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
 // character of a && operator.
 InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
-Primary     = Paren | MultiStr | RawStr2 | RawStr1 | Template | NumberLit
+Primary     = Paren | MultiStr | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | DictLit | ArrayLit
             | Shorthand | MultiTrail | Call | VarRef ;
@@ -896,13 +967,19 @@ Primary     = Paren | MultiStr | RawStr2 | RawStr1 | Template | NumberLit
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
 // decimal ones (0 would otherwise match and leave xFF behind), and the fractional
-// form before the plain integer. Only NumDec (the fractional / exponent form) still
-// comes from lib/numbers.abnf; the INTEGER forms are read here instead, because the
-// shared ones go through parseInt, which is a double: 9223372036854775807 comes back
-// as 9223372036854776000 and 0xFFFFFFFFFFFFFFFF as 18446744073709552000. Both are
-// ordinary Swift literals, so swIntLit emits the DIGITS and js_gilit reads them
-// exactly whenever the value has left the range a double holds.
-NumberLit   = HexFloatLit | SwHexLit | SwBinLit | SwOctLit | NumDec | SwDecLit ;
+// form before the plain integer. NONE of them come from lib/numbers.abnf any more:
+// the shared INTEGER forms go through parseInt, which is a double, so
+// 9223372036854775807 came back as 9223372036854776000 and 0xFFFFFFFFFFFFFFFF as
+// 18446744073709552000 - both ordinary Swift literals, which swIntLit emits as
+// DIGITS for js_gilit to read exactly. And the shared FRACTIONAL form emits a plain
+// number, where a Swift float literal has to emit the js_swflo BOX that makes it a
+// Double rather than an Int (see the "Doubles" note in abnf/jsrtswift.go);
+// SwFloLit is NumDec's rule with that one difference.
+NumberLit   = HexFloatLit | SwHexLit | SwBinLit | SwOctLit | SwFloLit | SwDecLit ;
+SwFloLit    <~~ push(makeFloConst(parseFloat(up.in.split("_").join("")))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ SwFloExp ] | SwFloExp ) :whitespace(Whitespace) ;
+SwFloExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
 SwHexLit    <~~ push(swIntLit(up.in)) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexFDig { HexFDig | "_" } :whitespace(Whitespace) ;
 SwBinLit    <~~ push(swIntLit(up.in)) ~~>
@@ -916,7 +993,7 @@ SwDecLit    <~~ push(swIntLit(up.in)) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 // 0xFp2 / 0xC.8p0: the mantissa is hexadecimal, the p exponent is DECIMAL and scales
 // by a power of two, and it is mandatory - without it the same text is a hex integer.
-HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
+HexFloatLit <~~ push(makeFloConst(parseHexFloat(up.in))) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexFDig { HexFDig | "_" }
               [ "." HexFDig { HexFDig | "_" } ]
               ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
@@ -1003,8 +1080,16 @@ MultiTrail  <~~ push(makeCall(takeAll())) ~~>
 // String interpolation: "sum = \(a + b)".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplExpr | TplChunk } '"' :whitespace(Whitespace) ;
-TplExpr     <~~ push({e: pop()}) ~~>
-            = "\\(" :whitespace(Whitespace) Expression ")" ;
+// A LABEL is allowed inside an interpolation - `"[\\(foo: x)]"` - because
+// ExpressibleByStringInterpolation lets a type declare labelled
+// appendInterpolation overloads. The label names nothing here and is dropped.
+TplExpr     <~~ push({e: takeAll()[0]}) ~~>
+            = "\\(" :whitespace(Whitespace) [ TplLabel ] Expression { TplMore } ")" ;
+TplLabel    = Id ":" !":" ;
+// Swift 4 let an interpolation carry SEVERAL values - `"[\\(x, x)]"` - and the
+// parser still accepts them (Swift 5 warns that they no longer form a tuple). Only
+// the first is interpolated here, which is the Swift 5 reading of the warning.
+TplMore     = "," [ TplLabel ] Expression ;
 TplChunk    <~~ push({s: swUnescape(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
@@ -1020,9 +1105,13 @@ TplPlain    = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7
 MultiStr    <~~ push(makeMultiStr(takeAll())) ~~>
             = '"""' :whitespace() { MlExpr | MlChunk } '"""' :whitespace(Whitespace) ;
 MlExpr      <~~ push({e: pop()}) ~~>
-            = "\\(" :whitespace(Whitespace) Expression ")" ;
+            = "\\(" :whitespace(Whitespace) [ TplLabel ] Expression ")" ;
 MlChunk     <~~ push({s: up.in}) ~~> = MlChar { MlChar } ;
-MlChar      = TplEsc | MlPlain ;
+// A backslash at the END of a line elides that line break - the multi-line
+// literal's line-continuation. It is spelled here and not in TplEsc because a
+// single-line literal cannot contain a line break at all.
+MlChar      = TplEsc | MlCont | MlPlain ;
+MlCont      = "\\" ( "\n" | "\r" ) ;
 // Any character that does not start the closing delimiter; the backslash (0x5c) is
 // excluded so an escape and an interpolation are reached first.
 MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
@@ -1031,6 +1120,14 @@ MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
 // backslash is a backslash - and the only interpolation is \#( ... ) / \##( ... ),
 // whose pound count matches the delimiter's. Two pound levels are supported, which
 // is what real code uses; more would just be more of the same rules.
+// Three pound levels. The multi-line raw forms (###""" ... """###) ride the same
+// rules: the opening delimiter starts with ###" and the closing one ends with "###,
+// so the extra quotes are simply content - which is exactly the text Swift keeps.
+RawStr3     <~~ push(makeRawStr(takeAll())) ~~>
+            = '###"' :whitespace() { Raw3Expr | Raw3Chunk } '"###' :whitespace(Whitespace) ;
+Raw3Expr    <~~ push({e: pop()}) ~~> = "\\###(" :whitespace(Whitespace) [ TplLabel ] Expression ")" ;
+Raw3Chunk   <~~ push({s: up.in}) ~~> = Raw3Char { Raw3Char } ;
+Raw3Char    = !'"###' !"\\###(" "\x00"..."\U0010ffff" ;
 RawStr2     <~~ push(makeRawStr(takeAll())) ~~>
             = '##"' :whitespace() { Raw2Expr | Raw2Chunk } '"##' :whitespace(Whitespace) ;
 Raw2Expr    <~~ push({e: pop()}) ~~> = "\\##(" :whitespace(Whitespace) Expression ")" ;
@@ -1486,6 +1583,33 @@ KwContinue  = "continue" KwEnd ;
     function swEmitConv(b, v, it) {
         return callExt(b, "js_swintconv", [v, emitNum(b, it.w), it.u ? hTrue : hFalse])
     }
+    // A callable VALUE backed by one extern: jsf_N(env, args) reads `arity`
+    // arguments and returns extName(...). abs/max/min need it because the Swift
+    // spellings are Double-aware externs rather than the shared Math members, and
+    // the program calls them like any other function value.
+    function emitExtFn(b, extName, arity) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF
+        var savedScope = curScopeV
+        curF = f
+        var fb = f.NewBlock("entry")
+        curScopeV = callExt(fb, "js_scope_new", [f.Params[0]])
+        var argv = []
+        for (var i = 0; i < arity; i++) { argv.push(callExt(fb, "js_arg", [f.Params[1], handle(i)])) }
+        fb.NewRet(callExt(fb, extName, argv))
+        curF = savedF
+        curScopeV = savedScope
+        return callExt(b, "js_closure", [handle(idx), curScopeV])
+    }
+    // ----- Double: the boxed float (see the "Doubles" note in abnf/jsrtswift.go) -----
+    // A float LITERAL emits the box, so `7.0 / 2.0` is 3.5 where the two operands
+    // were otherwise indistinguishable from `7 / 2` and divided as integers.
+    // The twin of swFlo in swift-interpreter.abnf.
+    function makeFloConst(f) {
+        return function(b) { return {b: b, v: callExt(b, "js_swflo", [emitNum(b, f)])} }
+    }
     // 0xC.8p0: a hexadecimal mantissa scaled by a DECIMAL power-of-two exponent.
     // Written out rather than handed to parseFloat, which does not accept the form.
     function parseHexFloat(s) {
@@ -1535,6 +1659,10 @@ KwContinue  = "continue" KwEnd ;
             if (e == 116) { out += "\t"; i += 2; continue }
             if (e == 114) { out += "\r"; i += 2; continue }
             if (e == 48) { out += String.fromCharCode(0); i += 2; continue }
+            // A backslash before a line break ELIDES it (the multi-line literal's
+            // line continuation); both spellings of the break.
+            if (e == 10) { i += 2; continue }
+            if (e == 13) { i += 2; if (str.charCodeAt(i) == 10) { i++ } ; continue }
             if (e == 117 && str.charCodeAt(i + 2) == 123) {
                 var j = i + 3
                 var cp = 0
@@ -2006,31 +2134,6 @@ KwContinue  = "continue" KwEnd ;
         })
     }
     function rtEqKey() { return rtProbe("sw_eqkey", "__eqkey") }
-    // Int arithmetic is 32 bit and truncating; Double arithmetic is not. The value
-    // model has ONE number type, so the two are told apart by the OPERANDS: the
-    // 32-bit truncation is applied only when both of them are whole numbers. Emitted
-    // only for a program that has a fractional literal, so every other program keeps
-    // the unconditional truncation - and the IR - it had.
-    function rtIsWhole() {
-        return rtFunc("sw_iswhole", 1, function(b, ps) {
-            var numB = curF.NewBlock("")
-            var noB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "number")])), numB, noB)
-            numB.NewRet(callExt(numB, "js_seq", [callExt(numB, "js_mod", [ps[0], emitNum(numB, 1)]), emitNum(numB, 0)]))
-            noB.NewRet(hFalse)
-        })
-    }
-    function rtIntWrap() {
-        return rtFunc("sw_iwrap", 3, function(b, ps) {
-            var l1 = curF.NewBlock("")
-            var wrapB = curF.NewBlock("")
-            var asIsB = curF.NewBlock("")
-            b.NewCondBr(truthy(b, b.NewCall(rtIsWhole(), [ps[1]])), l1, asIsB)
-            l1.NewCondBr(truthy(l1, l1.NewCall(rtIsWhole(), [ps[2]])), wrapB, asIsB)
-            wrapB.NewRet(callExt(wrapB, "js_bor", [ps[0], emitNum(wrapB, 0)]))
-            asIsB.NewRet(ps[0])
-        })
-    }
     // ----- Strings are sequences of extended grapheme clusters -----
     // .count counts CLUSTERS and == compares by CANONICAL EQUIVALENCE, so these two
     // walk the string by code point (js_kindex answers the rune at a code-unit index;
@@ -2817,7 +2920,8 @@ KwContinue  = "continue" KwEnd ;
         // straight through to js_get for every other receiver, and only these three
         // names emit it, so a program that never reads one emits the IR it did
         // before. (swGetField in swift-interpreter.abnf is the twin.)
-        if (name == "description" || name == "bitWidth" || name == "magnitude") {
+        if (name == "description" || name == "bitWidth" || name == "magnitude"
+            || name == "isNaN" || name == "isInfinite" || name == "isFinite" || name == "isZero") {
             return callExt(b, "js_swget", [cur, emitStr(b, name)])
         }
         return callExt(b, "js_get", [cur, emitStr(b, name)])
@@ -2866,7 +2970,7 @@ KwContinue  = "continue" KwEnd ;
                     if (s.kind == "mcall") {
                         var ea = emitArgRecs(b, s.args)
                         b = ea.b
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                        cur = callExt(b, "js_swmcall", [cur, emitStr(b, s.name), ea.v])
                     } else if (s.kind == "field") { cur = emitFieldRead(b, cur, s.name) }
                     else if (s.kind == "call") {
                         var eac = emitArgRecs(b, s.args)
@@ -2921,7 +3025,7 @@ KwContinue  = "continue" KwEnd ;
                     if (s.name == "init" && curType() != null) {
                         mname = pickOverload("init", typeRec(curType().name).inits, s.args)
                     }
-                    cur = callExt(b, "js_mcall", [cur, emitStr(b, mname), ea.v])
+                    cur = callExt(b, "js_swmcall", [cur, emitStr(b, mname), ea.v])
                     emitWriteBacks(b, ea.boxes)
                 } else if (s.kind == "call") {
                     var eac = emitArgRecs(b, s.args)
@@ -3189,6 +3293,18 @@ KwContinue  = "continue" KwEnd ;
         // Int(x) / Int8(x) / UInt64(x): the integer types are descriptors, not
         // functions (so Int.max stays an ordinary property read), and the call form
         // is resolved here at walk time. A user type of the same name still wins.
+        // Double(x) / Float(x) / String(x): the same walk-time resolution the
+        // integer types get. Double(3) is 3.0 and Double(3) / 2 is 1.5 - the whole
+        // point of the box - and String(x) is the text print would have written.
+        if ((name == "Double" || name == "Float" || name == "String")
+            && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
+            var convExt = name == "String" ? "js_swstr" : "js_swflo"
+            return function(b) {
+                var ec2 = emitArgRecs(b, args)
+                b = ec2.b
+                return {b: b, v: callExt(b, convExt, [callExt(b, "js_pyget", [ec2.v, emitNum(b, 0)])])}
+            }
+        }
         var swIt = swIntWidthOf(name)
         if (swIt != null && lookupSig(name) == null && classNames[name] != 1 && enumNames[name] != 1) {
             return function(b) {
@@ -3385,8 +3501,24 @@ KwContinue  = "continue" KwEnd ;
         // `var u: UInt8 = 250`: the DECLARED width goes on the value, so the
         // arithmetic that follows wraps at 8 bits rather than at 64.
         var iw = null
-        if (items[k] != undefined && items[k].itype != undefined) { iw = swIntWidthOf(items[k].itype); k++ }
+        var isDoubleTy = false
+        if (items[k] != undefined && items[k].itype != undefined) {
+            iw = swIntWidthOf(items[k].itype)
+            isDoubleTy = items[k].itype == "Double" || items[k].itype == "Float"
+            k++
+        }
         var init = items[k]
+        // `let d: Double = 3` holds 3.0, so d / 2 is 1.5 and print(d) writes "3.0".
+        // The annotation is the only thing that says so: the initializer is an
+        // untyped integer literal.
+        if (isDoubleTy && init != undefined) {
+            return function(b) {
+                var rd = init(b)
+                b = rd.b
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_swflo", [rd.v])])
+                return b
+            }
+        }
         if (iw != null && init != undefined) {
             var itI = iw
             return function(b) {
@@ -4862,10 +4994,27 @@ KwContinue  = "continue" KwEnd ;
             callExt(b, "js_set", [intV, emitStr(b, "zero"), swEmitConv(b, emitNum(b, 0), it)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tn), intV])
         }
-        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
-        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
+        // The FLOAT types, the same shape: Double.infinity / .nan / .pi / .zero,
+        // with the call form Double(x) resolved in makeCall. Float is an alias -
+        // see the precision note in abnf/jsrtswift.go.
+        var floTypeNames = ["Double", "Float"]
+        for (var fi = 0; fi < floTypeNames.length; fi++) {
+            var floV = callExt(b, "js_obj_new", [])
+            var oneV = callExt(b, "js_swflo", [emitNum(b, 1)])
+            var zeroV = callExt(b, "js_swflo", [emitNum(b, 0)])
+            var infV = callExt(b, "js_swarith", [emitStr(b, "/"), oneV, zeroV])
+            callExt(b, "js_set", [floV, emitStr(b, "infinity"), infV])
+            callExt(b, "js_set", [floV, emitStr(b, "nan"),
+                                  callExt(b, "js_swarith", [emitStr(b, "/"), zeroV, zeroV])])
+            callExt(b, "js_set", [floV, emitStr(b, "pi"), callExt(b, "js_swflo", [emitNum(b, 3.141592653589793)])])
+            callExt(b, "js_set", [floV, emitStr(b, "zero"), zeroV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, floTypeNames[fi]), floV])
+        }
+        // abs/max/min are Double-aware: Math.abs would truncate a boxed operand to
+        // an integer, and Math.max compares two boxes as OBJECTS.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), emitExtFn(b, "js_swabs", 1)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), emitExtFn(b, "js_swmax", 2)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), emitExtFn(b, "js_swmin", 2)])
         // Imported declarations first (so the main file's code can use them), then the
         // main file's top level statements in source order.
         b = emitImported(b)

@@ -71,11 +71,14 @@ by their declared precedence and associativity, operator overloading through
 `static func + / == / prefix -` on a type, the bitwise and overflow operators,
 and ranges as values (1...5 ~= 3, for-in over a range value).
 
-The value model: Int arithmetic is 32 bit and truncating, Double arithmetic is
-not, and the two are told apart by the OPERANDS - an operation whose operands are
-both whole numbers answers like Int. A Double that happens to hold a whole number
-is therefore treated as an Int; that is the one place this single-number-type
-model shows. A user-defined infix operator sits at one level of the expression
+The value model: a number carries its own type. An Int is a plain value at its
+declared width (Int is 64 bit; Int8 ... UInt64 are exactly what they say and wrap
+at their width - real Swift traps instead), and a Double is a BOX, so 7.0 / 2.0 is
+3.5 where 7 / 2 is 3 and a whole Double still prints 3.0 rather than 3. A mixed
+Int/Double operation evaluates in floating point, which is real Swift's answer
+when a literal is involved and a compile error otherwise - this front end has no
+type checker to tell the two apart. Float is modelled as Double, i.e. at 64 bit
+precision. A user-defined infix operator sits at one level of the expression
 grammar, binding tighter than * and /, and the precedence groups order the custom
 operators among THEMSELVES. A compound assignment is lowered to a = a <op> b, so
 an overloaded + is what runs for +=, and a declared `static func +=` is accepted
@@ -94,8 +97,44 @@ Top level self checking programs count failures and end with exit(failures).") ;
 // --- main rules
 
 // Shared token productions (languages/lib).
-:include("lib/cstyle-comments.abnf") ;
-:include("lib/ident.abnf") ;
+// Swift's whitespace, spelled HERE rather than taken from lib/cstyle-comments.abnf,
+// because Swift accepts more of it than C does. The real lexer treats a form feed
+// (0x0C) and a vertical tab (0x0B) as plain whitespace, and it accepts a
+// NON-BREAKING SPACE (U+00A0) and its Unicode relatives with a warning and a fix-it
+// rather than an error - `let x\u{a0}= 3` compiles. A NUL byte is the same story: it
+// warns "nul character embedded in middle of file" and lexes on. The lib file backs
+// ~15 grammars where most of that would be wrong, so the divergence lives here.
+// Everything else is the lib file verbatim.
+Whitespace  = { @+" \t\r\n\x0c\x0b\x00" | SwUniSpace | Comment } ;
+SwUniSpace  = "\u00a0" | "\u1680" | "\u2000"..."\u200a" | "\u202f" | "\u205f" | "\u3000" | "\ufeff" ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+// Swift's identifiers, spelled HERE rather than taken from lib/ident.abnf, because
+// Swift accepts far more than ASCII in a name: `case 😀` and `let π = 3` are both
+// ordinary declarations (Swift's rule is a Unicode category set close to XID_Start /
+// XID_Continue). The approximation below is "any scalar at U+00A1 or above except
+// the ones this grammar lexes as WHITESPACE" - the space characters have to be cut
+// out, or a non-breaking space after a name would be absorbed into it. KwEnd and
+// IdBacktick are the lib file verbatim.
+Id          = ( "a"..."z" | "A"..."Z" | "_" | IdUni ) :whitespace()
+              { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | IdUni } :whitespace(Whitespace) ;
+IdUni       = "\u00a1"..."\u167f" | "\u1681"..."\u1fff" | "\u200b"..."\u2027"
+            | "\u202a"..."\u202e" | "\u2030"..."\u205e" | "\u2060"..."\u2fff"
+            | "\u3001"..."\ufefe" | "\uff00"..."\U0010ffff" ;
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
+IdBacktick  = "`" :whitespace() IdBtChar { IdBtChar } "`" :whitespace(Whitespace) ;
+IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
 
@@ -179,7 +218,7 @@ Hashbang    = "#!" :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
 // Declaration modifiers and attributes (@objc, @available(...), @escaping) are
 // parsed and ignored.
 Modifiers   = { Modifier | Attribute } ;
-Attribute   = "@" Id { "." Id } [ SkipParen ] ;
+Attribute   = "@" Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ SkipParen ] ;
 Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
               | "prefix" | "postfix" | "infix"
               | "final" | "static" | "mutating" | "nonmutating"
@@ -226,8 +265,13 @@ ParamList   <~~ push({params: takeAll()}) ~~>
 // name; with one, the label and the name are the same. The label `_` means "no
 // label". The declared type is kept as text, for picking between overloads.
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = Id <~~ push({pid: up.in}) ~~> [ Id <~~ push({pid: up.in}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
+            = { ParamLead } Id <~~ push({pid: up.in}) ~~> [ Id <~~ push({pid: up.in}) ~~> ] ":" [ ParamInout ] { ParamAttr } ParamType [ ParamVariadic ] [ "=" ParamDflt ] ;
 ParamInout  <~~ push({pinout: 1}) ~~> = "inout" KwEnd ;
+// A DECLARATION attribute in front of the parameter name - `func f(@_noImplicitCopy
+// _ x: K)`. It contributes nothing here, so it pushes nothing; its argument list (if
+// it has one) is adjacent, which is what keeps `@escaping (Int) -> Int` in the
+// parameter TYPE position from losing its function type to SkipParen.
+ParamLead   = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 ParamType   <~~ push({ptype: up.in}) ~~> = Type ;
 ParamVariadic <~~ push({pvar: 1}) ~~> = "..." ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
@@ -257,7 +301,10 @@ TypeList    = Type { "," Type } ;
 // A nested type is matched BEFORE the modifier-led members, so the `class` of
 // `class Inner {}` is read as the declaration keyword and the `class` of
 // `class var kind` as a modifier (ClassDecl fails on the `var` that follows).
-Member      = PoundIfMember | MemberDirective | MemberType | [ MemberModifiers ] ( CaseDecl | InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+Member      = PoundIfMember | MemberDirective | MemberSemi | MemberType | [ MemberModifiers ] ( CaseDecl | InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+// A stray `;` between members - `enum E { enum F { case x }; case a }`. It declares
+// nothing, so it pushes the same empty member record a #directive does.
+MemberSemi  <~~ push({}) ~~> = ";" ;
 // The nested declaration's own statement is dropped: a nested type is accepted
 // structurally, not yet reachable as Outer.Inner.
 MemberType  <~~ push({nested: pop()}) ~~>
@@ -382,7 +429,12 @@ TypeAliasDecl <~~ push(function() {}) ~~>
 // implicitly unwrapped T!, tuples/function types (A, B) -> C, dotted and generic,
 // opaque/existential `some P` / `any P`, and compositions P & Q. The `&` of a
 // composition is spelled ( "&" !"&" ) so `x is T && y` is not read as `T & (&y)`.
-Type        = TypeMod TypeSuffixed { TypeAmp TypeMod TypeSuffixed } ;
+Type        = { TypeAttr } TypeMod TypeSuffixed { TypeAmp TypeMod TypeSuffixed } ;
+// An attribute ON a type: `typealias F = @isolated(any) () -> ()`, `@Sendable () ->
+// ()`, `@convention(c) () -> ()`. Its argument list is ADJACENT in Swift, which is
+// what lets `@escaping (Int) -> Int` keep its function type - a SkipParen that
+// accepted the space would swallow the parameter list.
+TypeAttr    = "@" Id { "." Id } [ SkipAngle ] [ NoSpaceParen SkipParen ] ;
 // The optional / implicitly-unwrapped marker has to be ADJACENT to the type:
 // `x is T ? a : b` must keep its conditional, and `T?` never has a space in Swift.
 TypeSuffixed = TypeCore { NoSpace ( "?" | "!" ) } ;
@@ -398,7 +450,12 @@ NoSpace     = :script(~~
     })()
 ~~) ;
 TypeAmp     = "&" !"&" ;
-TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" ) KwEnd } ;
+// The ownership and existential modifiers are CONTEXTUAL keywords, so each one is
+// also a legal type NAME: `func zim(x: borrowing) {}` declares a parameter of a type
+// called `borrowing`. The lookahead is what tells them apart - a modifier is always
+// followed by the type it modifies, never by the token that ends one.
+TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" ) KwEnd NotTypeEnd } ;
+NotTypeEnd  = !")" !"," !"=" !">" !"{" ;
 TypeCore    = "[" Type [ ":" Type ] "]"
             | "(" [ TupleTypeElem { "," TupleTypeElem } ] ")" [ TypeEffects ] [ "->" Type ]
             | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
@@ -424,7 +481,11 @@ TypeEffects = { ( "async" | "throws" | "rethrows" ) KwEnd } ;
 // do/throw are genuinely executed (try/catch via excTry, throw via excThrow); the
 // Cplx* / Local* / defer / fallthrough forms are recognized but not executed - they
 // route to notImplStmt (a warning under -warn-unsupported).
-Statement   = PoundDirective
+// A declaration STATEMENT carrying an attribute - `@_noImplicitCopy let y = x`
+// inside a body, `@A<Float> var test0: Int { ... }` at top level. It needs at
+// least one `@`, so it can never be confused with a bare expression statement.
+Statement   = AttrDecl
+            | PoundDirective
             | Decl | LocalFunc | LocalType | CplxIf | If | CplxGuard | Guard
             | CplxWhile | While | Repeat | For | Switch | Return | Throw | Break
             | Continue | Fallthrough | Do | Defer | Empty | TupleAssign
@@ -435,6 +496,8 @@ Statement   = PoundDirective
 // as an expression, `cond { ... }` would swallow the block of `if cond { ... }`, and
 // PEG never goes back to re-read the condition. Every keyword-led statement is
 // matched before this rule, so only a bare `name { ... }` reaches it.
+AttrDecl    = Attribute { Attribute } [ Modifiers ] ( Decl | LocalFunc | LocalType ) ;
+
 TrailCallStmt <~~ push(exprToStmt(pop())) ~~> = TrailCall [ ";" ] ;
 TrailCall   <~~ push(makeCall(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> TrailArg { LabTrail } ;
@@ -558,16 +621,19 @@ DeclBind    <~~ push(makeDecl(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" DeclAnnType ] [ "=" Expression ] ;
 // The declaration's type annotation. It is DISCARDED everywhere except for the two
 // things this front end can act on without a type checker: the element labels of a
-// tuple type (LabelledTupleType), and the WIDTH of an integer type - `var u: UInt8 =
+// tuple type (LabelledTupleType), the WIDTH of an integer type - `var u: UInt8 =
 // 250` has to make 250 a UInt8, because nothing about the value 250 says so and the
-// `u &+ 10` that follows has to wrap at 8 bits. IntAnnType is tried before the
-// general Type; the names are spelled longest-first (PEG first-match: "Int" would
-// otherwise match the front of "Int8") and closed with a KwEnd so a user type called
-// `Int8Box` is not read as `Int8`.
+// `u &+ 10` that follows has to wrap at 8 bits - and the FLOATNESS of a Double type,
+// for the same reason: `let d: Double = 3` holds 3.0, and nothing about the untyped
+// literal 3 says so. IntAnnType is tried before the general Type; the names are
+// spelled longest-first (PEG first-match: "Int" would otherwise match the front of
+// "Int8") and closed with a KwEnd so a user type called `Int8Box` is not read as
+// `Int8`.
 DeclAnnType = LabelledTupleType | IntAnnType | Type ;
 IntAnnType  <~~ push({itype: up.in}) ~~>
             = ( "Int64" | "Int32" | "Int16" | "Int8" | "Int"
-              | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt" ) KwEnd
+              | "UInt64" | "UInt32" | "UInt16" | "UInt8" | "UInt"
+              | "Double" | "Float" ) KwEnd
               NotTypeSuffix ;
 // `Int?`, `Int!`, `Int.Type`, `Int & P`: the annotation is a COMPOSED type, not the
 // bare integer type, so IntAnnType has to decline it and let the general Type read
@@ -890,13 +956,21 @@ LabTrail    <~~ push(makeLabTrail(takeAll())) ~~>
 // callee, so a call may leave defaulted parameters out) and, for &x, the name it
 // passes by reference.
 CallArg     <~~ push(makeCallArg(takeAll())) ~~>
-            = [ ArgLabel ] ( InoutArg | Expression ) ;
+            = [ ArgLabel ] ( InoutArg | Expression | OpRefArg ) ;
+// `(1..<3).reduce(0, +)`: an operator used as a VALUE. It is the LAST alternative
+// on purpose - `f(-1)` is an expression, and only a run of operator characters that
+// no expression could read reaches this rule. Building the function it denotes is a
+// separate job (the operator table is per-type), so it reports not-implemented at
+// RUN time and the file parses.
+OpRefArg    <~~ push(notImplExpr("an operator used as a value", up.pos)) ~~>
+            = OpRefChar :whitespace() { OpRefChar } :whitespace(Whitespace) ;
+OpRefChar   = @+"+-*/%<>=!&|^~?" ;
 ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
 // &x: an inout argument. Spelled ( "&" !"&" ) so it cannot start on the first
 // character of a && operator.
 InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
-Primary     = Paren | MultiStr | RawStr2 | RawStr1 | Template | NumberLit
+Primary     = Paren | MultiStr | RawStr3 | RawStr2 | RawStr1 | Template | NumberLit
             | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | DictLit | ArrayLit
             | Shorthand | MultiTrail | Call | VarRef ;
@@ -904,13 +978,19 @@ Primary     = Paren | MultiStr | RawStr2 | RawStr1 | Template | NumberLit
 // The numeric literal forms, longest/most specific first (PEG first-match): a hex
 // FLOAT before the hex integer that is its prefix, the based forms before the
 // decimal ones (0 would otherwise match and leave xFF behind), and the fractional
-// form before the plain integer. Only NumDec (the fractional / exponent form) still
-// comes from lib/numbers.abnf; the INTEGER forms are read here instead, because the
-// shared ones go through parseInt, which is a double: 9223372036854775807 comes back
-// as 9223372036854776000 and 0xFFFFFFFFFFFFFFFF as 18446744073709552000. Both are
-// ordinary Swift literals, so swRadix reads them exactly and answers a sized-integer
-// box when the digits do not fit a double (lib/interp-core.js, the sz* layer).
-NumberLit   = HexFloatLit | SwHexLit | SwBinLit | SwOctLit | NumDec | SwDecLit ;
+// form before the plain integer. NONE of them come from lib/numbers.abnf any more:
+// the shared INTEGER forms go through parseInt, which is a double, so
+// 9223372036854775807 came back as 9223372036854776000 and 0xFFFFFFFFFFFFFFFF as
+// 18446744073709552000 - both ordinary Swift literals, which swRadix reads exactly
+// into a sized-integer box (lib/interp-core.js, the sz* layer). And the shared
+// FRACTIONAL form pushes a plain number, where a Swift float literal has to push
+// the {__flo} box that makes it a Double rather than an Int (see swFlo below);
+// SwFloLit is NumDec's rule with that one difference.
+NumberLit   = HexFloatLit | SwHexLit | SwBinLit | SwOctLit | SwFloLit | SwDecLit ;
+SwFloLit    <~~ push(makeConst(swFlo(parseFloat(up.in.split("_").join(""))))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ SwFloExp ] | SwFloExp ) :whitespace(Whitespace) ;
+SwFloExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
 SwHexLit    <~~ push(makeConst(swRadix(up.in))) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexFDig { HexFDig | "_" } :whitespace(Whitespace) ;
 SwBinLit    <~~ push(makeConst(swRadix(up.in))) ~~>
@@ -924,7 +1004,7 @@ SwDecLit    <~~ push(makeConst(swRadix(up.in))) ~~>
             = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 // 0xFp2 / 0xC.8p0: the mantissa is hexadecimal, the p exponent is DECIMAL and scales
 // by a power of two, and it is mandatory - without it the same text is a hex integer.
-HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
+HexFloatLit <~~ push(makeConst(swFlo(parseHexFloat(up.in)))) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexFDig { HexFDig | "_" }
               [ "." HexFDig { HexFDig | "_" } ]
               ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
@@ -1016,8 +1096,16 @@ MultiTrail  <~~ push(makeCall(takeAll())) ~~>
 // String interpolation: "sum = \(a + b)".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplExpr | TplChunk } '"' :whitespace(Whitespace) ;
-TplExpr     <~~ push({e: pop()}) ~~>
-            = "\\(" :whitespace(Whitespace) Expression ")" ;
+// A LABEL is allowed inside an interpolation - `"[\\(foo: x)]"` - because
+// ExpressibleByStringInterpolation lets a type declare labelled
+// appendInterpolation overloads. The label names nothing here and is dropped.
+TplExpr     <~~ push({e: takeAll()[0]}) ~~>
+            = "\\(" :whitespace(Whitespace) [ TplLabel ] Expression { TplMore } ")" ;
+TplLabel    = Id ":" !":" ;
+// Swift 4 let an interpolation carry SEVERAL values - `"[\\(x, x)]"` - and the
+// parser still accepts them (Swift 5 warns that they no longer form a tuple). Only
+// the first is interpolated here, which is the Swift 5 reading of the warning.
+TplMore     = "," [ TplLabel ] Expression ;
 TplChunk    <~~ push({s: swUnescape(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
@@ -1033,9 +1121,13 @@ TplPlain    = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7
 MultiStr    <~~ push(makeMultiStr(takeAll())) ~~>
             = '"""' :whitespace() { MlExpr | MlChunk } '"""' :whitespace(Whitespace) ;
 MlExpr      <~~ push({e: pop()}) ~~>
-            = "\\(" :whitespace(Whitespace) Expression ")" ;
+            = "\\(" :whitespace(Whitespace) [ TplLabel ] Expression ")" ;
 MlChunk     <~~ push({s: up.in}) ~~> = MlChar { MlChar } ;
-MlChar      = TplEsc | MlPlain ;
+// A backslash at the END of a line elides that line break - the multi-line
+// literal's line-continuation. It is spelled here and not in TplEsc because a
+// single-line literal cannot contain a line break at all.
+MlChar      = TplEsc | MlCont | MlPlain ;
+MlCont      = "\\" ( "\n" | "\r" ) ;
 // Any character that does not start the closing delimiter; the backslash (0x5c) is
 // excluded so an escape and an interpolation are reached first.
 MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
@@ -1044,6 +1136,14 @@ MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
 // backslash is a backslash - and the only interpolation is \#( ... ) / \##( ... ),
 // whose pound count matches the delimiter's. Two pound levels are supported, which
 // is what real code uses; more would just be more of the same rules.
+// Three pound levels. The multi-line raw forms (###""" ... """###) ride the same
+// rules: the opening delimiter starts with ###" and the closing one ends with "###,
+// so the extra quotes are simply content - which is exactly the text Swift keeps.
+RawStr3     <~~ push(makeRawStr(takeAll())) ~~>
+            = '###"' :whitespace() { Raw3Expr | Raw3Chunk } '"###' :whitespace(Whitespace) ;
+Raw3Expr    <~~ push({e: pop()}) ~~> = "\\###(" :whitespace(Whitespace) [ TplLabel ] Expression ")" ;
+Raw3Chunk   <~~ push({s: up.in}) ~~> = Raw3Char { Raw3Char } ;
+Raw3Char    = !'"###' !"\\###(" "\x00"..."\U0010ffff" ;
 RawStr2     <~~ push(makeRawStr(takeAll())) ~~>
             = '##"' :whitespace() { Raw2Expr | Raw2Chunk } '"##' :whitespace(Whitespace) ;
 Raw2Expr    <~~ push({e: pop()}) ~~> = "\\##(" :whitespace(Whitespace) Expression ")" ;
@@ -1367,6 +1467,10 @@ KwContinue  = "continue" KwEnd ;
             if (e == 116) { out += "\t"; i += 2; continue }
             if (e == 114) { out += "\r"; i += 2; continue }
             if (e == 48) { out += String.fromCharCode(0); i += 2; continue }
+            // A backslash before a line break ELIDES it (the multi-line literal's
+            // line continuation); both spellings of the break.
+            if (e == 10) { i += 2; continue }
+            if (e == 13) { i += 2; if (str.charCodeAt(i) == 10) { i++ } ; continue }
             if (e == 117 && str.charCodeAt(i + 2) == 123) {
                 var j = i + 3
                 var cp = 0
@@ -1570,6 +1674,9 @@ KwContinue  = "continue" KwEnd ;
         // typeof test below - and through szStr, not through a double, or
         // Int.max would print 9.223372036854776e+18.
         if (szIs(v)) { return szStr(v) }
+        // A Double is boxed too, and prints through Swift's own float rendering:
+        // 1.0 is "1.0", not the "1" a JS number would give.
+        if (isFlo(v)) { return swFloStr(v.__flo) }
         if (typeof v != "object") { return "" + v }
         if (Array.isArray(v)) {
             var out = "["
@@ -1633,20 +1740,139 @@ KwContinue  = "continue" KwEnd ;
         }
         return sout + ")"
     }
-    // Int arithmetic is 32 bit and truncating; Double arithmetic is not. The value
-    // model has ONE number type, so the two are told apart by the operands: an
-    // operation whose operands are both integral answers like Int, and one with a
-    // fractional operand answers like Double. (A Double that happens to hold a whole
-    // number is therefore treated as an Int - the one place this model shows.)
-    function swWhole(v) { return szIs(v) || (typeof v == "number" && v === Math.floor(v)) }
+    // ----- Double: a boxed {__flo: value} -----
+    // Swift's Double is a DIFFERENT type from Int, and this value model has one JS
+    // number, so `7.0 / 2.0` used to arrive with exactly the operands `7 / 2` has
+    // and divided as integers (3, not 3.5). Telling the two apart by "does the
+    // value have a fraction" cannot repair that, because 7.0 has no fraction. So
+    // the type goes ON the value: a float is BOXED, the same trick the sized
+    // integers next door use and the one commit 636e326 gave Java/Kotlin/Go/C#.
+    //
+    // Invariant, in BOTH halves:
+    //     a plain number / a {__sz} box  ==  an Int (or a sized integer type)
+    //     a {__flo} box                  ==  a Double (or a Float)
+    //
+    // The residual "a fractional plain number counts as a Double" test is kept as a
+    // safety net for any value that reaches arithmetic without having been boxed.
+    //
+    // DELIBERATE SIMPLIFICATION, both halves: Float is an ALIAS of Double, i.e. it
+    // is modelled at 64 bit precision. Every value both types hold exactly gives
+    // the same answer and the same text; a computation that LOSES precision does
+    // not - real swift prints `Float(1) / Float(3)` as 0.33333334 and this prints
+    // 0.3333333333333333. Modelling the 32 bit width honestly needs float32
+    // rounding after every operator AND a float32 shortest-round-trip renderer in
+    // the frozen JS subset (which has no toPrecision and no Math.fround), which is
+    // a bigger machine than Float's share of real Swift justifies. Aliasing was
+    // chosen over refusing `Float` outright because a program that writes Float is
+    // asking for floating point, and Double answers it correctly everywhere the
+    // two widths agree.
+    //
+    // DELIBERATE SIMPLIFICATION, both halves: real Swift does NOT implicitly
+    // convert between Int and Double - `x + 2.0` with `let x = 5` is a COMPILE
+    // ERROR, and only an untyped literal may take the other side's type. This front
+    // end has no type checker, so a mixed operation is evaluated in floating point
+    // (which is the answer for the literal case, `1 + 2.0 == 3.0`) instead of being
+    // rejected. The divergence is confined to programs swift would not have built.
+    function swFlo(f) { return {__flo: f} }
+    function isFlo(v) { return v != undefined && v != null && typeof v == "object" && v.__flo !== undefined }
+    // The infinities and the NaN, spelled without a literal (the frozen bootstrap
+    // has no Infinity binding, and a division is the portable way to reach them).
+    var swZeroF = 0
+    var swNegOne = 0 - 1
+    var swInfF = 1 / swZeroF
+    var swNanF = swZeroF / swZeroF
+    // Double.description / print(d): SwiftDtoa's shortest decimal that round-trips,
+    // written as a plain decimal when the scientific exponent is in -4 ... 15 and in
+    // computerized scientific notation (with a two digit minimum exponent) outside
+    // it, the integral case always carrying a ".0" - so 1e15 prints
+    // 1000000000000000.0 and 1e16 prints 1e+16. The infinities are "inf"/"-inf" and
+    // the NaN is "nan", all verified against swift 6.1.2. The Go twin is swFloStr
+    // in abnf/jsrtswift.go and the two MUST stay in step.
+    function swFloStr(x) {
+        if (x !== x) { return "nan" }
+        if (x === swInfF) { return "inf" }
+        if (x === swInfF * swNegOne) { return "-inf" }
+        var neg = x < 0 || (x === 0 && 1 / x < 0)
+        var a = neg ? x * swNegOne : x
+        var s = swFloDigits(a)
+        return neg ? "-" + s : s
+    }
+    // Splits the host's shortest decimal for a >= 0 into its digit run and its
+    // decimal point position, then renders Swift's form.
+    function swFloDigits(a) {
+        if (a === 0) { return "0.0" }
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) == "e" || s.charAt(i) == "E") { ei = i } }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            exp = parseInt(et, 10)
+        }
+        var digits = ""
+        var pt = 0 - 1
+        for (var j = 0; j < mant.length; j++) {
+            var ch = mant.charAt(j)
+            if (ch == ".") { pt = digits.length } else { digits = digits + ch }
+        }
+        if (pt < 0) { pt = digits.length }
+        var lead = 0
+        while (lead < digits.length - 1 && digits.charAt(lead) == "0") { lead++ }
+        digits = digits.substring(lead)
+        pt = pt - lead + exp
+        var endz = digits.length
+        while (endz > 1 && digits.charAt(endz - 1) == "0") { endz-- }
+        digits = digits.substring(0, endz)
+        var e10 = pt - 1
+        if (e10 < 0 - 4 || e10 >= 16) {
+            var frac = digits.substring(1)
+            var es = e10 < 0 ? (0 - e10) : e10
+            var etx = "" + es
+            if (es < 10) { etx = "0" + etx }
+            return digits.charAt(0) + (frac == "" ? "" : "." + frac) + "e" + (e10 < 0 ? "-" : "+") + etx
+        }
+        if (pt <= 0) {
+            var z = ""
+            var n0 = 0 - pt
+            for (var q = 0; q < n0; q++) { z = z + "0" }
+            return "0." + z + digits
+        }
+        if (pt >= digits.length) {
+            var z2 = ""
+            for (var q2 = 0; q2 < pt - digits.length; q2++) { z2 = z2 + "0" }
+            return digits + z2 + ".0"
+        }
+        return digits.substring(0, pt) + "." + digits.substring(pt)
+    }
+    // Double.rounded() is .toNearestOrAwayFromZero, where JS's Math.round rounds a
+    // half toward +infinity: (-2.5).rounded() is -3 in swift and -2 through Math.round.
+    function swRoundHalfAway(f) { return f < 0 ? 0 - Math.round(0 - f) : Math.round(f) }
+    // Int arithmetic is 64 bit at the operand's width; Double arithmetic is not. The
+    // two are told apart by the BOX (see swFlo above): an operation whose operands
+    // are both integral answers like Int, and one with a boxed operand answers a
+    // Double.
+    function swWhole(v) {
+        if (isFlo(v)) { return false }
+        return szIs(v) || (typeof v == "number" && v === Math.floor(v))
+    }
     function swIntish(l, r) { return swWhole(l) && swWhole(r) }
-    // swD is the plain-number reading of an operand: a sized-integer box becomes its
-    // (possibly rounded) double, everything else passes through unchanged. It is what
-    // the Double side of a mixed operation, an index, a bound or a count needs.
-    function swD(v) { return szIs(v) ? szNum(v) : v }
+    // swD is the plain-number reading of an operand: a float box becomes its double
+    // and a sized-integer box its (possibly rounded) double, everything else passes
+    // through unchanged. It is what the Double side of a mixed operation, an index,
+    // a bound or a count needs.
+    function swD(v) {
+        if (isFlo(v)) { return v.__flo }
+        return szIs(v) ? szNum(v) : v
+    }
     function swadd(l, r) {
         if (typeof l == "string" || typeof r == "string") { return swstr(l) + swstr(r) }
-        return swIntish(l, r) ? szArith("+", l, r) : swD(l) + swD(r)
+        // Array + Array is CONCATENATION in Swift, not the JS "1,23" that the
+        // untyped + produced.
+        if (Array.isArray(l) && Array.isArray(r)) { return concat2impl(l, r) }
+        return swIntish(l, r) ? szArith("+", l, r) : swFlo(swD(l) + swD(r))
     }
     // Swift's SMART SHIFT: an over-shift answers 0 (or the sign, for a signed >>),
     // and a NEGATIVE count shifts the other way - `256 >> -2` is 1024, verified
@@ -1724,6 +1950,12 @@ KwContinue  = "continue" KwEnd ;
     // note above - real Swift traps instead); a String is failable.
     function swIntConv(x, w, u) {
         if (typeof x == "string") { return swIntFromStr(x, w, u) }
+        // Int(3.7) TRUNCATES toward zero (3), Int(-3.7) is -3.
+        if (isFlo(x)) {
+            var f = x.__flo
+            if (f !== f || f === swInfF || f === swInfF * swNegOne) { fail("integer conversion of " + swFloStr(f)) }
+            return szConv(f < 0 ? Math.ceil(f) : Math.floor(f), w, u)
+        }
         if (szIs(x)) { return szConv(x, w, u) }
         if (x === true) { return szConv(1, w, u) }
         if (x === false) { return szConv(0, w, u) }
@@ -1764,6 +1996,21 @@ KwContinue  = "continue" KwEnd ;
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
         // A sized-integer box is an object, so its own members have to be answered
         // before the generic object paths below take it for a struct instance.
+        // A Double is a box as well, and answers its own members before the generic
+        // object paths take it for a struct instance. .isNaN / .isInfinite are the
+        // only way to spot the values a Double comparison cannot: NaN != NaN.
+        if (isFlo(o)) {
+            var fv = o.__flo
+            if (name == "isNaN") { return fv !== fv }
+            if (name == "isInfinite") { return fv === swInfF || fv === swInfF * swNegOne }
+            if (name == "isFinite") { return fv === fv && fv !== swInfF && fv !== swInfF * swNegOne }
+            if (name == "isZero") { return fv === 0 }
+            if (name == "description") { return swFloStr(fv) }
+            if (name == "magnitude") { return swFlo(fv < 0 ? 0 - fv : fv) }
+            var ft = builtinTable("Double", false)
+            if (ft != null && hasOwn(ft, name)) { return ft[name] }
+            return undefined
+        }
         if (szIs(o)) {
             if (name == "description") { return szStr(o) }
             if (name == "bitWidth") { return o.w }
@@ -1877,9 +2124,21 @@ KwContinue  = "continue" KwEnd ;
         if (t == "\n") { println(out) } else { print(out + t) }
     }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
-    hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
-    hostGlobals["max"] = function(a, b) { return a > b ? a : b }
-    hostGlobals["min"] = function(a, b) { return a < b ? a : b }
+    // abs/max/min are Double-aware: a boxed operand keeps its box (abs(-1.5) is 1.5,
+    // not the 1 the |0 truncation gave) and compares by its VALUE (two boxes are two
+    // objects, and `a > b` between objects is false).
+    hostGlobals["abs"] = function(v) {
+        if (isFlo(v)) { return swFlo(v.__flo < 0 ? 0 - v.__flo : v.__flo) }
+        return v < 0 ? -v | 0 : v | 0
+    }
+    hostGlobals["max"] = function(a, b) {
+        if (isFlo(a) || isFlo(b)) { return swD(a) > swD(b) ? a : b }
+        return a > b ? a : b
+    }
+    hostGlobals["min"] = function(a, b) {
+        if (isFlo(a) || isFlo(b)) { return swD(a) < swD(b) ? a : b }
+        return a < b ? a : b
+    }
 
     // ----- Method dispatch (the js_mcall equivalent) -----
     function mcall(target, name, args) {
@@ -1898,6 +2157,18 @@ KwContinue  = "continue" KwEnd ;
             if (name == "hasPrefix") { return target.slice(0, args[0].length) === args[0] }
             if (name == "contains") { return target.indexOf(args[0]) >= 0 }
             fail("unknown String method: " + name)
+        }
+        // The Double methods this subset carries. Verified against swift 6.1.2:
+        // 2.0.rounded() is 2.0, 2.5.squareRoot() is 1.5811388300841898 and
+        // 7.0.truncatingRemainder(dividingBy: 2.0) is 1.0.
+        if (isFlo(target)) {
+            var tf = target.__flo
+            if (name == "rounded") { return swFlo(swRoundHalfAway(tf)) }
+            if (name == "squareRoot") { return swFlo(Math.sqrt(tf)) }
+            if (name == "truncatingRemainder") { return swFlo(tf % swD(args[0])) }
+            if (name == "isMultiple") { return tf % swD(args[0]) === 0 }
+            if (name == "description") { return swFloStr(tf) }
+            fail("unknown Double method: " + name)
         }
         if (isDict(target)) {
             if (name == "count") { return target.keys.length }
@@ -2838,8 +3109,23 @@ KwContinue  = "continue" KwEnd ;
         // `var u: UInt8 = 250`: the DECLARED width goes on the value, so the
         // arithmetic that follows wraps at 8 bits rather than at 64.
         var iw = null
-        if (items[k] != undefined && items[k].itype != undefined) { iw = swIntWidthOf(items[k].itype); k++ }
+        var isDoubleTy = false
+        if (items[k] != undefined && items[k].itype != undefined) {
+            iw = swIntWidthOf(items[k].itype)
+            isDoubleTy = items[k].itype == "Double" || items[k].itype == "Float"
+            k++
+        }
         var init = items[k]
+        // `let d: Double = 3` holds 3.0, so d / 2 is 1.5 and print(d) writes "3.0".
+        // The annotation is the only thing that says so: the initializer is an
+        // untyped integer literal.
+        if (isDoubleTy) {
+            if (init == undefined) { return function() { declVar(name, null) } }
+            return function() {
+                var dv = init()
+                declVar(name, dv === null || dv === undefined ? dv : swFloConv(dv))
+            }
+        }
         if (iw != null) {
             var wI = iw.w
             var uI = iw.u
@@ -3654,6 +3940,7 @@ KwContinue  = "continue" KwEnd ;
         return builtinExt[key]
     }
     function builtinTableFor(v) {
+        if (isFlo(v)) { return builtinTable("Double", false) }
         if (typeof v == "number" || szIs(v)) { return builtinTable("Int", false) }
         if (typeof v == "string") { return builtinTable("String", false) }
         if (typeof v == "boolean") { return builtinTable("Bool", false) }
@@ -3859,6 +4146,14 @@ KwContinue  = "continue" KwEnd ;
     function swEqD(l, r, depth) {
         if (depth > 32) { return false }
         if (typeof l == "string" && typeof r == "string") { return swStrEq(l, r) }
+        // A float box is an object, so it too has to be compared BY VALUE, and
+        // ACROSS the box boundary: `1.0 == 1` holds in Swift (the untyped literal
+        // takes the Double type), and 2.0 == 2 must not depend on which side is
+        // boxed. NaN != NaN falls out of the double comparison.
+        if (isFlo(l) || isFlo(r)) {
+            if (typeof swD(l) != "number" || typeof swD(r) != "number") { return false }
+            return swD(l) === swD(r)
+        }
         // A sized-integer box is an object, so it has to be compared BY VALUE here
         // rather than falling into the identity test below: Int.max &+ 1 == Int.min
         // is two distinct boxes holding the same 64 bits.
@@ -3953,16 +4248,23 @@ KwContinue  = "continue" KwEnd ;
     // The arithmetic operators, Double-aware (see swIntish above). == and != are
     // installed further down, over enum cases and canonical string equality.
     swOverloadable("+", function(l, r) { return swadd(l, r) })
-    swOverloadable("-", function(l, r) { return swIntish(l, r) ? szArith("-", l, r) : swD(l) - swD(r) })
-    swOverloadable("*", function(l, r) { return swIntish(l, r) ? szArith("*", l, r) : swD(l) * swD(r) })
-    swOverloadable("/", function(l, r) { return swIntish(l, r) ? szArith("/", l, r) : swD(l) / swD(r) })
-    swOverloadable("%", function(l, r) { return swIntish(l, r) ? szArith("%", l, r) : swD(l) % swD(r) })
+    swOverloadable("-", function(l, r) { return swIntish(l, r) ? szArith("-", l, r) : swFlo(swD(l) - swD(r)) })
+    swOverloadable("*", function(l, r) { return swIntish(l, r) ? szArith("*", l, r) : swFlo(swD(l) * swD(r)) })
+    swOverloadable("/", function(l, r) { return swIntish(l, r) ? szArith("/", l, r) : swFlo(swD(l) / swD(r)) })
+    swOverloadable("%", function(l, r) { return swIntish(l, r) ? szArith("%", l, r) : swFlo(swD(l) % swD(r)) })
     // A box has to be compared through szCmp rather than by <: a UInt64 above 2^63
-    // reads as a NEGATIVE value in the pair, so UInt64.max < 0 would hold.
-    swOverloadable("<", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) < 0 : l < r })
-    swOverloadable(">", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) > 0 : l > r })
-    swOverloadable("<=", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) <= 0 : l <= r })
-    swOverloadable(">=", function(l, r) { return (szIs(l) || szIs(r)) ? szCmp(l, r) >= 0 : l >= r })
+    // reads as a NEGATIVE value in the pair, so UInt64.max < 0 would hold. A FLOAT
+    // box is an object, so it has to be unboxed instead - `1.5 < 2.0` between two
+    // objects is false in JS.
+    function swOrd(l, r, want) {
+        if (isFlo(l) || isFlo(r)) { return want(swD(l), swD(r)) }
+        if (szIs(l) || szIs(r)) { return want(szCmp(l, r), 0) }
+        return want(l, r)
+    }
+    swOverloadable("<", function(l, r) { return swOrd(l, r, function(a, b) { return a < b }) })
+    swOverloadable(">", function(l, r) { return swOrd(l, r, function(a, b) { return a > b }) })
+    swOverloadable("<=", function(l, r) { return swOrd(l, r, function(a, b) { return a <= b }) })
+    swOverloadable(">=", function(l, r) { return swOrd(l, r, function(a, b) { return a >= b }) })
     // A compound assignment is lowered to `a = a <op> b`, which is what makes an
     // overloaded operator work through it. A type may still DECLARE `static func +=`
     // - it is accepted - but the + overload is the one that runs.
@@ -3977,9 +4279,60 @@ KwContinue  = "continue" KwEnd ;
             var v = t()
             var f = findOpFn("-", v)
             if (f != null) { return f(undefined, v) }
-            return swWhole(v) ? szNeg(v) : 0 - swD(v)
+            // A float negates by MULTIPLYING by -1: `0 - 0.0` is +0.0 in JS, so
+            // -0.0 would have lost its sign (and print "0.0" where swift says "-0.0").
+            return swWhole(v) ? szNeg(v) : swFlo(swD(v) * swNegOne)
         }
     }
+    // Double(x) / Float(x): the conversion that BOXES, and the type's own statics.
+    // Double(3) is 3.0 and Double(3) / 2 is 1.5 - that is the whole point of the
+    // box. A String source is failable, like Int("x").
+    // Double("3.5") is FAILABLE: swift answers nil unless the WHOLE string is a
+    // number, where parseFloat would stop at the first bad character and answer 3.5
+    // for "3.5x". [+-]? digits [. digits] [(e|E) [+-] digits], at least one digit.
+    function swFloText(s) {
+        var i = 0
+        if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
+        var d0 = i
+        while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++ }
+        var seen = i > d0
+        if (i < s.length && s.charAt(i) == ".") {
+            i++
+            var d1 = i
+            while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++ }
+            if (i > d1) { seen = true }
+        }
+        if (!seen) { return false }
+        if (i < s.length && (s.charAt(i) == "e" || s.charAt(i) == "E")) {
+            i++
+            if (i < s.length && (s.charAt(i) == "+" || s.charAt(i) == "-")) { i++ }
+            var d2 = i
+            while (i < s.length && s.charAt(i) >= "0" && s.charAt(i) <= "9") { i++ }
+            if (i == d2) { return false }
+        }
+        return i == s.length
+    }
+    function swFloConv(x) {
+        if (isFlo(x)) { return x }
+        if (typeof x == "string") {
+            if (!swFloText(x)) { return null }
+            return swFlo(parseFloat(x))
+        }
+        if (x === true) { return swFlo(1) }
+        if (x === false) { return swFlo(0) }
+        if (x === null || x === undefined) { fail("Double conversion of nil") }
+        return swFlo(swD(x) * 1)
+    }
+    function swFloType() {
+        return {infinity: swFlo(swInfF), nan: swFlo(swNanF), pi: swFlo(3.141592653589793),
+                zero: swFlo(0), __conv: swFloConv}
+    }
+    hostGlobals["Double"] = swFloType()
+    // Float is an ALIAS of Double here - see the note at swFlo above for the
+    // precision this deliberately does not model.
+    hostGlobals["Float"] = swFloType()
+    // String(x) / String(describing: x): the text print would have written.
+    hostGlobals["String"] = {__conv: function(x) { return swstr(x) }}
     hostGlobals["Int"] = swIntType(64, false)
     hostGlobals["Int64"] = swIntType(64, false)
     hostGlobals["Int32"] = swIntType(32, false)
@@ -3998,6 +4351,32 @@ KwContinue  = "continue" KwEnd ;
     core.getField = swGetField
     core.getIndex = swIndex
     // Unqualified names fall back to properties of the enclosing self.
+    // A Dictionary key that is a BOX - a Double or a sized integer - is an object,
+    // and dictFind's index is built on ===, so two boxes holding the same number
+    // were two different keys: `[Int8(1): "x"]` then `m[Int8(1)]` could not find its
+    // own entry, and neither could `[1.5: "a"]` then `m[1.5]`. Normalising the key
+    // to its numeric text fixes both, and makes 1 and 1.0 the SAME key, which is
+    // Swift's rule (1.0 == 1 and equal values hash equal).
+    // The id is the value's NUMERIC text, not its Swift rendering, so 1.0, 1 and
+    // Int8(1) all land on the same id - which is what makes them one key. A NaN key
+    // has no id at all (it is not equal to itself), exactly as dictKeyId decides for
+    // a plain NaN.
+    core.keyId = function(k) {
+        if (isFlo(k)) { return k.__flo !== k.__flo ? null : "n" + k.__flo }
+        if (szIs(k)) { return "n" + szStr(k) }
+        return null
+    }
+    core.keyEq = function(a, b) {
+        if (isFlo(a) || isFlo(b)) {
+            if (typeof swD(a) != "number" || typeof swD(b) != "number") { return false }
+            return swD(a) === swD(b)
+        }
+        if (szIs(a) || szIs(b)) {
+            if (!swWhole(a) || !swWhole(b)) { return false }
+            return szEq(a, b)
+        }
+        return false
+    }
     core.varMiss = function(name) {
         var self = findThis()
         if (self != undefined && self !== null) {
