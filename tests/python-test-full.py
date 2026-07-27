@@ -941,6 +941,65 @@ head
         pass
     check("corp30", Derived().__class__ is Derived)
 
+    # A subscript may hold a comma-separated list that MIXES plain expressions and
+    # slices - CPython's test_compile writes `d[1:2, 1:2] = 1`. The key is a TUPLE
+    # whose sliced entries are slice objects; this value model has no slice type, so
+    # a sliced entry is the three-element list [start, stop, step]. The checks below
+    # only ask about the shape both readings share (the key arrives, and it has as
+    # many entries as there were items), so they hold under CPython too.
+    class Cube:
+        def __init__(self):
+            self.log = []
+            self.key = None
+        def __getitem__(self, k):
+            self.key = k
+            return len(k)
+        def __setitem__(self, k, v):
+            self.key = k
+            self.log.append(v)
+    cb = Cube()
+    check("corp31", cb[1:2, 1:2] == 2)
+    check("corp32", len(cb.key) == 2)
+    cb[1:2, 1:2] = 7
+    check("corp33", cb.log == [7])
+    check("corp34", len(cb.key) == 2)
+    cb[1:2, 1:2] += 1
+    check("corp35", cb.log == [7, 3])
+    check("corp36", cb[0, 1:3, ::2] == 3)
+    check("corp37", cb[:, :] == 2)
+    check("corp38", cb[1:2, 3] == 2)
+    # The plain single slice and the plain index keep their own paths.
+    row = [0, 1, 2, 3, 4]
+    check("corp39", row[1:3] == [1, 2])
+    check("corp40", row[::2] == [0, 2, 4])
+    check("corp41", row[2] == 2)
+    check("corp42", row[1:4:2] == [1, 3])
+
+    # \N{NAME} inside an f-string: the brace after the backslash-N belongs to the
+    # ESCAPE and must not open a replacement field (test_fstring line 990). Only a
+    # small table of names is supported; these four are in it.
+    check("corp43", f'\N{GREEK CAPITAL LETTER DELTA}' == '\u0394')
+    check("corp44", f'{2}\N{GREEK CAPITAL LETTER DELTA}{3}' == '2\u03943')
+    check("corp45", f'\N{LEFT CURLY BRACKET}1+1\N{RIGHT CURLY BRACKET}' == '{1+1}')
+    check("corp46", f'2\N{AMPERSAND}3' == '2&3')
+    # And the other side of the same rule: a backslash before a brace is a literal
+    # backslash, and the brace still opens a field (test_fstring line 1016).
+    check("corp47", f'\\{6*7}' == '\\42')
+    check("corp48", f'\\N{6*7}' == '\\N42')
+
+    # A non-ASCII identifier (PEP 3131). test_fstring declares one deliberately,
+    # "to trigger the code in ast.c that deals with non-ascii expression values".
+    tenπ = 31.4
+    check("corp49", tenπ == 31.4)
+    check("corp50", f"{tenπ}" == "31.4")
+
+    # The `=` debug form inside a NESTED format spec. `{y=}` renders as the spec text
+    # `y=20` - fill `y`, align `=`, width 20 - which this model does not reproduce (it
+    # reads the nested field as the bare width), so only the resulting WIDTH is
+    # asserted, and CPython agrees on that.
+    y = 20
+    check("corp51", len(f"{2:{y=}}") == 20)
+
 # ===== END SECTIONS =====
 
 def main():

@@ -57,7 +57,26 @@ return the failure count from main().") ;
 // --- main rules
 
 // Shared token productions (languages/lib).
-:include("lib/ident.abnf") ;
+// Identifiers, INLINED from lib/ident.abnf and widened: a Python identifier may hold
+// non-ASCII letters (PEP 3131), and CPython's test_fstring writes `ten<pi> = 31.4`
+// deliberately, "to trigger the code in ast.c that deals with non-ascii expression
+// values". The shared lib rule is ASCII-only and every other language here wants it that
+// way, so the widened copy lives with the language that needs it. The range starts at
+// \x7f, not \x80: c.peek reads BYTES and \x80 is a UTF-8 continuation byte, which
+// matches nothing (docs/abnf-dialect-gotchas.md). This is a RECOGNITION rule, not
+// XID_Start - it accepts any non-ASCII byte in a name, which is wider than Python.
+// KwEnd is widened the same way, so a keyword glued to a non-ASCII letter (`in<pi>`)
+// stays one identifier rather than a keyword plus a name.
+Id          = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "\x7f"..."\U0010ffff" } :whitespace(Whitespace) ;
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95
+                || (cc >= 97 && cc <= 122) || cc >= 127)
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
 
@@ -439,7 +458,7 @@ ExprList    <~~ push(makeExprList(takeAll())) ~~>
 // Id and the only call form was the argument-less one. This is the shape
 // docs/abnf-dialect-gotchas.md calls "object creation must SEED the member chain".
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetSeed { CallSfx | MethodSfx | TSlice | TIndex | TAttr } ;
+            = TargetSeed { CallSfx | MethodSfx | TSubTup | TSlice | TIndex | TAttr } ;
 // A plain name stays a STRING - it is the only seed that can be a bare store into a scope,
 // and it is the overwhelmingly common one. Any other seed contributes a read thunk.
 // TargetExpr comes FIRST: a bytes/str prefix letter is a perfectly good Id, so
@@ -494,6 +513,69 @@ TargetExpr  <~~ push({tb: pop()}) ~~> = EmptyTuple | Grouped | ListLit | StringL
 // d[1, 1] = v: the subscript is an expression LIST, so a tuple index works.
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
+// The write side of the mixed subscript above: `d[1:2, 1:2] = 1` and
+// `d[1:2, 1:2] += 1`. It builds the same tuple key the reading SubTupSfx does, and
+// pushes it as a plain index step, so the assignment path needs no change at all.
+TSubTup     <~~ push({idx: makeSubTuple(takeAll())}) ~~>
+            = TupSliceAhead "[" :whitespace(WhitespaceNL) SubItem { "," SubItem } [ "," ] "]" :whitespace(Whitespace) ;
+// A zero-width guard for the mixed subscript below: do the brackets AHEAD hold both a
+// depth-0 comma and a depth-0 colon? That is exactly the shape neither SliceSfx (which
+// takes no comma) nor IndexSfx (which takes no colon) can parse, so gating the mixed
+// form on it leaves `a[1:2]`, `a[::2]` and `a[0, 1]` on the paths they already had.
+// The scan skips string literals whole (their contents are not brackets), tracks the
+// bracket depth, declines the walrus `:=` and is capped like every scan in this tree.
+TupSliceAhead = :script(~~
+    (function() {
+        var i = 0
+        // The `[` of a suffix is matched AFTER whitespace skipping, so step over it.
+        while (i < 4096) {
+            var w = c.peek(i)
+            if (w === 32 || w === 9 || w === 10 || w === 13 || w === 12) { i++; continue }
+            break
+        }
+        if (c.peek(i) !== 91) { return abnf.newToken("\x01no-bracket", 0) }
+        i++
+        var depth = 0
+        var comma = false
+        var colon = false
+        var n = 0
+        while (n < 16384) {
+            n++
+            var ch = c.peek(i)
+            if (ch < 0) { break }
+            if (ch === 34 || ch === 39) {
+                var q = ch
+                i++
+                while (n < 16384) {
+                    n++
+                    var s = c.peek(i)
+                    if (s < 0) { break }
+                    i++
+                    if (s === 92) { i++; continue }
+                    if (s === q) { break }
+                }
+                continue
+            }
+            if (ch === 40 || ch === 91 || ch === 123) { depth++; i++; continue }
+            if (ch === 41 || ch === 125) { depth--; i++; continue }
+            if (ch === 93) {
+                if (depth === 0) { break }
+                depth--
+                i++
+                continue
+            }
+            if (depth === 0 && ch === 44) { comma = true; i++; continue }
+            if (depth === 0 && ch === 58) {
+                if (c.peek(i + 1) !== 61) { colon = true }
+                i++
+                continue
+            }
+            i++
+        }
+        if (comma && colon) { return undefined }
+        return abnf.newToken("\x01not-tuple-slice", 0)
+    })()
+~~) ;
 // A slice target: xs[1:3] = [9], xs[::2] = [7, 8], del xs[::2].
 TSlice      <~~ push(makeSliceSfx(takeAll())) ~~>
             = "[" :whitespace(WhitespaceNL) [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" :whitespace(Whitespace) ;
@@ -609,7 +691,7 @@ Power       <~~ push(makePower(takeAll())) ~~>
 // f(a), s[i], s[a:b], lst.append(x), obj.attr (attribute access is not implemented).
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx | AttrSfx } ;
+            = Primary { CallSfx | MethodSfx | SubTupSfx | SliceSfx | IndexSfx | AttrSfx } ;
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
             = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
@@ -636,6 +718,19 @@ SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
 SliceLo     <~~ push({slo: pop()}) ~~> = Expression ;
 SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 SliceStep   <~~ push({sstep: pop()}) ~~> = Expression ;
+// A subscript whose contents MIX plain expressions and slices: `d[1:2, 1:2]`,
+// `a[0, 1:2]`, `m[:, ::2]`. CPython hands __getitem__ / __setitem__ a TUPLE whose
+// sliced entries are slice objects (test_compile line 407 writes `d[1:2, 1:2] = 1`).
+// Tried BEFORE SliceSfx and IndexSfx and gated on TupSliceAhead, so it fires only for
+// the shape those two cannot parse. The value model has no slice type, so a sliced
+// entry is the three-element list [start, stop, step] with None for an omitted bound;
+// the tuple itself is the plain list every other tuple in this subset is.
+SubTupSfx   <~~ push({kind: "index", idx: makeSubTuple(takeAll())}) ~~>
+            = TupSliceAhead "[" :whitespace(WhitespaceNL) SubItem { "," SubItem } [ "," ] "]" :whitespace(Whitespace) ;
+SubItem     = SubSlice | SubIndex ;
+SubSlice    <~~ push({sslice: makeSliceSfx(takeAll())}) ~~>
+            = [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] ;
+SubIndex    <~~ push({sitem: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
 
@@ -744,7 +839,12 @@ FSpec       <~~ push({fspec: takeAll()}) ~~>
 // real, and test_fstring checks them. Both only affect how the WIDTH is rendered, which
 // this model reads as a plain number, so they are parsed and DROPPED - neither production
 // carries a tag, so the field still contributes exactly the one thunk FSpec expects.
-FSpecField  = "{" :whitespace(Whitespace) Expression [ FSpecConv ] [ FSpecSub ] "}" :whitespace() ;
+// The `=` debug form may appear in a NESTED field too: `f"{2:{y=}}"` renders the spec
+// as `y=20`, which is fill `y`, align `=`, width 20 (test_fstring line 1640). It is
+// parsed and DROPPED - FSpecDbg carries no tag, so the nested field still contributes
+// exactly the one thunk its parent pops.
+FSpecDbg    = :whitespace() FDbgSp "=" NotEqSign FDbgSp ;
+FSpecField  = "{" :whitespace(Whitespace) Expression [ FSpecDbg ] [ FSpecConv ] [ FSpecSub ] "}" :whitespace() ;
 FSpecConv   = "!" ( "r" | "s" | "a" ) ;
 // The nested spec NESTS again: f'{value:{width:{0}}.{precision:1}}' is three levels deep,
 // and PEP 701 puts no limit on it. FSpecSubField is FSpecField with a dropping tag - the
@@ -758,7 +858,7 @@ FSpecConv   = "!" ( "r" | "s" | "a" ) ;
 FSpecSub    = ":" :whitespace() { FSpecSubField | FSpecSubChunk } :whitespace(Whitespace) ;
 FSpecSubChunk = FSpecChar { FSpecChar } ;
 FSpecSubField <~~ pop() ~~>
-            = "{" :whitespace(Whitespace) Expression [ FSpecConv ] [ FSpecSub ] "}" :whitespace() ;
+            = "{" :whitespace(Whitespace) Expression [ FSpecDbg ] [ FSpecConv ] [ FSpecSub ] "}" :whitespace() ;
 FSpecChunk  <~~ push({chunk: up.in}) ~~>
             = FSpecChar { FSpecChar } ;
 FSpecChar   = "\x20"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
@@ -767,15 +867,38 @@ FChunkD     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharD { FCharD } 
 // ASCII byte after the backslash, so an f-string opening `f"""\` + newline (a line
 // continuation, and how CPython's test_tokenize writes its expected-token blocks) did not
 // match. The compiler's copy already used the wide form; this is the interpreter catching up.
-FCharD      = FBrace | StrEsc2 | FPlainD ;
+FCharD      = FBrace | FNamedEsc | FStrEsc | FBksl | FPlainD ;
 FChunkS     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharS { FCharS } ;
-FCharS      = FBrace | StrEsc2 | FPlainS ;
+FCharS      = FBrace | FNamedEsc | FStrEsc | FBksl | FPlainS ;
 FChunk3D    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3D { FChar3D } ;
-FChar3D     = FBrace | StrEsc2 | FPlain3D ;
+FChar3D     = FBrace | FNamedEsc | FStrEsc | FBksl | FPlain3D ;
 FChunk3S    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3S { FChar3S } ;
-FChar3S     = FBrace | StrEsc2 | FPlain3S ;
+FChar3S     = FBrace | FNamedEsc | FStrEsc | FBksl | FPlain3S ;
 // {{ and }} are the escaped braces.
 FBrace      = "{{" | "}}" ;
+// The named-unicode escape INSIDE an f-string. A `{` normally opens a replacement
+// field, but the one after a backslash-N belongs to the escape: without this rule
+// StrEsc2 matched only the `\N` and left the `{` to open a field, so
+// `f'\N{GREEK CAPITAL LETTER DELTA}'` (test_fstring line 990) did not parse at all.
+// It has to be tried BEFORE StrEsc2, which would otherwise take the `\N` and commit.
+// The name characters are exactly the ones a Unicode character name may hold -
+// upper-case letters, digits, spaces and hyphens - which keeps the rule from running
+// past a missing `}` and eating the closing quote; an unterminated `\N{` therefore
+// falls back to StrEsc2 and behaves as it did before. The NAME TABLE is a small
+// subset (pyUniNames); a name outside it parses and renders as the empty string.
+FNamedEsc   = "\\N{" FNameCh { FNameCh } "}" ;
+// A backslash escape inside an f-string never consumes a BRACE. CPython's f-string
+// lexer treats `{` and `}` as structural first: `f'\{6*7}'` is a (warned about, still
+// legal) invalid escape - a literal backslash - followed by a REPLACEMENT FIELD, and it
+// evaluates to '\\42'; `f'\}'` is the error "single '}' is not allowed". Using the plain
+// StrEsc2 here swallowed the `{`, so the field never opened and test_fstring line 1016
+// (`fr'\{6*7}'`) died on the closing brace instead. FBksl is the lone backslash that is
+// left over, which pyUnescape keeps verbatim - and, because FPlain* already excludes the
+// backslash, nothing else can match it by accident.
+FStrEsc     = "\\" FEscCh ;
+FEscCh      = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+FBksl       = "\\" ;
+FNameCh     = "0"..."9" | "A"..."Z" | " " | "-" ;
 FPlainD     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 FPlainS     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
 FPlain3D    = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
@@ -2106,6 +2229,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     pyUniNames["DEGREE SIGN"] = 176
     pyUniNames["EURO SIGN"] = 8364
     pyUniNames["GREEK SMALL LETTER ALPHA"] = 945
+    pyUniNames["GREEK CAPITAL LETTER DELTA"] = 916
+    pyUniNames["AMPERSAND"] = 38
+    pyUniNames["LEFT CURLY BRACKET"] = 123
+    pyUniNames["RIGHT CURLY BRACKET"] = 125
+    pyUniNames["EXCLAMATION MARK"] = 33
+    pyUniNames["LATIN SMALL LETTER A WITH DIAERESIS"] = 228
     pyUniNames["GREEK SMALL LETTER PI"] = 960
     pyUniNames["EM DASH"] = 8212
     pyUniNames["SNOWMAN"] = 9731
@@ -2133,7 +2262,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (e == "u") { out += String.fromCharCode(hexAt(text, i + 2, 4)); i += 6; continue }
             if (e == "U") { out += codePoint(hexAt(text, i + 2, 8)); i += 10; continue }
             if (e == "N" && text.charAt(i + 2) == "{") {
-                var close = text.indexOf("}", i + 3)
+                // A forward SCAN, not text.indexOf("}", i + 3): the frozen engine
+                // ignores indexOf's from-index (docs/abnf-dialect-gotchas.md), so it
+                // answered with the FIRST `}` in the whole chunk - which may sit before
+                // this escape, sending `i` backwards and spinning to the step cap. It
+                // only surfaced once f-strings started reaching this branch, behind a
+                // green goja run.
+                var close = -1
+                for (var cj = i + 3; cj < text.length; cj++) {
+                    if (text.charAt(cj) == "}") { close = cj; break }
+                }
                 if (close > 0) {
                     var nm = text.substring(i + 3, close)
                     out += hasOwn(pyUniNames, nm) ? codePoint(pyUniNames[nm]) : ""
@@ -2596,6 +2734,30 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (items[i].sstep != undefined) st = items[i].sstep
         }
         return {kind: "slice", lo: lo, hi: hi, step: st}
+    }
+    // items = [{sitem} | {sslice}...] -> the TUPLE a mixed subscript indexes with.
+    // `d[1:2, 1:2]` is one key in CPython too: a tuple whose sliced entries are slice
+    // objects. This value model has one sequence type and no slice type, so the tuple is
+    // a plain list and a sliced entry is the three-element list [start, stop, step] with
+    // None for an omitted bound. That is enough to store through such a subscript, read
+    // it back and pull the bounds apart; it is NOT a CPython slice object (it has no
+    // .start / .stop / .step attributes and no indices() method).
+    function makeSubTuple(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i]
+                if (it.sslice != undefined) {
+                    var sl = it.sslice
+                    var one = []
+                    one.push(sl.lo != null ? sl.lo() : null)
+                    one.push(sl.hi != null ? sl.hi() : null)
+                    one.push(sl.step != null ? sl.step() : null)
+                    a.push(one)
+                } else { a.push(it.sitem()) }
+            }
+            return a
+        }
     }
     // The indices a slice selects, in order - Python's rules: negative bounds wrap,
     // open ends follow the direction, and a negative step walks backwards.

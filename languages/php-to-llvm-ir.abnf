@@ -198,7 +198,12 @@ ParamMod    <~~ push({pmod: up.in}) ~~> = Modifier ;
 // substitutes the default when the argument was not passed (see paramDefaults).
 ParamDefault <~~ push({pdef: pop()}) ~~> = PlainEq Expression ;
 TypeHint    = [ "?" ] TypeAtom { ( "|" | "&" ) [ "?" ] TypeAtom } ;
-TypeAtom    = KwArray | [ "\\" ] Id { "\\" Id } ;
+// A DNF type (PHP 8.2) parenthesizes an INTERSECTION inside a union: '(X&Y)|Z',
+// 'X|(A&B)'. The parenthesized group is just another atom of the surrounding
+// TypeHint, so one alternative covers every position a type may stand in (parameter,
+// return, property). Type hints carry no runtime meaning in this subset.
+TypeAtom    = KwArray | TypeParen | [ "\\" ] Id { "\\" Id } ;
+TypeParen   = "(" TypeHint ")" ;
 ReturnType  = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
@@ -222,8 +227,17 @@ MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
 // implementing class inherit them. An initializer may read 'self::' - makeClassStmt
 // binds the class as self BEFORE evaluating them, in declaration order, which is what
 // makes 'const TWICE = self::SIZE * 2' work.
+// The TYPE of a PHP 8.3 typed class constant is a full TypeHint, not just a word:
+// 'const ?string C1', 'const array|string C10', 'const stdClass&Stringable C' all
+// occur in php-src's own suite. The typed form has to be its own alternative and be
+// tried FIRST - writing it as an optional [ TypeHint ] would let 'const SIZE = 4'
+// consume SIZE as the type and then fail on '=', because a PEG never retries an
+// optional that matched. CIds still covers the plain 'const int SIZE' spelling, so
+// both routes reach makeCItem with exactly the {cname} records it always saw.
 ClassConst  <~~ push({cconsts: takeAll()}) ~~>
-            = [ AttrGrp ] { Modifier } KwConst CItem { "," CItem } ";" ;
+            = [ AttrGrp ] { Modifier } KwConst ( ConstTyped | ConstPlain ) ";" ;
+ConstTyped  = TypeHint CItem { "," CItem } ;
+ConstPlain  = CItem { "," CItem } ;
 CItem       <~~ push(makeCItem(takeAll())) ~~>
             = CIds [ "=" Expression ] ;
 // 'const int SIZE' is a TYPED constant: the last word is the name. Each word pushes
@@ -269,8 +283,19 @@ NsDecl      <~~ push(makeNs(takeAll(), up.pos)) ~~>
             = KwNamespace { Id | "\\" } ( Semi | NsBody ) ;
 NsBody      <~~ push({nsbody: makeBody(takeAll())}) ~~>
             = "{" { TopItem } "}" ;
+// use A\B; / use A\B as C, D\E as F; / use function f; / use const C;
+// and the GROUP form 'use Foo\Bar\{A, B as C, function f, const K,};' of PHP 7.
+// Imports are not modelled in this subset, so the whole declaration is recognized
+// structurally and routed to notImplemented - but it has to be recognized WHOLE, or
+// the rest of the file is lost. UseGroup is tried first: its prefix ends in the '\{'
+// that a plain path can never contain.
 UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
-            = KwUse { Id | "\\" } [ KwAs Id ] Semi ;
+            = KwUse [ UseKind ] UseItem { "," UseItem } Semi ;
+UseKind     = ( "function" | "const" ) KwEnd ;
+UseItem     = UseGroup | UsePath ;
+UseGroup    = [ "\\" ] Id { "\\" Id } "\\" "{" UseInner { "," UseInner } [ "," ] "}" ;
+UseInner    = [ UseKind ] UsePath ;
+UsePath     = [ "\\" ] Id { "\\" Id } [ KwAs Id ] ;
 // enum Name : backing-type implements I { case A = "a"; const C = 1; method... }
 // An enum is a CLASS whose cases are singleton instances published as class constants,
 // so 'E::A' is one constant read, 'E::A === E::A' is object identity (which is what
@@ -301,8 +326,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 // assigned. A 'static' property is stored on the CLASS descriptor instead (under an
 // 's:' key), and because js_phsset walks __super to the declaring class, a subclass
 // shares its parent's single storage - PHP's rule.
-PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
-            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ( ";" | PropHooks ) ;
+// One declaration may introduce SEVERAL properties - 'public $name, $bars;' and
+// 'static public $a, $aa;' both occur in php-src's own suite - so the tag pushes one
+// {propdecl} per name rather than exactly one, and every name inherits the shared
+// modifiers and type hint. makeClassStmt already walks the member list, so N records
+// need no change there.
+PropDecl    <~~ var pds = makeProps(takeAll()); for (var pi = 0; pi < pds.length; pi++) { push({propdecl: pds[pi]}) } ~~>
+            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ]
+              { "," DollarName [ "=" Expression ] } ( ";" | PropHooks ) ;
 // PHP 8.4 property hooks: 'public int $x = 1 { get => e; set { ... } }' (and the
 // bodyless 'get;' / 'set;' of an abstract or interface property, which declares a hook
 // without providing one). Each hook becomes an ordinary METHOD on the class -
@@ -334,10 +365,15 @@ Block       <~~ push({body: makeBody(takeAll())}) ~~>
 // Every statement pushes exactly one thunk: function(block) -> block.
 // A declaration is a statement too: PHP allows `if (...) { class Foo {} }`, and a
 // conditionally declared class is common enough in real files to be worth parsing.
+// A named 'function f() {}' written INSIDE a body is a declaration statement too (PHP
+// registers it when control reaches it). DefStmt wraps Def so the thunk it pushes is
+// the same makeDefStmt record TopItem builds; an ANONYMOUS function still rolls back
+// here (Def demands a Name) and reaches ClosureExpr through ExprStmt.
 Statement   = InlineHtml | ShortEcho | EchoStmt | GlobalStmt | UnsetStmt | StaticVarStmt | Block | If | While | ForEach | For
             | Switch | DoWhile | Try | Throw | Declare
-            | ClassDecl | EnumDecl | TypeDecl | ConstDecl | NsDecl | UseDecl
+            | DefStmt | ClassDecl | EnumDecl | TypeDecl | ConstDecl | NsDecl | UseDecl
             | Return | Break | Continue | Goto | Label | Empty | ExprStmt ;
+DefStmt     <~~ push(makeDefStmt(pop())) ~~> = Def ;
 // goto L; / L: -- a jump inside one function body. The label is a real basic block, so
 // the jump costs one branch; PHP's rule that a goto may LEAVE a block but never enter
 // one falls out of where the label's block is created (makeBody registers the labels
@@ -375,7 +411,7 @@ DefaultLabel <~~ push({casedflt: true}) ~~> = KwDefault ( ":" | ";" ) ;
 KwCase      = "case" KwEnd ;
 // do { ... } while (e); -- the body runs before the condition is ever tested.
 DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
-            = KwDo ( Block | BodyStmt ) KwWhile "(" Expression ")" Semi ;
+            = KwDo Body KwWhile "(" Expression ")" Semi ;
 // try/catch/finally + throw are genuinely compiled: throw calls js_throw, each try/catch/
 // finally body compiles to its own closure handed to js_try, and a return/break/continue
 // leaving a try or catch body becomes a control signal that excDispatch re-issues in the
@@ -405,8 +441,11 @@ DeclDirective <~~ takeAll() ~~> = Id "=" Expression ;
 // const NAME = expr; -- a global constant. Constants live in the same flat name space
 // as classes and functions here (they carry no '$' sigil, so no PHP variable can
 // collide with one), which is what lets ConstRef resolve them with a plain scope read.
+// A global 'const' may carry an ATTRIBUTE GROUP of its own ('#[A1(11)] const C = 1;'
+// appears five times in php-src's attributes tests). AttrGrp pushes nothing, so
+// makeConstDecl sees exactly the items it always saw.
 ConstDecl   <~~ push(makeConstDecl(takeAll())) ~~>
-            = KwConst CItem { "," CItem } Semi ;
+            = [ AttrGrp ] KwConst CItem { "," CItem } Semi ;
 CatchType   = CatchName { "|" CatchName } ;
 CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 
@@ -430,10 +469,21 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 // AltBody that then has to be careful: a bare 'endif' would otherwise parse as a
 // constant-reference statement and swallow the terminator, which is why the five
 // endXXX words are reserved in NotKw.
+// The body of every compound statement may be a braced BLOCK or a single unbraced
+// statement - 'if ($i == 0) return;', 'foreach ($a as $v) echo $v;', 'while (0);'.
+// Body keeps the two spellings behind one name (BodyStmt below already pushes exactly
+// the {body} record a Block does), so every builder is reused unchanged. Block is
+// tried first: a '{' is both a block and a statement, and the direct route is cheaper.
+//
+// 'else if' needs no rule of its own once this exists: KwElseif matches only the
+// single word 'elseif', so 'else if (...) {...}' takes the [ KwElse Body ] arm and
+// Body parses the rest as a NESTED If - which is also exactly PHP's binding, with each
+// 'else' attaching to the nearest open 'if'.
+Body        = Block | BodyStmt ;
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" ( AltIfTail | Block { ElseIf } [ KwElse Block <~~ push({els: pop().body}) ~~> ] ) ;
+            = KwIf "(" Expression ")" ( AltIfTail | Body { ElseIf } [ KwElse Body <~~ push({els: pop().body}) ~~> ] ) ;
 ElseIf      <~~ var b = pop(); push({elifCond: pop(), elifBody: b.body}) ~~>
-            = KwElseif "(" Expression ")" Block ;
+            = KwElseif "(" Expression ")" Body ;
 AltIfTail   = ":" AltBody { AltElseIf } [ KwElse ":" AltBody <~~ push({els: pop().body}) ~~> ] KwEndif Semi ;
 AltElseIf   <~~ var b2 = pop(); push({elifCond: pop(), elifBody: b2.body}) ~~>
             = KwElseif "(" Expression ")" ":" AltBody ;
@@ -443,13 +493,13 @@ AltBody     <~~ push({body: makeBody(takeAll())}) ~~>
             = { Statement } ;
 
 While       <~~ push(makeWhile(pop().body, pop())) ~~>
-            = KwWhile "(" Expression ")" ( AltWhileBody | Block | BodyStmt ) ;
+            = KwWhile "(" Expression ")" ( AltWhileBody | Body ) ;
 AltWhileBody = ":" AltBody KwEndwhile Semi ;
 
 // for (init; cond; post) { body }. The three clauses are optional and wrapped
 // with a kind marker so the builder can tell them apart on the stack.
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Block | BodyStmt ) ;
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Body ) ;
 AltForBody  = ":" AltBody KwEndfor Semi ;
 ForInit     <~~ push({k: "init", t: exprToStmt(pop())}) ~~> = Expression ;
 ForCond     <~~ push({k: "cond", t: pop()}) ~~> = Expression ;
@@ -457,7 +507,7 @@ ForPost     <~~ push({k: "post", t: exprToStmt(pop())}) ~~> = Expression ;
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
 ForEach     <~~ push(makeForeach(takeAll())) ~~>
-            = KwForeach "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Block | BodyStmt ) ;
+            = KwForeach "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Body ) ;
 AltForeachBody = ":" AltBody KwEndforeach Semi ;
 // 'as [$k, $v]' destructures each element; the pattern is the same one list()/[] uses
 // in an assignment, so both spellings bind identically.
@@ -483,7 +533,15 @@ JumpLevel   <~~ push({lvl: phpSmallInt(up.in)}) ~~>
             = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 // Every expression pushes exactly one thunk: function(block) -> {b, v}.
-Expression  = RefAssign | DestructAssign | Assignment | YieldExpr | Ternary ;
+// '@expr' is PHP's error-suppression operator: it evaluates its operand and throws
+// away any DIAGNOSTIC the evaluation would have produced. This subset does not model
+// the diagnostic channel at all, so the operator is a pass-through and both rules are
+// deliberately item-NEUTRAL (no tag) exactly like Pos - each pushes the one thunk its
+// operand pushed. It is needed at TWO levels because PHP reads '@$ar[0] = "v"' as
+// '@($ar[0] = "v")': the Expression-level form covers the assignment, the UnaryExpr
+// one covers '@foo()' inside a larger expression.
+Expression  = SuppressExpr | RefAssign | RefAssignVal | DestructAssign | Assignment | YieldExpr | Ternary ;
+SuppressExpr = "@" Expression ;
 
 // yield / yield $v / yield $k => $v / yield from $it. A function whose body contains
 // one is a GENERATOR function: calling it does not run the body, it makes a generator
@@ -506,6 +564,14 @@ KwFrom      = "from" KwEnd ;
 RefAssign   <~~ push(makeRefAssign(takeAll())) ~~>
             = Target PlainEq RefAmp Target ;
 RefAmp      <~~ noteRef() ~~> = "&" !"&" ;
+// '$h =& f();' - the right side is a call to a function DECLARED to return by
+// reference ('function &f()'). Only a variable-like right side has a storage cell to
+// share, so this form cannot go through makeRefAssign; it degrades to an ordinary
+// assignment of the returned value, which is what the alias would have observed for
+// every read. Tried AFTER RefAssign, so '$b = &$a' keeps its exact real-reference
+// binding. The '&' pushes nothing, so makeAssign sees the two items it always saw.
+RefAssignVal <~~ push(makeAssign(takeAll())) ~~>
+            = Target PlainEq <~~ push("=") ~~> "&" !"&" Expression ;
 
 // list($a, $b) = e  /  [$a, $b] = e  -- array destructuring. A slot may be EMPTY
 // ([, $second]), KEYED (["y" => $py]) or itself a nested pattern ([[$m, $n], [$o]]).
@@ -527,8 +593,12 @@ DKeyed      <~~ var dv = pop(); push({dkey: pop(), dval: dv}) ~~>
 DPlain      <~~ push({dval: pop()}) ~~>
             = DValue ;
 DValue      = DestructPat | DTarget ;
+// list(&$a, &$b) = $arr / foreach ($c as [&$x, $y]): a slot may bind BY REFERENCE.
+// References into array storage are not modelled here, so the '&' is accepted and the
+// slot binds by value - the syntax is what was blocking the file. The literal pushes
+// nothing, so the rule stays item-neutral.
 DTarget     <~~ push({dt: pop()}) ~~>
-            = Target ;
+            = [ "&" !"&" ] Target ;
 
 // cond ? a : b  /  cond ?: b (Elvis, yields cond when truthy) ; '??' null-coalescing
 // binds tighter than the ternary but looser than ||.
@@ -549,7 +619,7 @@ AssignOp    = "**=" | "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%=" |
             | "&=" | "|=" | "^=" | PlainEq ;
 PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { ArrowField | TIndex | TAppend } ;
+            = TargetHead { ArrowField | ArrowDyn | TIndex | TAppend } ;
 // A static property (self::$made = ..., C::$made++) and a variable variable
 // ($$name = e, ${expr} = e) are assignable heads too. A static head carries its base
 // and property name, a variable-variable head the THUNK that computes the name, and
@@ -570,9 +640,17 @@ PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
 // name thunk instead of a literal name, and every reader below asks refNameV for the
 // name handle - so the scope call is the same one a plain variable makes, with a
 // computed string in place of the constant.
+// '$$$a = "x"': the HEAD recurses the way the var-var EXPRESSION already does, so any
+// depth of indirection is a name thunk over the next one down.
 VarVarHead  <~~ push({varexpr: pop()}) ~~>
-            = "$" ( VarRef | "{" Expression "}" ) ;
+            = "$" ( VarRef | VarVarRef | "{" Expression "}" ) ;
 ArrowField  = "->" MethodName <~~ push({key: up.in}) ~~> ;
+// '$o->$name = e' and '$o->{expr} = e': the PROPERTY name is computed. It cannot be
+// baked into the step record the way a literal name is, so the step carries the THUNK
+// and emitRefPath materializes it where the literal key would have been emitted.
+// Tried after ArrowField, which cannot match a '$' or a '{' anyway.
+ArrowDyn    <~~ push({keyT: pop()}) ~~>
+            = "->" ( VarRef | "{" Expression "}" ) ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 TAppend     <~~ push({append: true}) ~~>
@@ -582,8 +660,18 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { OrOp AndExpr } ;
 OrOp        = "||" | ( "or" KwEnd ) ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
-            = BitOrExpr { AndOp BitOrExpr } ;
+            = PipeExpr { AndOp PipeExpr } ;
 AndOp       = "&&" | ( "and" KwEnd ) ;
+// '$x |> f(...)' is PHP 8.5's pipe: the left value becomes the single argument of the
+// callable on the right, and the operator is LEFT associative, so '5 |> a |> b' is
+// 'b(a(5))'. Its level is fixed by php-src's own test
+//     assert(false && foo() . bar() |> baz() . quux());
+// which means 'false && ((foo() . bar()) |> (baz() . quux()))' - tighter than '&&',
+// looser than '.'. The right operand is any callable VALUE: a first-class callable
+// 'f(...)', a closure, or a function name in a string, which is what phpCallable
+// already normalizes for call_user_func.
+PipeExpr    <~~ push(makePipe(takeAll())) ~~>
+            = BitOrExpr { "|>" BitOrExpr } ;
 
 // The binary operator ladder, in PHP's own precedence order (loosest first):
 //   ||  &&  |  ^  &  == != === !== <=>  < <= > >=  .  << >>  + -  * / %  **
@@ -594,7 +682,7 @@ AndOp       = "&&" | ( "and" KwEnd ) ;
 // Mirrors the same ladder in php-interpreter.abnf.
 BitOrExpr   <~~ push(foldBinary(takeAll())) ~~>
             = BitXorExpr { SingleBar <~~ push(up.in) ~~> BitXorExpr } ;
-SingleBar   = "|" !"|" ;
+SingleBar   = "|" !"|" !">" ;
 BitXorExpr  <~~ push(foldBinary(takeAll())) ~~>
             = BitAndExpr { "^" <~~ push(up.in) ~~> BitAndExpr } ;
 BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
@@ -619,7 +707,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Cast | Clone | InstanceofExpr | PreIncDec | Neg | Pos | BitNot | NotOp
-            | ThrowExpr | PowExpr ;
+            | Suppress | ThrowExpr | PowExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
@@ -643,8 +731,15 @@ CastKw      <~~ push({cast: stripWs(up.in)}) ~~>
               | "string" | "array" | "object" | "unset" | "binary" ) KwEnd ;
 // clone $o : a copy of the instance whose __clone hook, when the class has one,
 // runs on the COPY. Array properties are values, so they are copied along.
-Clone       <~~ push(makeClone(pop())) ~~>
+// clone $o  /  clone($o)  and PHP 8.5's clone-WITH, 'clone($o, ["p" => 1])', which
+// copies the object and then overwrites the named properties on the copy. CloneWith
+// demands the comma, so an ordinary parenthesized 'clone($o)' rolls back into the
+// ClonePlain arm and keeps its exact previous parse.
+Clone       = CloneWith | ClonePlain ;
+ClonePlain  <~~ push(makeClone(pop())) ~~>
             = KwClone UnaryExpr ;
+CloneWith   <~~ var w = pop(); push(makeCloneWith(pop(), w)) ~~>
+            = KwClone "(" Expression "," Expression ")" ;
 // $x instanceof Foo : the runtime type test (js_phisa), which matches the class
 // itself, every base class and every implemented interface. Tried before the plain
 // unary path; if no 'instanceof' follows, this alternative fails and rolls back, so an
@@ -659,6 +754,8 @@ PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Pos         = "+" UnaryExpr ;
+// See SuppressExpr: '@' as a prefix INSIDE an expression ('$x = @foo() + 1').
+Suppress    = "@" UnaryExpr ;
 
 PostfixExpr = IncDec | CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
@@ -740,7 +837,11 @@ IncDyn      <~~ push({incdyn: pop()}) ~~>
 // new \ReflectionClass(...). Namespaces have no runtime model here (NsDecl and
 // UseDecl are notImplemented), so a qualified name resolves on its LAST segment,
 // which is what makes the common `\Exception` / `\strlen` spelling work.
-QName       = [ "\\" ] Name { "\\" MethodName } ;
+// 'namespace\foo' names a constant/function/class RELATIVE to the current namespace.
+// Names are not qualified in this subset, so the prefix is skipped and the last
+// segment is what lastSeg keeps - the same treatment '\foo\foo' already gets.
+// KwNamespace carries a KwEnd, so it cannot swallow the start of 'namespaced_thing'.
+QName       = [ "\\" ] [ KwNamespace "\\" ] Name { "\\" MethodName } ;
 ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
             = QName ;
 
@@ -775,8 +876,9 @@ NewName     <~~ push({cls: lastSeg(stripWs(up.in))}) ~~> = QName ;
 // declaration does and makeClassStmt builds the descriptor unchanged - the only
 // difference is that the declaration is emitted where the expression stands, under a
 // generated name, and the instantiation follows it.
+// 'new #[A1(7)] class () { }' attaches an attribute group to the anonymous class.
 NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
-            = KwNew KwClass [ "(" [ ArgList ] ")" ] [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ]
+            = KwNew [ AttrGrp ] KwClass [ "(" [ ArgList ] ")" ] [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ]
               [ KwImplements ImplNames ] "{" { Member } "}" ;
 
 // fn (params) => expr : an arrow function. It is a closure whose body is a single
@@ -822,7 +924,7 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
-            = [ AttrGrp ] [ "static" KwEnd ] KwFunction ParamList [ UseClause ] [ ReturnType ] Block ;
+            = [ AttrGrp ] [ "static" KwEnd ] KwFunction [ "&" ] ParamList [ UseClause ] [ ReturnType ] Block ;
 UseClause   = KwUse "(" [ UseVar { "," UseVar } ] [ "," ] ")" ;
 // 'use ($x)' captures by VALUE - a snapshot taken where the closure is created, so a
 // later write to $x outside is not visible inside. 'use (&$x)' captures by REFERENCE,
@@ -889,8 +991,10 @@ PhpInt      <~~ push(phpIntLit(up.in)) ~~>
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
             = DollarName ;
+// '$$$$d' / '${$$$a}': the indirection RECURSES, each level a name thunk over the
+// next one down, so any depth reads the same way the head form writes it.
 VarVarRef   <~~ push(makeVarVarRef(pop())) ~~>
-            = "$" ( VarRef | "{" Expression "}" ) ;
+            = "$" ( VarRef | VarVarRef | "{" Expression "}" ) ;
 Null        <~~ push(makeConst(null)) ~~> = "null" KwEnd ;
 
 // $name: the dollar sigil is part of the stored key (PHP variables and function
@@ -2424,6 +2528,41 @@ KwInstanceof = "instanceof" KwEnd ;
         }
     }
 
+    // ----- '|>' : the pipe, left associative -----
+    // makePipe receives [v, f1, f2, ...] and builds f2(f1(v)). pipeStep is a named
+    // function rather than an inline closure so each step captures its OWN operands
+    // (an inline closure in the loop would share the loop variable, and the frozen
+    // engine is stricter about that than goja). The right operand is coerced with the
+    // same callableV a '(...)' call suffix uses, so a function NAME in a string, a
+    // closure and a first-class callable all work; an instance runs its __invoke, the
+    // same branch the call suffix emits.
+    function pipeStep(lhsT, rhsT) {
+        return function(b) {
+            var rl = lhsT(b)
+            b = rl.b
+            var rr = rhsT(b)
+            b = rr.b
+            var argsV = argList(b, [rl.v])
+            var rc = callableV(b, rr.v)
+            b = rc.b
+            if (!magicInvoke) { return {b: b, v: callExt(b, "js_call", [rc.v, hUndef, argsV])} }
+            var invB = curF.NewBlock("")
+            var fnB = curF.NewBlock("")
+            var endI = curF.NewBlock("")
+            b.NewCondBr(emitIsObj(b, rc.v), invB, fnB)
+            var iv = callExt(invB, "js_mcall", [rc.v, emitStr(invB, "__invoke"), argsV])
+            invB.NewBr(endI)
+            var fv = callExt(fnB, "js_call", [rc.v, hUndef, argsV])
+            fnB.NewBr(endI)
+            return {b: endI, v: endI.NewPhi([llvm.ir.NewIncoming(iv, invB), llvm.ir.NewIncoming(fv, fnB)])}
+        }
+    }
+    function makePipe(items) {
+        var cur = items[0]
+        for (var i = 1; i < items.length; i++) { cur = pipeStep(cur, items[i]) }
+        return cur
+    }
+
     // ----- PHP's value model: the whole operator ladder goes through js_ph* -------
     // The handle runtime's default operators are JavaScript's, and PHP's are not:
     // '==' is loose, '"0"' is falsy, a float is a distinct type from an int, and an
@@ -3204,6 +3343,46 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: r.b, v: callExt(r.b, "js_phclone", [r.v])}
         }
     }
+    // clone($o, $overrides): the clone is built exactly as 'clone $o' builds it (the
+    // property copy and the __clone hook, both inside js_phclone), and the second
+    // operand - an ordered map of property name to value - is then written onto the
+    // COPY by a runtime loop over its keys, the same js_range_len / js_range_key /
+    // js_range_val walk foreach uses. A non-array second operand yields a zero-length
+    // range, so it is ignored rather than raising: this subset has no Error channel.
+    function makeCloneWith(objT, withT) {
+        var base = makeClone(objT)
+        return function(b) {
+            var rc = base(b)
+            b = rc.b
+            var copyV = rc.v
+            var rw = withT(b)
+            b = rw.b
+            hidCount++
+            var wName = "0cw_w" + hidCount
+            var lName = "0cw_len" + hidCount
+            var iName = "0cw_i" + hidCount
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, wName), rw.v])
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, lName), callExt(b, "js_range_len", [rw.v])])
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var lenV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, lName)])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            var wV = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, wName)])
+            var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var keyV = callExt(bodyB, "js_phstr", [callExt(bodyB, "js_range_key", [wV, iB])])
+            var rv = phDeref(bodyB, callExt(bodyB, "js_range_val", [wV, iB]))
+            bodyB = rv.b
+            bodyB = emitPropSet(bodyB, copyV, keyV, callExt(bodyB, "js_phcopy", [rv.v]), null)
+            callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, iName),
+                                            intWrap(bodyB, callExt(bodyB, "js_jadd", [iB, emitNum(bodyB, 1)]))])
+            bodyB.NewBr(headB)
+            return {b: exitB, v: copyV}
+        }
+    }
     // An interface: a descriptor with __isiface, its parent interfaces and its
     // constants. Methods are declarations only and are not emitted - dispatch always
     // walks the instance's own class chain, never an interface.
@@ -3475,11 +3654,26 @@ KwInstanceof = "instanceof" KwEnd ;
                 b = rs.b
                 o = rs.v
             }
+            // '$o->$n->x': a computed property name. The thunk yields the name, js_phstr
+            // coerces it to the string key, and the read is the ordinary one - but with
+            // no compile-time name there is no hook dispatch to select, so it passes
+            // null (isHooked answers false for it).
+            else if (s.keyT != undefined) {
+                var rt = s.keyT(b)
+                b = rt.b
+                var rs2 = emitPropGet(b, o, callExt(b, "js_phstr", [rt.v]), null)
+                b = rs2.b
+                o = rs2.v
+            }
             else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_phget", [o, ri.v]) }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.append === true) { return {b: b, obj: o, kind: "append"} }
         if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), keyName: last.key, kind: "field"} }
+        if (last.keyT != undefined) {
+            var rl = last.keyT(b)
+            return {b: rl.b, obj: o, key: callExt(rl.b, "js_phstr", [rl.v]), keyName: null, kind: "field"}
+        }
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v, kind: "index"}
     }
@@ -4222,25 +4416,36 @@ KwInstanceof = "instanceof" KwEnd ;
         if (arrow == null && block == null) { return {hkind: kind, hempty: true} }
         return {hkind: kind, hparam: param, harrowT: arrow, hbodyT: block}
     }
-    function makeProp(items) {
+    // One PropDecl may carry several names ('public $a, $b = 2;'). Items arrive in
+    // source order - the shared {mod} records first, then name / initializer pairs -
+    // so a new record opens at every name string and the modifiers seen so far apply
+    // to all of them, which is PHP's rule. The hooks record can only follow the LAST
+    // name (PHP forbids hooks on a multi-name declaration), so it lands on 'cur'.
+    function makeProps(items) {
+        var out = []
         var isStatic = false
-        var pname = ""
-        var init = null
-        var hooks = []
+        var cur = null
         for (var i = 0; i < items.length; i++) {
-            if (items[i] == undefined) { continue }
-            if (items[i].mod != undefined) {
-                if (hasWord(items[i].mod, "static")) { isStatic = true }
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (typeof it == "string") {
+                cur = {name: it.substring(1), init: null, isStatic: isStatic, hooks: []}
+                out.push(cur)
             }
-            else if (items[i].hooks != undefined) { hooks = items[i].hooks }
-            else if (typeof items[i] == "string") { pname = items[i].substring(1) }
-            else { init = items[i] }
+            else if (it.mod != undefined) {
+                if (hasWord(it.mod, "static")) { isStatic = true }
+            }
+            else if (it.hooks != undefined) {
+                if (cur != null) {
+                    cur.hooks = it.hooks
+                    for (var k = 0; k < it.hooks.length; k++) {
+                        if (it.hooks[k].hempty != true) { noteHooked(cur.name) }
+                    }
+                }
+            }
+            else { if (cur != null) { cur.init = it } }
         }
-        if (pname == "") { return null }
-        for (var k = 0; k < hooks.length; k++) {
-            if (hooks[k].hempty != true) { noteHooked(pname) }
-        }
-        return {name: pname, init: init, isStatic: isStatic, hooks: hooks}
+        return out
     }
     function hasWord(s, w) {
         for (var i = 0; i + w.length <= s.length; i++) {

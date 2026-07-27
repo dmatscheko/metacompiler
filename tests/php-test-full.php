@@ -892,6 +892,124 @@ function s29dump() {
     var_dump(true, null, "ab", [1 => "x"]);
 }
 
+// ===== SECTION 30: the widened parse surface =====
+// The constructs php-src's own test suite uses that this grammar could not read
+// before 2026-07-27. Each line here unblocked real corpus files, and the count of
+// files it unblocked is the reason it is in the ratchet rather than in a comment.
+//
+// The three PHP 8.5 forms below are pinned to php-src's own --EXPECT-- blocks under
+// tests/reference/php/php-src-tests/extracted/tests/ (there is no php binary on this
+// machine, so the corpus IS the specification):
+//   pipe_operator/simple_userland_call  "5 |> '_test'"                  -> int(6)
+//   pipe_operator/wrapped_chains        "$x |> '_test1' |> '_test2'", 5 -> int(12)
+//                                       so '|>' is LEFT associative
+//   pipe_operator/precedence_addition   "5 + 2 |> '_test1'"             -> int(14)
+//                                       so '|>' binds LOOSER than '+'
+//   pipe_operator/precedence_coalesce   "5 |> get_username(...) ?? 'd'" -> "5"
+//                                       so '??' binds LOOSER than '|>'
+// All four of those corpus files reproduce byte-for-byte against this grammar.
+//
+// Deliberately NOT asserted here, and why: multi-level array auto-vivification
+// ('$a[0]["k"] = 1'), which the compiler half does not do yet - it is a pre-existing
+// cross-half divergence, verified identical at HEAD, and it is chipped separately
+// rather than hidden by writing around it silently.
+class S30Box { public $a, $b; public $p = 1; }
+class S30Vis { public private(set) int $n = 4; }
+function s30dbl($x) { return $x * 2; }
+function s30inc($x) { return $x + 1; }
+function &s30ref() { static $v = 7; return $v; }
+function s30dnf(): (S30Box&S30Vis)|int { return 5; }
+
+function s30() {
+    // --- unbraced single-statement bodies ---
+    $t = "";
+    if (1) $t = $t . "a";
+    if (0) $t = $t . "z"; else $t = $t . "b";
+    if (0) $t = $t . "z"; else if (1) $t = $t . "c"; else $t = $t . "z";
+    for ($i = 0; $i < 2; $i++) $t = $t . "d";
+    foreach ([1, 2] as $v) $t = $t . "e";
+    $n = 0;
+    while ($n < 2) $n = $n + 1;
+    do $n = $n + 1; while (0);
+    check("u1", $t === "abcddee");
+    check("u2", $n === 3);
+    // an empty body is a body: 'foreach (...);' and 'while (0);'
+    $m = 0;
+    foreach ([1, 2, 3] as $q);
+    while ($m > 0);
+    check("u3", $q === 3 && $m === 0);
+    // dangling else binds to the NEAREST if
+    $d = "";
+    if (1) if (0) $d = "x"; else $d = "y";
+    check("u4", $d === "y");
+
+    // --- '@' error suppression is a pass-through, and covers a whole assignment ---
+    $ar = [];
+    @$ar[0] = "v";
+    check("s1", @$ar[0] === "v");
+    check("s2", @s30dbl(4) === 8);
+
+    // --- the pipe operator (PHP 8.5), left associative ---
+    check("p1", (5 |> s30dbl(...)) === 10);
+    check("p2", (5 |> s30dbl(...) |> s30inc(...)) === 11);
+    check("p3", (5 |> "s30dbl") === 10);
+    // '|>' binds tighter than '&&' and looser than '.', and single '|' still works
+    check("p4", (5 | 2) === 7 && (5 & 3) === 1);
+
+    // --- one declaration, several properties ---
+    $bx = new S30Box();
+    $bx->a = 1; $bx->b = 2;
+    check("m1", $bx->a + $bx->b === 3);
+
+    // --- computed property names, on the write side AND the read side ---
+    $nm = "p";
+    $bx->$nm = 9;
+    check("m2", $bx->p === 9 && $bx->$nm === 9);
+    $bx->{"q" . "r"} = 3;
+    check("m3", $bx->qr === 3 && $bx->{"qr"} === 3);
+    $bx->{1234} = "N";
+    check("m4", $bx->{1234} === "N");
+
+    // --- variable variables nest ---
+    $one = "two"; $two = "three";
+    $$$one = "deep";
+    check("v1", $three === "deep");
+
+    // --- '=&' from a reference-returning call degrades to a value assignment ---
+    $h =& s30ref();
+    check("r1", $h === 7);
+    // the real reference form is untouched
+    $x = 3; $y =& $x; $y = 9;
+    check("r2", $x === 9);
+
+    // --- a '&' slot in a destructuring pattern ---
+    list(&$la, $lb) = [4, 5];
+    check("r3", $la === 4 && $lb === 5);
+    foreach ([[6, 7]] as [&$fa, $fb]) { check("r4", $fa === 6 && $fb === 7); }
+
+    // --- an attribute group on an anonymous class ---
+    $anon = new #[S30Attr(7)] class () { public $z = 8; };
+    check("a1", $anon->z === 8);
+
+    // --- clone-with (PHP 8.5) overwrites named properties on the COPY ---
+    $c1 = new S30Box(); $c1->p = 1;
+    $c2 = clone($c1, ["p" => 5]);
+    check("c1", $c2->p === 5 && $c1->p === 1);
+    $c3 = clone($c1);
+    check("c2", $c3->p === 1);
+
+    // --- PHP 8.4 asymmetric visibility, and PHP 8.2 DNF types ---
+    check("d1", (new S30Vis())->n === 4);
+    check("d2", s30dnf() === 5);
+
+    // --- a declaration is a statement: class and function inside a function body ---
+    if (1) {
+        class S30Inner { public $w = 6; }
+        function s30nested() { return 11; }
+    }
+    check("n1", (new S30Inner())->w === 6 && s30nested() === 11);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -927,6 +1045,7 @@ function main() {
     s28(); // SECTION-CALL 28
     s29(); // SECTION-CALL 29
     s29dump(); // SECTION-CALL 29
+    s30(); // SECTION-CALL 30
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }
