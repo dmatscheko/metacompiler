@@ -1,19 +1,43 @@
 :title("Batch interpreter") ;
-:description("Interprets a subset of Windows Batch (cmd.exe .bat) directly, without
-generating code. The script is a flat list of lines - labels and statements - executed
-by a program counter, so goto and call :label work; if/for bodies are parenthesized
-( ) blocks whose goto/exit signals propagate out to that program counter. Every value is
-a string; set /a and (( )) arithmetic are 32 bit integer (an unset or non-numeric operand
-is 0). Implemented: @ prefix and @echo off (ignored); echo text and echo.; set VAR=value;
-set /a VAR=expr; %VAR% expansion and %%i for-variables; if with string ==, numeric
-EQU/NEQ/LSS/LEQ/GTR/GEQ, `if defined VAR`, `if not`, and an else ( ) branch; for %%i in
-(words) do ( ); labels :name, goto name, goto :eof, call :name, exit /b [N], exit [N];
-rem and :: comments. Keywords are recognised in all-lowercase or all-UPPERCASE; labels
-are case sensitive. The run's exit code is the script's, so a self checking script that
-ends with `exit /b <failures>` is green exactly when it passes.
+:description("Interprets Windows Batch (the cmd.exe .bat / .cmd command language) directly,
+without generating code. The script is a flat list of lines - labels and statements - executed
+by a program counter, so goto and call :label work; if/for bodies are parenthesized ( ) blocks
+whose goto/exit signals propagate out to that program counter. Every value is a string, and
+set /a arithmetic is 32 bit integer (an unset or non-numeric operand is 0).
 
-NOT modelled: delayed expansion !x!, for /f //l //r, pipes/redirection, real external
-commands, %1 call parameters, environment inheritance.") ;
+Implemented: @ prefix and @echo off; echo text, echo. and echo(; set VAR=value, set VAR= (which
+deletes), the quoted set form, set /a and set /p; the whole set /a operator set in the precedence
+set /? documents (assignment and its compound forms, comma sequencing, | ^ and shifts, + - * /
+and the modulo written %% in a file, unary ! ~ -, hex 0x and octal literals); %VAR% expansion
+with the substring (:~n,m, n or m negative) and substitution (:from=to, case insensitive, and
+the leading-* form that replaces everything up to and including the match) operators; delayed
+expansion !VAR! under setlocal enabledelayedexpansion; setlocal / endlocal with a real
+environment stack; %%i for-variables and %0..%9 / %* call arguments, both with the ~ modifiers
+that are pure string operations (~ strips quotes, ~d ~p ~n ~x ~f and combinations split a path)
+plus shift; if with string == (and /i), numeric EQU/NEQ/LSS/LEQ/GTR/GEQ, if defined, if exist,
+if errorlevel, if not and an else branch; plain for, for /l counted loops and for /f over a
+quoted string or the output of a command, with eol= skip= delims= and tokens= (including
+n,m ranges and the * remainder); the command separators & && ||; redirection; labels :name,
+goto name, goto :eof, call :name, call set (which expands a second time), exit /b [N], exit [N];
+errorlevel as a pseudo-variable; rem and :: comments; the caret escape and the caret line
+continuation.
+
+Variable names are case insensitive, for-variable letters are not, and labels are case
+sensitive. Keywords are recognised in all-lowercase or all-UPPERCASE. %VAR% is expanded the way
+cmd.exe expands it - the whole command line is expanded BEFORE it runs, so %VAR% inside a ( )
+block is the value from before the block while !VAR! is the current one. The run's exit code is
+the script's, so a self checking script that ends with `exit /b <failures>` is green exactly
+when it passes.
+
+NOT modelled, because the runtime has neither a filesystem nor real child processes: external
+programs and pipes carrying their data; for /r, for /d and file sets for for /f; if exist for
+anything but the reserved device names (nul, con, prn, aux, com1-9, lpt1-9), which always
+exist; the ~s ~a ~t ~z modifiers, which stat a file and so answer empty; a redirection target,
+so an output redirection discards; stdin, so set /p always reads nothing and leaves its
+variable unchanged; and date/time, %RANDOM%, codepages and the registry.
+
+One divergence worth naming: a for /f command set has to be an echo, the one internal command
+in this runtime that produces capturable output.") ;
 
 :startRule(Program) ;
 :whitespace(Hspace) ;
@@ -27,60 +51,131 @@ ColonComment = "::" :whitespace() { NotNL } Newline ;
 LabelLine   <~~ push({lbl: pop()}) ~~>
             = ":" LabelName :whitespace() { NotNL } Newline ;
 StmtLine    <~~ push({stmt: pop()}) ~~>
-            = [ At ] Stmt Newline ;
+            = [ At ] Chain Newline ;
 At          = "@" :whitespace() ;
 
+// ----- command chains and redirection -----
+// 'a & b' runs both, 'a && b' runs b only after success, 'a || b' only after failure.
+// A redirection is attached to the piece it follows; there is no filesystem here, so an
+// output redirection DISCARDS (the same capture machinery that backs for /f 'command').
+Chain       <~~ push(makeChain(takeAll())) ~~>
+            = Piece { ChainOp Piece } ;
+ChainOp     <~~ push(up.in) ~~> = "&&" | "||" | "&" ;
+Piece       <~~ push(makeRedir(takeAll())) ~~>
+            = Stmt { Redir } ;
+Redir       <~~ push(mkRedir(takeAll())) ~~>
+            = [ RedirFd ] RedirOp RedirTarget ;
+RedirFd     <~~ push({fd: up.in}) ~~> = "0"..."9" ;
+RedirOp     <~~ push({op: up.in}) ~~> = ">>" | ">&" | ">" | "<" ;
+RedirTarget <~~ push({tgt: up.in}) ~~> = RTChar :whitespace() { RTChar } :whitespace(Hspace) ;
+
 // A statement (also used inside ( ) blocks, where Newlines separate them).
-Stmt        = Rem | EchoCtl | EchoDot | Echo | SetA | SetQ | Set | If | For | GotoEof | Goto | Call | ExitB | Exit ;
+Stmt        = Rem | EchoCtl | EchoDot | EchoParen | Echo
+            | SetA | SetP | SetQ | Set
+            | Setlocal | Endlocal | Shift | Ver
+            | If | ForL | ForF | For
+            | GotoEof | Goto | CallSet | Call | ExitB | Exit | Group ;
 
 // ----- echo -----
 Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
 EchoCtl     <~~ push(makeNop()) ~~> = KwEcho ( KwOn | KwOff ) ;
-EchoDot     <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "." :whitespace() ;
+EchoDot     <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "." :whitespace(Hspace) ;
+EchoParen   <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "(" :whitespace(Hspace) ;
 Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
 
-// ----- set VAR=value  /  set /a VAR=expr -----
-SetA        <~~ push(makeSetA(takeAll())) ~~>
-            = KwSet "/a" :whitespace(Hspace) SetName "=" Arith ;
+// ----- set VAR=value  /  set /a expr  /  set /p VAR=prompt -----
+SetA        <~~ push(makeSetA(pop())) ~~> = KwSet "/a" :whitespace(Hspace) ArithBody ;
+ArithBody   = ArithQuoted | Arith ;
+ArithQuoted <~~ push(pop()) ~~> = '"' :whitespace(Hspace) Arith '"' :whitespace(Hspace) ;
+// set /p prompts and reads a line; there is no stdin in this runtime, so it always reads
+// nothing and (as cmd.exe does on end of file) leaves the variable unchanged.
+SetP        <~~ push(makeSetP(takeAll())) ~~>
+            = KwSet "/p" :whitespace(Hspace) SetName "=" ( LineText | Empty ) ;
 // 'set "name=value"' is the quoted form: the quotes delimit the assignment rather than
 // becoming part of the value, which is how a value with a trailing space is written.
 SetQ        <~~ push(makeSet(takeAll())) ~~>
             = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) ;
 QLineText   <~~ push(makeWord(takeAll())) ~~>
             = :whitespace() { QLinePart } :whitespace() ;
-QLinePart   = VarPct | ForRef | QLineChars ;
+QLinePart   = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | QLineChars ;
 QLineChars  <~~ push(makeStr(up.in)) ~~> = QLineChar :whitespace() { QLineChar } ;
-QLineChar   = "\x20"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not " or %
+QLineChar   = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " or %
 Set         <~~ push(makeSet(takeAll())) ~~>
             = KwSet SetName "=" ( LineText | Empty ) ;
 SetName     <~~ push(up.in) ~~>
             = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
 Empty       <~~ push(makeStr("")) ~~> = "" ;
 
+// ----- setlocal / endlocal / shift / ver -----
+Setlocal    <~~ push(makeSetlocal(takeAll())) ~~> = KwSetlocal { SlOpt } ;
+SlOpt       <~~ push(up.in) ~~> = SlChar :whitespace() { SlChar } :whitespace(Hspace) ;
+SlChar      = "a"..."z" | "A"..."Z" ;
+Endlocal    <~~ push(makeEndlocal()) ~~> = KwEndlocal ;
+Shift       <~~ push(makeShift(takeAll())) ~~> = KwShift [ ShiftOpt ] ;
+ShiftOpt    <~~ push(up.in) ~~> = "/" :whitespace() "0"..."9" :whitespace(Hspace) ;
+Ver         <~~ push(makeVer()) ~~> = KwVer ;
+
 // ----- goto / call / exit -----
 GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
 // 'goto :label' and 'goto label' are the same jump; ':eof' is matched by GotoEof above.
 Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) ;
-Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { Word } :whitespace(Hspace) ;
-ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" [ Word ] :whitespace(Hspace) ;
+// 'call set NAME=text' re-parses its argument, so the text goes through a SECOND round of
+// %VAR% expansion - the documented way to expand a name that another variable holds.
+CallSet     <~~ push(makeCallSet(takeAll())) ~~>
+            = KwCall KwSet SetName "=" ( LineText | Empty ) ;
+Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { ArgWord } :whitespace(Hspace) ;
+ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" :whitespace(Hspace) [ Word ] :whitespace(Hspace) ;
 Exit        <~~ push(makeExit(takeAll())) ~~> = KwExit [ Word ] :whitespace(Hspace) ;
 
 // ----- if / for (parenthesized bodies) -----
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf [ KwNot <~~ push({neg: true}) ~~> ] Cond Body [ KwElse Body ] ;
+            = KwIf { IfFlag } Cond Body [ KwElse Body ] ;
+IfFlag      = IfNot | IfCi ;
+IfNot       <~~ push({neg: true}) ~~> = KwNot ;
+IfCi        <~~ push({ci: true}) ~~> = "/i" :whitespace(Hspace) ;
+// for /l counts start,step,end; for /f parses text; the plain for walks a word list.
+ForL        <~~ push(makeForL(takeAll())) ~~>
+            = KwFor "/l" :whitespace(Hspace) ForVar KwIn "(" :whitespace(Hspace)
+              ForNum "," :whitespace(Hspace) ForNum "," :whitespace(Hspace) ForNum
+              ")" :whitespace(Hspace) KwDo Body ;
+ForF        <~~ push(makeForF(takeAll())) ~~>
+            = KwFor "/f" :whitespace(Hspace) [ ForOpts ] ForVar KwIn "(" :whitespace(Hspace)
+              ForFSrc ")" :whitespace(Hspace) KwDo Body ;
+ForOpts     <~~ push({opts: up.in}) ~~> = '"' :whitespace() { NotDQ } '"' :whitespace(Hspace) ;
+ForFSrc     = ForFLit | ForFCmd ;
+ForFLit     <~~ push({lit: pop()}) ~~> = RawQuoted ;
+// The single-quoted form is a COMMAND whose output is parsed. External programs are out of
+// scope for this runtime, so the command has to be an `echo` - the one internal command that
+// produces capturable output.
+ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace() SqEcho "'" :whitespace(Hspace) ;
+SqEcho      <~~ push(makeEcho(pop())) ~~> = KwEcho SqText ;
+SqText      <~~ push(makeWord(takeAll())) ~~> = [ SqPart ] :whitespace() { SqPart } ;
+SqPart      = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | SqChars ;
+SqChars     <~~ push(makeStr(up.in)) ~~> = SqChar :whitespace() { SqChar } ;
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor ForVar KwIn "(" { Word } ")" KwDo Body ;
-ForVar      = "%%" ForLetter :whitespace(Hspace) ;
+            = KwFor ForVar KwIn "(" :whitespace(Hspace) { Word } ")" :whitespace(Hspace) KwDo Body ;
+ForVar      = "%%" :whitespace() ForLetter :whitespace(Hspace) ;
+ForNum      <~~ push(makeWord(takeAll())) ~~>
+            = ForNumPart :whitespace() { ForNumPart } :whitespace(Hspace) ;
+ForNumPart  = ForRef | VarPct | ParamRef | BangVar | ForNumChars ;
+ForNumChars <~~ push(makeStr(up.in)) ~~> = FNChar :whitespace() { FNChar } ;
+FNChar      = "0"..."9" | "-" | "+" ;
 // A body is a ( ... ) block (statements separated by newlines) or a single statement.
 Body        = Block | Single ;
 Block       <~~ push({body: makeSeq(takeAll())}) ~~>
-            = "(" :whitespace(Hspace) OptNL { Stmt SepNL } ")" :whitespace(Hspace) ;
+            = "(" :whitespace(Hspace) OptNL { Chain SepNL } ")" :whitespace(Hspace) ;
 Single      <~~ push({body: pop()}) ~~> = Stmt ;
+Group       <~~ push(makeGroup(pop())) ~~> = Block ;
 OptNL       = { Newline } ;
 SepNL       = { Newline } ;
 
 // ----- conditions -----
-Cond        = DefinedCond | CmpCond | StrCond ;
+Cond        = ErrCond | ExistCond | DefinedCond | CmpCond | StrCond ;
+// 'if errorlevel N' is true when the code is N or greater.
+ErrCond     <~~ push(mkErrLevel(pop())) ~~> = KwErrorlevel Word ;
+// There is no filesystem here, so `if exist` can only answer for the reserved device names
+// (nul, con, prn, aux, com1-9, lpt1-9), which always exist; anything else answers false.
+ExistCond   <~~ push(mkExist(pop())) ~~> = KwExist Word ;
 DefinedCond <~~ push(mkDefined(pop())) ~~> = KwDefined SetName ;
 CmpCond     <~~ push(mkCmp(takeAll())) ~~> = CmpArg CmpOp CmpArg ;
 StrCond     <~~ push(mkStrCmp(takeAll())) ~~> = CmpArg "==" <~~ push("==") ~~> CmpArg ;
@@ -96,19 +191,70 @@ CmpOp       = ( "EQU" | "NEQ" | "LSS" | "LEQ" | "GTR" | "GEQ"
 // swallow the next token (1 EQU 1 became one word 1EQU1).
 Word        <~~ push(makeWord(takeAll())) ~~>
             = Part :whitespace() { Part } :whitespace(Hspace) ;
-Part        = VarPct | ForRef | DQuote | Bareword ;
-VarPct      <~~ push(mkVarRef(pop())) ~~>
-            = "%" VarNm "%" :whitespace() ;
-VarNm       <~~ push(up.in) ~~>
+Part        = DQuote | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
+            | EscNL | EscCh | PctLit | BangLit | Bareword ;
+// An argument keeps its quotes (%~1 is what strips them), so it uses RawQuoted.
+ArgWord     <~~ push(makeWord(takeAll())) ~~>
+            = ArgPart :whitespace() { ArgPart } :whitespace(Hspace) ;
+ArgPart     = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
+            | EscNL | EscCh | PctLit | BangLit | Bareword ;
+
+// %VAR%, with the substring (:~n,m) and substitution (:from=to) operators.
+VarPct      <~~ push(mkVarRef(takeAll())) ~~>
+            = "%" :whitespace() VarNm [ VarMod ] "%" :whitespace() ;
+VarNm       <~~ push({nm: up.in}) ~~>
             = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace() ;
-ForRef      <~~ push(mkForRef(pop())) ~~>
-            = "%%" ForLetter :whitespace() ;
-ForLetter   <~~ push(up.in) ~~>
+VarMod      = SubStrMod | SubstMod ;
+SubStrMod   <~~ push(mkSubStr(takeAll())) ~~> = ":~" [ SubStart ] [ SubLenPart ] ;
+SubStart    <~~ push({start: up.in}) ~~> = SNum ;
+SubLenPart  = "," [ SubLen ] ;
+SubLen      <~~ push({len: up.in}) ~~> = SNum ;
+SNum        = [ "-" ] "0"..."9" { "0"..."9" } ;
+SubstMod    <~~ push(mkSubst(takeAll())) ~~>
+            = ":" [ SubStar ] SubFrom "=" [ SubTo ] ;
+SubStar     <~~ push({star: true}) ~~> = "*" ;
+SubFrom     <~~ push({from: up.in}) ~~> = SubFChar { SubFChar } ;
+SubTo       <~~ push({to: up.in}) ~~> = SubTChar { SubTChar } ;
+SubFChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\x3c" | "\x3e"..."\U0010ffff" ;  // not % or =
+SubTChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\U0010ffff" ;                    // not %
+
+// %%i for-variables, with the ~ modifiers (pure string operations on the value).
+ForRef      <~~ push(mkForRef(takeAll())) ~~>
+            = "%%" :whitespace() [ TildeMod ] ForLetter :whitespace() ;
+TildeMod    <~~ push({mods: up.in}) ~~> = "~" :whitespace() { ModLetter } :whitespace() ;
+ModLetter   = "d" | "p" | "n" | "x" | "f" | "s" | "a" | "t" | "z"
+            | "D" | "P" | "N" | "X" | "F" | "S" | "A" | "T" | "Z" ;
+ForLetter   <~~ push({fv: up.in}) ~~>
             = ( "a"..."z" | "A"..."Z" ) :whitespace() ;
+// %1..%9 call arguments (%0 is the label), %* the whole tail, %~1 with the same modifiers.
+ParamStar   <~~ push(mkParamStar()) ~~> = "%*" :whitespace() ;
+ParamRef    <~~ push(mkParamRef(takeAll())) ~~>
+            = "%" :whitespace() [ TildeMod ] ParamDigit :whitespace() ;
+ParamDigit  <~~ push({pn: up.in}) ~~> = "0"..."9" ;
+// !VAR! is the delayed-expansion form: it reads the CURRENT value even inside a block.
+// Outside `setlocal enabledelayedexpansion` it is literal text, which the thunk decides.
+BangVar     <~~ push(mkBangRef(takeAll())) ~~>
+            = "!" :whitespace() VarNm [ VarMod ] "!" :whitespace() ;
+// In a batch file %% is a literal percent sign; a lone % or ! that starts nothing is itself.
+PctPct      <~~ push(makeStr("%")) ~~> = "%%" :whitespace() ;
+PctLit      <~~ push(makeStr("%")) ~~> = "%" :whitespace() ;
+BangLit     <~~ push(makeStr("!")) ~~> = "!" :whitespace() ;
+// A caret escapes the next character; a caret at end of line continues the line.
+EscNL       <~~ push(makeStr("")) ~~> = "^" :whitespace() NLChars :whitespace() ;
+EscCh       <~~ push(makeStr(escBody(up.in))) ~~> = "^" :whitespace() AnyChar :whitespace() ;
+NLChars     = "\r\n" | "\n" | "\r" ;
+AnyChar     = "\x00"..."\U0010ffff" ;
+
+// A double-quoted run. DQuote drops the quotes (an `if` argument), RawQuoted keeps them
+// (a call argument, and text inside a value, where the quotes are part of the string).
 DQuote      <~~ push(makeWord(takeAll())) ~~>
             = '"' :whitespace() { DPart } '"' :whitespace() ;
-DPart       = VarPct | ForRef | DText ;
-DText       <~~ push(makeStr(up.in)) ~~> = { NotDQPct } ;
+RawQuoted   <~~ push(makeWord(takeAll())) ~~>
+            = DqOpen :whitespace() { DPart } DqClose :whitespace() ;
+DqOpen      <~~ push(makeStr("\x22")) ~~> = '"' ;
+DqClose     <~~ push(makeStr("\x22")) ~~> = '"' ;
+DPart       = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | DText ;
+DText       <~~ push(makeStr(up.in)) ~~> = NotDQPct :whitespace() { NotDQPct } ;
 Bareword    <~~ push(makeStr(up.in)) ~~>
             = BareChar :whitespace() { BareChar } :whitespace() ;
 
@@ -119,20 +265,49 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
 // that the engine's leading skip ate every space that followed an expansion.
 LineText    <~~ push(makeWord(takeAll())) ~~>
             = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
-LinePart    = VarPct | ForRef | LineChars ;
+LinePart    = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
+            | EscNL | EscCh | PctLit | BangLit | DqLit | LineChars ;
+DqLit       <~~ push(makeStr("\x22")) ~~> = '"' :whitespace() ;
 LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
 
-// ----- arithmetic (integer): + - * / %, comparisons, parens, bare names, numbers -----
-Arith       = ArithCmp ;
-ArithCmp    <~~ push(foldArith(takeAll())) ~~>
-            = ArithAdd { ( "==" | "!=" | "<=" | "<" | ">=" | ">" ) <~~ push(up.in) ~~> ArithAdd } ;
-ArithAdd    <~~ push(foldArith(takeAll())) ~~>
-            = ArithMul { ( "+" | "-" ) <~~ push(up.in) ~~> ArithMul } ;
-ArithMul    <~~ push(foldArith(takeAll())) ~~>
-            = ArithAtom { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> ArithAtom } ;
-ArithAtom   = ( "(" Arith ")" ) | ArithNeg | ArithNum | ArithVar ;
-ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" ArithAtom ;
-ArithNum    <~~ push(mkANum(up.in)) ~~> = ( "0"..."9" { "0"..."9" } ) :whitespace(Hspace) ;
+// ----- arithmetic (32 bit integer), in the precedence set /? documents -----
+Arith       = ArithSeq ;
+ArithSeq    <~~ push(foldSeq(takeAll())) ~~> = ArithAssign { "," :whitespace(Hspace) ArithAssign } ;
+ArithAssign = ArithSet | ArithOr ;
+ArithSet    <~~ push(mkAssign(takeAll())) ~~> = ArithName AssignOp ArithAssign ;
+ArithName   <~~ push(up.in) ~~>
+            = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
+AssignOp    <~~ push(up.in) ~~>
+            = ( "*=" | "/=" | "%%=" | "%=" | "+=" | "-=" | "&=" | "^=" | "|=" | "<<=" | ">>=" | AssignEq )
+              :whitespace(Hspace) ;
+AssignEq    = "=" ;
+ArithOr     <~~ push(foldArith(takeAll())) ~~> = ArithXor { OrOp ArithXor } ;
+OrOp        <~~ push(up.in) ~~> = "|" :whitespace(Hspace) ;
+ArithXor    <~~ push(foldArith(takeAll())) ~~> = ArithAnd { XorOp ArithAnd } ;
+XorOp       <~~ push(up.in) ~~> = "^" :whitespace(Hspace) ;
+ArithAnd    <~~ push(foldArith(takeAll())) ~~> = ArithShift { AndOp ArithShift } ;
+AndOp       <~~ push(up.in) ~~> = "&" :whitespace(Hspace) ;
+ArithShift  <~~ push(foldArith(takeAll())) ~~> = ArithAdd { ShiftOp ArithAdd } ;
+ShiftOp     <~~ push(up.in) ~~> = ( "<<" | ">>" ) :whitespace(Hspace) ;
+ArithAdd    <~~ push(foldArith(takeAll())) ~~> = ArithMul { AddOp ArithMul } ;
+AddOp       <~~ push(up.in) ~~> = ( "+" | "-" ) :whitespace(Hspace) ;
+ArithMul    <~~ push(foldArith(takeAll())) ~~> = ArithUnary { MulOp ArithUnary } ;
+MulOp       <~~ push(up.in) ~~> = ( "*" | "/" | "%%" | "%" ) :whitespace(Hspace) ;
+// ArithExp comes FIRST: !counter! is a delayed expansion, not a logical not of 'counter!'.
+ArithUnary  = ArithExp | ArithNot | ArithBNot | ArithNeg | ArithAtom ;
+ArithNot    <~~ push(mkANot(pop())) ~~> = "!" :whitespace(Hspace) ArithUnary ;
+ArithBNot   <~~ push(mkABNot(pop())) ~~> = "~" :whitespace(Hspace) ArithUnary ;
+ArithNeg    <~~ push(mkANeg(pop())) ~~> = "-" :whitespace(Hspace) ArithUnary ;
+ArithAtom   = ArithParen | ArithHex | ArithOct | ArithNum | ArithExp | ArithVar ;
+ArithParen  <~~ push(pop()) ~~> = "(" :whitespace(Hspace) Arith ")" :whitespace(Hspace) ;
+ArithHex    <~~ push(mkAHex(up.in)) ~~> = ( "0x" | "0X" ) :whitespace() HexDig :whitespace() { HexDig } :whitespace(Hspace) ;
+HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
+ArithOct    <~~ push(mkAOct(up.in)) ~~> = "0" :whitespace() OctDig :whitespace() { OctDig } :whitespace(Hspace) ;
+OctDig      = "0"..."7" ;
+ArithNum    <~~ push(mkANum(up.in)) ~~> = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Hspace) ;
+// A %VAR% / %1 expansion is a value inside set /a too.
+ArithExp    <~~ push(mkAStr(pop())) ~~> = ArithExpPart :whitespace(Hspace) ;
+ArithExpPart = ForRef | VarPct | ParamRef | BangVar ;
 ArithVar    <~~ push(mkAVar(up.in)) ~~>
             = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Hspace) ;
 
@@ -143,10 +318,16 @@ KwEchoW   = ( "echo" | "ECHO" ) ;                 // no boundary: echo. is echo 
 KwOn      = ( "on" | "ON" ) KwEnd ;
 KwOff     = ( "off" | "OFF" ) KwEnd ;
 KwSet     = ( "set" | "SET" ) KwEnd ;
+KwSetlocal = ( "setlocal" | "SETLOCAL" ) KwEnd ;
+KwEndlocal = ( "endlocal" | "ENDLOCAL" ) KwEnd ;
+KwShift   = ( "shift" | "SHIFT" ) KwEnd ;
+KwVer     = ( "ver" | "VER" ) KwEnd ;
 KwIf      = ( "if" | "IF" ) KwEnd ;
 KwNot     = ( "not" | "NOT" ) KwEnd ;
 KwElse    = ( "else" | "ELSE" ) KwEnd ;
 KwDefined = ( "defined" | "DEFINED" ) KwEnd ;
+KwExist   = ( "exist" | "EXIST" ) KwEnd ;
+KwErrorlevel = ( "errorlevel" | "ERRORLEVEL" ) KwEnd ;
 KwFor     = ( "for" | "FOR" ) KwEnd ;
 KwIn      = ( "in" | "IN" ) KwEnd ;
 KwDo      = ( "do" | "DO" ) KwEnd ;
@@ -168,11 +349,21 @@ LineCont    = "^" ( "\r\n" | "\n" | "\r" ) ;
 Newline     = ( "\r\n" | "\n" | "\r" ) :whitespace(Hspace) ;
 LabelName   <~~ push(up.in) ~~>
             = ( "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "." } :whitespace() ;
-// A bareword char: printable except whitespace, ) % " and the special glue.
-BareChar    = "\x21" | "\x23"..."\x24" | "\x26"..."\x27" | "\x2a"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
-LineChar    = "\x20"..."\x24" | "\x26"..."\x28" | "\x2a"..."\U0010ffff" ;   // except % ) and newline
+// A bareword char: printable except whitespace and the characters that start something
+// else - % ! " ( ) & | < > ^ .
+BareChar    = "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x5d"
+            | "\x5f"..."\x7b" | "\x7d"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
+// A line-text char: the same set plus space, tab, ( and , but still not % ! " ) & | < > ^ .
+LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27"..."\x28" | "\x2a"..."\x3b" | "\x3d"
+            | "\x3f"..."\x5d" | "\x5f"..."\x7b" | "\x7d"..."\U0010ffff" ;
+// A redirection target: printable except whitespace " & < > | .
+RTChar      = "\x21" | "\x23"..."\x25" | "\x27"..."\x3b" | "\x3d" | "\x3f"..."\x7b"
+            | "\x7d"..."\U0010ffff" ;
+// Text inside a single-quoted for /f command: not ' % ! and not a newline.
+SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x26" | "\x28"..."\U0010ffff" ;
 NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
-NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not " (0x22) or % (0x25)
+NotDQ       = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;                     // not " (0x22)
+NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " % newline
 
 :startScript(~~
 
@@ -184,7 +375,25 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         return items
     }
 
-    // ----- integer -> decimal string, hand rolled to avoid any engine formatting drift -----
+    // ----- small string helpers (hand rolled: the frozen engine has no split/join, and its
+    // ----- indexOf ignores the from-index, so every scan below is an explicit loop) -----
+    function lower(s) {
+        var out = "", i = 0
+        for (i = 0; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            out = out + ((cc >= 65 && cc <= 90) ? String.fromCharCode(cc + 32) : s.charAt(i))
+        }
+        return out
+    }
+    function findAt(hay, needle, from) {          // index of needle at or after from, or -1
+        var n = needle.length, i = from
+        if (n == 0) { return from }
+        while (i + n <= hay.length) {
+            if (hay.substring(i, i + n) == needle) { return i }
+            i = i + 1
+        }
+        return -1
+    }
     var DIGITS = "0123456789"
     function intToStr(n) {
         var m = n | 0
@@ -200,71 +409,348 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         return neg ? ("-" + s) : s
     }
     function toInt(s) {
-        var n = parseInt(s, 10)
-        return (n != n) ? 0 : (n | 0)
+        var i = 0, sign = 1, v = 0
+        while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t")) { i = i + 1 }
+        if (i < s.length && (s.charAt(i) == "-" || s.charAt(i) == "+")) {
+            if (s.charAt(i) == "-") { sign = -1 }
+            i = i + 1
+        }
+        while (i < s.length) {
+            var cc = s.charCodeAt(i)
+            if (cc < 48 || cc > 57) { break }
+            v = (v * 10 + (cc - 48)) | 0
+            i = i + 1
+        }
+        return (sign * v) | 0
     }
+    function parseRadix(text, radix, skip) {
+        var v = 0, i = skip
+        while (i < text.length) {
+            var cc = text.charCodeAt(i)
+            var d = -1
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            if (d < 0 || d >= radix) { break }
+            v = (v * radix + d) | 0
+            i = i + 1
+        }
+        return v
+    }
+    function escBody(s) { return s.substring(1) }
 
-    // ----- variables: a single global string environment (keys "$"-prefixed) -----
-    var vars = {}
-    function setVar(name, val) { vars["$" + name] = "" + val }
-    function getVar(name) { return hasOwn(vars, "$" + name) ? vars["$" + name] : "" }
-    function isDefined(name) { return hasOwn(vars, "$" + name) }
-    // for-loop variables live in their own table, keyed by the %%x letter.
+    // ===================================================================================
+    //  The environment.
+    //
+    //  Variable names are case insensitive, so the table is keyed by the lower-cased name.
+    //  `lineOld` is the PARSE-TIME snapshot that makes %VAR% behave the way cmd.exe's
+    //  expansion does: a whole command line is expanded BEFORE it runs, so %VAR% inside a
+    //  ( ) block is the value from before the block, while !VAR! is the current one. Rather
+    //  than copy the environment at every line, each write records the pre-write value once;
+    //  %VAR% reads that overlay when it exists, !VAR! always reads live.
+    // ===================================================================================
+
+    var vars = {}, defs = {}, varKeys = []
+    var errlvl = 0
+    var delayedOn = false
+    var localStack = []
+    var lineOld = {}
+
+    function ensureKey(k) { if (!hasOwn(defs, k)) { varKeys.push(k); vars[k] = ""; defs[k] = false } }
+    function noteWrite(k) {
+        if (!hasOwn(lineOld, k)) {
+            lineOld[k] = {v: (hasOwn(vars, k) ? vars[k] : ""), d: (hasOwn(defs, k) ? defs[k] : false)}
+        }
+    }
+    function setVar(name, val) {
+        var k = "$" + lower(name)
+        noteWrite(k); ensureKey(k)
+        vars[k] = "" + val; defs[k] = true
+    }
+    function unsetVar(name) {
+        var k = "$" + lower(name)
+        noteWrite(k); ensureKey(k)
+        vars[k] = ""; defs[k] = false
+    }
+    function isDefined(name) { var k = "$" + lower(name); return hasOwn(defs, k) && defs[k] }
+    function liveVal(name) {
+        var k = "$" + lower(name)
+        if (hasOwn(defs, k) && defs[k]) { return vars[k] }
+        if (k == "$errorlevel") { return intToStr(errlvl) }
+        return ""
+    }
+    function snapVal(name) {
+        var k = "$" + lower(name)
+        if (hasOwn(lineOld, k)) {
+            if (lineOld[k].d) { return lineOld[k].v }
+            if (k == "$errorlevel") { return intToStr(errlvl) }
+            return ""
+        }
+        return liveVal(name)
+    }
+    // for-loop variables live in their own table, keyed by the %%x letter (case SENSITIVE).
     var forVars = {}
     function setForVar(letter, val) { forVars["$" + letter] = "" + val }
     function getForVar(letter) { return hasOwn(forVars, "$" + letter) ? forVars["$" + letter] : "" }
+    function nextLetter(letter, n) {
+        var cc = letter.charCodeAt(0) + n
+        return String.fromCharCode(cc)
+    }
 
-    // ----- value / word thunks: function() -> string -----
+    // ----- call arguments: %0..%9, %* and shift -----
+    var argFrames = [{lbl: "", a: []}]
+    function curFrame() { return argFrames[argFrames.length - 1] }
+    function argAt(n) {
+        var f = curFrame()
+        if (n == 0) { return f.lbl }
+        return (n <= f.a.length) ? f.a[n - 1] : ""
+    }
+    function argTail() {
+        var f = curFrame(), out = "", i = 0
+        for (i = 0; i < f.a.length; i++) { out = out + ((i > 0) ? " " : "") + f.a[i] }
+        return out
+    }
+    function shiftArgs(from) {
+        var a = curFrame().a, i = from
+        while (i + 1 <= a.length - 1) { a[i] = a[i + 1]; i = i + 1 }
+        if (a.length > from) { a.pop() }
+    }
+
+    // ----- output capture (redirection discards; for /f 'echo ...' parses what it caught) --
+    var capStack = []
+    function outLine(s) {
+        if (capStack.length > 0) {
+            capStack[capStack.length - 1] = capStack[capStack.length - 1] + s + "\n"
+        } else { println(s) }
+    }
+    function capStart() { capStack.push("") }
+    function capEnd() { return capStack.pop() }
+
+    // ===================================================================================
+    //  The string operators of %VAR:~n,m% / %VAR:a=b% and of the ~ modifiers.
+    // ===================================================================================
+
+    function stripQuotes(s) {
+        if (s.length >= 2 && s.charAt(0) == "\x22" && s.charAt(s.length - 1) == "\x22") {
+            return s.substring(1, s.length - 1)
+        }
+        return s
+    }
+    function substrOp(s, startText, lenText, hasLen) {
+        var n = s.length
+        var st = (startText == null) ? 0 : toInt(startText)
+        if (st < 0) { st = n + st; if (st < 0) { st = 0 } }
+        if (st > n) { st = n }
+        var end = n
+        if (hasLen) {
+            var L = toInt(lenText)
+            end = (L < 0) ? (n + L) : (st + L)
+        }
+        if (end < st) { end = st }
+        if (end > n) { end = n }
+        return s.substring(st, end)
+    }
+    // The match is case insensitive; a leading * replaces everything up to and INCLUDING it.
+    function substOp(s, from, to, star) {
+        if (from == "") { return s }
+        var ls = lower(s), lf = lower(from)
+        if (star) {
+            var at = findAt(ls, lf, 0)
+            if (at < 0) { return s }
+            return to + s.substring(at + from.length)
+        }
+        var out = "", i = 0
+        while (i < s.length) {
+            if (i + from.length <= s.length && ls.substring(i, i + from.length) == lf) {
+                out = out + to; i = i + from.length
+            } else { out = out + s.charAt(i); i = i + 1 }
+        }
+        return out
+    }
+    function hasMod(mods, ch) {
+        var i = 0
+        for (i = 0; i < mods.length; i++) { if (lower(mods.charAt(i)) == ch) { return true } }
+        return false
+    }
+    // Pure string path arithmetic. ~f ~d ~p ~n ~x ~nx are string operations; ~s ~a ~t ~z
+    // would have to stat the file, which this runtime cannot do, so they answer "".
+    function applyMods(mods, raw) {
+        var s = stripQuotes(raw)
+        if (mods == "") { return s }
+        var drive = "", rest = s
+        if (s.length >= 2 && s.charAt(1) == ":") { drive = s.substring(0, 2); rest = s.substring(2) }
+        var cut = -1, i = 0
+        for (i = 0; i < rest.length; i++) {
+            var ch = rest.charAt(i)
+            if (ch == "\x5c" || ch == "/") { cut = i }
+        }
+        var path = (cut >= 0) ? rest.substring(0, cut + 1) : ""
+        var base = (cut >= 0) ? rest.substring(cut + 1) : rest
+        var dot = -1
+        for (i = 0; i < base.length; i++) { if (base.charAt(i) == ".") { dot = i } }
+        var nm = (dot > 0) ? base.substring(0, dot) : base
+        var ext = (dot > 0) ? base.substring(dot) : ""
+        if (hasMod(mods, "f")) { return drive + path + nm + ext }
+        var out = ""
+        if (hasMod(mods, "d")) { out = out + drive }
+        if (hasMod(mods, "p")) { out = out + path }
+        if (hasMod(mods, "n")) { out = out + nm }
+        if (hasMod(mods, "x")) { out = out + ext }
+        return out
+    }
+
+    // ===================================================================================
+    //  Value / word thunks: function() -> string
+    // ===================================================================================
+
     function makeStr(s) { return function() { return s } }
-    function mkVarRef(name) { return function() { return getVar(name) } }
-    function mkForRef(letter) { return function() { return getForVar(letter) } }
     function makeWord(parts) {
         return function() {
-            var out = ""
-            var i = 0
+            var out = "", i = 0
             for (i = 0; i < parts.length; i++) { out = out + parts[i]() }
             return out
         }
     }
+    function modsOf(items, upto) {
+        var i = 0
+        for (i = 0; i < upto; i++) { if (items[i].mods != undefined) { return items[i].mods.substring(1) } }
+        return null                                // null = no ~ at all, so the value is raw
+    }
+    function mkSubStr(items) {                     // [{start}?, {len}?]
+        var st = null, ln = null, hasLen = false, i = 0
+        for (i = 0; i < items.length; i++) {
+            if (items[i].start != undefined) { st = items[i].start }
+            if (items[i].len != undefined) { ln = items[i].len; hasLen = true }
+        }
+        return function(s) { return substrOp(s, st, ln, hasLen) }
+    }
+    function mkSubst(items) {                      // [{star}?, {from}, {to}?]
+        var star = false, from = "", to = "", i = 0
+        for (i = 0; i < items.length; i++) {
+            if (items[i].star != undefined) { star = true }
+            if (items[i].from != undefined) { from = items[i].from }
+            if (items[i].to != undefined) { to = items[i].to }
+        }
+        return function(s) { return substOp(s, from, to, star) }
+    }
+    function mkVarRef(items) {                     // [{nm}, mod?]
+        var nm = items[0].nm
+        var mod = (items.length > 1) ? items[1] : null
+        return function() {
+            var v = snapVal(nm)
+            if (mod != null) { v = mod(v) }
+            return v
+        }
+    }
+    function mkBangRef(items) {                    // [{nm}, mod?]
+        var nm = items[0].nm
+        var mod = (items.length > 1) ? items[1] : null
+        return function() {
+            if (!delayedOn) { return "!" + nm + "!" }
+            var v = liveVal(nm)
+            if (mod != null) { v = mod(v) }
+            return v
+        }
+    }
+    function mkForRef(items) {                     // [{mods}?, {fv}]
+        var letter = items[items.length - 1].fv
+        var mods = modsOf(items, items.length - 1)
+        return function() {
+            var v = getForVar(letter)
+            return (mods == null) ? v : applyMods(mods, v)
+        }
+    }
+    function mkParamRef(items) {                   // [{mods}?, {pn}]
+        var n = toInt(items[items.length - 1].pn)
+        var mods = modsOf(items, items.length - 1)
+        return function() {
+            var v = argAt(n)
+            return (mods == null) ? v : applyMods(mods, v)
+        }
+    }
+    function mkParamStar() { return function() { return argTail() } }
 
-    // ----- arithmetic thunks: function() -> 32 bit int -----
+    // ===================================================================================
+    //  Arithmetic thunks: function() -> 32 bit int
+    // ===================================================================================
+
     function mkANum(s) { var n = toInt(s); return function() { return n } }
-    function mkAVar(name) { return function() { return toInt(getVar(name)) } }
+    function mkAHex(s) { var n = parseRadix(s, 16, 2); return function() { return n } }
+    function mkAOct(s) { var n = parseRadix(s, 8, 1); return function() { return n } }
+    function mkAVar(name) { return function() { return toInt(liveVal(name)) } }
+    function mkAStr(t) { return function() { return toInt(t()) } }
     function mkANeg(t) { return function() { return (0 - t()) | 0 } }
+    function mkANot(t) { return function() { return (t() == 0) ? 1 : 0 } }
+    function mkABNot(t) { return function() { return (~t()) | 0 } }
     function aOp(op, l, r) {
         if (op == "+") return (l + r) | 0
         if (op == "-") return (l - r) | 0
         if (op == "*") return Math.imul(l, r)
         if (op == "/") return (r == 0) ? 0 : ((l / r) | 0)
-        if (op == "%") return (r == 0) ? 0 : ((l % r) | 0)
-        if (op == "==") return (l == r) ? 1 : 0
-        if (op == "!=") return (l != r) ? 1 : 0
-        if (op == "<") return (l < r) ? 1 : 0
-        if (op == "<=") return (l <= r) ? 1 : 0
-        if (op == ">") return (l > r) ? 1 : 0
-        if (op == ">=") return (l >= r) ? 1 : 0
+        if (op == "%" || op == "%%") return (r == 0) ? 0 : ((l % r) | 0)
+        if (op == "<<") return (l << (r & 31)) | 0
+        if (op == ">>") return (l >> (r & 31)) | 0
+        if (op == "&") return (l & r) | 0
+        if (op == "|") return (l | r) | 0
+        if (op == "^") return (l ^ r) | 0
         return 0
     }
     function foldArith(items) {
         if (items.length == 1) return items[0]
         return function() {
-            var v = items[0]()
-            var i = 1
+            var v = items[0](), i = 1
             for (i = 1; i < items.length; i += 2) { v = aOp(items[i], v, items[i + 1]()) }
             return v
         }
     }
-
-    // ----- condition thunks: function() -> boolean -----
-    function mkDefined(name) { return function() { return isDefined(name) } }
-    function mkStrCmp(items) {                         // [leftWord, "==", rightWord]
-        var lT = items[0], rT = items[2]
-        return function() { return lT() == rT() }
-    }
-    function mkCmp(items) {                            // [leftWord, OP, rightWord]
-        var lT = items[0], op = items[1], rT = items[2]
-        var opl = op
+    function foldSeq(items) {
+        if (items.length == 1) return items[0]
         return function() {
+            var v = 0, i = 0
+            for (i = 0; i < items.length; i++) { v = items[i]() }
+            return v
+        }
+    }
+    function mkAssign(items) {                     // [name, op, valueThunk]
+        var name = items[0], op = items[1], vT = items[2]
+        return function() {
+            var v = vT()
+            var res = v
+            if (op != "=") {
+                var cur = toInt(liveVal(name))
+                res = aOp(op.substring(0, op.length - 1), cur, v)
+            }
+            setVar(name, intToStr(res))
+            return res
+        }
+    }
+
+    // ===================================================================================
+    //  Condition thunks: function() -> boolean
+    // ===================================================================================
+
+    function mkDefined(name) { return function(ci) { return isDefined(name) } }
+    function mkErrLevel(wT) { return function(ci) { return errlvl >= toInt(wT()) } }
+    function isDevice(s) {
+        if (s == "nul" || s == "con" || s == "prn" || s == "aux") { return true }
+        if (s.length == 4 && (s.substring(0, 3) == "com" || s.substring(0, 3) == "lpt")) {
+            var cc = s.charCodeAt(3)
+            return cc >= 49 && cc <= 57
+        }
+        return false
+    }
+    function mkExist(wT) { return function(ci) { return isDevice(lower(stripQuotes(wT()))) } }
+    function mkStrCmp(items) {                     // [leftWord, "==", rightWord]
+        var lT = items[0], rT = items[2]
+        return function(ci) {
+            var a = lT(), b = rT()
+            if (ci) { a = lower(a); b = lower(b) }
+            return a == b
+        }
+    }
+    function mkCmp(items) {                        // [leftWord, OP, rightWord]
+        var lT = items[0], opl = items[1], rT = items[2]
+        return function(ci) {
             var x = toInt(lT()), y = toInt(rT())
             if (opl == "EQU" || opl == "equ") return x == y
             if (opl == "NEQ" || opl == "neq") return x != y
@@ -276,64 +762,100 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         }
     }
 
-    // ----- statement thunks: function() -> undefined | signal -----
-    // signals: {gotoLbl}, {callLbl}, {ret: code}, {procexit: code}
+    // ===================================================================================
+    //  Statement thunks: function() -> undefined | signal
+    //  signals: {gotoLbl}, {ret: code|null}, {procexit: code}
+    // ===================================================================================
+
     function makeNop() { return function() { return undefined } }
-    function makeEcho(wordT) {
-        return function() { println(wordT()); return undefined }
+    function makeGroup(rec) { return rec.body }
+    function makeEcho(wordT) { return function() { outLine(wordT()); return undefined } }
+    function makeVer() {
+        return function() {
+            outLine("Microsoft Windows [Version 10.0.19045.0]")
+            errlvl = 0
+            return undefined
+        }
     }
-    function makeSet(items) {                          // [name, valueLineThunk]
+    function makeSet(items) {                      // [name, valueThunk]
         var name = items[0], valT = items[1]
-        return function() { setVar(name, valT()); return undefined }
+        return function() {
+            var v = valT()
+            if (v == "") { unsetVar(name) } else { setVar(name, v) }
+            return undefined
+        }
     }
-    function makeSetA(items) {                         // [name, arithThunk]
-        var name = items[0], arithT = items[1]
-        return function() { setVar(name, intToStr(arithT())); return undefined }
+    function makeSetP(items) {                     // [name, promptThunk] - no stdin here
+        var promptT = items[1]
+        return function() { promptT(); return undefined }
+    }
+    function makeSetA(arithT) { return function() { arithT(); return undefined } }
+    function makeShift(items) {
+        var from = 0
+        if (items.length > 0) { from = toInt(items[0].substring(1)) }
+        return function() { shiftArgs(from); return undefined }
+    }
+    function makeSetlocal(opts) {
+        return function() {
+            var snapV = {}, snapD = {}, i = 0
+            for (i = 0; i < varKeys.length; i++) { snapV[varKeys[i]] = vars[varKeys[i]]; snapD[varKeys[i]] = defs[varKeys[i]] }
+            localStack.push({v: snapV, d: snapD, dly: delayedOn})
+            for (i = 0; i < opts.length; i++) {
+                var o = lower(opts[i])
+                if (o == "enabledelayedexpansion") { delayedOn = true }
+                if (o == "disabledelayedexpansion") { delayedOn = false }
+            }
+            return undefined
+        }
+    }
+    function makeEndlocal() {
+        return function() {
+            if (localStack.length == 0) { return undefined }
+            var s = localStack.pop()
+            var i = 0
+            // Record every pre-restore value first, so that `endlocal & set X=%inner%` still
+            // sees the local value on the right hand side - cmd expands the whole line first.
+            for (i = 0; i < varKeys.length; i++) { noteWrite(varKeys[i]) }
+            for (i = 0; i < varKeys.length; i++) {
+                var k = varKeys[i]
+                if (hasOwn(s.d, k)) { vars[k] = s.v[k]; defs[k] = s.d[k] } else { vars[k] = ""; defs[k] = false }
+            }
+            delayedOn = s.dly
+            return undefined
+        }
+    }
+    // 'call set NAME=text' runs its argument through a SECOND expansion pass.
+    function expandPct(s) {
+        var out = "", i = 0
+        while (i < s.length) {
+            if (s.charAt(i) == "%") {
+                var j = i + 1, nm = ""
+                while (j < s.length && s.charAt(j) != "%") { nm = nm + s.charAt(j); j = j + 1 }
+                if (j < s.length && nm.length > 0) { out = out + liveVal(nm); i = j + 1; continue }
+            }
+            out = out + s.charAt(i); i = i + 1
+        }
+        return out
+    }
+    function makeCallSet(items) {
+        var name = items[0], valT = items[1]
+        return function() {
+            var v = expandPct(valT())
+            if (v == "") { unsetVar(name) } else { setVar(name, v) }
+            return undefined
+        }
     }
     function makeGoto(name) { return function() { return {gotoLbl: name} } }
-    // 'call :label' runs the subroutine INLINE, right where the call stands. It used to
-    // hand a {callLbl} signal to the program counter instead, which made every enclosing
-    // block treat the call as a control transfer: a 'call' inside a for body ended the
-    // LOOP after one round, and the statements after it in an if body never ran.
-    // items[0] = label; the arguments are parsed and dropped (no %1 parameters yet).
-    var progItems = null
-    var progLabels = null
-    function batCall(label) {
-        if (progItems == null || !hasOwn(progLabels, "$" + label)) {
-            println("The system cannot find the batch label specified - " + label)
-            exit(1)
-        }
-        var pc = progLabels["$" + label] + 1
-        while (pc < progItems.length) {
-            var it = progItems[pc]
-            // Running into the next label ends the subroutine, as cmd does.
-            if (it.lbl != undefined) { return undefined }
-            var sig = it.stmt()
-            if (sig != undefined) {
-                if (sig.procexit != undefined) { return sig }   // 'exit' ends the process
-                if (sig.ret != undefined) { return undefined }  // 'exit /b' returns
-                if (sig.gotoLbl != undefined) {
-                    if (sig.gotoLbl == "eof") { return undefined }
-                    if (!hasOwn(progLabels, "$" + sig.gotoLbl)) {
-                        println("The system cannot find the batch label specified - " + sig.gotoLbl)
-                        exit(1)
-                    }
-                    pc = progLabels["$" + sig.gotoLbl] + 1
-                    continue
-                }
-            }
-            pc = pc + 1
-        }
-        return undefined
-    }
-    function makeCall(items) { return function() { return batCall(items[0]) } }
     function makeExitB(items) {
-        var codeT = items.length > 0 ? items[0] : null
-        return function() { return {ret: codeT != null ? toInt(codeT()) : 0} }
+        var codeT = (items.length > 0) ? items[0] : null
+        return function() {
+            if (codeT == null) { return {retbare: 1} }        // 'exit /b' keeps the old code
+            return {ret: toInt(codeT())}
+        }
     }
     function makeExit(items) {
-        var codeT = items.length > 0 ? items[0] : null
-        return function() { return {procexit: codeT != null ? toInt(codeT()) : 0} }
+        var codeT = (items.length > 0) ? items[0] : null
+        return function() { return {procexit: (codeT != null) ? toInt(codeT()) : errlvl} }
     }
     function makeSeq(items) {
         return function() {
@@ -345,16 +867,56 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             return undefined
         }
     }
-    // items = [ {neg}?, condThunk, {body:thenSeq}, {body:elseSeq}? ]
+    // A redirection has nowhere to go in this runtime, so an output redirection swallows the
+    // output; an input redirection is a no-op (set /p already reads nothing).
+    function makeRedir(items) {
+        var st = items[0]
+        if (items.length == 1) { return st }
+        var out = false, i = 1
+        for (i = 1; i < items.length; i++) { if (items[i].out) { out = true } }
+        if (!out) { return st }
+        return function() {
+            capStart()
+            var r = st()
+            capEnd()
+            return r
+        }
+    }
+    function mkRedir(items) {
+        var op = "", i = 0
+        for (i = 0; i < items.length; i++) { if (items[i].op != undefined) { op = items[i].op } }
+        return {out: (op != "<")}
+    }
+    function makeChain(items) {                    // [stmt, op, stmt, op, stmt, ...]
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var r = items[0]()
+            if (r != undefined) { return r }
+            var i = 1
+            for (i = 1; i < items.length; i += 2) {
+                var op = items[i]
+                if (op == "&&" && errlvl != 0) { continue }
+                if (op == "||" && errlvl == 0) { continue }
+                r = items[i + 1]()
+                if (r != undefined) { return r }
+            }
+            return undefined
+        }
+    }
+    // items = [ {neg}|{ci} ..., condThunk, {body:thenSeq}, {body:elseSeq}? ]
     function makeIf(items) {
-        var neg = false
-        var idx = 0
-        if (items[0] != null && typeof items[0] == "object" && items[0].neg != undefined) { neg = true; idx = 1 }
+        var neg = false, ci = false, idx = 0
+        while (idx < items.length && items[idx] != null && typeof items[idx] == "object"
+               && (items[idx].neg != undefined || items[idx].ci != undefined)) {
+            if (items[idx].neg != undefined) { neg = true }
+            if (items[idx].ci != undefined) { ci = true }
+            idx = idx + 1
+        }
         var condT = items[idx]
         var thenT = items[idx + 1].body
         var elseT = (items.length > idx + 2) ? items[idx + 2].body : null
         return function() {
-            var c2 = condT()
+            var c2 = condT(ci)
             if (neg) { c2 = !c2 }
             if (c2) { return thenT() }
             if (elseT != null) { return elseT() }
@@ -363,9 +925,8 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
     }
     // items = [letter, wordThunk..., {body:bodySeq}]
     function makeFor(items) {
-        var letter = items[0]
-        var last = items[items.length - 1]
-        var bodyT = last.body
+        var letter = items[0].fv
+        var bodyT = items[items.length - 1].body
         var words = items.slice(1, items.length - 1)
         return function() {
             var j = 0
@@ -377,8 +938,204 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             return undefined
         }
     }
+    // items = [letter, startW, stepW, endW, {body}]
+    function makeForL(items) {
+        var letter = items[0].fv
+        var sT = items[1], pT = items[2], eT = items[3]
+        var bodyT = items[4].body
+        return function() {
+            var from = toInt(sT()), step = toInt(pT()), to = toInt(eT())
+            if (step == 0) { return undefined }         // cmd would loop forever; refuse to hang
+            var i = from
+            while ((step > 0) ? (i <= to) : (i >= to)) {
+                setForVar(letter, intToStr(i))
+                var r = bodyT()
+                if (r != undefined) return r
+                i = (i + step) | 0
+            }
+            return undefined
+        }
+    }
 
-    // ----- the program counter: runs the flat line list, honouring goto/call/exit -----
+    // ----- for /f: options, tokenizing and the line walk -----
+    function parseFOpts(raw) {
+        var o = {eol: ";", skip: 0, delims: " \t", tokens: "1"}
+        if (raw == null) { return o }
+        var s = raw.substring(1, raw.length - 1)
+        var i = 0
+        while (i < s.length) {
+            while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t")) { i = i + 1 }
+            var ks = i
+            while (i < s.length && s.charAt(i) != "=" && s.charAt(i) != " " && s.charAt(i) != "\t") { i = i + 1 }
+            var key = lower(s.substring(ks, i))
+            var val = ""
+            if (i < s.length && s.charAt(i) == "=") {
+                i = i + 1
+                var vs = i
+                while (i < s.length && s.charAt(i) != " " && s.charAt(i) != "\t") { i = i + 1 }
+                val = s.substring(vs, i)
+            }
+            if (key == "eol") { o.eol = val }
+            if (key == "skip") { o.skip = toInt(val) }
+            if (key == "delims") { o.delims = val }
+            if (key == "tokens") { o.tokens = val }
+        }
+        return o
+    }
+    function isDelim(ch, delims) {
+        var i = 0
+        for (i = 0; i < delims.length; i++) { if (delims.charAt(i) == ch) { return true } }
+        return false
+    }
+    function splitLines(text) {
+        var out = [], cur = "", i = 0
+        for (i = 0; i < text.length; i++) {
+            var ch = text.charAt(i)
+            if (ch == "\n") { out.push(cur); cur = "" }
+            else if (ch != "\r") { cur = cur + ch }
+        }
+        if (cur != "") { out.push(cur) }
+        return out
+    }
+    // tokens=1,3 / tokens=* / tokens=1* / tokens=2-4 -> a list of 1-based indices + a star flag
+    function parseTokens(spec) {
+        var nums = [], star = false, i = 0, cur = "", lastNum = 0
+        var s = spec + ","
+        for (i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "*") { star = true; continue }
+            if (ch == ",") {
+                if (cur != "") {
+                    var dash = -1, k = 0
+                    for (k = 1; k < cur.length; k++) { if (cur.charAt(k) == "-") { dash = k } }
+                    if (dash > 0) {
+                        var a = toInt(cur.substring(0, dash)), b = toInt(cur.substring(dash + 1))
+                        var j = a
+                        while (j <= b) { nums.push(j); lastNum = j; j = j + 1 }
+                    } else { var n1 = toInt(cur); nums.push(n1); lastNum = n1 }
+                }
+                cur = ""
+                continue
+            }
+            cur = cur + ch
+        }
+        return {nums: nums, star: star, last: lastNum}
+    }
+    function forFTokens(line, delims, spec) {
+        var toks = [], starts = [], ends = []
+        var i = 0, n = line.length
+        while (i < n) {
+            while (i < n && isDelim(line.charAt(i), delims)) { i = i + 1 }
+            if (i >= n) { break }
+            var st = i
+            while (i < n && !isDelim(line.charAt(i), delims)) { i = i + 1 }
+            toks.push(line.substring(st, i)); starts.push(st); ends.push(i)
+        }
+        if (toks.length == 0) { return null }
+        var out = [], k = 0
+        for (k = 0; k < spec.nums.length; k++) {
+            var idx = spec.nums[k]
+            out.push((idx >= 1 && idx <= toks.length) ? toks[idx - 1] : "")
+        }
+        if (spec.star) {
+            var rest = ""
+            if (spec.last == 0) { rest = line.substring(starts[0]) }
+            else if (spec.last <= toks.length) {
+                var p = ends[spec.last - 1]
+                while (p < n && isDelim(line.charAt(p), delims)) { p = p + 1 }
+                rest = line.substring(p)
+            }
+            out.push(rest)
+        }
+        return out
+    }
+    // items = [{opts}?, letter, {lit}|{cmd}, {body}]
+    function makeForF(items) {
+        var idx = 0, optRaw = null
+        if (items[0].opts != undefined) { optRaw = items[0].opts; idx = 1 }
+        var letter = items[idx].fv
+        var src = items[idx + 1]
+        var bodyT = items[idx + 2].body
+        return function() {
+            var o = parseFOpts(optRaw)
+            var spec = parseTokens(o.tokens)
+            var text = ""
+            if (src.lit != undefined) { text = stripQuotes(src.lit()) }
+            else { capStart(); src.cmd(); text = capEnd() }
+            var lines = splitLines(text)
+            var i = 0
+            for (i = o.skip; i < lines.length; i++) {
+                var line = lines[i]
+                if (o.eol != "" && line.length > 0 && line.charAt(0) == o.eol.charAt(0)) { continue }
+                var vals = forFTokens(line, o.delims, spec)
+                if (vals == null) { continue }
+                var k = 0
+                for (k = 0; k < vals.length; k++) { setForVar(nextLetter(letter, k), vals[k]) }
+                var r = bodyT()
+                if (r != undefined) return r
+            }
+            return undefined
+        }
+    }
+
+    // ===================================================================================
+    //  The program counter: runs the flat line list, honouring goto/call/exit.
+    // ===================================================================================
+
+    var progItems = null
+    var progLabels = null
+    // 'call :label' runs the subroutine INLINE, right where the call stands. Handing a signal
+    // to the program counter instead made every enclosing block treat the call as a control
+    // transfer: a 'call' inside a for body ended the LOOP after one round.
+    function batCall(label, args) {
+        if (progItems == null || !hasOwn(progLabels, "$" + label)) {
+            println("The system cannot find the batch label specified - " + label)
+            exit(1)
+        }
+        // cmd.exe expanded this whole line before it started, so a %VAR% that FOLLOWS the
+        // call must still read the pre-call value. Freeze every name into the caller's
+        // overlay here (noteWrite keeps the earliest value, so this is idempotent).
+        var f = 0
+        for (f = 0; f < varKeys.length; f++) { noteWrite(varKeys[f]) }
+        argFrames.push({lbl: ":" + label, a: args})
+        var savedLine = lineOld
+        var pc = progLabels["$" + label] + 1
+        var out = undefined
+        while (pc < progItems.length) {
+            var it = progItems[pc]
+            if (it.lbl != undefined) { break }          // running into the next label ends it
+            lineOld = {}
+            var sig = it.stmt()
+            if (sig != undefined) {
+                if (sig.procexit != undefined) { out = sig; break }
+                if (sig.retbare != undefined) { break }
+                if (sig.ret != undefined) { errlvl = sig.ret; break }
+                if (sig.gotoLbl != undefined) {
+                    if (sig.gotoLbl == "eof") { break }
+                    if (!hasOwn(progLabels, "$" + sig.gotoLbl)) {
+                        println("The system cannot find the batch label specified - " + sig.gotoLbl)
+                        exit(1)
+                    }
+                    pc = progLabels["$" + sig.gotoLbl] + 1
+                    continue
+                }
+            }
+            pc = pc + 1
+        }
+        lineOld = savedLine
+        argFrames.pop()
+        return out
+    }
+    function makeCall(items) {
+        var label = items[0]
+        var argTs = items.slice(1)
+        return function() {
+            var args = [], i = 0
+            for (i = 0; i < argTs.length; i++) { args.push(argTs[i]()) }
+            return batCall(label, args)
+        }
+    }
+
     function runProgram(items) {
         var labelMap = {}
         var i = 0
@@ -387,42 +1144,25 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         }
         progItems = items
         progLabels = labelMap
-        var callStack = []
         var pc = 0
         while (pc < items.length) {
             var it = items[pc]
             if (it.lbl != undefined) { pc = pc + 1; continue }
+            lineOld = {}
             var sig = it.stmt()
             if (sig == undefined) { pc = pc + 1; continue }
             if (sig.procexit != undefined) { exit(sig.procexit) }
             if (sig.gotoLbl != undefined) {
-                if (sig.gotoLbl == "eof") {
-                    if (callStack.length > 0) { pc = callStack.pop() } else { exit(0) }
-                } else if (hasOwn(labelMap, "$" + sig.gotoLbl)) {
-                    pc = labelMap["$" + sig.gotoLbl]
-                } else {
-                    println("The system cannot find the batch label specified - " + sig.gotoLbl)
-                    exit(1)
-                }
-                continue
+                if (sig.gotoLbl == "eof") { exit(errlvl) }
+                if (hasOwn(labelMap, "$" + sig.gotoLbl)) { pc = labelMap["$" + sig.gotoLbl]; continue }
+                println("The system cannot find the batch label specified - " + sig.gotoLbl)
+                exit(1)
             }
-            if (sig.callLbl != undefined) {
-                if (hasOwn(labelMap, "$" + sig.callLbl)) {
-                    callStack.push(pc + 1)
-                    pc = labelMap["$" + sig.callLbl]
-                } else {
-                    println("The system cannot find the batch label specified - " + sig.callLbl)
-                    exit(1)
-                }
-                continue
-            }
-            if (sig.ret != undefined) {
-                if (callStack.length > 0) { pc = callStack.pop() } else { exit(sig.ret) }
-                continue
-            }
+            if (sig.retbare != undefined) { exit(errlvl) }
+            if (sig.ret != undefined) { exit(sig.ret) }
             pc = pc + 1
         }
-        exit(0)
+        exit(errlvl)
         return undefined
     }
 
