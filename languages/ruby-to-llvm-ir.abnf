@@ -659,8 +659,9 @@ RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
 RetryExpr   <~~ push(makeRetry()) ~~>
             = KwRetry ;
 
-// raise [EXPR[, EXPR]]: raise the first expression's value (a bare raise re-raise is
-// approximated as raising nil); a trailing message argument is parsed and ignored.
+// raise [EXPR[, EXPR]]: a class becomes a fresh instance carrying the message, a
+// string becomes a RuntimeError, and a bare raise re-raises what the running rescue
+// clause caught (js_rraise).
 RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
             = KwRaise [ Expression { "," Expression } ] ;
 
@@ -1242,38 +1243,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- ranges (eager arrays), arrays, hashes, templates -----
     function makeRange(items) {
         if (items.length == 1) { return items[0] }
-        // An endless range (5..) has no upper bound to count to, and the lowering
-        // materializes ranges as arrays - so it stays unsupported rather than hanging.
-        if (typeof items[0] == "string") { return notImplExpr("beginless range (..9)", 0) }
-        if (items.length < 3) { return notImplExpr("endless range (5..)", 0) }
-        var loT = items[0]
-        var op = items[1]
-        var hiT = items[2]
+        // A range with BOTH bounds is materialized as an array (js_rrangearr, which
+        // also knows the String ranges "a".."c"), because that is what everything
+        // downstream expects: `for i in 1..3', `a[1..2]', `(1..n).each'.
+        // A range with an open end ((5..), (..9)) has no array to build and becomes
+        // the js_rrangeopen object, which answers cover? / include? / === instead.
+        var beginless = typeof items[0] == "string"
+        var loT = beginless ? null : items[0]
+        var op = beginless ? items[0] : items[1]
+        var hiT = beginless ? items[1] : (items.length > 2 ? items[2] : null)
+        var exclV = op == "..." ? hTrue : hFalse
         return function(b) {
-            var rl = loT(b)
-            b = rl.b
-            var rh = hiT(b)
-            b = rh.b
-            var arrV = callExt(b, "js_arr_new", [])
-            hidCount++
-            var iName = "$rng" + hidCount
-            var eName = "$rngE" + hidCount
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), rl.v])
-            var endV = op == "..." ? intWrap(b, callExt(b, "js_sub", [rh.v, emitNum(b, 1)])) : rh.v
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, eName), endV])
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var eV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, eName)])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_le", [iV, eV])), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            callExt(bodyB, "js_arr_push", [arrV, iV2])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
-                                            intWrap(bodyB, callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)]))])
-            bodyB.NewBr(headB)
-            return {b: exitB, v: arrV}
+            var loV = hNull
+            var hiV = hNull
+            if (loT != null) { var rl = loT(b); b = rl.b; loV = rl.v }
+            if (hiT != null) { var rh = hiT(b); b = rh.b; hiV = rh.v }
+            if (loT == null || hiT == null) {
+                return {b: b, v: callExt(b, "js_rrangeopen", [loV, hiV, exclV])}
+            }
+            return {b: b, v: callExt(b, "js_rrangearr", [loV, hiV, exclV])}
         }
     }
     // [a, *b, c]: a splat element splices the inner array in with an emitted loop.
@@ -2294,8 +2282,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: excDispatch(b, ctl), v: ctl}
         }
     }
-    // raise [EXPR[, EXPR]]: evaluate the first expression and raise it with js_throw (a
-    // bare raise re-raise throws nil); the message argument is ignored.
+    // raise [EXPR[, EXPR]]: evaluate the operand and the optional message and hand
+    // both to js_rraise, which decides what exception object to throw.
     function makeRaise(items, pos) {
         var t = items.length > 0 ? items[0] : null
         var msgT = items.length > 1 ? items[1] : null

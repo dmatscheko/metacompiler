@@ -3051,6 +3051,102 @@ func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
 	return c
 }
 
+// ----- Ruby ranges -----
+// A range with both bounds is MATERIALIZED as an array (that is what the whole
+// lowering of ruby-to-llvm-ir.abnf expects: `for i in 1..3', `a[1..2]',
+// `(1..n).each'), which rubyRangeArr builds - for numbers and for the String
+// ranges "a".."c" alike. A range with an OPEN end ((5..), (..9)) has no array to
+// build, so it stays the rubyOpenRange object below, which answers the membership
+// questions that are the only thing such a range is used for.
+
+// rubyStrSucc is String#succ for the simple alphanumeric case: the last character
+// is incremented, carrying into the one before it when it wraps ("az" -> "ba").
+func rubyStrSucc(s string) string {
+	if s == "" {
+		return ""
+	}
+	b := []byte(s)
+	for i := len(b) - 1; i >= 0; i-- {
+		switch {
+		case b[i] >= 'a' && b[i] < 'z', b[i] >= 'A' && b[i] < 'Z', b[i] >= '0' && b[i] < '9':
+			b[i]++
+			return string(b)
+		case b[i] == 'z':
+			b[i] = 'a'
+		case b[i] == 'Z':
+			b[i] = 'A'
+		case b[i] == '9':
+			b[i] = '0'
+		default:
+			b[i]++
+			return string(b)
+		}
+	}
+	return string(b[0]) + string(b)
+}
+
+// rubyRangeArr materializes lo..hi (excl: the three-dot form) as an array. The
+// step cap keeps a nonsensical range from hanging the program.
+func (rt *jsrt) rubyRangeArr(lo, hi interface{}, excl bool) *jsArray {
+	out := &jsArray{}
+	if ls, isStr := lo.(string); isStr {
+		hs := rt.toString(hi)
+		for s, n := ls, 0; n < 1000000; n++ {
+			if excl && s == hs {
+				break
+			}
+			if len(s) > len(hs) {
+				break
+			}
+			out.elems = append(out.elems, s)
+			if s == hs {
+				break
+			}
+			s = rubyStrSucc(s)
+		}
+		return out
+	}
+	l, h := rubyToF(lo), rubyToF(hi)
+	if excl {
+		h = h - 1
+	}
+	for i, n := l, 0; i <= h && n < 10000000; i, n = i+1, n+1 {
+		out.elems = append(out.elems, i)
+	}
+	return out
+}
+
+// rubyOpenRange builds the object standing for a range with a missing bound.
+func rubyOpenRange(lo, hi interface{}, excl bool) *jsObject {
+	o := newJSObject()
+	o.set("__rrange", true)
+	o.set("begin", lo)
+	o.set("end", hi)
+	o.set("excl", excl)
+	return o
+}
+
+// rubyOpenRangeCover is `r.cover?(v)' / `r === v' for such a range: the missing
+// side never constrains.
+func (rt *jsrt) rubyOpenRangeCover(o *jsObject, v interface{}) bool {
+	if lo := o.props["begin"]; !isUndefOrNull(lo) {
+		if c, ok := rt.rubySpaceship(v, lo); !ok || c < 0 {
+			return false
+		}
+	}
+	if hi := o.props["end"]; !isUndefOrNull(hi) {
+		c, ok := rt.rubySpaceship(v, hi)
+		if !ok {
+			return false
+		}
+		if excl, _ := o.props["excl"].(bool); excl {
+			return c < 0
+		}
+		return c <= 0
+	}
+	return true
+}
+
 // rubyExcObj answers whether v is an exception instance: a user object carrying
 // the `args' slot every raise path fills in (rubyExc / the default initialize).
 func rubyExcObj(v interface{}) bool {
@@ -3592,6 +3688,8 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return float64(rt.strLen(o))
 		case "to_s":
 			return o
+		case "to_sym", "intern":
+			return jsSym{s: o}
 		case "upcase":
 			return strings.ToUpper(o)
 		case "downcase":
@@ -3607,6 +3705,20 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 	case *jsArray:
 		return rt.rubyArrayMethod(o, name, args)
 	case *jsObject:
+		if _, isRng := o.props["__rrange"]; isRng {
+			// A range with an open end: only the membership questions make sense.
+			switch name {
+			case "cover?", "include?", "member?", "===":
+				return rt.rubyOpenRangeCover(o, argAt(args, 0))
+			case "begin", "first":
+				return o.props["begin"]
+			case "end", "last":
+				return o.props["end"]
+			case "exclude_end?":
+				return o.props["excl"]
+			}
+			rt.fail("unknown method on an endless Range: %s", name)
+		}
 		if keys, vals, isDict := dictParts(o); isDict {
 			switch name {
 			case "size", "length":
@@ -5065,8 +5177,23 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		},
 		// === (case equality): a Range (an eager array here) matches by membership, a
 		// class object by is_a?, everything else by ==.
+		// lo..hi / lo...hi with BOTH bounds: the array the lowering iterates and
+		// indexes with. Numbers and the String ranges "a".."c" alike.
+		"js_rrangearr": func(a []uint64) uint64 {
+			return w(rt.rubyRangeArr(u(a[0]), u(a[1]), rt.truthy(u(a[2]))))
+		},
+		// (5..) / (..9): no array to build, so the range stays an object that answers
+		// cover? / include? / === (see rubyOpenRangeCover).
+		"js_rrangeopen": func(a []uint64) uint64 {
+			return w(rubyOpenRange(u(a[0]), u(a[1]), rt.truthy(u(a[2]))))
+		},
 		"js_rcase": func(a []uint64) uint64 {
 			l, r := u(a[0]), u(a[1])
+			if lo, ok := l.(*jsObject); ok {
+				if _, isRng := lo.props["__rrange"]; isRng {
+					return boolH(rt.rubyOpenRangeCover(lo, r))
+				}
+			}
 			if la, ok := l.(*jsArray); ok {
 				for _, e := range la.elems {
 					if rt.rubyEq(e, r) {
