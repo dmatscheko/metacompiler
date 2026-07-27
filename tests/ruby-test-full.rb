@@ -30,6 +30,8 @@
 # and the 3.4 'it' parameter. Rational 1r / Complex 2i literals ARE covered
 # (literal syntax); define_method appears exactly once. Sections 21-23 need
 # MRI >= 3.1 (case/in, endless def, hash shorthand); 01-20 run on MRI >= 2.6.
+# Section 31 needs MRI >= 3.1 as well; its expected values come from ruby/spec's own
+# descriptions in language/pattern_matching_spec.rb, which name each form outright.
 #
 # Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 # code), organized after the ISO/IEC 30170 Ruby specification chapters and
@@ -538,11 +540,9 @@ class S25Outer
       "inner"
     end
   end
-  # A nested class DECLARES here (the section locks its syntax); resolving it by its
-  # short name from a method of the enclosing class is not implemented in either
-  # grammar, so the check below stays on the outer class.
+  S25_IN_CLASS = 3
   def make
-    "outer"
+    S25Inner.new
   end
 end
 S25_CONST = 11
@@ -582,7 +582,9 @@ def s25
   check("p1", (1; 2; 3) == 3)
   check("p2", () == nil)
   check("p3", [0, (), 2].size == 3)
-  check("p4", S25Outer.new.make == "outer")
+  check("p4", S25Outer.new.make.who == "inner")
+  check("p4b", S25Outer::S25Inner.new.who == "inner")
+  check("p4c", S25Outer::S25_IN_CLASS == 3)
   check("p5", S25Err.new.run == "boom")
   check("p6", S25Err.new.late == 11)
   check("p7", ::S25_CONST == 11)
@@ -620,6 +622,228 @@ def s26
   r = [1].map { next 7, 8 }
   check("y13", r == [[7, 8]])
 end
+# ===== SECTION 27: destructuring and splat assignment =====
+def s27_pair
+  [7, 8]
+end
+def s27
+  a = *[1, 2]
+  check("d1", a == [1, 2])
+  b = *nil
+  check("d2", b == [])
+  c = 1, 2, 3
+  check("d3", c == [1, 2, 3])
+  d, e = 1
+  check("d4", d == 1 && e == nil)
+  f, = [4, 5, 6]
+  check("d5", f == 4)
+  g, h, = [4, 5, 6]
+  check("d6", g == 4 && h == 5)
+  (*i) = nil
+  check("d7", i == [nil])
+  *, j = [1, 2, 3]
+  check("d8", j == 3)
+  (k, l), m = [1, 2], 3
+  check("d9", k == 1 && l == 2 && m == 3)
+  n, (o, p) = 1, [2, 3]
+  check("d10", n == 1 && o == 2 && p == 3)
+  q, r, *s = *[1, 2, 3, 4]
+  check("d11", q == 1 && r == 2 && s == [3, 4])
+  t, u = s27_pair
+  check("d12", t == 7 && u == 8)
+end
+# ===== SECTION 28: calls, arguments and blocks =====
+def s28_join(text, extra)
+  text + extra.to_s
+end
+def s28_hash(h)
+  h
+end
+def s28_block(a)
+  yield a
+end
+def s28_one
+  1
+end
+class S28Sup
+  def hi(x)
+    "sup:" + x
+  end
+end
+class S28Sub < S28Sup
+  def hi(x)
+    super(x) + "|" + (block_given? ? yield : "noblk")
+  end
+end
+def s28
+  check("c1", s28_join("a", 1) == "a1")
+  taken = s28_join "b", 2
+  check("c2", taken == "b2")
+  h = s28_hash("a" => 1, :b => 2)
+  check("c3", h.size == 2 && h["a"] == 1)
+  arr = ["foo" => :bar, baz: 42]
+  check("c4", arr.size == 1 && arr[0].size == 2)
+  check("c5", s28_block(3) { |v| v * 2 } == 6)
+  outer = 9
+  check("c6", [1].map { |one; outer| one } == [1])
+  check("c7", outer == 9)
+  check("c8", S28Sub.new.hi("x") { "blk" } == "sup:x|blk")
+  check("c9", __FILE__.length > 0 && __LINE__ > 0)
+  check("c10", [10, 20][1] == 20)
+  f = lambda { |a = 5, b = 4| a + b }
+  check("c11", f.call == 9)
+  check("c12", s28_hash(1, ) == 1)
+  # A parenthesis-less lambda parameter list: the braces are the lambda's BODY, not a
+  # block on the default value's call.
+  lam = -> a=s28_one() { a }
+  check("c13", lam.call == 1)
+  lam2 = -> b { b + 1 }
+  check("c14", lam2.call(1) == 2)
+end
+# ===== SECTION 29: literals with unusual spellings =====
+def s29
+  ip = "xxx"
+  check("l1", %!hey #{ip}! == "hey xxx")
+  check("l2", %@hey #{ip}@ == "hey xxx")
+  check("l3", %<hey #{ip}> == "hey xxx")
+  check("l4", %=hey #{ip}= == "hey xxx")
+  check("l5", %s{plain}.to_s == "plain")
+  check("l6", %r!a+!.match("baaa").to_a[0] == "aaa")
+  check("l7", "a#{}b" == "ab")
+  multi = "one
+two"
+  check("l8", multi.length == 7)
+  check("l9", ?z == "z")
+  check("l10", ?\C-a == "\x01")
+  check("l11", ?\M-\C-z == "\x9A")
+  check("l12", {a!: 1, b?: 2}.size == 2)
+  check("l13", {a!: 1}[:a!] == 1)
+  check("l14", {"d": 4}[:d] == 4)
+  check("l15", :ilétait.to_s.length == 7)
+  check("l16", %q!raw #{ip}! == "raw \#{ip}")
+end
+# ===== SECTION 30: declarations as expressions, and body clauses =====
+class S30Base
+  def kind
+    "base"
+  end
+end
+# A class body is an EXPRESSION whose value is its last statement's; a def is one whose
+# value is the method name. Both have to sit at top level (Ruby forbids a class
+# definition inside a method body), so the section only asserts on what they produced.
+S30_EMPTY_VAL = (class S30Empty; end)
+S30_TWENTY_VAL = (class S30Twenty; 20; end)
+S30_DEF_VAL = def s30_made; 5; end
+# `class << OBJ ... end` opens the singleton class of a VALUE anywhere, not only as
+# `class << self` inside a class body, and it is an EXPRESSION - the `.should` in a spec
+# suite hangs off its `end`. Its value is its last statement's.
+S30_META_VAL = (class << S30Base; 7; end)
+def s30
+  check("e1", S30_EMPTY_VAL == nil)
+  check("e2", S30_TWENTY_VAL == 20)
+  check("e3", S30_DEF_VAL == :s30_made && s30_made == 5)
+  flag = true
+  n = 0
+  while flag do
+    n += 1
+    flag = false
+  end
+  check("e4", n == 1)
+  m = 0
+  for k in [1, 2] do
+    m += k
+  end
+  check("e5", m == 3)
+  obj = S30Holder.new
+  for obj.slot in [1, 2, 3]
+    m += obj.slot
+  end
+  check("e6", obj.slot == 3 && m == 9)
+  for (a, b) in [[1, 2]]
+    check("e7", a == 1 && b == 2)
+  end
+  check("e8", S30_META_VAL == 7)
+end
+class S30Holder
+  attr_accessor :slot
+end
+# ===== SECTION 31: pattern matching, the bracket-less and Constant forms =====
+# Needs MRI >= 3.1, so /usr/bin/ruby 2.6 cannot check these. The expected values come
+# from ruby/spec's own descriptions in language/pattern_matching_spec.rb, which name
+# each form outright: "supports form pat, pat, ...", "supports form id: pat, id: pat,
+# ...", "supports form Constant(pat, pat, ...)", "supports form Constant[id: pat, ...]",
+# "does match partially from the array beginning if list + , syntax used" and
+# "matches anything with *".
+class S31Point
+  attr_reader :x, :y
+  def initialize(x, y)
+    @x = x
+    @y = y
+  end
+  def deconstruct
+    [@x, @y]
+  end
+  def deconstruct_keys(keys)
+    {x: @x, y: @y}
+  end
+end
+def s31_kind(v)
+  case v
+  in a: 1, b: 1
+    "hash-bare"
+  in Hash(k: Integer => n)
+    "hash-const:" + n.to_s
+  in Array(0, 1, 2)
+    "arr-const"
+  in Array[9, 8]
+    "arr-brk"
+  in [7, 6, ]
+    "arr-partial"
+  in 5, 4
+    "arr-bare"
+  in {"q": 1}
+    "quoted-key"
+  in *
+    "any-array"
+  else
+    "other"
+  end
+end
+# The pin `^@ivar` reads the CURRENT value of the instance variable, so it needs a
+# method to run in (a top-level @ivar has no self to hang on here).
+class S31Pinned
+  def initialize
+    @pin = 4
+  end
+  def test(v)
+    case v
+    in ^@pin
+      "pinned"
+    else
+      "no"
+    end
+  end
+end
+def s31
+  check("m1", s31_kind({a: 1, b: 1}) == "hash-bare")
+  check("m2", s31_kind({k: 3}) == "hash-const:3")
+  check("m3", s31_kind([0, 1, 2]) == "arr-const")
+  check("m4", s31_kind([9, 8]) == "arr-brk")
+  check("m5", s31_kind([7, 6, 5, 4]) == "arr-partial")
+  check("m6", s31_kind([5, 4]) == "arr-bare")
+  check("m7", s31_kind({"q": 1}) == "quoted-key")
+  check("m8", s31_kind([1]) == "any-array")
+  check("m9", s31_kind("z") == "other")
+  p1 = S31Point.new(1, 2)
+  check("m10", (case p1; in S31Point(x: 1, y: y); y; else 0; end) == 2)
+  check("m11", (case p1; in S31Point[1, b]; b; else 0; end) == 2)
+  check("m12", S31Pinned.new.test(4) == "pinned" && S31Pinned.new.test(5) == "no")
+  check("m13", (case 2; in ^(1 + 1); "computed"; else "no"; end) == "computed")
+  [1, 2] => q, w
+  check("m14", [q, w] == [1, 2])
+  {a: 3} => a:
+  check("m15", a == 3)
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -647,5 +871,10 @@ s23() # SECTION-CALL 23
 s24() # SECTION-CALL 24
 s25() # SECTION-CALL 25
 s26() # SECTION-CALL 26
+s27() # SECTION-CALL 27
+s28() # SECTION-CALL 28
+s29() # SECTION-CALL 29
+s30() # SECTION-CALL 30
+s31() # SECTION-CALL 31
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

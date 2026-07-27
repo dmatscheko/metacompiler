@@ -39,7 +39,11 @@ The same subset with the same semantics is compiled to LLVM IR by ruby-to-llvm-i
 
 // Ruby '#' line comments (the '#{' of an interpolation lives inside a string
 // token, which disables whitespace skipping, so it never reaches here).
-Whitespace  = { @+" \t\r\n" | Comment } ;
+Whitespace  = { @+" \t\r\n" | Comment | LineJoin } ;
+// A backslash at the end of a line joins it to the next one, so the pair is nothing
+// but whitespace (`.should == \` continued on the following line).
+LineJoin    = "\\" :whitespace() "\r"..."\r" "\n"..."\n" :whitespace(Whitespace)
+            | "\\" :whitespace() "\n"..."\n" :whitespace(Whitespace) ;
 Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -49,17 +53,22 @@ Program     <~~ runProgram(takeAll()) ~~>
 // A def / class / module is a STATEMENT in Ruby, not only a top-level item: it may
 // stand inside a method, an if, a block ('it "..." do def helper; end end' is the
 // shape most of a spec suite has). Body and Program therefore accept the same items.
-BodyItem    = HdBodyItem | AliasTop | Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement ;
+BodyItem    = HdBodyItem | AliasTop | Statement ;
 
 // module M ... end: accepted but not implemented (no namespacing). Its body is a
 // program of the same items; under -warn-unsupported they run in the current scope
 // so any defs/classes/calls stay visible. A nested module recurses.
-ModuleDecl  <~~ push(makeModuleStmt(takeAll())) ~~>
+ModuleDecl  <~~ push(makeModuleStmt(takeAll(), up.pos)) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
               { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
-              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | ClassBodyStmt } End ;
+              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | ClassBodyStmt } [ ClassGuard ] End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = [ "::" ] Name { "::" Name } ;
+// The name in a class/module header is normally a constant path, but Ruby also parses
+// a path rooted at a keyword literal (`class nil::Foo`) and rejects it at RUN time
+// with a TypeError - so it has to get past the parser first.
+ClassPath   = KwNilPath | ScopedName ;
+KwNilPath   = "nil" KwEnd "::" Name ;
 
 // A def: implicit return of the last expression, or an explicit return. A singleton
 // receiver (def self.m / def obj.m) is accepted but not implemented (routed as a
@@ -97,7 +106,7 @@ SelfRecv    <~~ push({selfrecv: true}) ~~>
 // `def obj.m` also names the receiver with an @ivar, a @@classvar, a $global or a
 // scoped constant (`def @obj.foo`, `def Foo::Bar.m`) - all of them singleton defs.
 SelfRecvHead = KwSelf | "@@" Id | "@" Id | "$" Id | ScopedName ;
-ParamList   = "(" [ Param { "," Param } ] ")" ;
+ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault
             | BGroup | ParamSimple ;
 // def m(...) - argument forwarding. It is exactly `*__fwd_a, &__fwd_b` under two
@@ -105,41 +114,63 @@ Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | Param
 // new binding machinery is needed at all.
 ParamFwd    <~~ push({param: "__fwd_a", splat: true}) ; push({param: "__fwd_b", blockp: true}) ~~>
             = "..." ;
+// `**nil` declares that the method takes no keyword arguments; it is the same shape
+// as an anonymous `**` for everything the binder does.
 ParamDSplat <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, kwrest: true}) ~~>
-            = "**" [ Name <~~ push(up.in) ~~> ] ;
+            = "**" [ KwNil | Name <~~ push(up.in) ~~> ] ;
+KwNil       = "nil" KwEnd ;
 ParamSplat  <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, splat: true}) ~~>
             = "*" !"*" [ Name <~~ push(up.in) ~~> ] ;
 // &blk: the block the call was given, received as an ordinary named parameter.
-ParamBlock  <~~ push({param: pop(), blockp: true}) ~~>
-            = "&" Name <~~ push(up.in) ~~> ;
+// `def m(&)` declares an ANONYMOUS block parameter, and `f(&)` inside such a method
+// forwards it. Both are the same reserved name, exactly as `...` is spelled out above.
+ParamBlock  <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : "__fwd_b", blockp: true}) ~~>
+            = "&" !"&" [ Name <~~ push(up.in) ~~> ] ;
 // name: / name: DEFAULT - a keyword parameter, filled from the call's trailing hash.
 ParamKw     <~~ var n = takeAll(); push({param: n[0], kw: true, defT: n.length > 1 ? n[1] : undefined}) ~~>
-            = Name <~~ push(up.in) ~~> ":" !":" [ Expression ] ;
+            = Name <~~ push(up.in) ~~> ":" NotColonGlued [ Expression ] ;
 ParamDefault <~~ var n = takeAll(); push({param: n[0], defT: n[1]}) ~~>
             = Name <~~ push(up.in) ~~> "=" !"=" Expression ;
 ParamSimple = Name <~~ push({param: up.in}) ~~> ;
 // Method / call names may end with ? or ! (empty?, include?); Name may not. A def
 // may equally name an OPERATOR (def +, def -@, def [], def []=, def <=>), which is
 // how a class joins the operator table - the longest spelling comes first (PEG).
-MethodName  = OpMethodName | Id [ "?" | "!" ] ;
+MethodName  = OpMethodName | Id [ "?" | "!" NotEqGlued ] ;
+// `A.new.should != 2` - without this the `!` is taken as part of the method name and
+// the `= 2` is left over. It has to be a :script rather than a `!"="` lookahead,
+// because a lookahead skips the space in front of it and would then also reject the
+// perfectly good `x.foo! == 1`.
+NotEqGlued = :script(~~
+    (function() {
+        if (c.peek(0) === 61) { return abnf.newToken("\x01eq", 0) }
+    })()
+~~) ;
 OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" | ">="
             | "**" | "+@" | "-@" | "=~" | "+" | "-" | "*" | "/" | "%" | "<" | ">"
-            | "&" | "|" | "^" | "~" | "!" ;
+            | "&" | "|" | "^" | "~" | "!" | "`" ;
 
 // class C ... end with instance methods; C.new builds an instance. attr_reader /
 // attr_writer / attr_accessor declare @ivar getters/setters on the class.
 // A superclass (class D < Base) is accepted but not implemented (no inheritance);
 // the class body still runs as its own methods.
-ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass ScopedName <~~ push(up.in) ~~> [ Superclass ]
+ClassDecl   <~~ push(makeClassStmt(takeAll(), up.pos)) ~~>
+            = KwClass ClassPath <~~ push(up.in) ~~> [ Superclass ]
               { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
               | AliasStmt | ClassDecl <~~ push({cstmt: pop()}) ~~>
-              | ModuleDecl <~~ push({cstmt: pop()}) ~~> | ClassBodyStmt } End ;
+              | ModuleDecl <~~ push({cstmt: pop()}) ~~> | ClassBodyStmt } [ ClassGuard ] End ;
+// A class body may carry its own rescue / else / ensure clauses, with no `begin` of
+// its own - exactly like a def body. They come after the body items, and no class-body
+// item can start with `rescue` or `ensure`, so the item loop stops there by itself.
+ClassGuard  <~~ push({cguard: takeAll()}) ~~>
+            = RescueClause { RescueClause } [ KwElse Body <~~ push({elsebody: pop().body}) ~~> ]
+              [ KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ]
+            | KwEnsure Body <~~ push({finalbody: pop().body}) ~~> ;
+
 // class << self ... end inside a class body: every def inside it is a method of the
 // class object. Written as its own alternative of the class body so the defs can be
 // folded straight into the enclosing class rather than run as a nested statement.
 SingletonBlock <~~ push({sblock: takeAll()}) ~~>
-            = KwClass "<<" KwSelf SgItems End ;
+            = KwClass "<<" KwSelf SgItems [ ClassGuard ] End ;
 // class << EXPR ... end anywhere else: the singleton ("eigen") class of a VALUE.
 // `class << obj`, `class << true`, `class << CONST` all open it. We approximate the
 // eigenclass by the value's own class object, which is what the specs that ask for
@@ -147,8 +178,8 @@ SingletonBlock <~~ push({sblock: takeAll()}) ~~>
 // singleton method when the value IS a class (the `class << self` case) and an
 // ordinary method of its class otherwise. It is a PRIMARY and not only a statement:
 // `class << true; self; end.should == TrueClass` takes a method suffix on the `end`.
-SingletonDecl <~~ push(makeSingletonStmt(takeAll())) ~~>
-            = KwClass "<<" SgTarget SgItems End ;
+SingletonDecl <~~ push(makeSingletonStmt(takeAll(), up.pos)) ~~>
+            = KwClass "<<" SgTarget SgItems [ ClassGuard ] End ;
 SgTarget    = KwSelf <~~ push({sgself: true}) ~~> | Expression <~~ push({sgexpr: pop()}) ~~> ;
 SgItems     = { Semi | Def <~~ push({method: pop()}) ~~> | AttrDecl | AliasStmt
             | ClassDecl <~~ push({cstmt: pop()}) ~~> | ModuleDecl <~~ push({cstmt: pop()}) ~~>
@@ -156,15 +187,48 @@ SgItems     = { Semi | Def <~~ push({method: pop()}) ~~> | AttrDecl | AliasStmt
 // `alias' outside a class body - at top level or inside a block (`class_eval do
 // alias new old end'). The enclosing class is only known at run time there, so this
 // is the statement wrapper around the same declaration.
-AliasTop    <~~ push(makeAliasTop(pop(), up.pos)) ~~>
-            = AliasStmt ;
+AliasTop    <~~ push(makeAliasTop(pop().alias, up.pos)) ~~>
+            = AliasStmtDyn ;
+// Outside a class body the alias names may be COMPUTED: `alias :"#{name}" value` is
+// ordinary Ruby. A class body's alias stays on the static AliasStmt above, because the
+// method tables it feeds are built while walking.
+AliasStmtDyn <~~ push({alias: takeAll()}) ~~>
+            = KwAlias AliasNameDyn AliasNameDyn ;
+AliasNameDyn = AliasDqInterp | AliasName ;
+AliasDqInterp = ":" ColonGlued DqStr ;
 // alias NEW OLD (a keyword, unlike alias_method which is an ordinary call).
 AliasStmt   <~~ push({alias: takeAll()}) ~~>
             = KwAlias AliasName AliasName ;
-AliasName   = ":" SymName <~~ push(up.in) ~~> | MethodName <~~ push(up.in) ~~> ;
+// An alias names a method as a bare word, as a symbol (:name, :"name", :'name') or -
+// for the global-variable form of alias - as a $global.
+AliasName   = AliasSq | AliasDq | ":" :whitespace() SymName <~~ push(up.in) ~~> :whitespace(Whitespace)
+            | AliasGvarP | AliasGvar | MethodName <~~ push(up.in) ~~> ;
+AliasSq     = ":" :whitespace() "'" SymName <~~ push(up.in) ~~> "'" :whitespace(Whitespace) ;
+AliasDq     = ":" :whitespace() '"' SymName <~~ push(up.in) ~~> '"' :whitespace(Whitespace) ;
+AliasGvarP  = "$" :whitespace() GvarNumCh <~~ push("$" + up.in) ~~> :whitespace(Whitespace) ;
+AliasGvar   = "$" Id <~~ push("$" + up.in) ~~> ;
 // class D < Base: real inheritance (method lookup walks __super, and `super` calls
 // the overridden method).
-Superclass  = "<" !"<" ScopedName <~~ push({supername: up.in}) ~~> ;
+Superclass  = "<" !"<" KwSelf <~~ push({supername: "self"}) ~~>
+            | "<" !"<" ScopedName <~~ push({supername: up.in}) ~~> HeaderEnd
+            | "<" !"<" SuperExprDrop ;
+// HeaderEnd is what tells `class D < Base` from `class D < Module.new`: only a name
+// that ENDS the header line is the constant path the method tables are built from;
+// anything else is an expression and falls to SuperExprDrop below.
+HeaderEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 1000 && (cc === 32 || cc === 9 || cc === 13)) { i = i + 1; cc = c.peek(i); steps = steps + 1 }
+        if (cc === 10 || cc === 59 || cc === 35 || cc < 0) { return undefined }
+        return abnf.newToken("\x01notheaderend", 0)
+    })()
+~~) ;
+// Ruby evaluates the superclass, so it may be any expression - `class C < ""` parses
+// and raises a TypeError at RUN time. Only a constant path names a class the method
+// tables can be built from, so anything else is parsed and dropped.
+SuperExprDrop <~~ pop() ~~> = PostfixExpr ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
 ClassBodyStmt <~~ push({cstmt: pop()}) ~~>
@@ -196,20 +260,28 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
-            = SimpleStmt [ SameLine ModKw Expression ] ;
+            = SimpleStmt [ SameLine ModKw ModCond ] ;
+// `remove_method :m if method_defined? :m` - the condition of a modifier is a full
+// statement-level expression, so a paren-less call is one of the forms it may take.
+ModCond     = CommandForm | Expression ;
 SimpleStmt  = PutsStmt | MultiAssign | AppendStmt | CommandStmt | PatAssign | ExprStmt ;
 // EXPR => PATTERN: Ruby 3's rightward assignment / destructuring statement. It raises
 // when the pattern does not match, so it is a statement and not a test. FatArrowAhead
 // is a cheap fast-fail: without it EVERY statement would parse its expression twice.
 PatAssign   <~~ push(makePatAssign(takeAll())) ~~>
-            = FatArrowAhead Expression "=>" Pattern [ ";" ] ;
+            = FatArrowAhead Expression "=>" PatTop [ ";" ] ;
 // NAME arg[, arg] [block]: the parenthesis-less command call (`describe "x" do .. end`,
 // `include Comparable`, `alias_method :other, :real`). It lives at STATEMENT level
 // only: inside an argument list `f(double, 21)` a bare name is a VALUE, not a call of
 // the following arguments, and Ruby itself resolves that with the local-variable
 // table a PEG parser does not have. CmdArgAhead is the spacing rule Ruby uses to tell
 // `foo -1` (an argument) from `foo - 1` (a subtraction).
-CommandStmt <~~ push(makeCall(takeAll())) ~~>
+CommandStmt = CommandForm ;
+// The same form where a VALUE is expected: `code = fixture __FILE__, "x.rb"` and
+// `return get_ary 3 do |i| ... end` are both paren-less calls in expression position.
+// CmdArgAhead is what keeps it out of everything else - a bare name followed by a
+// newline, an operator, a comma or a `)` never reaches it.
+CommandForm <~~ push(makeCall(takeAll())) ~~>
             = BareName <~~ push(up.in) ~~> SameLine CmdArgAhead Arg { "," Arg } [ Block ] ;
 // TARGET << V [<< V]: Ruby strings are mutable, so `s << "bc"` has to update the
 // variable itself. The append is therefore a statement form that WRITES BACK to its
@@ -245,15 +317,19 @@ DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" 
 // Kept at statement level (needs a comma after the first target) so it never
 // interferes with a nested expression.
 MultiAssign <~~ push(makeMultiAssign(takeAll())) ~~>
-            = MTarget "," [ MTarget { "," MTarget } [ "," ] ] "=" Expression { "," Expression } [ ";" ] ;
+            = MSplat "=" !"=" RetVal { "," RetVal } [ ";" ]
+            | MGroup "=" !"=" RetVal { "," RetVal } [ ";" ]
+            | MTarget "=" !"=" NotTilde RetVal "," RetVal { "," RetVal } [ ";" ]
+            | MTarget "," [ MTarget { "," MTarget } [ "," ] ] "=" RetVal { "," RetVal } [ ";" ] ;
 // A multiple-assignment target: a splat target (*rest, which collects the leftover
 // values into an array), a parenthesized nested group ((m, n), o = [5, 6], 7) or an
 // ordinary target. Longest first, so *x and (x, y) are not read as a plain Target.
 MTarget     = MSplat | MGroup | Target ;
-MSplat      <~~ push({splat: pop()}) ~~>
-            = "*" Target ;
+// The name may be omitted: `*, last = arr` and `(* = 1)` discard what they collect.
+MSplat      <~~ var n = takeAll(); push({splat: n.length > 0 ? n[0] : makeTargetRef([{var: "__splat_discard"}])}) ~~>
+            = "*" !"*" [ Target ] ;
 MGroup      <~~ push({group: takeAll()}) ~~>
-            = "(" MTarget "," MTarget { "," MTarget } ")" ;
+            = "(" MTarget [ "," [ MTarget { "," MTarget } ] [ "," ] ] ")" ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
@@ -292,7 +368,13 @@ Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Expression ] ;
 
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
-            = Target AssignOp <~~ push(up.in) ~~> AssignExpr ;
+            = Target AssignOp <~~ push(up.in) ~~> AssignRhs ;
+// `x = *arr` copies the array (and wraps a non-array in one); `x = f a, b` is a
+// paren-less call. Both are tried before the ordinary expression, and both fail on
+// the very first token when the right side is anything else.
+AssignRhs   = SplatRhs | CommandForm | AssignExpr ;
+SplatRhs    <~~ push(makeSplatRhs(pop())) ~~>
+            = "*" !"*" AssignExpr ;
 // ||= and &&= (conditional assignment) are accepted but not implemented (no short
 // circuit); makeAssign warns and falls back to a plain assignment.
 // NotTilde is what keeps `s =~ /re/` out of the assignment path: `=` followed by
@@ -301,17 +383,29 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 // in front of it and would then also reject the perfectly good `x = ~5`.
 AssignOp    = "||=" | "&&=" | "**=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%="
             | "|=" | "&=" | "^=" | ( "=" !"=" NotTilde ) ;
+// A label's `:` may not be the first half of a `::`. It has to be a :script anchored
+// on the very next byte, because a `!":"` lookahead SKIPS the whitespace in front of
+// it - which made `{ |a, b: :b| ... }` reject its own keyword parameter, the `:` of
+// the symbol VALUE being what the lookahead found. Same trap as `!"literal"` above.
+NotColonGlued = :script(~~
+    (function() {
+        if (c.peek(0) === 58) { return abnf.newToken("\x01coloncolon", 0) }
+    })()
+~~) ;
 NotTilde = :script(~~
     (function() {
         if (c.peek(0) === 126) { return abnf.newToken("\x01tilde", 0) }
     })()
 ~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { "." Id <~~ push({key: up.in}) ~~> | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
+            = TargetHead { "." Id <~~ push({key: up.in}) ~~> | "&." Id <~~ push({key: up.in}) ~~>
+              | "::" Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win), and the
 // scoped-constant head before the plain name for the same reason. `self` is a head of
 // its own: `self.attr = v` is how a method writes through its own accessor.
-TargetHead  = "::" Name <~~ push({var: up.in}) ~~>
+TargetHead  = "$" :whitespace() GvarDashCh <~~ push({gvar: up.in}) ~~> :whitespace(Whitespace)
+            | ParenTarget
+            | "::" Name <~~ push({var: up.in}) ~~>
             | "$" :whitespace() GvarNumCh <~~ push({gvar: up.in}) ~~> :whitespace(Whitespace)
             | "$" Id <~~ push({gvar: up.in}) ~~>
             | "@@" Id <~~ push({cvar: up.in}) ~~>
@@ -320,8 +414,72 @@ TargetHead  = "::" Name <~~ push({var: up.in}) ~~>
             | ScopedConstName <~~ push({sconst: up.in}) ~~>
             | Name <~~ push({var: up.in}) ~~> ;
 ScopedConstName = Name "::" Name { "::" Name } ;
-TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+// A parenthesised statement sequence used as an assignment TARGET:
+// `(ScratchPad << :x; obj).a = 1`. It is guarded, because Target is attempted at every
+// assignment level and parsing a whole statement list inside every parenthesised
+// expression would be a 2^depth blow-up on nested parentheses. The guard walks to the
+// MATCHING close paren and only lets the alternative run when a `.` or `[` follows it,
+// which is the only shape where a parenthesised head can be a target at all.
+ParenTarget <~~ push({texpr: pop().body}) ~~>
+            = ParenTargetAhead "(" Body ")" ;
+ParenTargetAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noparentarget", 0)
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        if (cc !== 40) { return no }
+        var depth = 0
+        var guard = 0
+        while (guard < 100000) {
+            guard = guard + 1
+            var d = c.peek(i)
+            if (d < 0) { return no }
+            if (d === 34 || d === 39) {                    // step over a string
+                var q = d
+                i = i + 1
+                var e = c.peek(i)
+                while (e >= 0 && e !== q) {
+                    if (e === 92) { i = i + 1 }
+                    i = i + 1
+                    e = c.peek(i)
+                }
+                if (e !== q) { return no }
+                i = i + 1
+                continue
+            }
+            if (d === 40 || d === 91 || d === 123) { depth = depth + 1; i = i + 1; continue }
+            if (d === 41 || d === 93 || d === 125) {
+                depth = depth - 1
+                i = i + 1
+                if (depth === 0) { break }
+                continue
+            }
+            i = i + 1
+        }
+        if (depth !== 0) { return no }
+        var j = i
+        var f = c.peek(j)
+        var st2 = 0
+        while (st2 < 1000 && (f === 32 || f === 9 || f === 13)) { j = j + 1; f = c.peek(j); st2 = st2 + 1 }
+        if (f === 46 || f === 91) { return undefined }     // '.' or '['
+        if (f === 58 && c.peek(j + 1) === 58) { return undefined }   // '::'
+        if (f === 38 && c.peek(j + 1) === 46) { return undefined }   // '&.'
+        return no
+    })()
+~~) ;
+
+// A subscript target may carry SEVERAL arguments (`@obj[1, *ary] = 4` reaches a
+// user-defined `[]=` with three). Only the first is lowered; the rest are parsed so
+// the surrounding file is understood, which is what a multi-key []= costs here.
+TIndex      <~~ var n = takeAll(); push({idx: n[0]}) ~~>
+            = "[" Arg { "," Arg } "]" ;
 
 // The RIGHT operand of && / || may be an ASSIGNMENT: `true && false && x = 1` and
 // `x = 1 || false && x = 2` are ordinary Ruby, because `=` binds looser than the
@@ -435,9 +593,15 @@ SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: up.in}) ~~> ;
 // The LineCont guard keeps a line that OPENS with an array literal from being read
 // as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
-IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
-            = LineCont "[" Expression "]" ;
-MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
+// A subscript reaches a user-defined #[] with a full argument list; only the first
+// argument is lowered, the rest are parsed so the surrounding file is understood.
+IndexSfx    <~~ var n = takeAll(); push({kind: "index", idx: n[0]}) ~~>
+            = LineCont "[" Arg { "," Arg } "]" ;
+// SameLine is what stops an argument list from reaching across a line break: after
+// `n.to_s` a `(` that OPENS the next line is a fresh statement, not this call's
+// arguments. (Ruby wants the `(` glued to the name; requiring only the same line keeps
+// the `foo (1)` spelling working, which Ruby warns about but accepts.)
+MArgs       = SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ] | Block ;
 
 // A call argument: an ordinary expression, or one of the forms accepted for
 // recognition but not implemented - keyword argument (name: v), splat / double-splat
@@ -446,11 +610,19 @@ MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
 // FwdArg comes LAST: a leading "..." is first offered to Expression, which reads it
 // as a beginless exclusive range and only fails when no operand follows - so `f(...)`
 // forwards while `f(...9)` stays a range.
-Arg         = KwArg | SplatArg | BlockArg | Expression | FwdArg ;
+Arg         = KwArg | SplatArg | BlockArg | ArrowArg | FwdArg ;
+// KEY => VALUE among the arguments: Ruby collects the trailing run of `name: v` and
+// `key => v` pairs into ONE Hash and passes it as the last argument, so
+// `m(kw: 1, true => false)` is a call with a single Hash. Spelled as an OPTIONAL tail
+// of the ordinary argument, so a plain argument still parses its expression once.
+ArrowArg    <~~ var n = takeAll(); if (n.length > 1) { push({kwkeyT: n[0], kwT: n[1]}) } else { push(n[0]) } ~~>
+            = Expression [ "=>" Expression ] ;
 FwdArg      <~~ push({splatT: makeVarRef("__fwd_a")}) ; push({blkT: makeVarRef("__fwd_b")}) ~~>
             = "..." ;
-KwArg       <~~ var n = takeAll(); push({kwname: n[0], kwT: n[1]}) ~~>
-            = SymName <~~ push(up.in) ~~> ":" !":" Expression ;
+// The value may be OMITTED (Ruby 3.1): `m(a:, b:)` passes the local - or the method -
+// of the same name, exactly like the `{x:, y:}` hash shorthand.
+KwArg       <~~ var n = takeAll(); push({kwname: n[0], kwT: n.length > 1 ? n[1] : makeVarRef(n[0])}) ~~>
+            = SymName <~~ push(up.in) ~~> ":" NotColonGlued [ Expression ] ;
 // *arr splices an array into the positional arguments, **h merges a hash into the
 // keyword arguments.
 SplatArg    <~~ push({splatT: pop()}) ~~>
@@ -458,7 +630,8 @@ SplatArg    <~~ push({splatT: pop()}) ~~>
 // &expr: pass expr as the call's block. A Proc is passed straight through; a symbol
 // becomes the "call this method on each element" proc (`[1, 2].map(&:to_s)`).
 BlockArg    <~~ push({blkT: makeBlockArg(pop())}) ~~>
-            = "&" Expression ;
+            = "&" Expression
+            | "&" !"&" <~~ push(makeVarRef("__fwd_b")) ~~> ;
 
 // ->(a, b = 1) { ... } / -> { ... }: a lambda literal. Unlike a block it is a VALUE,
 // and a `return` inside it returns from the lambda itself.
@@ -468,8 +641,99 @@ LambdaBody  = KwDo Body End | "{" [ BlockParams ] Body "}" ;
 
 // A block passed to a method call: a real closure over the current scope.
 Block       <~~ push(makeBlock(takeAll())) ~~>
-            = KwDo [ BlockParams ] GuardedBlockBody End
-            | "{" [ BlockParams ] BlockBody "}" ;
+            = NoLoopDo KwDo [ BlockParams ] GuardedBlockBody End
+            | NoLambdaParam "{" [ BlockParams ] BlockBody "}" ;
+// A `{` may not open a BLOCK inside a parenthesis-less lambda parameter list: in
+// `-> a=a() { a }` the braces are the lambda's BODY, and without this guard the default
+// value `a()` takes them as its block and the lambda is left with none. Like NoLoopDo
+// above, the guard re-derives the answer by walking backwards - here to the `->` that
+// opened the parameter list, stopping at anything that ends one.
+NoLambdaParam = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01lambdaparam", 0)
+        var i = -1
+        var depth = 0
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            var cc = c.peek(i)
+            if (cc < 0) { return undefined }
+            if (cc === 41 || cc === 93) { depth = depth + 1; i = i - 1; continue }
+            if (cc === 40 || cc === 91) {
+                if (depth === 0) { return undefined }
+                depth = depth - 1
+                i = i - 1
+                continue
+            }
+            if (depth > 0) { i = i - 1; continue }
+            if (cc === 123 || cc === 125 || cc === 59 || cc === 10) { return undefined }
+            // A `->` at bracket depth zero: the parameter list it opened is what we are
+            // standing in, unless it was parenthesised (`-> (a) { ... }`).
+            if (cc === 62 && c.peek(i - 1) === 45) {
+                var j = i + 1
+                var dd = c.peek(j)
+                var st2 = 0
+                while (st2 < 1000 && (dd === 32 || dd === 9)) { j = j + 1; dd = c.peek(j); st2 = st2 + 1 }
+                if (dd === 40) { return undefined }
+                return no
+            }
+            i = i - 1
+        }
+        return undefined
+    })()
+~~) ;
+
+// A `do` block may not open inside the CONDITION of a loop: `while flag do ... end`
+// gives the `do` to the loop, not to a call of `flag`. A guard cannot carry a flag
+// (guards must be pure functions of source and position), so it re-derives the answer
+// by walking BACKWARDS to the start of the enclosing statement and reading its first
+// word - the same shape as Swift's NoTrailCtx in languages/swift-*.abnf.
+NoLoopDo = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01loopdo", 0)
+        var i = -1
+        var depth = 0
+        var steps = 0
+        var start = 0
+        var found = false
+        while (steps < 100000 && !found) {
+            steps = steps + 1
+            var cc = c.peek(i)
+            if (cc < 0) { start = i + 1; found = true; break }
+            if (cc === 41 || cc === 93) { depth = depth + 1; i = i - 1; continue }
+            if (cc === 40 || cc === 91) {
+                // An unmatched opener starts the enclosing expression, so the word right
+                // after it is the one to read: `defined?(while x do y end)` has its loop
+                // header inside the parentheses.
+                if (depth === 0) { start = i + 1; found = true; break }
+                depth = depth - 1
+                i = i - 1
+                continue
+            }
+            if (depth > 0) { i = i - 1; continue }
+            if (cc === 125 || cc === 123 || cc === 59) { start = i + 1; found = true; break }
+            if (cc === 10) { start = i + 1; found = true; break }
+            i = i - 1
+        }
+        if (!found) { return undefined }
+        // Read the first word of that statement, skipping leading blanks.
+        var j = start
+        var dd = c.peek(j)
+        var st2 = 0
+        while (st2 < 1000 && (dd === 32 || dd === 9 || dd === 13)) { j = j + 1; dd = c.peek(j); st2 = st2 + 1 }
+        var w = ""
+        var st3 = 0
+        while (st3 < 100 && ((dd >= 65 && dd <= 90) || (dd >= 97 && dd <= 122) || dd === 95)) {
+            w = w + String.fromCharCode(dd)
+            j = j + 1
+            dd = c.peek(j)
+            st3 = st3 + 1
+        }
+        if (w === "while" || w === "until" || w === "for") { return no }
+        return undefined
+    })()
+~~) ;
+
 // The body is wrapped only to keep its SOURCE TEXT: a block with no |params| that
 // mentions _1 / _2 takes them as its parameters, and Ruby decides the block's arity
 // from the HIGHEST one mentioned (which is what makes { _1 + _2 } destructure a
@@ -483,8 +747,13 @@ GuardedBlockBody <~~ push({body: makeGuardedBody(takeAll()), btext: up.in}) ~~>
             = GuardedItems ;
 // The trailing comma is legal and meaningful: `{ |a, | ... }` forces the single
 // argument to be DESTRUCTURED rather than taken whole.
+// After a `;` come the block-LOCAL variables: names that are fresh in the block even
+// when the enclosing scope has one of the same name. They are ordinary parameters here
+// (a block is always called with fewer arguments than it has names, and the extra ones
+// arrive as nil, which is exactly what a block-local starts as).
 BlockParams <~~ push({bparams: takeAll()}) ~~>
-            = "|" [ BParam { "," BParam } [ "," ] ] "|" ;
+            = "|" [ BParam { "," BParam } [ "," ] ] [ ";" BLocal { "," BLocal } ] "|" ;
+BLocal      = Name <~~ push({param: up.in}) ~~> ;
 // A block parameter may be a parenthesized group that destructures one element:
 // `[[1, [2, 3]]].each { |a, (b, c)| ... }`.
 // A default value inside |...| may NOT be a full expression: `{ |a=5, b=4| ... }`
@@ -493,7 +762,7 @@ BlockParams <~~ push({bparams: takeAll()}) ~~>
 BParam      = BGroup | ParamFwd | ParamDSplat | ParamSplat | ParamBlock | BParamKw
             | BParamDefault | ParamSimple ;
 BParamKw    <~~ var n = takeAll(); push({param: n[0], kw: true, defT: n.length > 1 ? n[1] : undefined}) ~~>
-            = Name <~~ push(up.in) ~~> ":" !":" [ BitAndExpr ] ;
+            = Name <~~ push(up.in) ~~> ":" NotColonGlued [ BitAndExpr ] ;
 BParamDefault <~~ var n = takeAll(); push({param: n[0], defT: n[1]}) ~~>
             = Name <~~ push(up.in) ~~> "=" !"=" BitAndExpr ;
 BGroup      <~~ push({pgroup: takeAll()}) ~~>
@@ -502,13 +771,18 @@ BGroup      <~~ push({pgroup: takeAll()}) ~~>
 Primary     = "(" Expression ")" | ParenBody | LambdaLit | SingletonDecl
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
-            | HeredocLit | HeredocRef
+            | CmdLit | HeredocLit | HeredocRef
             | StrLit | CharLit | PercentLit | RegexLit
             | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
             | SymLit
             | ArrayLit | HashLit
-            | True | False | Nil | Self
+            | True | False | Nil | Self | FileLit | LineLit | DirLit
+            | ClassDecl | ModuleDecl | DefExpr
             | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | TopConst | ScopedConst | Call | VarRef ;
+// `def m ... end` is an expression whose value is the Symbol :m (Ruby 2.1). Defining
+// the method is its side effect, which is what makeDefStmt already does.
+DefExpr     <~~ push(makeDefExpr(pop())) ~~>
+            = Def ;
 
 // ::CONST - a constant looked up in Object, the top-level namespace. It is the same
 // value as the bare CONST here (there is one constant table), but the spelling is
@@ -533,7 +807,40 @@ ForExpr     <~~ push(makeForIn(takeAll())) ~~>
 // The trailing comma is meaningful, exactly as in a block parameter list: `for i, in`
 // forces each element to be DESTRUCTURED rather than taken whole.
 ForVars     = "(" ForVarList ")" | ForVarList ;
-ForVarList  = Name <~~ push({fvar: up.in}) ~~> { "," [ "*" ] [ Name <~~ push({fvar: up.in}) ~~> ] } ;
+ForVarList  = ForVar { "," [ "*" ] [ ForVar ] } ;
+// A parenthesised loop variable destructures one element; the names are collected
+// flat, which is what makeForIn already binds them as.
+// The loop variable may be an @ivar, a @@classvar or a $global as well as a local -
+// `for` does not open a scope, so every one of them is an ordinary assignment.
+// A `for` variable that is a METHOD-CALL target (`for obj.attr in coll`). The guard
+// keeps the common case - a plain local - off the Target path: it only lets it run
+// when the name ahead is followed by a `.`, a `[` or a `::`.
+ForPathAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noforpath", 0)
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) { return no }
+        while ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc === 46 || cc === 91) { return undefined }
+        if (cc === 58 && c.peek(i + 1) === 58) { return undefined }
+        return no
+    })()
+~~) ;
+ForVar      = "(" ForVarList ")" | ForPathAhead Target <~~ push({ftarget: pop()}) ~~>
+            | "@@" Id <~~ push({fvar: "@@" + up.in}) ~~>
+            | "@" Id <~~ push({fvar: "@" + up.in}) ~~> | "$" Id <~~ push({fvar: "$" + up.in}) ~~>
+            | Name <~~ push({fvar: up.in}) ~~> ;
 
 // super / super(args): call the method of the same name in the superclass. A BARE
 // super forwards the arguments the current method received (Ruby), while super()
@@ -864,7 +1171,119 @@ HdBodyScan = :script(~~
 // whitespace into an array of strings / symbols. Each form accepts the three usual
 // delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
 // because the dialect has no parameterized rules.
-PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare ;
+PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare | PctAny ;
+// A % literal with an ARBITRARY delimiter. Ruby lets any non-alphanumeric character
+// delimit one (`%!a!`, `%@a@`, `%#a#`, `%r)a)`), and lets %s and %x use the bracket
+// pairs the rules above reserve for the other kinds. Writing every delimiter out as
+// its own character class is not practical, so this is a scanner: it returns the whole
+// literal as one token and makePctAny splits it apart again - the same shape the
+// heredoc lexer uses. It comes LAST, so every bracket form above still wins.
+PctAny      <~~ push(makePctAny(up.in, up.pos)) ~~>
+            = PctAnyScan :whitespace(Whitespace) ;
+PctAnyScan = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01nopctany", 0)
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        var start = i
+        if (c.peek(i) !== 37) { return no }                       // '%'
+        i = i + 1
+        var kind = 0
+        var k = c.peek(i)
+        if (k === 113 || k === 81 || k === 119 || k === 87 || k === 105 || k === 73
+            || k === 114 || k === 115 || k === 120) { kind = k; i = i + 1 }
+        var d = c.peek(i)
+        if (d < 33 || d > 126) { return no }                      // must be punctuation
+        if ((d >= 48 && d <= 57) || (d >= 65 && d <= 90) || (d >= 97 && d <= 122)) { return no }
+        // '=' IS a legal delimiter (`%=a=`): this rule is only ever reached where a
+        // VALUE is expected, and `x %= 2` is taken by the assignment rule long before.
+        // A bracket delimiter is normally taken by one of the specific productions
+        // above; this rule is reached with one only when they FAILED - which is what
+        // `%i{a b #{c}}` needs, its nested brace being outside their character classes.
+        var isBracket = (d === 40 || d === 91 || d === 123 || d === 60)
+        var close = d
+        if (d === 40) { close = 41 }
+        if (d === 91) { close = 93 }
+        if (d === 123) { close = 125 }
+        if (d === 60) { close = 62 }
+        i = i + 1
+        var depth = 1
+        var guard = 0
+        while (guard < 1000000) {
+            guard = guard + 1
+            var e = c.peek(i)
+            if (e < 0) { return no }
+            if (e === 92 && close !== 92) { i = i + 2; continue }  // an escaped character
+            if (e === close) {
+                depth = depth - 1
+                i = i + 1
+                if (depth === 0) { break }
+                continue
+            }
+            // Step over a `#{...}` interpolation, or `%@a #{@ip}@` would close on the
+            // `@` INSIDE it. The delimiter test above comes first, so `%#a#` - where the
+            // delimiter IS a '#' - still ends where it should.
+            if (e === 35 && c.peek(i + 1) === 123) {
+                var idepth = 1
+                i = i + 2
+                var inner = 0
+                while (inner < 100000) {
+                    inner = inner + 1
+                    var g = c.peek(i)
+                    if (g < 0) { return no }
+                    if (g === 92) { i = i + 2; continue }
+                    if (g === 123) { idepth = idepth + 1 }
+                    if (g === 125) {
+                        idepth = idepth - 1
+                        if (idepth === 0) { i = i + 1; break }
+                    }
+                    i = i + 1
+                }
+                continue
+            }
+            i = i + 1
+        }
+        if (depth !== 0) { return no }
+        if (kind === 114) {                                       // %r keeps its flags
+            var fl = c.peek(i)
+            while (fl === 105 || fl === 109 || fl === 120 || fl === 111 || fl === 117
+                   || fl === 110 || fl === 101 || fl === 115) { i = i + 1; fl = c.peek(i) }
+        }
+        // Rebuild the exact source slice (c.peek answers BYTES - decode the UTF-8).
+        var out = ""
+        var p = start
+        while (p < i) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return no
+        }
+        return abnf.newToken(out, 0)
+    })()
+~~) ;
 PctQ        <~~ push(makeConst(unescapeSq(pctRawOf(takeAll())))) ~~>
             = "%q" :whitespace() PctRawBody :whitespace(Whitespace) ;
 PctW        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), false))) ~~>
@@ -891,7 +1310,17 @@ PctBrcCh    = "\x00"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 PctTplBody  = "(" { TplExpr | PctParChunk } ")"
             | "[" { TplExpr | PctBrkChunk } "]"
             | "{" { TplExpr | PctBrcChunk } "}"
-            | "<" { TplExpr | PctAngChunk } ">" ;
+            | "<" { TplExpr | PctAngChunk } ">"
+            | "!" { TplExpr | PctBngChunk } "!"
+            | "|" { TplExpr | PctPipChunk } "|" ;
+// Ruby lets ANY non-alphanumeric character delimit a % literal; the bracket pairs
+// above and these two are the ones that turn up in practice.
+PctBngChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBngTC { PctBngTC } ;
+PctBngTC    = TplEsc | HashChar | PctBngPlain ;
+PctBngPlain = "\x00"..."\x20" | "\x22" | "\x24"..."\x5b" | "\x5d"..."\U0010ffff" ;
+PctPipChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctPipTC { PctPipTC } ;
+PctPipTC    = TplEsc | HashChar | PctPipPlain ;
+PctPipPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // The angle-bracket delimiter (%<a #{b}>), the fourth of Ruby's bracket pairs.
 PctAngChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctAngTC { PctAngTC } ;
 PctAngTC    = TplEsc | HashChar | PctAngPlain ;
@@ -917,6 +1346,16 @@ PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x
 // A `/` only starts a literal in VALUE position, which is exactly where Primary is
 // reached - so `8 / 2 / 2` still divides: after the 8 the parser is at the operator
 // level and never offers Primary a `/`.
+// `echo hi` / %x{echo hi}: run a sub-shell and yield its output. There is no process
+// spawning here, so the interpolation is evaluated (for its side effects) and the
+// result is the empty string - notImplemented, not a parse failure.
+CmdLit      <~~ push(makeCommand(makeTemplate(takeAll()), up.pos)) ~~>
+            = "`" :whitespace() { TplExpr | BtChunk } "`" :whitespace(Whitespace)
+            | "%x" :whitespace() PctTplBody :whitespace(Whitespace) ;
+BtChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = BtTC { BtTC } ;
+BtTC        = TplEsc | HashChar | BtPlain ;
+BtPlain     = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
+
 RegexLit    <~~ push(makeRegex(takeAll())) ~~>
             = "/" :whitespace() { ReTplExpr | ReSlashChunk } "/" ReFlags :whitespace(Whitespace) ;
 PctR        <~~ push(makeRegex(takeAll())) ~~>
@@ -958,7 +1397,12 @@ RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U
 // which is exactly what keeps the ternary `c ? a : b` out of it.
 CharLit     <~~ push(makeConst(charLitVal(up.in))) ~~>
             = "?" :whitespace() CharBody :whitespace(Whitespace) ;
-CharBody    = "\\" "\x21"..b"\x7e" | "\x21"..."\U0010ffff" ;
+// ?\C-z / ?\M-\C-z: the control and meta forms of a character literal. Longest first
+// (PEG), or the plain escape below would take the backslash and leave the rest.
+CharBody    = CharCtl | "\\" "\x21"..b"\x7e" | "\x21"..."\U0010ffff" ;
+CharCtl     = CharCtlPfx [ CharCtlPfx ] CharCtlCh ;
+CharCtlPfx  = "\\M-" | "\\C-" | "\\c" ;
+CharCtlCh   = "\\" "\x21"..."\x7e" | "\x21"..."\U0010ffff" ;
 
 // if / unless usable as a statement and as an expression (yields the branch value).
 IfExpr      <~~ push(makeIf(takeAll())) ~~>
@@ -998,7 +1442,29 @@ ScalarVal   <~~ push({t: pop(), isRange: false}) ~~>
 // local that receives the matched part, and the bindings of a failed alternative
 // simply stay behind, which is what Ruby does too.
 InClause    <~~ push(makeIn(takeAll())) ~~>
-            = KwIn Pattern [ PatGuard ] [ KwThen ] Body ;
+            = KwIn PatTop [ PatGuard ] [ KwThen ] Body ;
+// At the TOP of an `in` clause the brackets may be dropped: `in a: 1, b: 1` is the
+// hash pattern `{a: 1, b: 1}` and `in 1, 2` the array pattern `[1, 2]`. Both forms
+// exist only here, which is why they are not alternatives of PatPrim - a nested
+// `in [x, {a: 1}]` still needs its braces. The bare hash comes first (PEG): it starts
+// with `name:`, which no other pattern can.
+PatTop      = PatBareHash | PatBareSplat | PatBareArray | Pattern ;
+// `in *;` and `in *rest` on their own: an array pattern that is nothing but a splat,
+// which matches any deconstructable value ("matches anything with *").
+PatBareSplat <~~ push(makePatArray(takeAll())) ~~>
+            = PatSplat ;
+// SameLine is what bounds an OMITTED value: `{a: 1} => a:` followed by `a.should == 1`
+// on the next line must not read that line as the pattern for the key.
+PatBareHash <~~ push(makePatHash(takeAll())) ~~>
+            = PatBareHashElem { "," PatBareHashElem } ;
+PatBareHashElem = PatHashRest | PatBareHashPair ;
+PatBareHashPair <~~ push(makePatPair(takeAll())) ~~>
+            = PatKey [ SameLine Pattern ] ;
+// SameLine is what ends the bracket-less list: `in 5, 4,` followed by the clause body
+// on the next line must not read that body as a third element. A comma left over at
+// the end of the line is then the partial-match marker, exactly as inside brackets.
+PatBareArray <~~ push(makePatArray(takeAll())) ~~>
+            = PatArrElem "," [ SameLine PatArrElem { "," SameLine PatArrElem } ] [ PatArrTrail ] ;
 PatGuard    = PatGuardIf | PatGuardUnless ;
 PatGuardIf  <~~ push({guard: pop(), gneg: false}) ~~> = KwIf Expression ;
 PatGuardUnless <~~ push({guard: pop(), gneg: true}) ~~> = KwUnless Expression ;
@@ -1012,12 +1478,43 @@ PatAlt      <~~ push(makePatAlt(takeAll())) ~~>
 // Order matters (PEG): the bracketed forms first, then a pinned name, then a bare
 // LOWER-case name (a binding), and only then a general expression - which is what a
 // Constant (Integer, String), a literal and a range all are.
-PatPrim     = PatArray | PatHash | PatPin | PatVar | PatValue ;
+PatPrim     = PatConstHash | PatConstArr | PatArray | PatHash | PatParen | PatPinExpr | PatPin
+            | PatVar | PatValue ;
+// Constant(pat, ...) / Constant[pat, ...] and Constant(id: pat, ...) - the value must
+// be an instance of the constant AND deconstruct to the pattern inside. The spec suite
+// spells all four forms out ("supports form Constant(pat, pat, ...)").
+// SameLine keeps the deconstruction bracket on the constant's own line: without it
+// `[1, 2] => a, b` followed by a line that OPENS with `[a, b]` reads that array as the
+// pattern `b[a, b]`, and the parse then dies on the `.` after it.
+PatConstArr <~~ push(makePatConstPat(takeAll())) ~~>
+            = PatConstName SameLine PatConstArrBody ;
+PatConstArrBody <~~ push(makePatArray(takeAll())) ~~>
+            = "(" [ PatArrElem { "," PatArrElem } [ PatArrTrail ] ] ")"
+            | "[" [ PatArrElem { "," PatArrElem } [ PatArrTrail ] ] "]" ;
+PatConstHash <~~ push(makePatConstPat(takeAll())) ~~>
+            = PatConstName SameLine PatConstHashBody ;
+PatConstHashBody <~~ push(makePatHash(takeAll())) ~~>
+            = "(" PatHashElem { "," PatHashElem } ")"
+            | "[" PatHashElem { "," PatHashElem } "]" ;
+PatConstName <~~ push(makeScopedConst(up.in)) ~~> = Name { "::" Name } ;
+// A pattern in parentheses - the spec puts a whole range pattern on its own line
+// inside them, so this is not the same thing as a Constant() deconstruction.
+PatParen    = "(" Pattern ")" ;
+// A pin may name an @ivar, a @@classvar or a $global as well as a local: `in ^@a`
+// tests against the CURRENT value of @a rather than binding it.
 PatPin      <~~ push(makePatPin(pop())) ~~>
             = "^" PatPinName ;
-PatPinName  <~~ push(up.in) ~~> = Name ;
+// ^(EXPR): the pin may hold a whole expression (Ruby 3.1), which is evaluated and then
+// matched with === like any other value pattern.
+PatPinExpr  <~~ push(makePatValue(pop())) ~~>
+            = "^" "(" Expression ")" ;
+PatPinName  <~~ push(up.in) ~~> = "@@" Id | "@" Id | "$" Id | Name ;
 PatArray    <~~ push(makePatArray(takeAll())) ~~>
-            = "[" [ PatArrElem { "," PatArrElem } ] "]" ;
+            = "[" [ PatArrElem { "," PatArrElem } [ PatArrTrail ] ] "]" ;
+// `in [0, 1, ]` matches the array's BEGINNING and ignores the rest - the trailing
+// comma is exactly an anonymous splat ("does match partially from the array beginning
+// if list + , syntax used").
+PatArrTrail <~~ push({psplat: ""}) ~~> = "," ;
 PatArrElem  = PatSplat | Pattern ;
 // [*pre, 42, *post]: a splat swallows any number of elements; two of them make the
 // FIND pattern, which searches for the middle anywhere in the array.
@@ -1025,7 +1522,7 @@ PatSplat    <~~ var n = takeAll(); push({psplat: n.length > 0 ? n[0] : ""}) ~~>
             = "*" !"*" [ PatSplatName ] ;
 PatSplatName <~~ push(up.in) ~~> = Name ;
 PatHash     <~~ push(makePatHash(takeAll())) ~~>
-            = "{" [ PatHashElem { "," PatHashElem } ] "}" ;
+            = "{" [ PatHashElem { "," PatHashElem } [ "," ] ] "}" ;
 PatHashElem = PatHashRest | PatHashPair ;
 PatHashRest <~~ var n = takeAll(); push({prest: n.length > 0 ? n[0] : ""}) ~~>
             = "**" [ PatSplatName ] ;
@@ -1033,7 +1530,11 @@ PatHashRest <~~ var n = takeAll(); push({prest: n.length > 0 ? n[0] : ""}) ~~>
 // binds the local r to it.
 PatHashPair <~~ push(makePatPair(takeAll())) ~~>
             = PatKey [ Pattern ] ;
-PatKey      <~~ push({pkey: hashShortName(up.in)}) ~~> = SymName ":" !":" ;
+// A hash-pattern key may be written as a quoted label ({"a": 0}); Ruby allows only a
+// LABEL here, never a `"a" => 1` pair, which is why the value stays a plain symbol.
+PatKey      = PatKeyPlain | PatKeyQ ;
+PatKeyPlain <~~ push({pkey: hashShortName(up.in)}) ~~> = SymName ":" NotColonGlued ;
+PatKeyQ     = '"' :whitespace() SymName <~~ push({pkey: up.in}) ~~> '"' ":" NotColonGlued :whitespace(Whitespace) ;
 PatVar      <~~ push(makePatVar(up.in)) ~~> = NotKw LcId ;
 LcId        = ( "a"..."z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
 PatValue    <~~ push(makePatValue(pop())) ~~> = RangeExpr ;
@@ -1055,25 +1556,32 @@ BeginExpr   <~~ push(makeTry(takeAll(), up.pos)) ~~>
 // to sit on the rescue's own line.
 RescueClause <~~ push(makeExcept(takeAll())) ~~>
             = KwRescue [ SameLine ErrList ] [ "=>" ExcName ] [ KwThen ] Body <~~ push({rbody: pop().body}) ~~> ;
-// The captured name may be any assignable target, not only a local: `rescue => @e`
-// and `rescue => @@e` both bind the exception to that variable.
-ExcName     = "@@" Id <~~ push({hname: up.in, hkind: "cvar"}) ~~>
-            | "@" Id <~~ push({hname: up.in, hkind: "ivar"}) ~~>
-            | "$" Id <~~ push({hname: up.in, hkind: "gvar"}) ~~>
-            | Name <~~ push({hname: up.in, hkind: "local"}) ~~> ;
+// The capture is any assignable TARGET, not only a local: `rescue => @e`,
+// `rescue => @@e`, `rescue => obj.field` and `rescue => obj&.field` all bind the
+// exception through the ordinary assignment path. A bare name still DECLARES a fresh
+// local in the handler's scope, which is what Ruby does and what a plain write would
+// not do.
+ExcName     <~~ push({href: pop()}) ~~>
+            = Target ;
 ErrList     = ErrName { "," ErrName } ;
-ErrName     = ScopedName <~~ push({etype: up.in}) ~~> ;
+ErrName     = ErrSplat | ScopedName <~~ push({etype: up.in}) ~~> ;
+// `rescue *exception_list`: the classes come from an array only known at run time, so
+// there is no name to discriminate on. The clause degrades to the catch-all it would
+// be with no list at all - which is what dropping the expression here leaves.
+ErrSplat    <~~ pop() ~~>
+            = "*" !"*" Expression ;
 
 // The optional argument of return/break/next must not start at a statement-modifier
 // keyword: in `break if C` the `if` belongs to the enclosing ModStmt - without the
 // NoModKw guard it parses as a block-if argument expression and swallows the loop's
 // `end`.
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ NoModKw Expression { "," Expression } ] ;
+            = KwReturn [ NoModKw CommandForm | NoModKw RetVal { "," RetVal } ] ;
+RetVal      = SplatRhs | Expression ;
 BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
-            = KwBreak [ NoModKw Expression ] ;
+            = KwBreak [ NoModKw CommandForm | NoModKw RetVal ] ;
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
-            = KwNext [ NoModKw Expression { "," Expression } ] ;
+            = KwNext [ NoModKw CommandForm | NoModKw RetVal { "," RetVal } ] ;
 // redo re-runs the current block body with the same element, without advancing the
 // iteration (it travels to the iterating method as its own control signal).
 RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
@@ -1094,7 +1602,7 @@ RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
 // the longest form comes first, so `x ? a : b` only reaches the ternary after the
 // call alternatives have failed and rolled back.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = BareName <~~ push(up.in) ~~> "(" [ Arg { "," Arg } ] ")" [ Block ]
+            = BareName <~~ push(up.in) ~~> SameLine "(" [ Arg { "," Arg } [ "," ] ] ")" [ Block ]
             | BareName <~~ push(up.in) ~~> Block
             | PredName <~~ push(up.in) ~~> ;
 BareName    = NotKw Id [ "?" | "!" ] ;
@@ -1115,13 +1623,17 @@ GvarRef     = "$" Id <~~ push(makeGvarRef(up.in)) ~~> ;
 // only need their own spelling here (Id does not start with a digit).
 // (GvarNumCh is a production of its own because a Command followed by a GROUP is
 // read as a repetition - see the Times trap in docs/abnf-dialect-gotchas.md.)
-GvarNum     = "$" :whitespace() GvarNumCh <~~ push(makeGvarRef(up.in)) ~~> :whitespace(Whitespace) ;
+GvarNum     = "$" :whitespace() GvarDashCh <~~ push(makeGvarRef(up.in)) ~~> :whitespace(Whitespace)
+            | "$" :whitespace() GvarNumCh <~~ push(makeGvarRef(up.in)) ~~> :whitespace(Whitespace) ;
+// $-0 / $-a / $-I: the command-line flag globals, a '-' plus one more character.
+GvarDashCh  = "-" GvarDashTail ;
+GvarDashTail = "0"..."9" | "a"..."z" | "A"..."Z" | "_" ;
 // Ruby's punctuation globals: the capture groups $1..$9, $~ / $& (the last match),
 // $0 (the program name), $! (the current exception), $? $$ $. $, $; $/ $: $" $* $<
 // $> $+ $_ $@. They are ordinary entries in the global table; only the spelling is
 // unusual, and each has to be listed because Id cannot start with punctuation.
 GvarNumCh   = "0"..."9" | "~" | "&" | "!" | "?" | "$" | "." | "," | ";" | "/" | "\\"
-            | ":" | "*" | "<" | ">" | "+" | "@" | "'" | "`" | '"' ;
+            | ":" | "*" | "<" | ">" | "+" | "@" | "'" | "`" | '"' | "=" ;
 CvarRef     = "@@" Id <~~ push(makeCvarRef(up.in)) ~~> ;
 // defined?(X) answers what kind of thing X is - or nil when it is nothing. Its
 // argument is NOT evaluated, so the production keeps only the source text and
@@ -1134,12 +1646,21 @@ DefinedExpr <~~ push(makeDefined(takeAll())) ~~>
 DefArgTxt   <~~ takeAll(); push({dtext: up.in}) ~~>
             = Expression | GvarRef | Id ;
 Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
+// The source-position literals, resolved where they are WRITTEN (both are compile
+// time constants in Ruby too). __dir__ is a method, not a keyword, but it answers the
+// same question and nothing else here can.
+FileLit     <~~ push(makeConst(c.file)) ~~> = "__FILE__" KwEnd ;
+LineLit     <~~ push(makeConst(c.lineOf(up.pos))) ~~> = "__LINE__" KwEnd ;
+DirLit      <~~ push(makeConst(dirOfFile(c.file))) ~~> = "__dir__" KwEnd ;
 Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
 
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
-            = "[" [ ArrElem { "," ArrElem } ] "]" ;
+            = "[" [ ArrElem { "," ArrElem } [ "," ] ] "]" ;
 // An array element may be splatted: [0, *[1, 2], 3] splices the inner array in.
-ArrElem     = ArrSplat | Expression ;
+// An array literal ends the same way a call's argument list does: a trailing run of
+// `key => v` / `name: v` pairs is ONE Hash element (`["foo" => :bar, baz: 42]` is a
+// one-element array holding a two-entry Hash).
+ArrElem     = ArrSplat | KwArg | ArrowArg ;
 ArrSplat    <~~ push({splat: pop()}) ~~>
             = "*" !"*" Expression ;
 HashLit     <~~ push(makeHash(takeAll())) ~~>
@@ -1148,9 +1669,14 @@ HashLit     <~~ push(makeHash(takeAll())) ~~>
 // symbol :name, which the runtime already represents as the string "name").
 // HashShort is the Ruby 3.1 value omission {x:, y:} - the value is the local (or
 // method) of the same name. It comes AFTER HashColon so the form WITH a value wins.
-HashEntry   = HashDSplat | HashColon | HashShort | HashArrow ;
+HashEntry   = HashDSplat | HashColon | HashQColon | HashShort | HashArrow ;
+// A quoted LABEL ({"d": 4}) is the Symbol key :d - unlike {"d" => 4}, whose key is the
+// String. It is tried before HashArrow, which is what the same text with `=>` needs.
+HashQColon  <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
+            = '"' :whitespace() SymNameSfx <~~ push(makeConst(mkSym(up.in))) ~~> '"'
+              :whitespace(Whitespace) ":" NotColonGlued Expression ;
 HashShort   <~~ var n = hashShortName(up.in); push({hk: makeConst(mkSym(n)), hv: makeVarRef(n)}) ~~>
-            = SymName ":" !":" ;
+            = SymNameSfx ":" NotColonGlued ;
 // {**other, k: v} merges another hash in.
 HashDSplat  <~~ push({hsplat: pop()}) ~~>
             = "**" Expression ;
@@ -1158,8 +1684,9 @@ HashArrow   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
 HashColon   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = SymKey ":" Expression ;
+// A hash key may end in ? or ! just as a method name can ({a!: 1} is the key :a!).
 SymKey      <~~ push(makeConst(mkSym(up.in))) ~~>
-            = SymName ;
+            = SymNameSfx ;
 
 // :"two words" and :"n#{1 + 1}" are symbol literals with a string body.
 // A Symbol literal. Beyond the plain :name Ruby spells one for every kind of name a
@@ -1175,15 +1702,38 @@ SymPlain    = ":" :whitespace() SymNameSfx <~~ push(makeConst(mkSym(up.in))) ~~>
 SymNameSfx  = SymName :whitespace() [ SymSfxQ | SymSfxB | SymSfxE ] ;
 SymSfxQ     = "?" ;
 SymSfxB     = "!" !"=" ;
-SymSfxE     = "=" !"=" !"~" !">" ;
+SymSfxE     = "=" SymSfxEOk ;
+// `{:a==>1}` is the symbol :a= followed by the `=>` of the hash - so an `=` after the
+// name is part of the NAME when what follows it is `=>`, and the operator otherwise.
+SymSfxEOk = :script(~~
+    (function() {
+        var a = c.peek(0)
+        if (a === 126 || a === 62) { return abnf.newToken("\x01sym", 0) }
+        if (a === 61) {
+            if (c.peek(1) === 62) { return undefined }
+            return abnf.newToken("\x01sym", 0)
+        }
+    })()
+~~) ;
 SymVar      = ":" :whitespace() SymVarName <~~ push(makeConst(mkSym(up.in))) ~~> :whitespace(Whitespace) ;
 SymVarName  = "@@" Id | "@" Id | "$" Id ;
 SymOp       = ":" :whitespace() OpMethodName <~~ push(makeConst(mkSym(up.in))) ~~> :whitespace(Whitespace) ;
+// The quote has to be GLUED to the colon, or `yield : "noblk"` (the false branch of a
+// ternary) reads as the symbol :noblk - the quote token would otherwise skip the space.
 SymQuoted   <~~ push(makeSymOf(pop())) ~~>
-            = ":" DqStr ;
+            = ":" ColonGlued DqStr ;
 SymSq       <~~ push(makeSymOf(pop())) ~~>
-            = ":" SqStr ;
-SymName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+            = ":" ColonGlued SqStr ;
+ColonGlued = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { return abnf.newToken("\x01gap", 0) }
+    })()
+~~) ;
+// A Symbol name is not restricted to ASCII: `:il_etait` may be spelled with accented
+// letters, and Ruby accepts every non-ASCII character in an identifier.
+SymName     = ( "a"..."z" | "A"..."Z" | "_" | "\x7f"..."\U0010ffff" ) :whitespace()
+              { "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "\x7f"..."\U0010ffff" } ;
 
 // Two string literals that are only separated by whitespace are ONE string in Ruby
 // ("a" 'd' is "ad"), so a string primary is a run of pieces.
@@ -1193,21 +1743,26 @@ StrPiece    = DqStr | SqStr ;
 
 // Double quoted strings interpolate '#{expr}'; single quoted are literal.
 DqStr       <~~ push(makeTemplate(takeAll())) ~~>
-            = '"' :whitespace() { TplExpr | TplChunk } '"' :whitespace(Whitespace) ;
+            = '"' :whitespace() { TplExpr | TplEmpty | TplChunk } '"' :whitespace(Whitespace) ;
 TplExpr     <~~ push({e: pop()}) ~~>
             = "#{" :whitespace(Whitespace) Expression "}" ;
+// An EMPTY interpolation is legal and contributes nothing: `"#{}" == ""`.
+TplEmpty    <~~ push({s: ""}) ~~>
+            = "#{" :whitespace(Whitespace) "}" :whitespace() ;
 TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | HashChar | TplPlain ;
 TplEsc      = "\\" "\x20"..b"\x7e" ;
 HashChar    = "#" !"{" ;
-TplPlain    = "\x20"..."\x21" | "\x24"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+// A double-quoted string may span LINES, so the newline is an ordinary body character.
+TplPlain    = "\x20"..."\x21" | "\x24"..."\x5b" | "\x5d"..."\x7e" | @"\t" | @"\n" | @"\r"
+            | "\x7f"..."\U0010ffff" ;
 
 SqStr       = "'" :whitespace() { SqEsc | SqLone | SqPlain } <~~ push(makeConst(unescapeSq(up.in))) ~~> "'" :whitespace(Whitespace) ;
 SqEsc       = "\\" ( "'" | "\\" ) ;
 // Only \' and \\ are escapes inside '..'; any other backslash is a literal one.
 SqLone      = "\\" ;
-SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" ;
+SqPlain     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" | @"\n" | @"\r" ;
 
 // A Name that is not a reserved word (keywords, literals, puts/print). The
 // negative lookahead runs at PARSE time, so it must be self contained.
@@ -1294,9 +1849,17 @@ PredOk      = :script(~~
             // A '?' followed by a SPACE may still be a ternary (`a? b : c`), so it is
             // declined; one followed by a LINE BREAK cannot be - `if block_given?` on
             // its own line is a bare predicate call, and refusing it cost whole files.
-            if (nx === 61 || nx === 32 || nx === 9) {
+            // The exception is a SECOND '?' after the space: `block_given? ? a : b` is
+            // the predicate followed by the ternary, and nothing else it could be.
+            if (nx === 32 || nx === 9) {
+                var k2 = i + 1
+                var e2 = c.peek(k2)
+                var st4 = 0
+                while (st4 < 1000 && (e2 === 32 || e2 === 9)) { k2 = k2 + 1; e2 = c.peek(k2); st4 = st4 + 1 }
+                if (e2 === 63) { return undefined }
                 return abnf.newToken("\x01no", 0)
             }
+            if (nx === 61) { return abnf.newToken("\x01no", 0) }
             return undefined
         }
         return abnf.newToken("\x01no", 0)
@@ -1719,12 +2282,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
 
     // for VAR[, VAR] in COLL ... end. `for` does not open a scope, so the loop variable
     // is written with the ordinary local-assignment rule and outlives the loop.
+    // A for-loop variable spelled @v / @@v / $v is written through the matching target
+    // kind; a plain name is an ordinary local (for does not open a scope).
+    // One loop variable: a general target (`for obj.attr in ...`) writes through the
+    // assignment path, everything else through its name.
+    function forOneSet(name, ref, v) {
+        if (ref == null) { forVarSet(name, v); return }
+        if (ref.path.length == 0) { writeTarget(ref, v); return }
+        var p = resolveRefRuby(ref)
+        rsetIndex(p.obj, p.key, v)
+    }
+    function forVarSet(name, v) {
+        if (name.charAt(0) != "@" && name.charAt(0) != "$") { rubySet(name, v); return }
+        if (name.charAt(0) == "$") { writeTarget({gvar: name.slice(1), path: []}, v); return }
+        if (name.charAt(1) == "@") { writeTarget({cvar: name.slice(2), path: []}, v); return }
+        writeTarget({ivar: name.slice(1), path: []}, v)
+    }
     function makeForIn(items) {
         var names = []
         var collT = null
         var body = null
+        var refs = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].fvar != undefined) { names.push(items[i].fvar) }
+            if (items[i].fvar != undefined) { names.push(items[i].fvar); refs.push(null) }
+            else if (items[i].ftarget != undefined) { names.push(""); refs.push(items[i].ftarget) }
             else if (items[i].body != undefined) { body = items[i].body }
             else { collT = items[i] }
         }
@@ -1737,12 +2318,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else if (isDict(coll)) { for (var d = 0; d < coll.keys.length; d++) { seq.push([coll.keys[d], coll.vals[d]]) } }
             else { fail("for-in needs an array or a hash") }
             for (var i = 0; i < seq.length; i++) {
-                if (names.length == 1) { rubySet(names[0], seq[i]) }
+                if (names.length == 1) { forOneSet(names[0], refs[0], seq[i]) }
                 else {
                     var el = anytype
                     el = seq[i]
                     for (var j = 0; j < names.length; j++) {
-                        rubySet(names[j], Array.isArray(el) && j < el.length ? el[j] : null)
+                        forOneSet(names[j], refs[j], Array.isArray(el) && j < el.length ? el[j] : null)
                     }
                 }
                 var st = runLoopBody(body)
@@ -1887,6 +2468,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isUserObj(v)) { return mcall(v, "-@", [], null) }
         fail("cannot negate")
     }
+    // `x = *v`: an Array is copied, anything else is wrapped in a one-element Array
+    // (and nil becomes the empty Array), which is what Ruby's splat on a right side does.
+    function makeSplatRhs(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (Array.isArray(v)) { return v.slice(0) }
+            if (v === null || v === undefined) { return [] }
+            return [v]
+        }
+    }
     makeNeg = function(t) { return function() { return rneg(t()) } }
     // Unary plus: the identity. `+"str"` asks Ruby for an unfrozen copy of a frozen
     // string literal, and every string value here is already an ordinary mutable one.
@@ -2014,7 +2606,18 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeArray(items) {
         return function() {
             var out = []
+            var kwd = null
             for (var i = 0; i < items.length; i++) {
+                if (items[i].kwname != undefined) {
+                    if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
+                    dictSet(kwd, mkSym(items[i].kwname), items[i].kwT())
+                    continue
+                }
+                if (items[i].kwkeyT != undefined) {
+                    if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
+                    dictSet(kwd, items[i].kwkeyT(), items[i].kwT())
+                    continue
+                }
                 if (items[i].splat != undefined) {
                     var sv = anytype
                     sv = items[i].splat()
@@ -2022,6 +2625,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     else { out.push(sv) }
                 } else { out.push(items[i]()) }
             }
+            if (kwd != null) { out.push(kwd) }
             return out
         }
     }
@@ -2225,6 +2829,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // pieces. The marker queues a box here; the body item below fills the oldest unfilled
     // one. Tags run on a walk of the FINISHED parse tree, left to right, so the two
     // queues stay in source order and a rolled-back alternative never reaches them.
+    // The directory part of a path. No lastIndexOf in the frozen engine - walk back.
+    function dirOfFile(path) {
+        var cut = -1
+        for (var i = path.length - 1; i >= 0; i--) {
+            if (path.charAt(i) == "/") { cut = i; break }
+        }
+        return cut < 0 ? "." : path.slice(0, cut)
+    }
     var heredocBoxes = []
     var heredocFilled = 0
     function makeHeredocRef(marker) {
@@ -2308,7 +2920,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // Split an interpolating body into the {s: text} / {e: thunk} pieces makeTemplate
     // consumes. The expression of a '#{}' is parsed with the grammar itself, from the
     // Expression production - the same door require uses to pull in another file.
-    function heredocParts(body) {
+    function heredocParts(body) { return heredocPartsOf(body, false) }
+    function heredocPartsOf(body, raw) {
         var parts = []
         var lit = ""
         var i = 0
@@ -2325,15 +2938,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     j++
                 }
                 if (depth != 0) { lit += ch; i++; continue }
-                if (lit.length > 0) { parts.push({s: unescapeJs(lit)}) ; lit = "" }
-                parts.push({e: parseFragment(body.slice(i + 2, j))})
+                if (lit.length > 0) { parts.push({s: raw ? lit : unescapeJs(lit)}) ; lit = "" }
+                var frag = body.slice(i + 2, j)
+                if (stripWs(frag) == "") { parts.push({s: ""}) } else { parts.push({e: parseFragment(frag)}) }
                 i = j + 1
                 continue
             }
             lit += ch
             i++
         }
-        if (lit.length > 0) { parts.push({s: unescapeJs(lit)}) }
+        if (lit.length > 0) { parts.push({s: raw ? lit : unescapeJs(lit)}) }
         return parts
     }
     function parseFragment(src) {
@@ -2352,8 +2966,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function makeSymOf(t) { return function() { return mkSym(rstr(t())) } }
     // ?a / ?\n: the body of a one-character literal, with the escapes of "..".
+    // ?\C-z is the control character (the letter modulo 32) and ?\M-x sets the high bit,
+    // so ?\M-\C-z is 0x1a + 0x80 = 0x9a. Both prefixes may be spelled in either order.
+    function ctlCharVal(b) {
+        var meta = false
+        var ctrl = false
+        var i = 0
+        while (i < b.length) {
+            if (b.charAt(i) == "\\" && b.charAt(i + 1) == "M" && b.charAt(i + 2) == "-") { meta = true; i = i + 3; continue }
+            if (b.charAt(i) == "\\" && b.charAt(i + 1) == "C" && b.charAt(i + 2) == "-") { ctrl = true; i = i + 3; continue }
+            if (b.charAt(i) == "\\" && b.charAt(i + 1) == "c") { ctrl = true; i = i + 2; continue }
+            break
+        }
+        var rest = b.slice(i)
+        var code = 0
+        if (rest.charAt(0) == "\\") { code = unescapeJs(rest).charCodeAt(0) } else { code = rest.charCodeAt(0) }
+        if (ctrl) { code = code % 32 }
+        if (meta) { code = code + 128 }
+        return String.fromCharCode(code)
+    }
     function charLitVal(s) {
         var body = s.slice(1)
+        if (body.charAt(0) == "\\" && (body.charAt(1) == "M" || body.charAt(1) == "C" || body.charAt(1) == "c")) {
+            if (body.charAt(1) == "c" || body.charAt(2) == "-") { return ctlCharVal(body) }
+        }
         if (body.charCodeAt(0) == 92) { return unescapeJs(body) }
         return body
     }
@@ -2458,6 +3094,49 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function isMatchD(v) { return v !== null && v !== undefined && typeof v == "object" && v.__md === true }
     // The literal's tag: a body with no '#{}' is compiled once, right here; an
     // interpolating one is rebuilt (and cache-looked-up) on every evaluation.
+    // `cmd` / %x{cmd}: no sub-process here. The interpolation still runs (a `#{...}`
+    // may have side effects) and the value is the empty string.
+    function makeCommand(t, pos) {
+        notImpl("sub-shell command literal", pos)
+        return function() { t(); return "" }
+    }
+    // Split a scanned % literal back into its kind, its body and (for %r) its flags,
+    // and build the same value the bracket productions above would have built. The
+    // body's `#{...}` pieces are re-parsed with heredocParts, exactly as a heredoc's
+    // are; a regexp keeps its body RAW, so its literal chunks are not unescaped.
+    function makePctAny(text, pos) {
+        var i = 1
+        var kind = ""
+        var c0 = text.charAt(1)
+        if (c0 == "q" || c0 == "Q" || c0 == "w" || c0 == "W" || c0 == "i" || c0 == "I"
+            || c0 == "r" || c0 == "s" || c0 == "x") { kind = c0; i = 2 }
+        var open = text.charAt(i)
+        var close = open
+        if (open == "(") { close = ")" }
+        if (open == "[") { close = "]" }
+        if (open == "{") { close = "}" }
+        if (open == "<") { close = ">" }
+        var end = -1
+        for (var j = text.length - 1; j > i; j--) {
+            if (text.charAt(j) == close) { end = j; break }
+        }
+        if (end < 0) { end = text.length }
+        var body = text.slice(i + 1, end)
+        var flags = text.slice(end + 1)
+        if (kind == "q") { return makeConst(unescapeSq(body)) }
+        if (kind == "w") { return makeConst(pctWords(body, false)) }
+        if (kind == "i") { return makeConst(pctWords(body, true)) }
+        if (kind == "s") { return makeConst(mkSym(body)) }
+        if (kind == "W") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), false) }
+        if (kind == "I") { return makeWordsThunk(makeTemplate(heredocPartsOf(body, false)), true) }
+        if (kind == "x") { return makeCommand(makeTemplate(heredocPartsOf(body, false)), pos) }
+        if (kind == "r") {
+            var parts = heredocPartsOf(body, true)
+            parts.push({reflags: flags})
+            return makeRegex(parts)
+        }
+        return makeTemplate(heredocPartsOf(body, false))
+    }
     function makeRegex(items) {
         var flags = ""
         var parts = []
@@ -3062,6 +3741,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 dictSet(kwd, mkSym(t.kwname), t.kwT())
                 continue
             }
+            // `key => v` among the arguments: the same trailing Hash, with an evaluated
+            // key rather than a symbol name.
+            if (t.kwkeyT != undefined) {
+                if (kwd == null) { kwd = {__dict: true, keys: [], vals: []} }
+                dictSet(kwd, t.kwkeyT(), t.kwT())
+                continue
+            }
             if (t.splatT != undefined) {
                 var sv = anytype
                 sv = t.splatT()
@@ -3151,9 +3837,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- Assignment (locals, @ivars, index / field targets) -----
     makeTargetRef = function(items) {
         var head = items[0]
-        return {ivar: head.ivar, gvar: head.gvar, cvar: head.cvar, sconst: head.sconst, name: head.var, path: items.slice(1)}
+        return {ivar: head.ivar, gvar: head.gvar, cvar: head.cvar, sconst: head.sconst,
+                texpr: head.texpr, name: head.var, path: items.slice(1)}
     }
     function readTarget(ref) {
+        if (ref.texpr != undefined) { return ref.texpr() }
         if (ref.sconst != undefined) { return makeScopedConst(ref.sconst)() }
         if (ref.gvar != undefined) { return hasOwn(rubyGlobals, ref.gvar) ? rubyGlobals[ref.gvar] : null }
         if (ref.cvar != undefined) { return makeCvarRef(ref.cvar)() }
@@ -3165,6 +3853,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return getVar(ref.name)
     }
     function writeTarget(ref, v) {
+        // A parenthesised head is only ever a target THROUGH a path ((...).a = 1);
+        // writing the parenthesised value itself is not an assignable form in Ruby.
+        if (ref.texpr != undefined) { fail("cannot assign to a parenthesized expression") }
         if (ref.sconst != undefined) { rubySet(ref.sconst, v); return }
         if (ref.gvar != undefined) { scopePut(rubyGlobals, ref.gvar, v); return }
         if (ref.cvar != undefined) { setCvar(ref.cvar, v); return }
@@ -3325,9 +4016,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // are stored under a "$c$" prefix so Outer::Inner::VALUE can walk down to them,
     // and ALSO in the enclosing scope, which is how an unqualified WORD inside an
     // included module's method still resolves.
-    function makeModuleStmt(items) {
+    function makeModuleStmt(items, pos) {
         var name = items[0]
-        var ordered = items.slice(1)
+        var all = items.slice(1)
+        var ordered = []
+        var guards = []
+        for (var q = 0; q < all.length; q++) {
+            if (all[q] != undefined && all[q].cguard != undefined) { guards = all[q].cguard }
+            else { ordered.push(all[q]) }
+        }
         return function() {
             var existing = anytype
             existing = hasOwn(globalScope, name) ? globalScope[name] : undefined
@@ -3344,7 +4041,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             declVar("self", mod)
             curClass = mod
             curVis = "public"
-            for (var i = 0; i < ordered.length; i++) {
+            // The module body's items, as one runnable unit, so a `rescue` / `ensure` on
+            // the module body can wrap them (a module body is a def body's twin here).
+            var runItems = function() {
+              for (var i = 0; i < ordered.length; i++) {
                 var it = ordered[i]
                 if (it == undefined) { continue }
                 if (it.method != undefined) {
@@ -3360,6 +4060,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 } else if (it.alias != undefined) { doAlias(mod, it.alias[0], it.alias[1]) }
                 else if (it.nested != undefined) { it.nested() }
                 else if (it.cstmt != undefined) { it.cstmt() }
+              }
+              return null
+            }
+            if (guards.length > 0) {
+                var titems = [{trybody: runItems}]
+                for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
+                makeTry(titems, pos)()
+            } else {
+                runItems()
             }
             // Publish the module scope: constants and nested definitions become
             // members of the module AND stay visible where the module was written.
@@ -3592,6 +4301,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // arguments is an error in Ruby anyway, and the feature-matrix file uses that shape
     // to pass a method around as a value.
     var rubyMethods = {}
+    // The same registration, as an EXPRESSION: its value is the method's name as a Symbol.
+    function makeDefExpr(fn) {
+        var t = makeDefStmt(fn)
+        var nm = fn.name
+        return function() { t(); return mkSym(nm) }
+    }
     function makeDefStmt(fn) {
         if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
         return function() { declVar(fn.name, makeFunClosure(fn)); return null }
@@ -3637,12 +4352,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // body items have to be executed in source order.
     var curClass = null
     var curVis = "public"
-    function makeClassStmt(items) {
+    function makeClassStmt(items, pos) {
         var name = items[0]
         var supName = null
         var ordered = []
+        var guards = []
         for (var i = 1; i < items.length; i++) {
             if (items[i].supername != undefined) { supName = items[i].supername }
+            else if (items[i].cguard != undefined) { guards = items[i].cguard }
             else { ordered.push(items[i]) }
         }
         return function() {
@@ -3668,11 +4385,21 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var saved = scopes
             var savedClass = curClass
             var savedVis = curVis
-            scopes = [globalScope, {}]
+            // The class body gets a scope of its own, published afterwards exactly the
+            // way a module body's is: a nested class or a CONST written here becomes a
+            // $c$ member of the class (so Outer::Inner and C::CONST resolve) and stays
+            // visible where the class was written (so a method of Outer can name Inner).
+            var clsScope = {}
+            scopes = [globalScope, clsScope]
             declVar("self", cls)
             curClass = cls
             curVis = "public"
-            for (var st = 0; st < ordered.length; st++) {
+            // The class body's items, as one runnable unit so a `rescue` / `ensure` on the
+            // class body can wrap them the way a def body's clauses wrap its statements.
+            var lastVal = anytype
+            lastVal = null
+            var runItems = function() {
+              for (var st = 0; st < ordered.length; st++) {
                 var it = ordered[st]
                 if (it.method != undefined) { declareMethods(cls, [it.method]) }
                 else if (it.sblock != undefined) {
@@ -3691,25 +4418,38 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     }
                 }
                 else if (it.alias != undefined) { doAlias(cls, it.alias[0], it.alias[1]) }
-                else if (it.cstmt != undefined) { it.cstmt() }
+                else if (it.cstmt != undefined) { lastVal = it.cstmt() }
+              }
+              return null
+            }
+            if (guards.length > 0) {
+                var titems = [{trybody: runItems}]
+                for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
+                makeTry(titems, pos)()
+            } else {
+                runItems()
             }
             scopes = saved
             curClass = savedClass
             curVis = savedVis
-            return null
+            publishModuleScope(cls, clsScope)
+            // A class body is an EXPRESSION: its value is its last statement's.
+            return lastVal
         }
     }
     // class << VALUE ... end - the singleton class body. The eigenclass is approximated
     // by the value's own class object (for a class VALUE, by the class itself), so a def
     // inside `class << self` still becomes a singleton method of the class. The body runs
     // with self bound to that object and the block's value is its last statement's.
-    function makeSingletonStmt(items) {
+    function makeSingletonStmt(items, pos) {
         var targetT = null
         var isSelf = false
         var ordered = []
+        var guards = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].sgself != undefined) { isSelf = true }
             else if (items[i].sgexpr != undefined) { targetT = items[i].sgexpr }
+            else if (items[i].cguard != undefined) { guards = items[i].cguard }
             else { ordered.push(items[i]) }
         }
         return function() {
@@ -3727,7 +4467,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             curVis = "public"
             var last = anytype
             last = null
-            for (var st = 0; st < ordered.length; st++) {
+            // As in a class body, a rescue / ensure written here wraps the whole body.
+            var runItems = function() {
+              for (var st = 0; st < ordered.length; st++) {
                 var it = ordered[st]
                 if (it.method != undefined) {
                     var sm = it.method
@@ -3743,6 +4485,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 }
                 else if (it.alias != undefined) { doAlias(cls, it.alias[0], it.alias[1]) }
                 else if (it.cstmt != undefined) { last = it.cstmt() }
+              }
+              return null
+            }
+            if (guards.length > 0) {
+                var titems = [{trybody: runItems}]
+                for (var g = 0; g < guards.length; g++) { titems.push(guards[g]) }
+                makeTry(titems, pos)()
+            } else {
+                runItems()
             }
             scopes = saved
             curClass = savedClass
@@ -3769,14 +4520,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // `alias' reached as a statement: the class it applies to is whatever `self' is at
     // that moment (a class body run through class_eval, or the top level, where there
     // is none and the alias is a plain name binding).
+    // An alias name reaches here either as text or - when it was written with an
+    // interpolated symbol - as a thunk that produces it.
+    function aliasNameOf(v) {
+        if (typeof v == "function") { return rstr(v()) }
+        return v
+    }
     function makeAliasTop(pair, pos) {
         return function() {
             var self = anytype
             self = findSelf()
             var cls = anytype
             cls = (self != undefined && self != null && self.__isclass === true) ? self : curClass
-            if (cls != undefined && cls != null) { doAlias(cls, pair[0], pair[1]); return null }
-            rubySet(pair[0], getVar(pair[1]))
+            var newName = aliasNameOf(pair[0])
+            var oldName = aliasNameOf(pair[1])
+            if (cls != undefined && cls != null) { doAlias(cls, newName, oldName); return null }
+            // At top level there is no class to hang the alias on: the new name is bound
+            // to the same closure, and registered as a no-argument method so a bare
+            // reference to it CALLS it (which is what makeDefStmt does for a def).
+            rubyMethods["$" + newName] = true
+            rubySet(newName, getVar(oldName))
             return null
         }
     }
@@ -3928,6 +4691,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return true
         }
     }
+    // Constant(...) / Constant[...]: the class test first, then the deconstruction.
+    function makePatConstPat(items) {
+        var clsT = items[0]
+        var inner = items[1]
+        return function(v) {
+            if (!rtest(caseEq(clsT(), v))) { return false }
+            return inner(v)
+        }
+    }
     function makePatAlt(items) {
         if (items.length == 1) { return items[0] }
         var alts = items
@@ -3941,6 +4713,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     // ^name: match against the CURRENT value of the local, never rebind it.
     function makePatPin(name) {
+        // `^@a` / `^@@a` / `^$a` read through the matching variable kind.
+        if (name.charAt(0) == "@" || name.charAt(0) == "$") {
+            var ref = anytype
+            ref = name.charAt(0) == "$" ? {gvar: name.slice(1), path: []}
+                : (name.charAt(1) == "@" ? {cvar: name.slice(2), path: []} : {ivar: name.slice(1), path: []})
+            return function(v) { return rubyEq(readTarget(ref), v) }
+        }
         return function(v) { return rubyEq(getVar(name), v) }
     }
     // A constant, a literal or a range: Ruby uses === here, which is class membership
@@ -4233,6 +5012,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return function() {
             var vals = []
+            // One TARGET and several values takes the whole list as an Array
+            // (`args = 1, 2, 3` assigns [1, 2, 3]), unless the target is a splat or a
+            // group, which destructure as usual.
+            if (targets.length == 1 && values.length > 1
+                && targets[0].splat == undefined && targets[0].group == undefined) {
+                var whole = []
+                for (var w = 0; w < values.length; w++) { whole.push(values[w]()) }
+                destructure(targets, [whole])
+                return whole
+            }
             // One right-hand value is DESTRUCTURED over the targets - including the
             // single-target `a, = [1, 2, 3]`, whose trailing comma is the whole point.
             if (values.length == 1 && targets.length >= 1) {
@@ -4253,15 +5042,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // items = [name, bodyThunk] or [bodyThunk] (rescue with no binding).
     function makeExcept(items) {
         var types = []
-        var hname = undefined
-        var hkind = "local"
+        var href = null
         var body = null
         for (var i = 0; i < items.length; i++) {
             if (items[i].etype != undefined) { types.push(stripWs(items[i].etype)) }
-            else if (items[i].hname != undefined) { hname = items[i].hname; hkind = items[i].hkind }
+            else if (items[i].href != undefined) { href = items[i].href }
             else if (items[i].rbody != undefined) { body = items[i].rbody }
         }
-        return {handler: body, hname: hname, hkind: hkind, etypes: types}
+        return {handler: body, href: href, etypes: types}
+    }
+    // Bind the raised value to a rescue clause's `=> TARGET`. A bare local name
+    // DECLARES in the handler's own scope (Ruby); everything else - an @ivar, a
+    // @@classvar, a $global, obj.field, obj&.field, a[i] - goes through the ordinary
+    // assignment path.
+    function bindExcTarget(ref, v) {
+        if (ref.path.length == 0) {
+            if (ref.name != undefined) { declVar(ref.name, v); return }
+            writeTarget(ref, v)
+            return
+        }
+        var p = resolveRefRuby(ref)
+        rsetIndex(p.obj, p.key, v)
     }
     // A rescue clause matches when the raised value is an instance of ANY of its
     // listed classes; a clause with no list catches every StandardError.
@@ -4324,12 +5125,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (hit == null) { throw e }
                     threw = true
                     scopes.push({})
-                    if (hit.hname != undefined) {
-                        if (hit.hkind == "ivar") { writeTarget({ivar: hit.hname, path: []}, e.v) }
-                        else if (hit.hkind == "cvar") { writeTarget({cvar: hit.hname, path: []}, e.v) }
-                        else if (hit.hkind == "gvar") { writeTarget({gvar: hit.hname, path: []}, e.v) }
-                        else { declVar(hit.hname, e.v) }
-                    }
+                    if (hit.href != null) { bindExcTarget(hit.href, e.v) }
                     curExc.push(e.v)
                     try {
                         box.v = hit.handler()

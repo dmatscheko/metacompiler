@@ -51,6 +51,13 @@ scanned backward silently did nothing.)
 cap on every call, which is quadratic over a file. Always test `< 0`. Negative
 offsets are legal and useful: `c.peek(-n)` reads backwards.
 
+**A character-range endpoint below `\x7f` works; `\x80` does not.** Widening a Ruby
+Symbol name to accept accented letters with `"\x80"..."\U0010ffff"` matched nothing at
+all — `:il_était` still died on the `é` — while `"\x7f"..."\U0010ffff"` works. `\x7f`
+is a whole rune on its own and `\x80` is a UTF-8 continuation byte, so only the first
+survives the decode. Start such a range at `\x7f`; the existing `TplPlain` in every
+string rule here already does.
+
 **`c.peek` returns BYTES, not runes.** A `KwEnd` that compared against code
 points made `1<U+2028>` unparseable. Decode UTF-8 inline if you need a rune.
 
@@ -356,6 +363,16 @@ which makes it present as an operator-precedence bug somewhere else entirely.
 When the lookahead has to be anchored to the very next byte, test it with a
 `:script` on `c.peek(0)` rather than with `!"…"`.
 
+The same trap sat on six `":" !":"` sites in the Ruby grammars, where the lookahead
+is there to keep a label's `:` from being the first half of a `::`. It also rejected
+the perfectly good
+
+    { |a, b: :b, c: :c| ... }
+
+because the lookahead stepped over the space and found the `:` of the symbol VALUE —
+so a block could not declare a keyword parameter whose default is a symbol. One
+`NotColonGlued` script on `c.peek(0)` replaced all six.
+
 ## An operator that is a longer spelling of an ASSIGNMENT operator
 
 Ruby's `=~` broke `AssignOp = ... | ( "=" !"=" )` in a way that never failed: the
@@ -384,6 +401,45 @@ When the lookahead has to be anchored to the very next BYTE, it has to be a
 (Returning `undefined` means "match empty and SUCCEED"; returning an impossible
 token is how a `:script` fails.) The same shape is needed for any operator whose
 first character is an assignment operator: `=~`, `!~`, and `=>` next to `=`.
+
+## An operator whose operand is really the START of a different lexical form
+
+The same shape once more, and the nastiest instance of it found so far. Ruby's
+
+    evaluate <<-ruby do
+      @a = -> ((a)) { a }
+    ruby
+
+is a command call whose argument is a HEREDOC. But `AppendStmt` is spelled
+
+    AppendStmt = Target "<<" !"<" AddExpr { "<<" AddExpr } ;
+
+and `-ruby` is a perfectly good `AddExpr` — a unary minus applied to the variable
+`ruby`. So the statement parses as `evaluate << (-ruby)`, **succeeds**, and there is
+no parse error anywhere near the mistake. The damage surfaces two lines later, as
+the heredoc BODY being offered to the parser as ordinary code:
+
+    ruby interpreter error: unknown name: @a
+
+which sends you looking at lambdas and destructuring parameters. The same reading
+hides `<<~A`, `<<'A'` and `<<"A"`, and `ShiftExpr` has it too (`x = a <<-B`).
+
+The fix is a zero-width guard directly after the `<<`, refusing the operator when a
+heredoc marker is GLUED to it:
+
+    AppendStmt = Target "<<" !"<" NotHeredoc AddExpr { "<<" NotHeredoc AddExpr } ;
+    ShiftExpr  = AddExpr { ShiftOp <~~ push(up.in) ~~> NotHeredoc AddExpr } ;
+
+`NotHeredoc` answers "this is a heredoc" for `~`, `-`, `'`, `"` or an upper-case /
+underscore initial glued to the `<<`, and lets everything else through — which is
+exactly Ruby's own rule, and why `a << b`, `a << -1` and `arr << Foo` keep working
+(they all have a space, so nothing is glued).
+
+It has to be a `:script` on `c.peek(0)`, not `!"~"` / `!"-"`: a negative lookahead
+is matched like a token and therefore SKIPS the whitespace in front of it (see the
+`!"literal"` entry above), so `!"-"` would also reject the perfectly good
+`a << -1`. Two entries in this file now share that conclusion; treat "the fix is a
+`!"…"` lookahead" as wrong by default whenever the distinction is *gluing*.
 
 ## The Times trap also fires on a group of single-character alternatives
 
