@@ -743,6 +743,155 @@ function s27() {
     $t = true; $f = false; $n = null;
     check("agr6", strlen($t) === 1 && strlen($f) === 0 && strlen($n) === 0);
 }
+// ===== SECTION 28: 64-bit integers =====
+// PHP's int is 64 bit two's complement, and its overflow rule is the OPPOSITE of
+// C's: an operation whose exact result leaves 64 bits does not wrap, it silently
+// becomes a float. Every expectation below is quoted from PHP's own test suite,
+// vendored under tests/reference/php/php-src-tests/ - the .phpt named on each
+// line is the one whose --EXPECT-- block specifies it.
+function s28() {
+    // lang/operators/add_basiclong_64bit.phpt defines MAX_64Bit / MIN_64Bit
+    // exactly this way and var_dumps int(9223372036854775807).
+    check("i64a", PHP_INT_MAX === 9223372036854775807);
+    check("i64b", PHP_INT_MIN === -9223372036854775807 - 1);
+    check("i64c", PHP_INT_SIZE === 8);
+    check("i64d", (string)1234567890123456789 === "1234567890123456789");
+    // add_basiclong_64bit.phpt: "9223372036854775807 + 1" is
+    // float(9.223372036854776E+18), "+ -1" is int(9223372036854775806).
+    check("i64e", is_float(PHP_INT_MAX + 1) && is_int(PHP_INT_MAX + -1));
+    check("i64f", PHP_INT_MAX + -1 === 9223372036854775806);
+    check("i64g", is_int(PHP_INT_MAX) && !is_float(PHP_INT_MAX));
+    // multiply_basiclong_64bit.phpt: the product that still fits stays an int.
+    check("i64h", is_float(PHP_INT_MAX * 2) && 4611686018427387903 * 2 === 9223372036854775806);
+    // subtract_basiclong_64bit.phpt: MIN_64Bit - 1 is a float.
+    check("i64i", is_float(PHP_INT_MIN - 1) && is_int(PHP_INT_MIN + 1));
+    // negate_basiclong_64bit.phpt: the one int that cannot be negated is MIN.
+    check("i64j", is_float(-PHP_INT_MIN) && -PHP_INT_MAX === PHP_INT_MIN + 1);
+    // postinc_basiclong_64bit.phpt / predec_basiclong_64bit.phpt.
+    $x = PHP_INT_MAX; $x++;
+    $y = PHP_INT_MIN; $y--;
+    check("i64k", is_float($x) && is_float($y));
+    // divide_basiclong_64bit.phpt: '/' is an int ONLY when it comes out exact.
+    check("i64l", 6 / 3 === 2 && is_int(6 / 3));
+    check("i64m", 7 / 2 === 3.5 && is_float(7 / 2));
+    check("i64n", intdiv(7, 2) === 3 && intdiv(-7, 2) === -3);
+    check("i64o", 9223372036854775807 / 7 === 1317624576693539401);
+    // modulus_basiclong_64bit.phpt: '%' casts both operands to int, and
+    // "9223372036854775807 % -1" is int(0).
+    check("i64p", 7 % 3 === 1 && -7 % 3 === -1 && 7.9 % 3 === 1);
+    check("i64q", PHP_INT_MAX % -1 === 0 && PHP_INT_MIN % -1 === 0);
+    // bitwiseShiftLeft_basiclong_64bit.phpt: '<<' WRAPS - "9223372036854775807
+    // << 1" is int(-2), not a float - and a count at or above 64 shifts out.
+    check("i64r", PHP_INT_MAX << 1 === -2 && is_int(PHP_INT_MAX << 1));
+    check("i64s", 1 << 62 === 4611686018427387904 && 1 << 63 === PHP_INT_MIN);
+    check("i64t", PHP_INT_MAX << 65 === 0 && PHP_INT_MAX << 9223372036854775807 === 0);
+    // bitwiseShiftRight_basiclong_64bit.phpt: ">> 65" is int(0) for a positive
+    // value and int(-1) for a negative one.
+    check("i64u", PHP_INT_MAX >> 65 === 0 && PHP_INT_MIN >> 65 === -1);
+    check("i64v", PHP_INT_MIN >> 1 === -4611686018427387904);
+    // bitwiseNot / bitwiseAnd / bitwiseOr / bitwiseXor _basiclong_64bit.phpt.
+    check("i64w", ~PHP_INT_MAX === PHP_INT_MIN && ~0 === -1 && ~PHP_INT_MIN === PHP_INT_MAX);
+    check("i64x", (PHP_INT_MAX & PHP_INT_MIN) === 0 && (PHP_INT_MAX | PHP_INT_MIN) === -1);
+    check("i64y", (PHP_INT_MAX ^ PHP_INT_MIN) === -1 && (PHP_INT_MAX & 255) === 255);
+    // The two arithmetic errors PHP 8 made catchable. Messages quoted from
+    // divide_basiclong_64bit.phpt ("DivisionByZeroError: Division by zero"),
+    // modulus_basiclong_64bit.phpt ("Modulo by zero") and
+    // bitwiseShiftLeft_basiclong_64bit.phpt ("Bit shift by negative number").
+    $m = "";
+    try { $z = 1 / 0; } catch (DivisionByZeroError $e) { $m = $e->getMessage(); }
+    check("i64z", $m === "Division by zero");
+    $m = "";
+    try { $z = 1 % 0; } catch (DivisionByZeroError $e) { $m = $e->getMessage(); }
+    check("i64A", $m === "Modulo by zero");
+    $m = "";
+    try { $z = 1 << -1; } catch (ArithmeticError $e) { $m = $e->getMessage(); }
+    check("i64B", $m === "Bit shift by negative number");
+    $m = "";
+    try { $z = intdiv(1, 0); } catch (DivisionByZeroError $e) { $m = $e->getMessage(); }
+    check("i64C", $m === "Division by zero");
+    // A DivisionByZeroError IS an ArithmeticError (PHP's real hierarchy).
+    $ok = false;
+    try { $z = 1 / 0; } catch (ArithmeticError $e) { $ok = true; }
+    check("i64D", $ok);
+    // lang/integer_literals/{hexadecimal,binary,octal}_64bit.phpt: a literal that
+    // does not FIT is a float, not a wrapped int.
+    check("i64E", is_int(0x7FFFFFFFFFFFFFFF) && 0x7FFFFFFFFFFFFFFF === PHP_INT_MAX);
+    check("i64F", is_float(0xFFFFFFFFFFFFFFFF) && is_float(0x45FFFABCDE0000000));
+    check("i64G", is_int(0b111111111111111111111111111111111111111111111111111111111111111));
+    check("i64H", 0o777777777777777777777 === PHP_INT_MAX && is_float(0o1000000000000000000000));
+    check("i64I", 0_16 === 14 && 00_016 === 14 && 016 === 14);
+    check("i64J", is_int(9223372036854775807) && is_float(9223372036854775808));
+    // tests/int_overflow_64bit.phpt: (int) of an out-of-range float WRAPS modulo
+    // 2^64 - (int)(PHP_INT_MAX * 2 + 4) is int(0), i.e. 2^64 mod 2^64.
+    check("i64K", (int)(PHP_INT_MAX + 1) === PHP_INT_MIN);
+    check("i64L", (int)(PHP_INT_MAX * 2 + 4) === 0);
+    check("i64M", (int)(PHP_INT_MAX + 1000) === PHP_INT_MIN);
+    // tests/int_underflow_64bit.phpt: every value below MIN casts to MIN.
+    check("i64N", (int)(-9223372036854775809) === PHP_INT_MIN);
+    // A numeric STRING that overflows is a float too (is_numeric_string reports
+    // IS_DOUBLE), which is why the sum below changes type.
+    check("i64O", "9223372036854775807" + 0 === PHP_INT_MAX);
+    check("i64P", is_float("9223372036854775808" + 0));
+    // Comparison is exact at 64 bits: a double would collapse these onto one value.
+    check("i64Q", 9223372036854775807 > 9223372036854775806);
+    check("i64R", !(PHP_INT_MAX == PHP_INT_MAX - 1) && (PHP_INT_MAX <=> PHP_INT_MAX - 1) === 1);
+    // Array keys are 64 bit too, and a string key that does not fit stays a string.
+    $a = [];
+    $a[PHP_INT_MAX] = "hi";
+    $a[PHP_INT_MIN] = "lo";
+    check("i64S", $a[PHP_INT_MAX] === "hi" && $a[PHP_INT_MIN] === "lo" && count($a) === 2);
+    // '**' overflows to a float like every other arithmetic operator.
+    check("i64T", 2 ** 62 === 4611686018427387904 && is_int(2 ** 62) && is_float(2 ** 63));
+    check("i64U", (-2) ** 3 === -8 && is_float(2 ** -1));
+    check("i64V", abs(PHP_INT_MIN) === 9.2233720368547758E+18 && abs(-5) === 5);
+}
+
+// ===== SECTION 29: the type predicates and PHP's two float renderers =====
+// PHP renders a float TWO ways: echo / (string) / interpolation use
+// precision=14, while var_dump and var_export use serialize_precision=-1, the
+// shortest round-tripping digits. The same value is 9.2233720368548E+18 to the
+// first and 9.223372036854776E+18 to the second - confusing them is the classic
+// trap, and both spellings appear in the SAME corpus file
+// (lang/operators/add_basiclong_64bit.phpt: the "--- testing: ..." echo lines
+// against the var_dump lines under them).
+function s29() {
+    check("typ1", gettype(5) === "integer" && gettype(5.0) === "double");
+    check("typ2", gettype("s") === "string" && gettype(true) === "boolean" && gettype(null) === "NULL");
+    check("typ3", gettype([]) === "array" && gettype(new S29Box()) === "object");
+    check("typ4", is_int(5) && !is_int(5.0) && is_float(5.0) && !is_float(5));
+    check("typ5", is_string("a") && is_bool(false) && is_array([]) && is_null(null));
+    check("typ6", is_numeric("12") && is_numeric(1.5) && !is_numeric("x"));
+    check("typ7", get_debug_type(5) === "int" && get_debug_type(5.0) === "float");
+    check("typ8", get_debug_type(null) === "null" && get_debug_type(new S29Box()) === "S29Box");
+    check("typ9", get_class(new S29Box()) === "S29Box");
+    // precision=14 for the string form.
+    check("flo1", (string)(PHP_INT_MAX + 1) === "9.2233720368548E+18");
+    check("flo2", (string)(0.1 + 0.2) === "0.3");
+    check("flo3", (string)(1 / 3) === "0.33333333333333");
+    check("flo4", (string)3.0 === "3" && (string)(-0.0) === "-0");
+    check("flo5", "" . 1.0E+25 === "1.0E+25" && "" . 1.0E-5 === "1.0E-5");
+    check("flo6", "" . 0.0001 === "0.0001" && "" . 100000000000000.0 === "1.0E+14");
+    // INF / NAN print as those three letters in both renderers (the corpus's
+    // float(INF) line in lang/integer_literals/binary_64bit.phpt).
+    check("flo7", "" . INF === "INF" && "" . -INF === "-INF" && "" . NAN === "NAN");
+    $big = PHP_INT_MAX + 1;
+    check("flo9", "v=$big" === "v=9.2233720368548E+18");
+}
+class S29Box { public $v = 1; }
+// var_dump's OWN renderer is serialize_precision=-1, which no expression above
+// can observe - so these lines put it in the transcript, where the matrix's
+// byte-identity check and ./test.sh --cross both see it. Every expected line is
+// quoted from the corpus: int(9223372036854775807) and
+// float(9.223372036854776E+18) from lang/operators/add_basiclong_64bit.phpt,
+// float(1.9119287772983036E+25) from lang/integer_literals/binary_64bit.phpt,
+// float(INF) from the same file.
+function s29dump() {
+    var_dump(PHP_INT_MAX, PHP_INT_MAX + 1, PHP_INT_MIN);
+    var_dump(0.1 + 0.2, 1 / 3, 3.0, 1.0E+25);
+    var_dump(0b111111010000101010101010101010111111111111111111111111111111111111111111111111111111);
+    var_dump(true, null, "ab", [1 => "x"]);
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -775,6 +924,9 @@ function main() {
     s25(); // SECTION-CALL 25
     s26(); // SECTION-CALL 26
     s27(); // SECTION-CALL 27
+    s28(); // SECTION-CALL 28
+    s29(); // SECTION-CALL 29
+    s29dump(); // SECTION-CALL 29
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

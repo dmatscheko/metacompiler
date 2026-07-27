@@ -25,6 +25,16 @@ strings are byte strings (strlen counts UTF-8 bytes), '/' yields an int only whe
 division is exact, '.' concatenates, and ==/===/<=>/< follow the PHP 8 comparison
 rules (0 == \"a\" is false).
 
+The int is 64 bit two's complement (PHP_INT_MAX is 9223372036854775807), and it does
+NOT wrap on overflow: an arithmetic result that leaves 64 bits silently becomes a
+float, so PHP_INT_MAX + 1 is 9.2233720368548E+18. The bitwise operators DO wrap, an
+out-of-range float casts to int modulo 2^64, and an integer literal too large for 64
+bits is a float. Floats have TWO renderers, which is PHP's own confusing pair: echo /
+(string) / interpolation use precision=14, var_dump uses serialize_precision=-1 (the
+shortest round-tripping digits) - so the same value prints as 9.2233720368548E+18 and
+9.223372036854776E+18. Division by zero, modulo by zero and a negative shift count are
+the catchable DivisionByZeroError / ArithmeticError PHP 8 made them.
+
 Classes are covered in full: inheritance and interfaces, class constants (typed and
 self-referential), static properties and methods, self:: / static:: / parent:: with
 late static binding, constructor property promotion, anonymous classes, traits with
@@ -1315,11 +1325,76 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // object          -> {__obj, __class, p} with the properties in an ordered map
     function mkFlo(n) { return {__flo: true, f: n} }
     function isFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo === true }
-    function isInt(v) { return typeof v == "number" }
-    function isNum(v) { return typeof v == "number" || isFlo(v) }
-    function numOf(v) { return isFlo(v) ? v.f : v }
+    // ----- PHP's int is 64 bit two's complement -----
+    // An int is a PLAIN JS NUMBER while it stays inside [-2^53, 2^53] (every
+    // ordinary program), and the shared sized-integer box {__sz, p, w, u} of
+    // lib/interp-core.js otherwise - w is always 64 and u always false here,
+    // because PHP has exactly one integer type. The invariant is the one Go's
+    // grammar keeps (see abnf/jsrtint.go), so szStr / szNum / szCmp / szEq all
+    // apply unchanged; what is PHP's OWN is the overflow rule below.
+    //
+    // PHP does NOT wrap on overflow: `PHP_INT_MAX + 1` silently becomes the
+    // float 9.2233720368548E+18. That is the opposite of C, Go, Java and every
+    // other language in this tree, so the arithmetic cannot be szArith - it is
+    // iAdd / iSub / iMul below, which compute the exact 64 bit result, detect
+    // the overflow from the sign pattern and answer a float box instead.
+    // Verified against tests/reference/php/.../lang/operators/*_basiclong_64bit.phpt.
+    function isInt(v) { return typeof v == "number" || szIs(v) }
+    function isNum(v) { return typeof v == "number" || szIs(v) || isFlo(v) }
+    function numOf(v) { if (isFlo(v)) { return v.f }; if (szIs(v)) { return szNum(v) }; return v }
+    // mkInt normalizes a 64 bit pair back to the invariant (plain number or box).
+    function mkInt(p) { return szNorm(p, 64, false) }
+    function iPairOf(v) { return szIs(v) ? v.p : i64FromNum(v) }
+    function i64IsNeg(p) { return (p.h & 0x80000000) !== 0 }
+    var PHP_INF = 1 / 0
+    var I64_MIN_P = i64Make(0x80000000, 0)
+    var I64_MAX_P = i64Make(0x7fffffff, 0xffffffff)
+    var I64_NEG1 = i64Make(0xffffffff, 0xffffffff)
     // trunc toward zero (PHP's (int) cast and intdiv); Math.trunc is not everywhere.
     function trunc(n) { return n < 0 ? 0 - Math.floor(0 - n) : Math.floor(n) }
+
+    // The three overflowing operators. On overflow PHP evaluates the operation
+    // AGAIN in double precision - (double)a + (double)b, exactly what
+    // ZEND_SIGNED_ADD_OVERFLOW's slow path does - so the answers here are the
+    // corpus's float(9.223372036854776E+18) and not a rounded 64 bit value.
+    function iAdd(a, b) {
+        var r = i64Add(a, b)
+        if (i64IsNeg(a) === i64IsNeg(b) && i64IsNeg(r) !== i64IsNeg(a)) {
+            return mkFlo(i64ToNumS(a) + i64ToNumS(b))
+        }
+        return mkInt(r)
+    }
+    function iSub(a, b) {
+        var r = i64Sub(a, b)
+        if (i64IsNeg(a) !== i64IsNeg(b) && i64IsNeg(r) !== i64IsNeg(a)) {
+            return mkFlo(i64ToNumS(a) - i64ToNumS(b))
+        }
+        return mkInt(r)
+    }
+    function iMul(a, b) {
+        if (i64IsZero(a) || i64IsZero(b)) { return 0 }
+        var r = i64Mul(a, b)
+        var ov = false
+        // -1 * MIN wraps back to MIN, so the quotient test below would accept it.
+        if (i64Eq(a, I64_NEG1) && i64Eq(b, I64_MIN_P)) { ov = true }
+        else if (i64Eq(b, I64_NEG1) && i64Eq(a, I64_MIN_P)) { ov = true }
+        else if (!i64Eq(i64DivModS(r, a).q, b)) { ov = true }
+        if (ov) { return mkFlo(i64ToNumS(a) * i64ToNumS(b)) }
+        return mkInt(r)
+    }
+    // The (int) reading of ANY value, as a 64 bit pair. A float out of range wraps
+    // modulo 2^64, which is what the corpus's int_overflow_64bit.phpt records
+    // ((int)(PHP_INT_MAX * 2 + 4) is int(0), i.e. 2^64 mod 2^64).
+    function toLongP(v) {
+        var n = toNumV(v)
+        if (szIs(n)) { return n.p }
+        if (typeof n == "number") { return i64FromNum(n) }
+        var f = n.f
+        if (f !== f) { return i64Make(0, 0) }
+        if (f === PHP_INF || f === 0 - PHP_INF) { return i64Make(0, 0) }
+        return i64FromNum(trunc(f))
+    }
+    function toLong(v) { return mkInt(toLongP(v)) }
 
     // ----- literal builders (the tags call these) -----
     function stripUnd(s) {
@@ -1330,10 +1405,76 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         return out
     }
-    function phpIntLit(t) { return parseInt(stripUnd(t), 10) }
+    // An integer literal that does not FIT in 64 bits is a float, not a wrapped
+    // integer: `0xFFFFFFFFFFFFFFFF` is float(1.8446744073709552E+19) and a long
+    // enough digit run is float(INF). Corpus: lang/integer_literals/*_64bit.phpt.
+    // The decimal form is read with parseFloat (correctly rounded); the power-of-two
+    // radices accumulate, which is exact until the value leaves 2^53 and then
+    // rounds the same way zend_hex_strtod does.
+    function digitsOnly(s, radix) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            var d = 0 - 1
+            if (c >= 48 && c <= 57) { d = c - 48 }
+            else if (c >= 97 && c <= 122) { d = c - 87 }
+            else if (c >= 65 && c <= 90) { d = c - 55 }
+            if (d >= 0 && d < radix) { out += s.charAt(i) }
+        }
+        var j = 0
+        while (j < out.length - 1 && out.charAt(j) == "0") { j++ }
+        return out.substring(j)
+    }
+    // Fits in a SIGNED 64 bit integer? Compared as text so that no double is
+    // involved: 9223372036854775807 and ...808 are the same double.
+    function decFits64(s) {
+        if (s.length < 19) { return true }
+        if (s.length > 19) { return false }
+        return s <= "9223372036854775807"
+    }
+    function radixFits64(s, bits) {
+        var n = s.length * bits
+        if (n <= 63) { return true }
+        if (n - bits >= 64) { return false }
+        // The top digit decides: the value fits when it leaves the sign bit clear.
+        var top = parseInt(s.charAt(0), 1 << bits)
+        var spare = 64 - (s.length - 1) * bits
+        return top < Math.pow(2, spare - 1)
+    }
+    function radixFloat(s, radix) {
+        var v = 0
+        for (var i = 0; i < s.length; i++) { v = v * radix + parseInt(s.charAt(i), radix) }
+        return v
+    }
+    function allOct(s) {
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) < "0" || s.charAt(i) > "7") { return false } }
+        return true
+    }
+    function phpIntLit(t) {
+        var raw = stripUnd(t)
+        // PHP's legacy octal survives an underscore right after the leading zero
+        // ("0_16" is 14), and that form reaches the DECIMAL production because the
+        // octal one wants a digit there. Corpus: lang/integer_literals/octal_64bit.phpt.
+        if (raw.length > 1 && raw.charAt(0) == "0" && allOct(raw)) {
+            return phpRadixLitBits(digitsOnly(raw, 8), 8, 3)
+        }
+        var s = digitsOnly(raw, 10)
+        if (decFits64(s)) { return mkInt(i64FromStr(s)) }
+        return mkFlo(parseFloat(s))
+    }
     function phpFloatLit(t) { return parseFloat(stripUnd(t)) }
-    function phpRadixLit(t, radix) { return parseInt(stripUnd(t).substring(2), radix) }
-    function phpLegOctLit(t) { return parseInt(stripUnd(t), 8) }
+    function phpRadixLitBits(s, radix, bits) {
+        if (radixFits64(s, bits)) { return mkInt(i64FromRadix(s, radix)) }
+        return mkFlo(radixFloat(s, radix))
+    }
+    function phpRadixLit(t, radix) {
+        var bits = radix == 16 ? 4 : (radix == 8 ? 3 : 1)
+        return phpRadixLitBits(digitsOnly(stripUnd(t).substring(2), radix), radix, bits)
+    }
+    function phpLegOctLit(t) { return phpRadixLitBits(digitsOnly(stripUnd(t), 8), 8, 3) }
+    // The plain-number reading a non-value site needs (a break level, an array
+    // position): those are small by construction.
+    function phpSmallInt(t) { return parseInt(stripUnd(t), 10) }
 
     // ----- numeric strings -----
     // A string is numeric when it is an optionally signed decimal / float, with
@@ -1365,11 +1506,28 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         while (i < s.length && (s.charAt(i) == " " || s.charAt(i) == "\t" || s.charAt(i) == "\n" || s.charAt(i) == "\r")) { i++ }
         if (i != s.length) { return null }
         var txt = s.substring(st, en)
-        return isF ? mkFlo(parseFloat(txt)) : parseInt(txt, 10)
+        return isF ? mkFlo(parseFloat(txt)) : intStrVal(txt)
+    }
+    // The int a DIGIT RUN denotes, promoted to a float when it does not fit in 64
+    // bits: is_numeric_string reports IS_DOUBLE for "9223372036854775808", so
+    // "9223372036854775808" + 0 is a float and not a saturated int.
+    function intStrVal(txt) {
+        var neg = false
+        var body = txt
+        if (body.charAt(0) == "+") { body = body.substring(1) }
+        else if (body.charAt(0) == "-") { neg = true; body = body.substring(1) }
+        var ds = digitsOnly(body, 10)
+        // The negative side reaches one further: -9223372036854775808 is an int.
+        if (decFits64(ds) || (neg && ds.length == 19 && ds <= "9223372036854775808")) {
+            var p = i64FromStr(ds)
+            return mkInt(neg ? i64Neg(p) : p)
+        }
+        return mkFlo(parseFloat(txt))
     }
     // The arithmetic coercion: everything becomes an int or a float box.
     function toNumV(v) {
         if (typeof v == "number") { return v }
+        if (szIs(v)) { return v }
         if (isFlo(v)) { return v }
         if (v === true) { return 1 }
         if (v === false || v === null || v === undefined) { return 0 }
@@ -1396,7 +1554,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
         if (d == 0) { return 0 }
         var txt = s.substring(0, i)
-        return isF ? mkFlo(parseFloat(txt)) : parseInt(txt, 10)
+        return isF ? mkFlo(parseFloat(txt)) : intStrVal(txt)
     }
 
     // ----- PHP truthiness: false, 0, 0.0, "", "0", [] and null are falsy. -----
@@ -1404,6 +1562,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (v === null || v === undefined || v === false) { return false }
         if (v === true) { return true }
         if (typeof v == "number") { return v !== 0 }
+        // An int box is out of the exactly representable range, so it is never 0.
+        if (szIs(v)) { return true }
         if (isFlo(v)) { return v.f !== 0 }
         if (typeof v == "string") { return v !== "" && v !== "0" }
         if (isArr(v)) { return v.keys.length > 0 }
@@ -1857,13 +2017,26 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function phpKey(k) {
         if (typeof k == "number") { return trunc(k) }
-        if (isFlo(k)) { return trunc(k.f) }
+        if (szIs(k)) { return k }
+        if (isFlo(k)) { return toLong(k) }
         if (k === true) { return 1 }
         if (k === false) { return 0 }
         if (k === null || k === undefined) { return "" }
-        if (typeof k == "string") { return isCanonInt(k) ? parseInt(k, 10) : k }
+        if (typeof k == "string") {
+            if (!isCanonInt(k)) { return k }
+            // A canonical decimal folds to an int key only while it FITS: PHP keeps
+            // "9223372036854775808" a STRING key.
+            var n = intStrVal(k)
+            return isFlo(n) ? k : n
+        }
         return k
     }
+    // A 64 bit key outside [-2^53, 2^53] is a BOX, and two boxes holding the same
+    // value are different objects - so the shared dict is told how to hash and
+    // compare one. The id can never collide with a plain number's, because a plain
+    // number key is by construction inside the exactly representable range.
+    core.keyId = function(k) { return szIs(k) ? "n" + szStr(k) : null }
+    core.keyEq = function(a, b) { return szIs(a) && szIs(b) && szEq(a, b) }
     function arrSet(a, k, v) {
         var key = phpKey(k)
         var at = dictFind(a, key)
@@ -1931,15 +2104,126 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (v === false) { return "" }
         if (typeof v == "string") { return v }
         if (typeof v == "number") { return "" + v }
+        if (szIs(v)) { return szStr(v) }
         if (isFlo(v)) { return floStr(v.f) }
         if (isArr(v)) { return "Array" }
         if (isObj(v)) { return objToString(v) }
         return "" + v
     }
-    // PHP prints a float without a fractional part as an integer: (string)3.0 == "3".
-    function floStr(n) {
-        if (n === trunc(n) && n < 1000000000000000 && n > -1000000000000000) { return "" + trunc(n) }
-        return "" + n
+    // ----- float rendering: PHP has TWO, and they differ -----
+    // echo / (string) / interpolation render with precision=14; var_dump,
+    // var_export and json use serialize_precision=-1, which means the SHORTEST
+    // round-tripping digits laid out at ndigit=17. Confusing the two is the
+    // classic PHP float trap: the same value is 9.2233720368548E+18 to echo and
+    // 9.223372036854776E+18 to var_dump. Corpus: the "--- testing: ..." echo lines
+    // and the var_dump lines of lang/operators/add_basiclong_64bit.phpt, plus
+    // float(1.9119287772983036E+25) in lang/integer_literals/binary_64bit.phpt.
+    //
+    // Both are zend_gcvt(value, ndigit, '.', 'E'): exponential notation exactly
+    // when `decpt < 0 ? decpt < -3 : decpt > ndigit`, a mantissa that always keeps
+    // one digit after the point ("1.0E+25"), and an exponent that is never zero
+    // padded. The digits come from the JS shortest representation, which is the
+    // same digit string zend_d2s_short_buf produces for serialize_precision=-1;
+    // precision=14 rounds that string, which can differ from rounding the exact
+    // binary value only when digits 15..17 sit exactly on a tie.
+    function floStr(n) { return floFormat(n, 14) }
+    function floDump(n) { return floFormat(n, 17) }
+    // The shortest decimal digits of a positive finite double, with the position of
+    // the decimal point: value == 0.<d> * 10^<e>.
+    function floSplit(a) {
+        var s = "" + a
+        var mant = s
+        var exp = 0
+        var ei = 0 - 1
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i)
+            if (c == "e" || c == "E") { ei = i }
+        }
+        if (ei >= 0) {
+            mant = s.substring(0, ei)
+            var et = s.substring(ei + 1)
+            var eneg = false
+            if (et.charAt(0) == "+") { et = et.substring(1) }
+            else if (et.charAt(0) == "-") { eneg = true; et = et.substring(1) }
+            exp = parseInt(et, 10)
+            if (eneg) { exp = 0 - exp }
+        }
+        var dot = 0 - 1
+        for (var j = 0; j < mant.length; j++) { if (mant.charAt(j) == ".") { dot = j } }
+        var digs = mant
+        var intLen = mant.length
+        if (dot >= 0) {
+            digs = mant.substring(0, dot) + mant.substring(dot + 1)
+            intLen = dot
+        }
+        var decpt = intLen + exp
+        var k = 0
+        while (k < digs.length && digs.charAt(k) == "0") { k++; decpt = decpt - 1 }
+        digs = digs.substring(k)
+        var m = digs.length
+        while (m > 0 && digs.charAt(m - 1) == "0") { m = m - 1 }
+        digs = digs.substring(0, m)
+        if (digs.length == 0) { return {d: "0", e: 1} }
+        return {d: digs, e: decpt}
+    }
+    // Round a digit string to `nd` significant digits, half up, and drop the
+    // trailing zeros the way dtoa's mode 2 does.
+    function floRound(d, decpt, nd) {
+        var keep = d
+        var pt = decpt
+        if (d.length > nd) {
+            keep = d.substring(0, nd)
+            if (d.charCodeAt(nd) - 48 >= 5) {
+                var i = nd - 1
+                var carry = 1
+                var tail = ""
+                while (i >= 0 && carry == 1) {
+                    var v = keep.charCodeAt(i) - 48 + 1
+                    if (v == 10) { tail = "0" + tail } else { tail = "" + v + tail; carry = 0 }
+                    i = i - 1
+                }
+                keep = keep.substring(0, i + 1) + tail
+                if (carry == 1) { keep = ("1" + keep).substring(0, nd); pt = pt + 1 }
+            }
+        }
+        var m = keep.length
+        while (m > 1 && keep.charAt(m - 1) == "0") { m = m - 1 }
+        keep = keep.substring(0, m)
+        if (keep == "0") { pt = 1 }
+        return {d: keep, e: pt}
+    }
+    function floFormat(n, nd) {
+        if (n !== n) { return "NAN" }
+        if (n === PHP_INF) { return "INF" }
+        if (n === 0 - PHP_INF) { return "-INF" }
+        var sign = ""
+        var a = n
+        if (n < 0) { sign = "-"; a = 0 - n }
+        else if (n === 0 && 1 / n < 0) { sign = "-" }
+        if (a === 0) { return sign + "0" }
+        var sp = floSplit(a)
+        var r = floRound(sp.d, sp.e, nd)
+        var d = r.d
+        var decpt = r.e
+        if (decpt < 0 ? decpt < 0 - 3 : decpt > nd) {
+            var e2 = decpt - 1
+            var frac = d.length > 1 ? d.substring(1) : "0"
+            var es = "+"
+            var ea = e2
+            if (e2 < 0) { es = "-"; ea = 0 - e2 }
+            return sign + d.charAt(0) + "." + frac + "E" + es + ea
+        }
+        if (decpt <= 0) {
+            var z = ""
+            for (var p = 0; p < 0 - decpt; p++) { z += "0" }
+            return sign + "0." + z + d
+        }
+        if (decpt >= d.length) {
+            var z2 = ""
+            for (var q = 0; q < decpt - d.length; q++) { z2 += "0" }
+            return sign + d + z2
+        }
+        return sign + d.substring(0, decpt) + "." + d.substring(decpt)
     }
     function phpConcat(l, r) { return phpStr(l) + phpStr(r) }
 
@@ -2532,7 +2816,27 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (name == "__FUNCTION__" || name == "__METHOD__") { return varExists(FN_KEY) ? getVar(FN_KEY) : "" }
             if (name == "__CLASS__") { var s = ctxSelf(); return s == null ? "" : s.__name }
             if (name == "PHP_EOL") { return "\n" }
+            // PHP's int is 64 bit two's complement on every build this project
+            // targets, so PHP_INT_MAX / PHP_INT_MIN are the boxed extremes rather
+            // than a double's 9223372036854775808.
             if (name == "PHP_INT_SIZE") { return 8 }
+            if (name == "PHP_INT_MAX") { return mkInt(I64_MAX_P) }
+            if (name == "PHP_INT_MIN") { return mkInt(I64_MIN_P) }
+            // Spelled with Math.pow because the grammar-script dialect has no
+            // exponent literals ("1e-16" is 1 followed by the name e, see
+            // js-interpreter.abnf); every value below is exact in binary anyway.
+            if (name == "PHP_FLOAT_EPSILON") { return mkFlo(Math.pow(2, 0 - 52)) }
+            if (name == "PHP_FLOAT_MAX") { return mkFlo((2 - Math.pow(2, 0 - 52)) * Math.pow(2, 1023)) }
+            if (name == "PHP_FLOAT_MIN") { return mkFlo(Math.pow(2, 0 - 1022)) }
+            if (name == "PHP_FLOAT_DIG") { return 15 }
+            if (name == "INF") { return mkFlo(PHP_INF) }
+            if (name == "NAN") { return mkFlo(0 / 0) }
+            if (name == "M_PI") { return mkFlo(Math.PI) }
+            if (name == "E_ALL") { return 32767 }
+            if (name == "E_ERROR") { return 1 }
+            if (name == "E_WARNING") { return 2 }
+            if (name == "E_NOTICE") { return 8 }
+            if (name == "E_DEPRECATED") { return 8192 }
             if (hasOwn(phpConsts, name)) { return phpConsts[name] }
             fail("undefined constant " + name)
         }
@@ -3527,7 +3831,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var nm = undefined
         var body = null
         for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].ctype != undefined) { types.push(stripWs(items[i].ctype)) }
+            // A catch type may be written fully qualified (\Throwable, Foo\Bar); the
+            // last segment is the name the class table holds, exactly as ConstRef and
+            // Call already resolve one.
+            if (items[i] != undefined && items[i].ctype != undefined) { types.push(lastSeg(stripWs(items[i].ctype))) }
             else if (typeof items[i] == "string") { nm = items[i] }
             else { body = items[i] }
         }
@@ -3556,10 +3863,122 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         "array_push": function(a, v) { arrPush(a, v); return a.keys.length },
         "array_keys": function(d) { return arrOf(d.keys) },
         "array_values": function(d) { return arrOf(derefAll(d.vals)) },
-        "abs": function(n) { var v = toNumV(n); return numOf(v) < 0 ? phpArith("-", 0, v) : v },
+        "abs": function(n) {
+            var v = toNumV(n)
+            if (isFlo(v)) { return v.f < 0 ? mkFlo(-v.f) : v }
+            return i64IsNeg(iPairOf(v)) ? phpNeg(v) : v
+        },
         "max": function(a, b) { return phpCmp(a, b) > 0 ? a : b },
         "min": function(a, b) { return phpCmp(a, b) < 0 ? a : b },
-        "intdiv": function(a, b) { return trunc(numOf(toNumV(a)) / numOf(toNumV(b))) }
+        // intdiv() is the TRUNCATING division '/' is not: intdiv(7, 2) is int(3)
+        // where 7 / 2 is float(3.5). It is also the one place a 64 bit quotient can
+        // fail to exist, since PHP_INT_MIN / -1 has no int result.
+        "intdiv": function(a, b) {
+            var pb = toLongP(b)
+            if (i64IsZero(pb)) { phpRaise("DivisionByZeroError", "Division by zero") }
+            var pa = toLongP(a)
+            if (i64Eq(pb, I64_NEG1) && i64Eq(pa, I64_MIN_P)) {
+                phpRaise("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer")
+            }
+            return mkInt(i64DivModS(pa, pb).q)
+        },
+        // The type predicates. They exist to make the int / float distinction
+        // OBSERVABLE, which is the whole point of boxing a float and of the 64 bit
+        // integer above: is_int(5) and is_float(5.0) are both true and neither
+        // value is the other's type.
+        "is_int": function(v) { return isInt(v) },
+        "is_integer": function(v) { return isInt(v) },
+        "is_long": function(v) { return isInt(v) },
+        "is_float": function(v) { return isFlo(v) },
+        "is_double": function(v) { return isFlo(v) },
+        "is_string": function(v) { return typeof v == "string" },
+        "is_bool": function(v) { return typeof v == "boolean" },
+        "is_array": function(v) { return isArr(v) },
+        "is_object": function(v) { return isObj(v) },
+        "is_null": function(v) { return v === null || v === undefined },
+        "is_numeric": function(v) { return isNum(v) || (typeof v == "string" && numStrVal(v) != null) },
+        // define() puts a name in the SAME table `const` writes, which is what makes
+        // a defined constant readable through a bare name.
+        "define": function(n, v) { rawSet(phpConsts, phpStr(n), v); return true },
+        "defined": function(n) { return hasOwn(phpConsts, phpStr(n)) },
+        "constant": function(n) { return hasOwn(phpConsts, phpStr(n)) ? phpConsts[phpStr(n)] : null },
+        // The diagnostics level is not modelled (every engine error here is fatal),
+        // so error_reporting() accepts and reports a level without acting on it.
+        "error_reporting": function(v) { return 32767 },
+        "get_class": function(v) { return isObj(v) ? v.__class.__name : false },
+        "gettype": function(v) { return phpTypeName(v) },
+        "get_debug_type": function(v) { return phpDebugType(v) },
+        "var_dump": function(a, b, c, d, e, f, g, h) {
+            var args = [a, b, c, d, e, f, g, h]
+            for (var i = 0; i < args.length; i++) {
+                if (args[i] === undefined) { return null }
+                print(dumpOf(args[i], 0))
+            }
+            return null
+        }
+    }
+    // gettype()'s historical spellings; get_debug_type() is the modern one.
+    function phpTypeName(v) {
+        if (v === null || v === undefined) { return "NULL" }
+        if (typeof v == "boolean") { return "boolean" }
+        if (isInt(v)) { return "integer" }
+        if (isFlo(v)) { return "double" }
+        if (typeof v == "string") { return "string" }
+        if (isArr(v)) { return "array" }
+        if (isObj(v)) { return "object" }
+        return "unknown type"
+    }
+    function phpDebugType(v) {
+        if (v === null || v === undefined) { return "null" }
+        if (typeof v == "boolean") { return "bool" }
+        if (isInt(v)) { return "int" }
+        if (isFlo(v)) { return "float" }
+        if (typeof v == "string") { return "string" }
+        if (isArr(v)) { return "array" }
+        if (isObj(v)) { return v.__class == null ? "object" : v.__class.__name }
+        return "unknown"
+    }
+    // var_dump's rendering. A float goes through floDump (serialize_precision=-1),
+    // NOT through the precision=14 renderer echo uses - that is the trap the two
+    // renderers exist to keep apart. An object's #id is handed out on first dump,
+    // which is enough for a single-run transcript to be stable.
+    var dumpIds = 0
+    function dumpInd(n) {
+        var s = ""
+        for (var i = 0; i < n; i++) { s += " " }
+        return s
+    }
+    function dumpOf(v, ind) {
+        var pad = dumpInd(ind)
+        if (v === null || v === undefined) { return pad + "NULL\n" }
+        if (v === true) { return pad + "bool(true)\n" }
+        if (v === false) { return pad + "bool(false)\n" }
+        if (isInt(v)) { return pad + "int(" + phpStr(v) + ")\n" }
+        if (isFlo(v)) { return pad + "float(" + floDump(v.f) + ")\n" }
+        if (typeof v == "string") { return pad + "string(" + byteLen(v) + ") \"" + v + "\"\n" }
+        if (isArr(v)) {
+            var out = pad + "array(" + v.keys.length + ") {\n"
+            for (var i = 0; i < v.keys.length; i++) {
+                out += dumpKey(v.keys[i], ind + 2)
+                out += dumpOf(deref(v.vals[i]), ind + 2)
+            }
+            return out + pad + "}\n"
+        }
+        if (isObj(v)) {
+            if (v.__vdid == undefined) { dumpIds = dumpIds + 1; v.__vdid = dumpIds }
+            var name = v.__class == null ? "stdClass" : v.__class.__name
+            var o2 = pad + "object(" + name + ")#" + v.__vdid + " (" + v.p.keys.length + ") {\n"
+            for (var j = 0; j < v.p.keys.length; j++) {
+                o2 += dumpKey(v.p.keys[j], ind + 2)
+                o2 += dumpOf(deref(v.p.vals[j]), ind + 2)
+            }
+            return o2 + pad + "}\n"
+        }
+        return pad + "NULL\n"
+    }
+    function dumpKey(k, ind) {
+        if (typeof k == "string") { return dumpInd(ind) + "[\"" + k + "\"]=>\n" }
+        return dumpInd(ind) + "[" + phpStr(k) + "]=>\n"
     }
     function phpLen(v) {
         if (isArr(v)) { return v.keys.length }
@@ -3585,6 +4004,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             return true
         }
         if (l === null || l === undefined) { return r === null || r === undefined }
+        // Two ints compare by VALUE: above 2^53 one of them is a box, and two boxes
+        // holding the same 64 bit value are different objects.
+        if (isInt(l) || isInt(r)) { return isInt(l) && isInt(r) && szEq(l, r) }
         return l === r
     }
     // == is PHP 8's loose equality: a bool on either side compares truthiness, null
@@ -3617,12 +4039,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof l == "string" && typeof r == "string") {
             var nl = numStrVal(l)
             var nr = numStrVal(r)
-            if (nl != null && nr != null) { return numOf(nl) === numOf(nr) }
+            if (nl != null && nr != null) { return numEq(nl, nr) }
             return l === r
         }
         if (typeof l == "string" && isNum(r)) { return strNumLoose(l, r) }
         if (typeof r == "string" && isNum(l)) { return strNumLoose(r, l) }
-        return numOf(toNumV(l)) === numOf(toNumV(r))
+        return numEq(toNumV(l), toNumV(r))
+    }
+    // Two numbers, compared the way PHP does: int against int at 64 bits (a double
+    // would collapse 2^63 and 2^63 - 1 onto the same value), anything else as
+    // doubles, which is the LONG-to-DOUBLE widening compare_function performs.
+    function numEq(a, b) {
+        if (isInt(a) && isInt(b)) { return szEq(a, b) }
+        return numOf(a) === numOf(b)
+    }
+    function numCmp(a, b) {
+        if (isInt(a) && isInt(b)) { return szCmp(a, b) }
+        return cmpNum(numOf(a), numOf(b))
     }
     function looseNull(v) {
         if (typeof v == "string") { return v === "" }
@@ -3632,7 +4065,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     function strNumLoose(s, n) {
         var ns = numStrVal(s)
-        if (ns != null) { return numOf(ns) === numOf(n) }
+        if (ns != null) { return numEq(ns, n) }
         return s === phpStr(n)
     }
     function cmpNum(a, b) { return a < b ? -1 : (a > b ? 1 : 0) }
@@ -3657,66 +4090,125 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         if (typeof l == "string" && typeof r == "string") {
             var nl = numStrVal(l)
             var nr = numStrVal(r)
-            if (nl != null && nr != null) { return cmpNum(numOf(nl), numOf(nr)) }
+            if (nl != null && nr != null) { return numCmp(nl, nr) }
             return cmpStr(l, r)
         }
         if (typeof l == "string" && isNum(r)) {
             var x = numStrVal(l)
             if (x == null) { return cmpStr(l, phpStr(r)) }
-            return cmpNum(numOf(x), numOf(r))
+            return numCmp(x, r)
         }
         if (typeof r == "string" && isNum(l)) {
             var y = numStrVal(r)
             if (y == null) { return cmpStr(phpStr(l), r) }
-            return cmpNum(numOf(l), numOf(y))
+            return numCmp(l, y)
         }
-        return cmpNum(numOf(toNumV(l)), numOf(toNumV(r)))
+        return numCmp(toNumV(l), toNumV(r))
     }
 
     // ----- arithmetic: int stays int, and any float operand makes the result float --
     function phpArith(op, l, r) {
         var a = toNumV(l)
         var b = toNumV(r)
-        var f = isFlo(a) || isFlo(b)
-        var x = numOf(a)
-        var y = numOf(b)
-        if (op == "+") { return f ? mkFlo(x + y) : x + y }
-        if (op == "-") { return f ? mkFlo(x - y) : x - y }
-        if (op == "*") { return f ? mkFlo(x * y) : x * y }
-        if (op == "/") {
-            if (y === 0) { fail("division by zero") }
-            var q = x / y
-            if (!f && q === trunc(q)) { return q }
-            return mkFlo(q)
-        }
+        // '%' is the one arithmetic operator that is INTEGER only: PHP casts both
+        // operands to int first, so 7.5 % 2 is 1 and not 1.5.
         if (op == "%") {
-            var iy = trunc(y)
-            if (iy === 0) { fail("modulo by zero") }
-            return trunc(x) % iy
+            var pb = toLongP(b)
+            if (i64IsZero(pb)) { phpRaise("DivisionByZeroError", "Modulo by zero") }
+            // MIN % -1 traps on the hardware, and PHP answers 0 for it.
+            if (i64Eq(pb, I64_NEG1)) { return 0 }
+            return mkInt(i64DivModS(toLongP(a), pb).r)
+        }
+        if (isFlo(a) || isFlo(b)) { return phpFloArith(op, numOf(a), numOf(b)) }
+        return phpIntArith(op, iPairOf(a), iPairOf(b))
+    }
+    function phpFloArith(op, x, y) {
+        if (op == "+") { return mkFlo(x + y) }
+        if (op == "-") { return mkFlo(x - y) }
+        if (op == "*") { return mkFlo(x * y) }
+        if (op == "/") {
+            if (y === 0) { phpRaise("DivisionByZeroError", "Division by zero") }
+            return mkFlo(x / y)
+        }
+        if (op == "**") { return mkFlo(Math.pow(x, y)) }
+        fail("unknown arithmetic operator " + op)
+    }
+    // Two ints. The result is an int unless the exact 64 bit answer does not FIT,
+    // in which case PHP promotes to a float computed in double precision - it never
+    // wraps. Division is the other special case: it stays an int only when it comes
+    // out exact (6/3 is int(2), 7/2 is float(3.5)).
+    function phpIntArith(op, a, b) {
+        if (op == "+") { return iAdd(a, b) }
+        if (op == "-") { return iSub(a, b) }
+        if (op == "*") { return iMul(a, b) }
+        if (op == "/") {
+            if (i64IsZero(b)) { phpRaise("DivisionByZeroError", "Division by zero") }
+            if (i64Eq(b, I64_NEG1) && i64Eq(a, I64_MIN_P)) { return mkFlo(0 - i64ToNumS(a)) }
+            var d = i64DivModS(a, b)
+            if (i64IsZero(d.r)) { return mkInt(d.q) }
+            return mkFlo(i64ToNumS(a) / i64ToNumS(b))
         }
         if (op == "**") {
-            var p = Math.pow(x, y)
-            if (!f && y >= 0 && p === trunc(p)) { return p }
-            return mkFlo(p)
+            if (i64IsNeg(b)) { return mkFlo(Math.pow(i64ToNumS(a), i64ToNumS(b))) }
+            // Squaring, with the same overflow test every multiplication gets: the
+            // first product that leaves 64 bits makes the WHOLE result a float,
+            // recomputed as pow((double)base, (double)exp).
+            var e = i64ToNumS(b)
+            var acc = i64Make(0, 1)
+            var base = a
+            while (e > 0) {
+                if (e % 2 == 1) {
+                    var t = iMul(acc, base)
+                    if (isFlo(t)) { return mkFlo(Math.pow(i64ToNumS(a), i64ToNumS(b))) }
+                    acc = iPairOf(t)
+                }
+                e = Math.floor(e / 2)
+                if (e > 0) {
+                    var t2 = iMul(base, base)
+                    if (isFlo(t2)) { return mkFlo(Math.pow(i64ToNumS(a), i64ToNumS(b))) }
+                    base = iPairOf(t2)
+                }
+            }
+            return mkInt(acc)
         }
         fail("unknown arithmetic operator " + op)
     }
+    // The bitwise operators are exact 64 bit and cast their operands to int. Unlike
+    // the arithmetic ones they WRAP - `PHP_INT_MAX << 1` is int(-2), not a float
+    // (lang/operators/bitwiseShiftLeft_basiclong_64bit.phpt) - and a negative shift
+    // count is an error rather than a shift the other way.
     function phpBit(op, l, r) {
-        var x = trunc(numOf(toNumV(l))) | 0
-        var y = trunc(numOf(toNumV(r))) | 0
-        if (op == "&") { return x & y }
-        if (op == "|") { return x | y }
-        if (op == "^") { return x ^ y }
-        if (op == "<<") { return x << y }
-        if (op == ">>") { return x >> y }
+        var x = toLongP(l)
+        if (op == "&") { return mkInt(i64And(x, toLongP(r))) }
+        if (op == "|") { return mkInt(i64Or(x, toLongP(r))) }
+        if (op == "^") { return mkInt(i64Xor(x, toLongP(r))) }
+        if (op == "<<" || op == ">>") {
+            var n = i64ToNumS(toLongP(r))
+            if (n < 0) { phpRaise("ArithmeticError", "Bit shift by negative number") }
+            if (n >= 64) {
+                if (op == "<<") { return 0 }
+                return i64IsNeg(x) ? mkInt(I64_NEG1) : 0
+            }
+            return mkInt(op == "<<" ? i64Shl(x, n) : i64ShrS(x, n))
+        }
         fail("unknown bit operator " + op)
     }
 
     // ----- prefix operators, '**' and the type casts -----
-    makeNeg = function(t) { return function() { return phpArith("-", 0, t()) } }
+    // Unary minus keeps the operand's TYPE: a float negates as a float (so -0.0
+    // stays -0), and an int negates at 64 bits - where the one value that cannot
+    // be negated, PHP_INT_MIN, promotes to a float like any other overflow.
+    makeNeg = function(t) { return function() { return phpNeg(t()) } }
+    function phpNeg(v) {
+        var a = toNumV(v)
+        if (isFlo(a)) { return mkFlo(-a.f) }
+        var p = iPairOf(a)
+        if (i64Eq(p, I64_MIN_P)) { return mkFlo(-i64ToNumS(p)) }
+        return mkInt(i64Neg(p))
+    }
     makeNot = function(t) { return function() { return !phptest(t()) } }
     function makeBitNot(t) {
-        return function() { return ~(trunc(numOf(toNumV(t()))) | 0) }
+        return function() { return mkInt(i64Not(toLongP(t()))) }
     }
     function foldPow(items) {
         if (items.length == 1) { return items[0] }
@@ -3743,7 +4235,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         return function() { return phpCast(kind, t()) }
     }
     function phpCast(kind, v) {
-        if (kind == "int" || kind == "integer") { return trunc(numOf(toNumV(v))) }
+        // (int) of an out-of-range float WRAPS modulo 2^64 rather than saturating:
+        // (int)(PHP_INT_MAX * 2 + 4) is int(0). Corpus: tests/int_overflow_64bit.phpt
+        // and tests/int_underflow_64bit.phpt.
+        if (kind == "int" || kind == "integer") { return toLong(v) }
         if (kind == "float" || kind == "double" || kind == "real") { return mkFlo(numOf(toNumV(v))) }
         if (kind == "string" || kind == "binary") { return phpStr(v) }
         if (kind == "bool" || kind == "boolean") { return phptest(v) }
@@ -3788,7 +4283,19 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     declBuiltinClass("InvalidArgumentException", "LogicException")
     declBuiltinClass("TypeError", "Error")
     declBuiltinClass("ValueError", "Error")
-    declBuiltinClass("DivisionByZeroError", "Error")
+    declBuiltinClass("ArithmeticError", "Error")
+    declBuiltinClass("DivisionByZeroError", "ArithmeticError")
+    // The engine's own arithmetic errors are THROWN, not fatal: PHP made division
+    // by zero and a negative shift count catchable in 8.0, and the corpus tests
+    // that (lang/operators/divide_basiclong_64bit.phpt catches DivisionByZeroError).
+    function phpRaise(clsName, msg) {
+        if (!varExists(clsName)) { fail(msg) }
+        var o = newObj(getVar(clsName))
+        dictSet(o.p, "message", msg)
+        dictSet(o.p, "code", 0)
+        throw {__exc: true, v: o}
+    }
+
 
     // ----- core config -----
     core.lang = "php"

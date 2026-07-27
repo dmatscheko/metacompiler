@@ -19,8 +19,11 @@ array(...)), $a[] append, the builtins count/strlen/in_array/array_keys/array_va
 array_push/abs/max/min, and echo/print.
 
 PHP's VALUE MODEL is the one php-interpreter.abnf documents, and the two must agree:
-an int is a plain number, a float is BOXED (so 3.0 is not identical to 3 and match(3.0)
-picks the float arm), a string is byte based, and an array is ONE ordered key/value map
+an int is 64 bit two's complement (a plain number while it stays exact, a box beyond
+2^53) whose overflow PROMOTES to a float rather than wrapping, a float is BOXED (so 3.0
+is not identical to 3 and match(3.0) picks the float arm) and prints through two
+renderers (precision=14 for echo, serialize_precision=-1 for var_dump), a string is
+byte based, and an array is ONE ordered key/value map
 with a next-automatic-index, so === compares the keys and their order while == does not.
 Truthiness is PHP's (false, 0, 0.0, the empty string, the string zero, the empty array
 and null are falsy), == is PHP 8 loose equality and the whole operator ladder, the casts
@@ -476,7 +479,7 @@ Break       <~~ push(makeBreak(takeAll())) ~~>
             = KwBreak [ JumpLevel ] Semi ;
 Continue    <~~ push(makeContinue(takeAll())) ~~>
             = KwContinue [ JumpLevel ] Semi ;
-JumpLevel   <~~ push({lvl: phpIntLit(up.in)}) ~~>
+JumpLevel   <~~ push({lvl: phpSmallInt(up.in)}) ~~>
             = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 // Every expression pushes exactly one thunk: function(block) -> {b, v}.
@@ -870,18 +873,18 @@ PhpFloat    <~~ push(makeFloat(phpFloatLit(up.in))) ~~>
             | "0"..."9" :whitespace() { "0"..."9" | "_" } FloatTail :whitespace(Whitespace) ;
 FloatTail   = "." { "0"..."9" | "_" } [ ExpPart ] | ExpPart ;
 ExpPart     = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
-PhpHex      <~~ push(makeConst(phpRadixLit(up.in, 16))) ~~>
+PhpHex      <~~ push(phpRadixLit(up.in, 16)) ~~>
             = "0" ( "x" | "X" ) :whitespace() HexDig { HexDig | "_" } :whitespace(Whitespace) ;
 HexDig      = "0"..."9" | "a"..."f" | "A"..."F" ;
-PhpBin      <~~ push(makeConst(phpRadixLit(up.in, 2))) ~~>
+PhpBin      <~~ push(phpRadixLit(up.in, 2)) ~~>
             = "0" ( "b" | "B" ) :whitespace() BinDig { BinDig | "_" } :whitespace(Whitespace) ;
 BinDig      = "0" | "1" ;
-PhpOct      <~~ push(makeConst(phpRadixLit(up.in, 8))) ~~>
+PhpOct      <~~ push(phpRadixLit(up.in, 8)) ~~>
             = "0" ( "o" | "O" ) :whitespace() OctDig { OctDig | "_" } :whitespace(Whitespace) ;
 OctDig      = "0"..."7" ;
-PhpLegOct   <~~ push(makeConst(phpLegOctLit(up.in))) ~~>
+PhpLegOct   <~~ push(phpLegOctLit(up.in)) ~~>
             = "0" :whitespace() OctDig { OctDig | "_" } :whitespace(Whitespace) ;
-PhpInt      <~~ push(makeConst(phpIntLit(up.in))) ~~>
+PhpInt      <~~ push(phpIntLit(up.in)) ~~>
             = "0"..."9" :whitespace() { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
@@ -1451,9 +1454,63 @@ KwInstanceof = "instanceof" KwEnd ;
         return out
     }
     function phpFloatLit(t) { return parseFloat(stripUnd(t)) }
-    function phpIntLit(t) { return parseInt(stripUnd(t), 10) }
-    function phpRadixLit(t, radix) { return parseInt(stripUnd(t).substring(2), radix) }
-    function phpLegOctLit(t) { return parseInt(stripUnd(t), 8) }
+    // ----- integer literals -----
+    // PHP's int is 64 bit, so a literal can be exact where a JS number is not, and
+    // one that does not FIT is a float rather than a wrapped int
+    // (0xFFFFFFFFFFFFFFFF is float(1.8446744073709552E+19)). The digits are
+    // therefore handed to js_philit whenever they leave the exactly representable
+    // range; a small literal stays an ordinary emitNum constant, so a program that
+    // never writes a big number emits exactly the IR it emitted before.
+    // Corpus: lang/integer_literals/*_64bit.phpt.
+    function digitsOnly(s, radix) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charCodeAt(i)
+            var d = 0 - 1
+            if (c >= 48 && c <= 57) { d = c - 48 }
+            else if (c >= 97 && c <= 122) { d = c - 87 }
+            else if (c >= 65 && c <= 90) { d = c - 55 }
+            if (d >= 0 && d < radix) { out += s.charAt(i) }
+        }
+        var j = 0
+        while (j < out.length - 1 && out.charAt(j) == "0") { j++ }
+        return out.substring(j)
+    }
+    // Exact in a double? 2^53 is 16 decimal digits, 13 hex, 53 binary, 18 octal;
+    // the digit COUNT is the cheap conservative test and anything longer goes
+    // through the extern, which is exact either way.
+    function litIsSmall(ds, radix) {
+        var lim = 15
+        if (radix == 16) { lim = 13 }
+        else if (radix == 8) { lim = 17 }
+        else if (radix == 2) { lim = 52 }
+        return ds.length <= lim
+    }
+    function makeIntLit(ds, radix) {
+        if (litIsSmall(ds, radix)) { return makeConst(parseInt(ds, radix)) }
+        return function(b) {
+            return {b: b, v: callExt(b, "js_philit", [emitStr(b, ds), emitNum(b, radix)])}
+        }
+    }
+    function allOct(s) {
+        for (var i = 0; i < s.length; i++) { if (s.charAt(i) < "0" || s.charAt(i) > "7") { return false } }
+        return true
+    }
+    function phpIntLit(t) {
+        var raw = stripUnd(t)
+        // PHP's legacy octal survives an underscore right after the leading zero
+        // ("0_16" is 14), and that form reaches the DECIMAL production because the
+        // octal one wants a digit there.
+        if (raw.length > 1 && raw.charAt(0) == "0" && allOct(raw)) {
+            return makeIntLit(digitsOnly(raw, 8), 8)
+        }
+        return makeIntLit(digitsOnly(raw, 10), 10)
+    }
+    function phpRadixLit(t, radix) { return makeIntLit(digitsOnly(stripUnd(t).substring(2), radix), radix) }
+    function phpLegOctLit(t) { return makeIntLit(digitsOnly(stripUnd(t), 8), 8) }
+    // The plain-number reading a non-value site needs (a break level): small by
+    // construction.
+    function phpSmallInt(t) { return parseInt(stripUnd(t), 10) }
 
     // ----- heredoc / nowdoc -----
     // HdScan handed over the WHOLE literal as one token: the '<<<MARK' line, the body
@@ -3889,6 +3946,21 @@ KwInstanceof = "instanceof" KwEnd ;
         return name == "count" || name == "strlen" || name == "in_array"
             || name == "array_push" || name == "array_keys" || name == "array_values" || name == "intdiv"
             || name == "abs" || name == "max" || name == "min"
+            || name == "var_dump" || name == "gettype" || name == "get_debug_type" || name == "get_class"
+            || name == "define" || name == "defined" || name == "constant" || name == "error_reporting"
+            || phpIsKind(name) != ""
+    }
+    // The is_* family, mapped onto the ONE js_phis extern.
+    function phpIsKind(name) {
+        if (name == "is_int" || name == "is_integer" || name == "is_long") { return "int" }
+        if (name == "is_float" || name == "is_double") { return "float" }
+        if (name == "is_string") { return "string" }
+        if (name == "is_bool") { return "bool" }
+        if (name == "is_array") { return "array" }
+        if (name == "is_object") { return "object" }
+        if (name == "is_null") { return "null" }
+        if (name == "is_numeric") { return "numeric" }
+        return ""
     }
     function emitBuiltin(b, name, args) {
         var vs = []
@@ -3908,6 +3980,36 @@ KwInstanceof = "instanceof" KwEnd ;
         if (name == "abs") { return {b: b, v: callExt(b, "js_phabs", [vs[0]])} }
         if (name == "max") { return {b: b, v: callExt(b, "js_phmax", [vs[0], vs[1]])} }
         if (name == "min") { return {b: b, v: callExt(b, "js_phmin", [vs[0], vs[1]])} }
+        // var_dump renders through js_phdump and prints the result: a float there
+        // uses serialize_precision=-1, not the precision=14 echo uses.
+        if (name == "var_dump") {
+            var printV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "print")])
+            for (var d = 0; d < vs.length; d++) {
+                callExt(b, "js_call", [printV, hUndef, argList(b, [callExt(b, "js_phdump", [vs[d]])])])
+            }
+            return {b: b, v: hNull}
+        }
+        if (name == "gettype") { return {b: b, v: callExt(b, "js_phtype", [vs[0]])} }
+        if (name == "get_debug_type") { return {b: b, v: callExt(b, "js_phdtype", [vs[0]])} }
+        if (name == "get_class") { return {b: b, v: callExt(b, "js_phgetclass", [vs[0]])} }
+        // define() writes the SAME scope a `const` does, which is what makes a
+        // defined constant readable through a bare name.
+        if (name == "define") {
+            callExt(b, "js_scope_set_or_create", [curScopeV, callExt(b, "js_phstr", [vs[0]]), vs[1]])
+            return {b: b, v: hTrue}
+        }
+        if (name == "defined") {
+            var probe = callExt(b, "js_phclslookup", [curScopeV, callExt(b, "js_phstr", [vs[0]])])
+            return {b: b, v: callExt(b, "js_phnot", [callExt(b, "js_seq", [probe, hNull])])}
+        }
+        if (name == "constant") {
+            return {b: b, v: callExt(b, "js_phclslookup", [curScopeV, callExt(b, "js_phstr", [vs[0]])])}
+        }
+        // The diagnostics level is not modelled (every engine error here is fatal
+        // or a thrown Error), so error_reporting() reports a level without acting.
+        if (name == "error_reporting") { return {b: b, v: emitNum(b, 32767)} }
+        var kind = phpIsKind(name)
+        if (kind != "") { return {b: b, v: callExt(b, "js_phis", [emitStr(b, kind), vs[0]])} }
         return {b: b, v: callExt(b, "js_phintdiv", [vs[0], vs[1]])}
     }
     function makeCall(items) {
@@ -4485,7 +4587,8 @@ KwInstanceof = "instanceof" KwEnd ;
     var excRoots = ["Exception", "Error"]
     var excDerived = [["RuntimeException", "Exception"], ["LogicException", "Exception"],
                       ["InvalidArgumentException", "LogicException"], ["TypeError", "Error"],
-                      ["ValueError", "Error"], ["DivisionByZeroError", "Error"]]
+                      ["ValueError", "Error"], ["ArithmeticError", "Error"],
+                      ["DivisionByZeroError", "ArithmeticError"]]
     // $this->name = args[idx] when that argument was passed, else the default. PHP's
     // Exception::__construct($message = "", $code = 0), written out as a branch because
     // the parameter binding here has no default-value model.
@@ -4569,7 +4672,34 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "FALSE"), hFalse])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "NULL"), hNull])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_EOL"), emitStr(b, "\n")])
+        // PHP's int is 64 bit two's complement, so the extremes are values a double
+        // cannot carry and have to come from js_philit.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_INT_SIZE"), emitNum(b, 8)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_INT_MAX"),
+                                     callExt(b, "js_philit", [emitStr(b, "9223372036854775807"), emitNum(b, 10)])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_INT_MIN"),
+                                     callExt(b, "js_philit", [emitStr(b, "-9223372036854775808"), emitNum(b, 10)])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_FLOAT_DIG"), emitNum(b, 15)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_FLOAT_EPSILON"),
+                                     callExt(b, "js_phflo", [emitNum(b, Math.pow(2, 0 - 52))])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_FLOAT_MAX"),
+                                     callExt(b, "js_phflo", [emitNum(b, (2 - Math.pow(2, 0 - 52)) * Math.pow(2, 1023))])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_FLOAT_MIN"),
+                                     callExt(b, "js_phflo", [emitNum(b, Math.pow(2, 0 - 1022))])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "INF"), callExt(b, "js_phflo", [emitNum(b, 1 / 0)])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "NAN"), callExt(b, "js_phflo", [emitNum(b, 0 / 0)])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "M_PI"), callExt(b, "js_phflo", [emitNum(b, Math.PI)])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_ALL"), emitNum(b, 32767)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_ERROR"), emitNum(b, 1)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_WARNING"), emitNum(b, 2)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_NOTICE"), emitNum(b, 8)])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "E_DEPRECATED"), emitNum(b, 8192)])
         b = emitExcClasses(b) // Exception / Error and their subclasses
+        // The engine's own arithmetic errors (division by zero, a negative shift
+        // count) are THROWN, and the class descriptors live in this scope - so the
+        // runtime is handed the scope to look them up in. See phpRaise in
+        // abnf/jsrtphp.go and phpRaise in php-interpreter.abnf.
+        callExt(b, "js_phrtinit", [curScopeV])
         b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
         b = makeSeq(items)(b)

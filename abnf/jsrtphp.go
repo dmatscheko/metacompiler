@@ -35,9 +35,63 @@ func phpMkFlo(f float64) jsPhpFlo { return jsPhpFlo{f: f} }
 
 func phpIsFlo(v interface{}) bool { _, ok := v.(jsPhpFlo); return ok }
 
+// ----- PHP's int is 64 bit two's complement ----------------------------------
+//
+// The value model matches php-interpreter.abnf's exactly: an int is a PLAIN
+// float64 while it stays inside [-2^53, 2^53] and the shared sized-integer box
+// jsGInt{w: 64, u: false} of jsrtint.go otherwise, so giNorm / giStr / giFromFloat
+// are reused unchanged. What is PHP's OWN is the overflow rule: PHP does NOT
+// wrap, it silently promotes to a float computed in double precision, so
+// PHP_INT_MAX + 1 is the float 9.2233720368548E+18. The arithmetic below is
+// therefore not giArith - it is the overflow-detecting phpIntArith.
+//
+// Verified against tests/reference/php/php-src-tests/lang/operators/
+// *_basiclong_64bit.phpt, whose --EXPECT-- blocks this file reproduces byte for
+// byte through the same test runner the interpreter half passes.
+
+const phpIntMax = int64(9223372036854775807)
+const phpIntMin = int64(-9223372036854775808)
+
+// phpIsInt: every plain float64 in this model is an integer (a PHP float is a
+// jsPhpFlo box), and a jsGInt is one that left the exact range.
+func phpIsInt(v interface{}) bool {
+	switch t := v.(type) {
+	case float64:
+		return true
+	case jsGInt:
+		return t.w == 64 && !t.u
+	}
+	return false
+}
+
+// phpMkInt applies the invariant: a plain number while the value is exact.
+func phpMkInt(v int64) interface{} { return giNorm(v, 64, false) }
+
+// phpLongOf reads an INT operand's 64 bit value (the caller has already
+// established that it is one).
+func phpLongOf(v interface{}) int64 {
+	switch t := v.(type) {
+	case jsGInt:
+		return t.v
+	case float64:
+		return int64(t)
+	}
+	return 0
+}
+
+// phpFloToLong is the (int) reading of a float: truncation toward zero, then a
+// WRAP modulo 2^64 rather than a saturation - (int)(PHP_INT_MAX * 2 + 4) is
+// int(0), which tests/int_overflow_64bit.phpt records.
+func phpFloToLong(f float64) int64 {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0
+	}
+	return giFromFloat(f)
+}
+
 func phpIsNum(v interface{}) bool {
 	switch v.(type) {
-	case float64, jsPhpFlo:
+	case float64, jsGInt, jsPhpFlo:
 		return true
 	}
 	return false
@@ -47,6 +101,8 @@ func phpNumOf(v interface{}) float64 {
 	switch t := v.(type) {
 	case float64:
 		return t
+	case jsGInt:
+		return float64(t.v)
 	case jsPhpFlo:
 		return t.f
 	}
@@ -61,13 +117,118 @@ func phpTrunc(n float64) float64 {
 	return math.Trunc(n)
 }
 
-// phpFloStr renders a float the way PHP does: one without a fractional part
-// prints as an integer, so (string)3.0 is "3".
-func phpFloStr(n float64) string {
-	if n == phpTrunc(n) && n < 1e15 && n > -1e15 {
-		return strconv.FormatFloat(phpTrunc(n), 'f', -1, 64)
+// ----- float rendering: PHP has TWO, and they differ -------------------------
+//
+// echo / (string) / interpolation render with precision=14; var_dump, var_export
+// and json use serialize_precision=-1, which means the SHORTEST round-tripping
+// digits laid out at ndigit=17. The same value is 9.2233720368548E+18 to echo
+// and 9.223372036854776E+18 to var_dump, and confusing the two is the classic
+// PHP float trap. Both are zend_gcvt(value, ndigit, '.', 'E'): exponential
+// notation exactly when `decpt < 0 ? decpt < -3 : decpt > ndigit`, a mantissa
+// that always keeps one digit after the point ("1.0E+25"), and an exponent that
+// is never zero padded. This is the byte-for-byte twin of floStr / floDump in
+// php-interpreter.abnf.
+func phpFloStr(n float64) string  { return phpFloFormat(n, 14) }
+func phpFloDump(n float64) string { return phpFloFormat(n, 17) }
+
+// phpFloSplit answers the shortest decimal digits of a positive finite double
+// and the position of the decimal point: value == 0.<digits> * 10^<decpt>.
+func phpFloSplit(a float64) (string, int) {
+	s := strconv.FormatFloat(a, 'e', -1, 64) // "d.dddde±dd"
+	mant, exps := s, "0"
+	if i := strings.IndexByte(s, 'e'); i >= 0 {
+		mant, exps = s[:i], s[i+1:]
 	}
-	return jsNumString(n)
+	exp, _ := strconv.Atoi(exps)
+	digs := strings.Replace(mant, ".", "", 1)
+	decpt := exp + 1
+	for len(digs) > 0 && digs[0] == '0' {
+		digs = digs[1:]
+		decpt--
+	}
+	for len(digs) > 0 && digs[len(digs)-1] == '0' {
+		digs = digs[:len(digs)-1]
+	}
+	if digs == "" {
+		return "0", 1
+	}
+	return digs, decpt
+}
+
+// phpFloRound rounds a digit string to nd significant digits, half up, and drops
+// the trailing zeros dtoa's mode 2 drops.
+func phpFloRound(d string, decpt, nd int) (string, int) {
+	if len(d) > nd {
+		keep := []byte(d[:nd])
+		if d[nd] >= '5' {
+			i := nd - 1
+			for i >= 0 {
+				if keep[i] == '9' {
+					keep[i] = '0'
+					i--
+					continue
+				}
+				keep[i]++
+				break
+			}
+			if i < 0 {
+				keep = append([]byte{'1'}, keep...)[:nd]
+				decpt++
+			}
+		}
+		d = string(keep)
+	}
+	for len(d) > 1 && d[len(d)-1] == '0' {
+		d = d[:len(d)-1]
+	}
+	if d == "0" {
+		decpt = 1
+	}
+	return d, decpt
+}
+
+func phpFloFormat(n float64, nd int) string {
+	if math.IsNaN(n) {
+		return "NAN"
+	}
+	if math.IsInf(n, 1) {
+		return "INF"
+	}
+	if math.IsInf(n, -1) {
+		return "-INF"
+	}
+	sign, a := "", n
+	if n < 0 || (n == 0 && math.Signbit(n)) {
+		sign, a = "-", -n
+	}
+	if a == 0 {
+		return sign + "0"
+	}
+	d, decpt := phpFloSplit(a)
+	d, decpt = phpFloRound(d, decpt, nd)
+	exponential := decpt > nd
+	if decpt < 0 {
+		exponential = decpt < -3
+	}
+	if exponential {
+		e2 := decpt - 1
+		frac := "0"
+		if len(d) > 1 {
+			frac = d[1:]
+		}
+		es, ea := "+", e2
+		if e2 < 0 {
+			es, ea = "-", -e2
+		}
+		return sign + d[:1] + "." + frac + "E" + es + strconv.Itoa(ea)
+	}
+	if decpt <= 0 {
+		return sign + "0." + strings.Repeat("0", -decpt) + d
+	}
+	if decpt >= len(d) {
+		return sign + d + strings.Repeat("0", decpt-len(d))
+	}
+	return sign + d[:decpt] + "." + d[decpt:]
 }
 
 // phpArrParts views a PHP array as (keys, vals). A PHP array is the ordered map
@@ -150,6 +311,8 @@ func (rt *jsrt) phpTest(v interface{}) bool {
 		return t
 	case float64:
 		return t != 0
+	case jsGInt: // An int box is outside the exact range, so it is never 0.
+		return true
 	case jsPhpFlo:
 		return t.f != 0
 	case string:
@@ -176,6 +339,8 @@ func (rt *jsrt) phpStr(v interface{}) string {
 		return t
 	case float64:
 		return jsNumString(t)
+	case jsGInt:
+		return giStr(t)
 	case jsPhpFlo:
 		return phpFloStr(t.f)
 	}
@@ -274,14 +439,37 @@ func phpNumStrVal(s string) interface{} {
 	if i != len(s) {
 		return nil
 	}
-	f, err := strconv.ParseFloat(s[st:en], 64)
+	if isF {
+		f, err := strconv.ParseFloat(s[st:en], 64)
+		if err != nil {
+			return nil
+		}
+		return phpMkFlo(f)
+	}
+	return phpIntStrVal(s[st:en])
+}
+
+// phpIntStrVal is the value a signed DIGIT RUN denotes, promoted to a float when
+// it does not fit in 64 bits: is_numeric_string reports IS_DOUBLE for
+// "9223372036854775808", so "9223372036854775808" + 0 is a float and not a
+// saturated int.
+func phpIntStrVal(txt string) interface{} {
+	body, neg := txt, false
+	if strings.HasPrefix(body, "+") {
+		body = body[1:]
+	} else if strings.HasPrefix(body, "-") {
+		neg, body = true, body[1:]
+	}
+	if v, err := strconv.ParseInt(txt, 10, 64); err == nil {
+		return phpMkInt(v)
+	}
+	_ = neg
+	_ = body
+	f, err := strconv.ParseFloat(txt, 64)
 	if err != nil {
 		return nil
 	}
-	if isF {
-		return phpMkFlo(f)
-	}
-	return f
+	return phpMkFlo(f)
 }
 
 // phpLeadingNum: a non-numeric string still contributes its numeric PREFIX
@@ -313,20 +501,25 @@ func phpLeadingNum(s string) interface{} {
 	if d == 0 {
 		return float64(0)
 	}
-	f, err := strconv.ParseFloat(s[:i], 64)
-	if err != nil {
-		return float64(0)
-	}
 	if isF {
+		f, err := strconv.ParseFloat(s[:i], 64)
+		if err != nil {
+			return float64(0)
+		}
 		return phpMkFlo(f)
 	}
-	return f
+	if v := phpIntStrVal(s[:i]); v != nil {
+		return v
+	}
+	return float64(0)
 }
 
 // phpToNum is the arithmetic coercion: everything becomes an int or a float box.
 func (rt *jsrt) phpToNum(v interface{}) interface{} {
 	switch t := v.(type) {
 	case float64:
+		return t
+	case jsGInt:
 		return t
 	case jsPhpFlo:
 		return t
@@ -349,68 +542,214 @@ func (rt *jsrt) phpToNum(v interface{}) interface{} {
 	return float64(0)
 }
 
-// phpArith: an int stays an int, and any float operand makes the result a float.
+// phpToLong is the (int) reading of ANY value.
+func (rt *jsrt) phpToLong(v interface{}) int64 {
+	n := rt.phpToNum(v)
+	if f, ok := n.(jsPhpFlo); ok {
+		return phpFloToLong(f.f)
+	}
+	return phpLongOf(n)
+}
+
+// phpArith: an int stays an int unless the exact 64 bit answer does not FIT, and
+// any float operand makes the result a float.
 func (rt *jsrt) phpArith(op string, l, r interface{}) interface{} {
 	a := rt.phpToNum(l)
 	b := rt.phpToNum(r)
-	f := phpIsFlo(a) || phpIsFlo(b)
-	x, y := phpNumOf(a), phpNumOf(b)
-	box := func(v float64) interface{} {
-		if f {
-			return phpMkFlo(v)
+	// '%' is the one arithmetic operator that is INTEGER only: PHP casts both
+	// operands to int first, so 7.5 % 2 is 1 and not 1.5.
+	if op == "%" {
+		y := rt.phpToLong(b)
+		if y == 0 {
+			rt.phpRaise("DivisionByZeroError", "Modulo by zero")
 		}
-		return v
+		if y == -1 { // MIN % -1 traps on the hardware; PHP answers 0.
+			return float64(0)
+		}
+		return phpMkInt(rt.phpToLong(a) % y)
 	}
+	if phpIsFlo(a) || phpIsFlo(b) {
+		return rt.phpFloArith(op, phpNumOf(a), phpNumOf(b))
+	}
+	return rt.phpIntArith(op, phpLongOf(a), phpLongOf(b))
+}
+
+func (rt *jsrt) phpFloArith(op string, x, y float64) interface{} {
 	switch op {
 	case "+":
-		return box(x + y)
+		return phpMkFlo(x + y)
 	case "-":
-		return box(x - y)
+		return phpMkFlo(x - y)
 	case "*":
-		return box(x * y)
+		return phpMkFlo(x * y)
 	case "/":
 		if y == 0 {
-			rt.fail("division by zero")
+			rt.phpRaise("DivisionByZeroError", "Division by zero")
 		}
-		q := x / y
-		if !f && q == phpTrunc(q) {
-			return q
-		}
-		return phpMkFlo(q)
-	case "%":
-		iy := phpTrunc(y)
-		if iy == 0 {
-			rt.fail("modulo by zero")
-		}
-		return math.Mod(phpTrunc(x), iy)
+		return phpMkFlo(x / y)
 	case "**":
-		p := math.Pow(x, y)
-		if !f && y >= 0 && p == phpTrunc(p) {
-			return p
-		}
-		return phpMkFlo(p)
+		return phpMkFlo(math.Pow(x, y))
 	}
 	rt.fail("unknown arithmetic operator %s", op)
 	return nil
 }
 
+// phpAddOv / phpSubOv / phpMulOv are the three operators that can leave 64 bits.
+// On overflow the operation is evaluated AGAIN in double precision, exactly what
+// ZEND_SIGNED_ADD_OVERFLOW's slow path does, so the answer is
+// float(9.223372036854776E+18) and not a rounded 64 bit value.
+func phpAddOv(x, y int64) (int64, bool) {
+	r := x + y
+	return r, (x >= 0) == (y >= 0) && (r >= 0) != (x >= 0)
+}
+
+func phpSubOv(x, y int64) (int64, bool) {
+	r := x - y
+	return r, (x >= 0) != (y >= 0) && (r >= 0) != (x >= 0)
+}
+
+func phpMulOv(x, y int64) (int64, bool) {
+	if x == 0 || y == 0 {
+		return 0, false
+	}
+	if (x == -1 && y == phpIntMin) || (y == -1 && x == phpIntMin) {
+		return phpIntMin, true
+	}
+	r := x * y
+	return r, r/x != y
+}
+
+func (rt *jsrt) phpIntArith(op string, x, y int64) interface{} {
+	switch op {
+	case "+":
+		if r, ov := phpAddOv(x, y); !ov {
+			return phpMkInt(r)
+		}
+		return phpMkFlo(float64(x) + float64(y))
+	case "-":
+		if r, ov := phpSubOv(x, y); !ov {
+			return phpMkInt(r)
+		}
+		return phpMkFlo(float64(x) - float64(y))
+	case "*":
+		if r, ov := phpMulOv(x, y); !ov {
+			return phpMkInt(r)
+		}
+		return phpMkFlo(float64(x) * float64(y))
+	case "/":
+		// Division stays an int only when it comes out EXACT: 6/3 is int(2) where
+		// 7/2 is float(3.5). intdiv() is the truncating one.
+		if y == 0 {
+			rt.phpRaise("DivisionByZeroError", "Division by zero")
+		}
+		if y == -1 && x == phpIntMin {
+			return phpMkFlo(-float64(phpIntMin))
+		}
+		if x%y == 0 {
+			return phpMkInt(x / y)
+		}
+		return phpMkFlo(float64(x) / float64(y))
+	case "**":
+		if y < 0 {
+			return phpMkFlo(math.Pow(float64(x), float64(y)))
+		}
+		// Squaring, with the same overflow test every multiplication gets: the
+		// first product that leaves 64 bits makes the WHOLE result a float.
+		acc, base, e := int64(1), x, y
+		for e > 0 {
+			if e&1 == 1 {
+				r, ov := phpMulOv(acc, base)
+				if ov {
+					return phpMkFlo(math.Pow(float64(x), float64(y)))
+				}
+				acc = r
+			}
+			e >>= 1
+			if e > 0 {
+				r, ov := phpMulOv(base, base)
+				if ov {
+					return phpMkFlo(math.Pow(float64(x), float64(y)))
+				}
+				base = r
+			}
+		}
+		return phpMkInt(acc)
+	}
+	rt.fail("unknown arithmetic operator %s", op)
+	return nil
+}
+
+// The bitwise operators are exact 64 bit and cast their operands to int. Unlike
+// the arithmetic ones they WRAP - PHP_INT_MAX << 1 is int(-2), not a float
+// (lang/operators/bitwiseShiftLeft_basiclong_64bit.phpt) - and a negative shift
+// count is an ArithmeticError rather than a shift the other way.
 func (rt *jsrt) phpBit(op string, l, r interface{}) interface{} {
-	x := int32(int64(phpTrunc(phpNumOf(rt.phpToNum(l)))))
-	y := int32(int64(phpTrunc(phpNumOf(rt.phpToNum(r)))))
+	x := rt.phpToLong(l)
 	switch op {
 	case "&":
-		return float64(x & y)
+		return phpMkInt(x & rt.phpToLong(r))
 	case "|":
-		return float64(x | y)
+		return phpMkInt(x | rt.phpToLong(r))
 	case "^":
-		return float64(x ^ y)
-	case "<<":
-		return float64(x << uint(uint32(y)&31))
-	case ">>":
-		return float64(x >> uint(uint32(y)&31))
+		return phpMkInt(x ^ rt.phpToLong(r))
+	case "<<", ">>":
+		n := rt.phpToLong(r)
+		if n < 0 {
+			rt.phpRaise("ArithmeticError", "Bit shift by negative number")
+		}
+		if n >= 64 {
+			if op == "<<" || x >= 0 {
+				return float64(0)
+			}
+			return float64(-1)
+		}
+		if op == "<<" {
+			return phpMkInt(x << uint(n))
+		}
+		return phpMkInt(x >> uint(n))
 	}
 	rt.fail("unknown bit operator %s", op)
 	return nil
+}
+
+// phpNeg is unary minus. It keeps the operand's TYPE (so -0.0 stays -0), and the
+// one int that cannot be negated, PHP_INT_MIN, promotes like any other overflow.
+func (rt *jsrt) phpNeg(v interface{}) interface{} {
+	a := rt.phpToNum(v)
+	if f, ok := a.(jsPhpFlo); ok {
+		return phpMkFlo(-f.f)
+	}
+	x := phpLongOf(a)
+	if x == phpIntMin {
+		return phpMkFlo(-float64(phpIntMin))
+	}
+	return phpMkInt(-x)
+}
+
+// ----- the engine's own arithmetic errors ------------------------------------
+//
+// PHP made division by zero and a negative shift count CATCHABLE in 8.0, and the
+// corpus tests exactly that (divide_basiclong_64bit.phpt catches
+// DivisionByZeroError). The class descriptors live in the emitted module, not
+// here, so phpmain hands its scope over once through js_phrtinit and the raise
+// looks the class up there; without one (an imported fragment, a unit test) the
+// error stays the fatal it was.
+var phpMainScope = map[*jsrt]uint64{}
+
+func (rt *jsrt) phpRaise(clsName, msg string) {
+	h, has := phpMainScope[rt]
+	if !has {
+		rt.fail("%s", msg)
+	}
+	cls := rt.scopeGet(rt.scopeOf(h), clsName)
+	if cls == nil || isNullish(cls) {
+		rt.fail("%s", msg)
+	}
+	o := newJSObject()
+	o.set("__class", cls)
+	o.set("message", msg)
+	o.set("code", float64(0))
+	panic(&jsThrown{value: o})
 }
 
 // ----- comparison ------------------------------------------------------------
@@ -443,6 +782,11 @@ func (rt *jsrt) phpIdentical(l, r interface{}) bool {
 	if isNullish(l) || isNullish(r) {
 		return isNullish(l) && isNullish(r)
 	}
+	// Two ints compare by VALUE: above 2^53 one of them is a box, and two boxes
+	// holding the same 64 bit value are different Go values only by accident.
+	if phpIsInt(l) || phpIsInt(r) {
+		return phpIsInt(l) && phpIsInt(r) && phpLongOf(l) == phpLongOf(r)
+	}
 	return rt.strictEq(l, r)
 }
 
@@ -456,10 +800,9 @@ func isNullish(v interface{}) bool {
 
 // phpKeyEq compares two normalized array keys (an int or a string).
 func phpKeyEq(a, b interface{}) bool {
-	af, aIsN := a.(float64)
-	bf, bIsN := b.(float64)
+	aIsN, bIsN := phpIsInt(a), phpIsInt(b)
 	if aIsN || bIsN {
-		return aIsN && bIsN && af == bf
+		return aIsN && bIsN && phpLongOf(a) == phpLongOf(b)
 	}
 	as, aIsS := a.(string)
 	bs, bIsS := b.(string)
@@ -533,7 +876,7 @@ func (rt *jsrt) phpLoose(l, r interface{}) bool {
 	if lIsS && rIsS {
 		nl, nr := phpNumStrVal(ls), phpNumStrVal(rs)
 		if nl != nil && nr != nil {
-			return phpNumOf(nl) == phpNumOf(nr)
+			return phpNumEq(nl, nr)
 		}
 		return ls == rs
 	}
@@ -543,7 +886,32 @@ func (rt *jsrt) phpLoose(l, r interface{}) bool {
 	if rIsS && phpIsNum(l) {
 		return rt.phpStrNumLoose(rs, l)
 	}
-	return phpNumOf(rt.phpToNum(l)) == phpNumOf(rt.phpToNum(r))
+	return phpNumEq(rt.phpToNum(l), rt.phpToNum(r))
+}
+
+// phpNumEq / phpNumCmp compare two numbers the way PHP does: int against int at
+// 64 bits (a double would collapse 2^63 and 2^63 - 1 onto the same value),
+// anything else as doubles, which is the LONG-to-DOUBLE widening
+// compare_function performs.
+func phpNumEq(a, b interface{}) bool {
+	if phpIsInt(a) && phpIsInt(b) {
+		return phpLongOf(a) == phpLongOf(b)
+	}
+	return phpNumOf(a) == phpNumOf(b)
+}
+
+func phpNumCmp(a, b interface{}) float64 {
+	if phpIsInt(a) && phpIsInt(b) {
+		x, y := phpLongOf(a), phpLongOf(b)
+		if x < y {
+			return -1
+		}
+		if x > y {
+			return 1
+		}
+		return 0
+	}
+	return phpCmpNum(phpNumOf(a), phpNumOf(b))
 }
 
 func (rt *jsrt) phpLooseNull(v interface{}) bool {
@@ -561,7 +929,7 @@ func (rt *jsrt) phpLooseNull(v interface{}) bool {
 
 func (rt *jsrt) phpStrNumLoose(s string, n interface{}) bool {
 	if ns := phpNumStrVal(s); ns != nil {
-		return phpNumOf(ns) == phpNumOf(n)
+		return phpNumEq(ns, n)
 	}
 	return s == rt.phpStr(n)
 }
@@ -658,7 +1026,7 @@ func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 	if lIsS && rIsS {
 		nl, nr := phpNumStrVal(ls), phpNumStrVal(rs)
 		if nl != nil && nr != nil {
-			return phpCmpNum(phpNumOf(nl), phpNumOf(nr))
+			return phpNumCmp(nl, nr)
 		}
 		return phpCmpStr(ls, rs)
 	}
@@ -667,16 +1035,16 @@ func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 		if x == nil {
 			return phpCmpStr(ls, rt.phpStr(r))
 		}
-		return phpCmpNum(phpNumOf(x), phpNumOf(r))
+		return phpNumCmp(x, r)
 	}
 	if rIsS && phpIsNum(l) {
 		y := phpNumStrVal(rs)
 		if y == nil {
 			return phpCmpStr(rt.phpStr(l), rs)
 		}
-		return phpCmpNum(phpNumOf(l), phpNumOf(y))
+		return phpNumCmp(l, y)
 	}
-	return phpCmpNum(phpNumOf(rt.phpToNum(l)), phpNumOf(rt.phpToNum(r)))
+	return phpNumCmp(rt.phpToNum(l), rt.phpToNum(r))
 }
 
 // ----- arrays: ONE ordered map, with PHP's key normalization -----------------
@@ -687,9 +1055,11 @@ func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 func phpNormKey(v interface{}) interface{} {
 	switch t := v.(type) {
 	case float64:
-		return phpTrunc(t)
+		return t
+	case jsGInt:
+		return v
 	case jsPhpFlo:
-		return phpTrunc(t.f)
+		return phpMkInt(phpFloToLong(t.f))
 	case bool:
 		if t {
 			return float64(1)
@@ -698,10 +1068,11 @@ func phpNormKey(v interface{}) interface{} {
 	case jsUndefT, jsNullT:
 		return ""
 	case string:
+		// A canonical decimal folds to an int key only while it FITS: PHP keeps
+		// "9223372036854775808" a STRING key.
 		if phpIsCanonInt(t) {
-			f, err := strconv.ParseFloat(t, 64)
-			if err == nil {
-				return f
+			if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+				return phpMkInt(n)
 			}
 		}
 		return t
@@ -740,7 +1111,7 @@ func phpIsCanonInt(s string) bool {
 			return false
 		}
 	}
-	return len(s)-i <= 18
+	return true
 }
 
 // phpKeyIndex is a linear lookup by normalized key. It stays linear on purpose:
@@ -791,7 +1162,7 @@ func (rt *jsrt) phpArrSet(av interface{}, k, v interface{}) {
 	o, ok := phpAsArr(av)
 	if !ok {
 		if arr, isArr := av.(*jsArray); isArr { // a raw list still indexes by position
-			i := int(phpTrunc(phpNumOf(rt.phpToNum(k))))
+			i := int(rt.phpToLong(k))
 			for len(arr.elems) <= i {
 				arr.elems = append(arr.elems, jsNull)
 			}
@@ -844,7 +1215,7 @@ func (rt *jsrt) phpArrGet(av interface{}, k interface{}) interface{} {
 		return jsNull
 	}
 	if s, ok := av.(string); ok {
-		i := int(phpTrunc(phpNumOf(rt.phpToNum(k))))
+		i := int(rt.phpToLong(k))
 		if i < 0 {
 			i += len(s)
 		}
@@ -874,7 +1245,7 @@ func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
 		if !phpNumericKey(k) {
 			return false
 		}
-		i := int(phpTrunc(phpNumOf(rt.phpToNum(k))))
+		i := int(rt.phpToLong(k))
 		return i >= 0 && i < len(s)
 	}
 	if o, ok := av.(*jsObject); ok {
@@ -973,7 +1344,9 @@ func (rt *jsrt) phpLen(v interface{}) float64 {
 func (rt *jsrt) phpCast(kind string, v interface{}) interface{} {
 	switch kind {
 	case "int", "integer":
-		return phpTrunc(phpNumOf(rt.phpToNum(v)))
+		// (int) of an out-of-range float WRAPS modulo 2^64 rather than saturating:
+		// (int)(PHP_INT_MAX * 2 + 4) is int(0). Corpus: tests/int_overflow_64bit.phpt.
+		return phpMkInt(rt.phpToLong(v))
 	case "float", "double", "real":
 		return phpMkFlo(phpNumOf(rt.phpToNum(v)))
 	case "string", "binary":
@@ -1213,4 +1586,268 @@ func (rt *jsrt) phpClone(v interface{}) interface{} {
 		}
 	}
 	return out
+}
+
+// ----- the externs this file owns --------------------------------------------
+//
+// Registration is additive: the init() below appends a registrar to
+// rxExtraExterns, which jsrtregex.go runs LAST - so the handful of entries that
+// share a name with one in jsrt.go REPLACE it, and the PHP-only externs are
+// created here rather than in the shared table.
+
+// phpDumpIds hands out var_dump's object handles (#1, #2, ...) on first sight,
+// which is enough for a single run's transcript to be stable.
+var phpDumpIds = map[*jsrt]map[*jsObject]int{}
+
+func (rt *jsrt) phpDumpID(o *jsObject) int {
+	m, has := phpDumpIds[rt]
+	if !has {
+		m = map[*jsObject]int{}
+		phpDumpIds[rt] = m
+	}
+	if id, seen := m[o]; seen {
+		return id
+	}
+	id := len(m) + 1
+	m[o] = id
+	return id
+}
+
+// phpTypeName is gettype()'s historical spelling; phpDebugType is
+// get_debug_type()'s modern one.
+func (rt *jsrt) phpTypeName(v interface{}) string {
+	switch v.(type) {
+	case jsUndefT, jsNullT:
+		return "NULL"
+	case bool:
+		return "boolean"
+	case float64, jsGInt:
+		return "integer"
+	case jsPhpFlo:
+		return "double"
+	case string:
+		return "string"
+	}
+	if phpIsArr(v) {
+		return "array"
+	}
+	if phpIsObj(v) {
+		return "object"
+	}
+	return "unknown type"
+}
+
+func (rt *jsrt) phpDebugType(v interface{}) string {
+	switch v.(type) {
+	case jsUndefT, jsNullT:
+		return "null"
+	case bool:
+		return "bool"
+	case float64, jsGInt:
+		return "int"
+	case jsPhpFlo:
+		return "float"
+	case string:
+		return "string"
+	}
+	if phpIsArr(v) {
+		return "array"
+	}
+	if phpIsObj(v) {
+		return rt.phpClassName(v)
+	}
+	return "unknown"
+}
+
+func (rt *jsrt) phpClassName(v interface{}) string {
+	if o, ok := v.(*jsObject); ok {
+		if cls, has := o.props["__class"]; has {
+			if c, isO := cls.(*jsObject); isO {
+				return rt.phpStr(c.props["__name"])
+			}
+		}
+	}
+	return "stdClass"
+}
+
+// phpDump is var_dump's rendering. A float goes through phpFloDump
+// (serialize_precision=-1), NOT through the precision=14 renderer echo uses -
+// that is the trap the two renderers exist to keep apart.
+func (rt *jsrt) phpDump(v interface{}, ind int) string {
+	pad := strings.Repeat(" ", ind)
+	switch t := v.(type) {
+	case jsUndefT, jsNullT:
+		return pad + "NULL\n"
+	case bool:
+		if t {
+			return pad + "bool(true)\n"
+		}
+		return pad + "bool(false)\n"
+	case float64, jsGInt:
+		return pad + "int(" + rt.phpStr(v) + ")\n"
+	case jsPhpFlo:
+		return pad + "float(" + phpFloDump(t.f) + ")\n"
+	case string:
+		return pad + "string(" + strconv.Itoa(len(t)) + ") \"" + t + "\"\n"
+	}
+	if keys, vals, ok := phpArrParts(v); ok {
+		out := pad + "array(" + strconv.Itoa(len(keys.elems)) + ") {\n"
+		for i := range keys.elems {
+			out += rt.phpDumpKey(keys.elems[i], ind+2)
+			out += rt.phpDump(phpDeref(vals.elems[i]), ind+2)
+		}
+		return out + pad + "}\n"
+	}
+	if phpIsObj(v) {
+		o := v.(*jsObject)
+		names := []string{}
+		for _, k := range o.keys {
+			if !phpHiddenProp(k) {
+				names = append(names, k)
+			}
+		}
+		out := pad + "object(" + rt.phpClassName(v) + ")#" + strconv.Itoa(rt.phpDumpID(o)) +
+			" (" + strconv.Itoa(len(names)) + ") {\n"
+		for _, k := range names {
+			out += pad + "  [\"" + k + "\"]=>\n"
+			out += rt.phpDump(phpDeref(o.props[k]), ind+2)
+		}
+		return out + pad + "}\n"
+	}
+	return pad + "NULL\n"
+}
+
+func (rt *jsrt) phpDumpKey(k interface{}, ind int) string {
+	if s, ok := k.(string); ok {
+		return strings.Repeat(" ", ind) + "[\"" + s + "\"]=>\n"
+	}
+	return strings.Repeat(" ", ind) + "[" + rt.phpStr(k) + "]=>\n"
+}
+
+// phpLit is an integer literal that a double cannot hold: the emitter passes the
+// DIGITS, because a literal above 2^53 would already have been rounded on the
+// way through the grammar's own JS numbers. A literal that does not FIT in 64
+// bits is a float, not a wrapped int - 0xFFFFFFFFFFFFFFFF is
+// float(1.8446744073709552E+19) and a long enough digit run is float(INF).
+// Corpus: lang/integer_literals/*_64bit.phpt.
+func phpLit(text string, radix int) interface{} {
+	if v, err := strconv.ParseInt(text, radix, 64); err == nil {
+		return phpMkInt(v)
+	}
+	if radix == 10 {
+		f, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			return float64(0)
+		}
+		return phpMkFlo(f)
+	}
+	// A power-of-two radix accumulates, exactly as php-interpreter.abnf's
+	// radixFloat does, which is what zend_hex_strtod amounts to.
+	v := 0.0
+	for i := 0; i < len(text); i++ {
+		d := 0
+		c := text[i]
+		switch {
+		case c >= '0' && c <= '9':
+			d = int(c - '0')
+		case c >= 'a' && c <= 'f':
+			d = int(c-'a') + 10
+		case c >= 'A' && c <= 'F':
+			d = int(c-'A') + 10
+		default:
+			continue
+		}
+		v = v*float64(radix) + float64(d)
+	}
+	return phpMkFlo(v)
+}
+
+func init() {
+	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
+		u := rt.unwrap
+		w := rt.wrap
+		boolH := func(b bool) uint64 {
+			if b {
+				return jsHTrue
+			}
+			return jsHFalse
+		}
+
+		// phpmain hands its scope over once, so phpRaise can find the emitted
+		// DivisionByZeroError / ArithmeticError descriptors.
+		m["js_phrtinit"] = func(a []uint64) uint64 {
+			phpMainScope[rt] = a[0]
+			return 0
+		}
+		// The four that REPLACE a jsrt.go entry: each of them was 32 bit or
+		// double based and is now exact 64 bit.
+		m["js_phneg"] = func(a []uint64) uint64 { return w(rt.phpNeg(u(a[0]))) }
+		m["js_phbnot"] = func(a []uint64) uint64 { return w(phpMkInt(^rt.phpToLong(u(a[0])))) }
+		m["js_phintdiv"] = func(a []uint64) uint64 {
+			y := rt.phpToLong(u(a[1]))
+			if y == 0 {
+				rt.phpRaise("DivisionByZeroError", "Division by zero")
+			}
+			x := rt.phpToLong(u(a[0]))
+			if y == -1 && x == phpIntMin {
+				rt.phpRaise("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer")
+			}
+			return w(phpMkInt(x / y))
+		}
+		m["js_phabs"] = func(a []uint64) uint64 {
+			n := rt.phpToNum(u(a[0]))
+			if f, isF := n.(jsPhpFlo); isF {
+				if f.f < 0 {
+					return w(phpMkFlo(-f.f))
+				}
+				return w(n)
+			}
+			if phpLongOf(n) < 0 {
+				return w(rt.phpNeg(n))
+			}
+			return w(n)
+		}
+		// A literal the grammar's own JS numbers cannot carry: (digits, radix).
+		m["js_philit"] = func(a []uint64) uint64 {
+			return w(phpLit(rt.toString(u(a[0])), jsToInt(rt.toNumber(u(a[1])))))
+		}
+		// The type predicates and var_dump: the whole point of the boxes is that
+		// the int / float distinction is OBSERVABLE.
+		m["js_phis"] = func(a []uint64) uint64 {
+			v := u(a[1])
+			switch rt.toString(u(a[0])) {
+			case "int":
+				return boolH(phpIsInt(v))
+			case "float":
+				return boolH(phpIsFlo(v))
+			case "string":
+				_, ok := v.(string)
+				return boolH(ok)
+			case "bool":
+				_, ok := v.(bool)
+				return boolH(ok)
+			case "array":
+				return boolH(phpIsArr(v))
+			case "object":
+				return boolH(phpIsObj(v))
+			case "null":
+				return boolH(isNullish(v))
+			case "numeric":
+				if s, ok := v.(string); ok {
+					return boolH(phpNumStrVal(s) != nil)
+				}
+				return boolH(phpIsNum(v))
+			}
+			return jsHFalse
+		}
+		m["js_phtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpTypeName(u(a[0]))) }
+		m["js_phdtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDebugType(u(a[0]))) }
+		m["js_phdump"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDump(u(a[0]), 0)) }
+		m["js_phgetclass"] = func(a []uint64) uint64 {
+			if phpIsObj(u(a[0])) {
+				return rt.wrapStr(rt.phpClassName(u(a[0])))
+			}
+			return jsHFalse
+		}
+	})
 }
