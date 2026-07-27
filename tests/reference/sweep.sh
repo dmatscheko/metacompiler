@@ -346,6 +346,25 @@ expectations_for() {
                      || ($0 ~ /unicodeExtendedEscapesInRegularExpressions(17|19)\.ts$/)
                   print (bad ? "reject|" : "parse|") $0 }' "$all"
             return ;;
+        python)
+            # CPython's suite has no negative-test convention to read, so the
+            # default here was a blanket "must parse". Two of the thirty files
+            # are not valid Python at all - they carry deliberate syntax-error
+            # cases inline:
+            #     test_listcomps.py   [*i for i in [1, 2, 3]]
+            #                         iterable unpacking cannot be used in a
+            #                         comprehension
+            #     test_patma.py       case +0:
+            # Confirmed by compiling each file with the python3 on this machine
+            # (3.14): it rejects exactly these two and accepts the other 28. So
+            # refusing them is correct and demanding that we parse them made
+            # 30/30 unreachable by construction.
+            #
+            # Re-check with python3 before adding to this list - a file that
+            # merely fails for US is a grammar gap, not a corpus bug.
+            awk '{ bad = ($0 ~ /\/(test_listcomps|test_patma)\.py$/)
+                   print (bad ? "reject|" : "parse|") $0 }' "$all"
+            return ;;
         go)
             # The first line of every golang/go test/ file is its directive;
             # "// errorcheck" means the compiler must reject the file.

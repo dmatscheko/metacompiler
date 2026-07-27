@@ -753,6 +753,194 @@ def s23():
     check("agr12", max(1, 2) == 2 and min(1, 2) == 1)
     check("agr13", max([3, 1, 2]) == 3 and min([3, 1, 2]) == 1)
 
+# ===== SECTION 24: the syntax the reference corpus asked for =====
+# Every check below is a construct CPython's OWN test suite writes and one or
+# both grammars could not parse. They took the cpython-tests corpus from
+# 53.3% / 23.3% (interpreter / compiler) to 83.3% / 86.7%, so this section is
+# the ratchet that keeps them. Grouped by the gap each one closes.
+def s24():
+    # An import is a SMALL statement, not only a module-level one: inside a
+    # function and inside a try are how CPython's suite writes most of them.
+    import re
+    try:
+        import re
+    except ImportError:
+        pass
+    check("corp01", re.search(r"\d", "a1").group(0) == "1")
+
+    # A bare tuple after return and after yield, and a parameter list written
+    # across lines with an empty-tuple default.
+    def pair(a,
+             b=(),
+             c=None):
+        return a, b
+    check("corp02", pair(1) == (1, ()))
+
+    def gen():
+        yield 1, 2
+    check("corp03", list(gen()) == [(1, 2)])
+
+    # An expression statement may itself be a bare tuple.
+    1, 2, 3
+
+    # A subscript takes an expression LIST, on the read and on the write side.
+    class Grid:
+        def __init__(self):
+            self.cells = {}
+        def __setitem__(self, k, v):
+            self.cells[str(k)] = v
+        def __getitem__(self, k):
+            return self.cells[str(k)]
+    g = Grid()
+    g[1, 2] = "pair"
+    check("corp04", g[1, 2] == "pair")
+
+    # The iterable of a for statement is an expression list too.
+    seen = []
+    for v in 1, 2, 3:
+        seen.append(v)
+    check("corp05", seen == [1, 2, 3])
+
+    # Comprehensions: several `for` clauses, interleaved `if`s, a tuple target,
+    # a starred rest in the target and a target that is a SUBSCRIPT.
+    check("corp06", [a for b in ["xy", "z"] for a in b] == ["x", "y", "z"])
+    check("corp07", {k: v for k in range(3) for v in range(3) if k == v} == {0: 0, 1: 1, 2: 2})
+    check("corp08", [line for _, _, line in [(1, 2, 3), (4, 5, 6)]] == [3, 6])
+    check("corp09", [kind for (kind, s, *rest) in [(1, 2, 3, 4), (5, 6, 7)]] == [1, 5])
+    slot = [None]
+    check("corp10", [0 for slot[0] in "ab"] == [0, 0] and slot == ["b"])
+    # The comprehension variable stays LOCAL to the comprehension.
+    shadow = 5
+    check("corp11", [shadow for shadow in range(2)] == [0, 1] and shadow == 5)
+
+    # An assignment target is a SEED plus a suffix chain: the seed may be a
+    # literal or a parenthesized expression, and a CALL may sit on the way.
+    box = {}
+    def hold():
+        return box
+    hold()["k"] = 1
+    check("corp12", box == {"k": 1})
+    nest = {"k": [10, 20]}
+    def outer():
+        return nest
+    outer()["k"][1] = 99
+    check("corp13", nest["k"][1] == 99)
+    grid = [[0]]
+    [grid][0][0] = 7
+    check("corp14", grid == [7])
+    paren = {}
+    (paren)["k"] = 2
+    check("corp15", paren["k"] == 2)
+
+    # Target lists: a RECORDED trailing comma makes a one-element tuple that
+    # unpacks, and a BRACKETED target always unpacks however few elements it has.
+    one, = [7]
+    check("corp16", one == 7)
+    (two,) = [8]
+    check("corp17", two == 8)
+    [three] = [9]
+    check("corp18", three == 9)
+    plain = [9]
+    check("corp19", plain == [9])
+    tup = []
+    for x, in [(1,), (2,), (3,)]:
+        tup.append(x)
+    check("corp20", tup == [1, 2, 3])
+
+    # `in` and the other reserved words are not target names, which is what lets
+    # the trailing comma above stop where it does. A name that merely STARTS
+    # with a keyword is fine.
+    information = 4
+    notably = 5
+    check("corp21", information + notably == 9)
+
+    # del: a trailing comma, a parenthesized target and the empty one.
+    da, db, dc = "xyz"
+    del da
+    del db,
+    del (dc)
+    del ()
+
+    # An annotation is an arbitrary EXPRESSION, not a little type language.
+    def ann(p: not (int is int), q: 1 if True else 2 = 3) -> [int][0]:
+        return q
+    check("corp22", ann(0) == 3)
+    marked: dict[str, int] = {}
+    check("corp23", marked == {})
+
+    # A triple-quoted string may open with a backslash-newline continuation.
+    cont = """\
+one {"two"} three
+"""
+    check("corp24", cont == 'one {"two"} three\n')
+
+    # PEP 701: a replacement field may span LINES and carry `#` comments. The short
+    # form of this did not even fail - it ended the field early and rendered the rest
+    # of the expression as literal text.
+    spread = f'''
+head
+{ # a comment, with an apostrophe: it's fine
+3 # a number
+* 2}'''
+    check("corp31", spread == "\nhead\n6")
+    # An f-string may open with a backslash-newline line continuation.
+    joined = f"""\
+{1 + 1}"""
+    check("corp32", joined == "2")
+
+    # A nested field inside a format SPEC may carry its own conversion and its own
+    # (non-nesting) spec. They only decide how the WIDTH is rendered, so all three
+    # spellings must agree - which is what this checks, rather than the exact digits.
+    fv = 12.34567
+    fw = 10
+    fp = 4
+    check("corp33", f"{fv:{fw!r}.{fp}}" == f"{fv:{fw}.{fp}}")
+    check("corp34", f"{fv:{fw:0}.{fp:1}}" == f"{fv:{fw}.{fp}}")
+    # The nested spec nests AGAIN - PEP 701 puts no limit on the depth.
+    check("corp35", f"{fv:{fw:{0}}.{fp:1}}" == f"{fv:{fw}.{fp}}")
+    # A replacement field holds an expression LIST, so a bare tuple works in one.
+    check("corp36", f"{3,}" == str((3,)))
+
+    # PEP 758 (3.14): an except clause may list its types without parentheses.
+    caught = ""
+    try:
+        raise TypeError("t")
+    except KeyError, TypeError, ValueError:
+        caught = "multi"
+    check("corp25", caught == "multi")
+
+    # Parenthesized with-items, written across lines, and an unpacking `as`.
+    class CM:
+        def __init__(self, v):
+            self.v = v
+        def __enter__(self):
+            return self.v
+        def __exit__(self, a, b, c):
+            return False
+    with (
+        CM(1) as w1,
+        CM((2, 3)) as (w2, w3)
+    ):
+        check("corp26", w1 == 1 and w2 == 2 and w3 == 3)
+
+    # lambda takes the '/' positional-only marker and a trailing comma.
+    lam = lambda a, /, b=2: a + b
+    check("corp27", lam(1) == 3)
+    lam2 = lambda z,: z
+    check("corp28", lam2(4) == 4)
+
+    # Unary plus, and a class header written across lines with a keyword argument.
+    check("corp29", +42 == 42)
+    class Base:
+        pass
+    class Mixin:
+        pass
+    class Derived(Base,
+                  Mixin,
+                  metaclass=type):
+        pass
+    check("corp30", Derived().__class__ is Derived)
+
 # ===== END SECTIONS =====
 
 def main():
@@ -779,5 +967,6 @@ def main():
     s21() # SECTION-CALL 21
     s22() # SECTION-CALL 22
     s23() # SECTION-CALL 23
+    s24() # SECTION-CALL 24
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

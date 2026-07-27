@@ -890,8 +890,16 @@ FDq         = '"' :whitespace() { FExpr | FChunkD } '"' :whitespace(Whitespace) 
 FSq         = "'" :whitespace() { FExpr | FChunkS } "'" :whitespace(Whitespace) ;
 // up.in is the whole `{...}` field, which is what the `=` debug form needs: it echoes
 // the SOURCE TEXT of the expression, whitespace included (f"{x = }" -> "x = 5").
+// The replacement field switches to WhitespaceNL, not Whitespace: since PEP 701 the
+// expression inside {} may span LINES and carry `#` comments, which is exactly what
+//     f'''{ # the following operation
+//     3
+//     * 2}'''
+// is. With the newline-less Whitespace the comment ran to the end of its line and the
+// parse stopped there - and in the shorter cases it did not fail at all, it silently
+// ended the field early and printed the rest of the expression as literal text.
 FExpr       <~~ push(makeFField(takeAll(), up.in)) ~~>
-            = "{" :whitespace(Whitespace) Expression [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
+            = "{" :whitespace(WhitespaceNL) ExprList [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
 // The `=` debug form. Skipped whitespace never reaches up.in, so the spaces around
 // the `=` are matched as ORDINARY TOKENS (whitespace skipping off for this
 // production only) - that is what makes f"{x = }" echo "x = 5" and not "x=5".
@@ -901,7 +909,26 @@ FDbgSp      = [ @+" \t" ] ;
 FConv       = "!" ( "r" | "s" | "a" ) <~~ push({fconv: up.in}) ~~> ;
 FSpec       <~~ push({fspec: takeAll()}) ~~>
             = ":" :whitespace() { FSpecField | FSpecChunk } ;
-FSpecField  = "{" :whitespace(Whitespace) Expression "}" :whitespace() ;
+// A NESTED field inside a format spec may carry its own conversion and its own
+// (non-nesting) spec: f'{v:{width!r}.{prec}}' and f'{v:{width:0}.{prec:1}}' are both
+// real, and test_fstring checks them. Both only affect how the WIDTH is rendered, which
+// this model reads as a plain number, so they are parsed and DROPPED - neither production
+// carries a tag, so the field still contributes exactly the one thunk FSpec expects.
+FSpecField  = "{" :whitespace(Whitespace) Expression [ FSpecConv ] [ FSpecSub ] "}" :whitespace() ;
+FSpecConv   = "!" ( "r" | "s" | "a" ) ;
+// The nested spec NESTS again: f'{value:{width:{0}}.{precision:1}}' is three levels deep,
+// and PEP 701 puts no limit on it. FSpecSubField is FSpecField with a dropping tag - the
+// whole sub-spec is discarded, so it must stay item-neutral, and popping the one thunk its
+// Expression pushes is what keeps FSpec's takeAll() seeing exactly the fields it renders.
+// FSpecSubChunk, not FSpecChunk: FSpecChunk carries a `push({chunk})` tag, so reusing it
+// here made the DROPPED sub-spec push its text into the enclosing FSpec's takeAll() - the
+// "tagging a sub-rule changes how many items its PARENT pops" trap. It did not fail: the
+// leaked `0` of `{width:0}` was appended to the width and the field rendered 100 columns
+// wide instead of 10.
+FSpecSub    = ":" :whitespace() { FSpecSubField | FSpecSubChunk } :whitespace(Whitespace) ;
+FSpecSubChunk = FSpecChar { FSpecChar } ;
+FSpecSubField <~~ pop() ~~>
+            = "{" :whitespace(Whitespace) Expression [ FSpecConv ] [ FSpecSub ] "}" :whitespace() ;
 FSpecChunk  <~~ push({chunk: up.in}) ~~>
             = FSpecChar { FSpecChar } ;
 FSpecChar   = "\x20"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
@@ -1720,8 +1747,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // One step along a target path: an index ([i], js_pyget) or an attribute
     // (.name, js_get - matching the pyattr read of the interpreter).
+    // One step along a target path. Everything BUT the last step of a target is an
+    // ordinary READ, so the call and method-call forms emit exactly what foldCallMember
+    // emits - that is what makes `hold()["k"] = 1` write into the slot it reads.
     function emitPathStep(b, o, step) {
         if (step.tattr == true) { return {b: b, v: callExt(b, "js_pygetattr", [o, emitStr(b, step.name)])} }
+        if (step.kind == "call") {
+            var ea = emitCallArgs(b, step.args)
+            return {b: ea.b, v: callExt(ea.b, "js_pycall", [o, ea.pos, ea.kw])}
+        }
+        if (step.kind == "mcall") {
+            var ea2 = emitCallArgs(b, step.args)
+            return {b: ea2.b, v: callExt(ea2.b, "js_pyrxmcall", [o, emitStr(ea2.b, step.name), ea2.pos, ea2.kw])}
+        }
+        if (step.kind == "attr") { return {b: b, v: callExt(b, "js_pygetattr", [o, emitStr(b, step.name)])} }
+        if (step.kind == "slice") {
+            var ss = emitSliceBounds(b, step)
+            return {b: ss.b, v: callExt(ss.b, "js_pyslice3", [o, ss.lo, ss.hi, ss.step])}
+        }
         if (step.tslice == true) {
             var sb = emitSliceBounds(b, step)
             return {b: sb.b, v: callExt(sb.b, "js_pyslice3", [o, sb.lo, sb.hi, sb.step])}

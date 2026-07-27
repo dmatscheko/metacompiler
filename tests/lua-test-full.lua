@@ -422,6 +422,107 @@ local function s19()
   check("agr10", 0xFF | 0x100, 511)
   check("agr11", ~0, -1)
 end
+-- ===== SECTION 20: the syntax the reference corpus asked for =====
+-- Every check below is a construct Lua's OWN test suite writes and neither
+-- grammar could parse. They took the lua-tests corpus from 54.5% to 100.0% in
+-- both halves, so this section is the ratchet that keeps them.
+local function s20()
+  -- A target is Lua's `var`, so a CALL may sit in front of the final field or
+  -- index: getmetatable(t).__index = f is the shape the suite uses 5 times.
+  local function id(t) return t end
+  local a = {}
+  id(a).x = 7
+  check("corp01", a.x, 7)
+  id(a)["y"] = 8
+  check("corp02", a.y, 8)
+
+  -- The same inside a multiple assignment, mixed with plain targets.
+  local b, c = {}, {}
+  local g
+  a[1], id(b)[2], g = 10, 20, 30
+  check("corp03", a[1], 10)
+  check("corp04", b[2], 20)
+  check("corp05", g, 30)
+
+  -- And with a METHOD call on the way (o:m().x = v).
+  local o = {t = {}}
+  o.m = function(self) return self.t end
+  o:m().z = 9
+  check("corp06", o.t.z, 9)
+
+  -- A chain of two calls, and a call seeded from a field.
+  local outer = {inner = function() return a end}
+  outer.inner().w = 11
+  check("corp07", a.w, 11)
+
+  -- A bare `return` is followed by a block terminator, not by an expression.
+  -- `end`, `else`, `elseif` and `until` are ordinary identifiers to the Id rule,
+  -- so `return end` used to parse as "return the variable named end" and the
+  -- block then ate the NEXT `end`: the parse slid one keyword out of step and
+  -- died at EOF, four files later.
+  local function bareIf(n)
+    if n == 0 then return end
+    return n
+  end
+  check("corp08", bareIf(0), nil)
+  check("corp09", bareIf(5), 5)
+
+  local function bareElse(n)
+    if n == 0 then
+      return
+    else
+      return n
+    end
+  end
+  check("corp10", bareElse(0), nil)
+  check("corp11", bareElse(3), 3)
+
+  local function bareElseif(n)
+    if n == 0 then
+      return
+    elseif n == 1 then
+      return
+    end
+    return n
+  end
+  check("corp12", bareElseif(1), nil)
+  check("corp13", bareElseif(4), 4)
+
+  -- A bare return closing a while, a repeat/until, a numeric for and a do block.
+  local function bareWhile()
+    while true do return end
+  end
+  check("corp14", bareWhile(), nil)
+
+  local function bareRepeat()
+    repeat return until true
+  end
+  check("corp15", bareRepeat(), nil)
+
+  local function bareFor()
+    for i = 1, 3 do return end
+  end
+  check("corp16", bareFor(), nil)
+
+  local function bareDo()
+    do return end
+  end
+  check("corp17", bareDo(), nil)
+
+  -- A bare return as the last statement of an anonymous function that is itself
+  -- a call argument - `f(function () ... return end)` - which is the exact shape
+  -- coroutine.lua dies on: the closing `)` had nothing left to close.
+  local function apply(f) return f() end
+  check("corp18", apply(function () return end), nil)
+  check("corp19", apply(function () if false then return end return 6 end), 6)
+
+  -- A bare return still takes its values when there ARE any on the same line.
+  local function two() return 1, 2 end
+  local x, y = two()
+  check("corp20", x, 1)
+  check("corp21", y, 2)
+end
+
 -- ===== END SECTIONS =====
 
 s01() -- SECTION-CALL 01
@@ -443,5 +544,6 @@ s16() -- SECTION-CALL 16
 s17() -- SECTION-CALL 17
 s18() -- SECTION-CALL 18
 s19() -- SECTION-CALL 19
+s20() -- SECTION-CALL 20
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

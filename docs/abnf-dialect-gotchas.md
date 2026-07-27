@@ -832,3 +832,92 @@ and `${v#pat}` machinery walks it in byte positions.
 Note also that the C locale changes the answer: `/opt/homebrew/bin/bash` counts bytes
 under `LANG=C` and characters under a UTF-8 locale. Settle such a question with the
 locale set explicitly.
+
+## The block terminator is an ordinary identifier, so an OPTIONAL tail eats it
+
+Lua's `Return` was spelled
+
+    Return = KwReturn [ ExprList ] ;
+
+and `end`, `else`, `elseif` and `until` are perfectly good `Id`s. So
+
+    if n == 0 then return end
+
+parsed as "return the variable named `end`", the `if` then consumed the NEXT `end`,
+and the whole file slid one keyword out of step. **Nothing failed at the mistake.**
+The parse ran on to the end of the file and reported `450:1 (EOF)` — a position with
+no relation to the cause, in a file whose first four hundred lines are correct. Four
+of the thirty-three files in Lua's own test suite died this way, and the reported
+positions (three EOFs and one stray `)`) looked like four unrelated bugs.
+
+The fix is the zero-width guard the block rule already had:
+
+    Return = KwReturn [ NotEnders ExprList ] ;
+
+The shape generalizes to any language where a block is closed by a WORD rather than a
+punctuation mark, and where some construct takes an optional trailing expression:
+`return`, `break value`, `yield`, a bare `raise`. Python has the same exposure through
+`in`: `for x, in [(1,)]` had its `{ "," TargetItem }` repetition match the comma and
+then read `in` as a second target name. Note that a `!"in"` lookahead fixes neither
+case — it skips whitespace (see the `!"literal"` entry above) and it matches a mere
+PREFIX, so it would also reject the perfectly good name `information`. Both guards
+here read the whole word and compare it, and both deliberately omit the SOFT keywords
+(`match`, `case`, `type`, `_`), which are real names.
+
+## Two brackets that look like a target list and are not
+
+`(1).__class__ = MyInt` and `[list][0]: type` open with the same bracket a tuple
+target does, and `TupleTarget` has to be tried BEFORE the general target (otherwise
+`(a, b) = t` parses as one grouped target and never unpacks). So `TupleTarget` matched
+`(1)`, committed, and the `.__class__` was left with nothing to attach to — PEG never
+re-enters a rule that succeeded. A guard that declines the tuple reading when a suffix
+is glued to the closing bracket lets the general target read the whole thing:
+
+    TupleTarget = "(" … ")" NoTgtSuffix | "[" … "]" NoTgtSuffix ;
+
+The scan must stop at a NEWLINE: the next statement may perfectly well open with `(`
+or `[`, and treating that as a suffix of the previous one is the same class of bug in
+the other direction.
+
+The two brackets are also not interchangeable once you get there. `[g] = [4]` unpacks
+and binds `g` to `4`; the parenthesized `(g) = [4]` binds the whole list. A single
+`makeTargetList` for both gave the wrong answer for one of them with no parse error.
+And the trailing comma has to be RECORDED, not merely tolerated: `x, = t` and
+`for x, in [(1,)]` are ONE-element tuple targets that unpack, and a target list that
+dropped the comma degraded them to plain targets — again, a wrong answer, no error.
+
+## The reference corpus is not always valid in the version you have
+
+Two of the thirty python files carry code the interpreter on this machine refuses:
+
+    $ python3 -c "compile(open('test_listcomps.py').read(), 'x', 'exec')"
+    SyntaxError: iterable unpacking cannot be used in comprehension   # [*i for i in …]
+    $ python3 -c "compile(open('test_patma.py').read(), 'x', 'exec')"
+    SyntaxError: invalid syntax                                       # case +0:
+
+Both are deliberate negative tests sitting in a file the sweep marks `parse`, and
+python's corpus carries a blanket "must parse" expectation with no negative-test
+convention encoded — so the ceiling for that corpus is 28/30, not 30/30. Settle this
+with the interpreter before contorting a grammar: it took one `compile()` call, and it
+is the difference between a real gap and an impossible one.
+
+The traffic runs the other way too. `except EOFError, TypeError, ZeroDivisionError:`
+reads like Python 2 and is rejected on sight by anyone who remembers it — but PEP 758
+made it legal in 3.14, which is what the corpus targets, and `python3` on this machine
+accepts it. Check the version the corpus tracks, not the version you learned.
+
+## A dropped sub-production must be item-NEUTRAL, tag included
+
+An f-string's nested format spec — the `:0` of `f'{value:{width:0}}'` — is parsed and
+thrown away, so the obvious spelling reuses the chunk production that already exists:
+
+    FSpecSub = ":" :whitespace() { FSpecSubField | FSpecChunk } … ;
+
+`FSpecChunk` carries `push({chunk: up.in})`. The discarded sub-spec therefore pushed
+its text onto the value stack, where the ENCLOSING field's `takeAll()` collected it and
+appended it to the width. `f'{value:{width:0}.{prec:1}}'` rendered one hundred columns
+wide instead of ten, with no error anywhere and both engines agreeing. A production
+whose whole purpose is to be dropped needs its own untagged chunk rule — this is the
+"tagging a sub-rule changes how many items its PARENT pops" trap met from the other
+side, where the sub-rule was tagged all along and the new parent is the one that
+cannot afford it.
