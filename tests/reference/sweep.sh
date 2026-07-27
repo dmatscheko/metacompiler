@@ -322,29 +322,115 @@ expectations_for() {
             # was wrong - refusing them is the correct behaviour, so they carry
             # the hard 'reject' expectation and we are scored on refusing them.
             #
-            # unicodeExtendedEscapes/ is not segregated by directory and needs two
-            # further rules, each on its own evidence:
-            #
-            #   - Three files carry the suite's own marker comment, "Shouldn't
-            #     work, negatives are not allowed" (the ...14 files, one each for
-            #     Strings, Templates and RegularExpressions). That comment IS the
-            #     expectation, so key on it rather than on the names.
-            #   - RegularExpressions17 and 19 are equally invalid but say nothing.
-            #     node v24 refuses /\u{r}\u{n}\u{t}/gu and /\u{}/gu outright with
-            #     "Invalid Unicode escape", so refusing them is correct and
-            #     demanding we parse them was wrong.
-            #
-            # Do not add to the second list without the same node check: it is
-            # the difference between a corpus bug and one of ours.
+            # Everything below that is a PER-FILE correction, and every entry was
+            # settled with node v24 parsed at the true Script goal
+            # (new vm.Script(src) - `node --check` wraps the file in a CommonJS
+            # function and is not a faithful oracle). Nothing here may be added
+            # without the same check.
+
+            # (a) The suite's own marker comment, "Shouldn't work, negatives are
+            # not allowed", on the unicodeExtendedEscapes ...14 files (one each
+            # for Strings, Templates and RegularExpressions). The grep that read
+            # it used to run over the WHOLE corpus and caught three more files
+            # whose "shouldn't work" is about module resolution and type
+            # semantics, not syntax - node/nodeModules1.ts,
+            # node/allowJs/nodeModulesAllowJs1.ts ("dynamic import() always uses
+            # the esm resolver") and salsa/typeFromPropertyAssignment29.ts
+            # ("must be const", "classes already have statics"). They parse, and
+            # they are supposed to. Scope the grep to the directory the marker
+            # was found in, which is what the rule always meant.
             neg_ts="$TMP/neg.tsmark"
-            grep -il "shouldn't work\|should not work" $(cat "$all") 2>/dev/null | sort > "$neg_ts" || : > "$neg_ts"
+            grep -il "shouldn't work\|should not work" \
+                 $(grep '/unicodeExtendedEscapes/' "$all") 2>/dev/null | sort > "$neg_ts" || : > "$neg_ts"
+
+            # (b) Files the directory rule calls 'parse' that are LEXICALLY
+            # invalid JavaScript - no TypeScript syntax is involved anywhere near
+            # the failure, so node is the whole answer and refusing them is
+            # correct. Four clusters, each verified file by file:
+            #
+            #   templateStringUnterminated1-5 (+ _ES6) and TemplateExpression1
+            #       an unterminated template literal; node: "Unexpected end of
+            #       input" / "Missing } in template expression".
+            #   unicodeExtendedEscapes Strings 07,12,17,19,20,21,22,24,25,
+            #       Templates 07,12,17,19, RegularExpressions 07,12
+            #       \u{110000}, \u{FFFFFFFF}, \u{r}, \u{}, \u{ , \u{67 - node:
+            #       "Undefined Unicode code-point" / "Invalid Unicode escape
+            #       sequence" / "Invalid regular expression".
+            #   the scanner/ numeric and string literal negatives
+            #       1e, 1e+, 01.0, 0x, "\u000G", an unterminated string, a raw
+            #       NUL, and a keyword spelled with a \u escape. Five of them
+            #       carry the suite's own Sputnik '@negative' tag as well. (The
+            #       sixth @negative file, parser/ecmascript5/parserS7.6.1.1_A1.10
+            #       .ts, has its offending line COMMENTED OUT and node accepts
+            #       it, which is why the tag alone is not the rule.)
+            #   parserGreaterThanTokenAmbiguity 2,3,4,7,8,9,12,13,14,17,18,19
+            #       the whole point of that directory: '>' '>' separated by a
+            #       space, a comment or a newline is NOT '>>', so '1 > > 2' and
+            #       '1 >> = 2' are syntax errors. node: "Unexpected token '>'" /
+            #       "Unexpected token '='". Files 11, 15, 16 and 20 ('1 >>= 2')
+            #       are deliberately NOT here: node calls them "Invalid
+            #       left-hand side in assignment", which is an EARLY error, and
+            #       this tree's convention (see the js corpus above) is that an
+            #       early error must still parse.
+            #   MemberFunctionDeclaration8_es6.ts - 'if (a) NOT-SIGN * bar;',
+            #       U+00AC where an expression belongs; node: "Invalid or
+            #       unexpected token".
+
+            # (c) Files the DIRECTORY rule calls 'reject' that are valid modern
+            # JavaScript or TypeScript. parser/ErrorRecovery is a directory of
+            # PARSER-recovery tests, and several of its cases recover from a
+            # grammar-check error rather than a parse error - the input is
+            # perfectly well-formed:
+            #
+            #   AccessibilityAfterStatic 2,3,4,5,11,14   'static public;',
+            #       'static public = 1;', 'static public: number;',
+            #       'static public', 'static public() {}', 'static public<T>() {}'
+            #       - a member NAMED 'public'. node accepts every JS-expressible
+            #       one of them; the ...1, ...7 and ...10 files ('static public
+            #       intI ...', two names) stay 'reject', and so does ...6, whose
+            #       class brace is never closed.
+            #   ArrowFunction4 / parserX_ArrowFunction4   'var v = (a, b) => {};'
+            #   parserVariableStatement1-4                'var a,\n b,\n c'
+            #       node accepts all six outright.
+            #   parserErrorRecovery_IncompleteMemberVariable1   'public con:
+            #       "hello";' is an ordinary string-literal type. Its sibling
+            #       ...2 carries the actual error ('public con:C "hello";') and
+            #       stays 'reject'.
+            #   parserCommaInTypeMemberList1 / 2   '{ workItem: any, width:
+            #       string }'. A comma in a type member list has been legal
+            #       TypeScript for a decade; the corpus itself settles it -
+            #       types/conditional/conditionalTypes1.ts:167 writes
+            #       'T extends { a: string, b: number }' in a file expected to
+            #       parse.
             awk -v marked="$neg_ts" '
                 BEGIN { while ((getline l < marked) > 0) mark[l] = 1 }
-                { bad = ($0 ~ /\/(ErrorRecovery|SkippedTokens)\//) \
+                {
+                  bad = ($0 ~ /\/(ErrorRecovery|SkippedTokens)\//) \
                      || ($0 ~ /\/decorators\/invalid\//) \
-                     || ($0 in mark) \
-                     || ($0 ~ /unicodeExtendedEscapesInRegularExpressions(17|19)\.ts$/)
-                  print (bad ? "reject|" : "parse|") $0 }' "$all"
+                     || ($0 in mark)
+                  # (b) lexically invalid, node-verified
+                  bad = bad \
+                     || ($0 ~ /\/es6\/templates\/templateStringUnterminated[1-5](_ES6)?\.ts$/) \
+                     || ($0 ~ /\/es6\/templates\/TemplateExpression1\.ts$/) \
+                     || ($0 ~ /unicodeExtendedEscapesInStrings(07|12|17|19|20|21|22|24|25)\.ts$/) \
+                     || ($0 ~ /unicodeExtendedEscapesInTemplates(07|12|17|19)\.ts$/) \
+                     || ($0 ~ /unicodeExtendedEscapesInRegularExpressions(07|12|17|19)\.ts$/) \
+                     || ($0 ~ /\/scanner\/ecmascript[35]\/scanner(ES3)?NumericLiteral[346]\.ts$/) \
+                     || ($0 ~ /\/scanner\/ecmascript5\/scannerS7\.4_A2_T2\.ts$/) \
+                     || ($0 ~ /\/scanner\/ecmascript5\/scannerS7\.8\.3_A6\.1_T1\.ts$/) \
+                     || ($0 ~ /\/scanner\/ecmascript5\/scannerS7\.8\.4_A7\.1_T4\.ts$/) \
+                     || ($0 ~ /\/scanner\/ecmascript5\/scannerStringLiterals\.ts$/) \
+                     || ($0 ~ /\/scanner\/ecmascript5\/scannerUnexpectedNullCharacter1\.ts$/) \
+                     || ($0 ~ /\/scanner\/ecmascript5\/scannerUnicodeEscapeInKeyword[12]\.ts$/) \
+                     || ($0 ~ /parserGreaterThanTokenAmbiguity(2|3|4|7|8|9|12|13|14|17|18|19)\.ts$/) \
+                     || ($0 ~ /\/MemberFunctionDeclaration8_es6\.ts$/)
+                  # (c) valid after all - overrides everything above
+                  good = ($0 ~ /parserAccessibilityAfterStatic(2|3|4|5|11|14)\.ts$/) \
+                      || ($0 ~ /\/ArrowFunctions\/(parserX_)?ArrowFunction4\.ts$/) \
+                      || ($0 ~ /\/parserVariableStatement[1-4]\.ts$/) \
+                      || ($0 ~ /parserErrorRecovery_IncompleteMemberVariable1\.ts$/) \
+                      || ($0 ~ /parserCommaInTypeMemberList[12]\.ts$/)
+                  print ((bad && !good) ? "reject|" : "parse|") $0 }' "$all"
             return ;;
         python)
             # CPython's suite has no negative-test convention to read, so the

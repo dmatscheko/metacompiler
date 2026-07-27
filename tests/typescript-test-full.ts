@@ -629,7 +629,10 @@ class S23Base {
     fresh: any;
     d: any;
     e: any;
-    constructor() { this.tag = "base"; }
+    ctrv: number;
+    constructor() { this.tag = "base"; this.ctrv = 4; }
+    get ctr(): number { return this.ctrv; }
+    set ctr(v: number) { this.ctrv = v; }
     get label(): string { return "B:" + this.tag; }
     set label(v: string) { this.tag = v; }
     get box(): any { return this.boxv; }
@@ -647,6 +650,17 @@ class S23Sub extends S23Base {
     destruct(): any { [super.d] = [11]; return this.d; }
     destructObj(): any { ({ q: super.e } = { q: 12 }); return this.e; }
     kind(): string { return "sub<" + super.kind() + ">"; }
+    // '++super.x' / 'super.x--': the read and the store both go through the class chain,
+    // so the accessor pair above is what runs. The prefix form yields the NEW value and
+    // the postfix one the old, exactly as on an ordinary member.
+    preUpdate(): number { return ++super.ctr; }
+    postUpdate(): number { return super.ctr--; }
+    // With a suffix behind it only the BASE is a super read: 'super.box.v' reads box
+    // through the chain and then updates an ordinary member of the object it answers.
+    pathUpdate(): string {
+        this.boxv = { v: 4 };
+        return (++super.box.v) + "," + this.boxv.v + "," + (super.box.v--) + "," + this.boxv.v;
+    }
 }
 function s23(): void {
     const s = new S23Sub();
@@ -661,6 +675,9 @@ function s23(): void {
     check("sup7", s.destruct() === 11);
     check("sup8", s.destructObj() === 12);
     check("sup9", s.kind() === "sub<base>");
+    check("sup10", s.preUpdate() === 5 && s.ctrv === 5);
+    check("sup11", s.postUpdate() === 5 && s.ctrv === 4);
+    check("sup12", s.pathUpdate() === "5,5,5,4");
 }
 
 // ===== SECTION 24: the general new forms =====
@@ -757,6 +774,72 @@ function s28(): void {
     check("dbg1", n === 1);
 }
 
+// ===== SECTION 29: shapes TypeScript parses and then refuses =====
+// Several TypeScript diagnostics are GRAMMAR CHECKS on a tree tsc has already built, not
+// parse errors, so the grammar has to reach the same tree. Each one is asserted through a
+// value-level consequence, since the checker's complaint is not observable here.
+class S29Base {
+    ctrv: number = 4;
+    get ctr(): number { return this.ctrv; }
+    set ctr(v: number) { this.ctrv = v; }
+}
+class S29Acc {
+    _v: number = 1;
+    // 1054 / 1049: a getter with a parameter and a setter with none or two. The extra (or
+    // missing) name simply has no effect - a getter is invoked with no argument, a setter
+    // with exactly one, whatever the list says.
+    get g(): number { return this._v; }
+    set g(a: number, b: number) { this._v = a; }
+}
+// 2369: an accessibility modifier outside a constructor is only a modifier for the type
+// checker; here it must parse and bind an ordinary parameter.
+function s29mods(public a: number, private b: number): number { return a + b; }
+// "A rest parameter must be last" - two of them parse, and the FIRST one takes the tail.
+function s29rest(...x: number[], ...y: number[]): number { return x.length; }
+function s29(): void {
+    const a: S29Acc = new S29Acc();
+    a.g = 9;
+    check("gc1", a.g === 9);
+    check("gc2", s29mods(2, 3) === 5);
+    check("gc3", s29rest(1, 2, 3) === 3);
+    // '++super.x' with a suffix behind it, and the plain postfix form.
+    const b: S29Base = new S29Base();
+    check("gc4", b.ctr === 4);
+    // 1091: several declarators in a for-in / for-of head. The loop binds the FIRST.
+    let seen: string = "";
+    for (var k = 1, unused = 2 in { x: 0, y: 0 }) { seen = seen + k; }
+    check("gc5", seen === "xy");
+    let n: number = 0;
+    for (var e, spare of [1, 2, 3]) { n = n + e; }
+    check("gc6", n === 6);
+    // The Annex B for-in initializer is parsed and dropped, and its 'in' belongs to the
+    // LOOP - not to the initializer expression.
+    let m: string = "";
+    for (var q = 1 in { p: 0 }) { m = m + q; }
+    check("gc7", m === "p");
+    // A numeric separator in the EXPONENT, and a comma expression as a case label.
+    check("gc8", 1e1_0 === 10000000000);
+    let hit: number = 0;
+    switch (2) { case (1, 2): hit = 1; break; default: hit = 2; }
+    check("gc9", hit === 1);
+    // 'typeof x--' is typeof over an update expression, not a bare name plus '--'.
+    let t: number = 3;
+    check("gc10", (typeof t--) === "number" && t === 2);
+}
+
+// ===== SECTION 30: private names through an optional chain =====
+class S30 {
+    #foo: number = 5;
+    #bar: number = 7;
+    read(): number | undefined { return this?.#foo; }
+    both(): number | undefined { return this?.#foo + this.#bar; }
+}
+function s30(): void {
+    const s: S30 = new S30();
+    check("opc1", s.read() === 5);
+    check("opc2", s.both() === 12);
+}
+
 // ===== END SECTIONS =====
 
 function main(): number {
@@ -788,6 +871,8 @@ function main(): number {
     s26(); // SECTION-CALL 26
     s27(); // SECTION-CALL 27
     s28(); // SECTION-CALL 28
+    s29(); // SECTION-CALL 29
+    s30(); // SECTION-CALL 30
     println("full: " + checks + " checks, " + failures + " failures");
     return failures;
 }

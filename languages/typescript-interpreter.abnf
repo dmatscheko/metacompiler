@@ -197,7 +197,12 @@ AmbientClass = [ KwAbstract ] KwClass Id [ TypeParams ] [ KwExtends TypeList ] [
 AmbientEnum = [ KwConst ] KwEnum Id SkipBlock ;
 AmbientFunc = [ KwAsync ] KwFunction [ GenMark ] Id [ TypeParams ] SigParamList [ TypeAnnot ] [ ";" ] ;
 AmbientVar  = KwVar AmbientVarDecl { "," AmbientVarDecl } [ ";" ] ;
-AmbientVarDecl = Id [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
+// 'declare var [a, b];' and 'declare const {}: unique symbol;' are TypeScript grammar
+// ERRORS ("a binding pattern parameter cannot be optional in an implementation
+// signature" / "a destructuring declaration must have an initializer"), which tsc
+// reports on a tree it has already built - so the pattern has to parse here too.
+AmbientVarDecl = DPattern [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ]
+               | Id [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 
 // An OVERLOAD signature: a function declaration with no body. It exists only for the type
 // checker, so it is erased - the implementation that follows is the one that runs. Tried
@@ -242,7 +247,7 @@ IfBody          = NotDeclHead Statement ;
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { CaseLabel | DefaultLabel | Statement } "}" ;
 CaseLabel   <~~ push({casev: pop()}) ~~>
-            = KwCase AssignExpr ":" ;
+            = KwCase Expression ":" ;
 DefaultLabel <~~ push({isdflt: true}) ~~>
             = KwDefault ":" ;
 
@@ -322,7 +327,15 @@ ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. *
 // A leading 'this: T' is TypeScript's way of typing the receiver. It is not a parameter
 // at all - the argument list is not shifted by it - so it pushes nothing and vanishes.
 ParamSeq    = ThisParam [ "," [ ParamRun ] ] | ParamRun ;
-ParamRun    = RestArg | Param { "," Param } [ "," [ RestArg ] ] ;
+// "A rest parameter must be last" and "a parameter property is only allowed in a
+// constructor" are GRAMMAR CHECKS TypeScript reports after parsing, not parse errors:
+// tsc builds a tree for 'function f(...x: Date, ...y: boolean)' and for
+// 'function foo(public x, private y)' and then complains about it. A syntax-only front
+// end has to reach the same tree, so the run is a flat list of items and every position
+// takes every shape. PropParam is tried before Param, and falls back to it cleanly when
+// the modifier word turns out to be the parameter's own NAME ('(public, x)').
+ParamRun    = ParamItem { "," ParamItem } [ "," ] ;
+ParamItem   = RestArg | PropParam | Param ;
 RestArg     = RestParam | RestPattern ;
 ThisParam   = KwThis [ "?" ] [ TypeAnnot ] ;
 
@@ -354,6 +367,15 @@ Empty       <~~ push(function() {}) ~~>
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
+// MEASURED AND REVERTED (2026-07-28): spelling this end as ( ";" | AsiEnd ), where AsiEnd
+// is the spec's automatic-semicolon rule (a line terminator, a '}' or the end of file must
+// follow), is correct JavaScript and a net LOSS on this corpus - reject 100 -> 103, parse
+// 5277 -> ~5137. The 140 files it costs were parsing only BECAUSE the ';' is optional:
+// 'declare module "jquery"' (the shorthand ambient module, which AmbientNs cannot express
+// without a body), 'export as namespace Foo;' (the UMD global export), 'import defer * as
+// ns from "m"' and 'protected class C {}' all currently degrade into a soup of bare
+// identifier expression statements and count as parsed. Restoring the guard is worth
+// roughly 25 + 9 + 5 files the moment those three real forms exist.
 
 // Every expression production pushes exactly one thunk: function() -> value.
 // The comma (sequence) operator is ACCEPTED but not lowered. With no comma this level
@@ -503,7 +525,13 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
 
-UnaryExpr   = PreIncDec | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | Delete | Void | Await | PostfixExpr ;
+UnaryExpr   = SuperPreUpdate | PreIncDec | Neg | Pos | Not | BitNot | TypeofName | Typeof | DeleteMember | Delete | Void | Await | PostfixExpr ;
+// '++super.x' / '--super[i]'. Target starts at 'NotReserved Id', which refuses the
+// reserved word 'super', so PreIncDec cannot reach a super property and the form needs
+// its own production - exactly the reason SuperAssign exists next to Assignment. It is
+// tried FIRST so the ordinary PreIncDec never sees the 'super'.
+SuperPreUpdate <~~ push(makeSuperUpdate(takeAll())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> KwSuper SuperKey { DotSuffix | IndexSuffix } ;
 // 'delete o.k' removes the property: the value model has no host delete, so the slot is
 // blanked AND the key is dropped from the object's __keys list, which is what 'in' and
 // for-in read (see jsKeys / makeIn). Tried before the general Delete so the member form
@@ -555,7 +583,13 @@ Typeof      <~~ push(makeTypeof(pop())) ~~>
 // as an OPTIONAL tail of the ordinary call/member expression rather than as a separate
 // alternative in front of it - an alternative would re-parse every postfix expression in
 // the language twice, since it can only fail after consuming the whole operand.
-PostfixExpr = IncDec | SuperCall | CallMemberUpdate ;
+PostfixExpr = SuperPostUpdate | IncDec | SuperCall | CallMemberUpdate ;
+// 'super.x++' / 'super[i]--'. The value form reaches CallMemberUpdate through Primary,
+// but the update tail there has no structure left to store through (makeMaybeUpdate can
+// only refuse it), so the postfix super form is taken here instead, where the SuperKey
+// is still in hand. It only ever costs a parse when the expression begins with 'super'.
+SuperPostUpdate <~~ push(makeSuperUpdate(takeAll())) ~~>
+            = KwSuper SuperKey { DotSuffix | IndexSuffix } ( "++" | "--" ) <~~ push(up.in) ~~> ;
 CallMemberUpdate <~~ push(makeMaybeUpdate(takeAll(), up.pos)) ~~>
             = CallMember [ UpdateOp ] ;
 UpdateOp    <~~ push({upd: up.in}) ~~>
@@ -566,7 +600,7 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
 SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
-            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
 // A call after a member access is a method call: the object becomes 'this' of the callee
@@ -611,12 +645,17 @@ IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms get their own suffix productions rather than reusing
 // CallSuffix/IndexSuffix, because the marker they push differs by the 'opt' flag.
-OptChainSuffix = "?." ( OptCallSuffix | OptIndexSuffix | OptDotSuffix ) ;
+OptChainSuffix = "?." ( OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ) ;
 OptCallSuffix <~~ push({kind:"call", opt: true, args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 OptIndexSuffix <~~ push({kind:"member", opt: true, key: pop()}) ~~>
             = "[" Expression "]" ;
 OptDotSuffix = Id <~~ push({kind:"member", opt: true, key: makeConst(up.in)}) ~~> ;
+// 'this?.#foo' - the optional-chaining form of PrivateDotSuffix. A private member is an
+// ordinary property whose name carries the '#', so the access only keeps the marker in
+// the key. Tried before the plain form, whose Id cannot start at a '#'.
+OptPrivateSuffix <~~ push({kind:"member", opt: true, key: makeConst("#" + pop())}) ~~>
+            = "#" Id <~~ push(up.in) ~~> ;
 
 // A call/array/new argument. A plain argument pushes its value thunk directly (the
 // common case, and what makes the fast path a plain function call); a SPREAD pushes a
@@ -756,8 +795,14 @@ GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
             = ( GetterHead PropKeyAny GetterParams [ TypeAnnot ] | SetterHead PropKeyAny SetterParams [ TypeAnnot ] ) Block ;
 GetterHead  <~~ push({acc: "get"}) ~~> = "get" KwEnd ;
 SetterHead  <~~ push({acc: "set"}) ~~> = "set" KwEnd ;
-GetterParams <~~ takeAll(); push([]) ~~> = "(" [ ThisParam ] ")" ;
-SetterParams <~~ push(takeAll()) ~~> = "(" [ ThisParam "," ] Param [ "," ] ")" ;
+// "A 'get' accessor cannot have parameters" (1054) and "a 'set' accessor must have
+// exactly one parameter" (1049) are TypeScript GRAMMAR CHECKS, reported on a tree tsc has
+// already built - the conformance suite files 'var v = { set foo() { } }' and
+// 'get Foo(a: number) { }' under parser/, expecting them to parse. So the arity is not
+// enforced here any more: the list is the ordinary one and the extra (or missing) names
+// simply have no effect, since a getter is invoked with no argument and a setter with one.
+GetterParams <~~ takeAll(); push([]) ~~> = "(" [ ParamSeq ] ")" ;
+SetterParams <~~ push(takeAll()) ~~> = "(" [ ParamSeq ] ")" ;
 // A shorthand method. The async and generator markers are kept, so 'async m() {}' and
 // '*m() {}' build the right kind of function value (see makeMethodProp).
 MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
@@ -865,10 +910,22 @@ ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
 // the same shapes with 'in' are legal uses of an ordinary variable named 'let'.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
 ForOfDecl   = [ KwAwait ] KwUsing NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ]
-            | KwVar NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] [ ForOfInit ] ;
+            | KwVar NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
 // The Annex B for-IN initializer: 'for (var a = 1 in X)' is legal sloppy JavaScript. It
 // is parsed and dropped - the loop variable is rebound on every iteration anyway.
-ForOfInit   <~~ pop() ~~> = "=" AssignExpr ;
+// The spec parses it as AssignmentExpression[~In]: the 'in' that follows belongs to the
+// LOOP, not to the initializer. RelExpr is the level directly below InExpr, so it is
+// exactly the sub-language that cannot consume an 'in' - an AssignExpr here would read
+// '1 in X' as a membership test and leave the loop header with no operator at all.
+ForOfInit   <~~ pop() ~~> = "=" RelExpr ;
+// "Only a single variable declaration is allowed in a 'for...in' statement" (1091) is a
+// GRAMMAR CHECK TypeScript reports on a tree it has built, not a parse error: the suite
+// files 'for (var a, b of X)' and 'for (var a = 1, b = 2 in X)' under parser/, expecting
+// them to parse. The extra declarators are therefore accepted and DROPPED - the loop binds
+// the first name, which is the only one the iteration can mean.
+// ForOfExtra pushes NOTHING: the name carries no tag and ForOfInit pops its own value,
+// so the run is item-neutral and makeForOf still sees exactly four items.
+ForOfExtra  = "," NotBindName Id [ TypeAnnot ] [ ForOfInit ] ;
 ForOfBare   = NotBindName Id <~~ push(up.in) ~~> [ TypeAnnot ] ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
@@ -1049,8 +1106,11 @@ ClassDecorators <~~ push({cdecs: takeAll()}) ~~>
 // dotted path, and at most one argument list ('@sealed', '@a.b.c', '@addN(5)'). Anything
 // wider would swallow the member that follows it - a decorator is not terminated by
 // anything, so the grammar is what has to stop.
+// The decorator expression is a LeftHandSideExpression, so a call may sit in the MIDDLE
+// of it ('@x().y', '@f(1).g(2)') and not only at the end - which is what the compiler
+// half already accepted and this one did not.
 Decorator   <~~ push(foldCallMember(takeAll())) ~~>
-            = "@" ( "(" Expression ")" | VarRef ) { DotSuffix } [ TypeArgs ] [ CallSuffix ] ;
+            = "@" ( "(" Expression ")" | VarRef ) { DotSuffix | CallSuffix | TypeArgsSuffix } ;
 
 // The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
 // 'extends (a, b)', 'extends b.c' and 'extends class {}' are all legal. The plain
@@ -1129,11 +1189,11 @@ MemberComputedKey <~~ push({mkT: pop()}) ~~>
 // makeCtorClosure knows to write through to the instance.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
             = MemberDecorators MemberMods KwConstructor CtorParams Block ;
+// The parameter list is the shared ParamSeq: PropParam is one of its item shapes, since
+// the modifier form has to PARSE everywhere before TypeScript's grammar check can refuse
+// it outside a constructor. Only here does the {prop} descriptor mean anything.
 CtorParams  <~~ push(takeAll()) ~~>
-            = "(" [ CtorParamSeq ] ")" ;
-CtorParamSeq = ThisParam [ "," [ CtorParamRun ] ] | CtorParamRun ;
-CtorParamRun = RestArg | CtorParam { "," CtorParam } [ "," [ RestArg ] ] ;
-CtorParam   = PropParam | Param ;
+            = "(" [ ParamSeq ] ")" ;
 PropParam   = ParamDecorators PropMod { PropMod } ( PropParamName | PropParamPattern ) ;
 PropParamName <~~ push(makePropParam(takeAll())) ~~>
             = NotBindName Id <~~ push(up.in) ~~> [ "?" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
@@ -1189,6 +1249,16 @@ FieldNameEnd = :script(~~
 // grammar's lone 'static' this is a repetition. Only 'static' has a run-time meaning; the
 // access modifiers, 'readonly', 'abstract', 'override', 'declare' and 'accessor' are
 // erased (they are kept on the descriptor only because hasStatic reads the same list).
+// MEASURED AND REVERTED (2026-07-28): TypeScript's ordering rule - "error 1029: 'public'
+// modifier must precede 'static' modifier" - is a post-parse GRAMMAR CHECK, not a parse
+// error, and spelling it structurally as { AccessMod } { MemberMod } puts it at the wrong
+// layer. The conformance suite proves it: classes/propertyMemberDeclarations/
+// accessibilityModifiers.ts holds a valid class AND, under the comment "// Errors,
+// accessibility modifiers must precede static", a class D full of 'static private ...' -
+// one file, expected to parse, so tsc plainly builds a tree for both. The same shape sits
+// among ordinary members in override/override5.ts and override7.ts ('override public op'),
+// defineProperty.ts ('declare public a') and autoAccessorDisallowedModifiers.ts. Measured:
+// reject 100 -> 103, parse 5271 -> 5266. A loss, and wrong besides.
 MemberMods  <~~ push({mods: takeAll()}) ~~>
             = { MemberMod <~~ push(stripWs(up.in)) ~~> } ;
 // A modifier word is only a modifier when a MEMBER follows it: 'static' directly in front
@@ -1233,7 +1303,7 @@ MemberDecorators <~~ push({decs: takeAll()}) ~~>
 // and the legacy 'import fs = require("fs")' equals form; all three are recognized, and
 // the type-only ones name nothing at run time anyway.
 ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
-            = KwImport ( ImportEquals | [ KwType ] ImportClause KwFrom ModPath [ ImportAttrs ] | ModPath [ ImportAttrs ] ) [ ";" ] ;
+            = KwImport ( ImportEquals | KwType ImportEquals | [ KwType ] ImportClause KwFrom ModPath [ ImportAttrs ] | ModPath [ ImportAttrs ] ) [ ";" ] ;
 // Import ATTRIBUTES: 'import x from "./m" with { type: "json" }' (and the older
 // 'assert { ... }' spelling). They describe how the host should load the module, which
 // this flat import model has no use for, so the clause is parsed and dropped.
@@ -1491,7 +1561,9 @@ BigIntLit   <~~ push(makeBigInt(radixVal(up.in, 0, 10))) ~~>
 // JsDecLit rather than requiring a '_': one production then covers both, and the plain
 // decimal below is only still there for the shapes this one does not reach.
 SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() { Digit | "_" } [ "." { Digit | "_" } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() { Digit | "_" } [ "." { Digit | "_" } ] [ SepDecExp ] KwEnd :whitespace(Whitespace) ;
+// The exponent takes separators too ('1e1_0'), which the plain DecExp below must not.
+SepDecExp   = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit | "_" } ;
 // The plain decimal. It is spelled out here rather than taken from lib/numbers.abnf
 // because JavaScript has the exponent form, which that DecLit does not: without it
 // '1e3' is the number 1 followed by the variable 'e3', which parses and then means
@@ -1791,7 +1863,16 @@ Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
 IdStart     = IdEscape | "a"..."z" | "A"..."Z" | "_" | "$" | IdUni ;
 IdPart      = IdEscape | "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | IdUni | IdUniPart ;
 IdEscape    = "\\" JsUniEsc ;
-IdUni       = "\u00aa"..."\u167f" | "\u1681"..."\u1fff" | "\u2070"..."\u218f"
+// The Latin-1 supplement is spelled out rather than swept into the first range, because
+// it is the one block where a NON-letter sits close enough to ASCII to turn up in real
+// source: U+00AC (the logic-not sign) is what the conformance suite plants in
+// ErrorRecovery/Blocks/parserErrorRecovery_Block2.ts and ParameterLists/...ParameterList4
+// as a deliberately invalid token, and node refuses it too ("Invalid or unexpected
+// token"). Accepting it made a garbage file parse. The letters of that block are exactly
+// AA, B5, BA, C0-D6, D8-F6 and F8 upward - so the multiplication and division signs
+// (U+00D7 / U+00F7) and all the punctuation stay out as well.
+IdUni       = "\u00aa" | "\u00b5" | "\u00ba" | "\u00c0"..."\u00d6" | "\u00d8"..."\u00f6"
+            | "\u00f8"..."\u167f" | "\u1681"..."\u1fff" | "\u2070"..."\u218f"
             | "\u2c00"..."\u2fef" | "\u3001"..."\ud7ff" | "\uf900"..."\ufdcf"
             | "\ufdf0"..."\ufefe" | "\U00010000"..."\U000effff" ;
 // ID_Continue but NOT ID_Start: the zero width non-joiner and joiner, and the two
@@ -2268,6 +2349,13 @@ NoLineBreak = :script(~~
 // This is a PEG - once TypeofName succeeded there is no going back to Typeof - so the
 // decision has to be made here, before the shorter form commits. Returns the impossible
 // token to FAIL, undefined to succeed.
+//
+// An OPTIONAL-CHAINING suffix counts too: 'typeof o?.foo' is a typeof over a chain, not
+// a bare name followed by a ternary. It cannot be refused on the '?' alone, because
+// 'typeof x ? a : b' is a perfectly good conditional whose test is a bare typeof - so
+// the '?' only disqualifies the name when the '.' is GLUED to it, which is what makes
+// '?.' one punctuator. A digit after that '.' is the spec's own exception ('a?.5:1' is a
+// conditional, not a chain), so it is left to the ternary as well.
 NotSuffix   = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)
@@ -2275,6 +2363,15 @@ NotSuffix   = :script(~~
             i = i + 1
             cc = c.peek(i)
         }
+        if (cc === 63) {
+            var d = c.peek(i + 2)
+            if (c.peek(i + 1) === 46 && !(d >= 48 && d <= 57)) { return abnf.newToken("\x01suffix", 0) }
+            return undefined
+        }
+        // '++' / '--' glued to the name is an UPDATE expression, so the operand is not a
+        // bare name either: 'typeof t--' is typeof (t--). A single '-' or '+' is the
+        // ordinary binary operator and must stay out of it ('typeof a - 1').
+        if ((cc === 43 || cc === 45) && c.peek(i + 1) === cc) { return abnf.newToken("\x01suffix", 0) }
         return (cc === 46 || cc === 91 || cc === 40 || cc === 96) ? abnf.newToken("\x01suffix", 0) : undefined
     })()
 ~~) ;
@@ -4751,6 +4848,33 @@ NotFuncHead = :script(~~
             if (op != "=") { v = applyOp(op, superGet(k), v) }
             superSet(k, v)
             return v
+        }
+    }
+    // '++super.x' and 'super.x++'. items = ["++"|"--", {skey}, ...path] for the prefix
+    // form and [{skey}, ...path, "++"|"--"] for the postfix one, so the shape of items[0]
+    // says which was parsed. With suffixes only the BASE is a super read and the rest is
+    // an ordinary member path, so it degrades to the {prim, path} reference the plain
+    // update builders already take; without them the read AND the store go through super.
+    function makeSuperUpdate(items) {
+        var pre = (typeof items[0] == "string")
+        var n = items.length
+        var op = pre ? items[0] : items[n - 1]
+        var keyItem = pre ? items[1] : items[0]
+        var path = pre ? items.slice(2) : items.slice(1, n - 1)
+        if (path.length > 0) {
+            var ref = {prim: makeSuperProp(keyItem), path: path}
+            if (pre) { return makePreIncDec(ref, op) }
+            return makeIncDec([ref, op])
+        }
+        var keyT = keyItem.skey
+        var delta = (op == "++") ? 1 : -1
+        return function() {
+            var k = anytype // A computed key is an arbitrary value.
+            k = keyT()
+            var old = superGet(k) - 0
+            superSet(k, old + delta)
+            if (pre) { return old + delta }
+            return old
         }
     }
     // The binder a destructuring catch parameter hands to excCatchBind: it declares the

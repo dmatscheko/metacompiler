@@ -222,7 +222,10 @@ AmbNamespace = ( KwNamespace | KwModule ) NsPath SkipBlock ;
 AmbClass    = [ "abstract" KwEnd ] KwClass Id [ TypeParams ] [ KwExtends Type ] [ KwImplements TypeList ] SkipBlock ;
 AmbFunc     = [ KwAsync ] KwFunction [ "*" ] Id [ TypeParams ] ParamList [ TypeAnnot ] [ ";" ] ;
 AmbVar      = KwVar AmbDeclarator { "," AmbDeclarator } [ ";" ] ;
-AmbDeclarator = Id [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
+// 'declare var [a, b];' is a TypeScript grammar ERROR, which tsc reports on a tree it
+// has already built - so the pattern has to parse here too.
+AmbDeclarator = DPattern [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ]
+              | Id [ "!" ] [ TypeAnnot ] [ "=" AssignExpr ] ;
 AmbEnum     = [ "const" KwEnd ] KwEnum Id SkipBlock ;
 
 // ----- enum -----
@@ -394,7 +397,7 @@ IfBody          = NotDeclHead Statement ;
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { CaseLabel | DefaultLabel | Statement } "}" ;
 CaseLabel   <~~ push({casev: pop()}) ~~>
-            = KwCase AssignExpr ":" ;
+            = KwCase Expression ":" ;
 DefaultLabel <~~ push({isdflt: true}) ~~>
             = KwDefault ":" ;
 
@@ -468,8 +471,13 @@ ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. *
 // TypeScript's 'this' parameter ('function f(this: {v: number})') is a pure type-layer
 // declaration in the FIRST position: it pushes nothing at all, so the real parameters
 // keep the argument indices they would have without it.
-ParamSeq    = ThisParam [ "," ( RestArg | Param { "," Param } [ "," [ RestArg ] ] ) ]
-            | RestArg | Param { "," Param } [ "," [ RestArg ] ] ;
+// "A rest parameter must be last" is a GRAMMAR CHECK TypeScript reports after parsing,
+// not a parse error: tsc builds a tree for 'function f(...x: Date, ...y: boolean)' and
+// then complains about it. A syntax-only front end has to reach the same tree, so the run
+// is a flat list of items and every position takes every shape.
+ParamSeq    = ThisParam [ "," [ ParamRun ] ] | ParamRun ;
+ParamRun    = ParamItem { "," ParamItem } [ "," ] ;
+ParamItem   = RestArg | Param ;
 ThisParam   = KwThis [ TypeAnnot ] ;
 RestArg     = RestParam | RestPattern ;
 
@@ -510,6 +518,15 @@ Empty       <~~ push(function(b) { return b }) ~~>
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression [ ";" ] ;
+// MEASURED AND REVERTED (2026-07-28): spelling this end as ( ";" | AsiEnd ), where AsiEnd
+// is the spec's automatic-semicolon rule (a line terminator, a '}' or the end of file must
+// follow), is correct JavaScript and a net LOSS on this corpus - reject 100 -> 103, parse
+// 5277 -> ~5137. The 140 files it costs were parsing only BECAUSE the ';' is optional:
+// 'declare module "jquery"' (the shorthand ambient module, which AmbientNs cannot express
+// without a body), 'export as namespace Foo;' (the UMD global export), 'import defer * as
+// ns from "m"' and 'protected class C {}' all currently degrade into a soup of bare
+// identifier expression statements and count as parsed. Restoring the guard is worth
+// roughly 25 + 9 + 5 files the moment those three real forms exist.
 
 // Every expression production pushes exactly one thunk: function(block) -> {b, v}.
 // The comma (sequence) operator is ACCEPTED but not lowered. With no comma this level
@@ -663,7 +680,13 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
 
-UnaryExpr   = PreIncDec | Neg | Plus | Not | BitNot | Typeof | Delete | Void | Await | PostfixExpr ;
+UnaryExpr   = SuperPreUpdate | PreIncDec | Neg | Plus | Not | BitNot | Typeof | Delete | Void | Await | PostfixExpr ;
+// '++super.x' / 'super[i]--'. A Target starts at a name and refuses the reserved word
+// 'super', so neither update production can reach a super property - the same reason
+// SuperAssign sits next to Assignment. The prefix form is tried before PreIncDec and the
+// postfix one before the ordinary postfix level; both cost a parse only after a 'super'.
+SuperPreUpdate <~~ push(makeSuperUpdate(takeAll(), up.pos)) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> KwSuper SuperKey { TargetSuffix } ;
 // 'delete o.k' drops the property and answers true; 'delete x' on a plain variable cannot
 // remove a binding and answers false, as in sloppy mode. The operand of the member form is
 // a Target - the same assignable-place production the assignments use - so a path that
@@ -707,14 +730,16 @@ TypeofExpr  <~~ push(makeUnary(pop(), "js_typeof")) ~~>
             = KwTypeof UnaryExpr ;
 
 // The postfix forms: i++ evaluates to the old value.
-PostfixExpr = IncDec | SuperCall | CallMember ;
+PostfixExpr = SuperPostUpdate | IncDec | SuperCall | CallMember ;
+SuperPostUpdate <~~ push(makeSuperUpdate(takeAll(), up.pos)) ~~>
+            = KwSuper SuperKey { TargetSuffix } ( "++" | "--" ) <~~ push(up.in) ~~> ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
 SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
-            = KwSuper [ "." Id <~~ push({mname: idName(up.in)}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwSuper [ "." Id <~~ push({mname: idName(up.in)}) ~~> ] [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
 // A call after a member access is a method call: the object becomes 'this' of the callee.
@@ -750,12 +775,18 @@ IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
             = "[" Expression "]" ;
 // The three optional forms carry the same payload as their plain counterparts plus the
 // 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
-OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptDotSuffix ;
+OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptPrivateSuffix | OptDotSuffix ;
 OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
             = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 OptIndexSuffix <~~ push({kind:"optmember", key: pop()}) ~~>
             = "?." "[" Expression "]" ;
 OptDotSuffix = "?." Id <~~ push({kind:"optmember", key: makeConst(idName(up.in))}) ~~> ;
+// 'this?.#foo' - the optional-chaining form of PrivSuffix. It must use the SAME mangled
+// key privName builds ('__#x'), not a raw '#x': the field is stored under the mangled
+// name, and a key that only carries the marker reads a slot that was never written.
+// Tried before the plain form, whose Id cannot start at a '#'.
+OptPrivateSuffix <~~ push({kind:"optmember", key: makeConst(privName(pop()))}) ~~>
+            = "?." "#" Id <~~ push(idName(up.in)) ~~> ;
 
 // A call/array/new argument. The spread form (...expr) pushes a marker instead of a
 // value thunk; pushArgs recognizes it and appends the ELEMENTS of the spread value.
@@ -888,8 +919,14 @@ ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
 GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
             = ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams [ TypeAnnot ]
               | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) Block ;
-GetterParams = "(" ")" ;
-SetterParams = "(" Param ")" ;
+// "A 'get' accessor cannot have parameters" (1054) and "a 'set' accessor must have
+// exactly one parameter" (1049) are TypeScript GRAMMAR CHECKS, reported on a tree tsc has
+// already built - the conformance suite files 'var v = { set foo() { } }' and
+// 'get Foo(a: number) { }' under parser/, expecting them to parse. So the arity is not
+// enforced here any more: the list is the ordinary one and the extra (or missing) names
+// simply have no effect, since a getter is invoked with no argument and a setter with one.
+GetterParams <~~ takeAll() ~~> = "(" [ ParamSeq ] ")" ;
+SetterParams = "(" [ ParamSeq ] ")" ;
 // A shorthand method: '{ m(x) { ... } }', with the async and generator prefixes.
 MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
             = [ AsyncMod ] [ GenMod ] MemberKey [ "?" ] [ TypeParams ] ParamList [ TypeAnnot ] Block ;
@@ -990,7 +1027,20 @@ ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
 // 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
 // the same shapes with 'in' are legal uses of an ordinary variable named 'let'.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
-ForOfDecl   = KwVar NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] ;
+// The Annex B for-IN initializer: 'for (var a = 1 in X)' is legal sloppy JavaScript. It
+// is parsed and dropped - the loop variable is rebound on every iteration anyway. The
+// spec parses it as AssignmentExpression[~In], so the initializer must be read at a level
+// that cannot consume the loop's own 'in': RelExpr sits directly below InExpr.
+ForOfDecl   = KwVar NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] [ ForOfInit ] { ForOfExtra } ;
+ForOfInit   <~~ pop() ~~> = "=" RelExpr ;
+// "Only a single variable declaration is allowed in a 'for...in' statement" (1091) is a
+// GRAMMAR CHECK TypeScript reports on a tree it has built, not a parse error: the suite
+// files 'for (var a, b of X)' and 'for (var a = 1, b = 2 in X)' under parser/, expecting
+// them to parse. The extra declarators are therefore accepted and DROPPED - the loop binds
+// the first name, which is the only one the iteration can mean.
+// ForOfExtra pushes NOTHING: the name carries no tag and ForOfInit pops its own value,
+// so the run is item-neutral and makeForOf still sees exactly the items it did.
+ForOfExtra  = "," NotBindName Id [ TypeAnnot ] [ ForOfInit ] ;
 ForOfBare   = NotBindName Id <~~ push(idName(up.in)) ~~> [ TypeAnnot ] ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
@@ -1283,6 +1333,16 @@ FieldNameEnd = :script(~~
 // perfectly ordinary MEMBER NAME as well, so each carries the NotMemberEnd guard: a word
 // that is directly followed by '(', '=', ';', ':', '?', '!', '<' or '}' is the member,
 // not a modifier ('class A { static() {} }', 'class A { readonly = 1 }').
+// MEASURED AND REVERTED (2026-07-28): TypeScript's ordering rule - "error 1029: 'public'
+// modifier must precede 'static' modifier" - is a post-parse GRAMMAR CHECK, not a parse
+// error, and spelling it structurally as { AccessMod } { MemberMod } puts it at the wrong
+// layer. The conformance suite proves it: classes/propertyMemberDeclarations/
+// accessibilityModifiers.ts holds a valid class AND, under the comment "// Errors,
+// accessibility modifiers must precede static", a class D full of 'static private ...' -
+// one file, expected to parse, so tsc plainly builds a tree for both. The same shape sits
+// among ordinary members in override/override5.ts and override7.ts ('override public op'),
+// defineProperty.ts ('declare public a') and autoAccessorDisallowedModifiers.ts. Measured:
+// reject 100 -> 103, parse 5271 -> 5266. A loss, and wrong besides.
 MemberMods  <~~ push({mods: takeAll()}) ~~>
             = { MemberModItem } ;
 // A decorator may also stand BETWEEN the modifiers ('public @dec method() {}'); in that
@@ -1338,7 +1398,7 @@ ImportStmt  <~~ push(jsImport(takeAll(), up.pos)) ~~>
 // and the older 'import X = require("...")' / 'import X = A.B' aliases; all of them are
 // erased the same way - only the module SPECIFIER matters, and only when it names a
 // project file.
-            = KwImport ( ImportEquals | ImportClause KwFrom ModPath | ModPath ) [ ImportAttrs ] [ ";" ] ;
+            = KwImport ( ImportEquals | KwType ImportEquals | ImportClause KwFrom ModPath | ModPath ) [ ImportAttrs ] [ ";" ] ;
 ImportAttrs = ( "with" | "assert" ) KwEnd SkipBlock ;
 ImportEquals = NotBindName Id "=" ( Id "(" ModPath ")" | Id { "." Id } ) ;
 ImportClause = [ KwType ] ( ImportBinding [ "," ImportTail ] | ImportTail ) ;
@@ -1472,10 +1532,16 @@ BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
             = ( HexPrefix HexDigit { HexDigit | "_" } | BinPrefix BinDigit { BinDigit | "_" }
               | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() { Digit | "_" } )
               "n" KwEnd :whitespace(Whitespace) ;
-// A decimal with numeric separators (1_000, 3.141_59); requires at least one '_'.
-// Tried before JsDecLit, which would stop at the first '_' and leave it dangling.
+// A decimal with numeric separators (1_000, 3.141_59, 1e1_0); requires at least one '_'.
+// Tried before JsDecLit, which would stop at the first '_' and leave it dangling. The
+// separator may sit in the EXPONENT alone, which the first alternative cannot reach - it
+// demands a '_' before the '.', so the second one carries that shape.
 SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
-            = Digit :whitespace() { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+            = Digit :whitespace() { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ SepDecExp ] KwEnd :whitespace(Whitespace)
+            | Digit :whitespace() { Digit } [ "." Digit { Digit } ] SepExpOnly KwEnd :whitespace(Whitespace) ;
+SepExpOnly  = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } "_" { Digit | "_" } ;
+// The exponent takes separators too ('1e1_0'), which the plain DecExp below must not.
+SepDecExp   = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit | "_" } ;
 // The plain decimal. It is spelled out here rather than taken from lib/numbers.abnf
 // because JavaScript has the exponent form, which that DecLit does not: without it
 // '1e3' is the number 1 followed by the variable 'e3', which parses and then means
@@ -2028,8 +2094,12 @@ NotChain    = :script(~~
             i = i + 1
             cc = c.peek(i)
         }
+        // '++' / '--' glued to the name is an UPDATE expression, so the operand is not a
+        // bare name either: 'typeof t--' is typeof (t--). A single '-' or '+' is the
+        // ordinary binary operator and must stay out of it ('typeof a - 1').
         var bad = cc === 46 || cc === 91 || cc === 40 || cc === 96
             || (cc === 63 && c.peek(i + 1) === 46)
+            || ((cc === 43 || cc === 45) && c.peek(i + 1) === cc)
         return bad ? abnf.newToken("\x01chain", 0) : undefined
     })()
 ~~) ;
@@ -4246,6 +4316,38 @@ NotFuncHead = :script(~~
             }
             callExt(b, "js_supset", [sb.sup, sb.self, kr.v, v])
             return {b: b, v: v}
+        }
+    }
+    // '++super.x' and 'super.x++'. items = ["++"|"--", {skey}, ...path] for the prefix
+    // form and [{skey}, ...path, "++"|"--"] for the postfix one, so the type of items[0]
+    // says which was parsed. With suffixes only the BASE is a super read and the rest is
+    // an ordinary member path, so it degrades to the {base, path} reference the plain
+    // update builders take; without them the read AND the store go through super.
+    function makeSuperUpdate(items, pos) {
+        var pre = (typeof items[0] == "string")
+        var n = items.length
+        var op = pre ? items[0] : items[n - 1]
+        var keyItem = pre ? items[1] : items[0]
+        var path = pre ? items.slice(2) : items.slice(1, n - 1)
+        var defName = curClassName
+        if (path.length > 0) {
+            if (path[path.length - 1].kind != "member") {
+                return notImplExpr("update of a super call result", pos)
+            }
+            var ref = {base: makeSuperProp(keyItem), path: path}
+            if (pre) { return makePreIncDec(ref, op) }
+            return makeIncDec([ref, op])
+        }
+        var keyT = keyItem.skey
+        var extName = (op == "++") ? "js_add" : "js_sub"
+        return function(b) {
+            var kr = keyT(b)
+            var sb = emitSuperBase(kr.b, defName)
+            var oldV = callExt(kr.b, "js_tonum", [callExt(kr.b, "js_supget", [sb.sup, sb.self, kr.v])])
+            var newV = callExt(kr.b, extName, [oldV, callExt(kr.b, "js_num_i", [handle(1)])])
+            callExt(kr.b, "js_supset", [sb.sup, sb.self, kr.v, newV])
+            if (pre) { return {b: kr.b, v: newV} }
+            return {b: kr.b, v: oldV}
         }
     }
     // The member-path target of a for-in/of. The path must END in a member, and this
