@@ -55,15 +55,34 @@ echo "building compiler..."
 go build -o "$BIN" . || { echo "clang-check.sh: build failed" >&2; exit 2; }
 
 # A compiler grammar prints its MODULE and then the program's own stdout under
-# -q (the module is a compiler's default output, not noise). Keep everything up
-# to and including the last line that is "}" or begins with @ / declare / define,
-# which is where the module ends and the program's output begins.
+# -q (the module is a compiler's default output, not noise), so the module has to
+# be cut out of the combined stream.
+#
+# Do NOT do this by finding the LAST line that looks like the end of IR. That is
+# the obvious approach and it is wrong, because the PROGRAM's output can contain
+# such a line: php's var_dump prints a bare "}" to close an array, which pushes
+# the cut past the real end and feeds program text to clang. It reports
+#     error: expected top-level entity ... int(9223372036854775807)
+# which reads exactly like an emitter bug and is not one.
+#
+# Scan forward instead, tracking brace depth. The module is a prefix: at depth 0
+# only @globals, declare, define and blanks belong to it, and the first line at
+# depth 0 that is none of those is where the program's output starts.
 module_only() {
-    awk 'BEGIN { n = 0 } { l[n++] = $0 }
-         END { last = -1
-               for (i = 0; i < n; i++)
-                   if (l[i] == "}" || l[i] ~ /^declare / || l[i] ~ /^@/ || l[i] ~ /^define /) last = i
-               for (i = 0; i <= last; i++) print l[i] }'
+    awk '
+        BEGIN { depth = 0 }
+        {
+            if (depth > 0) {                       # inside a define body
+                print
+                if ($0 ~ /^}/) depth = 0
+                next
+            }
+            if ($0 ~ /^define /) { print; depth = 1; if ($0 ~ /}[ \t]*$/) depth = 0; next }
+            if ($0 ~ /^@/ || $0 ~ /^declare / || $0 ~ /^[ \t]*$/ ||
+                $0 ~ /^source_filename/ || $0 ~ /^target / || $0 ~ /^;/ ||
+                $0 ~ /^!/ || $0 ~ /^%[A-Za-z_.$]/ || $0 ~ /^attributes /) { print; next }
+            exit                                   # first non-module line: stop
+        }'
 }
 
 printf '\n%-12s %8s  %s\n' LANGUAGE LINES VERDICT

@@ -359,11 +359,34 @@ cross_strip() {
     local all; all="$(LC_ALL=C tr -d '\000')"
     printf '%s\n' "$all" | grep -E '^warning: ' || true
     printf '%s\n' "$all" | grep -vE '^warning: ' \
-    | awk 'BEGIN { n = 0 } { l[n++] = $0 }
-         END { last = -1
-               for (i = 0; i < n; i++)
-                   if (l[i] == "}" || l[i] ~ /^declare / || l[i] ~ /^@/ || l[i] ~ /^define /) last = i
-               for (i = last + 1; i < n; i++) print l[i] }' \
+    | awk '
+        # Drop the emitted module, keep the program output that follows it.
+        #
+        # This used to search for the LAST line that looked like the end of IR
+        # and cut there. That is wrong, and it silently truncated the very
+        # output this group exists to compare: the PROGRAM can print such a
+        # line - php var_dump closes an array with a bare "}" - so the cut
+        # jumped PAST real output. Worse, it did so ASYMMETRICALLY, because the
+        # interpreter half has no module at all: one half lost the lines before
+        # its last "}" and the other lost module-plus-output, so a genuine
+        # divergence could cancel out into a clean diff.
+        #
+        # Scan forward with brace depth instead. The module is a prefix: at
+        # depth 0 only @globals, declare, define and blanks belong to it, and
+        # the first depth-0 line that is none of those begins the output. On
+        # interpreter output nothing matches at line 1, so it all passes
+        # through, which is what makes the two halves comparable.
+        BEGIN { depth = 0; done = 0 }
+        done { print; next }
+        {
+            if (depth > 0) { if ($0 ~ /^}/) depth = 0; next }
+            if ($0 ~ /^define /) { depth = 1; if ($0 ~ /}[ \t]*$/) depth = 0; next }
+            if ($0 ~ /^@/ || $0 ~ /^declare / || $0 ~ /^source_filename/ ||
+                $0 ~ /^target / || $0 ~ /^;/ || $0 ~ /^!/ ||
+                $0 ~ /^%[A-Za-z_.$]/ || $0 ~ /^attributes /) { next }
+            if ($0 ~ /^[ \t]*$/ && !seenout) { next }
+            done = 1; seenout = 1; print
+        }' \
     | grep -Ev '^[a-z#+-]+ (interpreter|compiler): |^  ==> Fail$|^[a-z#+-]+ (interpreter|compiler) error: ' \
     | grep -Ev '^(js runtime error: |jsmain\(\) returned )' \
     | grep -Ev '^[a-z0-9-]+: (exit status|main\(\) returned|program value is) [0-9-]+$' \

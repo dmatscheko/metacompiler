@@ -408,6 +408,33 @@ func main() {
 		return
 	}
 
+	// -exe is honoured by the GRAMMAR, not by this driver: a -to-llvm-ir grammar
+	// reads c.exePath and hands its module to clang. A grammar that never reads it
+	// ignores the flag completely - and the run then prints the program's output
+	// and exits 0 exactly as it always does, because llvm.Run executed the module
+	// as usual. That is indistinguishable from a successful native build.
+	//
+	// Only grammars emitting SELF-CONTAINED IR can implement it (c, tinyc, bash,
+	// batch, lisp, calculator, brainfuck). The other twelve languages emit handle
+	// IR calling js_* externs that clang has nothing to link against, so for most
+	// of the tree -exe has always been a silent no-op - and on 2026-07-27 that
+	// cost real work: a run was reported as clang-validated when no binary had
+	// been produced at all.
+	//
+	// Refuse up front rather than after the fact. The check cannot live after
+	// runPipeline: these language tests are self-checking and propagate the
+	// program's own result through os.Exit, so control never comes back here.
+	if o.exePath != "" && !strings.Contains(srcs[0], "exePath") {
+		fmt.Fprintf(os.Stderr,
+			"error: -exe: %s does not implement c.exePath, so no executable would be produced.\n"+
+				"       Only a grammar emitting self-contained IR can link natively. One emitting handle\n"+
+				"       IR (js_* externs into the Go runtime) has nothing for clang to link, and the run\n"+
+				"       would go through llvm.Run as usual while looking like a successful native build.\n"+
+				"       To clang-check such a grammar's module instead, use tests/clang-check.sh.\n",
+			o.files[0])
+		os.Exit(2)
+	}
+
 	runPipeline(o, srcs, parseropts)
 }
 
