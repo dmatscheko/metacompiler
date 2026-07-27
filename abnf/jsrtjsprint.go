@@ -402,6 +402,12 @@ func (rt *jsrt) jsvFlatten(out *[]interface{}, elems []interface{}, depth int) {
 
 // jsvMethod is the Go twin of `jsBuiltin` in languages/js-interpreter.abnf.
 func (rt *jsrt) jsvMethod(target interface{}, name string, args []interface{}) (interface{}, bool) {
+	// BigInt.prototype (abnf/jsrtjsbig.go): (255n).toString(16), (1n).valueOf().
+	if bi, ok := target.(*jsBigInt); ok {
+		if v, handled := rt.jsvBigIntMethod(bi.v, name, args); handled {
+			return v, true
+		}
+	}
 	// Object.keys / values / entries / assign / freeze / fromEntries.
 	if jsvIsObjectGlobal(target) {
 		switch name {
@@ -1307,4 +1313,8 @@ func (rt *jsrt) addJSValueExterns(m map[string]func(args []uint64) uint64) {
 		}
 		return baseMcall(a)
 	}
+
+	// BigInt last: its wrappers sit in FRONT of the js_js* names registered above
+	// (js_jsadd, js_jseq, js_jslt, ...), so they have to exist first.
+	rt.addJSBigIntExterns(m)
 }

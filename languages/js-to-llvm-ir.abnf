@@ -30,14 +30,31 @@ What is accepted but NOT lowered (each aborts with a file:line message, or warns
 skipped under -warn-unsupported): `with`, a logical assignment (&&= ||= ??=) to a bare
 super property, and the assign-nowhere heads the spec calls early errors ('0 = 0',
 'for (0 of 0)'). Deliberate semantic simplifications, because the runtime has no
-model for them: `await` is the identity (there is no promise type and no job queue, so an
-async function is an ordinary function that returns its value), a regular expression is
+model for them: a regular expression is
 matched by the shared engine (abnf/jsrtregex.go plus abnf/jsrtregexjs.go), which is one
 permissive dialect shared by four languages and so has no lookbehind and no property
 escapes, a
-for-of over a generator materializes it first (the loop iterates by index), a BigInt that
-meets a double in an arithmetic operator converts instead of raising a TypeError, and the
+for-of over a generator materializes it first (the loop iterates by index), and the
 string parts of a tagged template are an object with index keys rather than an Array.
+
+BigInt is REAL: arbitrary precision (2n ** 100n is exact), its own type for typeof and
+===, the mixed-operand TypeError of the spec for an arithmetic or bitwise operator, the
+mathematical == and < across the BigInt/Number line, the bitwise and shift operators on
+the two's complement bit string, BigInt(v) / Number(v) and (255n).toString(16). It is
+backed by Go math/big in abnf/jsrtjsbig.go; only a mixed COMPARISON goes through the
+double value, so a magnitude past 2^53 could round there.
+
+ASYNC IS NOT REAL, and the limitation is observable rather than cosmetic. There is no
+promise type and no job queue: an async function is an ordinary function that runs to
+completion synchronously and returns its value directly, `await e` is the identity on e,
+`for await` is a plain for-of and an async generator is a synchronous generator. So the
+syntax parses and type checks and single-threaded results come out right, but ORDERING
+does not: code after an await runs before the rest of the caller instead of after it,
+and nothing is deferred to a microtask. Building the real thing needs a job queue in the
+runtime and an async function compiled as a coroutine; abnf/jsrt.go's jsGenerator (a
+goroutine per body with an unbuffered channel handshake) is the machinery it would
+reuse, and the interpreter half would need the same suspension it has not got either -
+the two halves have to agree, so neither can move alone.
 
 Unlike MetaJS, variables are NOT type pinned: declarations and assignments go through the
 UNPINNED scope externals js_scope_decl / js_scope_set / js_scope_get, so a variable can
@@ -477,7 +494,7 @@ Neg         <~~ push(makeUnary(pop(), "js_neg")) ~~>
             = "-" UnaryExpr ;
 // Unary plus is ToNumber, not a no-op: '+"3"' is the number 3. It is tried after
 // PreIncDec so that '++x' stays an increment instead of '+(+x)'.
-Plus        <~~ push(makeUnary(pop(), "js_tonum")) ~~>
+Plus        <~~ push(makeUnary(pop(), "js_jstonumber")) ~~>
             = "+" UnaryExpr ;
 Not         <~~ push(makeUnary(pop(), "js_not")) ~~>
             = "!" UnaryExpr ;
@@ -2980,7 +2997,7 @@ NotFuncHead = :script(~~
             if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { break }
             digits = digits + src.charAt(i)
         }
-        return function(b) { return {b: b, v: callExt(b, "js_bigint", [emitStr(b, digits)])} }
+        return function(b) { return {b: b, v: callExt(b, "js_jsbigint", [emitStr(b, digits)])} }
     }
     // Drop the numeric separators of a decimal literal so parseFloat sees a plain number.
     function stripSeps(s) {
@@ -3163,12 +3180,13 @@ NotFuncHead = :script(~~
             return {b: r.b, v: callExt(r.b, extName, [r.v])}
         }
     }
-    // ~v is v ^ -1 on the ToInt32 value, so it reuses the xor external.
+    // ~v is v ^ -1 on the ToInt32 value for a number and -v - 1 in arbitrary
+    // precision for a BigInt; js_jsbnot is the one external that knows both.
     function makeBitNot(t) {
         return function(b) {
             var r = t(b)
             b = r.b
-            return {b: b, v: callExt(b, "js_bxor", [r.v, callExt(b, "js_num_i", [handle(-1)])])}
+            return {b: b, v: callExt(b, "js_jsbnot", [r.v])}
         }
     }
 
@@ -3335,15 +3353,11 @@ NotFuncHead = :script(~~
     }
 
     // ----- Exponentiation -----
-    // The runtime has no js_pow external, and it does not need one: Math.pow is a host
-    // global of the same runtime, so '**' lowers to a method call on it. js_mcall is the
-    // dispatch that finds a host function property on a plain object.
+    // js_jspow IS Math.pow (math.Pow over ToNumber) for two numbers and exact
+    // arbitrary precision for two BigInts, which Math.pow cannot be: 2n ** 64n has no
+    // double. It used to lower to a js_mcall on the Math host global.
     function emitPow(b, l, r) {
-        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
-        var argsV = callExt(b, "js_arr_new", [])
-        callExt(b, "js_arr_push", [argsV, l])
-        callExt(b, "js_arr_push", [argsV, r])
-        return callExt(b, "js_mcall", [mathV, emitStr(b, "pow"), argsV])
+        return callExt(b, "js_jspow", [l, r])
     }
     // One binary operator, by its source spelling (the compound '<op>=' forms map to the
     // same operator). Everything but '**' is a single external out of binExt.
@@ -3416,14 +3430,19 @@ NotFuncHead = :script(~~
     // Object]"` were all false in the compiler and true in node. Every one of them
     // delegates to the shared extern for two primitive operands, which is every
     // comparison a program that compares no objects makes.
-    binExt = {"+": "js_jsadd", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
+    // Every arithmetic and bitwise operator goes through the js_js* twin rather than
+    // the shared external, because a BigInt operand needs arbitrary precision and the
+    // spec's mixed-operand TypeError (abnf/jsrtjsbig.go). Each twin delegates to the
+    // shared one the moment neither operand is a BigInt, which is every program that
+    // writes no BigInt literal.
+    binExt = {"+": "js_jsadd", "-": "js_jssub", "*": "js_jsmul", "/": "js_jsdiv", "%": "js_jsmod",
                   "==": "js_jseq", "!=": "js_jsne", "===": "js_seq", "!==": "js_sne",
                   "<": "js_jslt", ">": "js_jsgt", "<=": "js_jsle", ">=": "js_jsge",
-                  "|": "js_bor", "^": "js_bxor", "&": "js_band",
-                  "<<": "js_shl", ">>": "js_shr", ">>>": "js_ushr",
-                  "+=": "js_jsadd", "-=": "js_sub", "*=": "js_mul", "/=": "js_div", "%=": "js_mod",
-                  "&=": "js_band", "^=": "js_bxor", "|=": "js_bor",
-                  "<<=": "js_shl", ">>=": "js_shr", ">>>=": "js_ushr"}
+                  "|": "js_jsbor", "^": "js_jsbxor", "&": "js_jsband",
+                  "<<": "js_jsshl", ">>": "js_jsshr", ">>>": "js_jsushr",
+                  "+=": "js_jsadd", "-=": "js_jssub", "*=": "js_jsmul", "/=": "js_jsdiv", "%=": "js_jsmod",
+                  "&=": "js_jsband", "^=": "js_jsbxor", "|=": "js_jsbor",
+                  "<<=": "js_jsshl", ">>=": "js_jsshr", ">>>=": "js_jsushr"}
     wraps = {} // MetaJS numbers are not wrapped to 32 bit.
 
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
@@ -3824,40 +3843,43 @@ NotFuncHead = :script(~~
     }
 
     // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
+    // ++/-- are ToNumeric-then-step, not ToNumber-then-add: a BigInt stays a BigInt
+    // and steps by 1n (js_jstonumeric / js_jsstep, abnf/jsrtjsbig.go), everything else
+    // becomes a number and steps by 1 exactly as js_tonum / js_add did.
     function makeIncDec(items) {
         var ref = items[0]
-        var extName = (items[1] == "++") ? "js_add" : "js_sub"
+        var delta = (items[1] == "++") ? 1 : -1
         return function(b) {
-            var oneV = callExt(b, "js_num_i", [handle(1)])
+            var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
-                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, extName, [oldV, oneV])])
+                var oldV = callExt(b, "js_jstonumeric", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, "js_jsstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
-            var oldM = callExt(b, "js_tonum", [callExt(b, "js_get", [p.obj, p.key])])
-            callExt(b, "js_set", [p.obj, p.key, callExt(b, extName, [oldM, oneV])])
+            var oldM = callExt(b, "js_jstonumeric", [callExt(b, "js_get", [p.obj, p.key])])
+            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_jsstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
     }
     // Prefix ++/--: like makeIncDec, but the expression value is the new one.
     function makePreIncDec(ref, op) {
-        var extName = (op == "++") ? "js_add" : "js_sub"
+        var delta = (op == "++") ? 1 : -1
         return function(b) {
-            var oneV = callExt(b, "js_num_i", [handle(1)])
+            var oneV = callExt(b, "js_num_i", [handle(delta)])
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
-                var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
-                var newV = callExt(b, extName, [oldV, oneV])
+                var oldV = callExt(b, "js_jstonumeric", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+                var newV = callExt(b, "js_jsstep", [oldV, oneV])
                 callExt(b, "js_scope_set", [curScopeV, nameV, newV])
                 return {b: b, v: newV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
-            var oldM = callExt(b, "js_tonum", [callExt(b, "js_get", [p.obj, p.key])])
-            var newM = callExt(b, extName, [oldM, oneV])
+            var oldM = callExt(b, "js_jstonumeric", [callExt(b, "js_get", [p.obj, p.key])])
+            var newM = callExt(b, "js_jsstep", [oldM, oneV])
             callExt(b, "js_set", [p.obj, p.key, newM])
             return {b: b, v: newM}
         }
@@ -5068,6 +5090,10 @@ NotFuncHead = :script(~~
         // a bare String(v) call aborted with "call of a non function value"; this is a
         // real function, and String.fromCharCode still resolves through js_jsmcall.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "String"), callExt(b, "js_jsstringfn", [])])
+        // BigInt(v) is ToBigInt and Number(v) is ToNumber; the latter is the only way
+        // back out of a BigInt, since unary '+' refuses it.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "BigInt"), callExt(b, "js_jsbigintfn", [])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Number"), callExt(b, "js_jsnumberfn", [])])
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

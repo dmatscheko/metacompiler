@@ -1085,3 +1085,20 @@ for Kotlin and one writing PHP's float epsilon, which is why it is recorded here
 It belongs to the "green under goja, dead under `-frozen`" class along with the
 `anytype` slot rule above — and it is the more confusing member, because the
 failure is not at the offending line and does not name a value at all.
+
+## Frozen type-pinning bites LOCALS too, not just parameters
+
+The documented rule is that a reassigned parameter keeps the type it was first
+called with. The same applies to a plain `var`, and it is easier to hit by
+accident because nothing about the call site warns you:
+
+    var b = toPrimitive(x)     // a string on the first call
+    b = parseFloat(b)          // -frozen: "variable 'b' has type string and
+                               //           cannot hold a number"
+
+Green under goja, dead under `-frozen`, and the error names a variable rather
+than the construct that caused it. Found in a BigInt relational helper, where
+`1n < [2n]` took a string out of ToPrimitive and then wanted a number.
+
+Declare any slot that will hold more than one type as `anytype`, or split the
+two meanings into two names.
