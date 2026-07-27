@@ -91,8 +91,32 @@ Stmt        = Rem | EchoCtl | EchoDot | EchoParen | Echo
 
 // ----- echo -----
 Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
-EchoCtl     <~~ push(makeNop()) ~~> = KwEcho ( KwOn | KwOff ) ;
-EchoDot     <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "." :whitespace(Hspace) ;
+// `echo on` / `echo off` toggle command echoing - but ONLY when the on/off is the whole
+// rest of the line. Wine's expectation file records `echo off now` printing "off now"
+// (test_builtins.cmd.exp line 58), i.e. it is an ordinary echo, so EchoEol asserts the
+// end of the line before this rule may claim the statement.
+EchoCtl     <~~ push(makeNop()) ~~> = KwEcho ( KwOn | KwOff ) EchoEol ;
+EchoEol = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        if (cc == -1 || cc == 10 || cc == 13) { return undefined }
+        return abnf.newToken("\x01echo-eol", 0)
+    })()
+~~) ;
+// `echo` glued to a "." ":" or "/" with NO space: the punctuation is a separator, not part
+// of the text, and whatever follows it on the line IS the text. Ground truth is wine's own
+// expectation file (tests/reference/batch/wine-cmd-tests/tests/test_builtins.cmd.exp - there
+// is no cmd.exe or wine on this machine to run):
+//     echo.       -> (empty line)      echo.word  -> word
+//     echo:       -> (empty line)      echo:word  -> word
+//     echo/       -> (empty line)      echo/word  -> word
+// while the SPACED forms go through Echo and keep the punctuation:
+//     echo .      -> .                 echo .word -> .word
+// The :whitespace() comes BEFORE the separator: only the GLUED form is this rule.
+EchoDot     <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh LineText ;
+EchoSepCh   = "." | ":" | "/" ;
 EchoParen   <~~ push(makeEcho(makeStr(""))) ~~> = KwEchoW "(" :whitespace(Hspace) ;
 Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
 
@@ -162,8 +186,11 @@ ForFLit     <~~ push({lit: pop()}) ~~> = RawQuoted ;
 // capturable output - echo and ver.
 ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace(Hspace) SqChain "'" :whitespace(Hspace) ;
 SqChain     <~~ push(makeSeq(takeAll())) ~~> = SqCmd { "&" SqCmd } ;
-SqCmd       = SqEcho | SqVer ;
+SqCmd       = SqEchoDot | SqEcho | SqVer ;
 SqVer       <~~ push(makeVer()) ~~> = KwVer ;
+// cmd parses the command inside for /f ('...') with the same command parser, so the glued
+// `echo.` / `echo:` / `echo/` separator (see EchoDot) applies here too.
+SqEchoDot   <~~ push(makeEcho(pop())) ~~> = KwEchoW :whitespace() EchoSepCh SqText ;
 SqEcho      <~~ push(makeEcho(pop())) ~~> = KwEcho SqText ;
 // A bare word is a FILE set. The path model behind this runtime answers existence, not
 // contents, so a file set always reads nothing and the loop runs zero times.

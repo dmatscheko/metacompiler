@@ -762,6 +762,63 @@ s23() {
   check uni14 "${arr[1]:1:2}" "hr"
   check uni15 "${#arr[@]}" 2
 }
+# ===== SECTION 24: background lists, word "#", and word-shaped function names =====
+# Three constructs the grammars used to refuse or mis-read. Every expected value
+# below was produced by running the same code under GNU bash 5.3.15 first.
+#
+#   - `LIST &` : "&" both marks a list asynchronous AND separates statements, so
+#     `a & b`, `a &` and `a &<newline>b` are all one list. LIMIT (both halves):
+#     there is no second process here, so the statement runs to completion in a
+#     subshell and reports status 0 - `cmd & wait` sees exactly what bash sees,
+#     concurrency does not, so nothing below depends on overlap.
+#   - "#" only opens a comment at the START of a word: bash prints a#b for
+#     `echo a#b`, and 64#a is an arithmetic base-N literal, not a comment.
+#   - a function NAME is a word, not an identifier: show-len, ble/foo, py-repr.
+s24-hyphen() { echo "hy-$1"; }
+s24/slash() { echo "sl-$1"; }
+s24sub() ( echo "in-sub"; )
+s24() {
+  # "#" inside a word is literal
+  check bg1 "$(echo a#b)" "a#b"
+  local hv=y#z
+  check bg2 "$hv" "y#z"
+  check bg3 "$(( 64#a ))" 10
+  check bg4 "$(( 2#1011 ))" 11
+
+  # word-shaped function names, and a subshell function body
+  check bg5 "$(s24-hyphen q)" "hy-q"
+  check bg6 "$(s24/slash r)" "sl-r"
+  check bg7 "$(s24sub)" "in-sub"
+
+  # `&` as a statement terminator and as a separator
+  local out
+  out="$( { echo one & wait; } )"
+  check bg8 "$out" "one"
+  # "&" as a SEPARATOR between two statements. Only the count is asserted: real
+  # bash runs the two concurrently, so their order is not defined - what is being
+  # ratcheted here is that `a & b` is one statement list, not a syntax error.
+  out="$( { echo two & echo three; wait; } )"
+  check bg9 "${#out}" 9
+  # a group and a subshell may be backgrounded
+  out="$( { { echo grp; } & wait; } )"
+  check bg10 "$out" "grp"
+  out="$( { ( echo sub ) & wait; } )"
+  check bg11 "$out" "sub"
+  # inside a loop body and a case body
+  out="$( { for i in 1 2; do echo "i=$i" & done; wait; } )"
+  check bg12 "$out" "i=1
+i=2"
+  out="$( { case x in x) echo c1 & ;; esac; wait; } )"
+  check bg13 "$out" "c1"
+  # a backgrounded statement runs in a SUBSHELL: the parent keeps its value
+  local v=1
+  v=2 &
+  wait
+  check bg14 "$v" 1
+  # `wait` with nothing to wait for succeeds
+  wait
+  check bg15 $? 0
+}
 # ===== END SECTIONS =====
 
 s01   # SECTION-CALL 01
@@ -787,5 +844,6 @@ s20   # SECTION-CALL 20
 s21   # SECTION-CALL 21
 s22   # SECTION-CALL 22
 s23   # SECTION-CALL 23
+s24   # SECTION-CALL 24
 echo "full: $checks checks, $fails failures"
 exit $fails

@@ -55,22 +55,35 @@ thing on its line (HdScan refuses those rather than mis-parsing them).") ;
 
 // A whole script: statements separated by ; or newlines (blank / comment lines collapse).
 // The production tag runs all top level statement thunks and exits with the final status.
-Program     <~~ runProgram(takeAll()) ~~>
-            = OptSep [ Statement { Sep Statement } OptSep ] ;
+Program     <~~ runProgram(linkAsync(takeAll())) ~~>
+            = OptSep [ Statement { ListSep Statement } ListOptSep ] ;
 
 // Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
 // skipped before each separator token, so blank and comment-only lines vanish here.
+// NotCaseTerm is here, not only in CaseSep: ";;" / ";&" / ";;&" are the CASE-CLAUSE
+// terminators and nothing else. `echo 1 ;; echo 2` and `echo a;&` are syntax errors in real
+// bash, so a run of separators must never swallow one as "two semicolons".
 OptSep      = [ Sep ] ;
-Sep         = SepTok { SepTok } ;
+Sep         = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
 SepTok      = ";" | "\n" ;
+
+// `LIST &` runs the list ASYNCHRONOUSLY, and "&" is a list separator in its own right, so
+// `a & b`, `a &` and `a &<newline>b` are all one statement list. Exactly one "&" may open a
+// separator run (`a & & b` is a syntax error in bash too), and NotAmp keeps "&&" out of it.
+// The {amp} marker lands in the enclosing statement list, where linkAsync() turns it into a
+// wrapper around the statement it followed.
+ListSep     = AmpSep | Sep ;
+ListOptSep  = [ ListSep ] ;
+AmpSep      <~~ push({amp: 1}) ~~> = AmpTok { NotCaseTerm SepTok } ;
+AmpTok      = "&" NotAmp ;
 
 Statement   = AndOrList ;
 
 // A brace / keyword delimited body: at least one statement. The trailing OptSep swallows the
 // final ; or newline before the closing keyword (fi / done / }), and a reserved word in
 // command position (guarded in SimpleCommand) stops the list so that keyword can match.
-CompoundList <~~ push(makeSeq(takeAll())) ~~>
-            = OptSep Statement { Sep Statement } OptSep ;
+CompoundList <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
+            = OptSep Statement { ListSep Statement } ListOptSep ;
 
 
 // --- compound statements
@@ -93,8 +106,8 @@ CaseStmt    <~~ push(makeCase(takeAll())) ~~>
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
 CasePats    <~~ push({pats: takeAll()}) ~~> = Word { "|" Word } ;
-CaseBody    <~~ push(makeSeq(takeAll())) ~~>
-            = CaseSepOpt [ Statement { CaseSep Statement } CaseSepOpt ] ;
+CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
+            = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
 CaseSepOpt  = [ CaseSep ] ;
 CaseTerm    = CaseNl CaseTermTok ;
@@ -123,10 +136,18 @@ ForWords    <~~ push({words: takeAll()}) ~~>
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
-            = FuncDefHead OptSep "{" CompoundList "}" ;
+            = FuncDefHead OptSep FuncBody ;
+// A function body may be ANY compound command; { LIST; } and ( LIST ) are the two that
+// appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
+FuncBody    = FuncBraceBody | Subshell ;
+FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
 FuncDefHead = ( KwFunction FuncName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
-FuncName    <~~ push({fname: up.in}) ~~>
-            = Name ;
+FuncName    = FuncNameTok :whitespace(Whitespace) ;
+// A bash function name is a WORD, not an identifier. The corpus is full of real ones:
+//     show-len() { ... }   py-repr() { ... }   ble/foo() { ... }   test-hyphen() { ... }
+// so anything that is not a blank, a separator, a metacharacter or a quote is allowed.
+FuncNameTok <~~ push({fname: up.in}) ~~>
+            = !@+" \t\n\r;&|<>(){}$'\"\\`=" ;
 
 Name        = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
 
@@ -165,8 +186,10 @@ AsgEq       = "=" NotEq ;
 
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
 Subshell    <~~ push(makeSubshell(pop())) ~~> = "(" CompoundList ")" [ RedirList ] ;
-// { LIST; } is a plain grouping: it runs in the CURRENT shell.
-BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" CompoundList "}" [ RedirList ] ;
+// { LIST; } is a plain grouping: it runs in the CURRENT shell. "{" only opens a group when
+// it is a WORD OF ITS OWN - `{ls; }` is the word "{ls" followed by a stray "}", which real
+// bash refuses ("syntax error near unexpected token `}'"), so BraceKwEnd demands the blank.
+BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
 ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
@@ -264,7 +287,7 @@ LtOne       = "<" NotLt ;
 Word        <~~ push(mkWord(takeAll())) ~~>
             = WordFirst :whitespace() { WordSeg } ;
 WordFirst   = Tilde | WordSeg ;
-WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceLit | BareSeg ;
+WordSeg     = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceLit | EgPfxLit | BareSeg ;
 
 // An expansion OUTSIDE quotes is subject to word splitting on IFS; the same production
 // inside a double-quoted string (or a ${...} word) is not, which is the only difference
@@ -277,14 +300,14 @@ UqExp       <~~ push(mkSplittable(pop())) ~~> = ExpSeg ;
 CWord       <~~ pushWords(mkWords(takeAll())) ~~>
             = CWordFirst :whitespace() { CWordSeg } ;
 CWordFirst  = Tilde | CWordSeg ;
-CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceRange | BraceAlts | BraceLit | BareSeg ;
+CWordSeg    = SqSeg | DqSeg | AnsiSeg | UqExp | LineCont | EscSeg | BraceRange | BraceAlts | BraceLit | EgPfxLit | BareSeg ;
 
 // {a,b,c} needs at least one comma; {x} is literal. {1..5} {5..1} {a..e} {1..9..3} are ranges.
 BraceAlts   <~~ push(mkBraceAlts(takeAll())) ~~>
             = "{" :whitespace() BraceAlt "," BraceAlt { "," BraceAlt } "}" ;
 BraceAlt    <~~ push({alt: takeAll()}) ~~> = { BraceAltSeg } ;
 BraceAltSeg = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceRange | BraceAlts | AltBare ;
-AltBare     <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;#$'\"\\(){},&|<>`" ;
+AltBare     <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;$'\"\\(){},&|<>`" ;
 BraceRange  <~~ push(mkBraceRange(takeAll())) ~~>
             = "{" :whitespace() RangeEnd ".." RangeEnd [ RangeStep ] "}" ;
 RangeEnd    <~~ push({rend: up.in}) ~~> = RangeTok ;
@@ -322,9 +345,41 @@ DqCont      <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
             = "\\" AnyCh ;
 
+// The extended globs @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b). MEASURED SCOPE: only PatSeg - the
+// right hand side of == / != inside [[ ]] - refers to ExtGlob. bash parses the WHOLE file
+// before it runs anything, so a `shopt -s extglob` on line 1 does not make line 5 parse:
+//     $ cat f; shopt -s extglob; echo @(*.cc|*.h)
+//     f: line 2: syntax error near unexpected token `('
+// while `[[ --verbose == --@(help|verbose) ]]` needs no shopt at all. Wiring ExtGlob into
+// WordSeg / CWordSeg as well was measured and REVERTED: +0 must-parse files, -27 on the
+// reject row (all of extglob-files/, extglob-match/003 and /020, toysh/003 and /004,
+// case_/012, globignore/018, redirect-multi/009 and /010).
+// They are ordinary PATTERN text as
+// far as the word is concerned - the group is rebuilt literally (with $ expansions and
+// quoted arms substituted) and globAt() is what understands it. Nesting is allowed:
+//     [[ --verbose=1 == --@(help|verbose=@(1|2)) ]]   is true in bash.
+ExtGlob     = ExtGlobPfx EgOpen EgSegs EgClose ;
+ExtGlobPfx  <~~ push(makeConst(up.in)) ~~> = EgPfxTok EgLParen ;
+EgPfxTok    = "@" | "?" | "*" | "+" | "!" ;
+// BareSeg's greedy run must not swallow the "@" of "--@(help|verbose)", so the five extglob
+// prefix characters are excluded from it and matched by this segment instead whenever they
+// are NOT opening a group (ordered choice puts ExtGlob first). A word is the concatenation
+// of its segments, so "a@b" is still exactly "a@b" - it is just three segments now.
+EgPfxLit    <~~ push(makeConst(up.in)) ~~> = EgPfxTok ;
+EgOpen      <~~ push(makeConst("(")) ~~> = "(" :whitespace() ;
+EgClose     <~~ push(makeConst(")")) ~~> = ")" ;
+EgSegs      = { EgSeg } ;
+EgSeg       = SqSeg | DqSeg | ExpSeg | EscSeg | ExtGlob | EgBar | EgPfxLit | EgBare ;
+EgBar       <~~ push(makeConst("|")) ~~> = "|" ;
+EgBare      <~~ push(makeConst(up.in)) ~~> = !@+"|()\"'\\$`@?*+!" ;
+
 // A bare run: any char that is not whitespace, a separator, or a shell metacharacter.
+// "#" is NOT excluded: it only opens a comment at the START of a word, and a word can never
+// start with one here because the Whitespace rule (which contains Comment) has already run
+// before the first segment. Excluding it made `echo a#b` print "a" and `[[ 64#a -eq 10 ]]`
+// a parse error - real bash prints a#b and accepts the base-N literal.
 BareSeg     <~~ push(makeConst(up.in)) ~~>
-            = !@+" \t\n\r;#$'\"\\(){}&|<>`" ;
+            = !@+" \t\n\r;$'\"\\(){}&|<>`@?*+!" ;
 
 AnyCh       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -350,11 +405,36 @@ ArithExp    <~~ push(mkArith(pop())) ~~>
 // skipped (a default word may contain spaces), and the enclosing state is restored on return.
 DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
             = "${" :whitespace() PeBody "}" ;
-PeBody      = PeLen | PeInd | PePatForm | PeCaseForm | PeReplForm | PeOpForm | PeSubstrForm | PePlain ;
-PeLen       <~~ push({pe: "len"}) ~~> = "#" PeTarget ;
-PeInd       <~~ push({pe: "ind"}) ~~> = "!" PeTarget ;
+// "#" (length) and "!" (indirection) are PREFIXES of a whole parameter expansion, not just of
+// a name: bash parses `${#x-default}` and `${!ref-default}` and `${!r@a}`. It refuses the
+// first at RUN time ("bad substitution") and honours the other two, which is what
+// mkParamExp does with the {lenp} / {indp} markers. Separate marker keys, not {pe}: the
+// inner form pushes {pe} of its own and `${###}` needs both.
+// Ordered choice COMMITS: once an alternative matches, a later failure of the "}" kills the
+// whole ${...}, it does not retry the next alternative. So the two alternatives that can end
+// early - the bare length form and the bare name - assert the closing brace themselves with
+// PeBraceEnd, which is what lets `${##}` (length of $#, = 1) and `${###}` ($# with an empty
+// "#" strip, = 2) both come out the way bash prints them.
+PeBody      = PeLen | PeIndForm | PeCore | PeLenBad ;
+PeLen       <~~ push({lenp: 1}) ~~> = "#" PeTarget PeBraceEnd ;
+// `${#x-default}` and `${#a[0]/1/xxx}` PARSE in bash and then fail at run time with
+// "bad substitution"; this is the alternative that reaches that documented behaviour.
+PeLenBad    <~~ push({lenp: 1}) ~~> = "#" PeCore ;
+PeIndForm   <~~ push({indp: 1}) ~~> = "!" ( PePfxNames | PeCore ) ;
+PeCore      = PePatForm | PeCaseForm | PeReplForm | PeXform | PeOpForm | PeSubstrForm | PePlain ;
 PeOpForm    = PeTarget PeOp [ BraceWord ] ;
-PePlain     = PeTarget ;
+PePlain     = PeTarget PeBraceEnd ;
+// ${!prefix*} / ${!prefix@} : the NAMES of every set variable starting with that prefix.
+// PeBraceEnd, or `${!r@a}` would match this rule with PfxTok = "@" and then choke on the
+// "a}" it left behind - ordered choice commits, so it would never reach PeCore's PeXform.
+PePfxNames  <~~ push({pfx: up.in}) ~~> = PeName PfxTok PeBraceEnd ;
+PfxTok      = "*" | "@" ;
+// ${v@Q} ${v@U} ${v@L} ${v@u} ${v@E} ${v@a} ${v@A} ${v@K} ${v@k} ${v@P} : the transform
+// operators. Verified against GNU bash 5.3.15 with x='a b':
+//     @Q -> 'a b'   @U -> A B   @L -> a b   @u -> A b   @E -> a b   @A -> x='a b'
+//     @a -> the attribute letters (i for `declare -i n`, a for an indexed array)
+PeXform     = PeTarget "@" PeXfOp ;
+PeXfOp      <~~ push({xf: up.in}) ~~> = "Q" | "E" | "P" | "A" | "K" | "a" | "k" | "L" | "U" | "u" ;
 
 // NAME or NAME[SUBSCRIPT] - the subscript is a word, read as an arithmetic index for an
 // indexed array and as a literal key for an associative one. "@" and "*" mean the whole array.
@@ -391,12 +471,22 @@ ReplTail    = "/" PePatArg ;
 
 // ${v:off} and ${v:off:len} : the offsets are arithmetic, so whitespace matters again -
 // which is also what tells ${v: -1} (a substring) from ${v:-default}.
-PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArList [ PeSubLen ] ;
-PeSubLen    = ":" ArList ;
+// An omitted offset or length is legal and means 0 / "to the end":
+//     $ x=abc;   echo "[${x::1}]"      ->  [a]
+//     $ a=(1 2); echo "${a[@]: }"      ->  1 2
+// PeArPad: whitespace skipping is OFF again for DollarBrace's own closing "}", so a blank
+// between the last arithmetic token and the brace (`${foo:3 :-3 }`, `${a[@]: }`) has to be
+// eaten while this production still has the Whitespace rule installed.
+PeSubstrForm <~~ push({pe: "substr"}) ~~> = PeTarget ":" :whitespace(Whitespace) ArOff [ PeSubLen ] :whitespace() PeArPad ;
+PeSubLen    = ":" ArOff ;
+ArOff       = ArList | ArEmpty ;
+ArEmpty     <~~ push(mkNum("0")) ~~> = ArEndHere ;
+PeArPad     = { PeBlank } ;
+PeBlank     = @+" \t" ;
 
 // A word inside ${...}: anything up to the closing brace, expansions included.
 BraceWord   <~~ push(mkWord(takeAll())) ~~> = BraceSeg { BraceSeg } ;
-BraceSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | BraceBare ;
+BraceSeg    = SqSeg | DqSeg | ExpSeg | LineCont | EscSeg | BraceBare ;
 BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
@@ -408,7 +498,7 @@ DollarAt    <~~ push(mkVarRef("@")) ~~> = "$@" ;
 DollarPid   <~~ push(mkVarRef("$")) ~~> = "$$" ;
 DollarBang  <~~ push(mkVarRef("!")) ~~> = "$!" ;
 DollarDash  <~~ push(mkVarRef("-")) ~~> = "$-" ;
-DollarLit   <~~ push(makeConst("$")) ~~> = "$" ;
+DollarLit   <~~ push(makeConst("$")) ~~> = "$" NotDollarBrace ;
 
 VarName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 ArgDigit    = "0"..."9" ;
@@ -506,7 +596,7 @@ CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x
 // literal (`[[ $s == "h*" ]]` does not glob), so quoted segments are glob-escaped here.
 CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp PatWord ;
 PatWord     <~~ push(mkWord(takeAll())) ~~> = PatSeg :whitespace() { PatSeg } ;
-PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | BareSeg ;
+PatSeg      = PatSq | PatDq | PatAnsi | ExpSeg | PatEsc | ExtGlob | EgPfxLit | BareSeg ;
 PatSq       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(globEscape(up.in))) ~~> "'" ;
 PatDq       <~~ push(mkQuotedPat(mkDqWord(takeAll()))) ~~>
             = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
@@ -683,6 +773,53 @@ KwEnd = :script(~~
     })()
 ~~) ;
 
+// The boundary after the "{" that opens a brace group. Unlike KwEnd this must NOT accept "#":
+// `{#comment` is not a group in bash either. Verified against GNU bash 5.3.15:
+//     { echo hi; }      OK        {ls; }   syntax error near unexpected token `}'
+//     {<newline>...}    OK        {;}      syntax error near unexpected token `;'
+//     {(echo hi);}      OK   - "(" is a metacharacter, so "{" is still a word of its own.
+// (`{;}` stays refused here too, one level later: CompoundList needs a statement.)
+BraceKwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc == -1) { return undefined }
+        if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { return undefined }
+        if (cc == 59 || cc == 38 || cc == 124) { return undefined }
+        if (cc == 40 || cc == 41 || cc == 60 || cc == 62) { return undefined }
+        return abnf.newToken("\x01brace-boundary", 0)
+    })()
+~~) ;
+
+// "$" as a literal dollar. Bash allows it (`echo $`, `echo $}`, `x=$;`) but NOT before "{":
+// `echo ${`, `echo x${` and `echo "${"` are all "bad substitution"/EOF errors there, so a
+// ${...} that DollarBrace could not parse must not silently degrade to "$" plus a "{" word.
+// That is what made the ksh-only `${ echo hi }` and `${|REPLY=x}` forms parse, and
+// "${foo%d'}" too.
+// Succeeds (consuming nothing) when the arithmetic slot of a ${v:off:len} is EMPTY, i.e.
+// when the next non-blank character is the ":" before the length or the closing "}".
+ArEndHere = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9) { i = i + 1; cc = c.peek(i) }
+        if (cc !== 125 && cc !== 58) { return abnf.newToken("\x01ar-empty", 0) }
+    })()
+~~) ;
+
+// Succeeds only when the very next character closes the ${...}. See PeBody for why.
+PeBraceEnd = :script(~~
+    (function() { if (c.peek(0) !== 125) { return abnf.newToken("\x01pe-end", 0) } })()
+~~) ;
+
+// The extglob prefix characters are only that when a "(" follows immediately.
+EgLParen = :script(~~
+    (function() { if (c.peek(0) !== 40) { return abnf.newToken("\x01eg", 0) } })()
+~~) ;
+
+NotDollarBrace = :script(~~
+    (function() { if (c.peek(0) === 123) { return abnf.newToken("\x01dollar-brace", 0) } })()
+~~) ;
+
 // Succeeds (consumes nothing) unless the upcoming word is a reserved keyword with a boundary,
 // in which case it fails so the SimpleCommand does not swallow the keyword.
 NotReserved = :script(~~
@@ -696,6 +833,17 @@ NotReserved = :script(~~
             var nb = c.peek(i + 1)
             if (nb == -1 || nb == 32 || nb == 9 || nb == 10 || nb == 13 || nb == 59 || nb == 38 || nb == 124 || nb == 41) {
                 return abnf.newToken("\x01close-brace", 0)
+            }
+        }
+        // "[[" with a boundary after it is the reserved word that opens a conditional
+        // command, never a command name: if CondCmd could not parse the [[ ... ]] then the
+        // file IS a syntax error and must not fall through to `command not found: [[`.
+        // (`echo [[ a ]]` still works - this only bites in COMMAND position. Boundary is
+        // required so the glob word "[[:alpha:]]x" stays an ordinary word.)
+        if (cc == 91 && c.peek(i + 1) == 91) {
+            var ab = c.peek(i + 2)
+            if (ab == -1 || ab == 32 || ab == 9 || ab == 10 || ab == 13) {
+                return abnf.newToken("\x01dbracket", 0)
             }
         }
         var w = ""
@@ -908,7 +1056,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (name == "?") { return numToStr(lastStatus) }
         // There is no process behind a grammar run, so $$ and $! are fixed, documented values.
         if (name == "$") { return "1000" }
-        if (name == "!") { return "0" }
+        if (name == "!") { return numToStr(lastBgPid) }
         if (name == "-") { return "hB" }
         if (name == "#") { return numToStr(posParams.length) }
         if (name == "*") { return joinParams(ifsFirst()) }
@@ -1048,8 +1196,148 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, wordThunk / arithThunk ...]
+    // ---- ${v@OP} transform operators ------------------------------------------------
+    // Every rule below was measured against GNU bash 5.3.15 before it was written.
+
+    function octal3(k) {
+        var o = ""
+        var n = k
+        var d
+        for (d = 0; d < 3; d++) { o = numToStr(n % 8) + o; n = (n - (n % 8)) / 8 }
+        return o
+    }
+    // ${v@Q}: the value quoted so the shell reads it back unchanged. bash ALWAYS quotes
+    // ('abc', not abc), writes an embedded quote as '\'', and switches the whole thing to
+    // the $'...' form as soon as the value holds a control character:
+    //     abc -> 'abc'   a b -> 'a b'   it's -> 'it'\''s'   "x<NL>y" -> $'x\ny'
+    function shellQuote(v) {
+        var ctl = false
+        var i
+        for (i = 0; i < v.length; i++) { var cc = v.charCodeAt(i); if (cc < 32 || cc == 127) { ctl = true } }
+        if (!ctl) {
+            var out = "'"
+            for (i = 0; i < v.length; i++) {
+                var ch = v.charAt(i)
+                if (ch == "'") { out = out + "'\\''" } else { out = out + ch }
+            }
+            return out + "'"
+        }
+        var o2 = "$'"
+        for (i = 0; i < v.length; i++) {
+            var c2 = v.charAt(i)
+            var k = v.charCodeAt(i)
+            if (c2 == "'") { o2 = o2 + "\\'" }
+            else if (c2 == "\\") { o2 = o2 + "\\\\" }
+            else if (k == 7) { o2 = o2 + "\\a" }
+            else if (k == 8) { o2 = o2 + "\\b" }
+            else if (k == 9) { o2 = o2 + "\\t" }
+            else if (k == 10) { o2 = o2 + "\\n" }
+            else if (k == 11) { o2 = o2 + "\\v" }
+            else if (k == 12) { o2 = o2 + "\\f" }
+            else if (k == 13) { o2 = o2 + "\\r" }
+            else if (k == 27) { o2 = o2 + "\\E" }
+            else if (k < 32 || k == 127) { o2 = o2 + "\\" + octal3(k) }
+            else { o2 = o2 + c2 }
+        }
+        return o2 + "'"
+    }
+    // ${v@a}: the attribute letters. LIMIT: this interpreter tracks the array attributes
+    // only, so `declare -i n` reports "" where bash reports "i" - the -i/-r/-x attributes
+    // are not modelled anywhere else in this grammar either.
+    function varAttrs(name) {
+        if (isArr(name)) { if (arrs[arrKey(name)].assoc) { return "A" } return "a" }
+        return ""
+    }
+    // ${!prefix*} / ${!prefix@}: the set variable names with that prefix, sorted.
+    //     $ Zq=1; Zw=2; echo "${!Z*}"   ->  Zq Zw
+    function varNamesWithPrefix(p) {
+        var out = []
+        var i
+        for (i = 0; i < varNames.length; i++) {
+            var nm = varNames[i]
+            if (nm.length >= p.length && nm.slice(0, p.length) == p && isSetVar(nm)) { out.push(nm) }
+        }
+        // Insertion sort: Array.prototype.sort is outside the -frozen JS subset.
+        var j
+        for (i = 1; i < out.length; i++) {
+            var v = out[i]
+            j = i - 1
+            while (j >= 0 && out[j] > v) { out[j + 1] = out[j]; j = j - 1 }
+            out[j + 1] = v
+        }
+        return out
+    }
+    // ${v@P}: PS1-style prompt expansion. Measured:
+    //     '\a\e\r\n'  -> $'\a\E\r\n'      '\[foo\]\$' -> foo$      '\\$' -> \$
+    //     '\1004$'    -> @4$   (\100 is the octal escape, the trailing $ stays literal)
+    // The escapes that need a process behind them (\u \h \s \j \! \#) answer this
+    // interpreter's documented fixed values rather than pretending to know a real system.
+    function promptExpand(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var ch = s.charAt(i)
+            if (ch != "\\") { out = out + ch; i = i + 1; continue }
+            i = i + 1
+            if (i >= s.length) { out = out + "\\"; i = i + 1; continue }
+            var e = s.charAt(i)
+            i = i + 1
+            if (e == "a") { out = out + "\x07" }
+            else if (e == "e") { out = out + "\x1b" }
+            else if (e == "n") { out = out + "\n" }
+            else if (e == "r") { out = out + "\r" }
+            else if (e == "\\") { out = out + "\\" }
+            else if (e == "[" || e == "]") { out = out + "" }
+            else if (e == "$") { out = out + "$" }
+            else if (e == "u") { out = out + getVarVal("USER") }
+            else if (e == "h" || e == "H") { out = out + "localhost" }
+            else if (e == "w") { out = out + getVarVal("PWD") }
+            else if (e == "W") { out = out + promptBase(getVarVal("PWD")) }
+            else if (e == "s") { out = out + "bash" }
+            else if (e == "j" || e == "!" || e == "#") { out = out + "0" }
+            else if (e >= "0" && e <= "7") {
+                var oct = e
+                while (oct.length < 3 && i < s.length) {
+                    var d = s.charAt(i)
+                    if (d < "0" || d > "7") { break }
+                    oct = oct + d
+                    i = i + 1
+                }
+                var n = 0
+                var q
+                for (q = 0; q < oct.length; q++) { n = n * 8 + (oct.charCodeAt(q) - 48) }
+                out = out + String.fromCharCode(n)
+            }
+            else { out = out + "\\" + e }
+        }
+        return out
+    }
+    // One value through one @-transform. @P (prompt expansion) is the only one that is not
+    // a pure string function; @a is the only one that looks at the NAME rather than the value.
+    function xformOne(v, xfOp, nm) {
+        if (xfOp == "Q") { return shellQuote(v) }
+        if (xfOp == "U") { return v.toUpperCase() }
+        if (xfOp == "L") { return v.toLowerCase() }
+        if (xfOp == "u") { if (v.length == 0) { return v } return v.charAt(0).toUpperCase() + v.slice(1) }
+        if (xfOp == "E") { return ansiC(v) }
+        if (xfOp == "P") { return promptExpand(v) }
+        if (xfOp == "a") { return varAttrs(nm) }
+        if (xfOp == "K" || xfOp == "k") { return shellQuote(v) }
+        // @A prints the assignment that would recreate the variable.
+        return nm + "=" + shellQuote(v)
+    }
+    function promptBase(p) {
+        var i
+        var last = -1
+        for (i = 0; i < p.length; i++) { if (p.charAt(i) == "/") { last = i } }
+        if (last < 0) { return p }
+        if (last == p.length - 1) { return p }
+        return p.slice(last + 1)
+    }
+
     function mkParamExp(items) {
-        var pe = "", name = "", op = "", anchor = ""
+        var pe = "", name = "", op = "", anchor = "", xf = "", pfx = ""
+        var lenp = false, indp = false
         var args = []
         var wordT = null
         var hasIdx = false
@@ -1058,11 +1346,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var it = items[i]
             if (typeof it == "function") { args.push(it); wordT = it }
             else if (it.hasIdx != undefined) { hasIdx = true }
+            else if (it.lenp != undefined) { lenp = true }
+            else if (it.indp != undefined) { indp = true }
+            else if (it.xf != undefined) { xf = it.xf }
+            else if (it.pfx != undefined) { pfx = it.pfx }
             else if (it.pe != undefined) { pe = it.pe }
             else if (it.pname != undefined) { name = it.pname }
             else if (it.op != undefined) { op = it.op }
             else if (it.anchor != undefined) { anchor = it.anchor }
         }
+        // A BARE "#"/"!" prefix keeps the dedicated length / indirection paths (including
+        // their array forms ${#a[@]} and ${!a[@]}); combined with an operator it does not.
+        var bare = (op == "" && pe == "" && xf == "")
+        if (lenp && bare) { pe = "len" }
+        if (indp && bare && pfx == "") { pe = "ind" }
         // NAME[SUBSCRIPT]: the first word thunk is the subscript, the rest belong to the
         // operator form (a default word, a pattern, a replacement).
         var idxT = null
@@ -1113,6 +1410,22 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     return joinList(out, ifsFirst())
                 }
             }
+            // ${a[@]@Q} transforms EVERY element, and the result is still a field list:
+            //     $ a=(1 2); echo "${a[@]@Q}"   ->   '1' '2'
+            if (xf != "") {
+                var idxXf = xf
+                var idxName = name
+                return function() {
+                    var sub = readIdx()
+                    if (sub != "@" && sub != "*") { return xformOne(arrGet(idxName, sub), idxXf, idxName) }
+                    var vals = arrValList(idxName)
+                    var outv = []
+                    var q
+                    for (q = 0; q < vals.length; q++) { outv.push(xformOne(vals[q], idxXf, idxName)) }
+                    if (sub == "@") { return encFields(outv) }
+                    return joinList(outv, ifsFirst())
+                }
+            }
             return function() {
                 var sub = readIdx()
                 if (sub == "@") { return encFields(arrValList(name)) }
@@ -1123,17 +1436,42 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
         if (pe == "len") { return function() { return numToStr(charLen(getVarVal(name))) } }
         if (pe == "ind") { return function() { return getVarVal(getVarVal(name)) } }
+        // ${!prefix*} and ${!prefix@} answer the NAMES of the set variables with that prefix,
+        // in sorted order. Measured: `Zq=1; Zw=2; echo "${!Z*}"` -> "Zq Zw".
+        if (pfx != "") {
+            var pfxName = name
+            var pfxAt = (pfx == "@")
+            return function() {
+                var ks = varNamesWithPrefix(pfxName)
+                if (pfxAt) { return encFields(ks) }
+                return joinList(ks, ifsFirst())
+            }
+        }
+        // ${#v OP arg} is a parse-time-legal, run-time-illegal combination in bash:
+        //     $ echo "${#x-default}"   ->  bash: ${#x-default}: bad substitution
+        if (lenp) { var badName = name; return function() { fail("${#" + badName + "...}: bad substitution"); return "" } }
+        // ${!ref OP arg}: the operator applies to the variable the indirection LANDED on, so
+        // every leaf below reads its name through nameOf() instead of closing over `name`.
+        var baseName = name
+        var indirect = indp
+        var nameOf = function() { if (indirect) { return getVarVal(baseName) } return baseName }
+        // The transform operators. @P (prompt expansion) is the only one that is not a pure
+        // string function; promptExpand implements the escapes bash documents for PS1.
+        if (xf != "") {
+            var xfOp = xf
+            return function() { return xformOne(getVarVal(nameOf()), xfOp, nameOf()) }
+        }
         if (pe == "substr") {
             var offT0 = args[0]
             var lenT0 = (args.length > 1) ? args[1] : null
-            return function() { return sliceStr(getVarVal(name), offT0, lenT0) }
+            return function() { return sliceStr(getVarVal(nameOf()), offT0, lenT0) }
         }
         if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") {
             var isPre = (pe == "#" || pe == "##")
             var lng = (pe == "##" || pe == "%%")
             var patT = (args.length > 0) ? args[0] : null
             return function() {
-                var v = getVarVal(name)
+                var v = getVarVal(nameOf())
                 var pat = (patT != null) ? wordJoin(patT()) : ""
                 if (pat == "") { return v }
                 return stripPat(v, pat, isPre, lng)
@@ -1141,34 +1479,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (pe == "^" || pe == "^^" || pe == "," || pe == ",,") {
             var cmode = pe
-            return function() { return caseMap(getVarVal(name), cmode) }
+            return function() { return caseMap(getVarVal(nameOf()), cmode) }
         }
         if (pe == "/" || pe == "//") {
             var rmode = (anchor != "") ? anchor : ((pe == "//") ? "all" : "one")
             var pT = (args.length > 0) ? args[0] : null
             var rT = (args.length > 1) ? args[1] : null
             return function() {
-                var v = getVarVal(name)
+                var v = getVarVal(nameOf())
                 var pat = (pT != null) ? wordJoin(pT()) : ""
                 var rep = (rT != null) ? wordJoin(rT()) : ""
                 if (pat == "") { return v }
                 return replacePat(v, pat, rep, rmode)
             }
         }
-        if (op == "") { return function() { return getVarVal(name) } }
+        if (op == "") { return function() { return getVarVal(nameOf()) } }
         return function() {
-            var v = getVarVal(name)
+            var v = getVarVal(nameOf())
             var colon = (op.charAt(0) == ":")
             var o = colon ? op.slice(1) : op
-            var blank = colon ? (!isSetVar(name) || v == "") : (!isSetVar(name))
+            var blank = colon ? (!isSetVar(nameOf()) || v == "") : (!isSetVar(nameOf()))
             if (o == "-") { return blank ? ((wordT != null) ? wordJoin(wordT()) : "") : v }
             if (o == "+") { return blank ? "" : ((wordT != null) ? wordJoin(wordT()) : "") }
             if (o == "=") {
-                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; setVarVal(name, d); return d }
+                if (blank) { var d = (wordT != null) ? wordJoin(wordT()) : ""; setVarVal(nameOf(), d); return d }
                 return v
             }
             if (o == "?") {
-                if (blank) { fail(name + ": " + ((wordT != null) ? wordJoin(wordT()) : "parameter null or not set")) }
+                if (blank) { fail(nameOf() + ": " + ((wordT != null) ? wordJoin(wordT()) : "parameter null or not set")) }
                 return v
             }
             return v
@@ -1226,9 +1564,93 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // The same matcher backs case, [[ == ]] and the ${v#pat} family, exactly like the shell.
 
     // Match p[pi..] against s[si..]. Recursive with backtracking over each "*".
+    // --- extended globs: @(a|b) ?(a|b) *(a|b) +(a|b) !(a|b) ---------------------------
+    // Index just past the ")" that closes the "(" at p[pi], honouring nesting and escapes.
+    function egEnd(p, pi) {
+        var d = 0
+        var j = pi
+        while (j < p.length) {
+            var c = p.charAt(j)
+            if (c == "\\") { j = j + 2; continue }
+            if (c == "(") { d = d + 1 }
+            else if (c == ")") { d = d - 1; if (d == 0) { return j + 1 } }
+            j = j + 1
+        }
+        return -1
+    }
+    // Split an extglob body on its TOP-LEVEL "|" (so @(a|b=@(1|2)) has two arms, not three).
+    function egAlts(body) {
+        var out = []
+        var cur = ""
+        var d = 0
+        var j = 0
+        while (j < body.length) {
+            var c = body.charAt(j)
+            if (c == "\\" && j + 1 < body.length) { cur = cur + c + body.charAt(j + 1); j = j + 2; continue }
+            if (c == "(") { d = d + 1 }
+            else if (c == ")") { d = d - 1 }
+            if (c == "|" && d == 0) { out.push(cur); cur = ""; j = j + 1; continue }
+            cur = cur + c
+            j = j + 1
+        }
+        out.push(cur)
+        return out
+    }
+    function egAnyFull(alts, seg) {
+        var i
+        for (i = 0; i < alts.length; i++) { if (globAt(alts[i], 0, seg, 0)) { return true } }
+        return false
+    }
+    // op is the prefix character; rest is the pattern that follows the group.
+    function egMatch(op, alts, rest, s, si) {
+        // !(pat) matches any run that pat does NOT match in full.
+        if (op == 33) {
+            var k = si
+            while (k <= s.length) {
+                if (!egAnyFull(alts, s.slice(si, k))) { if (globAt(rest, 0, s, k)) { return true } }
+                k = k + 1
+            }
+            return false
+        }
+        // ?(pat) zero or one, @(pat) exactly one.
+        if (op == 63 || op == 64) {
+            if (op == 63 && globAt(rest, 0, s, si)) { return true }
+            var i
+            for (i = 0; i < alts.length; i++) {
+                var k2 = si
+                while (k2 <= s.length) {
+                    if (globAt(alts[i], 0, s.slice(si, k2), 0) && globAt(rest, 0, s, k2)) { return true }
+                    k2 = k2 + 1
+                }
+            }
+            return false
+        }
+        // *(pat) zero or more, +(pat) one or more. Each round consumes at least one
+        // character (k3 starts past si), so the recursion cannot spin on an empty match.
+        if (op == 42 && globAt(rest, 0, s, si)) { return true }
+        var j
+        for (j = 0; j < alts.length; j++) {
+            var k3 = si + 1
+            while (k3 <= s.length) {
+                if (globAt(alts[j], 0, s.slice(si, k3), 0)) {
+                    if (globAt(rest, 0, s, k3)) { return true }
+                    if (egMatch(42, alts, rest, s, k3)) { return true }
+                }
+                k3 = k3 + 1
+            }
+        }
+        return false
+    }
+
     function globAt(p, pi, s, si) {
         while (pi < p.length) {
             var pc = p.charCodeAt(pi)
+            // An extglob prefix only counts when a "(" follows it; "*" and "?" are otherwise
+            // the ordinary wildcards, which is why this test comes first.
+            if ((pc == 64 || pc == 63 || pc == 42 || pc == 43 || pc == 33) && pi + 1 < p.length && p.charCodeAt(pi + 1) == 40) {
+                var ee = egEnd(p, pi + 1)
+                if (ee > 0) { return egMatch(pc, egAlts(p.slice(pi + 2, ee - 1)), p.slice(ee), s, si) }
+            }
             if (pc == 42) { // "*"
                 while (pi < p.length && p.charCodeAt(pi) == 42) { pi = pi + 1 }
                 if (pi >= p.length) { return true }
@@ -2303,6 +2725,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cmd == "echo") { echoCmd(args); setStatus(0); return 0 }
         if (cmd == "[" || cmd == "test") { var st = testBuiltin(cmd, args); setStatus(st); return st }
         if (cmd == "true" || cmd == ":") { setStatus(0); return 0 }
+        // `cmd &` already ran to completion (see mkAsync), so there is never anything left
+        // to wait for and no job list to print. LIMIT: `wait PID` answers 0 rather than the
+        // job's real status, and `jobs` prints nothing.
+        if (cmd == "wait") { setStatus(0); return 0 }
+        // LIMIT: `shopt` accepts and reports success for anything. The one option scripts in
+        // the corpus actually turn on is extglob, and globAt() understands extended globs
+        // unconditionally, so setting it changes nothing here. A `shopt -q` QUERY therefore
+        // answers "on" for every option, which is not what bash does.
+        if (cmd == "shopt") { setStatus(0); return 0 }
         if (cmd == "unset") {
             var ui
             for (ui = 0; ui < args.length; ui++) {
@@ -2403,6 +2834,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 }
             }
             return st
+        }
+    }
+
+    // `cmd &` : the parser leaves an {amp} marker AFTER the statement it applies to, so a
+    // statement list is a mix of thunks and markers. linkAsync folds the markers away and
+    // hands back a list of plain thunks, which is what makeSeq / runProgram expect.
+    function linkAsync(items) {
+        var out = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { out.push(items[i]) }
+            else if (out.length > 0) { out[out.length - 1] = mkAsync(out[out.length - 1]) }
+        }
+        return out
+    }
+    // LIMIT, and a deliberate one: there is no second process behind a grammar run, so an
+    // asynchronous statement is run to completion HERE, in a subshell copy of the shell
+    // state, and reports status 0 immediately - which is what a real `cmd & wait` pair
+    // observes. What it cannot model is overlap: `sleep 1 & echo hi` prints "hi" after the
+    // sleep, not before it. $! answers a fresh, monotonically increasing fake pid.
+    var lastBgPid = 0
+    function mkAsync(t) {
+        return function() {
+            lastBgPid = lastBgPid + 1
+            var saved = saveShellState()
+            localFrames = []
+            var r = anytype
+            r = t()
+            restoreShellState(saved)
+            setStatus(0)
+            return 0
         }
     }
 

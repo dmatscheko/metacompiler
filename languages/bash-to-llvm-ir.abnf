@@ -69,22 +69,32 @@ and the arrays a subshell ADDS are not rolled back when it ends.") ;
 
 // A whole script: statements separated by ; or newlines (blank / comment lines collapse).
 // The production tag runs all top level statement thunks and exits with the final status.
-Program     <~~ runProgram(takeAll()) ~~>
-            = OptSep [ Statement { Sep Statement } OptSep ] ;
+Program     <~~ runProgram(linkAsync(takeAll())) ~~>
+            = OptSep [ Statement { ListSep Statement } ListOptSep ] ;
 
 // Statement separators: one or more ; or newlines. Leading whitespace (incl. #comments) is
 // skipped before each separator token, so blank and comment-only lines vanish here.
+// NotCaseTerm is here, not only in CaseSep: ";;" / ";&" / ";;&" terminate a CASE CLAUSE and
+// nothing else - `echo 1 ;; echo 2` is a syntax error in real bash.
 OptSep      = [ Sep ] ;
-Sep         = SepTok { SepTok } ;
+Sep         = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
 SepTok      = ";" | "\n" ;
+
+// `LIST &` runs the list asynchronously and "&" is itself a list separator. Exactly one "&"
+// may open a separator run; NotAmp keeps "&&" out. The {amp} marker lands in the enclosing
+// statement list and linkAsync() folds it into the statement it followed.
+ListSep     = AmpSep | Sep ;
+ListOptSep  = [ ListSep ] ;
+AmpSep      <~~ push({amp: 1}) ~~> = AmpTok { NotCaseTerm SepTok } ;
+AmpTok      = "&" NotAmp ;
 
 Statement   = AndOrList ;
 
 // A brace / keyword delimited body: at least one statement. The trailing OptSep swallows the
 // final ; or newline before the closing keyword (fi / done / }), and a reserved word in
 // command position (guarded in SimpleCommand) stops the list so that keyword can match.
-CompoundList <~~ push(makeSeq(takeAll())) ~~>
-            = OptSep Statement { Sep Statement } OptSep ;
+CompoundList <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
+            = OptSep Statement { ListSep Statement } ListOptSep ;
 
 
 // --- compound statements
@@ -107,8 +117,8 @@ CaseStmt    <~~ push(makeCase(takeAll())) ~~>
 CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
             = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
 CasePats    <~~ push({pats: takeAll()}) ~~> = Word { "|" Word } ;
-CaseBody    <~~ push(makeSeq(takeAll())) ~~>
-            = CaseSepOpt [ Statement { CaseSep Statement } CaseSepOpt ] ;
+CaseBody    <~~ push(makeSeq(linkAsync(takeAll()))) ~~>
+            = CaseSepOpt [ Statement { ListSep Statement } ListOptSep ] ;
 CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
 CaseSepOpt  = [ CaseSep ] ;
 CaseTerm    = CaseNl CaseTermTok ;
@@ -137,10 +147,17 @@ ForWords    <~~ push({words: takeAll()}) ~~>
 
 // NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
-            = FuncDefHead OptSep "{" CompoundList "}" ;
+            = FuncDefHead OptSep FuncBody ;
+// A function body may be any compound command; { LIST; } and ( LIST ) are the two that
+// appear in the wild ( `f() ( cd /tmp; pwd )` runs the body in a subshell ).
+FuncBody    = FuncBraceBody | Subshell ;
+FuncBraceBody <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" ;
 FuncDefHead = ( KwFunction FuncName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
-FuncName    <~~ push({fname: up.in}) ~~>
-            = Name ;
+FuncName    = FuncNameTok :whitespace(Whitespace) ;
+// A bash function name is a WORD, not an identifier: `show-len() {...}`, `ble/foo() {...}`
+// and `py-repr() {...}` are all real definitions in the wild.
+FuncNameTok <~~ push({fname: up.in}) ~~>
+            = !@+" \t\n\r;&|<>(){}$'\"\\`=" ;
 
 Name        = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
 
@@ -180,7 +197,9 @@ AsgEq       = "=" NotEq ;
 // ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
 Subshell    <~~ push(makeSubshell(pop())) ~~> = "(" CompoundList ")" [ RedirList ] ;
 // { LIST; } is a plain grouping: it runs in the CURRENT shell.
-BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" CompoundList "}" [ RedirList ] ;
+// "{" only opens a group when it is a WORD OF ITS OWN: `{ls; }` is the word "{ls" plus a
+// stray "}", which real bash refuses.
+BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" BraceKwEnd CompoundList "}" [ RedirList ] ;
 // (( expr )) as a command: status 0 when the value is non-zero.
 ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
 // [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
@@ -298,7 +317,7 @@ BraceAlts   <~~ push(mkBraceAlts(takeAll())) ~~>
             = "{" :whitespace() BraceAlt "," BraceAlt { "," BraceAlt } "}" ;
 BraceAlt    <~~ push({alt: takeAll()}) ~~> = { BraceAltSeg } ;
 BraceAltSeg = SqSeg | DqSeg | AnsiSeg | ExpSeg | EscSeg | BraceRange | BraceAlts | AltBare ;
-AltBare     <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;#$'\"\\(){},&|<>`" ;
+AltBare     <~~ push(makeConst(up.in)) ~~> = !@+" \t\n\r;$'\"\\(){},&|<>`" ;
 BraceRange  <~~ push(mkBraceRange(takeAll())) ~~>
             = "{" :whitespace() RangeEnd ".." RangeEnd [ RangeStep ] "}" ;
 RangeEnd    <~~ push({rend: up.in}) ~~> = RangeTok ;
@@ -337,8 +356,11 @@ EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
             = "\\" AnyCh ;
 
 // A bare run: any char that is not whitespace, a separator, or a shell metacharacter.
+// "#" is NOT excluded: it only opens a comment at the START of a word, and the Whitespace
+// rule (which contains Comment) has already run before a word's first segment. Excluding it
+// made `echo a#b` print "a" - real bash prints a#b.
 BareSeg     <~~ push(makeConst(up.in)) ~~>
-            = !@+" \t\n\r;#$'\"\\(){}&|<>`" ;
+            = !@+" \t\n\r;$'\"\\(){}&|<>`" ;
 
 AnyCh       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -697,6 +719,19 @@ KwEnd = :script(~~
     })()
 ~~) ;
 
+// The boundary after the "{" that opens a brace group. Verified against GNU bash 5.3.15:
+//   { echo hi; } OK    {ls; } syntax error    {(echo hi);} OK ("(" is a metacharacter).
+BraceKwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        if (cc == -1) { return undefined }
+        if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { return undefined }
+        if (cc == 59 || cc == 38 || cc == 124) { return undefined }
+        if (cc == 40 || cc == 41 || cc == 60 || cc == 62) { return undefined }
+        return abnf.newToken("\x01brace-boundary", 0)
+    })()
+~~) ;
+
 // Succeeds (consumes nothing) unless the upcoming word is a reserved keyword with a boundary,
 // in which case it fails so the SimpleCommand does not swallow the keyword.
 NotReserved = :script(~~
@@ -710,6 +745,15 @@ NotReserved = :script(~~
             var nb = c.peek(i + 1)
             if (nb == -1 || nb == 32 || nb == 9 || nb == 10 || nb == 13 || nb == 59 || nb == 38 || nb == 124 || nb == 41) {
                 return abnf.newToken("\x01close-brace", 0)
+            }
+        }
+        // "[[" with a boundary is the reserved word that opens a conditional command, never a
+        // command NAME: if CondCmd could not parse the [[ ... ]] the file IS a syntax error.
+        // (`echo [[ a ]]` still works - this only bites in COMMAND position.)
+        if (cc == 91 && c.peek(i + 1) == 91) {
+            var ab = c.peek(i + 2)
+            if (ab == -1 || ab == 32 || ab == 9 || ab == 10 || ab == 13) {
+                return abnf.newToken("\x01dbracket", 0)
             }
         }
         var w = ""
@@ -4191,6 +4235,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cmd == "echo") { return emitEcho(b, argTs) }
             if (cmd == "[" || cmd == "test") { return emitTest(b, cmd, argTs) }
             if (cmd == "true" || cmd == ":") { storeStatusI(b, 0); return b }
+            // `cmd &` already ran to completion (see mkAsync), so there is never anything
+            // left to wait for. LIMIT: `wait PID` answers 0, not the job's real status.
+            if (cmd == "wait") { storeStatusI(b, 0); return b }
             if (cmd == "false") { storeStatusI(b, 1); return b }
             if (cmd == "exit") {
                 var code = zero
@@ -4333,6 +4380,30 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = inner(b)
             emitCloseRedirs(b, sv)
             return b
+        }
+    }
+
+    // `cmd &` : the parser leaves an {amp} marker AFTER the statement it applies to, so a
+    // statement list is a mix of thunks and markers. linkAsync folds the markers away.
+    function linkAsync(items) {
+        var out = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { out.push(items[i]) }
+            else if (out.length > 0) { out[out.length - 1] = mkAsync(out[out.length - 1]) }
+        }
+        return out
+    }
+    // LIMIT, matching the interpreter half exactly: a compiled program has no second process
+    // either, so an asynchronous statement is emitted as a SUBSHELL that runs to completion
+    // here and then reports status 0. `cmd & wait` observes the same thing a real shell does;
+    // what neither half can model is overlap (`sleep 1 & echo hi` prints "hi" second).
+    function mkAsync(t) {
+        var inner = makeSubshell(t)
+        return function(b) {
+            var eb = inner(b)
+            eb.NewStore(zero, gStatus)
+            return eb
         }
     }
 

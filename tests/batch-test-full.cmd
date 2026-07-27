@@ -1026,6 +1026,72 @@ set want=yes
 call :check
 exit /b 0
 
+rem ===== SECTION 25: the glued echo separator and the echo on/off boundary =====
+rem cmd treats a "." ":" or "/" GLUED to the echo keyword as a separator, not as
+rem text: `echo.word` prints "word", `echo.` prints an empty line. With a space
+rem in between the punctuation is ordinary text again. And `echo on` / `echo off`
+rem only toggle echoing when that is the whole line - `echo off now` prints
+rem "off now". There is no cmd.exe and no wine on this machine, so the ground
+rem truth for every value below is wine's own expectation file, which the harness
+rem in tests/reference/batch/wine-cmd-tests/tests/batch.c compares cmd against:
+rem   test_builtins.cmd.exp:  echo.word -> word     echo .word -> .word
+rem                           echo:word -> word     echo :word -> :word
+rem                           echo/word -> word     echo /word -> /word
+rem                           echo off now -> off now
+:s25
+for /f "delims=" %%v in ('echo.word') do set got=%%v
+set cid=eds1
+set want=word
+call :check
+for /f "delims=" %%v in ('echo .word') do set got=%%v
+set cid=eds2
+set want=.word
+call :check
+for /f "delims=" %%v in ('echo:word') do set got=%%v
+set cid=eds3
+set want=word
+call :check
+for /f "delims=" %%v in ('echo :word') do set got=%%v
+set cid=eds4
+set want=:word
+call :check
+for /f "delims=" %%v in ('echo/word') do set got=%%v
+set cid=eds5
+set want=word
+call :check
+for /f "delims=" %%v in ('echo /word') do set got=%%v
+set cid=eds6
+set want=/word
+call :check
+rem `echo on` / `echo off` are only the toggle when nothing follows them.
+for /f "delims=" %%v in ('echo off now') do set got=%%v
+set cid=eds7
+set want=off now
+call :check
+for /f "delims=" %%v in ('echo on x') do set got=%%v
+set cid=eds8
+set want=on x
+call :check
+rem The glued forms with nothing after the separator print an empty line, which
+rem makes the for /f body run zero times - so `got` keeps its previous value.
+set got=untouched
+for /f "delims=" %%v in ('echo.') do set got=%%v
+set cid=eds9
+set want=untouched
+call :check
+set got=untouched
+for /f "delims=" %%v in ('echo:') do set got=%%v
+set cid=eds10
+set want=untouched
+call :check
+rem And the statement form prints the same text to stdout, which the goja and
+rem -frozen runs must agree on byte for byte.
+echo.here
+echo.
+echo:here
+echo/here
+goto :eof
+
 rem ===== END SECTIONS =====
 
 :main
@@ -1053,5 +1119,6 @@ call :s21 SECTION-CALL 21
 call :s22 SECTION-CALL 22
 call :s23 SECTION-CALL 23
 call :s24 SECTION-CALL 24
+call :s25 SECTION-CALL 25
 echo full: %checks% checks, %fails% failures
 exit /b %fails%
