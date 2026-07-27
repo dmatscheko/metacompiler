@@ -1,15 +1,18 @@
 --[[
   lua-test-recognize.lua
 
-  A real-world-looking Lua file that exercises the surface syntax the widened
-  grammar newly RECOGNIZES. Some of the constructs cannot be lowered and are
-  routed to notImplemented, so a plain run aborts at the first of them; run it
-  with -warn-unsupported to parse the whole file and skip those constructs:
+  A real-world-looking Lua file that exercises the surface syntax of the widened
+  grammar. Every construct in it is genuinely lowered now, in both grammars, so
+  the file runs and exits 0 with or without -warn-unsupported, and a run with
+  the flag reports no unsupported construct at all:
 
-      mec languages/lua-to-llvm-ir.abnf tests/lua-test-recognize.lua -q -warn-unsupported
+      mec languages/lua-to-llvm-ir.abnf tests/lua-test-recognize.lua -q
 
-  This mirrors the widen tests of the other languages: it is a SHOULD-FAIL by
-  default and a clean exit 0 under -warn-unsupported.
+  History: several of these constructs used to be recognised but routed to
+  notImplemented, so a plain run aborted at the first of them and this file was
+  a by-design SHOULD-FAIL guard, mirroring the widen tests of the other
+  languages. The full-syntax work implemented all of them, which removed the
+  guard's premise, so the matrix entry became an ordinary one. Do not re-arm it.
 ]]
 
 -- Genuine, fully supported additions ----------------------------------------

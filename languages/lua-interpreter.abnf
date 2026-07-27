@@ -1,25 +1,32 @@
-:title("Lua (subset) interpreter") ;
-:description("Parses a Lua subset and executes it directly, tree walking, without
-generating code.
+:title("Lua interpreter") ;
+:description("Parses Lua and executes it directly, tree walking, without generating code.
 
-The language: local variables (local x, local a, b = 1, 2) and auto-global assignment
-(a bare 'x = e' assigns an existing variable up the scope chain, else creates a global),
-numbers, strings, booleans and nil, string concatenation with .. , arithmetic + - * /
-(true division) // (floor division) % (floor modulo), comparisons == ~= < > <= >= ,
-and / or / not with Lua truthiness (only false and nil are falsy; 0 and '' are true) and
-operand values, if cond then ... elseif ... else ... end, while cond do ... end, numeric
-for i = a, b [, step] do ... end, the generic for over ipairs (for i, v in ipairs(t) do
-... end), repeat ... until cond, functions (function f(a, b) ... end, function tbl.field
-and the method sugar function tbl:m() with an implicit self, local function, function(...)
-... end expressions, closures over their defining scope) with return, break, method calls
-obj:m(args) (the receiver is passed as self), tables as arrays and maps ({} , {1, 2, 3} ,
-{x = 1} , t.x , t[k] , 1 based array indexing), the length operator #t (the sequence
-border of a table), multiple assignment (a, b = 1, 2), and print.
+The language: local variables (local x, local a, b = 1, 2, with the 5.4 attributes
+const and close accepted) and auto-global assignment (a bare 'x = e' assigns an existing
+variable up the scope chain, else creates a global; an unset global reads as nil), the
+full literal syntax (decimal, hexadecimal and hexadecimal-float numbers, single and
+double quoted strings with all of Lua's escapes, long brackets of any level for strings
+and for comments), Lua 5.3's two number subtypes - integers and floats are distinct, so
+1 renders as 1 and 1.0 as 1.0, a division is always a float and 7 // 2 stays an integer,
+string concatenation with .. , arithmetic + - * / (true division) // (floor division)
+% (floor modulo) ^ (float power) with the automatic string coercion, the bitwise
+operators and or xor not and the two shifts on 64-bit integers, comparisons == ~= < >
+<= >= , and / or / not with Lua truthiness (only false and nil are falsy; 0 and the
+empty string are true) and operand values, if cond then ... elseif ... else ... end,
+while cond do ... end, numeric for i = a, b [, step] do ... end, the generic for over
+the full iterator protocol (a triple of function, state and control value, which is what
+ipairs, pairs and any hand-written iterator return), repeat ... until cond, goto and
+::labels::, functions (function f(a, b) ... end, function tbl.field and the method sugar
+function tbl:m() with an implicit self, local function, function expressions, closures
+over their defining scope) with return, break, varargs and multiple return values (a
+call and ... expand in a list position and truncate to one value elsewhere), method
+calls obj:m(args) (the receiver is passed as self), the parenthesis-free call forms
+f 'str' and f {tbl}, tables as arrays and maps ({} , {1, 2, 3} , {x = 1} , t.x , t[k] ,
+1 based array indexing), the length operator #t (the sequence border of a table), and
+print.
 
-Not in the subset: the ^ power operator, bitwise operators, goto, metatables, coroutines,
-the string/table/math libraries, varargs, true multiple return values (a call yields its
-first value only), and the generic for over pairs() or any custom iterator (accepted, but
-reported as not implemented; -warn-unsupported skips it).
+Not in the subset: metatables, coroutines, and the standard library beyond print,
+next, ipairs, pairs, exit and the small string/table/math tables built below.
 
 There is no main(): the file simply runs top to bottom. Self checking programs count
 their failures and end with exit(fails). The same language with the same semantics is
@@ -50,16 +57,41 @@ Block       <~~ push(makeSeq(takeAll())) ~~>
 // a whole word, not merely a prefix like 'ending' - is next.
 NotEnders = :script(~~
     (function() {
-        // Skip leading whitespace and -- line comments (a :script sees the raw input).
+        // Skip the blanks and BOTH comment forms. A long comment --[==[ ... ]==] runs
+        // to a closing bracket of its own level and may span lines and hold ']]', so it
+        // cannot be treated as a '--' line comment.
         var off = 0
         var scanning = true
         while (scanning) {
-            var cc = c.peek(off)
-            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { off++ }
-            else if (cc === 45 && c.peek(off + 1) === 45) {
-                off += 2
-                while (c.peek(off) !== 10 && c.peek(off) !== -1) { off++ }
-            } else { scanning = false }
+            var wc = c.peek(off)
+            if (wc === 32 || wc === 9 || wc === 13 || wc === 10) { off = off + 1 }
+            else if (wc === 45 && c.peek(off + 1) === 45) {
+                var clv = 0
+                var e = off + 3
+                var isLong = false
+                if (c.peek(off + 2) === 91) {
+                    while (c.peek(e) === 61) { clv = clv + 1; e = e + 1 }
+                    if (c.peek(e) === 91) { isLong = true }
+                }
+                if (isLong) {
+                    var p = e + 1
+                    var closing = true
+                    while (closing) {
+                        var c2 = c.peek(p)
+                        if (c2 < 0) { off = p; closing = false }
+                        else if (c2 === 93) {
+                            var k2 = 0
+                            while (c.peek(p + 1 + k2) === 61) { k2 = k2 + 1 }
+                            if (k2 === clv && c.peek(p + 1 + k2) === 93) { off = p + k2 + 2; closing = false }
+                            else { p = p + 1 }
+                        } else { p = p + 1 }
+                    }
+                } else {
+                    off = off + 2
+                    while (c.peek(off) !== 10 && c.peek(off) >= 0) { off = off + 1 }
+                }
+            }
+            else { scanning = false }
         }
         var p0 = c.peek(off)
         var after = -1
@@ -130,20 +162,14 @@ NumFor      <~~ push(makeNumFor(takeAll())) ~~>
 ForName     <~~ push({fname: up.in}) ~~>
             = Id ;
 
-// for k, v in <iter> do ... end. Only the pairs()/ipairs() iterators are recognized;
-// ipairs is lowered to a 1-based array walk (index, value) that stops at the first nil.
-// pairs (key enumeration) and any other iterator are accepted but not implemented.
-GenFor      <~~ push(makeGenFor(takeAll(), up.pos)) ~~>
-            = KwFor GenName { "," GenName } KwIn IterExpr KwDo Block KwEndKw ;
+// for k, v in <explist> do ... end - the full generic for. The expression list yields
+// the iterator triple (function, state, control value) and every pass calls it; ipairs
+// and pairs are ordinary global functions returning such a triple, so a hand-written
+// iterator drives the loop the same way (see makeGenFor).
+GenFor      <~~ push(makeGenFor(takeAll())) ~~>
+            = KwFor GenName { "," GenName } KwIn ExprList KwDo Block KwEndKw ;
 GenName     <~~ push({gname: up.in}) ~~>
             = Id ;
-IterExpr    = IpairsIter | PairsIter | GenericIter ;
-IpairsIter  <~~ push({iterkind: "ipairs", tbl: pop()}) ~~>
-            = "ipairs" KwEnd "(" Expression ")" ;
-PairsIter   <~~ push({iterkind: "pairs", tbl: pop()}) ~~>
-            = "pairs" KwEnd "(" Expression ")" ;
-GenericIter <~~ takeAll(); push({iterkind: "generic"}) ~~>
-            = Expression { "," Expression } ;
 
 DoBlock     <~~ push(makeDoBlock(pop())) ~~>
             = KwDo Block KwEndKw ;
@@ -168,22 +194,22 @@ FuncName    <~~ push(makeFuncName(takeAll())) ~~>
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ ( Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ "," VarargPar ] | VarargPar ) ] ")" ;
-// A trailing '...' makes the function variadic. Accepted and ignored (extra arguments
-// are dropped); a use of '...' inside the body is separately not implemented.
-VarargPar   = "..." ;
+// A trailing '...' makes the function variadic: it is kept in the parameter list under
+// that very name, and makeClosure turns it into the frame's extra-argument array.
+VarargPar   <~~ push("...") ~~>
+            = "..." ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
             = KwBreak ;
 
-// goto Name jumps to a matching ::Name:: label (Lua 5.2+); both are accepted
-// structurally and reported as not implemented (the tree walker / CFG builder has no
-// cross-statement jump). -warn-unsupported keeps the surrounding code.
-Goto        <~~ push(notImplStmt("goto", up.pos)) ~~>
-            = KwGoto Id ;
-Label       <~~ push(notImplStmt("label", up.pos)) ~~>
-            = "::" Id "::" ;
+// goto Name jumps to a matching ::Name:: label (Lua 5.2+), backward as well as forward
+// and outward through any number of enclosing blocks - see makeGoto / makeSeq.
+Goto        <~~ push(makeGoto(pop())) ~~>
+            = KwGoto Id <~~ push(up.in) ~~> ;
+Label       <~~ push(makeLabel(pop())) ~~>
+            = "::" Id <~~ push(up.in) ~~> "::" ;
 // A lone ';' or one terminating the previous statement (Lua allows ';' between and
 // after statements): a no-op.
 EmptyStat   <~~ push(makeEmpty()) ~~>
@@ -210,13 +236,21 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = CmpExpr { KwAnd CmpExpr } ;
 
 CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = BitExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr } ;
+            = BOrExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BOrExpr } ;
 
-// Bitwise & | ~ << >> (Lua 5.3+): accepted, reported as not implemented (the handle
-// runtime has no integer bit operations). Binary '~' is guarded with !"=" so a '~='
-// comparison is left for CmpExpr above.
-BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
-            = ConcatExpr { ( "&" | "|" | "<<" | ">>" | ( "~" !"=" ) ) ConcatExpr } ;
+// The bitwise operators of Lua 5.3+, each on its own precedence level: | binds loosest,
+// then binary ~ (exclusive or), then &, then the shifts - all below the comparisons and
+// above concatenation. They work on 64-bit two's complement integers (luaBitOp), so a
+// float operand with an integral value converts and everything else is an error. Binary
+// '~' carries a !"=" lookahead so that a '~=' comparison is left to CmpExpr above.
+BOrExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = BXorExpr { "|" <~~ push(up.in) ~~> BXorExpr } ;
+BXorExpr    <~~ push(foldBinary(takeAll())) ~~>
+            = BAndExpr { ( "~" !"=" ) <~~ push(up.in) ~~> BAndExpr } ;
+BAndExpr    <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { "&" <~~ push(up.in) ~~> ShiftExpr } ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = ConcatExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> ConcatExpr } ;
 
 // Concatenation is right associative, so it recurses on its own right hand side.
 ConcatExpr  <~~ push(makeConcat(takeAll())) ~~>
@@ -235,43 +269,131 @@ LenExpr     <~~ push(makeLen(pop())) ~~>
             = "#" UnaryExpr ;
 NegExpr     <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
-// Unary bitwise not ~x (Lua 5.3+): accepted, not implemented (guarded against '~=').
-BNotExpr    <~~ pop(); push(notImplExpr("unary ~ (bitwise not)", up.pos)) ~~>
+// Unary bitwise not ~x (Lua 5.3+), guarded against '~=': the 64-bit complement.
+BNotExpr    <~~ push(makeBNot(pop())) ~~>
             = ( "~" !"=" ) UnaryExpr ;
-// Exponentiation a ^ b, right associative and binding tighter than the unary operators
-// (Lua float pow): accepted, not implemented (no js_pow extern in the handle runtime).
-PowExpr     <~~ push(makePow(takeAll(), up.pos)) ~~>
-            = SuffixedExpr [ "^" PowExpr ] ;
+// Exponentiation a ^ b: right associative (its right operand is a UnaryExpr, which
+// descends into PowExpr again) and binding tighter than the unary operators, so -2^2
+// is -(2^2) and 2^-1 is legal. The result is always a float, like in Lua.
+PowExpr     <~~ push(makePow(takeAll())) ~~>
+            = SuffixedExpr [ "^" UnaryExpr ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | MethodSfx | DotSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
-            = "(" [ Expression { "," Expression } ] ")" ;
+            = "(" [ ExprList ] ")" ;
+// f "s" / f [[s]] / f {t}: a call whose single argument is a string literal or a table
+// constructor may be written without the parentheses.
+StrCallSfx  <~~ push({kind:"call", args: takeAll()}) ~~>
+            = LuaDq | LuaSq | LongString ;
+TblCallSfx  <~~ push({kind:"call", args: takeAll()}) ~~>
+            = TableLit ;
 // obj:m(args): sugar for obj.m(obj, args) - the receiver is passed as the first arg.
+// The same parenthesis-free argument forms apply (obj:m "s", obj:m {t}).
 MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, args: it.slice(1)}) ~~>
-            = ":" MethodName "(" [ Expression { "," Expression } ] ")" ;
+            = ":" MethodName ( "(" [ ExprList ] ")" | LuaDq | LuaSq | LongString | TableLit ) ;
 MethodName  <~~ push({mname: up.in}) ~~>
             = Id ;
 DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FuncExpr | TableLit | LongString | VarargExpr
-            | DqString | SqString | Number | True | False | Nil | VarRef ;
+Primary     = ParenExpr | FuncExpr | TableLit | LongString | VarargExpr
+            | LuaDq | LuaSq | Number | True | False | Nil | VarRef ;
 
-// [[ ... ]] long-bracket string literals (also [=[ ]=] and [==[ ]==] for content that
-// contains a closing bracket). The body is verbatim (no escapes) and a single leading
-// newline is dropped, matching Lua. Longer '=' levels are still unrecognized.
-LongString  = LongStr2 | LongStr1 | LongStr0 ;
-LongStr0    = "[[" :whitespace() { !"]]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]]" :whitespace(Whitespace) ;
-LongStr1    = "[=[" :whitespace() { !"]=]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]=]" :whitespace(Whitespace) ;
-LongStr2    = "[==[" :whitespace() { !"]==]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]==]" :whitespace(Whitespace) ;
-// '...' in expression position (varargs): accepted, not implemented (the subset passes
-// only the named parameters).
-VarargExpr  <~~ push(notImplExpr("varargs ...", up.pos)) ~~>
+// ( e ). Parentheses are not only grouping in Lua: they also TRUNCATE a multi-value
+// expression (a call or ...) to its first value, which is why this is a production of
+// its own rather than an inline group.
+ParenExpr   <~~ push(luaParen(pop())) ~~>
+            = "(" Expression ")" ;
+
+// Long-bracket string literals [[ ... ]], [=[ ... ]=], [==[ ... ]==] - with ANY number
+// of '=' signs between the brackets. The closing bracket has to repeat the opening
+// level, which no fixed token can express, so one :script scans the whole literal and
+// hands the parser back a token for exactly those bytes. The body is verbatim (no
+// escape processing) and a single leading newline is dropped, matching Lua.
+LongString  <~~ push(makeConst(luaLong(luaLongBody(up.in)))) ~~>
+            = LongBracket :whitespace(Whitespace) ;
+LongBracket = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01not-a-long-bracket", 0)
+        // A :script sees the raw input, so what sits in front of the literal has to be
+        // stepped over here; the token returned starts AT the bracket, which is where
+        // the parser looks once it has skipped the same run itself.
+        // Skip the blanks and BOTH comment forms. A long comment --[==[ ... ]==] runs
+        // to a closing bracket of its own level and may span lines and hold ']]', so it
+        // cannot be treated as a '--' line comment.
+        var off = 0
+        var scanning = true
+        while (scanning) {
+            var wc = c.peek(off)
+            if (wc === 32 || wc === 9 || wc === 13 || wc === 10) { off = off + 1 }
+            else if (wc === 45 && c.peek(off + 1) === 45) {
+                var clv = 0
+                var e = off + 3
+                var isLong = false
+                if (c.peek(off + 2) === 91) {
+                    while (c.peek(e) === 61) { clv = clv + 1; e = e + 1 }
+                    if (c.peek(e) === 91) { isLong = true }
+                }
+                if (isLong) {
+                    var p = e + 1
+                    var closing = true
+                    while (closing) {
+                        var c2 = c.peek(p)
+                        if (c2 < 0) { off = p; closing = false }
+                        else if (c2 === 93) {
+                            var k2 = 0
+                            while (c.peek(p + 1 + k2) === 61) { k2 = k2 + 1 }
+                            if (k2 === clv && c.peek(p + 1 + k2) === 93) { off = p + k2 + 2; closing = false }
+                            else { p = p + 1 }
+                        } else { p = p + 1 }
+                    }
+                } else {
+                    off = off + 2
+                    while (c.peek(off) !== 10 && c.peek(off) >= 0) { off = off + 1 }
+                }
+            }
+            else { scanning = false }
+        }
+        if (c.peek(off) !== 91) { return no }
+        var lvl = 0
+        while (c.peek(off + 1 + lvl) === 61) { lvl = lvl + 1 }
+        if (c.peek(off + 1 + lvl) !== 91) { return no }
+        var i = off + lvl + 2
+        var open = true
+        while (open) {
+            var ch = c.peek(i)
+            if (ch < 0) { return no }
+            if (ch === 93) {
+                var k = 0
+                while (c.peek(i + 1 + k) === 61) { k = k + 1 }
+                if (k === lvl && c.peek(i + 1 + k) === 93) { i = i + k + 2; open = false }
+                else { i = i + 1 }
+            } else { i = i + 1 }
+        }
+        var s = ""
+        for (var j = off; j < i; j++) { s = s + String.fromCharCode(c.peek(j)) }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
+// '...' in expression position: all the extra arguments of the enclosing variadic
+// function as a multi-value - it expands in a list position and truncates to its first
+// value everywhere else.
+VarargExpr  <~~ push(makeVararg()) ~~>
             = "..." ;
 AnyByte     = "\x00"..."\U0010ffff" ;
+
+// Lua string literals. Their escapes are Lua's own, so the shared DqString / SqString
+// of lib/dq-strings.abnf - which allow only a printable byte after the backslash - are
+// replaced here: a backslash may be followed by any character, a real line break
+// included (that form stands for a newline), and the z escape swallows the whole
+// whitespace run behind it. luaUnesc resolves them all.
+LuaDq       = '"' :whitespace() { LuaZSkip | LuaEsc | DqPlain } <~~ push(makeConst(luaUnesc(up.in))) ~~> '"' :whitespace(Whitespace) ;
+LuaSq       = "'" :whitespace() { LuaZSkip | LuaEsc | SqPlain } <~~ push(makeConst(luaUnesc(up.in))) ~~> "'" :whitespace(Whitespace) ;
+LuaZSkip    = "\\z" { @+" \t\r\n" } ;
+LuaEsc      = "\\" AnyByte ;
 
 FuncExpr    <~~ push(makeFuncExpr(pop(), pop())) ~~>
             = KwFunction ParamList Block KwEndKw ;
@@ -288,15 +410,23 @@ NameField   <~~ var nv = pop(); push({fkind:"name", name: pop(), v: nv}) ~~>
 PosField    <~~ push({fkind:"pos", v: pop()}) ~~>
             = Expression ;
 
-// Numbers: hexadecimal (0x1F), a decimal with an exponent (1e3, 2.5e-4), or a plain
-// decimal (DecLit from lib/numbers.abnf). Hex/exponent are tried before DecLit, which
-// has neither.
-Number      = HexLit | FloatLit | DecLit ;
-HexLit      <~~ push(makeConst(luaHexVal(up.in))) ~~>
-            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+// Numbers, in every form Lua writes them: hexadecimal integers (0xff, 0XFF), hexadecimal
+// floats with a binary exponent (0x1p4, 0xA.8p0, 0x.8p1), and decimals with an optional
+// fraction and an optional decimal exponent (255, 1e3, 2.5e-2, .5, 3.). luaNumVal reads
+// the spelling and decides whether the literal is an integer or a float. The fraction
+// dot carries a !"." lookahead, so '1 .. 2' concatenates instead of reading '1.' first.
+Number      = HexNum | DecNum | DotNum ;
+HexNum      <~~ push(makeConst(luaNumVal(up.in))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexBody :whitespace(Whitespace) ;
+HexBody     = HexDigit { HexDigit } [ "." !"." { HexDigit } ] [ HexExp ]
+            | "." !"." HexDigit { HexDigit } [ HexExp ] ;
+HexExp      = ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
-FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." { "0"..."9" } ] ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
+DecNum      <~~ push(makeConst(luaNumVal(up.in))) ~~>
+            = "0"..."9" :whitespace() { "0"..."9" } [ "." !"." { "0"..."9" } ] [ DecExp ] :whitespace(Whitespace) ;
+DotNum      <~~ push(makeConst(luaNumVal(up.in))) ~~>
+            = "." :whitespace() "0"..."9" { "0"..."9" } [ DecExp ] :whitespace(Whitespace) ;
+DecExp      = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
 Nil         <~~ push(makeConst(undefined)) ~~>
             = "nil" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
@@ -323,14 +453,37 @@ KwAnd       = "and" KwEnd ;
 KwOr        = "or" KwEnd ;
 KwNot       = "not" KwEnd ;
 
-// Lua whitespace: blanks and newlines plus comments. Block comments --[[ ... ]] (and
-// --[=[ ]=] / --[==[ ]==]) are tried before the line comment, since '--[[' extends
-// '--'. A line comment runs to the end of the line.
+// Lua whitespace: blanks and newlines plus comments. A long comment --[[ ... ]] is a
+// '--' followed by a long bracket of any level, so it is scanned by the same :script as
+// a long string (LongCmtBracket below) and has to be tried before the line comment,
+// which '--[[' would otherwise start. A line comment runs to the end of the line.
 Whitespace  = { @+" \t\r\n" | Comment } ;
-Comment     = LongCmt2 | LongCmt1 | LongCmt0 | LineComment ;
-LongCmt0    = "--[[" :whitespace() { !"]]" AnyByte } "]]" :whitespace(Whitespace) ;
-LongCmt1    = "--[=[" :whitespace() { !"]=]" AnyByte } "]=]" :whitespace(Whitespace) ;
-LongCmt2    = "--[==[" :whitespace() { !"]==]" AnyByte } "]==]" :whitespace(Whitespace) ;
+Comment     = LongCmt | LineComment ;
+LongCmt     = LongCmtBracket ;
+LongCmtBracket = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01not-a-long-comment", 0)
+        if (c.peek(0) !== 45 || c.peek(1) !== 45 || c.peek(2) !== 91) { return no }
+        var lvl = 0
+        while (c.peek(3 + lvl) === 61) { lvl = lvl + 1 }
+        if (c.peek(3 + lvl) !== 91) { return no }
+        var i = lvl + 4
+        var open = true
+        while (open) {
+            var ch = c.peek(i)
+            if (ch < 0) { return no }
+            if (ch === 93) {
+                var k = 0
+                while (c.peek(i + 1 + k) === 61) { k = k + 1 }
+                if (k === lvl && c.peek(i + 1 + k) === 93) { i = i + k + 2; open = false }
+                else { i = i + 1 }
+            } else { i = i + 1 }
+        }
+        var s = ""
+        for (var j = 0; j < i; j++) { s = s + String.fromCharCode(c.peek(j)) }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
 LineComment = "--" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -348,37 +501,249 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // does not need one, so stmtPos is the identity here (keeps the grammar identical).
     function stmtPos(t) { return t }
 
-    // ----- Widening helpers -----
     // A no-op statement thunk for an empty ';' statement.
     function makeEmpty() { return function() { return undefined } }
-    // A bitwise/exponentiation node: pass through when the operator is absent (a single
-    // operand collected), otherwise accept-and-notImplemented. makeBit is applied to
-    // every BitExpr and makePow to every PowExpr, so the pass-through keeps operator-free
-    // programs behaving exactly as before.
-    function makeBit(items, pos) { if (items.length == 1) { return items[0] } return notImplExpr("bitwise operator", pos) }
-    function makePow(items, pos) { if (items.length == 1) { return items[0] } return notImplExpr("^ (exponentiation) operator", pos) }
-    // A long-bracket string body: a single leading newline is dropped (the Lua rule).
+
+    // ----- Long-bracket literals -----
+    // The :script hands the WHOLE literal over, brackets included, because only it knows
+    // the level; luaLongBody strips the two brackets back off and luaLong applies the Lua
+    // rule that a single line break right after the opening bracket is dropped.
+    function luaLongBody(s) {
+        var lvl = 0
+        while (1 + lvl < s.length && s.charCodeAt(1 + lvl) === 61) { lvl = lvl + 1 }
+        return s.slice(lvl + 2, s.length - (lvl + 2))
+    }
     function luaLong(s) {
         if (s.length > 0 && s.charCodeAt(0) === 10) { return s.slice(1) }
         if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return s.slice(2) }
         return s
     }
-    // Parse a hex integer literal (0x....) to a number, stopping at the first non-hex
-    // char (so trailing whitespace captured in up.in is ignored).
-    function luaHexVal(s) {
-        var v = 0
-        var i = 2
-        var going = true
-        while (going && i < s.length) {
-            var cc = s.charCodeAt(i)
-            var d = -1
-            if (cc >= 48 && cc <= 57) { d = cc - 48 }
-            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
-            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
-            if (d < 0) { going = false }
-            else { v = v * 16 + d; i = i + 1 }
+
+    // ----- The number model: Lua's integer and float subtypes -----
+    // Lua 5.3+ distinguishes integers from floats and the difference is observable: 1
+    // renders as '1' but 1.0 as '1.0', 7 // 2 is 3 while 7.0 // 2 is 3.0, and a division
+    // is always a float. Every number here is a host double, so the subtype comes from
+    // the spelling: a non-integral double is a float already, and an integral one counts
+    // as an integer UNLESS it sits in a float box {__f, v}. Only integral floats need the
+    // box, so ordinary integer arithmetic - the common case - allocates nothing.
+    function isFlt(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f === true }
+    function numOf(v) { return isFlt(v) ? v.v : v }
+    function isNum(v) { return typeof v == "number" || isFlt(v) }
+    // A Lua integer: an unboxed double with an integral, finite value.
+    function isInt(v) { return typeof v == "number" && v - v === 0 && Math.floor(v) === v }
+    // Box n as a float when it would otherwise read back as an integer. (n - n === 0
+    // rejects the infinities and NaN, which are floats already and never need a box.)
+    function mkFlt(n) { if (n - n === 0 && Math.floor(n) === n) { return {__f: true, v: n} } return n }
+
+    function isSpaceCode(cc) { return cc === 32 || cc === 9 || cc === 10 || cc === 13 }
+    function hexDigit(cc) {
+        if (cc >= 48 && cc <= 57) { return cc - 48 }
+        if (cc >= 97 && cc <= 102) { return cc - 87 }
+        if (cc >= 65 && cc <= 70) { return cc - 55 }
+        return -1
+    }
+    // Read a numeric literal: both the lexer's spelling and the one a string goes through
+    // when it coerces in arithmetic. Surrounding blanks and a leading sign are tolerated
+    // (the coercion needs that); anything that is not a complete number yields undefined.
+    function luaNumVal(s) {
+        var i = 0
+        var n = s.length
+        while (i < n && isSpaceCode(s.charCodeAt(i))) { i = i + 1 }
+        while (n > i && isSpaceCode(s.charCodeAt(n - 1))) { n = n - 1 }
+        var neg = false
+        if (i < n && (s.charCodeAt(i) === 43 || s.charCodeAt(i) === 45)) {
+            neg = s.charCodeAt(i) === 45
+            i = i + 1
         }
-        return v
+        if (i >= n) { return undefined }
+        var r = anytype // An integer (a plain number) or a float (possibly boxed).
+        if (s.charCodeAt(i) === 48 && i + 1 < n && (s.charCodeAt(i + 1) === 120 || s.charCodeAt(i + 1) === 88)) {
+            r = luaHexNum(s, i + 2, n)
+        } else {
+            r = luaDecNum(s, i, n)
+        }
+        if (r === undefined) { return undefined }
+        if (!neg) { return r }
+        if (isFlt(r)) { return mkFlt(0 - r.v) }
+        return 0 - r
+    }
+    // 0x...: an integer, unless the spelling carries a '.' or a binary 'p' exponent - then
+    // it is a float whose value is the hex mantissa times two to the exponent.
+    function luaHexNum(s, i, n) {
+        var v = 0
+        var digits = 0
+        var isFloat = false
+        while (i < n && hexDigit(s.charCodeAt(i)) >= 0) { v = v * 16 + hexDigit(s.charCodeAt(i)); i = i + 1; digits = digits + 1 }
+        if (i < n && s.charCodeAt(i) === 46) {
+            isFloat = true
+            i = i + 1
+            var scale = 1
+            while (i < n && hexDigit(s.charCodeAt(i)) >= 0) {
+                scale = scale / 16
+                v = v + hexDigit(s.charCodeAt(i)) * scale
+                i = i + 1
+                digits = digits + 1
+            }
+        }
+        if (digits === 0) { return undefined }
+        if (i < n && (s.charCodeAt(i) === 112 || s.charCodeAt(i) === 80)) {
+            isFloat = true
+            i = i + 1
+            var esign = 1
+            if (i < n && (s.charCodeAt(i) === 43 || s.charCodeAt(i) === 45)) {
+                if (s.charCodeAt(i) === 45) { esign = 0 - 1 }
+                i = i + 1
+            }
+            var e = 0
+            var edig = 0
+            while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { e = e * 10 + (s.charCodeAt(i) - 48); i = i + 1; edig = edig + 1 }
+            if (edig === 0) { return undefined }
+            v = v * Math.pow(2, esign * e)
+        }
+        if (i < n) { return undefined }
+        return isFloat ? mkFlt(v) : v
+    }
+    // A decimal literal: a float exactly when it has a fraction dot or an exponent.
+    function luaDecNum(s, i, n) {
+        var start = i
+        var isFloat = false
+        var digits = 0
+        while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { i = i + 1; digits = digits + 1 }
+        if (i < n && s.charCodeAt(i) === 46) {
+            isFloat = true
+            i = i + 1
+            while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { i = i + 1; digits = digits + 1 }
+        }
+        if (digits === 0) { return undefined }
+        if (i < n && (s.charCodeAt(i) === 101 || s.charCodeAt(i) === 69)) {
+            isFloat = true
+            i = i + 1
+            if (i < n && (s.charCodeAt(i) === 43 || s.charCodeAt(i) === 45)) { i = i + 1 }
+            var edig = 0
+            while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { i = i + 1; edig = edig + 1 }
+            if (edig === 0) { return undefined }
+        }
+        if (i < n) { return undefined }
+        var v = parseFloat(s.slice(start, i))
+        return isFloat ? mkFlt(v) : v
+    }
+
+    // ----- String escapes -----
+    // Lua's own set: the single letters a b f n r t v, a decimal byte of up to three
+    // digits, xNN, u{...} (a code point), a real line break (which stands for a newline)
+    // and z (which swallows the whitespace run behind it).
+    function luaUnesc(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var cc = s.charCodeAt(i)
+            if (cc !== 92) { out = out + String.fromCharCode(cc); i = i + 1; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e === 110) { out = out + String.fromCharCode(10); i = i + 2; continue }
+            if (e === 116) { out = out + String.fromCharCode(9);  i = i + 2; continue }
+            if (e === 114) { out = out + String.fromCharCode(13); i = i + 2; continue }
+            if (e === 97)  { out = out + String.fromCharCode(7);  i = i + 2; continue }
+            if (e === 98)  { out = out + String.fromCharCode(8);  i = i + 2; continue }
+            if (e === 102) { out = out + String.fromCharCode(12); i = i + 2; continue }
+            if (e === 118) { out = out + String.fromCharCode(11); i = i + 2; continue }
+            if (e === 10)  { out = out + String.fromCharCode(10); i = i + 2; continue }
+            if (e === 13) {
+                out = out + String.fromCharCode(10)
+                i = i + 2
+                if (i < s.length && s.charCodeAt(i) === 10) { i = i + 1 }
+                continue
+            }
+            if (e === 122) {
+                i = i + 2
+                while (i < s.length && isSpaceCode(s.charCodeAt(i))) { i = i + 1 }
+                continue
+            }
+            if (e === 120 || e === 88) {
+                var hv = 0
+                var hn = 0
+                i = i + 2
+                while (hn < 2 && i < s.length && hexDigit(s.charCodeAt(i)) >= 0) {
+                    hv = hv * 16 + hexDigit(s.charCodeAt(i))
+                    i = i + 1
+                    hn = hn + 1
+                }
+                out = out + String.fromCharCode(hv)
+                continue
+            }
+            if (e === 117) {
+                var uv = 0
+                i = i + 2
+                if (i < s.length && s.charCodeAt(i) === 123) { i = i + 1 }
+                while (i < s.length && hexDigit(s.charCodeAt(i)) >= 0) { uv = uv * 16 + hexDigit(s.charCodeAt(i)); i = i + 1 }
+                if (i < s.length && s.charCodeAt(i) === 125) { i = i + 1 }
+                out = out + codePointStr(uv)
+                continue
+            }
+            if (e >= 48 && e <= 57) {
+                var dv = 0
+                var dn = 0
+                i = i + 1
+                while (dn < 3 && i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) {
+                    dv = dv * 10 + (s.charCodeAt(i) - 48)
+                    i = i + 1
+                    dn = dn + 1
+                }
+                out = out + String.fromCharCode(dv)
+                continue
+            }
+            out = out + String.fromCharCode(e)
+            i = i + 2
+        }
+        return out
+    }
+    // A code point as a host string; above the basic plane it needs a surrogate pair.
+    function codePointStr(cp) {
+        if (cp < 65536) { return String.fromCharCode(cp) }
+        var v = cp - 65536
+        return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v % 1024))
+    }
+
+    // ----- Multiple values -----
+    // A call and ... are MULTI-VALUE expressions: all of their values count in a list
+    // position (the last item of an argument list, an expression list, a return or a
+    // table constructor) and only the first one everywhere else. They are carried in a
+    // box, which mkMulti builds only for a count other than one - so an ordinary
+    // single-valued call still hands its value over unwrapped.
+    function mkMulti(vs) { if (vs.length == 1) { return vs[0] } return {__mv: true, a: vs} }
+    function isMulti(v) { return v !== null && v !== undefined && typeof v == "object" && v.__mv === true }
+    function luaFirst(v) { if (isMulti(v)) { return v.a.length > 0 ? v.a[0] : undefined } return v }
+    function luaAll(v) {
+        if (isMulti(v)) { return v.a }
+        var one = []
+        one.push(v)
+        return one
+    }
+    // Evaluate a list of expression thunks the Lua way: every thunk but the last is
+    // truncated to one value, the last one expands.
+    function evalList(ts) {
+        var vs = []
+        var last = ts.length - 1
+        for (var i = 0; i < ts.length; i++) {
+            var v = anytype // Any Lua value, or a multi-value box.
+            v = ts[i]()
+            if (i === last) {
+                var all = luaAll(v)
+                for (var j = 0; j < all.length; j++) { vs.push(all[j]) }
+            } else { vs.push(luaFirst(v)) }
+        }
+        return vs
+    }
+    // ( e ) truncates a multi-value to its first value.
+    function luaParen(t) { return function() { return luaFirst(t()) } }
+    // '...': the extra arguments of the enclosing variadic call, kept in its frame under
+    // the name '...' by makeClosure.
+    function makeVararg() {
+        return function() {
+            var vs = anytype // The extra-argument array, or nil outside a vararg function.
+            vs = getVar("...")
+            if (vs === undefined || vs === null) { return mkMulti([]) }
+            return mkMulti(vs.slice())
+        }
     }
 
     // ----- Lua value helpers -----
@@ -388,26 +753,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaType(v) {
         if (v === undefined || v === null) { return "nil" }
         if (v === true || v === false) { return "boolean" }
-        if (typeof v == "number") { return "number" }
+        if (typeof v == "number" || isFlt(v)) { return "number" }
         if (typeof v == "string") { return "string" }
         if (typeof v == "function") { return "function" }
         return "table"
     }
-    // Only false and nil are falsy in Lua (0 and "" are true).
-    function luatruthy(v) { return v !== undefined && v !== null && v !== false }
-    // A table key: numbers and strings both address the map by their string form.
-    function luaKey(k) { return "" + k }
+    // Only false and nil are falsy in Lua (0 and "" are true). A multi-value is tested
+    // by its first value, which is what a bare call in a condition means.
+    function luatruthy(v) {
+        if (isMulti(v)) { return luatruthy(luaFirst(v)) }
+        return v !== undefined && v !== null && v !== false
+    }
+    // A table key: numbers and strings both address the map by their string form, and a
+    // float key with an integral value normalizes to that integer (t[2.0] is t[2]).
+    function luaKey(k) { if (isNum(k)) { return "" + numOf(k) } return "" + k }
+    // How a number renders: an integer without a fraction, a float always with one.
+    function luaNumStr(v) {
+        var n = numOf(v)
+        if (n !== n) { return "-nan" }
+        if (n - n !== 0) { return n > 0 ? "inf" : "-inf" }
+        if (isFlt(v)) { return "" + n + ".0" }
+        return "" + n
+    }
     function luaToStr(v) {
         if (v === undefined || v === null) { return "nil" }
         if (v === true) { return "true" }
         if (v === false) { return "false" }
+        if (isNum(v)) { return luaNumStr(v) }
         if (typeof v == "object") { return "table" }
         if (typeof v == "function") { return "function" }
         return "" + v
     }
     function luaIndex(o, k) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
-        if (typeof o != "object") { fail("attempt to index a " + luaType(o) + " value") }
+        if (typeof o != "object" || isFlt(o)) { fail("attempt to index a " + luaType(o) + " value") }
         var kk = luaKey(k)
         return hasOwn(o, kk) ? o[kk] : undefined
     }
@@ -421,63 +800,192 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function luaSetIndex(o, k, v) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
-        if (typeof o != "object") { fail("attempt to index a " + luaType(o) + " value") }
+        if (typeof o != "object" || isFlt(o)) { fail("attempt to index a " + luaType(o) + " value") }
         luaRawSet(o, luaKey(k), v)
     }
     // #t: the sequence border - the largest n with t[1..n] all non nil (strings by length).
     function luaLen(v) {
         if (typeof v == "string") { return v.length }
-        if (typeof v == "object" && v !== null) {
+        if (typeof v == "object" && v !== null && !isFlt(v)) {
             var n = 0
             while (hasOwn(v, "" + (n + 1)) && v["" + (n + 1)] !== undefined) { n++ }
             return n
         }
         fail("attempt to get length of a " + luaType(v) + " value")
     }
+    // Lua's modulo follows the sign of the DIVISOR (-0.5 % 2 is 1.5, not -0.5).
     function luaMod(a, b) { return a - Math.floor(a / b) * b }
+
+    // ----- 64-bit integer bit operations -----
+    // Lua's & | ~ << >> work on 64-bit two's complement integers, and a host double holds
+    // only 53 bits exactly - so every operand is split into two unsigned 32-bit halves,
+    // the operation runs on the halves, and the result is reassembled. The shifts are
+    // logical (they never sign-extend) and a count of 64 or more clears the value, both
+    // of which are Lua's rules rather than the host's.
+    function u32and(a, b) { var r = a & b; return r < 0 ? r + 4294967296 : r }
+    function u32or(a, b)  { var r = a | b; return r < 0 ? r + 4294967296 : r }
+    function u32xor(a, b) { var r = a ^ b; return r < 0 ? r + 4294967296 : r }
+    function u32not(a)    { var r = ~a;    return r < 0 ? r + 4294967296 : r }
+    // x is an unsigned 32-bit value and k is 0..31; the masking keeps every intermediate
+    // below 2^32, so no step loses precision.
+    function u32shl(x, k) { if (k <= 0) { return x } if (k >= 32) { return 0 } return (x % Math.pow(2, 32 - k)) * Math.pow(2, k) }
+    function u32shr(x, k) { if (k <= 0) { return x } if (k >= 32) { return 0 } return Math.floor(x / Math.pow(2, k)) }
+    // A Lua value as a 64-bit integer {hi, lo}: an integer, a float with an integral
+    // value, or a string that spells one.
+    function toI64(v) {
+        var a = anytype // The value after the string coercion.
+        a = toNumV(v)
+        if (a === undefined) { fail("attempt to perform bitwise operation on a " + luaType(v) + " value") }
+        var n = numOf(a)
+        if (n - n !== 0 || Math.floor(n) !== n) { fail("number has no integer representation") }
+        var hi = Math.floor(n / 4294967296)
+        var lo = n - hi * 4294967296
+        hi = hi % 4294967296
+        if (hi < 0) { hi = hi + 4294967296 }
+        return {hi: hi, lo: lo}
+    }
+    function fromI64(hi, lo) {
+        if (hi >= 2147483648) { return (hi - 4294967296) * 4294967296 + lo }
+        return hi * 4294967296 + lo
+    }
+    function shl64(hi, lo, k) {
+        if (k >= 64) { return {hi: 0, lo: 0} }
+        if (k >= 32) { return {hi: u32shl(lo, k - 32), lo: 0} }
+        if (k <= 0)  { return {hi: hi, lo: lo} }
+        return {hi: u32shl(hi, k) + u32shr(lo, 32 - k), lo: u32shl(lo, k)}
+    }
+    function shr64(hi, lo, k) {
+        if (k >= 64) { return {hi: 0, lo: 0} }
+        if (k >= 32) { return {hi: 0, lo: u32shr(hi, k - 32)} }
+        if (k <= 0)  { return {hi: hi, lo: lo} }
+        return {hi: u32shr(hi, k), lo: u32shr(lo, k) + u32shl(hi % Math.pow(2, k), 32 - k)}
+    }
+    function luaBit(op, l, r) {
+        if (op == "<<" || op == ">>") {
+            var p = toI64(l)
+            var kk = toI64(r)
+            var k = fromI64(kk.hi, kk.lo)
+            var left = (op == "<<")
+            if (k < 0) { k = 0 - k; left = !left }
+            var q = left ? shl64(p.hi, p.lo, k) : shr64(p.hi, p.lo, k)
+            return fromI64(q.hi, q.lo)
+        }
+        var a = toI64(l)
+        var b = toI64(r)
+        if (op == "&") { return fromI64(u32and(a.hi, b.hi), u32and(a.lo, b.lo)) }
+        if (op == "|") { return fromI64(u32or(a.hi, b.hi), u32or(a.lo, b.lo)) }
+        return fromI64(u32xor(a.hi, b.hi), u32xor(a.lo, b.lo))
+    }
+    function luaBitNot(v) {
+        var a = toI64(v)
+        return fromI64(u32not(a.hi), u32not(a.lo))
+    }
 
     // ----- Overridden operator / expression builders -----
 
-    binOp = function(op, l, r) {
-        if (op == "+")  { return l + r }
-        if (op == "-")  { return l - r }
-        if (op == "*")  { return l * r }
-        if (op == "/")  { return l / r }
-        if (op == "//") { return Math.floor(l / r) }
-        if (op == "%")  { return luaMod(l, r) }
-        if (op == "==") { return l === r }
-        if (op == "~=") { return l !== r }
-        if (op == "<")  { return l < r }
-        if (op == ">")  { return l > r }
-        if (op == "<=") { return l <= r }
-        if (op == ">=") { return l >= r }
+    // A value as a number, with Lua's automatic string coercion; undefined when it is
+    // not convertible.
+    function toNumV(v) {
+        if (typeof v == "number" || isFlt(v)) { return v }
+        if (typeof v == "string") { return luaNumVal(v) }
+        return undefined
     }
-    makeNeg = function(t) { return function() { return -t() } }
+    // Arithmetic. The result is an integer only when both operands are integers; / and ^
+    // always yield a float, and // and % keep the operands' subtype.
+    function luaArith(op, l, r) {
+        var a = anytype // The left operand as a number.
+        var b = anytype // The right operand as a number.
+        a = toNumV(l)
+        b = toNumV(r)
+        if (a === undefined) { fail("attempt to perform arithmetic on a " + luaType(l) + " value") }
+        if (b === undefined) { fail("attempt to perform arithmetic on a " + luaType(r) + " value") }
+        var x = numOf(a)
+        var y = numOf(b)
+        if (op == "/") { return mkFlt(x / y) }
+        if (op == "^") { return mkFlt(Math.pow(x, y)) }
+        var flt = !(isInt(a) && isInt(b))
+        var v = 0
+        if (op == "+")       { v = x + y }
+        else if (op == "-")  { v = x - y }
+        else if (op == "*")  { v = x * y }
+        else if (op == "//") { v = Math.floor(x / y) }
+        else                 { v = luaMod(x, y) }
+        return flt ? mkFlt(v) : v
+    }
+    // Equality compares numbers across the two subtypes (1 == 1.0) and everything else
+    // by identity; the ordering comparisons work on the numeric values or on strings.
+    function luaEq(l, r) {
+        if (isNum(l) && isNum(r)) { return numOf(l) === numOf(r) }
+        return l === r
+    }
+    function luaCmp(op, l, r) {
+        var a = anytype // The operands compare as numbers or as strings.
+        var b = anytype
+        a = isNum(l) ? numOf(l) : l
+        b = isNum(r) ? numOf(r) : r
+        if (op == "<")  { return a < b }
+        if (op == ">")  { return a > b }
+        if (op == "<=") { return a <= b }
+        return a >= b
+    }
+    binOp = function(op, l, r) {
+        var a = anytype // An operand may arrive as a multi-value box (a bare call).
+        var b = anytype
+        a = luaFirst(l)
+        b = luaFirst(r)
+        if (op == "==") { return luaEq(a, b) }
+        if (op == "~=") { return !luaEq(a, b) }
+        if (op == "<" || op == ">" || op == "<=" || op == ">=") { return luaCmp(op, a, b) }
+        if (op == "&" || op == "|" || op == "~" || op == "<<" || op == ">>") { return luaBit(op, a, b) }
+        return luaArith(op, a, b)
+    }
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype // The operand, before the string coercion.
+            v = luaFirst(t())
+            var a = toNumV(v)
+            if (a === undefined) { fail("attempt to perform arithmetic on a " + luaType(v) + " value") }
+            if (isFlt(a)) { return mkFlt(0 - a.v) }
+            return 0 - a
+        }
+    }
     makeNot = function(t) { return function() { return !luatruthy(t()) } }
-    function makeLen(t) { return function() { return luaLen(t()) } }
+    function makeLen(t) { return function() { return luaLen(luaFirst(t())) } }
+    function makeBNot(t) { return function() { return luaBitNot(luaFirst(t())) } }
+    // a ^ b: right associative (the grammar recurses on its right operand) and always a
+    // float result. A single collected operand means the '^' was absent.
+    function makePow(items) {
+        if (items.length == 1) { return items[0] }
+        var l = items[0]
+        var r = items[1]
+        return function() { return luaArith("^", luaFirst(l()), luaFirst(r())) }
+    }
     // Concatenation: right associative, so at most two operands per node.
     function makeConcat(items) {
         if (items.length == 1) { return items[0] }
         var l = items[0]
         var r = items[1]
-        return function() { return luaToStr(l()) + luaToStr(r()) }
+        return function() { return luaToStr(luaFirst(l())) + luaToStr(luaFirst(r())) }
     }
     // and / or keep the deciding operand, with Lua truthiness.
     makeOrAnd = function(items, isOr) {
         if (items.length == 1) { return items[0] }
         return function() {
             var v = anytype // The operands may be of mixed types.
-            v = items[0]()
+            v = luaFirst(items[0]())
             for (var i = 1; i < items.length; i++) {
                 if (isOr) { if (luatruthy(v)) { return v } }
                 else      { if (!luatruthy(v)) { return v } }
-                v = items[i]()
+                v = luaFirst(items[i]())
             }
             return v
         }
     }
 
-    // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...].
+    // items = [primaryThunk, {kind:"call"|"method"|"field"|"index", ...}...]. A call is
+    // the one step that may produce a multi-value: it keeps it when it is the last step
+    // (so the whole expression can expand in a list position) and the next step around
+    // it truncates to the first value, exactly like Lua.
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
@@ -488,39 +996,48 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "call") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
-                    if (typeof cur != "function") { fail("attempt to call a " + luaType(cur) + " value") }
-                    cur = cur.apply(undefined, argv)
+                    var argv = evalList(s.args)
+                    var fv = anytype // The callee, truncated to one value.
+                    fv = luaFirst(cur)
+                    if (typeof fv != "function") { fail("attempt to call a " + luaType(fv) + " value") }
+                    cur = fv.apply(undefined, argv)
                 } else if (s.kind == "method") {
                     var fn = anytype // The looked-up method value.
-                    fn = luaIndex(cur, s.name)
+                    var recv = anytype // The receiver, truncated to one value.
+                    recv = luaFirst(cur)
+                    fn = luaIndex(recv, s.name)
                     if (typeof fn != "function") { fail("attempt to call method '" + s.name + "' (a " + luaType(fn) + " value)") }
-                    var margv = []
-                    margv.push(cur) // The receiver becomes the first argument (self).
-                    for (var mj = 0; mj < s.args.length; mj++) { margv.push(s.args[mj]()) }
-                    cur = fn.apply(undefined, margv)
+                    var margv = evalList(s.args)
+                    cur = fn.apply(undefined, [recv].concat(margv))
                 } else if (s.kind == "field") {
-                    cur = luaIndex(cur, s.name)
+                    cur = luaIndex(luaFirst(cur), s.name)
                 } else {
-                    cur = luaIndex(cur, s.idx())
+                    cur = luaIndex(luaFirst(cur), luaFirst(s.idx()))
                 }
             }
             return cur
         }
     }
 
-    // { ... } fields, in source order: positional fields fill 1, 2, 3, ...
+    // { ... } fields, in source order: positional fields fill 1, 2, 3, ... A multi-value
+    // in the LAST positional field expands into as many entries as it has values.
     function makeTable(items) {
+        var lastPos = 0 - 1
+        for (var k = 0; k < items.length; k++) { if (items[k].fkind == "pos") { lastPos = k } }
         return function() {
             var t = {}
             t.__keys = []
             var pos = 1
             for (var i = 0; i < items.length; i++) {
                 var f = items[i]
-                if (f.fkind == "pos") { luaRawSet(t, "" + pos, f.v()); pos++ }
-                else if (f.fkind == "name") { luaRawSet(t, f.name, f.v()) }
-                else { luaRawSet(t, luaKey(f.k()), f.v()) }
+                if (f.fkind == "pos") {
+                    if (i === lastPos) {
+                        var all = luaAll(f.v())
+                        for (var j = 0; j < all.length; j++) { luaRawSet(t, "" + pos, all[j]); pos++ }
+                    } else { luaRawSet(t, "" + pos, luaFirst(f.v())); pos++ }
+                }
+                else if (f.fkind == "name") { luaRawSet(t, f.name, luaFirst(f.v())) }
+                else { luaRawSet(t, luaKey(luaFirst(f.k())), luaFirst(f.v())) }
             }
             return t
         }
@@ -529,7 +1046,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- Assignment -----
     function pathKey(p) {
         if (p.kind == "field") { return p.name }
-        return p.idx()
+        return luaFirst(p.idx())
     }
     function assignTarget(ref, v) {
         if (ref.path.length == 0) { setVar(ref.name, v); return }
@@ -548,8 +1065,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { targets.push(items[i]) }
         }
         return function() {
-            var vs = []
-            for (var i = 0; i < vals.length; i++) { vs.push(vals[i]()) }
+            var vs = evalList(vals)
             for (var t = 0; t < targets.length; t++) {
                 assignTarget(targets[t], t < vs.length ? vs[t] : undefined)
             }
@@ -563,8 +1079,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { names.push(items[i].lname) }
         }
         return function() {
-            var vs = []
-            for (var i = 0; i < vals.length; i++) { vs.push(vals[i]()) }
+            var before = closureCount
+            var vs = evalList(vals)
+            // The new locals must stay invisible to a closure that one of the initializers
+            // just built - 'local f = function() return f end' reads the GLOBAL f in Lua -
+            // and that closure captured the current frame, so the declarations go into a
+            // fresh one. Only the case that actually built a closure pays for the frame.
+            if (closureCount != before) { scopes.push({}) }
             for (var n = 0; n < names.length; n++) {
                 declVar(names[n], n < vs.length ? vs[n] : undefined)
             }
@@ -572,17 +1093,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ----- Functions -----
-    // A Lua closure captures its defining scope chain and gets a fresh frame per call.
+    // A Lua closure captures its defining scope chain and gets a fresh frame per call. A
+    // trailing '...' parameter makes it variadic: the arguments beyond the named ones are
+    // kept in the frame under the name '...', where makeVararg reads them.
+    var closureCount = 0
     function makeClosure(params, bodyT) {
         var env = scopes.slice()
+        var nfix = params.length
+        var variadic = false
+        if (nfix > 0 && params[nfix - 1] == "...") { variadic = true; nfix = nfix - 1 }
+        closureCount = closureCount + 1
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
             var saved = scopes
             scopes = env.slice()
             var frame = {}
-            for (var p = 0; p < params.length; p++) {
+            for (var p = 0; p < nfix; p++) {
                 frame[params[p]] = p < args.length ? args[p] : undefined
+            }
+            if (variadic) {
+                var extra = []
+                for (var e = nfix; e < args.length; e++) { extra.push(args[e]) }
+                frame["..."] = extra
             }
             scopes.push(frame)
             var r = bodyT()
@@ -633,6 +1166,59 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // ----- Statement thunks -----
+
+    // goto Name / ::Name::. A label is a MARKER in its block's item list rather than a
+    // thunk; a goto returns a jump signal, which the enclosing block consumes when it
+    // holds that label (backward as well as forward) and otherwise lets travel outward -
+    // which is how one goto leaves a nested loop or a do-block.
+    function makeGoto(name) { var sig = {__goto: name}; return function() { return sig } }
+    function makeLabel(name) { return {__label: name} }
+
+    // A block. Beyond running its statements it does two jobs:
+    //  - labels: it maps its own ::name:: markers to their positions and continues there
+    //    when a statement hands back a matching goto signal;
+    //  - scope: the frames its own 'local' statements pushed are dropped at its end, so a
+    //    local dies with its block and a loop body does not pile up one frame per pass.
+    // repeat/until is the exception - its condition is evaluated in the body's scope and
+    // must still see the body's locals - so makeRepeat clears seqTrim for one block.
+    var seqTrim = true
+    // Assigned rather than declared: interp-core.js has its own makeSeq, and only an
+    // assignment overrides it identically under goja and the frozen engine.
+    makeSeq = function(items) {
+        var labels = {}
+        var hasLabel = false
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] != "function" && items[i].__label != undefined) {
+                labels["$" + items[i].__label] = i
+                hasLabel = true
+            }
+        }
+        return function() {
+            var trim = seqTrim
+            seqTrim = true
+            var depth = scopes.length
+            var res = undefined
+            var i = 0
+            while (i < items.length) {
+                var it = items[i]
+                if (typeof it != "function") { i = i + 1; continue }
+                var r = it()
+                if (r != undefined) {
+                    if (hasLabel && r.__goto != undefined && hasOwn(labels, "$" + r.__goto)) {
+                        i = labels["$" + r.__goto] + 1
+                        continue
+                    }
+                    res = r
+                    i = items.length
+                    continue
+                }
+                i = i + 1
+            }
+            if (trim) { while (scopes.length > depth) { scopes.pop() } }
+            return res
+        }
+    }
+
     function makeElseIf(suite, cond) { return {elifCond: cond, suite: suite} }
     function makeElse(suite) { return {elseSuite: suite} }
     makeIf = function(items) {
@@ -652,6 +1238,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (elseT != null) { return elseT() }
         }
     }
+    // for i = start, limit [, step]. The three values keep their number subtype, so a
+    // float start or step makes the control variable a float; the loop variable is a
+    // fresh binding per iteration and assigning to it does not steer the loop.
     function makeNumFor(items) {
         var name = items[0].fname
         var startT = items[1]
@@ -659,19 +1248,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var block = items[items.length - 1]
         var stepT = (items.length == 5) ? items[3] : null
         return function() {
-            var i = startT()
-            var limit = limitT()
-            var step = stepT != null ? stepT() : 1
+            var i = anytype // The control value, an integer or a float.
+            i = luaFirst(startT())
+            var limit = luaFirst(limitT())
+            var step = anytype // The increment, 1 when the loop did not spell one out.
+            step = stepT != null ? luaFirst(stepT()) : 1
+            var lim = numOf(limit)
+            var stp = numOf(step)
             scopes.push({})
             var res = undefined
-            while (step > 0 ? i <= limit : i >= limit) {
+            while (stp > 0 ? numOf(i) <= lim : numOf(i) >= lim) {
                 scopes[scopes.length - 1][name] = i
                 var r = block()
                 if (r != undefined) {
                     if (r === BRK) { break }
                     if (r !== CONT) { res = r; break }
                 }
-                i = i + step
+                i = luaArith("+", i, step)
             }
             scopes.pop()
             return res
@@ -684,96 +1277,61 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var res = undefined
             var running = true
             while (running) {
+                var depth = scopes.length
                 scopes.push({})
+                seqTrim = false // The until condition still needs the body's locals.
                 var r = block()
                 var brk = false
                 if (r != undefined && r === BRK) { brk = true }
                 if (r != undefined && r !== BRK && r !== CONT) { res = r; brk = true }
-                if (brk) { scopes.pop(); running = false }
-                else {
-                    var stop = luatruthy(cond())
-                    scopes.pop()
-                    if (stop) { running = false }
-                }
+                if (brk) { running = false }
+                else if (luatruthy(cond())) { running = false }
+                while (scopes.length > depth) { scopes.pop() }
             }
             return res
         }
     }
-    // Generic for. items = [{gname}..., {iterkind, tbl?}, blockThunk]. Only ipairs is
-    // lowered (a 1-based array walk that stops at the first nil); pairs and any other
-    // iterator are accepted, then reported as not implemented.
-    function makeGenFor(items, pos) {
+    // Generic for, in its full Lua form: the expression list yields the iterator TRIPLE
+    // (function, state, initial control value), and each pass calls f(state, control).
+    // The loop ends when the first returned value is nil; otherwise that value becomes
+    // the next control value and the returned values are bound to the loop names. ipairs
+    // and pairs are ordinary global functions returning such a triple, so a hand-written
+    // iterator - stateless or a closure - drives the loop exactly the same way.
+    // items = [{gname}..., iterExprThunk..., blockThunk]; the block is always last.
+    function makeGenFor(items) {
         var names = []
-        var iter = null
-        var block = null
-        for (var i = 0; i < items.length; i++) {
-            var it = items[i]
-            if (typeof it == "function") { block = it }
-            else if (it.gname != undefined) { names.push(it.gname) }
-            else { iter = it }
+        var exprs = []
+        var block = items[items.length - 1]
+        for (var i = 0; i < items.length - 1; i++) {
+            if (typeof items[i] == "function") { exprs.push(items[i]) }
+            else { names.push(items[i].gname) }
         }
-        // pairs(t): full key/value enumeration over the table's own keys in insertion
-        // order (the hidden __keys list), skipping keys whose value is nil. The key is
-        // yielded in its stored (string) form, matching the compiler's js_keys view.
-        if (iter.iterkind == "pairs") {
-            var tblTp = iter.tbl
-            return function() {
-                var t = anytype // The iterated table.
-                t = tblTp()
-                if (t === undefined || t === null || typeof t != "object") {
-                    fail("bad argument to 'pairs' (table expected, got " + luaType(t) + ")")
-                }
-                scopes.push({})
-                var frame = scopes[scopes.length - 1]
-                var res = undefined
-                var keys = []
-                if (hasOwn(t, "__keys")) { keys = t.__keys.slice() }
-                var ki = 0
-                var running = true
-                while (running && ki < keys.length) {
-                    var kk = keys[ki]
-                    var v = anytype // The value at the current key.
-                    v = luaIndex(t, kk)
-                    if (v !== undefined && v !== null) {
-                        frame[names[0]] = kk
-                        if (names.length > 1) { frame[names[1]] = v }
-                        var r = block()
-                        if (r != undefined) {
-                            if (r === BRK) { running = false }
-                            else if (r !== CONT) { res = r; running = false }
-                        }
-                    }
-                    ki = ki + 1
-                }
-                scopes.pop()
-                return res
-            }
-        }
-        if (iter.iterkind != "ipairs") {
-            return notImplStmt("generic for over " + iter.iterkind + "()", pos)
-        }
-        var tblT = iter.tbl
         return function() {
-            var t = anytype // The iterated table.
-            t = tblT()
+            var vs = evalList(exprs)
+            var f = anytype // The iterator function.
+            var st = anytype // The invariant state.
+            var ctl = anytype // The control value, updated every pass.
+            f = vs.length > 0 ? vs[0] : undefined
+            st = vs.length > 1 ? vs[1] : undefined
+            ctl = vs.length > 2 ? vs[2] : undefined
+            if (typeof f != "function") { fail("attempt to call a " + luaType(f) + " value") }
             scopes.push({})
             var frame = scopes[scopes.length - 1]
             var res = undefined
-            var idx = 1
             var running = true
             while (running) {
-                var v = anytype // The element at the current index.
-                v = luaIndex(t, idx)
-                if (v === undefined || v === null) { running = false }
+                var all = luaAll(f(st, ctl))
+                var head = anytype // The first returned value: nil ends the loop.
+                head = all.length > 0 ? all[0] : undefined
+                if (head === undefined || head === null) { running = false }
                 else {
-                    frame[names[0]] = idx
-                    if (names.length > 1) { frame[names[1]] = v }
+                    ctl = head
+                    for (var n = 0; n < names.length; n++) { frame[names[n]] = n < all.length ? all[n] : undefined }
                     var r = block()
                     if (r != undefined) {
                         if (r === BRK) { running = false }
                         else if (r !== CONT) { res = r; running = false }
-                        else { idx = idx + 1 }
-                    } else { idx = idx + 1 }
+                    }
                 }
             }
             scopes.pop()
@@ -788,9 +1346,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return r
         }
     }
+    // return e1, e2, ...: all the values travel back, the last expression expanding, so
+    // 'return f()' propagates everything f returned (Lua's tail-call value rule).
     function makeReturn(items) {
-        var t = items.length > 0 ? items[0] : null
-        return function() { return {isRet: true, v: t != null ? t() : undefined} }
+        return function() { return {isRet: true, v: mkMulti(evalList(items))} }
     }
 
     // buildChunk runs the whole program (one seq thunk). The test calls exit(fails)
@@ -802,6 +1361,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     core.test = luatruthy
     // A bare assignment to a name that is nowhere in scope creates a global.
     core.setMiss = function(name, value) { globalScope[name] = value; return true }
+    // Reading a name that is nowhere in scope is not an error in Lua: an unset global
+    // simply reads as nil.
+    core.varMiss = function(name) { return {v: undefined} }
 
     // The host names a program can see.
     globalScope["print"] = function() {
@@ -812,29 +1374,63 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         println(out)
     }
-    globalScope["exit"] = function(code) { exit(code | 0) }
+    globalScope["exit"] = function(code) { exit(numOf(code) | 0) }
 
-    // next(t [, k]): the array-part iterator. next(t) yields index 1 (or nil when the
-    // table has no [1]); next(t, i) yields i+1 while t[i+1] is non-nil, else nil. The
-    // subset's calls return one value, so this is the key only (Lua's first result).
-    globalScope["next"] = function(t, k) {
+    // next(t [, k]): the table iterator, walking the table's own keys in insertion order
+    // (the hidden __keys list) and skipping the ones whose value is nil. It returns the
+    // key AND its value, and nil once the table is exhausted - which is exactly what the
+    // generic for expects, so pairs(t) is next plus the table.
+    function luaNext(t, k) {
+        if (t === undefined || t === null || typeof t != "object" || isFlt(t)) {
+            fail("bad argument to 'next' (table expected, got " + luaType(t) + ")")
+        }
+        var keys = hasOwn(t, "__keys") ? t.__keys : []
         var i = 0
-        if (k !== undefined && k !== null) { i = k }
-        var nk = i + 1
-        var v = anytype // The probed element.
+        if (k !== undefined && k !== null) {
+            var kk = luaKey(k)
+            while (i < keys.length && keys[i] !== kk) { i = i + 1 }
+            i = i + 1
+        }
+        while (i < keys.length) {
+            var v = anytype // The value at the candidate key.
+            v = luaIndex(t, keys[i])
+            if (v !== undefined && v !== null) { return mkMulti([luaKeyBack(keys[i]), v]) }
+            i = i + 1
+        }
+        return undefined
+    }
+    // The keys are stored in their string form (that is how the map addresses them), so
+    // an iteration hands a numeric key back as the number it was written as - t[1] is
+    // reached by the integer 1, not by "1".
+    function luaKeyBack(kk) {
+        var n = anytype // The key read back as a number, when it spells one.
+        n = luaNumVal(kk)
+        if (n !== undefined && luaKey(n) === kk) { return n }
+        return kk
+    }
+    globalScope["next"] = luaNext
+    globalScope["pairs"] = function(t) { return mkMulti([luaNext, t, undefined]) }
+    // ipairs(t): the 1-based array walk, as the same kind of triple - its iterator counts
+    // the control value up and stops at the first nil element.
+    function luaINext(t, i) {
+        var nk = numOf(i) + 1
+        var v = anytype // The element at the next index.
         v = luaIndex(t, nk)
         if (v === undefined || v === null) { return undefined }
-        return nk
+        return mkMulti([nk, v])
     }
+    globalScope["ipairs"] = function(t) { return mkMulti([luaINext, t, 0]) }
 
     // math.*: a small numeric library backed by JS Math (floor/abs/max/min, plus ceil
     // derived from floor so no host Math.ceil is required in frozen mode).
+    // floor/ceil answer an integer (Lua does too); abs/max/min keep their argument's
+    // number subtype, so math.abs(-1.0) stays a float.
     globalScope["math"] = {
-        floor: function(x) { return Math.floor(x) },
-        ceil: function(x) { return -Math.floor(-x) },
-        abs: function(x) { return Math.abs(x) },
-        max: function(a, b) { return Math.max(a, b) },
-        min: function(a, b) { return Math.min(a, b) }
+        floor: function(x) { return Math.floor(numOf(x)) },
+        ceil: function(x) { return 0 - Math.floor(0 - numOf(x)) },
+        abs: function(x) { return numOf(x) < 0 ? luaArith("-", 0, x) : x },
+        max: function(a, b) { return numOf(a) > numOf(b) ? a : b },
+        min: function(a, b) { return numOf(a) < numOf(b) ? a : b }
     }
 
     // string.*: 1-based, matching Lua. sub(s, i, j) maps to JS slice(i-1, j) (j omitted
@@ -843,11 +1439,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         len: function(s) { return s.length },
         upper: function(s) { return s.toUpperCase() },
         lower: function(s) { return s.toLowerCase() },
-        sub: function(s, i, j) { return s.slice(i - 1, j) },
+        sub: function(s, i, j) { return j === undefined ? s.slice(numOf(i) - 1) : s.slice(numOf(i) - 1, numOf(j)) },
         rep: function(s, n) {
             var out = ""
             var k = 0
-            while (k < n) { out = out + s; k = k + 1 }
+            var cnt = numOf(n)
+            while (k < cnt) { out = out + s; k = k + 1 }
             return out
         }
     }

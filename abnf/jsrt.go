@@ -3628,6 +3628,28 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			rt.noteGet(a[0], a[1])
 			return w(rt.getMember(u(a[0]), u(a[1])))
 		},
+		// Java's == when a char may be involved. Java's char reuses the jsChar type
+		// (so it does arithmetic and compares as its code), but String.charAt keeps
+		// answering a one-character String - the Java subset has no char-typed
+		// expression results - so a Char must compare equal to that String too.
+		// Without a jsChar operand this is exactly js_seq, and only the Java compiler
+		// grammar emits it, so no other language can reach the extra branch.
+		"js_jchareq": func(a []uint64) uint64 {
+			x, y := u(a[0]), u(a[1])
+			if c, ok := x.(jsChar); ok {
+				if s, isS := y.(string); isS {
+					r := []rune(s)
+					return boolH(len(r) == 1 && int32(r[0]) == c.code)
+				}
+			}
+			if c, ok := y.(jsChar); ok {
+				if s, isS := x.(string); isS {
+					r := []rune(s)
+					return boolH(len(r) == 1 && int32(r[0]) == c.code)
+				}
+			}
+			return boolH(rt.strictEq(x, y))
+		},
 		// Define a getter/setter property: (obj, key, getter|undef, setter|undef). Two
 		// calls for the same key merge, so 'get x' and 'set x' of one accessor pair meet
 		// on one record.

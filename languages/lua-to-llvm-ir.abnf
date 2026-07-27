@@ -1,5 +1,5 @@
-:title("Lua (subset) to LLVM IR compiler") ;
-:description("Compiles a Lua subset to an LLVM IR module and runs it with the built-in IR
+:title("Lua to LLVM IR compiler") ;
+:description("Compiles Lua to an LLVM IR module and runs it with the built-in IR
 interpreter and the MetaJS handle runtime (llvm.RunJS).
 
 The language is the one of lua-interpreter.abnf; see there for the description. This
@@ -8,22 +8,35 @@ grammar shares its rules and only swaps the tree walking start script for an emi
 The emitted IR is handle threaded: every dynamic value is an i64 handle into the value
 table of the Go side MetaJS runtime (abnf/jsrt.go), and every operation with real
 semantics is a call to one of its js_* externals. Only the control flow is real IR:
-if/elseif/while/numeric-for/and/or compile to basic blocks, branches and phis, driven by
-a Lua truthiness test (only false and nil are falsy) built from js_seq. repeat/until and
-the ipairs generic for lower to basic blocks the same way; a method call obj:m(a) loads m
-via js_get and js_call's it with the receiver prepended as self. The handles 0..3
-are nil, null, false and true. Locals live in scope chain objects (js_scope_new /
-js_scope_decl / js_scope_get / js_scope_set); a bare assignment goes through
-js_pyset_var (assign up the chain, else create). Tables are host objects (js_obj_new,
-js_get, js_set) with 1 based numeric keys stringified like the interpreter; #t probes
-t[1], t[2], ... for the sequence border. Concatenation stringifies both sides with
-js_pystr and joins them with js_add; the arithmetic and comparison operators map to
-js_add/js_sub/js_mul/js_div/js_fdiv/js_fmod and js_seq/js_sne/js_lt/js_gt/js_le/js_ge.
+if/elseif/while/numeric-for/generic-for/repeat/and/or compile to basic blocks, branches
+and phis, driven by a Lua truthiness test (only false and nil are falsy) built from
+js_seq; a ::label:: becomes a basic block of its own, so a goto is simply a branch and
+leaves as many enclosing loops as it has to.
+
+Two runtime shapes carry what a bare handle cannot. A FLOAT BOX is an object holding its
+number under __f: the value model has one host double, and Lua 5.3 needs integers and
+floats told apart, so an integral float is boxed and everything else stays a plain
+number. A MULTI-VALUE is an object holding its value array under __mv: a call and ...
+expand in a list position and truncate to one value elsewhere, and a count of exactly
+one is never boxed, so an ordinary call is as cheap as before. The branchy parts of both
+- the arithmetic with its subtype rule and its string coercion, the comparisons, the
+rendering, the list walks, the extra-argument tail - are emitted ONCE as plain IR
+functions named lua_* and called directly, rather than inline at every operator.
+
 Functions become IR functions jsf_N(env, args) plus a js_closure at the creation site;
-print is a small IR function over js_pyprint. The whole file becomes jsmain(env, args)
-and runs top to bottom. Self checking programs count their failures and end with
-exit(fails). The same language with the same semantics is interpreted directly by
-lua-interpreter.abnf.") ;
+locals live in scope chain objects (js_scope_new / js_scope_decl / js_scope_get /
+js_scope_set), a bare assignment goes through js_pyset_var (assign up the chain, else
+create) and a read through lua_getvar (an unset global reads as nil). Tables are host
+objects (js_obj_new, js_get, js_set) with 1 based numeric keys stringified like the
+interpreter; #t probes t[1], t[2], ... for the sequence border. print and the small
+math/string/table libraries plus next/ipairs/pairs are emitted as IR functions, and only
+when the program names them. The whole file becomes jsmain(env, args) and runs top to
+bottom. Self checking programs count their failures and end with exit(fails).
+
+Two gaps against the interpreter remain, both in the bitwise operators: and/or/xor map to
+the runtime's 32-bit externals rather than Lua's 64-bit ones (only the shift COUNT is
+Lua exact, via lua_shift), and arithmetic on a value that is not a number yields a NaN
+instead of an error. The same language is interpreted directly by lua-interpreter.abnf.") ;
 
 // --- main rules
 
@@ -49,16 +62,41 @@ Block       <~~ push(makeSeq(takeAll())) ~~>
 // a whole word, not merely a prefix like 'ending' - is next.
 NotEnders = :script(~~
     (function() {
-        // Skip leading whitespace and -- line comments (a :script sees the raw input).
+        // Skip the blanks and BOTH comment forms. A long comment --[==[ ... ]==] runs
+        // to a closing bracket of its own level and may span lines and hold ']]', so it
+        // cannot be treated as a '--' line comment.
         var off = 0
         var scanning = true
         while (scanning) {
-            var cc = c.peek(off)
-            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { off++ }
-            else if (cc === 45 && c.peek(off + 1) === 45) {
-                off += 2
-                while (c.peek(off) !== 10 && c.peek(off) !== -1) { off++ }
-            } else { scanning = false }
+            var wc = c.peek(off)
+            if (wc === 32 || wc === 9 || wc === 13 || wc === 10) { off = off + 1 }
+            else if (wc === 45 && c.peek(off + 1) === 45) {
+                var clv = 0
+                var e = off + 3
+                var isLong = false
+                if (c.peek(off + 2) === 91) {
+                    while (c.peek(e) === 61) { clv = clv + 1; e = e + 1 }
+                    if (c.peek(e) === 91) { isLong = true }
+                }
+                if (isLong) {
+                    var p = e + 1
+                    var closing = true
+                    while (closing) {
+                        var c2 = c.peek(p)
+                        if (c2 < 0) { off = p; closing = false }
+                        else if (c2 === 93) {
+                            var k2 = 0
+                            while (c.peek(p + 1 + k2) === 61) { k2 = k2 + 1 }
+                            if (k2 === clv && c.peek(p + 1 + k2) === 93) { off = p + k2 + 2; closing = false }
+                            else { p = p + 1 }
+                        } else { p = p + 1 }
+                    }
+                } else {
+                    off = off + 2
+                    while (c.peek(off) !== 10 && c.peek(off) >= 0) { off = off + 1 }
+                }
+            }
+            else { scanning = false }
         }
         var p0 = c.peek(off)
         var after = -1
@@ -98,10 +136,10 @@ Statement   <~~ push(stmtPos(pop())) ~~>
             = If | While | Repeat | NumFor | GenFor | DoBlock | LocalFunc | Local | Func
             | Return | Break | Goto | Label | EmptyStat | Require | AssignStat | CallStat ;
 
-// require "mod" / require("mod"): loads mod.lua (resolveImport -> core.importFile). Its
-// top-level declarations are stashed by buildMain (importDepth > 0) and prepended to
-// jsmain, so they register before the main chunk. A bareword require with a string-literal
-// argument; anything else rolls back to a normal call. A flat module model.
+// require "mod" / require("mod"): loads mod.lua (resolveImport -> core.importFile) and runs
+// its top level, so its functions register in the shared global scope. A bareword require
+// with a string-literal argument; anything else (require as a value, require(expr)) rolls
+// back to a normal call. A flat module model (the module's return value is not bound).
 Require     <~~ push(luaImport(takeAll(), up.pos)) ~~>
             = "require" KwEnd ( "(" ReqPath ")" | ReqPath ) ;
 ReqPath     = ModDq | ModSq ;
@@ -129,20 +167,14 @@ NumFor      <~~ push(makeNumFor(takeAll())) ~~>
 ForName     <~~ push({fname: up.in}) ~~>
             = Id ;
 
-// for k, v in <iter> do ... end. Only the pairs()/ipairs() iterators are recognized;
-// ipairs is lowered to a 1-based array walk (index, value) that stops at the first nil.
-// pairs (key enumeration) and any other iterator are accepted but not implemented.
-GenFor      <~~ push(makeGenFor(takeAll(), up.pos)) ~~>
-            = KwFor GenName { "," GenName } KwIn IterExpr KwDo Block KwEndKw ;
+// for k, v in <explist> do ... end - the full generic for. The expression list yields
+// the iterator triple (function, state, control value) and every pass calls it; ipairs
+// and pairs are ordinary global functions returning such a triple, so a hand-written
+// iterator drives the loop the same way (see makeGenFor).
+GenFor      <~~ push(makeGenFor(takeAll())) ~~>
+            = KwFor GenName { "," GenName } KwIn ExprList KwDo Block KwEndKw ;
 GenName     <~~ push({gname: up.in}) ~~>
             = Id ;
-IterExpr    = IpairsIter | PairsIter | GenericIter ;
-IpairsIter  <~~ push({iterkind: "ipairs", tbl: pop()}) ~~>
-            = "ipairs" KwEnd "(" Expression ")" ;
-PairsIter   <~~ push({iterkind: "pairs", tbl: pop()}) ~~>
-            = "pairs" KwEnd "(" Expression ")" ;
-GenericIter <~~ takeAll(); push({iterkind: "generic"}) ~~>
-            = Expression { "," Expression } ;
 
 DoBlock     <~~ push(makeDoBlock(pop())) ~~>
             = KwDo Block KwEndKw ;
@@ -167,22 +199,22 @@ FuncName    <~~ push(makeFuncName(takeAll())) ~~>
 
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ ( Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ "," VarargPar ] | VarargPar ) ] ")" ;
-// A trailing '...' makes the function variadic. Accepted and ignored (extra arguments
-// are dropped); a use of '...' inside the body is separately not implemented.
-VarargPar   = "..." ;
+// A trailing '...' makes the function variadic: it is kept in the parameter list under
+// that very name, and makeClosure turns it into the frame's extra-argument array.
+VarargPar   <~~ push("...") ~~>
+            = "..." ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
             = KwBreak ;
 
-// goto Name jumps to a matching ::Name:: label (Lua 5.2+); both are accepted
-// structurally and reported as not implemented (the tree walker / CFG builder has no
-// cross-statement jump). -warn-unsupported keeps the surrounding code.
-Goto        <~~ push(notImplStmt("goto", up.pos)) ~~>
-            = KwGoto Id ;
-Label       <~~ push(notImplStmt("label", up.pos)) ~~>
-            = "::" Id "::" ;
+// goto Name jumps to a matching ::Name:: label (Lua 5.2+), backward as well as forward
+// and outward through any number of enclosing blocks - see makeGoto / makeSeq.
+Goto        <~~ push(makeGoto(pop())) ~~>
+            = KwGoto Id <~~ push(up.in) ~~> ;
+Label       <~~ push(makeLabel(pop())) ~~>
+            = "::" Id <~~ push(up.in) ~~> "::" ;
 // A lone ';' or one terminating the previous statement (Lua allows ';' between and
 // after statements): a no-op.
 EmptyStat   <~~ push(makeEmpty()) ~~>
@@ -209,13 +241,21 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = CmpExpr { KwAnd CmpExpr } ;
 
 CmpExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = BitExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr } ;
+            = BOrExpr { ( "==" | "~=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BOrExpr } ;
 
-// Bitwise & | ~ << >> (Lua 5.3+): accepted, reported as not implemented (the handle
-// runtime has no integer bit operations). Binary '~' is guarded with !"=" so a '~='
-// comparison is left for CmpExpr above.
-BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
-            = ConcatExpr { ( "&" | "|" | "<<" | ">>" | ( "~" !"=" ) ) ConcatExpr } ;
+// The bitwise operators of Lua 5.3+, each on its own precedence level: | binds loosest,
+// then binary ~ (exclusive or), then &, then the shifts - all below the comparisons and
+// above concatenation. They work on 64-bit two's complement integers (luaBitOp), so a
+// float operand with an integral value converts and everything else is an error. Binary
+// '~' carries a !"=" lookahead so that a '~=' comparison is left to CmpExpr above.
+BOrExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = BXorExpr { "|" <~~ push(up.in) ~~> BXorExpr } ;
+BXorExpr    <~~ push(foldBinary(takeAll())) ~~>
+            = BAndExpr { ( "~" !"=" ) <~~ push(up.in) ~~> BAndExpr } ;
+BAndExpr    <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { "&" <~~ push(up.in) ~~> ShiftExpr } ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = ConcatExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> ConcatExpr } ;
 
 // Concatenation is right associative, so it recurses on its own right hand side.
 ConcatExpr  <~~ push(makeConcat(takeAll())) ~~>
@@ -234,43 +274,131 @@ LenExpr     <~~ push(makeLen(pop())) ~~>
             = "#" UnaryExpr ;
 NegExpr     <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
-// Unary bitwise not ~x (Lua 5.3+): accepted, not implemented (guarded against '~=').
-BNotExpr    <~~ pop(); push(notImplExpr("unary ~ (bitwise not)", up.pos)) ~~>
+// Unary bitwise not ~x (Lua 5.3+), guarded against '~=': the 64-bit complement.
+BNotExpr    <~~ push(makeBNot(pop())) ~~>
             = ( "~" !"=" ) UnaryExpr ;
-// Exponentiation a ^ b, right associative and binding tighter than the unary operators
-// (Lua float pow): accepted, not implemented (no js_pow extern in the handle runtime).
-PowExpr     <~~ push(makePow(takeAll(), up.pos)) ~~>
-            = SuffixedExpr [ "^" PowExpr ] ;
+// Exponentiation a ^ b: right associative (its right operand is a UnaryExpr, which
+// descends into PowExpr again) and binding tighter than the unary operators, so -2^2
+// is -(2^2) and 2^-1 is legal. The result is always a float, like in Lua.
+PowExpr     <~~ push(makePow(takeAll())) ~~>
+            = SuffixedExpr [ "^" UnaryExpr ] ;
 
 // f(a), t.x, t[k], t:m(a) in any mix.
 SuffixedExpr <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSfx | MethodSfx | DotSfx | IndexSfx } ;
+            = Primary { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
 CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
-            = "(" [ Expression { "," Expression } ] ")" ;
+            = "(" [ ExprList ] ")" ;
+// f "s" / f [[s]] / f {t}: a call whose single argument is a string literal or a table
+// constructor may be written without the parentheses.
+StrCallSfx  <~~ push({kind:"call", args: takeAll()}) ~~>
+            = LuaDq | LuaSq | LongString ;
+TblCallSfx  <~~ push({kind:"call", args: takeAll()}) ~~>
+            = TableLit ;
 // obj:m(args): sugar for obj.m(obj, args) - the receiver is passed as the first arg.
+// The same parenthesis-free argument forms apply (obj:m "s", obj:m {t}).
 MethodSfx   <~~ var it = takeAll(); push({kind:"method", name: it[0].mname, args: it.slice(1)}) ~~>
-            = ":" MethodName "(" [ Expression { "," Expression } ] ")" ;
+            = ":" MethodName ( "(" [ ExprList ] ")" | LuaDq | LuaSq | LongString | TableLit ) ;
 MethodName  <~~ push({mname: up.in}) ~~>
             = Id ;
 DotSfx      = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = "(" Expression ")" | FuncExpr | TableLit | LongString | VarargExpr
-            | DqString | SqString | Number | True | False | Nil | VarRef ;
+Primary     = ParenExpr | FuncExpr | TableLit | LongString | VarargExpr
+            | LuaDq | LuaSq | Number | True | False | Nil | VarRef ;
 
-// [[ ... ]] long-bracket string literals (also [=[ ]=] and [==[ ]==] for content that
-// contains a closing bracket). The body is verbatim (no escapes) and a single leading
-// newline is dropped, matching Lua. Longer '=' levels are still unrecognized.
-LongString  = LongStr2 | LongStr1 | LongStr0 ;
-LongStr0    = "[[" :whitespace() { !"]]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]]" :whitespace(Whitespace) ;
-LongStr1    = "[=[" :whitespace() { !"]=]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]=]" :whitespace(Whitespace) ;
-LongStr2    = "[==[" :whitespace() { !"]==]" AnyByte } <~~ push(makeConst(luaLong(up.in))) ~~> "]==]" :whitespace(Whitespace) ;
-// '...' in expression position (varargs): accepted, not implemented (the subset passes
-// only the named parameters).
-VarargExpr  <~~ push(notImplExpr("varargs ...", up.pos)) ~~>
+// ( e ). Parentheses are not only grouping in Lua: they also TRUNCATE a multi-value
+// expression (a call or ...) to its first value, which is why this is a production of
+// its own rather than an inline group.
+ParenExpr   <~~ push(luaParen(pop())) ~~>
+            = "(" Expression ")" ;
+
+// Long-bracket string literals [[ ... ]], [=[ ... ]=], [==[ ... ]==] - with ANY number
+// of '=' signs between the brackets. The closing bracket has to repeat the opening
+// level, which no fixed token can express, so one :script scans the whole literal and
+// hands the parser back a token for exactly those bytes. The body is verbatim (no
+// escape processing) and a single leading newline is dropped, matching Lua.
+LongString  <~~ push(makeConst(luaLong(luaLongBody(up.in)))) ~~>
+            = LongBracket :whitespace(Whitespace) ;
+LongBracket = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01not-a-long-bracket", 0)
+        // A :script sees the raw input, so what sits in front of the literal has to be
+        // stepped over here; the token returned starts AT the bracket, which is where
+        // the parser looks once it has skipped the same run itself.
+        // Skip the blanks and BOTH comment forms. A long comment --[==[ ... ]==] runs
+        // to a closing bracket of its own level and may span lines and hold ']]', so it
+        // cannot be treated as a '--' line comment.
+        var off = 0
+        var scanning = true
+        while (scanning) {
+            var wc = c.peek(off)
+            if (wc === 32 || wc === 9 || wc === 13 || wc === 10) { off = off + 1 }
+            else if (wc === 45 && c.peek(off + 1) === 45) {
+                var clv = 0
+                var e = off + 3
+                var isLong = false
+                if (c.peek(off + 2) === 91) {
+                    while (c.peek(e) === 61) { clv = clv + 1; e = e + 1 }
+                    if (c.peek(e) === 91) { isLong = true }
+                }
+                if (isLong) {
+                    var p = e + 1
+                    var closing = true
+                    while (closing) {
+                        var c2 = c.peek(p)
+                        if (c2 < 0) { off = p; closing = false }
+                        else if (c2 === 93) {
+                            var k2 = 0
+                            while (c.peek(p + 1 + k2) === 61) { k2 = k2 + 1 }
+                            if (k2 === clv && c.peek(p + 1 + k2) === 93) { off = p + k2 + 2; closing = false }
+                            else { p = p + 1 }
+                        } else { p = p + 1 }
+                    }
+                } else {
+                    off = off + 2
+                    while (c.peek(off) !== 10 && c.peek(off) >= 0) { off = off + 1 }
+                }
+            }
+            else { scanning = false }
+        }
+        if (c.peek(off) !== 91) { return no }
+        var lvl = 0
+        while (c.peek(off + 1 + lvl) === 61) { lvl = lvl + 1 }
+        if (c.peek(off + 1 + lvl) !== 91) { return no }
+        var i = off + lvl + 2
+        var open = true
+        while (open) {
+            var ch = c.peek(i)
+            if (ch < 0) { return no }
+            if (ch === 93) {
+                var k = 0
+                while (c.peek(i + 1 + k) === 61) { k = k + 1 }
+                if (k === lvl && c.peek(i + 1 + k) === 93) { i = i + k + 2; open = false }
+                else { i = i + 1 }
+            } else { i = i + 1 }
+        }
+        var s = ""
+        for (var j = off; j < i; j++) { s = s + String.fromCharCode(c.peek(j)) }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
+// '...' in expression position: all the extra arguments of the enclosing variadic
+// function as a multi-value - it expands in a list position and truncates to its first
+// value everywhere else.
+VarargExpr  <~~ push(makeVararg()) ~~>
             = "..." ;
 AnyByte     = "\x00"..."\U0010ffff" ;
+
+// Lua string literals. Their escapes are Lua's own, so the shared DqString / SqString
+// of lib/dq-strings.abnf - which allow only a printable byte after the backslash - are
+// replaced here: a backslash may be followed by any character, a real line break
+// included (that form stands for a newline), and the z escape swallows the whole
+// whitespace run behind it. luaUnesc resolves them all.
+LuaDq       = '"' :whitespace() { LuaZSkip | LuaEsc | DqPlain } <~~ push(makeConst(luaUnesc(up.in))) ~~> '"' :whitespace(Whitespace) ;
+LuaSq       = "'" :whitespace() { LuaZSkip | LuaEsc | SqPlain } <~~ push(makeConst(luaUnesc(up.in))) ~~> "'" :whitespace(Whitespace) ;
+LuaZSkip    = "\\z" { @+" \t\r\n" } ;
+LuaEsc      = "\\" AnyByte ;
 
 FuncExpr    <~~ push(makeFuncExpr(pop(), pop())) ~~>
             = KwFunction ParamList Block KwEndKw ;
@@ -287,15 +415,23 @@ NameField   <~~ var nv = pop(); push({fkind:"name", name: pop(), v: nv}) ~~>
 PosField    <~~ push({fkind:"pos", v: pop()}) ~~>
             = Expression ;
 
-// Numbers: hexadecimal (0x1F), a decimal with an exponent (1e3, 2.5e-4), or a plain
-// decimal (DecLit from lib/numbers.abnf). Hex/exponent are tried before DecLit, which
-// has neither.
-Number      = HexLit | FloatLit | DecLit ;
-HexLit      <~~ push(makeConst(luaHexVal(up.in))) ~~>
-            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } :whitespace(Whitespace) ;
+// Numbers, in every form Lua writes them: hexadecimal integers (0xff, 0XFF), hexadecimal
+// floats with a binary exponent (0x1p4, 0xA.8p0, 0x.8p1), and decimals with an optional
+// fraction and an optional decimal exponent (255, 1e3, 2.5e-2, .5, 3.). luaNumVal reads
+// the spelling and decides whether the literal is an integer or a float. The fraction
+// dot carries a !"." lookahead, so '1 .. 2' concatenates instead of reading '1.' first.
+Number      = HexNum | DecNum | DotNum ;
+HexNum      <~~ push(makeConst(luaNumVal(up.in))) ~~>
+            = ( "0x" | "0X" ) :whitespace() HexBody :whitespace(Whitespace) ;
+HexBody     = HexDigit { HexDigit } [ "." !"." { HexDigit } ] [ HexExp ]
+            | "." !"." HexDigit { HexDigit } [ HexExp ] ;
+HexExp      = ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
-FloatLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } [ "." { "0"..."9" } ] ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
+DecNum      <~~ push(makeConst(luaNumVal(up.in))) ~~>
+            = "0"..."9" :whitespace() { "0"..."9" } [ "." !"." { "0"..."9" } ] [ DecExp ] :whitespace(Whitespace) ;
+DotNum      <~~ push(makeConst(luaNumVal(up.in))) ~~>
+            = "." :whitespace() "0"..."9" { "0"..."9" } [ DecExp ] :whitespace(Whitespace) ;
+DecExp      = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
 Nil         <~~ push(makeConst(undefined)) ~~>
             = "nil" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
@@ -322,19 +458,41 @@ KwAnd       = "and" KwEnd ;
 KwOr        = "or" KwEnd ;
 KwNot       = "not" KwEnd ;
 
-// Lua whitespace: blanks and newlines plus comments. Block comments --[[ ... ]] (and
-// --[=[ ]=] / --[==[ ]==]) are tried before the line comment, since '--[[' extends
-// '--'. A line comment runs to the end of the line.
+// Lua whitespace: blanks and newlines plus comments. A long comment --[[ ... ]] is a
+// '--' followed by a long bracket of any level, so it is scanned by the same :script as
+// a long string (LongCmtBracket below) and has to be tried before the line comment,
+// which '--[[' would otherwise start. A line comment runs to the end of the line.
 Whitespace  = { @+" \t\r\n" | Comment } ;
-Comment     = LongCmt2 | LongCmt1 | LongCmt0 | LineComment ;
-LongCmt0    = "--[[" :whitespace() { !"]]" AnyByte } "]]" :whitespace(Whitespace) ;
-LongCmt1    = "--[=[" :whitespace() { !"]=]" AnyByte } "]=]" :whitespace(Whitespace) ;
-LongCmt2    = "--[==[" :whitespace() { !"]==]" AnyByte } "]==]" :whitespace(Whitespace) ;
+Comment     = LongCmt | LineComment ;
+LongCmt     = LongCmtBracket ;
+LongCmtBracket = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01not-a-long-comment", 0)
+        if (c.peek(0) !== 45 || c.peek(1) !== 45 || c.peek(2) !== 91) { return no }
+        var lvl = 0
+        while (c.peek(3 + lvl) === 61) { lvl = lvl + 1 }
+        if (c.peek(3 + lvl) !== 91) { return no }
+        var i = lvl + 4
+        var open = true
+        while (open) {
+            var ch = c.peek(i)
+            if (ch < 0) { return no }
+            if (ch === 93) {
+                var k = 0
+                while (c.peek(i + 1 + k) === 61) { k = k + 1 }
+                if (k === lvl && c.peek(i + 1 + k) === 93) { i = i + k + 2; open = false }
+                else { i = i + 1 }
+            } else { i = i + 1 }
+        }
+        var s = ""
+        for (var j = 0; j < i; j++) { s = s + String.fromCharCode(c.peek(j)) }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
 LineComment = "--" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // ---
-
 
 
 :startScript(~~
@@ -348,50 +506,641 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     var hidCount = 0
 
-    // ----- Widening helpers -----
     // A no-op statement thunk for an empty ';' statement.
     function makeEmpty() { return function(b) { return b } }
-    // A bitwise/exponentiation node: pass through when the operator is absent (a single
-    // operand collected), otherwise accept-and-notImplemented. makeBit is applied to
-    // every BitExpr and makePow to every PowExpr, so the pass-through keeps the emitted
-    // IR of operator-free programs exactly as before.
-    function makeBit(items, pos) { if (items.length == 1) { return items[0] } return notImplExpr("bitwise operator", pos) }
-    function makePow(items, pos) { if (items.length == 1) { return items[0] } return notImplExpr("^ (exponentiation) operator", pos) }
-    // A long-bracket string body: a single leading newline is dropped (the Lua rule).
+
+    // ----- Long-bracket literals -----
+    // The :script hands the WHOLE literal over, brackets included, because only it knows
+    // the level; luaLongBody strips the two brackets back off and luaLong applies the Lua
+    // rule that a single line break right after the opening bracket is dropped.
+    function luaLongBody(s) {
+        var lvl = 0
+        while (1 + lvl < s.length && s.charCodeAt(1 + lvl) === 61) { lvl = lvl + 1 }
+        return s.slice(lvl + 2, s.length - (lvl + 2))
+    }
     function luaLong(s) {
         if (s.length > 0 && s.charCodeAt(0) === 10) { return s.slice(1) }
         if (s.length > 1 && s.charCodeAt(0) === 13 && s.charCodeAt(1) === 10) { return s.slice(2) }
         return s
     }
-    // Parse a hex integer literal (0x....) to a number, stopping at the first non-hex
-    // char (so trailing whitespace captured in up.in is ignored).
-    function luaHexVal(s) {
-        var v = 0
-        var i = 2
-        var going = true
-        while (going && i < s.length) {
-            var cc = s.charCodeAt(i)
-            var d = -1
-            if (cc >= 48 && cc <= 57) { d = cc - 48 }
-            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
-            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
-            if (d < 0) { going = false }
-            else { v = v * 16 + d; i = i + 1 }
+
+    // ----- Numeric literals -----
+    // The same reader as the interpreter's: it decides from the spelling whether a
+    // literal is an integer or a float and marks a float by boxing it. The emitted
+    // runtime does not carry the integer/float subtype yet, so makeConst below unwraps
+    // the box again and both subtypes become one host double - the arithmetic and the
+    // rendering are identical, only '1.0' still prints as '1'.
+    function isFlt(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f === true }
+    function mkFlt(n) { if (n - n === 0 && Math.floor(n) === n) { return {__f: true, v: n} } return n }
+    function isSpaceCode(cc) { return cc === 32 || cc === 9 || cc === 10 || cc === 13 }
+    function hexDigit(cc) {
+        if (cc >= 48 && cc <= 57) { return cc - 48 }
+        if (cc >= 97 && cc <= 102) { return cc - 87 }
+        if (cc >= 65 && cc <= 70) { return cc - 55 }
+        return -1
+    }
+    function luaNumVal(s) {
+        var i = 0
+        var n = s.length
+        while (i < n && isSpaceCode(s.charCodeAt(i))) { i = i + 1 }
+        while (n > i && isSpaceCode(s.charCodeAt(n - 1))) { n = n - 1 }
+        var neg = false
+        if (i < n && (s.charCodeAt(i) === 43 || s.charCodeAt(i) === 45)) {
+            neg = s.charCodeAt(i) === 45
+            i = i + 1
         }
-        return v
+        if (i >= n) { return undefined }
+        var r = anytype // An integer (a plain number) or a float (possibly boxed).
+        if (s.charCodeAt(i) === 48 && i + 1 < n && (s.charCodeAt(i + 1) === 120 || s.charCodeAt(i + 1) === 88)) {
+            r = luaHexNum(s, i + 2, n)
+        } else {
+            r = luaDecNum(s, i, n)
+        }
+        if (r === undefined) { return undefined }
+        if (!neg) { return r }
+        if (isFlt(r)) { return mkFlt(0 - r.v) }
+        return 0 - r
+    }
+    function luaHexNum(s, i, n) {
+        var v = 0
+        var digits = 0
+        var isFloat = false
+        while (i < n && hexDigit(s.charCodeAt(i)) >= 0) { v = v * 16 + hexDigit(s.charCodeAt(i)); i = i + 1; digits = digits + 1 }
+        if (i < n && s.charCodeAt(i) === 46) {
+            isFloat = true
+            i = i + 1
+            var scale = 1
+            while (i < n && hexDigit(s.charCodeAt(i)) >= 0) {
+                scale = scale / 16
+                v = v + hexDigit(s.charCodeAt(i)) * scale
+                i = i + 1
+                digits = digits + 1
+            }
+        }
+        if (digits === 0) { return undefined }
+        if (i < n && (s.charCodeAt(i) === 112 || s.charCodeAt(i) === 80)) {
+            isFloat = true
+            i = i + 1
+            var esign = 1
+            if (i < n && (s.charCodeAt(i) === 43 || s.charCodeAt(i) === 45)) {
+                if (s.charCodeAt(i) === 45) { esign = 0 - 1 }
+                i = i + 1
+            }
+            var e = 0
+            var edig = 0
+            while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { e = e * 10 + (s.charCodeAt(i) - 48); i = i + 1; edig = edig + 1 }
+            if (edig === 0) { return undefined }
+            v = v * Math.pow(2, esign * e)
+        }
+        if (i < n) { return undefined }
+        return isFloat ? mkFlt(v) : v
+    }
+    function luaDecNum(s, i, n) {
+        var start = i
+        var isFloat = false
+        var digits = 0
+        while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { i = i + 1; digits = digits + 1 }
+        if (i < n && s.charCodeAt(i) === 46) {
+            isFloat = true
+            i = i + 1
+            while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { i = i + 1; digits = digits + 1 }
+        }
+        if (digits === 0) { return undefined }
+        if (i < n && (s.charCodeAt(i) === 101 || s.charCodeAt(i) === 69)) {
+            isFloat = true
+            i = i + 1
+            if (i < n && (s.charCodeAt(i) === 43 || s.charCodeAt(i) === 45)) { i = i + 1 }
+            var edig = 0
+            while (i < n && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) { i = i + 1; edig = edig + 1 }
+            if (edig === 0) { return undefined }
+        }
+        if (i < n) { return undefined }
+        var v = parseFloat(s.slice(start, i))
+        return isFloat ? mkFlt(v) : v
+    }
+    // The literal emitter: a float literal becomes a float box at run time, so 1.0 keeps
+    // its subtype apart from 1 all the way to the concatenation that renders it.
+    var coreMakeConst = makeConst
+    makeConst = function(v) {
+        if (!isFlt(v)) { return coreMakeConst(v) }
+        var n = v.v
+        return function(b) {
+            var o = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [o, emitStr(b, "__f"), emitNum(b, n)])
+            return {b: b, v: o}
+        }
+    }
+
+    // ----- String escapes -----
+    // Lua's own set: the single letters a b f n r t v, a decimal byte of up to three
+    // digits, xNN, u{...} (a code point), a real line break (which stands for a newline)
+    // and z (which swallows the whitespace run behind it).
+    function luaUnesc(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var cc = s.charCodeAt(i)
+            if (cc !== 92) { out = out + String.fromCharCode(cc); i = i + 1; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e === 110) { out = out + String.fromCharCode(10); i = i + 2; continue }
+            if (e === 116) { out = out + String.fromCharCode(9);  i = i + 2; continue }
+            if (e === 114) { out = out + String.fromCharCode(13); i = i + 2; continue }
+            if (e === 97)  { out = out + String.fromCharCode(7);  i = i + 2; continue }
+            if (e === 98)  { out = out + String.fromCharCode(8);  i = i + 2; continue }
+            if (e === 102) { out = out + String.fromCharCode(12); i = i + 2; continue }
+            if (e === 118) { out = out + String.fromCharCode(11); i = i + 2; continue }
+            if (e === 10)  { out = out + String.fromCharCode(10); i = i + 2; continue }
+            if (e === 13) {
+                out = out + String.fromCharCode(10)
+                i = i + 2
+                if (i < s.length && s.charCodeAt(i) === 10) { i = i + 1 }
+                continue
+            }
+            if (e === 122) {
+                i = i + 2
+                while (i < s.length && isSpaceCode(s.charCodeAt(i))) { i = i + 1 }
+                continue
+            }
+            if (e === 120 || e === 88) {
+                var hv = 0
+                var hn = 0
+                i = i + 2
+                while (hn < 2 && i < s.length && hexDigit(s.charCodeAt(i)) >= 0) {
+                    hv = hv * 16 + hexDigit(s.charCodeAt(i))
+                    i = i + 1
+                    hn = hn + 1
+                }
+                out = out + String.fromCharCode(hv)
+                continue
+            }
+            if (e === 117) {
+                var uv = 0
+                i = i + 2
+                if (i < s.length && s.charCodeAt(i) === 123) { i = i + 1 }
+                while (i < s.length && hexDigit(s.charCodeAt(i)) >= 0) { uv = uv * 16 + hexDigit(s.charCodeAt(i)); i = i + 1 }
+                if (i < s.length && s.charCodeAt(i) === 125) { i = i + 1 }
+                out = out + codePointStr(uv)
+                continue
+            }
+            if (e >= 48 && e <= 57) {
+                var dv = 0
+                var dn = 0
+                i = i + 1
+                while (dn < 3 && i < s.length && s.charCodeAt(i) >= 48 && s.charCodeAt(i) <= 57) {
+                    dv = dv * 10 + (s.charCodeAt(i) - 48)
+                    i = i + 1
+                    dn = dn + 1
+                }
+                out = out + String.fromCharCode(dv)
+                continue
+            }
+            out = out + String.fromCharCode(e)
+            i = i + 2
+        }
+        return out
+    }
+    function codePointStr(cp) {
+        if (cp < 65536) { return String.fromCharCode(cp) }
+        var v = cp - 65536
+        return String.fromCharCode(55296 + Math.floor(v / 1024)) + String.fromCharCode(56320 + (v % 1024))
+    }
+
+    // ----- Runtime helper functions -----
+    // A helper is emitted ONCE as a plain IR function and called directly, so the branchy
+    // parts of the value model live in one place instead of at every operator site. A
+    // helper has no env parameter and therefore no scope: everything it needs arrives in
+    // its arguments (which is why the '^' lowering, the one that reaches for the host's
+    // Math, stays at the call site).
+    var luaFns = {}
+    function luaFn(name) {
+        var have = luaFns["$" + name]
+        if (have != undefined) { return have }
+        var np = luaFnArity[name]
+        var params = []
+        for (var i = 0; i < np; i++) { params.push(llvm.ir.NewParam("p" + i, i64)) }
+        var f = m.NewFunc(name, i64, params)
+        luaFns["$" + name] = f // Registered before the body, so a helper may call itself.
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        curF = f
+        loopStack = []
+        luaFnBody(name, f.NewBlock("entry"), f.Params)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        return f
+    }
+    function callLua(b, name, args) { return b.NewCall(luaFn(name), args) }
+    var luaFnArity = {lua_getvar: 2, lua_ismv: 1, lua_first: 1, lua_all: 1, lua_mk: 1, lua_appendall: 2, lua_extend: 2, lua_spread: 3,
+                      lua_tail: 2, lua_shift: 3, lua_strall: 1,
+                      lua_num: 1, lua_isnum: 1, lua_isint: 1, lua_mkflt: 1, lua_res: 3,
+                      lua_arith: 3, lua_eq: 2, lua_cmp: 3, lua_cmpv: 1, lua_str: 1}
+    // Inside a helper the tested value is already a real boolean, so the plain host test
+    // is enough - Lua's own truthiness (the `truthy` override below) would recurse.
+    function rawTruthy(b, v) { return b.NewICmp(llvm.enum.IPredNE, callExt(b, "js_truthy", [v]), handle(0)) }
+    function luaFnBody(name, b, ps) {
+        if (name == "lua_ismv") {
+            // A multi-value is an object carrying its value array under __mv; anything
+            // else (a number, a string, nil, a table) is a single value.
+            var objB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "object")])), objB, noB)
+            objB.NewRet(callExt(objB, "js_sne", [callExt(objB, "js_get", [ps[0], emitStr(objB, "__mv")]), hUndef]))
+            noB.NewRet(hFalse)
+            return
+        }
+        if (name == "lua_first") {
+            var mvB = curF.NewBlock("")
+            var oneB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callLua(b, "lua_ismv", [ps[0]])), mvB, oneB)
+            mvB.NewRet(callExt(mvB, "js_get", [callExt(mvB, "js_get", [ps[0], emitStr(mvB, "__mv")]), emitNum(mvB, 0)]))
+            oneB.NewRet(ps[0])
+            return
+        }
+        if (name == "lua_all") {
+            var mvB2 = curF.NewBlock("")
+            var oneB2 = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callLua(b, "lua_ismv", [ps[0]])), mvB2, oneB2)
+            mvB2.NewRet(callExt(mvB2, "js_get", [ps[0], emitStr(mvB2, "__mv")]))
+            var a1 = callExt(oneB2, "js_arr_new", [])
+            callExt(oneB2, "js_arr_push", [a1, ps[0]])
+            oneB2.NewRet(a1)
+            return
+        }
+        if (name == "lua_mk") {
+            // An array of values as ONE Lua value: exactly one value stays unwrapped, any
+            // other count becomes a multi-value box.
+            var oneB3 = curF.NewBlock("")
+            var boxB = curF.NewBlock("")
+            var n = callExt(b, "js_get", [ps[0], emitStr(b, "length")])
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [n, emitNum(b, 1)])), oneB3, boxB)
+            oneB3.NewRet(callExt(oneB3, "js_get", [ps[0], emitNum(oneB3, 0)]))
+            var box = callExt(boxB, "js_obj_new", [])
+            callExt(boxB, "js_set", [box, emitStr(boxB, "__mv"), ps[0]])
+            boxB.NewRet(box)
+            return
+        }
+        if (name == "lua_getvar") {
+            // Reading a name that is nowhere in scope is not an error in Lua: an unset
+            // global simply reads as nil, where js_scope_get would abort.
+            var misB = curF.NewBlock("")
+            var hitB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_scope_typeof", [ps[0], ps[1]]), emitStr(b, "undefined")])), misB, hitB)
+            misB.NewRet(hUndef)
+            hitB.NewRet(callExt(hitB, "js_scope_get", [ps[0], ps[1]]))
+            return
+        }
+        if (name == "lua_num") {
+            // The raw number behind a Lua value: a float box gives up its number, a
+            // string coerces (Lua converts in arithmetic), everything else passes.
+            var objB = curF.NewBlock("")
+            var n1B = curF.NewBlock("")
+            var strB = curF.NewBlock("")
+            var elB = curF.NewBlock("")
+            var tv = callExt(b, "js_typeof", [ps[0]])
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [tv, emitStr(b, "object")])), objB, n1B)
+            objB.NewRet(callExt(objB, "js_get", [ps[0], emitStr(objB, "__f")]))
+            n1B.NewCondBr(rawTruthy(n1B, callExt(n1B, "js_seq", [tv, emitStr(n1B, "string")])), strB, elB)
+            // Lua also reads a hexadecimal string ('0x10' + 0 is 16), which the host's
+            // number conversion only accepts with a binary exponent - so a first attempt
+            // that came back NaN is retried with a 'p0' appended, which turns 0x10 into
+            // the hexadecimal float 0x10p0 and leaves every non-number string a NaN.
+            var hexB = curF.NewBlock("")
+            var okB = curF.NewBlock("")
+            var n0 = callExt(strB, "js_tonum", [ps[0]])
+            strB.NewCondBr(rawTruthy(strB, callExt(strB, "js_sne", [n0, n0])), hexB, okB)
+            hexB.NewRet(callExt(hexB, "js_tonum", [callExt(hexB, "js_add", [ps[0], emitStr(hexB, "p0")])]))
+            okB.NewRet(n0)
+            elB.NewRet(ps[0])
+            return
+        }
+        if (name == "lua_isnum") {
+            var numB = curF.NewBlock("")
+            var o1B = curF.NewBlock("")
+            var oB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            var tv2 = callExt(b, "js_typeof", [ps[0]])
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [tv2, emitStr(b, "number")])), numB, o1B)
+            numB.NewRet(hTrue)
+            o1B.NewCondBr(rawTruthy(o1B, callExt(o1B, "js_seq", [tv2, emitStr(o1B, "object")])), oB, noB)
+            oB.NewRet(callExt(oB, "js_sne", [callExt(oB, "js_get", [ps[0], emitStr(oB, "__f")]), hUndef]))
+            noB.NewRet(hFalse)
+            return
+        }
+        if (name == "lua_isint") {
+            // A Lua INTEGER: an unboxed number with an integral, finite value. The modulo
+            // of an infinity or a NaN is a NaN, which compares unequal to 0, so those
+            // stay floats without a test of their own.
+            var iB = curF.NewBlock("")
+            var noB2 = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "number")])), iB, noB2)
+            iB.NewRet(callExt(iB, "js_seq", [callExt(iB, "js_fmod", [ps[0], emitNum(iB, 1)]), emitNum(iB, 0)]))
+            noB2.NewRet(hFalse)
+            return
+        }
+        if (name == "lua_mkflt") {
+            // A float: boxed when its value would otherwise read back as an integer.
+            var boxB2 = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isint", [ps[0]])), boxB2, plainB)
+            var fo = callExt(boxB2, "js_obj_new", [])
+            callExt(boxB2, "js_set", [fo, emitStr(boxB2, "__f"), ps[0]])
+            boxB2.NewRet(fo)
+            plainB.NewRet(ps[0])
+            return
+        }
+        if (name == "lua_res") {
+            // The subtype rule of + - * // and %: an integer only when BOTH operands are.
+            var t1B = curF.NewBlock("")
+            var intB = curF.NewBlock("")
+            var fltB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isint", [ps[0]])), t1B, fltB)
+            t1B.NewCondBr(rawTruthy(t1B, callLua(t1B, "lua_isint", [ps[1]])), intB, fltB)
+            intB.NewRet(ps[2])
+            fltB.NewRet(callLua(fltB, "lua_mkflt", [ps[2]]))
+            return
+        }
+        if (name == "lua_arith") {
+            // p0 is the operator: 0 +, 1 -, 2 *, 3 / (always a float), 4 //, 5 %.
+            var x = callLua(b, "lua_num", [ps[1]])
+            var y = callLua(b, "lua_num", [ps[2]])
+            var ops = ["js_add", "js_sub", "js_mul", "js_div", "js_fdiv", "js_fmod"]
+            var cur = b
+            for (var k = 0; k < ops.length; k++) {
+                var hitB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                cur.NewCondBr(cur.NewICmp(llvm.enum.IPredEQ, ps[0], handle(k)), hitB, nextB)
+                var rv = callExt(hitB, ops[k], [x, y])
+                if (k == 3) { hitB.NewRet(callLua(hitB, "lua_mkflt", [rv])) }
+                else { hitB.NewRet(callLua(hitB, "lua_res", [ps[1], ps[2], rv])) }
+                cur = nextB
+            }
+            cur.NewRet(hUndef)
+            return
+        }
+        if (name == "lua_eq") {
+            // Numbers compare across the two subtypes (1 == 1.0); everything else by
+            // identity.
+            var e1B = curF.NewBlock("")
+            var enB = curF.NewBlock("")
+            var eoB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isnum", [ps[0]])), e1B, eoB)
+            e1B.NewCondBr(rawTruthy(e1B, callLua(e1B, "lua_isnum", [ps[1]])), enB, eoB)
+            enB.NewRet(callExt(enB, "js_seq", [callLua(enB, "lua_num", [ps[0]]), callLua(enB, "lua_num", [ps[1]])]))
+            eoB.NewRet(callExt(eoB, "js_seq", [ps[0], ps[1]]))
+            return
+        }
+        if (name == "lua_cmpv") {
+            // A comparison operand: a number unboxes, a string stays a string. This is
+            // also what a table key goes through, so t[2.0] addresses t[2].
+            var cvB = curF.NewBlock("")
+            var cpB = curF.NewBlock("")
+            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isnum", [ps[0]])), cvB, cpB)
+            cvB.NewRet(callLua(cvB, "lua_num", [ps[0]]))
+            cpB.NewRet(ps[0])
+            return
+        }
+        if (name == "lua_cmp") {
+            // p0 is the operator: 0 <, 1 >, 2 <=, 3 >=.
+            var cx = callLua(b, "lua_cmpv", [ps[1]])
+            var cy = callLua(b, "lua_cmpv", [ps[2]])
+            var cops = ["js_lt", "js_gt", "js_le", "js_ge"]
+            var ccur = b
+            for (var ci = 0; ci < cops.length; ci++) {
+                var chB = curF.NewBlock("")
+                var cnB = curF.NewBlock("")
+                ccur.NewCondBr(ccur.NewICmp(llvm.enum.IPredEQ, ps[0], handle(ci)), chB, cnB)
+                chB.NewRet(callExt(chB, cops[ci], [cx, cy]))
+                ccur = cnB
+            }
+            ccur.NewRet(hFalse)
+            return
+        }
+        if (name == "lua_str") {
+            // How a value renders in a concatenation or in print: nil and the booleans
+            // by name, an integer without a fraction, a float always with one.
+            var snB = curF.NewBlock("")
+            var s1B = curF.NewBlock("")
+            var sbB = curF.NewBlock("")
+            var s2B = curF.NewBlock("")
+            var smB = curF.NewBlock("")
+            var s3B = curF.NewBlock("")
+            var siB = curF.NewBlock("")
+            var sfB = curF.NewBlock("")
+            var sdB = curF.NewBlock("")
+            var srB = curF.NewBlock("")
+            var stv = callExt(b, "js_typeof", [ps[0]])
+            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [stv, emitStr(b, "undefined")])), snB, s1B)
+            snB.NewRet(emitStr(snB, "nil"))
+            s1B.NewCondBr(rawTruthy(s1B, callExt(s1B, "js_seq", [stv, emitStr(s1B, "boolean")])), sbB, s2B)
+            sbB.NewRet(sbB.NewSelect(rawTruthy(sbB, ps[0]), emitStr(sbB, "true"), emitStr(sbB, "false")))
+            s2B.NewCondBr(rawTruthy(s2B, callLua(s2B, "lua_isnum", [ps[0]])), smB, s3B)
+            s3B.NewRet(callExt(s3B, "js_pystr", [ps[0]]))
+            smB.NewCondBr(rawTruthy(smB, callLua(smB, "lua_isint", [ps[0]])), siB, sfB)
+            siB.NewRet(callExt(siB, "js_pystr", [ps[0]]))
+            var sn2 = callLua(sfB, "lua_num", [ps[0]])
+            sfB.NewCondBr(rawTruthy(sfB, callLua(sfB, "lua_isint", [sn2])), sdB, srB)
+            sdB.NewRet(callExt(sdB, "js_add", [callExt(sdB, "js_pystr", [sn2]), emitStr(sdB, ".0")]))
+            srB.NewRet(callExt(srB, "js_pystr", [sn2]))
+            return
+        }
+        if (name == "lua_shift") {
+            // A shift by 64 or more clears the value in Lua, where the host's 32-bit
+            // shift externals would wrap the count instead. p0 is 1 for '<<', 0 for '>>'.
+            var zeroB = curF.NewBlock("")
+            var doB = curF.NewBlock("")
+            var kAbs = callExt(b, "js_lt", [ps[2], emitNum(b, 0)])
+            var kMag = b.NewSelect(truthy(b, kAbs), callExt(b, "js_neg", [ps[2]]), ps[2])
+            b.NewCondBr(truthy(b, callExt(b, "js_ge", [kMag, emitNum(b, 64)])), zeroB, doB)
+            zeroB.NewRet(emitNum(zeroB, 0))
+            var leftB = curF.NewBlock("")
+            var rightB = curF.NewBlock("")
+            doB.NewCondBr(doB.NewICmp(llvm.enum.IPredNE, ps[0], handle(0)), leftB, rightB)
+            leftB.NewRet(callExt(leftB, "js_shl", [ps[1], ps[2]]))
+            rightB.NewRet(callExt(rightB, "js_ushr", [ps[1], ps[2]]))
+            return
+        }
+        if (name == "lua_tail") {
+            // The extra arguments of a variadic call: a fresh array of args[n...].
+            var out = callExt(b, "js_arr_new", [])
+            var total = callExt(b, "js_get", [ps[0], emitStr(b, "length")])
+            var tcell = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [tcell, emitStr(b, "i"), ps[1]])
+            var thB = curF.NewBlock("")
+            var tbB = curF.NewBlock("")
+            var teB = curF.NewBlock("")
+            b.NewBr(thB)
+            var tiV = callExt(thB, "js_get", [tcell, emitStr(thB, "i")])
+            thB.NewCondBr(truthy(thB, callExt(thB, "js_lt", [tiV, total])), tbB, teB)
+            var tiV2 = callExt(tbB, "js_get", [tcell, emitStr(tbB, "i")])
+            callExt(tbB, "js_arr_push", [out, callExt(tbB, "js_get", [ps[0], tiV2])])
+            callExt(tbB, "js_set", [tcell, emitStr(tbB, "i"), callExt(tbB, "js_add", [tiV2, emitNum(tbB, 1)])])
+            tbB.NewBr(thB)
+            teB.NewRet(out)
+            return
+        }
+        // The three list walkers. They share one shape: run over a source array with a
+        // counter kept in a small object cell (a helper has no scope chain of its own).
+        //   lua_appendall(dst, v)     push every value of v onto the array dst
+        //   lua_extend(dst, src)      push every element of the array src onto dst
+        //   lua_spread(tbl, n, v)     store the values of v at tbl[n], tbl[n+1], ...
+        var src = anytype // The array being walked.
+        if (name == "lua_strall") { src = ps[0] }
+        else if (name == "lua_extend") { src = ps[1] }
+        else if (name == "lua_spread") { src = callLua(b, "lua_all", [ps[2]]) }
+        else { src = callLua(b, "lua_all", [ps[1]]) }
+        var outArr = callExt(b, "js_arr_new", []) // Only lua_strall builds a result array.
+        var cnt = callExt(b, "js_get", [src, emitStr(b, "length")])
+        var cell = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [cell, emitStr(b, "i"), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_get", [cell, emitStr(headB, "i")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, cnt])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_get", [cell, emitStr(bodyB, "i")])
+        var elemV = callExt(bodyB, "js_get", [src, iV2])
+        if (name == "lua_strall") {
+            callExt(bodyB, "js_arr_push", [outArr, callLua(bodyB, "lua_str", [elemV])])
+        } else if (name == "lua_spread") {
+            callExt(bodyB, "js_set", [ps[0], callExt(bodyB, "js_add", [ps[1], iV2]), elemV])
+        } else {
+            callExt(bodyB, "js_arr_push", [ps[0], elemV])
+        }
+        callExt(bodyB, "js_set", [cell, emitStr(bodyB, "i"), callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
+        bodyB.NewBr(headB)
+        exitB.NewRet(name == "lua_strall" ? outArr : hUndef)
+    }
+    function emitArrExtend(b, dst, srcArr) { callLua(b, "lua_extend", [dst, srcArr]); return b }
+    function emitSpreadInto(b, tbl, startV, v) { callLua(b, "lua_spread", [tbl, startV, v]); return b }
+
+    // ----- goto and labels -----
+    // A ::name:: label becomes a real basic block, so a goto is simply a branch - which
+    // is what IR wants anyway. makeSeq creates a block for every label of a block BEFORE
+    // it emits the statements (so a forward goto finds its target) and keeps them on
+    // labelScopes while the block is being emitted, so a goto in a nested block or loop
+    // reaches an enclosing label and leaves the loops on the way out.
+    var labelScopes = []
+    function makeLabel(name) { return {__label: name} }
+    function makeGoto(name) {
+        return function(b) {
+            for (var i = labelScopes.length - 1; i >= 0; i--) {
+                var tgt = labelScopes[i]["$" + name]
+                if (tgt != undefined) {
+                    b.NewBr(tgt)
+                    return deadBlock()
+                }
+            }
+            fail("no visible label '" + name + "' for goto")
+        }
+    }
+    // A label marker is not a thunk, so it must not be wrapped with a source position.
+    var coreStmtPos = stmtPos
+    stmtPos = function(t) {
+        if (typeof t != "function") { return t }
+        return coreStmtPos(t)
+    }
+    makeSeq = function(items) {
+        return function(b) {
+            var scope = {}
+            var any = false
+            for (var i = 0; i < items.length; i++) {
+                if (typeof items[i] != "function" && items[i].__label != undefined) {
+                    scope["$" + items[i].__label] = curF.NewBlock("")
+                    any = true
+                }
+            }
+            if (any) { labelScopes.push(scope) }
+            for (var j = 0; j < items.length; j++) {
+                var it = items[j]
+                if (typeof it != "function") {
+                    if (it.__label != undefined) {
+                        var lb = scope["$" + it.__label]
+                        b.NewBr(lb)
+                        b = lb
+                    }
+                    continue
+                }
+                b = it(b)
+            }
+            if (any) { labelScopes.pop() }
+            return b
+        }
+    }
+
+    // Emit an expression list the Lua way into a fresh array: every thunk but the last is
+    // truncated to one value, the last one expands. This is what an argument list, an
+    // expression list, a return and a table constructor all use.
+    function emitListArr(b, ts) {
+        var arr = callExt(b, "js_arr_new", [])
+        var last = ts.length - 1
+        for (var i = 0; i < ts.length; i++) {
+            var r = ts[i](b)
+            b = r.b
+            if (i === last) { callLua(b, "lua_appendall", [arr, r.v]) }
+            else { callExt(b, "js_arr_push", [arr, callLua(b, "lua_first", [r.v])]) }
+        }
+        return {b: b, v: arr}
+    }
+    // ( e ) truncates a multi-value to its first value.
+    function luaParen(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callLua(r.b, "lua_first", [r.v])}
+        }
+    }
+    // '...' in expression position: the extra arguments of the enclosing variadic call,
+    // which emitFunction stored in the frame under that very name.
+    function makeVararg() {
+        return function(b) {
+            var arr = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "...")])
+            return {b: b, v: callLua(b, "lua_mk", [arr])}
+        }
+    }
+
+    // a ^ b: always a float in Lua. There is no js_pow external and none is needed - the
+    // host's Math lives in the same runtime, so the power is a method call on it.
+    function emitPow(b, l, r) {
+        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
+        var argsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsV, l])
+        callExt(b, "js_arr_push", [argsV, r])
+        return callExt(b, "js_mcall", [mathV, emitStr(b, "pow"), argsV])
+    }
+    function makePow(items) {
+        if (items.length == 1) { return items[0] }
+        var l = items[0]
+        var r = items[1]
+        return function(b) {
+            var rl = l(b)
+            b = rl.b
+            var rr = r(b)
+            b = rr.b
+            return {b: b, v: callLua(b, "lua_mkflt", [emitPow(b, callLua(b, "lua_num", [rl.v]), callLua(b, "lua_num", [rr.v]))])}
+        }
+    }
+    // Unary bitwise not: the complement is an exclusive or with all ones.
+    function makeBNot(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_bxor", [r.v, emitNum(r.b, 0 - 1)])}
+        }
     }
 
     // The standard-library tables (math/string/table) and the global next() are emitted
     // into jsmain's scope only when the program actually references them, so a program
     // that uses none of them compiles to exactly the IR it did before. makeVarRef is the
     // single read path for a bare name, so it is where a reference is noticed.
-    var libNeed = {math: false, string: false, table: false, next: false}
+    var libNeed = {math: false, string: false, table: false, next: false, ipairs: false, pairs: false}
     makeVarRef = function(name) {
-        if (name == "math" || name == "string" || name == "table" || name == "next") {
+        if (name == "math" || name == "string" || name == "table" || name == "next"
+            || name == "ipairs" || name == "pairs") {
             libNeed[name] = true
         }
         return function(b) {
-            return {b: b, v: callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, name)])}
+            return {b: b, v: callLua(b, "lua_getvar", [curScopeV, emitStr(b, name)])}
         }
     }
 
@@ -405,11 +1154,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    // Lua numbers are floats: unary minus does not truncate to 32 bit.
+    // Unary minus is 0 - x, so it keeps the operand's number subtype and coerces a
+    // string exactly like the binary operator does.
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_neg", [r.v])}
+            return {b: r.b, v: callLua(r.b, "lua_arith", [handle(1), emitNum(r.b, 0), r.v])}
         }
     }
     // not v: true exactly when v is falsy.
@@ -471,18 +1221,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rl.b
             var rr = r(b)
             b = rr.b
-            var ls = callExt(b, "js_pystr", [rl.v])
-            var rs = callExt(b, "js_pystr", [rr.v])
+            var ls = callLua(b, "lua_str", [callLua(b, "lua_first", [rl.v])])
+            var rs = callLua(b, "lua_str", [callLua(b, "lua_first", [rr.v])])
             return {b: b, v: callExt(b, "js_add", [ls, rs])}
         }
     }
 
     // Lua operators: no 32 bit wrapping, floor division //, floor modulo %, ~= not equal.
-    binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div",
-              "//": "js_fdiv", "%": "js_fmod",
-              "==": "js_seq", "~=": "js_sne",
-              "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge"}
+    // Every binary operator goes through the value model rather than straight to an
+    // external: the arithmetic has to know the two number subtypes and to coerce a
+    // string operand, and the comparisons have to see through a float box. The bitwise
+    // and/or/xor still map to the runtime's 32-bit externals - Lua's are 64-bit, so a
+    // value beyond 32 bits does not match Lua yet (the shift COUNT does, see lua_shift).
+    binExt = {"&": "js_band", "|": "js_bor", "~": "js_bxor"}
     wraps = {}
+    var arithCode = {"+": 0, "-": 1, "*": 2, "/": 3, "//": 4, "%": 5}
+    var cmpCode = {"<": 0, ">": 1, "<=": 2, ">=": 3}
+    emitBin = function(b, op, l, r) {
+        if (op == "<<" || op == ">>") {
+            return callLua(b, "lua_shift", [handle(op == "<<" ? 1 : 0),
+                callLua(b, "lua_num", [l]), callLua(b, "lua_num", [r])])
+        }
+        if (op == "&" || op == "|" || op == "~") {
+            return callExt(b, binExt[op], [callLua(b, "lua_num", [l]), callLua(b, "lua_num", [r])])
+        }
+        if (op == "==") { return callLua(b, "lua_eq", [l, r]) }
+        if (op == "~=") { return callExt(b, "js_not", [callLua(b, "lua_eq", [l, r])]) }
+        if (cmpCode[op] != undefined) { return callLua(b, "lua_cmp", [handle(cmpCode[op]), l, r]) }
+        return callLua(b, "lua_arith", [handle(arithCode[op]), l, r])
+    }
 
     // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...].
     foldCallMember = function(items) {
@@ -493,30 +1260,33 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var r = primary(b)
             b = r.b
             var cur = r.v
+            var afterCall = false
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
+                if (afterCall) { cur = callLua(b, "lua_first", [cur]) } // Only one value feeds a step.
+                afterCall = false
                 if (s.kind == "call") {
-                    var ea = emitArgs(b, s.args)
+                    var ea = emitListArr(b, s.args)
                     b = ea.b
                     cur = callExt(b, "js_call", [cur, hUndef, ea.v])
+                    afterCall = true
                 } else if (s.kind == "method") {
                     // obj:m(args): look up m on the receiver, then call it with the
                     // receiver prepended as the first argument (self).
                     var fn = callExt(b, "js_get", [cur, emitStr(b, s.name)])
                     var margs = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [margs, cur])
-                    for (var mj = 0; mj < s.args.length; mj++) {
-                        var mar = s.args[mj](b)
-                        b = mar.b
-                        callExt(b, "js_arr_push", [margs, mar.v])
-                    }
+                    var ma = emitListArr(b, s.args)
+                    b = ma.b
+                    b = emitArrExtend(b, margs, ma.v)
                     cur = callExt(b, "js_call", [fn, hUndef, margs])
+                    afterCall = true
                 } else if (s.kind == "field") {
                     cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
                 } else {
                     var ir = s.idx(b)
                     b = ir.b
-                    cur = callExt(b, "js_get", [cur, ir.v])
+                    cur = callExt(b, "js_get", [cur, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])])])
                 }
             }
             return {b: b, v: cur}
@@ -525,6 +1295,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // { ... } fields, in source order: positional fields fill numeric keys 1, 2, 3, ...
     function makeTable(items) {
+        var lastPos = 0 - 1
+        for (var k = 0; k < items.length; k++) { if (items[k].fkind == "pos") { lastPos = k } }
         return function(b) {
             var t = callExt(b, "js_obj_new", [])
             var pos = 1
@@ -533,18 +1305,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 if (f.fkind == "pos") {
                     var rv = f.v(b)
                     b = rv.b
-                    callExt(b, "js_set", [t, emitNum(b, pos), rv.v])
-                    pos++
+                    if (i === lastPos) {
+                        // The last positional field expands a multi-value into as many
+                        // entries as it has values, so {f()} collects everything f gave.
+                        b = emitSpreadInto(b, t, emitNum(b, pos), rv.v)
+                    } else {
+                        callExt(b, "js_set", [t, emitNum(b, pos), callLua(b, "lua_first", [rv.v])])
+                        pos++
+                    }
                 } else if (f.fkind == "name") {
                     var rv2 = f.v(b)
                     b = rv2.b
-                    callExt(b, "js_set", [t, emitStr(b, f.name), rv2.v])
+                    callExt(b, "js_set", [t, emitStr(b, f.name), callLua(b, "lua_first", [rv2.v])])
                 } else {
                     var rk = f.k(b)
                     b = rk.b
                     var rv3 = f.v(b)
                     b = rv3.b
-                    callExt(b, "js_set", [t, rk.v, rv3.v])
+                    callExt(b, "js_set", [t, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [rk.v])]), callLua(b, "lua_first", [rv3.v])])
                 }
             }
             return {b: b, v: t}
@@ -554,7 +1332,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- Assignment -----
     function pathKeyV(b, p) {
         if (p.kind == "field") { return {b: b, v: emitStr(b, p.name)} }
-        return p.idx(b)
+        var r = p.idx(b)
+        return {b: r.b, v: callLua(r.b, "lua_cmpv", [callLua(r.b, "lua_first", [r.v])])}
     }
     function emitTargetWrite(b, ref, v) {
         if (ref.path.length == 0) {
@@ -582,14 +1361,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { targets.push(items[i]) }
         }
         return function(b) {
-            var vvals = []
-            for (var i = 0; i < vals.length; i++) {
-                var r = vals[i](b)
-                b = r.b
-                vvals.push(r.v)
-            }
+            var ra = emitListArr(b, vals)
+            b = ra.b
             for (var t = 0; t < targets.length; t++) {
-                b = emitTargetWrite(b, targets[t], t < vvals.length ? vvals[t] : hUndef)
+                b = emitTargetWrite(b, targets[t], callExt(b, "js_get", [ra.v, emitNum(b, t)]))
             }
             return b
         }
@@ -602,14 +1377,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             else { names.push(items[i].lname) }
         }
         return function(b) {
-            var vvals = []
-            for (var i = 0; i < vals.length; i++) {
-                var r = vals[i](b)
-                b = r.b
-                vvals.push(r.v)
-            }
+            var before = funcCount
+            var ra = emitListArr(b, vals)
+            b = ra.b
+            // The new locals must stay invisible to a closure one of the initializers
+            // just built - 'local f = function() return f end' reads the GLOBAL f in Lua -
+            // and that closure captured the current frame, so the declarations go into a
+            // fresh one. Only the case that really built a function pays for the frame,
+            // and the enclosing block restores curScopeV on its way out.
+            if (funcCount != before) { curScopeV = callExt(b, "js_scope_new", [curScopeV]) }
             for (var n = 0; n < names.length; n++) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), n < vvals.length ? vvals[n] : hUndef])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), callExt(b, "js_get", [ra.v, emitNum(b, n)])])
             }
             return b
         }
@@ -628,6 +1406,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         for (var i = 0; i < params.length; i++) {
+            // A trailing '...' marks the function variadic: the arguments beyond the
+            // named ones go into the frame under that very name, where makeVararg
+            // reads them.
+            if (params[i] == "...") {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "..."),
+                    callLua(b, "lua_tail", [f.Params[1], emitNum(b, i)])])
+                continue
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]), callExt(b, "js_arg", [f.Params[1], handle(i)])])
         }
         var endB = bodyT(b)
@@ -761,9 +1547,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
             var limV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, limName)])
             var stpV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, stepName)])
-            var stepPos = truthy(headB, callExt(headB, "js_gt", [stpV, emitNum(headB, 0)]))
-            var leCond = callExt(headB, "js_le", [iV, limV])
-            var geCond = callExt(headB, "js_ge", [iV, limV])
+            // The three control values keep their number subtype (a float start or step
+            // makes the loop variable a float), so the tests run on the raw numbers.
+            var iN = callLua(headB, "lua_num", [iV])
+            var limN = callLua(headB, "lua_num", [limV])
+            var stepPos = truthy(headB, callExt(headB, "js_gt", [callLua(headB, "lua_num", [stpV]), emitNum(headB, 0)]))
+            var leCond = callExt(headB, "js_le", [iN, limN])
+            var geCond = callExt(headB, "js_ge", [iN, limN])
             var condH = headB.NewSelect(stepPos, leCond, geCond)
             headB.NewCondBr(truthy(headB, condH), bodyB, exitB)
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])])
@@ -772,7 +1562,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             loopStack.pop()
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             var stpV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, stepName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV2, stpV2])])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callLua(postB, "lua_arith", [handle(0), iV2, stpV2])])
             postB.NewBr(headB)
             curScopeV = saved
             return exitB
@@ -798,105 +1588,55 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return exitB
         }
     }
-    // Generic for. items = [{gname}..., {iterkind, tbl?}, blockThunk]. Only ipairs is
-    // lowered (a 1-based array walk that stops at the first nil); pairs and any other
-    // iterator are accepted, then reported as not implemented.
-    function makeGenFor(items, pos) {
+    // Generic for, in its full Lua form: the expression list yields the iterator TRIPLE
+    // (function, state, initial control value) and every pass calls f(state, control).
+    // The loop ends when the first returned value is nil; otherwise that value becomes
+    // the next control value and the returned values are bound to the loop names. ipairs
+    // and pairs are ordinary library functions returning such a triple, so a hand-written
+    // iterator - stateless or a closure - drives the loop exactly the same way.
+    // items = [{gname}..., iterExprThunk..., blockThunk]; the block is always last.
+    function makeGenFor(items) {
         var names = []
-        var iter = null
-        var block = null
-        for (var i = 0; i < items.length; i++) {
-            var it = items[i]
-            if (typeof it == "function") { block = it }
-            else if (it.gname != undefined) { names.push(it.gname) }
-            else { iter = it }
+        var exprs = []
+        var block = items[items.length - 1]
+        for (var i = 0; i < items.length - 1; i++) {
+            if (typeof items[i] == "function") { exprs.push(items[i]) }
+            else { names.push(items[i].gname) }
         }
-        // pairs(t): full key/value enumeration. js_keys returns the table's own keys as
-        // an array in insertion order (deterministic across engines and skipping the
-        // internal __ slots); the loop walks that array by index, reads each value, and
-        // skips keys whose value is nil (a removed entry). The key is bound in its stored
-        // (string) form. break -> exit, continue -> the index bump, like ipairs.
-        if (iter.iterkind == "pairs") {
-            var tblTp = iter.tbl
-            return function(b) {
-                var saved = curScopeV
-                curScopeV = callExt(b, "js_scope_new", [curScopeV])
-                hidCount++
-                var iName = "$pi" + hidCount
-                var tName = "$pt" + hidCount
-                var kName = "$pk" + hidCount
-                var nName = "$pn" + hidCount
-                var rt = tblTp(b)
-                b = rt.b
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), rt.v])
-                var keysV = callExt(b, "js_keys", [rt.v])
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, kName), keysV])
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nName), callExt(b, "js_get", [keysV, emitStr(b, "length")])])
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[0]), hUndef])
-                if (names.length > 1) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[1]), hUndef]) }
-                var headB = curF.NewBlock("")
-                var bodyB = curF.NewBlock("")
-                var runB = curF.NewBlock("")
-                var postB = curF.NewBlock("")
-                var exitB = curF.NewBlock("")
-                b.NewBr(headB)
-                var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-                var nV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, nName)])
-                headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, nV])), bodyB, exitB)
-                var iVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-                var kArr = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, kName)])
-                var tVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, tName)])
-                var keyV = callExt(bodyB, "js_get", [kArr, iVb])
-                var valV = callExt(bodyB, "js_get", [tVb, keyV])
-                bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_sne", [valV, hUndef])), runB, postB)
-                callExt(runB, "js_scope_set", [curScopeV, emitStr(runB, names[0]), keyV])
-                if (names.length > 1) { callExt(runB, "js_scope_set", [curScopeV, emitStr(runB, names[1]), valV]) }
-                loopStack.push({cont: postB, brk: exitB})
-                block(runB).NewBr(postB)
-                loopStack.pop()
-                var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
-                callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
-                postB.NewBr(headB)
-                curScopeV = saved
-                return exitB
-            }
-        }
-        if (iter.iterkind != "ipairs") {
-            return notImplStmt("generic for over " + iter.iterkind + "()", pos)
-        }
-        var tblT = iter.tbl
         return function(b) {
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             hidCount++
-            var iName = "$gi" + hidCount
-            var tName = "$gt" + hidCount
-            var rt = tblT(b)
-            b = rt.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), rt.v])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 1)])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[0]), hUndef])
-            if (names.length > 1) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[1]), hUndef]) }
+            var fName = "$gf" + hidCount
+            var sName = "$gs" + hidCount
+            var cName = "$gc" + hidCount
+            var ra = emitListArr(b, exprs)
+            b = ra.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fName), callExt(b, "js_get", [ra.v, emitNum(b, 0)])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), callExt(b, "js_get", [ra.v, emitNum(b, 1)])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName), callExt(b, "js_get", [ra.v, emitNum(b, 2)])])
+            for (var n = 0; n < names.length; n++) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), hUndef])
+            }
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
-            var elem = callExt(headB, "js_get", [tV, iV])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_sne", [elem, hUndef])), bodyB, exitB)
-            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
-            var tV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, tName)])
-            var elem2 = callExt(bodyB, "js_get", [tV2, iV2])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, names[0]), iV2])
-            if (names.length > 1) { callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, names[1]), elem2]) }
+            var fV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, fName)])
+            var argsV = callExt(headB, "js_arr_new", [])
+            callExt(headB, "js_arr_push", [argsV, callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, sName)])])
+            callExt(headB, "js_arr_push", [argsV, callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])])
+            var allV = callLua(headB, "lua_all", [callExt(headB, "js_call", [fV, hUndef, argsV])])
+            var firstV = callExt(headB, "js_get", [allV, emitNum(headB, 0)])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_sne", [firstV, hUndef])), bodyB, exitB)
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, cName), firstV])
+            for (var n2 = 0; n2 < names.length; n2++) {
+                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, names[n2]), callExt(bodyB, "js_get", [allV, emitNum(bodyB, n2)])])
+            }
             loopStack.push({cont: postB, brk: exitB})
             block(bodyB).NewBr(postB)
             loopStack.pop()
-            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
             postB.NewBr(headB)
             curScopeV = saved
             return exitB
@@ -911,16 +1651,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b
         }
     }
+    // return e1, e2, ...: all the values travel back as one Lua value (a single one
+    // unwrapped, any other count as a multi-value box), the last expression expanding -
+    // so 'return f()' propagates everything f returned.
     function makeReturn(items) {
-        var t = items.length > 0 ? items[0] : null
         return function(b) {
-            var v = hUndef
-            if (t != null) {
-                var r = t(b)
-                b = r.b
-                v = r.v
-            }
-            b.NewRet(v)
+            var ra = emitListArr(b, items)
+            b = ra.b
+            b.NewRet(callLua(b, "lua_mk", [ra.v]))
             return deadBlock()
         }
     }
@@ -957,27 +1695,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // math.*: floor via floor-division by 1; ceil derived from floor; abs/max/min via a
     // comparison and a select. All straight-line (Lua numbers are floats, no wrapping).
     function libFloor(bb, argsH) {
-        var x = libArg(bb, argsH, 0)
+        var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
         return {b: bb, v: callExt(bb, "js_fdiv", [x, emitNum(bb, 1)])}
     }
     function libCeil(bb, argsH) {
-        var x = libArg(bb, argsH, 0)
+        var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
         var fl = callExt(bb, "js_fdiv", [callExt(bb, "js_neg", [x]), emitNum(bb, 1)])
         return {b: bb, v: callExt(bb, "js_neg", [fl])}
     }
     function libAbs(bb, argsH) {
-        var x = libArg(bb, argsH, 0)
+        var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
         var isNeg = truthy(bb, callExt(bb, "js_lt", [x, emitNum(bb, 0)]))
         return {b: bb, v: bb.NewSelect(isNeg, callExt(bb, "js_neg", [x]), x)}
     }
     function libMax(bb, argsH) {
-        var a = libArg(bb, argsH, 0)
-        var c = libArg(bb, argsH, 1)
+        var a = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
+        var c = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
         return {b: bb, v: bb.NewSelect(truthy(bb, callExt(bb, "js_gt", [a, c])), a, c)}
     }
     function libMin(bb, argsH) {
-        var a = libArg(bb, argsH, 0)
-        var c = libArg(bb, argsH, 1)
+        var a = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
+        var c = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
         return {b: bb, v: bb.NewSelect(truthy(bb, callExt(bb, "js_lt", [a, c])), a, c)}
     }
 
@@ -1003,7 +1741,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function libSub(bb, argsH) {
         var s = libArg(bb, argsH, 0)
-        var i = libArg(bb, argsH, 1)
+        var i = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
         var j = libArg(bb, argsH, 2)
         var arr = callExt(bb, "js_arr_new", [])
         callExt(bb, "js_arr_push", [arr, callExt(bb, "js_sub", [i, emitNum(bb, 1)])])
@@ -1012,7 +1750,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function libRep(bb, argsH) {
         var s = libArg(bb, argsH, 0)
-        var n = libArg(bb, argsH, 1)
+        var n = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
         var saved = curScopeV
         curScopeV = callExt(bb, "js_scope_new", [curScopeV])
         hidCount++
@@ -1067,6 +1805,75 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return {b: bb, v: bb.NewSelect(truthy(bb, callExt(bb, "js_seq", [elem, hUndef])), hUndef, nk)}
     }
 
+    // ipairs(t) / pairs(t): both answer the iterator triple the generic for consumes.
+    // ipairs walks 1, 2, 3, ... and stops at the first nil element; pairs walks the
+    // table's own keys in insertion order (js_keys, deterministic across engines) and
+    // skips the ones whose value is nil, binding the key in its stored (string) form.
+    // ipairs' iterator is stateless (its control value is the index), pairs' is a closure
+    // over a cursor cell - the loop feeds the control value back either way.
+    function libINext(bb, argsH) {
+        var t = libArg(bb, argsH, 0)
+        var nk = callExt(bb, "js_add", [libArg(bb, argsH, 1), emitNum(bb, 1)])
+        var v = callExt(bb, "js_get", [t, nk])
+        var nilB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        bb.NewCondBr(truthy(bb, callExt(bb, "js_seq", [v, hUndef])), nilB, okB)
+        nilB.NewRet(hUndef)
+        var arr = callExt(okB, "js_arr_new", [])
+        callExt(okB, "js_arr_push", [arr, nk])
+        callExt(okB, "js_arr_push", [arr, v])
+        okB.NewRet(callLua(okB, "lua_mk", [arr]))
+        return {b: deadBlock(), v: hUndef}
+    }
+    function libIpairs(bb, argsH) {
+        var t = libArg(bb, argsH, 0)
+        var arr = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [arr, callExt(bb, "js_closure", [handle(emitLibFunc(libINext)), curScopeV])])
+        callExt(bb, "js_arr_push", [arr, t])
+        callExt(bb, "js_arr_push", [arr, emitNum(bb, 0)])
+        return {b: bb, v: callLua(bb, "lua_mk", [arr])}
+    }
+    // The cursor of a pairs walk: {t, k (the key array), i}. Its iterator ignores the
+    // control value the loop hands back and advances the cursor itself.
+    function libPNext(bb, argsH) {
+        var st = libArg(bb, argsH, 0)
+        var tV = callExt(bb, "js_get", [st, emitStr(bb, "t")])
+        var kV = callExt(bb, "js_get", [st, emitStr(bb, "k")])
+        var nV = callExt(bb, "js_get", [kV, emitStr(bb, "length")])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var hitB = curF.NewBlock("")
+        var skipB = curF.NewBlock("")
+        var endB = curF.NewBlock("")
+        bb.NewBr(headB)
+        var iV = callExt(headB, "js_get", [st, emitStr(headB, "i")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, nV])), bodyB, endB)
+        var iV2 = callExt(bodyB, "js_get", [st, emitStr(bodyB, "i")])
+        var keyV = callExt(bodyB, "js_get", [kV, iV2])
+        var valV = callExt(bodyB, "js_get", [tV, keyV])
+        callExt(bodyB, "js_set", [st, emitStr(bodyB, "i"), callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
+        bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_sne", [valV, hUndef])), hitB, skipB)
+        skipB.NewBr(headB)
+        var parr = callExt(hitB, "js_arr_new", [])
+        callExt(hitB, "js_arr_push", [parr, keyV])
+        callExt(hitB, "js_arr_push", [parr, valV])
+        hitB.NewRet(callLua(hitB, "lua_mk", [parr]))
+        endB.NewRet(hUndef)
+        return {b: deadBlock(), v: hUndef}
+    }
+    function libPairs(bb, argsH) {
+        var t = libArg(bb, argsH, 0)
+        var st = callExt(bb, "js_obj_new", [])
+        callExt(bb, "js_set", [st, emitStr(bb, "t"), t])
+        callExt(bb, "js_set", [st, emitStr(bb, "k"), callExt(bb, "js_keys", [t])])
+        callExt(bb, "js_set", [st, emitStr(bb, "i"), emitNum(bb, 0)])
+        var arr = callExt(bb, "js_arr_new", [])
+        callExt(bb, "js_arr_push", [arr, callExt(bb, "js_closure", [handle(emitLibFunc(libPNext)), curScopeV])])
+        callExt(bb, "js_arr_push", [arr, st])
+        callExt(bb, "js_arr_push", [arr, hUndef])
+        return {b: bb, v: callLua(bb, "lua_mk", [arr])}
+    }
+
     // libSet wires one closure into a library table field; libDecl binds a table (or a
     // bare function) into jsmain's scope under its global name.
     function libSet(b, obj, name, idx) {
@@ -1076,6 +1883,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Emit only the referenced libraries; a program that uses none emits nothing here and
     // its IR is unchanged from before this feature existed.
     function emitLibs(b) {
+        if (libNeed.ipairs) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ipairs"), callExt(b, "js_closure", [handle(emitLibFunc(libIpairs)), curScopeV])])
+        }
+        if (libNeed.pairs) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "pairs"), callExt(b, "js_closure", [handle(emitLibFunc(libPairs)), curScopeV])])
+        }
         if (libNeed.next) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "next"), callExt(b, "js_closure", [handle(emitLibFunc(libNext)), curScopeV])])
         }
@@ -1122,7 +1935,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var prIdx = funcCount
         var pf = m.NewFunc("jsf_" + prIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var pb = pf.NewBlock("entry")
-        pb.NewCall(getExtern("js_pyprint", 1), [pf.Params[1]])
+        pb.NewCall(getExtern("js_pyprint", 1), [callLua(pb, "lua_strall", [pf.Params[1]])])
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
         b = emitLibs(b)

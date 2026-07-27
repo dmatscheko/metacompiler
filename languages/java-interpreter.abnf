@@ -1,47 +1,60 @@
 :title("Java (subset) interpreter") ;
-:description("Parses a Java subset and executes it directly, without generating code.
+:description("Parses Java and executes it directly, without generating code. The
+goal is the whole practical language; tests/java-test-full.java is the ratchet that
+measures how far it is, and all 22 of its sections pass today.
 
-The subset: classes with fields (instance and static, with initializers), methods
-(instance and static), constructors, single inheritance (class B extends A: inherited
-fields and methods, overriding with dynamic dispatch, the implicit no argument super
-constructor, and super.m() calls; a class must appear before its subclasses),
-records with auto generated constructor and
-accessors (a modern Java SE nod, like 'var' local declarations), object creation with
-new, arrays (new int[n], new int[]{...}, a.length, indexing), the enhanced for loop
-(for (var x : arr)), int / boolean / String / var / class types (types are parsed;
-the semantics are dynamic), String concatenation with +, the String methods length(),
-charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one char
-String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
-if/else, while, do-while, both for forms, the classic colon switch on int or String
-(fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
-expr/block, no fallthrough), break/continue (labeled too: labeled loops, labeled
-blocks; a label inside a try body cannot jump out), return, assignment (also
-+= -= *= /= %= and the bitwise/shift compounds &= |= ^= <<= >>= >>>=), postfix ++/--,
-the ternary operator, || && with short circuit, & | ^ (non-short-circuit boolean
-operators on two booleans, int32 bit operations otherwise), << >> >>> (Java int
-semantics), == != < > <= >= (== compares objects by identity, use equals() for
-strings), + - * / % (int arithmetic is 32 bit, / truncates) and unary - ! ~.
+Types: classes with instance and static fields (with initializers), instance,
+static and abstract methods, OVERLOADED constructors with explicit this(...) and
+super(...) chaining, static and instance initializer blocks (run in the order they
+are written, before the constructor body), single inheritance with dynamic dispatch
+and super.m() calls (a class must appear before its subclasses), records (canonical,
+compact and secondary constructors, generated accessors and equals, hand written
+accessors win), interfaces (constants, abstract methods, default and private
+instance methods, static methods, and Iface.super.m() to pick one of two inherited
+defaults), anonymous classes over a class or an interface, ENUMS (constructor
+arguments, per-constant bodies as anonymous subclasses, values / valueOf /
+ordinal / name / compareTo), NESTED, INNER and LOCAL classes (Outer.this and the
+qualified o.new Inner(...) creation), and annotation types (parsed and dropped -
+nothing reads them at run time).
 
-Widened surface (parsed so a whole Java file is accepted): generics (<...>) and the
-extra primitive keywords are parsed and dropped; casts ((Type) expr) are identity;
-annotations (with or without arguments), implements/throws clauses and varargs (...)
-are parsed and ignored. try/catch/finally + throw are accepted and, under
--warn-unsupported, the try block still runs and a throw still evaluates its
-expression (no exception model, so no unwinding). Interfaces, enums, annotation types,
-nested/inner types, lambdas, method references and anonymous classes are accepted and
-reported as not implemented; -warn-unsupported downgrades that to a warning so call
-graphs / CFGs / traces still work on partly understood files.
+Values: int / long / double arithmetic on one 32 bit-truncating number type,
+boolean, String, arrays, null, and char as a boxed value that renders as its glyph
+but compares and calculates as its code, so c == 65, 'b' - 'a' == 1 and
+(char)(c + 1) == 'c' all hold. Literals cover hex / binary / octal / underscored /
+suffixed integers, fractional, exponent and hex floats, char literals with the full
+escape set (including the one-to-three digit octal form), and TEXT BLOCKS with
+incidental-indent stripping, trailing-space stripping and the line-joining and
+space-preserving escapes.
 
-Not genuinely modelled: switch expressions (switch as a value, yield), char
-literals, overloading,
-implicit field access (fields are reached via this.x or ClassName.x - like the
-explicit style many code bases enforce), real exception unwinding, functional
-interfaces (so lambdas/method references are inert) and reflection.
+Statements and expressions: if/else, while, do-while, both for forms, the classic
+colon switch and the arrow switch statement, switch EXPRESSIONS with yield in both
+forms, labeled break and continue, try/catch/finally with TYPED and MULTI catch
+clauses over a real java.lang exception hierarchy (Throwable down to the common
+RuntimeExceptions, with getMessage), try-with-resources closing in reverse order,
+throw with genuine unwinding, instanceof with a pattern binding, PATTERN SWITCH
+(type patterns, case null, when guards and record DECONSTRUCTION patterns, which
+instanceof takes too), enum constant labels, VARARGS (the call site collects the
+trailing arguments, or forwards an array as-is), multidimensional and jagged
+arrays with bare initializers and the C-style declarators, lambdas and method
+references (static, bound, unbound and constructor) that become real values of the
+functional interface they are assigned to, the full operator set including the
+bitwise and shift operators with Java int semantics, and the compound assignments.
 
-Fields live directly on the instance object, methods on the class descriptor; a
-constructor always exists (a default one is generated) and first applies the field
-initializers. main(String[] args) of class Main is the entry point; its return is void,
-so self checking programs end with System.exit(failures).") ;
+Widened surface (parsed so a whole file is accepted): generics are parsed and
+erased, call-site type arguments included; casts are identity except the primitive
+ones, which truncate or box; implements / throws / permits clauses are parsed.
+-warn-unsupported downgrades what is left to a warning so call graphs, CFGs and
+traces still work on partly understood files.
+
+Not genuinely modelled: generic type CHECKING (erased), sealed-hierarchy and
+switch EXHAUSTIVENESS checking, method overloading by parameter type (constructors
+are picked by arity), the flow scoping of pattern variables (a binding outlives the
+test that introduced it), implicit field access (fields are reached via this.x or
+ClassName.x, the explicit style many code bases enforce), threads and reflection.
+
+Fields live directly on the instance object, methods on the class descriptor.
+main(String[] args) of class Main is the entry point; its return is void, so self
+checking programs end with System.exit(failures).") ;
 
 
 // --- main rules
@@ -69,7 +82,7 @@ Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] Q
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
-            = [ LeadMods ] KwClass Id <~~ push(up.in); curClassName = up.in ~~> [ SkipAngle ]
+            = [ LeadMods ] KwClass Id <~~ push(up.in); jEnterClass(up.in) ~~> [ SkipAngle ]
               [ KwExtends Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] ]
               [ ImplementsSkip ] "{" { Member } "}" ;
 
@@ -80,16 +93,37 @@ RecordDecl  <~~ buildRecord(takeAll()) ~~>
 RParams     <~~ push({rparams: takeAll()}) ~~>
             = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
 
-Member      = NestedType | Ctor | Method | Field ;
+// A member starting with '{' (or 'static {') can only be an initializer block, so
+// both come first and no other member alternative is disturbed.
+Member      = StaticInit | InstInit | NestedType | Ctor | AbstractMethod | Method
+            | CompactCtor | Field ;
+// static { ... } runs once when the class is built; { ... } runs on every
+// construction, in TEXTUAL order with the field initializers around it.
+StaticInit  <~~ push({kind: "sinit", body: pop()}) ~~>
+            = "static" KwEnd Block ;
+InstInit    <~~ push({kind: "iinit", body: pop()}) ~~>
+            = Block ;
 
+// A constructor. Its body is NOT a plain Block: an explicit this(...) / super(...)
+// invocation may only stand first, and it decides what initializes the object, so it
+// is parsed as a separate head rather than as an ordinary statement.
 Ctor        <~~ push(makeCtor(takeAll())) ~~>
-            = [ LeadMods ] [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ Throws ] Block ;
+            = [ LeadMods ] [ SkipAngle ] Id <~~ push(up.in) ~~> ParamList [ Throws ] CtorBody ;
+CtorBody    <~~ push(makeCtorBody(takeAll())) ~~>
+            = "{" [ CtorCall ] { Statement } "}" ;
+// A record's COMPACT constructor: no parameter list at all - it receives the record
+// components, normalizes them, and the canonical assignment happens afterwards.
+CompactCtor <~~ push(makeCompactCtor(takeAll())) ~~>
+            = [ LeadMods ] Id <~~ push(up.in) ~~> Block ;
+// An abstract (or interface) method: a signature and no body.
+AbstractMethod <~~ push({kind: "amethod", name: pop()}) ~~>
+            = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ Throws ] ";" ;
 
 Method      <~~ push(makeMethod(takeAll())) ~~>
             = Mods [ SkipAngle ] Type Id <~~ push(up.in) ~~> ParamList [ Throws ] Block ;
 
 Field       <~~ push(makeField(takeAll())) ~~>
-            = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
+            = Mods FType Id <~~ push(up.in) ~~> [ CDims ] [ "=" VarInit ] ";" ;
 
 // Modifiers before a member: annotations (with or without arguments) are parsed and
 // ignored; ModWord keeps the modifier text so `static` is still detectable.
@@ -101,9 +135,15 @@ FType       <~~ push({ty: up.in}) ~~>
             = Type ;
 
 // A parameter may carry annotations, `final` and varargs (`...`); all ignored.
-ParamList   <~~ push({params: takeAll()}) ~~>
+ParamList   <~~ push(makeParams(takeAll())) ~~>
             = "(" [ Param { "," Param } ] ")" ;
-Param       = { Annotation | "final" KwEnd } Type [ "..." ] Id <~~ push(up.in) ~~> ;
+// A trailing `T... name` is a VARARGS parameter: the call site collects the
+// remaining arguments into an array (jFixVarargs), unless it already passes one.
+Param       = { Annotation | "final" KwEnd } Type [ VarArgs ] Id <~~ push(up.in) ~~> [ CDims ] ;
+VarArgs     <~~ push({vararg: true}) ~~>
+            = "..." ;
+// The C-style declarator suffix: `int a[]` and `int[] a[]` declare arrays too.
+CDims       = "[" "]" { "[" "]" } ;
 
 // Types are parsed and (apart from field defaults) ignored. Generic arguments
 // (<...>), dotted names, extra array dimensions and the extra primitive keywords are
@@ -113,8 +153,18 @@ Type        = ( PrimName KwEnd | "String" KwEnd | "void" KwEnd | "var" KwEnd
 PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short" | "byte" ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
-Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
-            | Try | Throw | Assert | Synchronized | CtorCall | Labeled | Decl | Empty | ExprStmt ;
+Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Yield | Break | Continue
+            | Try | Throw | Assert | Synchronized | LocalClass | Labeled | Decl | Empty | ExprStmt ;
+// A LOCAL class: the declaration builds it where the file is walked (so it is
+// registered before the enclosing method ever runs) and leaves a do-nothing
+// statement behind. Its scope is wider than Java's - it stays visible after the
+// method - which no program that compiles under javac can observe.
+LocalClass  <~~ push(function() {}) ~~>
+            = NestedType ;
+// yield: the value of the enclosing switch EXPRESSION arm. It travels as its own
+// signal, so it passes out of nested blocks and loops like return does.
+Yield       <~~ push(makeYield(pop())) ~~>
+            = "yield" KwEnd Expression ";" ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -137,14 +187,47 @@ Switch      <~~ push(makeSwitch(takeAll())) ~~>
 // per arm. Tried first; they fail fast at ':' for the classic forms.
 SwitchCase  = ArrowCase | ArrowDefault | Case | Default ;
 ArrowCase   <~~ pushArrowCase(takeAll()) ~~>
-            = KwCase ALabel { "," ALabel } "->" ArrowBody ;
-ALabel      <~~ push({alab: pop()}) ~~>
-            = CondExpr ;
+            = KwCase CaseLabel { "," CaseLabel } "->" ArrowBody ;
 ArrowBody   = Block | Throw | ExprStmt ;
 ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" ArrowBody ;
 Case        <~~ push(makeCase(takeAll())) ~~>
-            = KwCase CondExpr ":" { Statement } ;
+            = KwCase CaseLabel ":" { Statement } ;
+
+// ----- Case labels (shared by the statement switch and the switch expression).
+// A label is a PATTERN (type or record deconstruction, with an optional `when`
+// guard), `null`, a literal, a plain name, or any other constant expression.
+// The specific forms come first: a bare name would otherwise be swallowed by
+// Lambda ("case S -> 1" parses as the lambda "S -> 1" under a full expression),
+// and a name is also the only shape an ENUM constant label has - it names no
+// variable in any scope, so it is compared by its source TEXT instead.
+CaseLabel   <~~ push({lab: makeLabel(takeAll())}) ~~>
+            = ( NullLabel | RecPat | TypePat | LitLabel | NameLabel | ExprLabel ) [ WhenGuard ] ;
+NullLabel   <~~ push({lnull: true}) ~~>
+            = "null" KwEnd ;
+LitLabel    <~~ push({lval: pop()}) ~~>
+            = LabelLit ;
+LabelLit    = TextBlock | JavaStr | CharLit | HexLit | BinLit | OctLit | FloatLit
+            | UscoreInt | SuffInt | IntLit | True | False ;
+NameLabel   <~~ push(makeNameLabel(takeAll(), stripWs(up.in))) ~~>
+            = Id <~~ push(up.in) ~~> { "." Id <~~ push(up.in) ~~> } ;
+ExprLabel   <~~ push({lval: pop()}) ~~>
+            = CondExpr ;
+WhenGuard   <~~ push({lguard: pop()}) ~~>
+            = "when" KwEnd Expression ;
+
+// Patterns: `Type name` binds the scrutinee, `Type(sub, ...)` deconstructs a
+// record component-wise (the components are matched against nested patterns).
+// A `var` or primitive type in a pattern always matches - the type is erased.
+Pattern     = RecPat | TypePat ;
+RecPat      <~~ push(makeRecPat(takeAll())) ~~>
+            = PatType "(" [ Pattern { "," Pattern } ] ")" ;
+TypePat     <~~ push(makeTypePat(takeAll())) ~~>
+            = PatType PatName ;
+PatType     <~~ push({ptype: stripWs(up.in)}) ~~>
+            = [ "final" KwEnd ] Type ;
+PatName     <~~ push({pname: up.in}) ~~>
+            = Id ;
 Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
@@ -207,12 +290,26 @@ NotSwitchKw = :script(~~
 // including multi-catch A | B, are parsed but not discriminated), finally always runs.
 // return/break/continue inside a try still propagate. A try-with-resources header is
 // skipped (SkipParen), so its resources are not bound or auto-closed.
-Try         <~~ push(excTry(takeAll())) ~~>
-            = KwTry [ SkipParen ] TryBody { CatchClause } [ FinallyClause ] ;
+// try-with-resources, typed and MULTI catch clauses, finally. The clauses carry
+// their declared type(s), so excTryTyped (lib/interp-core.js) can pick the first
+// one that matches through core.excMatches instead of always taking the first.
+Try         <~~ push(jTry(takeAll())) ~~>
+            = KwTry [ Resources ] TryBody { CatchClause } [ FinallyClause ] ;
+// try (R a = ...; b) - each resource is closed, in REVERSE order, when the block
+// ends however it ends. A bare name is an already-open effectively final resource.
+Resources   <~~ push({resources: takeAll()}) ~~>
+            = "(" Resource { ";" Resource } [ ";" ] ")" ;
+Resource    = ResDecl | ResRef ;
+ResDecl     <~~ push(makeResDecl(takeAll())) ~~>
+            = [ LeadMods ] DeclType Id <~~ push(up.in) ~~> "=" Expression ;
+ResRef      <~~ push(makeResRef(up.in)) ~~>
+            = Id ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
-CatchClause <~~ push(excCatch(takeAll())) ~~>
-            = KwCatch "(" CatchType Id <~~ push(up.in) ~~> ")" Block ;
+CatchClause <~~ push(jCatch(takeAll())) ~~>
+            = KwCatch "(" [ "final" KwEnd ] CatchTypes Id <~~ push(up.in) ~~> ")" Block ;
+CatchTypes  <~~ push({ctypes: stripWs(up.in)}) ~~>
+            = Type { "|" Type } ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(excThrow(pop())) ~~>
@@ -221,16 +318,25 @@ Throw       <~~ push(excThrow(pop())) ~~>
 // An explicit constructor invocation (super(args) or this(args)): accepted and
 // reported as not implemented (the implicit no-argument super already ran). The
 // arguments are still evaluated so their calls stay visible.
-CtorCall    <~~ push(makeCtorCall(takeAll(), up.pos)) ~~>
-            = ( KwSuper | "this" KwEnd ) "(" [ Expression { "," Expression } ] ")" ";" ;
+CtorCall    <~~ push(makeCtorHead(takeAll())) ~~>
+            = CtorWhich "(" [ Expression { "," Expression } ] ")" ";" ;
+CtorWhich   <~~ push({cwhich: stripWs(up.in)}) ~~>
+            = KwSuper | "this" KwEnd ;
 
 Decl        = DeclCore ";" ;
 // A local declaration may carry annotations / `final` (e.g. @SuppressWarnings("x")
 // int y = 1); LeadMods drops them (they do not change the interpretation).
-DeclCore    <~~ push(makeSeq(takeAll())) ~~>
-            = [ LeadMods ] Type Declarator { "," Declarator } ;
-Declarator  <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
+DeclCore    <~~ push(makeDeclList(takeAll())) ~~>
+            = [ LeadMods ] DeclType Declarator { "," Declarator } ;
+DeclType    <~~ push({dty: stripWs(up.in)}) ~~>
+            = Type ;
+Declarator  <~~ push(makeDeclSpec(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ CDims ] [ "=" VarInit ] ;
+// An initializer is an expression or a BARE array initializer - `int[] a = {1, 2}`
+// and the nested `int[][] j = {{1}, {2, 3}}`, which needs no `new`.
+VarInit     = ArrayInit | Expression ;
+ArrayInit   <~~ push(makeArray(takeAll())) ~~>
+            = "{" [ VarInit { "," VarInit } [ "," ] ] "}" ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -283,8 +389,12 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // Java's flow scoping, which only admits it where the test held.
 InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
             = ShiftExpr [ InstTail ] ;
+// The record-deconstruction form (x instanceof Dot(int v)) needs the "(" to
+// match, so it fails fast for the ordinary `x instanceof T [name]`.
 InstTail    <~~ push(makeInstTail(takeAll())) ~~>
-            = KwInstanceof IofType [ IofBind ] ;
+            = KwInstanceof ( InstPat | IofType [ IofBind ] ) ;
+InstPat     <~~ push({ipat: pop()}) ~~>
+            = RecPat ;
 IofType     <~~ push(stripWs(up.in)) ~~>
             = Type ;
 IofBind     <~~ push({bind: stripWs(up.in)}) ~~>
@@ -317,29 +427,59 @@ UPlus       <~~ push(makeUPlus(pop())) ~~>
 // any unary operand; a reference cast excludes a leading '-'/'+' so `(a) - b` stays
 // subtraction (Java's cast/subtraction disambiguation).
 Cast        = PrimCast | RefCast ;
-PrimCast    <~~ push(makeCast(pop())) ~~>
-            = "(" PrimName KwEnd { "[" "]" } ")" UnaryExpr ;
-RefCast     <~~ push(makeCast(pop())) ~~>
+PrimCast    <~~ var pcInner = pop(); push(makeCast(pcInner, pop().ct)) ~~>
+            = "(" CastPrim ")" UnaryExpr ;
+CastPrim    <~~ push({ct: stripWs(up.in)}) ~~>
+            = PrimName KwEnd { "[" "]" } ;
+RefCast     <~~ push(makeCast(pop(), "")) ~~>
             = "(" RefType ")" UnaryNoPM ;
 UnaryNoPM   = Not | PostfixExpr ;
 RefType     = ( "String" KwEnd | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
 
-PostfixExpr = IncDec | NewExpr | SuperCall | CallMember ;
+// NewExpr is a Primary, not an alternative here, so `new Foo().bar()` and
+// `new int[]{1, 2}[0]` take the ordinary suffix chain.
+PostfixExpr = IncDec | SuperCall | IfaceSuper | QualNew | CallMember ;
+// o.new Inner(args): creation qualified by an enclosing instance. It comes
+// before CallMember, which would otherwise stop at `o` and leave `.new` behind.
+QualNew     <~~ push(makeQualNew(takeAll())) ~~>
+            = OuterRef "." KwNew Id <~~ push({qname: up.in}) ~~> [ SkipAngle ]
+              "(" [ Expression { "," Expression } ] ")" ;
+OuterRef    <~~ push({qouter: pop()}) ~~>
+            = Primary ;
+// Greet.super.hello() - the default method of a NAMED interface, which is how a
+// class that inherits two defaults picks one.
+IfaceSuper  <~~ push(makeIfaceSuper(takeAll())) ~~>
+            = Id <~~ push({isup: up.in}) ~~> "." KwSuper "." Id <~~ push({ismeth: up.in}) ~~>
+              "(" [ Expression { "," Expression } ] ")" ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // new Point(1, 2) | new int[]{1, 2, 3} | new int[n] | new Foo() { ... } (anonymous)
 NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
 NewObject   <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" ;
+            = KwNew NewName [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" ;
+// The type of a `new` may be qualified (new Outer.Nested()).
+NewName     <~~ push(jJoinDots(takeAll())) ~~>
+            = Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] { "." Id <~~ push(stripWs(up.in)) ~~> [ SkipAngle ] } ;
 // An anonymous class: accepted, reported as not implemented; the constructor
 // arguments still run so their calls stay visible under -warn-unsupported.
-NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" SkipBlock ;
-NewArrLit   <~~ push(makeArray(takeAll())) ~~>
-            = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
-NewArrSize  <~~ push(makeNewArray(pop())) ~~>
-            = KwNew ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | Id ) "[" Expression "]" ;
+// new Type(args) { members } - an anonymous subclass (of a class OR an interface),
+// built once on first evaluation and instantiated like any other class.
+NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
+            = KwNew NewName [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" AnonBody ;
+AnonBody    <~~ push({anonmembers: takeAll()}) ~~>
+            = "{" { Member } "}" ;
+NewArrLit   = KwNew Type ArrayInit ;
+// new T[a][b]...[]: every sized dimension is allocated, the trailing empty ones
+// leave their elements null (new int[2][] gives two null rows).
+NewArrSize  <~~ push(makeNewArray(takeAll())) ~~>
+            = KwNew ArrBase ArrDim { ArrDim } { ArrEmpty } ;
+ArrBase     <~~ push({abase: stripWs(up.in)}) ~~>
+            = PrimName KwEnd | "String" KwEnd | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+ArrDim      <~~ push({adim: pop()}) ~~>
+            = "[" Expression "]" ;
+ArrEmpty    <~~ push({aempty: true}) ~~>
+            = "[" "]" ;
 
 // super.m(args): the method search starts at the superclass of the class the call
 // appears in (curClassName is set while the class body is being built).
@@ -350,14 +490,47 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx } ;
+// An explicit call-site type argument (list.<String>of(...)) is parsed and
+// dropped like every other generic: types are erased in this model.
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = "." [ SkipAngle ] Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
-            | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null | VarRef ;
+// A switch EXPRESSION. It comes first because it is the only Primary that starts
+// with `switch`, and it has to be a Primary so `5 + switch (n) {...}` works.
+SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchArm } "}" ;
+SwitchArm   = ArmArrow | ArmArrowDflt | ArmColon | ArmColonDflt ;
+ArmArrow    <~~ push(makeArm(takeAll(), false)) ~~>
+            = KwCase CaseLabel { "," CaseLabel } "->" ArmBody ;
+ArmArrowDflt <~~ push(makeArm(takeAll(), true)) ~~>
+            = KwDefault "->" ArmBody ;
+ArmColon    <~~ push(makeArm(takeAll(), false)) ~~>
+            = KwCase CaseLabel { "," CaseLabel } ":" ArmStmts ;
+ArmColonDflt <~~ push(makeArm(takeAll(), true)) ~~>
+            = KwDefault ":" ArmStmts ;
+// An arrow body is a value, a block (which yields) or a throw; a colon body is a
+// run of statements that ends in a yield.
+ArmBody     = ArmBlock | ArmThrow | ArmValue ;
+ArmBlock    <~~ push({sstmts: takeAll()}) ~~>
+            = Block ;
+ArmThrow    <~~ push({sstmts: takeAll()}) ~~>
+            = Throw ;
+ArmValue    <~~ push({sval: pop()}) ~~>
+            = Expression ";" ;
+ArmStmts    <~~ push({sstmts: takeAll()}) ~~>
+            = { Statement } ;
+
+Primary     = NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | JavaStr | CharLit
+            | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null
+            | OuterThis | VarRef ;
+
+// Outer.this - the enclosing instance of an inner class. It has to beat VarRef,
+// which would read `Outer` as the class and then look for a field named `this`.
+OuterThis   <~~ push(makeOuterThis(up.in)) ~~>
+            = Id "." "this" KwEnd ;
 
 // Lambdas and method references are real closures on the runtime. A lambda captures
 // the defining scope; a functional-interface call site (any method call on the
@@ -379,6 +552,10 @@ LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
 MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
             = Id { "." Id } "::" ( Id | KwNew ) ;
 
+// Java's string literal. Same shape as lib/dq-strings.abnf, but decoded by
+// jUnescape, which knows Java's octal escapes ("A\102") and \s.
+JavaStr     = '"' :whitespace() { StrEsc | DqPlain } <~~ push(makeConst(jUnescape(up.in))) ~~> '"' :whitespace(Whitespace) ;
+
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
 // 'this' and class names resolve like variables.
@@ -392,11 +569,22 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 // recognized-but-not-implemented. Each form matches something plain IntLit
 // cannot, so ordinary decimal integers still reach IntLit untouched. -----
 
-// A char literal 'c' (escapes included). Reuses the balanced SkipChar shape.
-CharLit     <~~ push(notImplExpr("char literal", up.pos)) ~~> = SkipChar ;
+// A char literal. Java's char is an integral type that PRINTS as a glyph, so the
+// value is a boxed {__char: code}: every operator unboxes it (so 'b' - 'a' == 1 and
+// c == 65 hold) while string context renders the character. The escape set is
+// Java's: the single letters, a one-to-three digit OCTAL escape and \u form.
+CharLit     <~~ push(makeConst(jChar(jCharCode(up.in)))) ~~>
+            = "'" :whitespace() CharBody "'" :whitespace(Whitespace) ;
+CharBody    = "\\" CharEscBody | CharPlain ;
+CharEscBody = "u" JHexD JHexD JHexD JHexD | JOctRun | CharEsc ;
+JOctRun     = JOct [ JOct [ JOct ] ] ;
+JOct        = "0"..."7" ;
+JHexD       = "0"..."9" | "a"..."f" | "A"..."F" ;
+CharEsc     = "n" | "t" | "r" | "b" | "f" | "s" | "'" | '"' | "\\" ;
+CharPlain   = "\x09" | "\x0b"..."\x0c" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 // A text block """ ... """ ; the !'"""' lookahead lets single and double quotes appear
 // inside without ending the block. Whitespace is disabled inside so newlines are content.
-TextBlock   <~~ push(notImplExpr("text block", up.pos)) ~~>
+TextBlock   <~~ push(makeConst(jTextBlock(up.in))) ~~>
             = '"""' :whitespace() { !'"""' TBItem } '"""' :whitespace(Whitespace) ;
 TBItem      = "\\" "\x00"..."\U0010ffff" | "\x00"..."\U0010ffff" ;
 // Hex / binary: the 0x / 0b prefix is distinctive, so these never shadow a decimal int.
@@ -457,28 +645,51 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 // static to track). ModWord (used by Mods) keeps the modifier text.
 Annotation  = "@" Id { "." Id } [ SkipParen ] ;
 ModKw       = ( "public" | "private" | "protected" | "static" | "final" | "abstract"
-              | "synchronized" | "native" | "transient" | "volatile" | "strictfp" ) KwEnd ;
+              | "synchronized" | "native" | "transient" | "volatile" | "strictfp"
+              | "non-sealed" | "sealed" | "default" ) KwEnd ;
 LeadMods    = { Annotation | ModKw } ;
-ImplementsSkip = KwImplements Type { "," Type } ;
+ImplementsSkip = KwImplements ImplRef { "," ImplRef } ;
+ImplRef     <~~ push({impl: stripWs(up.in)}) ~~>
+            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 Throws      = KwThrows Type { "," Type } ;
 CatchType   = Type { "|" Type } ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a
 // whole Java file parses; -warn-unsupported lets the rest run). Bodies are skipped.
 UnsupType   = AnnotationDecl | Interface | EnumDecl ;
-AnnotationDecl <~~ notImpl("annotation type", up.pos) ~~>
-            = { ModKw } "@" KwInterface Id SkipBlock ;
-Interface   <~~ notImpl("interface", up.pos) ~~>
-            = LeadMods KwInterface Id [ SkipAngle ] [ KwExtends Type { "," Type } ] SkipBlock ;
-EnumDecl    <~~ notImpl("enum", up.pos) ~~>
-            = LeadMods KwEnum Id [ ImplementsSkip ] SkipBlock ;
+// An interface: constants (implicitly static final), abstract methods, `default`
+// and `private` instance methods and `static` methods. `sealed ... permits` is
+// accepted and dropped - the hierarchy is not checked, only parsed.
+Permits     = "permits" KwEnd Type { "," Type } ;
+IfaceExt    <~~ push({iext: stripWs(up.in)}) ~~>
+            = Id [ SkipAngle ] ;
+// An annotation TYPE is pure metadata - nothing in this model reads it at run
+// time - so the declaration is parsed and dropped, like the annotations themselves.
+AnnotationDecl = { ModKw } "@" KwInterface Id SkipBlock ;
+Interface   <~~ buildInterface(takeAll()) ~~>
+            = LeadMods KwInterface Id <~~ push(up.in) ~~> [ SkipAngle ]
+              [ KwExtends IfaceExt { "," IfaceExt } ] [ Permits ] "{" { Member } "}" ;
+// enum E { A(1), B { ... }; members }: a class whose constants are singleton
+// instances built once, in order. A constant with a body becomes an anonymous
+// SUBCLASS of the enum (so it can override a method), which is why the class
+// descriptor is built first and the constants are instantiated afterwards.
+EnumDecl    <~~ buildEnum(takeAll()) ~~>
+            = LeadMods KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ImplementsSkip ]
+              "{" [ EnumConst { "," EnumConst } ] [ "," ] [ ";" { Member } ] "}" ;
+EnumConst   <~~ push(makeEnumConst(takeAll())) ~~>
+            = { Annotation } Id <~~ push(up.in) ~~> [ EnumArgs ] [ EnumBody ] ;
+EnumArgs    <~~ push({eargs: takeAll()}) ~~>
+            = "(" [ Expression { "," Expression } ] ")" ;
+EnumBody    <~~ push({emembers: takeAll()}) ~~>
+            = "{" { Member } "}" ;
 
-// A type declared inside a class body (nested/inner): accepted, reported as not
-// implemented; its members are not lowered.
-NestedType  <~~ notImpl("nested type", up.pos) ~~>
-            = LeadMods NestedKw Id [ SkipAngle ] [ SkipParen ]
-              [ KwExtends Type { "," Type } ] [ ImplementsSkip ] SkipBlock ;
-NestedKw    = ( "class" | "interface" | "enum" | "record" ) KwEnd ;
+// A type declared inside a class body (nested, inner or a local class in a
+// method body) is the ordinary declaration again: its tag builds it exactly
+// like a top-level one, in the order the file is walked, so it is registered
+// before anything can name it. It contributes NO member to the enclosing type
+// (the build tags push nothing), and it is additionally registered under its
+// qualified name, so `new Outer.Nested()` resolves.
+NestedType  = ClassDecl | RecordDecl | Interface | EnumDecl | AnnotationDecl ;
 
 KwClass     = "class" KwEnd ;
 KwRecord    = "record" KwEnd ;
@@ -533,10 +744,108 @@ KwSync      = "synchronized" KwEnd ;
         min: function(a, b) { return a < b ? a : b }
     }
 
+    // ----- char: a boxed {__char: code} value -----
+    // Java's char is an integral type that renders as a glyph, so it can be neither a
+    // plain number (then "" + c would print 98) nor a one-character string (then
+    // c == 65 would be false). Boxing keeps both: binOp unboxes for EVERY operator,
+    // jstr renders the character, and only a (char) cast or String.charAt boxes again.
+    function jChar(code) { return {__char: code} }
+    function jIsChar(v) { return v !== null && v !== undefined && typeof v == "object" && v.__char !== undefined }
+    function jNum(v) { return jIsChar(v) ? v.__char : v }
+    // Java's escape set, shared by char literals, string literals and text blocks:
+    // the single letters, \s (a space that survives text-block trailing-space
+    // stripping), a one-to-three digit OCTAL escape, \uXXXX, and a backslash before a
+    // newline, which joins the lines (text blocks only, harmless elsewhere).
+    function jUnescape(s2) {
+        var out = ""
+        var i = 0
+        while (i < s2.length) {
+            var c = s2.charAt(i)
+            if (c != "\\") { out += c; i++; continue }
+            var e = s2.charAt(i + 1)
+            if (e == "n") { out += "\n"; i += 2; continue }
+            if (e == "t") { out += "\t"; i += 2; continue }
+            if (e == "r") { out += "\r"; i += 2; continue }
+            if (e == "b") { out += String.fromCharCode(8); i += 2; continue }
+            if (e == "f") { out += String.fromCharCode(12); i += 2; continue }
+            if (e == "s") { out += " "; i += 2; continue }
+            if (e == "\n") { i += 2; continue }
+            if (e == "u") {
+                var j = i + 2
+                while (s2.charAt(j) == "u") { j++ }
+                out += String.fromCharCode(parseInt(s2.substring(j, j + 4), 16))
+                i = j + 4
+                continue
+            }
+            if (e >= "0" && e <= "7") {
+                var oct = e
+                var k = i + 2
+                while (k < s2.length && oct.length < 3 && s2.charAt(k) >= "0" && s2.charAt(k) <= "7") {
+                    oct += s2.charAt(k)
+                    k++
+                }
+                out += String.fromCharCode(parseInt(oct, 8))
+                i = k
+                continue
+            }
+            out += e
+            i += 2
+        }
+        return out
+    }
+    // up.in of a char literal is the whole 'x' form, quotes included.
+    function jCharCode(text) {
+        var body = text.substring(1, text.length - 1)
+        return jUnescape(body).charCodeAt(0)
+    }
+    // A text block (JLS 3.10.6): drop the line after the opening delimiter, strip the
+    // COMMON indentation (the closing delimiter's own line counts, which is what lets
+    // it decide the indent), strip trailing whitespace per line, then unescape - in
+    // that order, so \s protects a trailing space and a trailing \ joins two lines.
+    function jRstrip(t) {
+        var n = t.length
+        while (n > 0 && (t.charAt(n - 1) == " " || t.charAt(n - 1) == "\t")) { n = n - 1 }
+        return t.substring(0, n)
+    }
+    function jIndentOf(t) {
+        var i = 0
+        while (i < t.length && (t.charAt(i) == " " || t.charAt(i) == "\t")) { i++ }
+        return i
+    }
+    function jTextBlock(raw) {
+        var inner = raw.substring(3, raw.length - 3)
+        var nl = inner.indexOf("\n")
+        var body = (nl < 0) ? inner : inner.substring(nl + 1)
+        var lines = body.split("\n")
+        var min = 1000000
+        var i
+        for (i = 0; i < lines.length; i++) {
+            var ln = lines[i]
+            var last = (i == lines.length - 1)
+            if (jRstrip(ln) == "") {
+                // A blank line never sets the indent, EXCEPT the closing delimiter's.
+                if (last && ln.length < min) { min = ln.length }
+                continue
+            }
+            var ind = jIndentOf(ln)
+            if (ind < min) { min = ind }
+        }
+        if (min > 100000) { min = 0 }
+        var out = ""
+        for (i = 0; i < lines.length; i++) {
+            var l2 = lines[i]
+            var cut = (l2.length > min) ? l2.substring(min) : ""
+            if (i > 0) { out += "\n" }
+            out += jRstrip(cut)
+        }
+        return jUnescape(out)
+    }
+
     // Java's toString for the printable subset.
     function jstr(v) {
         if (v === undefined || v === null) return "null"
         if (typeof v == "object") {
+            if (v.__char !== undefined) return String.fromCharCode(v.__char)
             if (v.__isclass) return "class " + v.__name
             if (v.__class != undefined) return v.__class.__name + "@obj"
             return "" + v
@@ -555,21 +864,37 @@ KwSync      = "synchronized" KwEnd ;
         if (typeof target == "string") {
             if (name == "length") return target.length
             if (name == "charCodeAt") return target.charCodeAt(args[0])
-            if (name == "charAt") return target.charAt(args[0])
+            if (name == "charAt") return jChar(target.charCodeAt(jNum(args[0])))
             if (name == "equals") return target === args[0]
             if (name == "substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
             if (name == "indexOf") return target.indexOf(args[0])
             if (name == "isEmpty") return target.length == 0
             fail("unknown String method: " + name)
         }
+        // A char answers the handful of methods a program calls on one. equals()
+        // accepts both a char and the one-character string it renders as.
+        if (typeof target == "object" && target !== null && target.__char !== undefined) {
+            if (name == "equals") {
+                var oc = args[0]
+                if (typeof oc == "string") { return String.fromCharCode(target.__char) === oc }
+                return jNum(oc) === target.__char
+            }
+            if (name == "toString") { return String.fromCharCode(target.__char) }
+            if (name == "charValue") { return target }
+            if (name == "compareTo") { return (target.__char - jNum(args[0])) | 0 }
+        }
         if (target === undefined || target === null) fail("method call ." + name + "() on null")
         if (target.__class != undefined) {
-            // The lookup follows the __super chain (inheritance). Own-property reads
-            // only: a bare c[name] resolved inherited Object.prototype members
-            // (toString, valueOf, ...) under a host JS engine.
-            var m = undefined
-            for (var c = target.__class; c != undefined && m == undefined; c = c.__super) { if (hasOwn(c, name)) m = c[name] }
-            if (typeof m != "function") fail("unknown method '" + name + "' on " + target.__class.__name)
+            // The lookup follows the __super chain and the interfaces along it. Own
+            // property reads only: a bare c[name] resolved inherited Object.prototype
+            // members (toString, valueOf, ...) under a host JS engine.
+            var m = jFindMember(target.__class, name)
+            if (typeof m != "function") {
+                // A lambda that adopted a functional interface answers that
+                // interface's single abstract method with the closure itself.
+                if (target.__sam != undefined) { return target.__sam.apply(undefined, args) }
+                fail("unknown method '" + name + "' on " + target.__class.__name)
+            }
             return m.apply(undefined, concat2impl([target], args))
         }
         var f = hasOwn(target, name) ? target[name] : undefined
@@ -582,8 +907,12 @@ KwSync      = "synchronized" KwEnd ;
 
     function jadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return jstr2(l) + jstr2(r)
-        if ((l | 0) == l && (r | 0) == r) { return (l + r) | 0 }
-        return l + r
+        var a = anytype
+        var b = anytype
+        a = jNum(l)
+        b = jNum(r)
+        if ((a | 0) == a && (b | 0) == b) { return (a + b) | 0 }
+        return a + b
     }
     function jstr2(v) {
         if (typeof v == "string") return v
@@ -613,18 +942,24 @@ KwSync      = "synchronized" KwEnd ;
             return v
         }
     }
+    // ++ / -- keep the type of what they step: on a char the result is a char
+    // again (Java's c++ on a char yields a char), on anything else an int32.
+    function jStep(v, d) {
+        if (jIsChar(v)) { return jChar((v.__char + d) & 65535) }
+        return (v + d) | 0
+    }
     function makeIncDec(items) {
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
         return function() {
             if (ref.path.length == 0) {
                 var n = getVar(ref.name)
-                setVar(ref.name, (n + d) | 0)
+                setVar(ref.name, jStep(n, d))
                 return n
             }
             var p = resolveRef(ref)
             var m = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
-            p.obj[p.key] = (m + d) | 0
+            p.obj[p.key] = jStep(m, d)
             return m
         }
     }
@@ -633,12 +968,12 @@ KwSync      = "synchronized" KwEnd ;
         var d = (op == "++") ? 1 : -1
         return function() {
             if (ref.path.length == 0) {
-                var n = (getVar(ref.name) + d) | 0
+                var n = jStep(getVar(ref.name), d)
                 setVar(ref.name, n)
                 return n
             }
             var p = resolveRef(ref)
-            var m = ((hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined) + d) | 0
+            var m = jStep(hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, d)
             p.obj[p.key] = m
             return m
         }
@@ -688,6 +1023,12 @@ KwSync      = "synchronized" KwEnd ;
     // ops; >>> keeps Java's int semantics via |0 (JS >>> yields unsigned).
     var coreBinOp = binOp
     binOp = function(op, l, r) {
+        // A char unboxes for every operator - Java's char IS an integral type - so
+        // 'b' - 'a' == 1, c == 65 and c < 'z' all hold. Gated on one typeof test that
+        // an ordinary number fails immediately.
+        if (typeof l == "object" || typeof r == "object") {
+            if (jIsChar(l) || jIsChar(r)) { return binOp(op, jNum(l), jNum(r)) }
+        }
         if (op == "&") { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
         if (op == "|") { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }
         if (op == "^") { if (typeof l == "boolean" && typeof r == "boolean") { return l != r } return l ^ r }
@@ -711,6 +1052,7 @@ KwSync      = "synchronized" KwEnd ;
     // code that compiles under javac only reads it where the test held).
     // A single item (no instanceof tail) is a transparent pass-through.
     function makeInstTail(items) {
+        if (items[0].ipat != undefined) { return {iof: true, pat: items[0].ipat} }
         var tail = {iof: true, tname: items[0]}
         if (items.length > 1) { tail.bind = items[1].bind }
         return tail
@@ -719,6 +1061,9 @@ KwSync      = "synchronized" KwEnd ;
         if (items.length == 1) return items[0]
         var operand = items[0]
         var tail = items[1]
+        if (tail.pat != undefined) {
+            return function() { return jMatchPat(tail.pat, operand()) }
+        }
         return function() {
             var v = operand()
             if (tail.bind != undefined) { declVar(tail.bind, v) }
@@ -726,6 +1071,83 @@ KwSync      = "synchronized" KwEnd ;
         }
     }
 
+    // ----- Patterns (case labels and instanceof) -----
+    // A type pattern binds when the value has the named type; `var` and the
+    // primitive names always bind (types are erased in this model). A record
+    // pattern additionally matches its components against nested patterns.
+    function makeTypePat(items) {
+        return {prec: false, ptype: items[0].ptype, pname: items[1].pname}
+    }
+    function makeRecPat(items) {
+        var p = {prec: true, ptype: items[0].ptype, psubs: [], pname: null}
+        for (var i = 1; i < items.length; i++) { p.psubs.push(items[i]) }
+        return p
+    }
+    // A pattern type that carries no run-time test: `var`, the primitives, and
+    // the boxes a deconstructed component is declared with.
+    function jPatAny(t) {
+        return t == "var" || t == "int" || t == "long" || t == "short" || t == "byte"
+            || t == "char" || t == "float" || t == "double" || t == "boolean"
+    }
+    function jMatchPat(p, v) {
+        if (!jPatAny(p.ptype) && !rtIsType(v, p.ptype)) { return false }
+        if (p.prec) {
+            if (v === null || v === undefined || typeof v != "object") { return false }
+            var comps = (v.__class != undefined && v.__class != null) ? v.__class.__record : undefined
+            if (comps == undefined) { return false }
+            if (p.psubs.length > comps.length) { return false }
+            for (var i = 0; i < p.psubs.length; i++) {
+                if (!jMatchPat(p.psubs[i], v[comps[i]])) { return false }
+            }
+        }
+        if (p.pname != undefined && p.pname != null) { declVar(p.pname, v) }
+        return true
+    }
+    // One case label: a pattern, `null`, or a constant expression - plus the
+    // optional `when` guard, which is evaluated only after the label bound.
+    function makeLabel(items) {
+        var lab = {pat: null, thunk: null, text: null, isnull: false, guard: null}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.lguard != undefined) { lab.guard = it.lguard; continue }
+            if (it.lnull != undefined) { lab.isnull = true; continue }
+            if (it.lval != undefined) { lab.thunk = it.lval; continue }
+            if (it.lname != undefined) { lab.thunk = it.lthunk; lab.text = it.lname; continue }
+            lab.pat = it
+        }
+        return lab
+    }
+    // A dotted-name label. Its TEXT is what an enum constant is matched by; the
+    // thunk is only used when the scrutinee is not an enum constant.
+    function makeNameLabel(items, text) {
+        return {lname: text, lthunk: makeNamePath(items)}
+    }
+    function makeNamePath(parts) {
+        return function() {
+            var v = anytype
+            v = getVar(parts[0])
+            for (var i = 1; i < parts.length; i++) { v = core.getField(v, parts[i]) }
+            return v
+        }
+    }
+
+    // Iface.super.m(args): the DEFAULT method of one named interface, invoked on
+    // this. It is how a class inheriting two defaults says which one it means.
+    function makeIfaceSuper(items) {
+        var iname = items[0].isup
+        var mname = items[1].ismeth
+        var args = items.slice(2)
+        return function() {
+            var self = getVar("this")
+            var iface = globalScope[iname]
+            if (iface == undefined || iface == null) fail("unknown interface: " + iname)
+            var m = hasOwn(iface, mname) ? iface[mname] : undefined
+            if (typeof m != "function") fail("interface " + iname + " has no default method " + mname)
+            var argv = [self]
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            return m.apply(undefined, argv)
+        }
+    }
     // super.m(args): the search starts at the superclass of the DEFINING class
     // (captured at build time), not at the instance's own class.
     function makeSuperCall(name, argThunks) {
@@ -746,8 +1168,8 @@ KwSync      = "synchronized" KwEnd ;
         var clsName = items[0]
         var args = items.slice(1)
         return function() {
-            var cls = getVar(clsName)
-            if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
+            var cls = jResolveClass(clsName)
+            if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + clsName)
             var obj = {__class: cls}
             var argv = [obj]
             for (var i = 0; i < args.length; i++) argv.push(args[i]())
@@ -762,26 +1184,82 @@ KwSync      = "synchronized" KwEnd ;
             return a
         }
     }
-    function makeNewArray(sizeT) {
+    // new T[a][b][] : the sized dimensions are allocated eagerly; an element of
+    // the innermost allocated dimension is the element type's default (0, false
+    // or null) - null whenever an unsized dimension still follows.
+    function jArrDefault(base) {
+        if (base == "boolean") { return false }
+        if (base == "int" || base == "long" || base == "short" || base == "byte"
+            || base == "char" || base == "float" || base == "double") { return 0 }
+        return null
+    }
+    function jAllocArr(ns, i, leaf) {
+        var n = ns[i]
+        var a = []
+        for (var k = 0; k < n; k++) {
+            if (i + 1 < ns.length) { a.push(jAllocArr(ns, i + 1, leaf)) }
+            else { a.push(leaf) }
+        }
+        return a
+    }
+    function makeNewArray(items) {
+        var base = items[0].abase
+        var dims = []
+        var open = 0
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].adim != undefined) { dims.push(items[i].adim) }
+            else { open = open + 1 }
+        }
+        var leaf = (open > 0) ? null : jArrDefault(base)
         return function() {
-            var n = sizeT()
-            var a = []
-            for (var i = 0; i < n; i++) a.push(0)
-            return a
+            var ns = []
+            for (var k = 0; k < dims.length; k++) { ns.push(dims[k]()) }
+            return jAllocArr(ns, 0, leaf)
         }
     }
     // An anonymous class is not lowered; evaluate the constructor arguments (so their
     // calls stay visible) and yield undefined.
-    function makeNewAnon(items, pos) {
-        notImpl("anonymous class", pos)
-        var args = items.slice(1)
+    // new Type(args) { members } - an anonymous subclass. The class is built on
+    // first evaluation (its supertype must already exist) and then reused, so a
+    // lambda-like anonymous class inside a loop does not rebuild per iteration.
+    var jAnonSeq = 0
+    function makeNewAnon(items) {
+        var superName = items[0]
+        var args = []
+        var members = []
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "object" && it != null && it.anonmembers != undefined) { members = it.anonmembers }
+            else { args.push(it) }
+        }
+        var built = null
         return function() {
-            for (var i = 0; i < args.length; i++) { args[i]() }
-            return undefined
+            if (built == null) {
+                jAnonSeq = jAnonSeq + 1
+                var ms = [{ext: superName}]
+                for (var k = 0; k < members.length; k++) { ms.push(members[k]) }
+                built = buildClassFrom("$anon" + jAnonSeq + "$" + superName, ms, undefined)
+                built.__name = superName
+            }
+            var obj = {__class: built}
+            var argv = []
+            for (var a = 0; a < args.length; a++) { argv.push(args[a]()) }
+            jCallCtor(built, obj, argv)
+            return obj
         }
     }
     // A cast is identity: (Type) expr evaluates to expr.
-    function makeCast(inner) { return inner }
+    // (Type) expr. A (char) cast BOXES its operand back into a char (that is what
+    // makes (char)(c + 1) == 'c' work); the integral casts truncate to int32 the way
+    // Java does; every other cast, reference casts included, is the identity.
+    function makeCast(inner, ty) {
+        if (ty == "char") { return function() { return jChar(jNum(inner()) & 65535) } }
+        if (ty == "int" || ty == "long" || ty == "short" || ty == "byte") {
+            return function() { return jNum(inner()) | 0 }
+        }
+        if (ty == "double" || ty == "float") { return function() { return jNum(inner()) } }
+        return inner
+    }
     // A lambda is a real closure: evaluating the lambda expression captures the
     // defining scope chain; each call binds the params in a fresh frame on top of
     // it. An expression body yields its value; a block body yields the value of its
@@ -823,8 +1301,27 @@ KwSync      = "synchronized" KwEnd ;
         var sep = text.indexOf("::")
         var tgtPath = text.slice(0, sep)
         var methodPart = text.slice(sep + 2)
-        if (methodPart == "new") { return notImplExpr("constructor reference", pos) }
         var parts = splitDots(tgtPath)
+        // Word::new - a constructor reference. It builds the instance the same way
+        // NewObject does, with the reference's own arguments.
+        if (methodPart == "new") {
+            return function() {
+                var captured = scopes.slice(0)
+                return function() {
+                    var savedS = scopes
+                    scopes = captured
+                    var cls = anytype
+                    cls = getVar(parts[0])
+                    scopes = savedS
+                    if (cls == undefined || !cls.__isclass) fail("unknown class: " + parts[0])
+                    var obj = {__class: cls}
+                    var argv = []
+                    for (var a = 0; a < arguments.length; a++) { argv.push(arguments[a]) }
+                    jCallCtor(cls, obj, argv)
+                    return obj
+                }
+            }
+        }
         return function() {
             var captured = scopes.slice(0)
             return function() {
@@ -845,11 +1342,123 @@ KwSync      = "synchronized" KwEnd ;
 
     // ----- Statement thunks -----
 
-    // try/catch/finally and throw are handled by excTry/excThrow (lib/interp-core.js).
-    // super(args) / this(args): not implemented; evaluate the arguments and continue.
-    function makeCtorCall(args, pos) {
-        notImpl("explicit constructor invocation", pos)
-        return function() { for (var i = 0; i < args.length; i++) { args[i]() } }
+    // ----- try/catch/finally, resources, and the builtin exception hierarchy -----
+    // A catch clause records the declared type(s) of its parameter; a multi-catch
+    // keeps them as the source wrote them, "AErr|BErr", and core.excMatches splits.
+    function jCatch(items) {
+        return {catchtype: items[0].ctypes, catchname: items[1], catchbody: items[2]}
+    }
+    function jTry(items) {
+        var res = null
+        var rest = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].resources != undefined) { res = items[i].resources }
+            else { rest.push(items[i]) }
+        }
+        if (res == null) { return excTryTyped(rest) }
+        var wrapped = []
+        for (var k = 0; k < rest.length; k++) {
+            if (rest[k].trybody != undefined) { wrapped.push({trybody: jWithResources(res, rest[k].trybody)}) }
+            else { wrapped.push(rest[k]) }
+        }
+        return excTryTyped(wrapped)
+    }
+    // The resources are opened left to right and closed right to left, whatever
+    // ends the block - a return, a break or a thrown exception.
+    function jWithResources(res, bodyT) {
+        return function() {
+            var opened = []
+            scopes.push({})
+            try {
+                for (var i = 0; i < res.length; i++) { opened.push(res[i]()) }
+                return bodyT()
+            } finally {
+                for (var k = opened.length - 1; k >= 0; k--) {
+                    var o = opened[k]
+                    if (o != null && o != undefined) { mcall(o, "close", []) }
+                }
+                scopes.pop()
+            }
+        }
+    }
+    function makeResDecl(items) {
+        var ty = items[0].dty
+        var nm = items[1]
+        var initT = items[2]
+        return function() {
+            var v = anytype
+            v = jTypeAdopt(initT(), ty)
+            declVar(nm, v)
+            return v
+        }
+    }
+    function makeResRef(name) {
+        var nm = stripWs(name)
+        return function() { return getVar(nm) }
+    }
+    // java.lang's exception types, as ordinary class descriptors: the message is a
+    // field the constructor stores, getMessage reads it, and the __super chain is
+    // what a typed catch and instanceof walk.
+    function jExcCtor(cls) {
+        return function() {
+            var self = arguments[0]
+            if (arguments.length > 1) { self.message = arguments[1] }
+            else if (self.message == undefined) { self.message = null }
+        }
+    }
+    function jExcGetMessage() { return arguments[0].message }
+    function jDefExc(name, superName) {
+        var cls = {__isclass: true, __name: name}
+        if (superName != null) { cls.__super = globalScope[superName] }
+        cls.__ctor = jExcCtor(cls)
+        cls.getMessage = jExcGetMessage
+        cls.getLocalizedMessage = jExcGetMessage
+        globalScope[name] = cls
+        return cls
+    }
+    var jExcTree = ["Throwable", "",
+                    "Exception", "Throwable",
+                    "Error", "Throwable",
+                    "RuntimeException", "Exception",
+                    "IOException", "Exception",
+                    "InterruptedException", "Exception",
+                    "IllegalArgumentException", "RuntimeException",
+                    "IllegalStateException", "RuntimeException",
+                    "ArithmeticException", "RuntimeException",
+                    "NullPointerException", "RuntimeException",
+                    "ClassCastException", "RuntimeException",
+                    "UnsupportedOperationException", "RuntimeException",
+                    "IndexOutOfBoundsException", "RuntimeException",
+                    "ArrayIndexOutOfBoundsException", "IndexOutOfBoundsException",
+                    "StringIndexOutOfBoundsException", "IndexOutOfBoundsException",
+                    "NumberFormatException", "IllegalArgumentException",
+                    "StackOverflowError", "Error",
+                    "AssertionError", "Error"]
+    for (var jei = 0; jei < jExcTree.length; jei = jei + 2) {
+        jDefExc(jExcTree[jei], jExcTree[jei + 1] == "" ? null : jExcTree[jei + 1])
+    }
+    // A typed catch matches when the thrown value is an instance of ANY of the
+    // clause's types (multi-catch is one clause with several).
+    // Is the value part of the java.lang Throwable hierarchy at all? This subset
+    // lets a program throw any object, and such a value is caught by the general
+    // exception types the way `catch (Exception e)` is written in practice.
+    function jIsThrowable(v) {
+        if (v === null || v === undefined || typeof v != "object") { return false }
+        for (var c = v.__class; c != undefined && c != null; c = c.__super) {
+            if (c.__name == "Throwable") { return true }
+        }
+        return false
+    }
+    core.excMatches = function(v, t) {
+        var names = t.split("|")
+        var general = !jIsThrowable(v)
+        for (var i = 0; i < names.length; i++) {
+            var n = names[i]
+            if (n == "") { continue }
+            if (rtIsType(v, n)) { return true }
+            if (general && (n == "Exception" || n == "Throwable" || n == "RuntimeException" || n == "Error")) { return true }
+        }
+        return false
     }
     // assert cond [: msg]; -- not implemented; the condition and message still evaluate.
     function makeAssert(items, pos) {
@@ -912,10 +1521,39 @@ KwSync      = "synchronized" KwEnd ;
         }
     }
 
-    function makeDecl(items) {
-        var name = items[0]
-        var init = items.length > 1 ? items[1] : makeConst(0)
-        return function() { declVar(name, init()) }
+    // A declarator keeps its name and initializer apart, because the declared TYPE
+    // (which the enclosing DeclCore knows) decides whether a lambda initializer has
+    // to adopt a functional interface.
+    function makeDeclSpec(items) {
+        return {dname: items[0], dinit: items.length > 1 ? items[1] : makeConst(0)}
+    }
+    function makeDeclList(items) {
+        var ty = items[0].dty
+        var specs = items.slice(1)
+        var thunks = []
+        for (var i = 0; i < specs.length; i++) { thunks.push(makeDeclOne(specs[i], ty)) }
+        return makeSeq(thunks)
+    }
+    function makeDeclOne(spec, ty) {
+        var nm = spec.dname
+        var it = spec.dinit
+        return function() {
+            var v = anytype
+            v = it()
+            declVar(nm, jTypeAdopt(v, ty))
+        }
+    }
+    // A lambda or method reference assigned to a functional-interface variable
+    // becomes an OBJECT of that interface, so its default methods work and the
+    // abstract one dispatches back into the closure.
+    function jTypeAdopt(v, ty) {
+        if (typeof v != "function" || ty == undefined) { return v }
+        var base = ty
+        var lt = base.indexOf("<")
+        if (lt >= 0) { base = base.substring(0, lt) }
+        var t = globalScope[base]
+        if (t == undefined || t == null || t.__isiface !== true) { return v }
+        return {__class: t, __sam: v}
     }
     function makeDo(condT, bodyT) {
         return function() {
@@ -932,7 +1570,23 @@ KwSync      = "synchronized" KwEnd ;
             } while (condT())
         }
     }
-    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
+    function makeCase(items) { return {isDefault: false, lab: items[0].lab, body: items.slice(1)} }
+    // Does a case label match the scrutinee? A pattern binds and tests; `null`
+    // matches only null; an ENUM scrutinee compares its label by NAME (the label
+    // is a bare constant, not an expression anywhere in scope); everything else
+    // evaluates the label thunk and compares by value. A `when` guard runs last,
+    // so it can read what the pattern just bound.
+    function jLabelHit(lab, v) {
+        var ok = false
+        if (lab.pat != null) { ok = jMatchPat(lab.pat, v) }
+        else if (lab.isnull) { ok = (v === null || v === undefined) }
+        else if (v === null || v === undefined) { ok = false }
+        else if (jIsEnumVal(v)) { ok = (lab.text != null) && jEnumLabelHit(lab.text, v) }
+        else { ok = jSwEq(lab.thunk(), v) }
+        if (!ok) { return false }
+        if (lab.guard != null) { return core.test(lab.guard()) }
+        return true
+    }
     function makeDefault(items) { return {isDefault: true, body: items} }
     // Arrow arms: one classic case object per label (empty bodies fall through
     // to the last, which carries the arm body plus an implicit break).
@@ -941,19 +1595,76 @@ KwSync      = "synchronized" KwEnd ;
         var labels = []
         var body = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].alab != undefined) { labels.push(items[i].alab) }
+            if (items[i].lab != undefined) { labels.push(items[i].lab) }
             else { body.push(items[i]) }
         }
         for (var i = 0; i < labels.length - 1; i++) {
-            push({isDefault: false, v: labels[i], body: []})
+            push({isDefault: false, lab: labels[i], body: []})
         }
-        push({isDefault: false, v: labels[labels.length - 1], body: body.concat([switchBreak()])})
+        push({isDefault: false, lab: labels[labels.length - 1], body: body.concat([switchBreak()])})
     }
     function pushArrowDefault(items) {
         push({isDefault: true, body: items.concat([switchBreak()])})
     }
     // Java switch compares with === (identity for ints and value for Strings, matching
     // js_seq of the compiled world). Execution falls through until a break.
+    // A switch label compares by VALUE, so a char label matches a char scrutinee.
+    function jSwEq(a, b) {
+        if (a === b) { return true }
+        if (typeof a == "object" || typeof b == "object") { return jNum(a) === jNum(b) }
+        return false
+    }
+    // One arm of a switch expression: its labels, and either a value or statements.
+    function makeArm(items, isDefault) {
+        var labels = []
+        var val = null
+        var stmts = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.lab != undefined) { labels.push(it.lab) }
+            else if (it.sval != undefined) { val = it.sval }
+            else if (it.sstmts != undefined) { stmts = it.sstmts }
+        }
+        return {isDefault: isDefault, labels: labels, val: val, stmts: stmts}
+    }
+    function makeYield(t) { return function() { return {isYield: true, v: t()} } }
+    // A switch expression: pick the arm, then either take its value directly (the
+    // arrow form) or run its statements until one yields. The colon form falls
+    // through to the following arms, exactly like the statement switch.
+    function makeSwitchExpr(items) {
+        var scrut = items[0]
+        var arms = items.slice(1)
+        return function() {
+            var v = scrut()
+            var idx = -1
+            var dflt = -1
+            var i
+            for (i = 0; i < arms.length; i++) {
+                if (arms[i].isDefault) { dflt = i; continue }
+                var ls = arms[i].labels
+                for (var j = 0; j < ls.length; j++) {
+                    if (jLabelHit(ls[j], v)) { idx = i; break }
+                }
+                if (idx >= 0) { break }
+            }
+            if (idx < 0) { idx = dflt }
+            if (idx < 0) { return undefined }
+            if (arms[idx].val != null) { return arms[idx].val() }
+            for (var k = idx; k < arms.length; k++) {
+                var st = arms[k].stmts
+                if (st == null) { continue }
+                for (var q = 0; q < st.length; q++) {
+                    var r = st[q]()
+                    if (r != undefined) {
+                        if (r.isYield === true) { return r.v }
+                        if (r === BRK) { return undefined }
+                        return r
+                    }
+                }
+            }
+            return undefined
+        }
+    }
     function makeSwitch(items) {
         var scrut = items[0]
         var cases = items.slice(1)
@@ -963,7 +1674,7 @@ KwSync      = "synchronized" KwEnd ;
             var dflt = -1
             for (var i = 0; i < cases.length; i++) {
                 if (cases[i].isDefault) { dflt = i; continue }
-                if (start < 0 && cases[i].v() === v) { start = i }
+                if (start < 0 && jLabelHit(cases[i].lab, v)) { start = i }
             }
             if (start < 0) { start = dflt }
             if (start < 0) { return undefined }
@@ -1039,6 +1750,33 @@ KwSync      = "synchronized" KwEnd ;
     }
     // ----- Class building -----
 
+    // The declared parameter names, and whether the last one is varargs.
+    function makeParams(items) {
+        var names = []
+        var isVar = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != null && items[i] != undefined && items[i].vararg != undefined) { isVar = true; continue }
+            names.push(items[i])
+        }
+        return {params: names, vararg: isVar}
+    }
+    // Reshapes a call's arguments for a varargs parameter: the trailing ones are
+    // collected into an array, unless the call already passes exactly one array
+    // there (sumV(given) forwards the array itself, as Java does).
+    function jFixVarargs(isVar, np, args) {
+        if (!isVar || np == 0) { return args }
+        var out = []
+        var i
+        for (i = 0; i < np - 1; i++) { out.push(i < args.length ? args[i] : undefined) }
+        if (args.length == np && Array.isArray(args[np - 1])) {
+            out.push(args[np - 1])
+            return out
+        }
+        var rest = []
+        for (i = np - 1; i < args.length; i++) { rest.push(args[i]) }
+        out.push(rest)
+        return out
+    }
     function makeMethod(items) {
         var mods = items[0].mods
         var name = items[1]
@@ -1046,10 +1784,37 @@ KwSync      = "synchronized" KwEnd ;
         var body = items[3]
         var isStatic = false
         for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
-        return {kind: "method", name: name, statik: isStatic, params: params, body: body}
+        return {kind: "method", name: name, statik: isStatic, params: params, vararg: items[2].vararg, body: body}
     }
+    // items = [name, {params}, {cbody}]; the cbody carries the optional explicit
+    // this()/super() head separately from the rest of the body.
     function makeCtor(items) {
-        return {kind: "ctor", name: items[0], params: items[1].params, body: items[2]}
+        var b = items[2]
+        return {kind: "ctor", name: items[0], params: items[1].params, vararg: items[1].vararg, body: b.cbody, head: b.head}
+    }
+    // A record's compact constructor: no declared parameters - it is handed the
+    // record components, and its body may reassign them.
+    // Splits the optional explicit this()/super() head off the rest of the body.
+    function makeCtorBody(items) {
+        var head = null
+        var stmts = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].ctorhead === true) { head = items[i] } else { stmts.push(items[i]) }
+        }
+        return {cbody: makeSeq(stmts), head: head}
+    }
+    function makeCompactCtor(items) {
+        return {kind: "compact", name: items[0], body: items[1]}
+    }
+    // The explicit constructor invocation. It is not an ordinary statement: the
+    // enclosing CtorBody lifts it out, and makeCtorClosure decides what it means.
+    // NOTE the unique name: two `function` declarations sharing a name inside this
+    // script silently rebind TAGS to the wrong productions (a Method node then runs
+    // the Ctor tag), which is a very long afternoon to debug. Keep names unique.
+    function makeCtorHead(items) {
+        var which = items[0].cwhich
+        var args = items.slice(1)
+        return {ctorhead: true, which: which, args: args}
     }
     function makeField(items) {
         var mods = items[0].mods
@@ -1066,96 +1831,444 @@ KwSync      = "synchronized" KwEnd ;
     }
 
     // Runs a method body with a fresh scope: params bound, this bound for instance methods.
+    // Builds one class descriptor from its members. Shared by class, record,
+    // interface, enum, nested/local/anonymous declarations - they differ only in
+    // which members they hand in and in the extra pieces bolted on afterwards.
     function buildClassFrom(name, members, recordParams) {
         var cls = {__isclass: true, __name: name}
         var fields = []
-        var ctorInfo = null
+        var ctors = []
+        var compact = null
         var sup = null
         var i
         for (i = 0; i < members.length; i++) {
             if (members[i].ext != undefined) {
-                sup = globalScope[members[i].ext]
+                sup = jResolveClass(members[i].ext)
                 if (sup == undefined) fail("unknown superclass: " + members[i].ext + " (a class must appear before its subclasses)")
-                cls.__super = sup
+                // `new Iface() { ... }` arrives as an extends too. An interface is
+                // no superclass: it has no constructor, so it joins __ifaces.
+                if (sup.__isiface === true) {
+                    if (cls.__ifaces == undefined) { cls.__ifaces = [] }
+                    cls.__ifaces.push(sup)
+                    sup = null
+                } else {
+                    cls.__super = sup
+                }
+            }
+            if (members[i].impl != undefined) {
+                var iv = globalScope[members[i].impl]
+                if (iv != undefined && iv != null) {
+                    if (cls.__ifaces == undefined) { cls.__ifaces = [] }
+                    cls.__ifaces.push(iv)
+                }
             }
         }
         if (recordParams != undefined) {
             for (i = 0; i < recordParams.length; i++) {
-                fields.push({name: recordParams[i], init: null, dflt: 0})
+                fields.push({name: recordParams[i], init: null, dflt: 0, kind: "field"})
             }
         }
+        // The class descriptor is published BEFORE the static initializers run, so a
+        // `static { Cls.field = ... }` block can already name its own class.
+        globalScope[name] = cls
+        var statics = []
         for (i = 0; i < members.length; i++) {
             var mm = members[i]
             if (mm.kind == "field") {
-                if (mm.statik) { cls[mm.name] = (mm.init != null) ? mm.init() : mm.dflt }
+                if (mm.statik) { statics.push(mm) }
                 else { fields.push(mm) }
             }
+            if (mm.kind == "iinit") { fields.push(mm) }
+            if (mm.kind == "sinit") { statics.push(mm) }
+            if (mm.kind == "compact") { compact = mm }
             if (mm.kind == "ctor") {
                 if (mm.name != name) fail("constructor name " + mm.name + " does not match class " + name)
-                ctorInfo = mm
+                ctors.push(mm)
             }
         }
-        // The constructor: the implicit super() first (the whole parent constructor,
-        // without arguments), then this class' field defaults and initializers.
-        function initFields(self) {
-            if (sup != null) sup.__ctor(self)
+        // ownInit is THIS class' share of construction: its field initializers and
+        // its instance initializer blocks, in the order they were written. The super
+        // constructor is not part of it - the explicit head decides when that runs.
+        function ownInit(self) {
             for (var k = 0; k < fields.length; k++) {
-                self[fields[k].name] = (fields[k].init != null && fields[k].init != undefined) ? fields[k].init() : fields[k].dflt
+                var fk = fields[k]
+                if (fk.kind == "iinit") { invokeBody([], fk.body, self, "this", []); continue }
+                self[fk.name] = (fk.init != null && fk.init != undefined) ? fk.init() : fk.dflt
             }
+        }
+        // refs is late-bound on purpose: makeCtorClosure captures the box, not the
+        // values, so a constructor can name its own class (this(...)) while the class
+        // is still being built.
+        var refs = {self: cls, sup: sup}
+        var closures = []
+        for (i = 0; i < ctors.length; i++) {
+            closures.push({info: ctors[i], fn: makeCtorClosure(ctors[i], ownInit, refs)})
         }
         if (recordParams != undefined) {
-            cls.__ctor = function() {
-                var self = arguments[0]
-                initFields(self)
-                for (var k = 0; k < recordParams.length; k++) self[recordParams[k]] = arguments[k + 1]
-            }
-            // Record accessors: p.a() returns the field a.
+            // A record's canonical constructor: run the compact body (which may
+            // reassign the components) over the parameters, then store them.
+            var canon = makeRecordCtor(recordParams, compact, ownInit, sup)
+            closures.push({info: {params: recordParams}, fn: canon})
             for (i = 0; i < recordParams.length; i++) {
-                cls[recordParams[i]] = makeRecordAccessor(recordParams[i])
+                if (!hasOwn(cls, recordParams[i])) { cls[recordParams[i]] = makeRecordAccessor(recordParams[i]) }
             }
-        } else if (ctorInfo != null) {
-            cls.__ctor = makeCtorClosure(ctorInfo, initFields)
-        } else {
-            cls.__ctor = function() { initFields(arguments[0]) }
+            cls.__record = recordParams
+            // A record's generated equals: same class, components equal component-wise.
+            // Installed before the declared methods, so a hand-written one wins.
+            cls.equals = makeRecordEquals(recordParams)
         }
+        cls.__ctor = makeCtorDispatch(closures, ownInit, refs)
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
                 cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
             }
         }
+        // Static fields and static initializer blocks, again in textual order.
+        for (i = 0; i < statics.length; i++) {
+            var st = statics[i]
+            if (st.kind == "sinit") { invokeBody([], st.body, undefined, "this", []); continue }
+            cls[st.name] = (st.init != null) ? st.init() : st.dflt
+        }
         globalScope[name] = cls
+        return cls
+    }
+    // The constructor entry point of a class: pick the overload by arity, or - when
+    // the class declares none - do the implicit super() plus own initialization.
+    function makeCtorDispatch(closures, ownInit, refs) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            var c = jPickCtor(closures, args.length)
+            if (c == null) {
+                // No constructor of this class fits. That is what an anonymous
+                // subclass (and an enum constant with a body) looks like: it
+                // declares none of its own, so the arguments belong to super.
+                if (refs.sup != null) { jCallCtor(refs.sup, self, args) }
+                ownInit(self)
+                return undefined
+            }
+            var a = [self]
+            for (var k = 0; k < args.length; k++) { a.push(args[k]) }
+            return c.fn.apply(undefined, a)
+        }
+    }
+    // A record's canonical constructor. The compact body sees the components as
+    // ordinary local variables and may reassign them; whatever they hold afterwards
+    // is what gets stored on the instance.
+    function makeRecordCtor(params, compact, ownInit, sup) {
+        return function() {
+            var self = arguments[0]
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(args.length < params.length ? arguments[i] : arguments[i]) }
+            if (sup != null) { jCallCtor(sup, self, []) }
+            ownInit(self)
+            if (compact != null) {
+                var saved = scopes
+                scopes = [globalScope, {}]
+                declVar("this", self)
+                for (var k = 0; k < params.length; k++) { declVar(params[k], k < args.length ? args[k] : undefined) }
+                compact.body()
+                for (var j = 0; j < params.length; j++) { self[params[j]] = getVar(params[j]) }
+                scopes = saved
+                return undefined
+            }
+            for (var q = 0; q < params.length; q++) { self[params[q]] = q < args.length ? args[q] : undefined }
+            return undefined
+        }
+    }
+    // Value equality: identity, then chars by code, then records component-wise.
+    function jValEq(a, b) {
+        if (a === b) { return true }
+        if (a === null || a === undefined || b === null || b === undefined) { return false }
+        if (typeof a != "object" || typeof b != "object") { return false }
+        if (a.__char !== undefined || b.__char !== undefined) { return jNum(a) === jNum(b) }
+        if (a.__class != undefined && a.__class === b.__class && a.__class.__record != undefined) {
+            var ps = a.__class.__record
+            for (var i = 0; i < ps.length; i++) { if (!jValEq(a[ps[i]], b[ps[i]])) { return false } }
+            return true
+        }
+        return false
+    }
+    function makeRecordEquals(params) {
+        return function() {
+            var self = arguments[0]
+            var other = arguments[1]
+            if (other === null || other === undefined || typeof other != "object") { return false }
+            if (other.__class !== self.__class) { return false }
+            for (var i = 0; i < params.length; i++) {
+                if (!jValEq(self[params[i]], other[params[i]])) { return false }
+            }
+            return true
+        }
     }
     function makeRecordAccessor(fname) {
         return function() { return arguments[0][fname] }
     }
-    function makeCtorClosure(info, initFields) {
+    // One constructor. The object is initialized by whatever its head says:
+    //   super(a)  - the named superclass constructor, then THIS class' own fields
+    //   this(a)   - another constructor of this class, which initializes everything
+    //   (none)    - the implicit no-argument super(), then this class' own fields
+    // The head's arguments may name the constructor's parameters, so they are
+    // evaluated INSIDE the body scope, not before it.
+    function makeCtorClosure(info, ownInit, refs) {
+        var head = info.head
+        var body = info.body
         return function() {
             var self = arguments[0]
-            initFields(self)
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            invokeBody(info.params, info.body, self, "this", args)
+            var full = function() {
+                if (head != undefined && head != null) {
+                    var av = []
+                    for (var k = 0; k < head.args.length; k++) { av.push(head.args[k]()) }
+                    if (head.which == "this") { jCallCtor(refs.self, self, av) }
+                    else {
+                        if (refs.sup != null) { jCallCtor(refs.sup, self, av) }
+                        ownInit(self)
+                    }
+                } else {
+                    if (refs.sup != null) { jCallCtor(refs.sup, self, []) }
+                    ownInit(self)
+                }
+                return body()
+            }
+            return invokeBody(info.params, full, self, "this", jFixVarargs(info.vararg, info.params.length, args))
         }
+    }
+    // Calls cls' constructor on an ALREADY allocated object.
+    function jCallCtor(cls, self, argv) {
+        var a = [self]
+        for (var i = 0; i < argv.length; i++) { a.push(argv[i]) }
+        cls.__ctor.apply(undefined, a)
+    }
+    // Java resolves an overload by argument TYPES; arity is what this model can see,
+    // and it separates every overload a program in this subset actually writes.
+    function jPickCtor(list, n) {
+        var i
+        for (i = 0; i < list.length; i++) { if (list[i].info.params.length == n) { return list[i] } }
+        if (list.length == 1) { return list[0] }
+        return null
     }
     function makeInstanceClosure(m) {
         return function() {
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, self, "this", args)
+            return invokeBody(m.params, m.body, self, "this", jFixVarargs(m.vararg, m.params.length, args))
         }
     }
     function makeStaticClosure(m) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, undefined, "this", args)
+            return invokeBody(m.params, m.body, undefined, "this", jFixVarargs(m.vararg, m.params.length, args))
         }
     }
 
+    // An interface is a class descriptor with __isiface: its fields are constants,
+    // its `default` / `private` methods are instance methods, its `static` methods
+    // are statics, and its abstract methods are only names (a class - or a lambda -
+    // supplies them).
+    function buildInterface(items) {
+        var name = items[0]
+        var members = []
+        var supers = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].iext != undefined) { supers.push(items[i].iext) }
+            else { members.push(items[i]) }
+        }
+        var cls = {__isclass: true, __isiface: true, __name: name, __abstract: []}
+        globalScope[name] = cls
+        var inherited = []
+        var i2 = 0
+        for (i2 = 0; i2 < supers.length; i2++) {
+            var sp = globalScope[supers[i2]]
+            if (sp != undefined && sp != null) { inherited.push(sp) }
+        }
+        cls.__ifaces = inherited
+        var i3 = 0
+        for (i3 = 0; i3 < members.length; i3++) {
+            var m = members[i3]
+            if (m.kind == "amethod") { cls.__abstract.push(m.name); continue }
+            if (m.kind == "method") {
+                cls[m.name] = m.statik ? makeStaticClosure(m) : makeInstanceClosure(m)
+                continue
+            }
+            // An interface field is implicitly public static final.
+            if (m.kind == "field") { cls[m.name] = (m.init != null) ? m.init() : m.dflt }
+            if (m.kind == "sinit") { invokeBody([], m.body, undefined, "this", []) }
+        }
+        return cls
+    }
+    // Walks a type and everything it inherits - superclasses first, then the
+    // interfaces of each - for a member. Interface DEFAULT methods therefore lose
+    // to a class' own method, exactly as in Java.
+    function jFindMember(cls, name) {
+        for (var c = cls; c != undefined && c != null; c = c.__super) {
+            if (hasOwn(c, name)) { return c[name] }
+            var ifs = c.__ifaces
+            if (ifs != undefined && ifs != null) {
+                for (var i = 0; i < ifs.length; i++) {
+                    var m = jFindMember(ifs[i], name)
+                    if (m != undefined) { return m }
+                }
+            }
+        }
+        return undefined
+    }
+    // ----- enums -----
+    // One constant: its name, the constructor arguments it passes, and (when it
+    // carries a body) the members of its own anonymous subclass.
+    function makeEnumConst(items) {
+        var ec = {econst: items[0], eargs: null, emembers: null}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].eargs != undefined) { ec.eargs = items[i].eargs }
+            if (items[i].emembers != undefined) { ec.emembers = items[i].emembers }
+        }
+        return ec
+    }
+    var jEnumSeq = 0
+    function buildEnum(items) {
+        var name = items[0]
+        var consts = []
+        var members = []
+        var i
+        for (i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it != null && it != undefined && it.econst != undefined) { consts.push(it) }
+            else { members.push(it) }
+        }
+        var cls = buildClassFrom(name, members, undefined)
+        cls.__isenum = true
+        // java.lang.Enum's own members, unless the enum declared its own.
+        if (!hasOwn(cls, "ordinal")) { cls.ordinal = jEnumOrdinal }
+        if (!hasOwn(cls, "name")) { cls.name = jEnumName }
+        if (!hasOwn(cls, "toString")) { cls.toString = jEnumName }
+        if (!hasOwn(cls, "compareTo")) { cls.compareTo = jEnumCompare }
+        if (!hasOwn(cls, "equals")) { cls.equals = jEnumEquals }
+        var vals = []
+        for (i = 0; i < consts.length; i++) {
+            var ec = consts[i]
+            var target = cls
+            if (ec.emembers != null) {
+                jEnumSeq = jEnumSeq + 1
+                var ms = [{ext: name}]
+                for (var q = 0; q < ec.emembers.length; q++) { ms.push(ec.emembers[q]) }
+                target = buildClassFrom("$enum" + jEnumSeq + "$" + name, ms, undefined)
+                target.__name = name
+                target.__isenum = true
+            }
+            var obj = {__class: target, __ename: ec.econst, __eord: i}
+            var argv = []
+            if (ec.eargs != null) { for (var a = 0; a < ec.eargs.length; a++) { argv.push(ec.eargs[a]()) } }
+            jCallCtor(target, obj, argv)
+            obj.__ename = ec.econst
+            obj.__eord = i
+            cls[ec.econst] = obj
+            vals.push(obj)
+        }
+        cls.__evalues = vals
+        cls.values = makeEnumValues(vals)
+        cls.valueOf = makeEnumValueOf(name, vals)
+        globalScope[name] = cls
+        // Deliberately no return value: an enum class holds its own constants,
+        // whose __class points back at it, so exporting it as the tag's
+        // completion value would send a CYCLIC object graph across the bridge
+        // (a stack overflow in the frozen runtime, and only there).
+    }
+    function jEnumOrdinal() { return arguments[0].__eord }
+    function jEnumName() { return arguments[0].__ename }
+    function jEnumCompare() { return (arguments[0].__eord - arguments[1].__eord) | 0 }
+    function jEnumEquals() { return arguments[0] === arguments[1] }
+    function makeEnumValues(vals) {
+        return function() {
+            var r = []
+            for (var i = 0; i < vals.length; i++) { r.push(vals[i]) }
+            return r
+        }
+    }
+    function makeEnumValueOf(name, vals) {
+        return function() {
+            var want = arguments[0]
+            for (var i = 0; i < vals.length; i++) { if (vals[i].__ename === want) { return vals[i] } }
+            fail("no enum constant " + name + "." + want)
+        }
+    }
+    // Is the value an enum constant, and does a switch label's SOURCE TEXT name it?
+    // Enum labels are unqualified constant names, which are not expressions in any
+    // enclosing scope, so they are matched textually rather than evaluated.
+    function jIsEnumVal(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__ename !== undefined
+    }
+    function jEnumLabelHit(text, v) {
+        if (text === v.__ename) { return true }
+        var dot = text.length - v.__ename.length - 1
+        return dot > 0 && text.charAt(dot) == "." && text.substring(dot + 1) === v.__ename
+    }
+
+    // curClassName is what super.m() resolves against. A nested class declaration
+    // interrupts its enclosing one, so the name is a STACK - without that, the
+    // outer class' later methods would search from the nested class' superclass.
+    var jClassStack = []
+    function jEnterClass(n) {
+        jClassStack.push(curClassName)
+        curClassName = n
+    }
     function buildClass(items) {
-        buildClassFrom(items[0], items.slice(1), undefined)
+        var cls = buildClassFrom(items[0], items.slice(1), undefined)
+        var outer = jClassStack.pop()
+        curClassName = outer
+        if (outer != "" && outer != undefined) { globalScope[outer + "." + items[0]] = cls }
+    }
+    // "Outer", "Nested" -> "Outer.Nested" (the type arguments are already gone).
+    function jJoinDots(parts) { return parts.join(".") }
+    // Finds a class by its simple or qualified name: nested types register under
+    // both, and an unregistered qualification falls back to the simple name.
+    function jResolveClass(nm) {
+        if (hasOwn(globalScope, nm)) { return globalScope[nm] }
+        var parts = nm.split(".")
+        var lastp = parts[parts.length - 1]
+        if (hasOwn(globalScope, lastp)) { return globalScope[lastp] }
+        return undefined
+    }
+    // Does cls, or anything it extends, carry this name? Used by Outer.this.
+    function jClassIs(cls, nm) {
+        for (var c = cls; c != undefined && c != null; c = c.__super) {
+            if (c.__name == nm) { return true }
+        }
+        return false
+    }
+    // Outer.this - the enclosing instance an inner class captured (o.new Inner()
+    // records it as __outer). Walks out until a class of that name is reached.
+    function makeOuterThis(text) {
+        var nm = stripWs(text).split(".")[0]
+        return function() {
+            var v = getVar("this")
+            while (v != undefined && v != null) {
+                if (v.__class != undefined && jClassIs(v.__class, nm)) { return v }
+                v = v.__outer
+            }
+            fail("no enclosing instance of " + nm)
+        }
+    }
+    // o.new Inner(args) - a qualified creation: the new instance records o as
+    // its enclosing instance, which is what Outer.this then finds.
+    function makeQualNew(items) {
+        var outerT = items[0].qouter
+        var cname = items[1].qname
+        var args = items.slice(2)
+        return function() {
+            var outer = outerT()
+            var cls = jResolveClass(cname)
+            if (cls == undefined || cls == null || !cls.__isclass) fail("unknown class: " + cname)
+            var obj = {__class: cls, __outer: outer}
+            var argv = []
+            for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
+            jCallCtor(cls, obj, argv)
+            return obj
+        }
     }
     function buildRecord(items) {
         buildClassFrom(items[0], items.slice(2), items[1].rparams)

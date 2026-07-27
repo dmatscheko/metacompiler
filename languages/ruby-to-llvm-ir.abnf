@@ -65,7 +65,8 @@ ParamDSplat <~~ var n = takeAll(); notImpl("double-splat parameter (**kw)", up.p
             = "**" [ Name <~~ push(up.in) ~~> ] ;
 ParamSplat  <~~ var n = takeAll(); notImpl("splat parameter (*args)", up.pos); push({param: n.length > 0 ? n[0] : "$rest"}) ~~>
             = "*" [ Name <~~ push(up.in) ~~> ] ;
-ParamBlock  <~~ notImpl("block parameter (&blk)", up.pos); push({param: pop()}) ~~>
+// &blk: the block the call was given, received as an ordinary named parameter.
+ParamBlock  <~~ push({param: pop()}) ~~>
             = "&" Name <~~ push(up.in) ~~> ;
 ParamKw     <~~ var n = takeAll(); notImpl("keyword parameter (name:)", up.pos); push({param: n[0]}) ~~>
             = Name <~~ push(up.in) ~~> ":" [ Expression ] ;
@@ -80,7 +81,7 @@ MethodName  = Id [ "?" | "!" ] ;
 // A superclass (class D < Base) is accepted but not implemented (no inheritance);
 // the class body still compiles as its own methods.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Name <~~ push(up.in) ~~> [ Superclass ] { Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
+            = KwClass Name <~~ push(up.in) ~~> [ Superclass ] { Semi | Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
 Superclass  <~~ notImpl("class superclass (< Base)", up.pos) ~~>
             = "<" ScopedName ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
@@ -101,7 +102,11 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // COND). A modifier only binds when its keyword sits on the SAME source line as
 // the statement (SameLine), so a block 'if'/'while' that opens the next line stays
 // a separate statement.
-Statement   = Require | DoWhileStmt | ModStmt ;
+// A bare ';' is an empty statement: Ruby uses it as a statement separator, and it
+// appears immediately after a def / class / module header (def f(x); BODY; end).
+// Semi pushes nothing, so a body simply skips it.
+Statement   = Semi | Require | DoWhileStmt | ModStmt ;
+Semi        = ";" ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
@@ -137,7 +142,15 @@ DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" 
 // Kept at statement level (needs a comma after the first target) so it never
 // interferes with a nested expression.
 MultiAssign <~~ push(makeMultiAssign(takeAll())) ~~>
-            = Target "," Target { "," Target } "=" Expression { "," Expression } [ ";" ] ;
+            = MTarget "," MTarget { "," MTarget } "=" Expression { "," Expression } [ ";" ] ;
+// A multiple-assignment target: a splat target (*rest, which collects the leftover
+// values into an array), a parenthesized nested group ((m, n), o = [5, 6], 7) or an
+// ordinary target. Longest first, so *x and (x, y) are not read as a plain Target.
+MTarget     = MSplat | MGroup | Target ;
+MSplat      <~~ push({splat: pop()}) ~~>
+            = "*" Target ;
+MGroup      <~~ push({group: takeAll()}) ~~>
+            = "(" MTarget "," MTarget { "," MTarget } ")" ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
@@ -183,10 +196,14 @@ RangeExpr   <~~ push(makeRange(takeAll())) ~~>
 // (so a << b << c chains). Binds tighter than range/comparison, looser than +.
 ShiftExpr   <~~ push(makeShift(takeAll())) ~~>
             = AddExpr { "<<" AddExpr } ;
+// The LineCont guard is what keeps `first, *rest = [1, 2, 3]' followed by a line
+// that OPENS with `*init, last = ...' from reading as one multiplication: in Ruby a
+// newline ends the statement once the expression is complete, so a binary operator
+// that starts a fresh source line never continues the previous expression.
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { LineCont ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = UnaryExpr { LineCont ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Neg | PostfixExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
@@ -204,8 +221,10 @@ FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
 SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
             = "&." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: up.in}) ~~> ;
+// The LineCont guard keeps a line that OPENS with an array literal from being read
+// as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = LineCont "[" Expression "]" ;
 MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
 
 // A call argument: an ordinary expression, or one of the forms accepted for
@@ -217,7 +236,9 @@ KwArg       <~~ takeAll(); push(notImplExpr("keyword argument (name:)", up.pos))
             = SymName ":" Expression ;
 SplatArg    <~~ takeAll(); push(notImplExpr("splat argument (* / **)", up.pos)) ~~>
             = ( "**" | "*" ) Expression ;
-BlockArg    <~~ takeAll(); push(notImplExpr("block argument (&)", up.pos)) ~~>
+// &expr: pass expr as the call's block. A Proc is passed straight through; a symbol
+// becomes the "call this method on each element" proc (`[1, 2].map(&:to_s)`).
+BlockArg    <~~ push({blkT: makeBlockArg(pop())}) ~~>
             = "&" Expression ;
 
 // A block passed to a method call: a real closure over the current scope.
@@ -225,25 +246,31 @@ Block       <~~ push(makeBlock(takeAll())) ~~>
             = KwDo [ BlockParams ] Body End
             | "{" [ BlockParams ] Body "}" ;
 BlockParams <~~ push({bparams: takeAll()}) ~~>
-            = "|" [ Param { "," Param } ] "|" ;
+            = "|" [ BParam { "," BParam } ] "|" ;
+// A block parameter may be a parenthesized group that destructures one element:
+// `[[1, [2, 3]]].each { |a, (b, c)| ... }`.
+BParam      = BGroup | Param ;
+BGroup      <~~ push({pgroup: takeAll()}) ~~>
+            = "(" BParam { "," BParam } ")" ;
 
 Primary     = "(" Expression ")"
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
-            | ReturnExpr | BreakExpr | NextExpr | RaiseExpr | YieldExpr
+            | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RaiseExpr | YieldExpr
             | DqStr | SqStr | PercentLit | FloatLit | IntLit | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
             | IvarRef | ScopedConst | Call | VarRef ;
 
-// for VAR in COLL ... end: accepted but not implemented (needs loop-variable
-// binding we do not model); parses the collection and body, warns, and is inert.
-ForExpr     <~~ takeAll(); push(notImplExpr("for-in loop", up.pos)) ~~>
+// for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
+// loop variable stays visible after the loop (Ruby), so it is written with the same
+// assignment path as an ordinary local. Several variables destructure each element.
+ForExpr     <~~ push(makeForIn(takeAll())) ~~>
             = KwFor ForVars KwIn Expression [ KwDo ] Body End ;
-ForVars     = Name { "," Name } ;
+ForVars     = Name <~~ push({fvar: up.in}) ~~> { "," Name <~~ push({fvar: up.in}) ~~> } ;
 
 // yield / yield(args) / yield args: accepted but not implemented (no block passing);
 // warns and yields a placeholder value.
-YieldExpr   <~~ takeAll(); push(notImplExpr("yield", up.pos)) ~~>
+YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
             = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
 
 // A floating point literal 3.14 / 1.0e9: accepted but not implemented (the runtime
@@ -313,11 +340,15 @@ ErrList     = Name { "," Name } ;
 // NoModKw guard it parses as a block-if argument expression and swallows the loop's
 // `end`.
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ NoModKw Expression ] ;
+            = KwReturn [ NoModKw Expression { "," Expression } ] ;
 BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
             = KwBreak [ NoModKw Expression ] ;
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
             = KwNext [ NoModKw Expression ] ;
+// redo re-runs the current block body with the same element, without advancing the
+// iteration (it travels to the iterating method as its own control signal).
+RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
+            = KwRedo ;
 
 // raise [EXPR[, EXPR]]: raise the first expression's value with js_throw (a bare raise
 // re-raise is approximated by throwing nil); a trailing message argument is ignored.
@@ -325,8 +356,22 @@ RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
             = KwRaise [ Expression { "," Expression } ] ;
 
 // f(args): a top level method or a class (for C.new the .new is a method suffix).
+// A call may carry a trailing block, with or without parentheses (`loop { ... }`,
+// `s13_blk(5) { |v| ... }`), and a predicate/bang method may be called bare
+// (`block_given?`). BareName is a non-keyword identifier that may end in ? or !;
+// the longest form comes first, so `x ? a : b` only reaches the ternary after the
+// call alternatives have failed and rolled back.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Name <~~ push(up.in) ~~> "(" [ Arg { "," Arg } ] ")" ;
+            = BareName <~~ push(up.in) ~~> "(" [ Arg { "," Arg } ] ")" [ Block ]
+            | BareName <~~ push(up.in) ~~> Block
+            | PredName <~~ push(up.in) ~~> ;
+BareName    = NotKw Id [ "?" | "!" ] ;
+// A bare predicate/bang call has to be told apart from `a != b` and from the ternary
+// `x ? a : b`, so the suffix character is checked with whitespace skipping OFF: a `!`
+// may not be followed by `=`, and a `?` may not be followed by whitespace (Ruby uses
+// exactly that spacing rule to separate `foo?` from `foo ? a : b`).
+PredName    = PredOk NotKw Id :whitespace() PredSfx :whitespace(Whitespace) ;
+PredSfx     = "?" | "!" ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Name ;
@@ -335,12 +380,19 @@ Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
 Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
 
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
-            = "[" [ Expression { "," Expression } ] "]" ;
+            = "[" [ ArrElem { "," ArrElem } ] "]" ;
+// An array element may be splatted: [0, *[1, 2], 3] splices the inner array in.
+ArrElem     = ArrSplat | Expression ;
+ArrSplat    <~~ push({splat: pop()}) ~~>
+            = "*" !"*" Expression ;
 HashLit     <~~ push(makeHash(takeAll())) ~~>
             = "{" [ HashEntry { "," HashEntry } ] "}" ;
 // { k => v } (arrow) and { name: v } (symbol key, genuinely lowered - name: is the
 // symbol :name, which the runtime already represents as the string "name").
-HashEntry   = HashColon | HashArrow ;
+HashEntry   = HashDSplat | HashColon | HashArrow ;
+// {**other, k: v} merges another hash in.
+HashDSplat  <~~ push({hsplat: pop()}) ~~>
+            = "**" Expression ;
 HashArrow   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
 HashColon   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
@@ -391,7 +443,8 @@ NotKw       = :script(~~
         var kws = ["def", "end", "if", "elsif", "else", "unless", "while", "until",
                    "do", "then", "return", "break", "next", "class", "module", "for",
                    "self", "nil", "true", "false", "and", "or", "not", "case", "when",
-                   "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print"]
+                   "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print",
+                   "redo"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -420,6 +473,60 @@ NoModKw     = :script(~~
         if (s === "if" || s === "unless" || s === "while" || s === "until") {
             return abnf.newToken("\x01modkw", 0)
         }
+        return undefined
+    })()
+~~) ;
+
+// PredOk succeeds (matching empty) only where a bare predicate/bang call really is
+// one: an identifier immediately followed by '?' or '!', where the '!' is not the
+// '!=' operator and the '?' is not the ternary (Ruby separates `foo?` from
+// `foo ? a : b` by exactly that spacing). Pure function of (source, position).
+PredOk      = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (true) {
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) { return abnf.newToken("\x01no", 0) }
+        while ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var nx = c.peek(i + 1)
+        if (cc === 33) {                                  // '!'
+            if (nx === 61) { return abnf.newToken("\x01no", 0) }
+            return undefined
+        }
+        if (cc === 63) {                                  // '?'
+            if (nx === 61 || nx === 32 || nx === 9 || nx === 13 || nx === 10) {
+                return abnf.newToken("\x01no", 0)
+            }
+            return undefined
+        }
+        return abnf.newToken("\x01no", 0)
+    })()
+~~) ;
+
+// LineCont succeeds (matching empty) only when the position does NOT start a fresh
+// source line, i.e. the token just before it is on the same line. It gates the
+// binary operators that can equally open a statement (*, +, -), so a line beginning
+// with one of them is a new statement rather than a continuation. Pure function of
+// (source, position), like the other guards here.
+LineCont    = :script(~~
+    (function() {
+        // Whitespace is skipped before tokens but not before a script, so the newline
+        // that would separate the two statements is still AHEAD of this position.
+        var i = -1
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
+        if (cc === 10) { return abnf.newToken("\x01nl", 0) }
+        var j = 0
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd === 10 || dd === 35 || dd === -1) { return abnf.newToken("\x01nl", 0) }
         return undefined
     })()
 ~~) ;
@@ -467,6 +574,7 @@ KwRaise     = "raise" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwNext      = "next" KwEnd ;
+KwRedo      = "redo" KwEnd ;
 KwSelf      = "self" KwEnd ;
 KwPuts      = ( "puts" | "print" ) KwEnd ;
 
@@ -508,7 +616,19 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: v}
         }
     }
+    // return with several values yields an array (Ruby: `return 3, 4` -> [3, 4]).
     function makeReturn(items) {
+        if (items.length > 1) {
+            return function(b) {
+                var arrV = callExt(b, "js_arr_new", [])
+                for (var i = 0; i < items.length; i++) {
+                    var ri = items[i](b)
+                    b = ri.b
+                    callExt(b, "js_arr_push", [arrV, ri.v])
+                }
+                return {b: retStmt(b, arrV), v: hNull}
+            }
+        }
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hNull
@@ -702,10 +822,16 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: exitB, v: arrV}
         }
     }
+    // [a, *b, c]: a splat element splices the inner array in with an emitted loop.
     function makeArray(items) {
         return function(b) {
             var arrV = callExt(b, "js_arr_new", [])
             for (var i = 0; i < items.length; i++) {
+                if (items[i].splat != undefined) {
+                    var rs = items[i].splat(b)
+                    b = emitSpliceInto(rs.b, arrV, rs.v)
+                    continue
+                }
                 var r = items[i](b)
                 b = r.b
                 callExt(b, "js_arr_push", [arrV, r.v])
@@ -713,10 +839,35 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: arrV}
         }
     }
+    // Append every element of srcV to dstV (both runtime arrays), with a counted loop.
+    function emitSpliceInto(b, dstV, srcV) {
+        hidCount++
+        var iName = "$spl" + hidCount
+        var lenV = callExt(b, "js_pylen", [srcV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        callExt(bodyB, "js_arr_push", [dstV, callExt(bodyB, "js_pyget", [srcV, iV2])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        intWrap(bodyB, callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)]))])
+        bodyB.NewBr(headB)
+        return exitB
+    }
+    // {**other, k: v}: a double-splat entry merges another hash in, key by key.
     function makeHash(items) {
         return function(b) {
             var d = callExt(b, "js_dict_new", [])
             for (var i = 0; i < items.length; i++) {
+                if (items[i].hsplat != undefined) {
+                    var rh = items[i].hsplat(b)
+                    b = emitMergeDict(rh.b, d, rh.v)
+                    continue
+                }
                 var rk = items[i].hk(b)
                 b = rk.b
                 var rv = items[i].hv(b)
@@ -725,6 +876,27 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             return {b: b, v: d}
         }
+    }
+    // Copy every key/value pair of srcV into dstV (both runtime dicts).
+    function emitMergeDict(b, dstV, srcV) {
+        hidCount++
+        var iName = "$mrg" + hidCount
+        var keysV = callExt(b, "js_keys", [srcV])
+        var lenV = callExt(b, "js_pylen", [keysV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        var kV = callExt(bodyB, "js_pyget", [keysV, iV2])
+        callExt(bodyB, "js_pyset", [dstV, kV, callExt(bodyB, "js_pyget", [srcV, kV])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        intWrap(bodyB, callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)]))])
+        bodyB.NewBr(headB)
+        return exitB
     }
     function makeTemplate(items) {
         return function(b) {
@@ -774,6 +946,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         callExt(b, "js_call", [initV, hUndef, argsV])
         return {b: b, v: objV}
     }
+    // Ruby's Array#== / Hash#== compare structurally. js_pyeq/js_pyne are exactly that
+    // (Python's == over the same runtime values), so the binary operator table simply
+    // points at them instead of the identity comparisons js_seq/js_sne.
+    binExt["=="] = "js_pyeq"
+    binExt["!="] = "js_pyne"
+
     core.indexExt = "js_pyget"    // [i] works for arrays, strings and hashes
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
@@ -787,11 +965,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
                     if (s.name == "new") {
-                        var rn = emitNew(b, cur, s.args)
+                        var rn = emitNew(b, cur, unwrapArgs(s.args))
                         b = rn.b
                         cur = rn.v
                     } else {
-                        var ea = emitArgs(b, s.args)
+                        var ea = emitArgs(b, unwrapArgs(s.args))
                         b = ea.b
                         cur = callExt(b, "js_rmcall", [cur, emitStr(b, s.name), ea.v])
                     }
@@ -806,7 +984,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     b.NewCondBr(truthy(b, callExt(b, "js_seq", [cur, hNull])), snEnd, callBk)
                     var snRes = hNull
                     if (s.kind == "smcall") {
-                        var sea = emitArgs(callBk, s.args)
+                        var sea = emitArgs(callBk, unwrapArgs(s.args))
                         callBk = sea.b
                         snRes = callExt(callBk, "js_rmcall", [cur, emitStr(callBk, s.name), sea.v])
                     } else if (s.name == "length" || s.name == "size") {
@@ -862,9 +1040,83 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             r.b.NewRet(r.v)
             return {b: deadBlock(), v: hNull}
         }
-        return function(b) {
+        return {blkT: function(b) {
             var idx = emitFunc(pnames, bodyStmt, false)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }}
+    }
+    // A block reaches a call as a marker, so a call can tell it from its arguments.
+    // The LLVM lowering keeps the interpreter's older convention of handing the block
+    // to js_rmcall as the LAST positional argument, so unwrapArgs simply puts it back
+    // at the end of the argument list.
+    function splitBlock(args) {
+        var plain = []
+        var blk = null
+        for (var i = 0; i < args.length; i++) {
+            if (args[i].blkT != undefined) { blk = args[i].blkT } else { plain.push(args[i]) }
+        }
+        return {args: plain, blk: blk}
+    }
+    function unwrapArgs(args) {
+        var sp = splitBlock(args)
+        if (sp.blk == null) { return sp.args }
+        var out = []
+        for (var i = 0; i < sp.args.length; i++) { out.push(sp.args[i]) }
+        out.push(sp.blk)
+        return out
+    }
+    // &expr as an argument: the value is handed over as the block itself.
+    function makeBlockArg(t) { return t }
+    // yield and redo need the block protocol the interpreter grew; not lowered yet.
+    function makeYield(items, pos) { return notImplExpr("yield", pos) }
+    function makeRedo(pos) { return notImplExpr("redo", pos) }
+    // for VAR[, VAR] in COLL ... end, lowered as a counted loop over the collection.
+    // `for` opens no scope, so the loop variable is written with the ordinary local
+    // assignment rule and outlives the loop, exactly as in Ruby.
+    function makeForIn(items) {
+        var names = []
+        var collT = null
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].fvar != undefined) { names.push(items[i].fvar) }
+            else if (items[i].body != undefined) { body = items[i].body }
+            else { collT = items[i] }
+        }
+        return function(b) {
+            var rc = collT(b)
+            b = rc.b
+            var seqV = rc.v
+            var lenV = callExt(b, "js_pylen", [seqV])
+            hidCount++
+            var iName = "$for" + hidCount
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            for (var k = 0; k < names.length; k++) {
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, names[k]), hNull])
+            }
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var elV = callExt(bodyB, "js_pyget", [seqV, iV2])
+            if (names.length == 1) {
+                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, names[0]), elV])
+            } else {
+                for (var j = 0; j < names.length; j++) {
+                    callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, names[j]),
+                                                    callExt(bodyB, "js_pyget", [elV, emitNum(bodyB, j)])])
+                }
+            }
+            loopStack.push({cont: headB, brk: exitB})
+            var rb = body(bodyB)
+            var curIV = callExt(rb.b, "js_scope_get", [curScopeV, emitStr(rb.b, iName)])
+            var nextIV = intWrap(rb.b, callExt(rb.b, "js_jadd", [curIV, emitNum(rb.b, 1)]))
+            callExt(rb.b, "js_scope_set", [curScopeV, emitStr(rb.b, iName), nextIV])
+            rb.b.NewBr(headB)
+            loopStack.pop()
+            return {b: exitB, v: hNull}
         }
     }
 
@@ -1163,6 +1415,80 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         else { callExt(b, "js_pyset", [p.obj, p.key, v]) }
         return b
     }
+    // a, b = ... : the right-hand side becomes ONE runtime array (a lone array value is
+    // unpacked positionally), which emitDestructure spreads over the targets. A splat
+    // target takes everything the fixed targets around it do not, so its share is only
+    // known at run time - hence the emitted loop rather than compile-time indices.
+    function emitDestructure(b, targets, arrV) {
+        var si = -1
+        var i
+        for (i = 0; i < targets.length; i++) { if (targets[i].splat != undefined) { si = i } }
+        if (si < 0) {
+            for (i = 0; i < targets.length; i++) {
+                var r0 = emitElemOrNil(b, arrV, emitNum(b, i))
+                b = emitAssignOne(r0.b, targets[i], r0.v)
+            }
+            return b
+        }
+        var lenV = callExt(b, "js_pylen", [arrV])
+        var after = targets.length - si - 1
+        for (i = 0; i < si; i++) {
+            var r1 = emitElemOrNil(b, arrV, emitNum(b, i))
+            b = emitAssignOne(r1.b, targets[i], r1.v)
+        }
+        // stop = max(si, len - after): the first index that belongs to the trailing targets.
+        hidCount++
+        var sName = "$dst" + hidCount
+        var iName = "$dsi" + hidCount
+        var stopV = intWrap(b, callExt(b, "js_sub", [lenV, emitNum(b, after)]))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), stopV])
+        var lowB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_lt", [stopV, emitNum(b, si)])), lowB, okB)
+        callExt(lowB, "js_scope_set", [curScopeV, emitStr(lowB, sName), emitNum(lowB, si)])
+        lowB.NewBr(okB)
+        b = okB
+        var midV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, si)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        var stV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, sName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, stV])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        callExt(bodyB, "js_arr_push", [midV, callExt(bodyB, "js_pyget", [arrV, iV2])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        intWrap(bodyB, callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)]))])
+        bodyB.NewBr(headB)
+        b = exitB
+        b = emitAssignOne(b, targets[si].splat, midV)
+        var stV2 = callExt(b, "js_scope_get", [curScopeV, emitStr(b, sName)])
+        for (i = 0; i < after; i++) {
+            var idxV = intWrap(b, callExt(b, "js_jadd", [stV2, emitNum(b, i)]))
+            var r2 = emitElemOrNil(b, arrV, idxV)
+            b = emitAssignOne(r2.b, targets[si + 1 + i], r2.v)
+        }
+        return b
+    }
+    // Positional read of a destructuring source: Ruby fills a target that has no value
+    // with nil, while js_pyget raises IndexError past the end - so the read is guarded.
+    function emitElemOrNil(b, arrV, idxV) {
+        var lenV = callExt(b, "js_pylen", [arrV])
+        var inB = curF.NewBlock("")
+        var endB = curF.NewBlock("")
+        var fromB = b
+        b.NewCondBr(truthy(b, callExt(b, "js_lt", [idxV, lenV])), inB, endB)
+        var gotV = callExt(inB, "js_pyget", [arrV, idxV])
+        inB.NewBr(endB)
+        var phi = endB.NewPhi([llvm.ir.NewIncoming(gotV, inB), llvm.ir.NewIncoming(hNull, fromB)])
+        return {b: endB, v: phi}
+    }
+    function emitAssignOne(b, tgt, v) {
+        if (tgt.group != undefined) { return emitDestructure(b, tgt.group, v) }
+        return emitAssignTarget(b, tgt, v)
+    }
     function makeMultiAssign(items) {
         var targets = []
         var values = []
@@ -1171,21 +1497,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { targets.push(items[i]) }
         }
         return function(b) {
-            var vals = []
+            var arrV = hNull
             if (values.length == 1 && targets.length > 1) {
                 var rr = values[0](b)
                 b = rr.b
-                for (var j = 0; j < targets.length; j++) {
-                    vals.push(callExt(b, "js_pyget", [rr.v, emitNum(b, j)]))
-                }
+                arrV = rr.v
             } else {
+                arrV = callExt(b, "js_arr_new", [])
                 for (var k = 0; k < values.length; k++) {
                     var rv = values[k](b)
                     b = rv.b
-                    vals.push(rv.v)
+                    callExt(b, "js_arr_push", [arrV, rv.v])
                 }
             }
-            for (var m = 0; m < targets.length; m++) { b = emitAssignTarget(b, targets[m], vals[m]) }
+            b = emitDestructure(b, targets, arrV)
             return {b: b, v: hNull}
         }
     }
@@ -1252,7 +1577,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- calls, defs, classes -----
     function makeCall(items) {
         var name = items[0]
-        var args = items.slice(1)
+        var args = unwrapArgs(items.slice(1))
         return function(b) {
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitArgs(b, args)
@@ -1308,7 +1633,24 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return {name: name, params: params, body: body != null ? body : makeBody([])}
     }
     function makeMethodInfo(fn) { return fn }
+    // Ruby has no bare method references: an identifier that is not a local variable is
+    // a parenthesis-less call of the method of that name. Only a ZERO parameter method
+    // is auto-called (a bare name for a method taking arguments is an error in Ruby, and
+    // the feature-matrix file uses that shape to pass a method around as a value). The
+    // registry is consulted when the reference is EMITTED, after every tag has run, so a
+    // def anywhere in the file counts.
+    var rubyMethods = {}
+    makeVarRef = function(name) {
+        return function(b) {
+            var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            if (rubyMethods["$" + name] === true) {
+                v = callExt(b, "js_call", [v, hUndef, callExt(b, "js_arr_new", [])])
+            }
+            return {b: b, v: v}
+        }
+    }
     function makeDefStmt(fn) {
+        if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name),

@@ -3,12 +3,17 @@
  * ignored), annotations, casts (identity), interfaces, enums, annotation types,
  * nested types, lambdas, method references and anonymous classes.
  *
- * Under a DEFAULT run this ABORTS at the first not-implemented construct (the
- * top-level interface below) with a clean file:line message. Under
- * -warn-unsupported every not-implemented construct warns and the genuinely
- * lowered parts (casts, generics) run; Main.main self checks them and exits with
- * the failure count (0 when all pass). (try/catch/finally + throw are now
- * implemented - see java-test-try.java.) **/
+ * Every construct here is genuinely implemented now, in both grammars, so the
+ * file runs and self checks with or without -warn-unsupported: Main.main exits
+ * with the failure count (0 when all pass). (try/catch/finally + throw are
+ * implemented too - see java-test-try.java.)
+ *
+ * History: interfaces, enums, annotation types, nested types, lambdas, method
+ * references and anonymous classes used to be recognised but not lowered, so a
+ * flagless run aborted at the top-level interface below and this file was a
+ * by-design SHOULD-FAIL guard. The full-syntax work implemented all of them,
+ * which removed the guard's premise, so the matrix entry became an ordinary
+ * one. Do not re-arm it. **/
 
 import java.util.List;
 

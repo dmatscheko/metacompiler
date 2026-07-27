@@ -641,7 +641,7 @@
             "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-widen.java", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Java widened surface SHOULD FAIL",
+            "name": "Java widened surface (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/java-to-llvm-ir.abnf", "tests/java-test-widen.java", "-q"]
@@ -1601,7 +1601,7 @@
             "program": "${workspaceFolder}","args": ["languages/ruby-to-llvm-ir.abnf", "tests/ruby-test-recognize.rb", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Lua recognition SHOULD FAIL",
+            "name": "Lua recognition (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/lua-to-llvm-ir.abnf", "tests/lua-test-recognize.lua", "-q"]

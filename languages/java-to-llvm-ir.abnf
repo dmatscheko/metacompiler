@@ -6,16 +6,31 @@ The subset: classes with fields (instance and static, with initializers), method
 (instance and static), constructors, single inheritance (class B extends A: inherited
 fields and methods, overriding with dynamic dispatch, the implicit no argument super
 constructor, and super.m() calls; a class must appear before its subclasses),
-records with auto generated constructor and
-accessors (a modern Java SE nod, like 'var' local declarations), object creation with
-new, arrays (new int[n], new int[]{...}, a.length, indexing), the enhanced for loop
-(for (var x : arr)), int / boolean / String / var / class types (types are parsed;
-the semantics are dynamic), String concatenation with +, the String methods length(),
-charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a one char
-String; there is no char type), System.out.println/print, System.exit, Math.abs/max/min,
+constructor OVERLOADING (resolved by argument count) and the explicit constructor
+invocations super(args) and this(args), static and instance initializer blocks,
+records (auto generated constructor, accessors and value equality, plus the compact
+constructor and extra constructors), enums (constants with arguments, constant
+specific bodies, values / valueOf / name / ordinal), interfaces (constants, default,
+private and static methods, Iface.super.m() and multiple inheritance of defaults),
+annotation types, nested / inner / local / anonymous classes (an inner instance keeps
+its enclosing one, reached with Outer.this and created with o.new Inner(...)),
+lambdas and method references (including Type::new) as real closures, SAM conversion
+when the declared type is a functional interface,
+object creation with new, arrays (new int[n], the multi dimensional new int[a][b]
+and the partial new int[a][], bare initializers like {1, 2}, C style declarators,
+a.length, indexing), varargs (a trailing array parameter, fed either by the extra
+arguments or by an array), the enhanced for loop
+(for (var x : arr)), int / boolean / char / String / var / class types (types are
+parsed; the semantics are dynamic, but char is a value of its own that prints as its
+glyph and computes on its code), String concatenation with +, the String methods
+length(), charAt(), equals(), substring(), indexOf() and isEmpty() (charAt yields a
+one character String, which compares equal to the matching char),
+System.out.println/print, System.exit, Math.abs/max/min,
 if/else, while, do-while, both for forms, the classic colon switch on int or String
 (fallthrough, stacked labels, default) and the arrow switch statement (case 1, 2 ->
-expr/block, no fallthrough), break/continue (labeled too: labeled loops, labeled
+expr/block, no fallthrough), switch as an EXPRESSION with yield in both forms, type
+and record deconstruction patterns in case labels with when guards, the instanceof
+pattern forms, break/continue (labeled too: labeled loops, labeled
 blocks; a label inside a try body cannot jump out), return, assignment (also
 += -= *= /= %= and the bitwise/shift compounds &= |= ^= <<= >>= >>>=), postfix ++/--,
 the ternary operator, || && with short circuit, & | ^ (non-short-circuit boolean
@@ -23,26 +38,37 @@ operators on two booleans, int32 bit operations otherwise), << >> >>> (Java int
 semantics), == != < > <= >= (== compares objects by identity, use equals() for
 strings), + - * / % (int arithmetic is 32 bit, / truncates) and unary - ! ~.
 
+Literals: decimal / hex / binary / octal / underscored / suffixed integers, the
+fractional, exponent and hexadecimal floating point forms, char literals with Java's
+escape set (the single letter ones, the quotes, the four digit unicode form and the
+classic octal escapes) and TEXT BLOCKS with the JLS incidental white space rules.
+
+try / catch (multi catch A | B) / finally / throw are genuinely modelled: a throw
+raises the value and the nearest try recovers it, a return/break/continue leaving a
+try body is re issued in the enclosing frame, and try-with-resources closes its
+resources in reverse order, whether the body completes or throws. The standard
+throwable classes the program names (Throwable, Exception, RuntimeException, Error
+and the common subclasses) are provided by the compile, with a message constructor
+and getMessage(); a class may extend them.
+
 Widened surface (parsed so a whole Java file is accepted): generics (<...>) and the
 extra primitive keywords are parsed and dropped; casts ((Type) expr) are identity;
-annotations (with or without arguments), implements/throws clauses and varargs (...)
-are parsed and ignored. try/catch/finally + throw are accepted and, under
--warn-unsupported, the try block is still compiled and a throw still lowers its
-expression (no exception model, so no unwinding). Interfaces, enums, annotation types,
-nested/inner types, lambdas, method references and anonymous classes are accepted and
+annotations (with or without arguments), throws clauses, sealed / non-sealed and the
+permits clause are parsed and ignored. assert and synchronized are recognized and
 reported as not implemented; -warn-unsupported downgrades that to a warning so call
 graphs / CFGs / traces still work on partly understood files.
 
-Not genuinely modelled: switch expressions (switch as a value, yield), char
-literals, overloading,
+Not genuinely modelled: overload resolution by argument TYPE (only the count
+discriminates), generic type checking (type arguments are erased at parse time),
 implicit field access (fields are reached via this.x or ClassName.x - like the
-explicit style many code bases enforce), real exception unwinding, functional
-interfaces (so lambdas/method references are inert) and reflection.
+explicit style many code bases enforce), checked exception analysis, threads and
+reflection.
 
 Fields live directly on the instance object (js_get/js_set), methods become own IR
 functions jsf_N(env, args) with the instance prepended to the arguments, stored on the
 class descriptor object; calls dispatch through the js_mcall external. A constructor
-always exists (a default one is generated) and first applies the field initializers.
+always exists (a default one is generated) and first applies the field initializers;
+an overloaded class also gets a dispatcher that picks the arity matching slot.
 The whole program becomes jsmain(env, args): it builds the class descriptors, then calls
 Main.main. Self checking programs end with System.exit(failures).
 The same language with the same semantics is interpreted directly by java-interpreter.abnf.") ;
@@ -85,7 +111,10 @@ RecordDecl  <~~ push(makeRecordStmt(takeAll())) ~~>
 RParams     <~~ push({rparams: takeAll()}) ~~>
             = "(" [ Type Id <~~ push(up.in) ~~> { "," Type Id <~~ push(up.in) ~~> } ] ")" ;
 
-Member      = NestedType | StaticInit | InitBlock | Ctor | AbstractMethod | CompactCtor | Method | Field ;
+// A stray ';' between members is legal Java (an empty declaration) and pushes nothing.
+Member      = EmptyMember | NestedType | StaticInit | InitBlock | Ctor | AbstractMethod
+            | CompactCtor | Method | Field ;
+EmptyMember = ";" ;
 
 // A static initializer - `static { ... }` - runs when the class is built, in textual
 // order among the static field initializers. An instance initializer - a bare
@@ -136,10 +165,13 @@ ModWord     <~~ push(up.in) ~~>
 FType       <~~ push({ty: up.in}) ~~>
             = Type ;
 
-// A parameter may carry annotations, `final` and varargs (`...`); all ignored.
-ParamList   <~~ push({params: takeAll()}) ~~>
+// A parameter may carry annotations and `final` (both ignored). A VARARGS parameter
+// (`int... xs`) is real: it collects the remaining arguments into an array, and an
+// array handed in its place is passed straight through, like in Java.
+ParamList   <~~ push(makeParams(takeAll())) ~~>
             = "(" [ Param { "," Param } ] ")" ;
-Param       = { Annotation | "final" KwEnd } Type [ "..." ] Id <~~ push(up.in) ~~> ;
+Param       = { Annotation | "final" KwEnd } Type [ "..." <~~ push({vararg: true}) ~~> ]
+              Id <~~ push(up.in) ~~> { "[" "]" } ;
 
 // Types are parsed and (apart from field defaults) ignored. Generic arguments
 // (<...>), dotted names, extra array dimensions and the extra primitive keywords are
@@ -151,7 +183,13 @@ PrimName    = "int" | "boolean" | "char" | "long" | "double" | "float" | "short"
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | If | While | Do | ForEach | For | Switch | Return | Yield | Break | Continue
-            | Try | Throw | Assert | Synchronized | CtorCall | Labeled | Decl | Empty | ExprStmt ;
+            | Try | Throw | Assert | Synchronized | CtorCall | LocalType | Labeled | Decl
+            | Empty | ExprStmt ;
+
+// A LOCAL type declaration - `class Local { ... }` inside a method body. It lowers
+// exactly like a top-level one, into the enclosing block's scope, so it sees the
+// method's locals.
+LocalType   = TypeDecl ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -175,19 +213,64 @@ Switch      <~~ push(makeSwitch(takeAll())) ~~>
 SwitchCase  = ArrowCase | ArrowDefault | Case | Default ;
 ArrowCase   <~~ pushArrowCase(takeAll()) ~~>
             = KwCase ALabel { "," ALabel } "->" ArrowBody ;
-ALabel      <~~ push({alab: pop()}) ~~>
-            = CondExpr ;
+ALabel      <~~ push({alab: makeArrowLabel(pop(), stripWs(up.in))}) ~~>
+            = ALabCore ;
+// A label that is a bare name directly before the arrow - `case S -> ...` - has to be
+// read as the name, because the expression grammar would otherwise take `S -> ...`
+// for a lambda (LambdaHead accepts a bare identifier). IdArrowAhead is the guard that
+// tells the two apart; every other label shape goes through the ordinary expression.
+ALabCore    = ALabName | PatLabel | CondExpr ;
+
+// A PATTERN label: `case Dot d ->`, `case Integer i when i > 10 ->`, and the record
+// deconstruction forms `case Dot(int x) ->` / `case Line(Dot(var x1), Dot d2) ->`.
+// A type pattern REQUIRES its binding name (Java says so), which is exactly what
+// keeps `case CONSTANT ->` from being read as one.
+PatLabel    <~~ push({plab: makePatLabel(takeAll())}) ~~>
+            = Pattern [ WhenClause ] ;
+WhenClause  <~~ push({pwhen: pop()}) ~~> = "when" KwEnd Expression ;
+Pattern     = RecPattern | TypePattern ;
+RecPattern  <~~ push(makeRecPattern(takeAll())) ~~>
+            = PatType "(" [ Pattern { "," Pattern } ] ")" [ PatBind ] ;
+TypePattern <~~ push(makeTypePattern(takeAll())) ~~>
+            = PatType PatBind ;
+PatType     <~~ push({pty: stripWs(up.in)}) ~~> = Type ;
+PatBind     <~~ push({pbind: stripWs(up.in)}) ~~> = Id ;
+ALabName    <~~ push(makeLabelName(stripWs(up.in))) ~~>
+            = IdArrowAhead Id ;
+// Succeeds (matching nothing) exactly when the input from here is an identifier
+// followed by '->'; otherwise it yields a token that cannot match, which fails the
+// alternative. A pure function of the source and the position, like NotSwitchKw.
+IdArrowAhead = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var st = s
+        while (true) {
+            var cc = c.peek(s)
+            var isDig = cc >= 48 && cc <= 57
+            var ok = (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95 || cc === 36 || (isDig && s > st)
+            if (!ok) { break }
+            s++
+        }
+        if (s === st) { return abnf.newToken("\x01no-id-arrow", 0) }
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        if (c.peek(s) === 45 && c.peek(s + 1) === 62) { return undefined }
+        return abnf.newToken("\x01no-id-arrow", 0)
+    })()
+~~) ;
 ArrowBody   = Block | Throw | ExprStmt ;
 ArrowDefault <~~ pushArrowDefault(takeAll()) ~~>
             = KwDefault "->" ArrowBody ;
 Case        <~~ push(makeCase(takeAll())) ~~>
-            = KwCase CondExpr ":" { Statement } ;
+            = KwCase CLabel ":" { Statement } ;
+CLabel      <~~ push(enumLabel(pop(), stripWs(up.in))) ~~>
+            = CondExpr ;
 Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
 // The enhanced for is tried first: its ':' fails fast for the classic form.
 ForEach     <~~ push(makeForEach(pop(), pop(), pop())) ~~>
-            = KwFor "(" Type Id <~~ push(up.in) ~~> ":" Expression ")" Statement ;
+            = KwFor "(" [ LeadMods ] Type Id <~~ push(up.in) ~~> ":" Expression ")" Statement ;
 
 For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Statement ;
@@ -253,7 +336,16 @@ NotSwitchKw = :script(~~
 // multi-catch A | B, are parsed but not discriminated); a try-with-resources header
 // is skipped.
 Try         <~~ push(makeTry(takeAll())) ~~>
-            = KwTry [ SkipParen ] TryBody { CatchClause } [ FinallyClause ] ;
+            = KwTry [ Resources ] TryBody { CatchClause } [ FinallyClause ] ;
+// try-with-resources: each resource is closed after the body, in reverse order,
+// whether the body completes or throws - so each one wraps the body in its own
+// try/finally. A bare name (`try (r3)`) reuses an existing effectively final value.
+Resources   <~~ push({resources: takeAll()}) ~~>
+            = "(" Resource { ";" Resource } [ ";" ] ")" ;
+Resource    = ResDecl | ResRef ;
+ResDecl     <~~ push(makeResDecl(takeAll())) ~~>
+            = [ LeadMods ] DType Id <~~ push(up.in) ~~> "=" Expression ;
+ResRef      <~~ push({res: stripWs(up.in), rinit: null}) ~~> = Id ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause <~~ push(makeCatch(takeAll())) ~~>
@@ -278,8 +370,11 @@ Decl        = DeclCore ";" ;
 DeclCore    <~~ push(makeDeclSeq(takeAll())) ~~>
             = [ LeadMods ] DType Declarator { "," Declarator } ;
 DType       <~~ push({dty: stripWs(up.in)}) ~~> = Type ;
+// The C-style declarator `int cstyle[] = {5, 6}` puts the array brackets after the
+// NAME (and `int[] mixed[]` splits them across both places); they carry no run-time
+// meaning here, so they are parsed and dropped.
 Declarator  <~~ push({dname: takeAll()}) ~~>
-            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
+            = Id <~~ push(up.in) ~~> { "[" "]" } [ "=" Expression ] ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -334,7 +429,10 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 InstOf      <~~ push(makeInstOf(takeAll(), up.pos)) ~~>
             = ShiftExpr [ InstTail ] ;
 InstTail    <~~ push(makeInstTail(takeAll())) ~~>
-            = KwInstanceof IofType [ IofBind ] ;
+            = KwInstanceof ( InstPat | IofType [ IofBind ] ) ;
+// x instanceof Dot(int v): the record deconstruction form of the test.
+InstPat     <~~ push({ipat: makePatLabel(takeAll())}) ~~>
+            = RecPattern ;
 IofType     <~~ push(stripWs(up.in)) ~~>
             = Type ;
 IofBind     <~~ push({bind: stripWs(up.in)}) ~~>
@@ -375,7 +473,14 @@ RefCast     <~~ push(makeCast(pop())) ~~>
 UnaryNoPM   = Not | PostfixExpr ;
 RefType     = ( "String" KwEnd | Id [ SkipAngle ] { "." Id [ SkipAngle ] } ) { "[" "]" } ;
 
-PostfixExpr = IncDec | NewExpr | QSuperCall | SuperCall | CallMember ;
+// NewExpr is a Primary, not an alternative here, so `new Foo().bar()` and
+// `new int[]{1, 2}[0]` take the ordinary suffix chain.
+PostfixExpr = IncDec | QualNew | QSuperCall | SuperCall | CallMember ;
+// `o.new Inner(args)`: creates an INNER instance whose __outer is o, which is what
+// `Outer.this` inside the inner class reads.
+QualNew     <~~ push(makeQualNew(takeAll())) ~~>
+            = Id <~~ push({qouter: up.in}) ~~> "." KwNew Id <~~ push(up.in) ~~> [ SkipAngle ]
+              "(" [ Expression { "," Expression } ] ")" ;
 // Iface.super.m(args): calls that interface's default method directly (Java's way of
 // picking one of several inherited defaults). Tried before SuperCall, whose 'super'
 // comes first and therefore cannot match this shape.
@@ -387,8 +492,11 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 
 // new Point(1, 2) | new int[]{1, 2, 3} | new int[n] | new Foo() { ... } (anonymous)
 NewExpr     = NewAnon | NewObject | NewArrLit | NewArrSize ;
+// `new Outer.Nested()`: nested types are hoisted under their simple name, so the
+// qualifier only has to be accepted - the last segment names the descriptor.
 NewObject   <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" ;
+            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ]
+              { "." Id <~~ push(up.in) ~~> [ SkipAngle ] } "(" [ Expression { "," Expression } ] ")" ;
 // An anonymous class `new Base(args) { members }`: a real, uniquely named class
 // descriptor emitted at the expression site, so it captures the enclosing scope.
 // Its constructor forwards its arguments to the base constructor; a base that is an
@@ -397,9 +505,16 @@ NewAnon     <~~ push(makeNewAnon(takeAll(), up.pos)) ~~>
             = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")"
               "{" { Member } "}" ;
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
-            = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
-NewArrSize  <~~ push(makeNewArray(pop())) ~~>
-            = KwNew ( "int" KwEnd | "boolean" KwEnd | "String" KwEnd | Id ) "[" Expression "]" ;
+            = KwNew Type "{" [ Expression { "," Expression } [ "," ] ] "}" ;
+// new T[a][b]...[] : every SIZED dimension is built (the innermost one filled with
+// the element type's default), and any trailing empty dimension leaves the last
+// level holding nulls - Java's `new int[2][]`.
+NewArrSize  <~~ push(makeNewArray(takeAll())) ~~>
+            = KwNew NAType NADim { NADim } { NAEmpty } ;
+NAType      <~~ push({naty: stripWs(up.in)}) ~~>
+            = ( PrimName KwEnd | "String" KwEnd | Id ) ;
+NADim       <~~ push({dim: pop()}) ~~> = "[" Expression "]" ;
+NAEmpty     <~~ push({nadim0: true}) ~~> = "[" "]" ;
 
 // super.m(args): the method search starts at the superclass of the class the call
 // appears in (curClassName is set while the class body is being built).
@@ -432,8 +547,15 @@ SwArrowBody = SwYield | Block | Throw ;
 SwYield     <~~ push(makeYield(pop())) ~~>
             = Expression ";" ;
 
-Primary     = SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
-            | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null | VarRef ;
+// A bare array initializer as an expression - `int[] a = {1, 2}`, and nested for the
+// jagged form. Only reachable where an expression is expected, so it cannot be
+// confused with a block (Statement tries Block long before ExprStmt).
+ArrLit      <~~ push(makeArray(takeAll())) ~~>
+            = "{" [ Expression { "," Expression } [ "," ] ] "}" ;
+
+Primary     = ArrLit | NewExpr | SwitchExpr | Lambda | MethodRef | "(" Expression ")" | TextBlock | DqString | CharLit
+            | HexLit | BinLit | OctLit | FloatLit | UscoreInt | SuffInt | IntLit | True | False | Null
+            | OuterThis | BareCall | VarRef ;
 
 // Lambdas and method references are real closures on the handle runtime. A lambda
 // captures the defining scope (js_closure); a functional-interface call site (any
@@ -458,6 +580,20 @@ MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
+// `Outer.this`: the enclosing instance of an inner-class instance, stored as
+// __outer when it is created. Tried before VarRef, which would otherwise read
+// `Outer` as a plain name and `.this` as a member.
+OuterThis   <~~ push(makeOuterThis()) ~~>
+            = Id "." KwThis ;
+
+// An UNQUALIFIED method call - `check(x)` rather than `this.check(x)` or
+// `Main.check(x)`. Java's own rule decides the receiver: a method the enclosing class
+// (or an ancestor) declares static is called on the class descriptor, everything else
+// on the enclosing instance - and in a static context there is none, so the class
+// descriptor is used there too. Tried before VarRef, which would read the name alone.
+BareCall    <~~ push(makeBareCall(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+
 // 'this' and class names resolve like variables.
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -469,11 +605,13 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 // recognized-but-not-implemented. Each form matches something plain IntLit
 // cannot, so ordinary decimal integers still reach IntLit untouched. -----
 
-// A char literal 'c' (escapes included). Reuses the balanced SkipChar shape.
-CharLit     <~~ push(notImplExpr("char literal", up.pos)) ~~> = SkipChar ;
+// A char literal 'c' (escapes included). Reuses the balanced SkipChar shape. The
+// value is a genuine char: it does arithmetic and compares as its code, prints as
+// its glyph, and concatenates as its glyph - see makeCharLit.
+CharLit     <~~ push(makeCharLit(up.in)) ~~> = SkipChar ;
 // A text block """ ... """ ; the !'"""' lookahead lets single and double quotes appear
 // inside without ending the block. Whitespace is disabled inside so newlines are content.
-TextBlock   <~~ push(notImplExpr("text block", up.pos)) ~~>
+TextBlock   <~~ push(makeConst(textBlock(up.in))) ~~>
             = '"""' :whitespace() { !'"""' TBItem } '"""' :whitespace(Whitespace) ;
 TBItem      = "\\" "\x00"..."\U0010ffff" | "\x00"..."\U0010ffff" ;
 // Hex / binary: the 0x / 0b prefix is distinctive, so these never shadow a decimal int.
@@ -546,13 +684,17 @@ LeadMods    = { Annotation | ModKw } ;
 ImplementsSkip <~~ push({impls: takeAll()}) ~~> = KwImplements IType { "," IType } ;
 IType       <~~ push(stripWs(up.in)) ~~> = Type ;
 Throws      = KwThrows Type { "," Type } ;
-CatchType   = Type { "|" Type } ;
+CatchType   = { Annotation } Type { "|" { Annotation } Type } ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a
 // whole Java file parses; -warn-unsupported lets the rest compile). Bodies are skipped.
 UnsupType   = AnnotationDecl | Interface | EnumDecl ;
-AnnotationDecl <~~ push(notImplStmt("annotation type", up.pos)) ~~>
-            = { ModKw } "@" KwInterface Id SkipBlock ;
+// An annotation type declaration (@interface M { int id(); ... }). Annotations
+// themselves are parsed and dropped everywhere they may appear, and this subset has
+// no reflection, so the declaration only has to introduce the NAME: it lowers to an
+// empty descriptor, like a marker interface with no members.
+AnnotationDecl <~~ push(makeAnnotationTypeStmt(takeAll())) ~~>
+            = { ModKw } "@" KwInterface Id <~~ push(up.in) ~~> SkipBlock ;
 // An interface lowers to a plain class descriptor: the default / static / private
 // methods become closures on it and the (implicitly static final) constants become
 // its properties. It has no constructor, so a class implementing it does not chain
@@ -565,16 +707,32 @@ InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
               [ KwExtends IType { "," IType } ] [ PermitsSkip ] "{" { Member } "}" ;
 InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
             = LeadMods KwInterface Id [ SkipAngle ] [ KwExtends Type { "," Type } ] [ PermitsSkip ] SkipBlock ;
-EnumDecl    <~~ push(notImplStmt("enum", up.pos)) ~~>
+// An enum lowers to a class descriptor plus one instance per constant, stored on the
+// descriptor under the constant's name. The constants are built in textual order, so
+// __eord (ordinal()) is their index and __values (values()) their list; name() and
+// valueOf() read the same two. A constant with its own BODY gets a per-constant
+// descriptor whose __super is the enum, so its overrides win over the enum's methods.
+// A body outside the member subset falls back to EnumSkip.
+EnumDecl    = EnumReal | EnumSkip ;
+EnumReal    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = LeadMods KwEnum Id <~~ push(up.in) ~~> [ ImplementsSkip ]
+              "{" [ EnumConst { "," EnumConst } ] [ "," ] [ ";" { Member } ] "}" ;
+EnumConst   <~~ push(makeEnumConst(takeAll())) ~~>
+            = { Annotation } Id <~~ push(up.in) ~~>
+              [ "(" [ Expression { "," Expression } ] ")" ] [ EnumBody ] ;
+EnumBody    <~~ push({ebody: takeAll()}) ~~> = "{" { Member } "}" ;
+EnumSkip    <~~ push(notImplStmt("enum", up.pos)) ~~>
             = LeadMods KwEnum Id [ ImplementsSkip ] SkipBlock ;
 
-// A type declared inside a class body (nested/inner): accepted, reported as not
-// implemented; its members are not lowered. It fires notImpl and pushes nothing, so
-// makeClassStmt simply skips it.
-NestedType  <~~ notImpl("nested type", up.pos) ~~>
-            = LeadMods NestedKw Id [ SkipAngle ] [ SkipParen ]
-              [ KwExtends Type { "," Type } ] [ ImplementsSkip ] [ PermitsSkip ] SkipBlock ;
-NestedKw    = ( "class" | "interface" | "enum" | "record" ) KwEnd ;
+// A type declared inside a class body (nested or inner). It is lowered exactly like
+// a top-level one and HOISTED: its descriptor is declared under its simple name in
+// the scope the enclosing class is built in, and also stored on the enclosing class
+// descriptor, so both `new Inner(...)` and `new Outer.Nested()` resolve. An INNER
+// (non-static) instance additionally carries __outer - the enclosing instance that
+// `o.new Inner(...)` supplies and `Outer.this` reads.
+NestedType  <~~ push(makeNestedMember(pop())) ~~>
+            = TypeDecl ;
+TypeDecl    = ClassDecl | RecordDecl | AnnotationDecl | Interface | EnumDecl ;
 
 KwClass     = "class" KwEnd ;
 KwRecord    = "record" KwEnd ;
@@ -796,6 +954,124 @@ KwYield     = "yield" KwEnd ;
         return parseFloat(s)
     }
 
+    // ----- Java escapes, char literals -----
+    // Java's escape set for string and char literals: the C-style single letters
+    // (b f n r t s), the quotes and the backslash, a 4-digit u escape, and the
+    // classic OCTAL escapes (up to three digits, value 0..255) - which the shared
+    // unescapeJs does not know, so this replaces it for the whole grammar.
+    unescapeJs = function(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var cc = s.charCodeAt(i)
+            if (cc != 92) { out = out + s.charAt(i); i++; continue }
+            var e = s.charAt(i + 1)
+            if (e == "n") { out = out + "\n"; i += 2; continue }
+            if (e == "t") { out = out + "\t"; i += 2; continue }
+            if (e == "r") { out = out + "\r"; i += 2; continue }
+            if (e == "b") { out = out + String.fromCharCode(8); i += 2; continue }
+            if (e == "f") { out = out + String.fromCharCode(12); i += 2; continue }
+            if (e == "s") { out = out + " "; i += 2; continue }
+            if (e == "\n") { i += 2; continue } // A text block's line continuation.
+            if (e == "u") {
+                var j = i + 2
+                while (s.charAt(j) == "u") { j++ } // \uuuuXXXX is legal Java.
+                out = out + String.fromCharCode(hexAt(s, j, 4))
+                i = j + 4
+                continue
+            }
+            var d = s.charCodeAt(i + 1)
+            if (d >= 48 && d <= 55) { // An octal escape: one to three digits, max 377.
+                var v = 0
+                var n = 0
+                var k = i + 1
+                while (n < 3 && k < s.length) {
+                    var dc = s.charCodeAt(k)
+                    if (dc < 48 || dc > 55) { break }
+                    var nv = v * 8 + (dc - 48)
+                    if (nv > 255) { break }
+                    v = nv
+                    n++
+                    k++
+                }
+                out = out + String.fromCharCode(v)
+                i = k
+                continue
+            }
+            out = out + e
+            i += 2
+        }
+        return out
+    }
+    // ----- Text blocks -----
+    // JLS 3.10.6 in order: take the content after the line terminator that must
+    // follow the opening delimiter, remove the INCIDENTAL white space (the smallest
+    // indentation over the non-blank lines and the closing delimiter's own line),
+    // strip each line's trailing white space, join with newlines - and only THEN
+    // process escapes, which is why a trailing space can still be written as an s
+    // escape and a line joined with a backslash before its newline.
+    function tbLeadWs(s) {
+        var n = 0
+        while (n < s.length && (s.charAt(n) == " " || s.charAt(n) == "\t")) { n++ }
+        return n
+    }
+    function tbRTrim(s) {
+        var e = s.length
+        while (e > 0) {
+            var ch = s.charAt(e - 1)
+            if (ch != " " && ch != "\t") { break }
+            e--
+        }
+        return s.substring(0, e)
+    }
+    function tbAt3(s, i) {
+        return s.charAt(i) == '"' && s.charAt(i + 1) == '"' && s.charAt(i + 2) == '"'
+    }
+    function textBlock(text) {
+        var a = 0
+        while (a + 2 < text.length && !tbAt3(text, a)) { a++ }
+        a = a + 3
+        var z = text.length - 3
+        while (z > a && !tbAt3(text, z)) { z-- }
+        var raw = text.substring(a, z)
+        raw = raw.split("\r\n").join("\n")
+        var nl = 0
+        while (nl < raw.length && raw.charAt(nl) != "\n") { nl++ }
+        raw = raw.substring(nl + 1)
+        var lines = raw.split("\n")
+        var last = lines.length - 1
+        var minInd = -1
+        for (var i = 0; i <= last; i++) {
+            var ind = tbLeadWs(lines[i])
+            if (i < last && ind == lines[i].length) { continue } // A blank line does not count.
+            if (minInd < 0 || ind < minInd) { minInd = ind }
+        }
+        if (minInd < 0) { minInd = 0 }
+        var out = ""
+        for (var k = 0; k <= last; k++) {
+            var ln = lines[k]
+            if (ln.length < minInd) { ln = "" } else { ln = ln.substring(minInd) }
+            if (k > 0) { out = out + "\n" }
+            out = out + tbRTrim(ln)
+        }
+        return unescapeJs(out)
+    }
+
+    // 'x' -> the char value of its single (possibly escaped) character. js_char boxes
+    // the code, so the value knows it is a char: it renders as the glyph but does
+    // arithmetic and comparison on the code, exactly like Java's char.
+    function makeCharLit(text) {
+        // The token is 'x', possibly with trailing layout: cut between the first and
+        // the last quote (stripWs would eat a literal space or tab char).
+        var a = 0
+        while (a < text.length && text.charAt(a) != "'") { a++ }
+        var z = text.length - 1
+        while (z > a && text.charAt(z) != "'") { z-- }
+        var dec = unescapeJs(text.substring(a + 1, z))
+        var code = dec.length > 0 ? dec.charCodeAt(0) : 0
+        return function(b) { return {b: b, v: callExt(b, "js_char", [handle(code)])} }
+    }
+
     // Unary + is identity; ~x is the int32 complement (x ^ -1).
     function makeUPlus(inner) { return inner }
     function makeBitNot(inner, pos) {
@@ -817,6 +1093,10 @@ KwYield     = "yield" KwEnd ;
         if (op == "<<" || op == "<<=") return callExt(b, "js_shl", [l, r])
         if (op == ">>" || op == ">>=") return callExt(b, "js_shr", [l, r])
         if (op == ">>>" || op == ">>>=") return intWrap(b, callExt(b, "js_ushr", [l, r]))
+        // == / != go through the char-aware equality (js_jchareq is js_seq unless a
+        // char meets the one-character String that charAt answers).
+        if (op == "==") return callExt(b, "js_jchareq", [l, r])
+        if (op == "!=") return callExt(b, "js_not", [callExt(b, "js_jchareq", [l, r])])
         return coreEmitBin(b, op, l, r)
     }
     // x instanceof Type [binding]: js_is_type decides; a pattern variable binds
@@ -824,6 +1104,7 @@ KwYield     = "yield" KwEnd ;
     // code that compiles under javac only reads it where the test held).
     // A single item (no instanceof tail) is a transparent pass-through.
     function makeInstTail(items) {
+        if (items[0] != undefined && items[0].ipat != undefined) { return {iof: true, pat: items[0].ipat} }
         var tail = {iof: true, tname: items[0]}
         if (items.length > 1) { tail.bind = items[1].bind }
         return tail
@@ -832,6 +1113,12 @@ KwYield     = "yield" KwEnd ;
         if (items.length == 1) return items[0]
         var operand = items[0]
         var tail = items[1]
+        if (tail.pat != undefined) {
+            return function(b) {
+                var r = operand(b)
+                return tail.pat(r.b, r.v)
+            }
+        }
         return function(b) {
             var r = operand(b)
             b = r.b
@@ -860,9 +1147,91 @@ KwYield     = "yield" KwEnd ;
         }
     }
 
-    function makeNew(items) {
-        var clsName = items[0]
+    // `o.new Inner(args)`: like new, plus the enclosing instance in __outer, set
+    // before the constructor runs so the constructor body can already use it.
+    function makeQualNew(items) {
+        var outerName = items[0].qouter
+        var clsName = items[1]
+        var args = items.slice(2)
+        return function(b) {
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+            var objV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+            callExt(b, "js_set", [objV, emitStr(b, "__outer"),
+                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, outerName)])])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, objV])
+            for (var i = 0; i < args.length; i++) {
+                var r = args[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [argsV, r.v])
+            }
+            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
+            callExt(b, "js_call", [ctorV, hUndef, argsV])
+            return {b: b, v: objV}
+        }
+    }
+    // Which class declares a method under which name, and whether it is static; plus
+    // each class's superclass, so an inherited method is found too. Filled while the
+    // declarations are walked, read when a call is EMITTED - by then it is complete.
+    var methodKind = {}
+    var classSuper = {}
+    // True while a function that has `this` in its scope chain is being emitted: an
+    // instance method or constructor, and anything nested inside one (a lambda, a try
+    // body), which captures the same scope.
+    var curHasThis = false
+    function lookupMethodKind(cls, name) {
+        var seen = {}
+        var c2 = cls
+        while (c2 != undefined && c2 != "" && seen["$" + c2] != true) {
+            seen["$" + c2] = true
+            var k = methodKind["$" + c2 + "#" + name]
+            if (k != undefined) { return k }
+            c2 = classSuper["$" + c2]
+        }
+        return null
+    }
+    function makeBareCall(items) {
+        var name = items[0]
         var args = items.slice(1)
+        var cls = curClassName
+        return function(b) {
+            var kind = lookupMethodKind(cls, name)
+            var recvV
+            if (cls == "") {
+                // Outside every class body: the only sensible reading is a callable
+                // value of that name in scope.
+                var ea0 = emitArgs(b, args)
+                var fnV = callExt(ea0.b, "js_scope_get", [curScopeV, emitStr(ea0.b, name)])
+                return {b: ea0.b, v: callExt(ea0.b, "js_call", [fnV, hUndef, ea0.v])}
+            }
+            if (kind != "instance" && (kind == "static" || !curHasThis)) {
+                recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cls)])
+            } else {
+                recvV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            }
+            var ea = emitArgs(b, args)
+            b = ea.b
+            return {b: b, v: callExt(b, "js_mcall", [recvV, emitStr(b, name), ea.v])}
+        }
+    }
+
+    // Outer.this -> this.__outer
+    function makeOuterThis() {
+        return function(b) {
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, "__outer")])}
+        }
+    }
+    function makeNew(items) {
+        var clsName = ""
+        var args = []
+        for (var q = 0; q < items.length; q++) {
+            // A qualified name (new Outer.Nested()) pushes each segment; the LAST one
+            // names the hoisted descriptor.
+            if (typeof items[q] == "string") { clsName = items[q] } else { args.push(items[q]) }
+        }
+        noteTypeUse(clsName)
         return function(b) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var objV = callExt(b, "js_obj_new", [])
@@ -890,11 +1259,61 @@ KwYield     = "yield" KwEnd ;
             return {b: b, v: arr}
         }
     }
-    function makeNewArray(sizeT) {
+    // new T[d0][d1]...[]: the sized dimensions are built outermost first, each level
+    // but the last filled with the next level (an emitted loop, since the sizes are
+    // run-time values). The innermost fill is the element type's default - 0 for the
+    // numeric primitives, false for boolean, null for a reference type and for the
+    // levels a trailing empty dimension leaves unbuilt.
+    var naCount = 0
+    function arrFillOf(ty, hasEmpty) {
+        if (hasEmpty) { return function(b) { return hNull } }
+        if (ty == "boolean") { return function(b) { return hFalse } }
+        if (ty == "int" || ty == "long" || ty == "short" || ty == "byte"
+            || ty == "double" || ty == "float") { return function(b) { return emitNum(b, 0) } }
+        if (ty == "char") { return function(b) { return callExt(b, "js_char", [handle(0)]) } }
+        return function(b) { return hNull }
+    }
+    function emitArrDims(b, dimVs, idx, fillFn) {
+        if (idx == dimVs.length - 1) {
+            return {b: b, v: callExt(b, "js_arr_new_n", [dimVs[idx], fillFn(b)])}
+        }
+        var arrV = callExt(b, "js_arr_new_n", [dimVs[idx], hNull])
+        naCount++
+        var iName = "$na" + naCount
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, dimVs[idx]])), bodyB, doneB)
+        var i2V = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        var sub = emitArrDims(bodyB, dimVs, idx + 1, fillFn)
+        var bb = sub.b
+        callExt(bb, "js_set", [arrV, i2V, sub.v])
+        callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, iName),
+                                     callExt(bb, "js_jadd", [i2V, emitNum(bb, 1)])])
+        bb.NewBr(headB)
+        return {b: doneB, v: arrV}
+    }
+    function makeNewArray(items) {
+        var ty = ""
+        var dims = []
+        var hasEmpty = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].naty != undefined) { ty = items[i].naty }
+            else if (items[i].dim != undefined) { dims.push(items[i].dim) }
+            else { hasEmpty = true }
+        }
+        var fillFn = arrFillOf(ty, hasEmpty)
         return function(b) {
-            var r = sizeT(b)
-            b = r.b
-            return {b: b, v: callExt(b, "js_arr_new_n", [r.v, emitNum(b, 0)])}
+            var dimVs = []
+            for (var k = 0; k < dims.length; k++) {
+                var r = dims[k](b)
+                b = r.b
+                dimVs.push(r.v)
+            }
+            return emitArrDims(b, dimVs, 0, fillFn)
         }
     }
     // A cast is identity: (Type) expr lowers to expr.
@@ -1034,14 +1453,51 @@ KwYield     = "yield" KwEnd ;
     // try/catch/finally: each body compiles to its own IR closure handed to js_try; the
     // try and catch bodies are ctl closures, so a return/break/continue leaving them
     // becomes a control signal that excDispatch re-issues here. The first catch wins.
+    // One try-with-resources resource: `Type name = init` (DType is dropped - the
+    // resource is only ever closed, never target-typed).
+    function makeResDecl(items) {
+        var name = ""
+        var init = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].dty != undefined) { continue }
+            if (typeof items[i] == "string") { name = items[i] } else { init = items[i] }
+        }
+        return {res: name, rinit: init}
+    }
+    // Wraps `innerT` in `try { innerT } finally { r.close() }`, with the resource
+    // declared just before. Applied innermost-last, so several resources close in
+    // reverse order, like Java's.
+    function makeResourceTry(r, innerT) {
+        var closeT = function(b) {
+            var vV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, r.res)])
+            callExt(b, "js_mcall", [vV, emitStr(b, "close"), callExt(b, "js_arr_new", [])])
+            return b
+        }
+        return function(b) {
+            if (r.rinit != null) {
+                var ir = r.rinit(b)
+                b = ir.b
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, r.res), ir.v])
+            }
+            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], innerT, false, null, null, null, true)), curScopeV])
+            var finClo = callExt(b, "js_closure", [handle(emitFunc([], closeT, false, null, null, null, true)), curScopeV])
+            return excDispatch(b, callExt(b, "js_try", [tryClo, hUndef, finClo]))
+        }
+    }
     function makeTry(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        var resources = null
         for (var i = 0; i < items.length; i++) {
+            if (items[i].resources != undefined) { resources = items[i].resources }
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
             else if (items[i].catchbody != undefined) {
                 if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
             }
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+        }
+        if (resources != null) {
+            for (var k = resources.length - 1; k >= 0; k--) { tryT = makeResourceTry(resources[k], tryT) }
         }
         return function(b) {
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, null, null, null, true)), curScopeV])
@@ -1271,7 +1727,8 @@ KwYield     = "yield" KwEnd ;
             return exitB
         }
     }
-    function makeCase(items) { return {isDefault: false, v: items[0], body: items.slice(1)} }
+    // A case label is {v: valueThunk} (compare) or {test: predicate} (a pattern).
+    function makeCase(items) { return {isDefault: false, lab: {v: items[0]}, body: items.slice(1)} }
     function makeDefault(items) { return {isDefault: true, body: items} }
     // Arrow arms: one classic case object per label (empty bodies fall through
     // to the last, which carries the arm body plus an implicit break).
@@ -1284,9 +1741,9 @@ KwYield     = "yield" KwEnd ;
             else { body.push(items[i]) }
         }
         for (var i = 0; i < labels.length - 1; i++) {
-            push({isDefault: false, v: labels[i], body: []})
+            push({isDefault: false, lab: labels[i], body: []})
         }
-        push({isDefault: false, v: labels[labels.length - 1], body: body.concat([switchBreak()])})
+        push({isDefault: false, lab: labels[labels.length - 1], body: body.concat([switchBreak()])})
     }
     function pushArrowDefault(items) {
         push({isDefault: true, body: items.concat([switchBreak()])})
@@ -1340,10 +1797,16 @@ KwYield     = "yield" KwEnd ;
             }
             for (var i = 0; i < cases.length; i++) {
                 if (cases[i].isDefault) { continue }
-                var rc = cases[i].v(b)
-                b = rc.b
                 var nextB = curF.NewBlock("")
-                b.NewCondBr(truthy(b, callExt(b, "js_seq", [r.v, rc.v])), bodyBs[i], nextB)
+                if (cases[i].lab.test != undefined) {
+                    var rp = cases[i].lab.test(b, r.v)
+                    b = rp.b
+                    b.NewCondBr(truthy(b, rp.v), bodyBs[i], nextB)
+                } else {
+                    var rc = cases[i].lab.v(b)
+                    b = rc.b
+                    b.NewCondBr(truthy(b, callExt(b, "js_jchareq", [r.v, rc.v])), bodyBs[i], nextB)
+                }
                 b = nextB
             }
             b.NewBr(dfltB)
@@ -1532,6 +1995,53 @@ KwYield     = "yield" KwEnd ;
         return handle(f.dfltH)
     }
 
+    // A parameter list: the names in order, with a varargs parameter kept as
+    // {rest: name} so emitFunc can tell it apart.
+    function makeParams(items) {
+        var out = []
+        var rest = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].vararg != undefined) { rest = true; continue }
+            if (rest) { out.push({rest: items[i]}); rest = false } else { out.push(items[i]) }
+        }
+        return {params: out}
+    }
+    // `int... xs`: the arguments from startIdx on, as an array. A single argument
+    // that already IS an array is passed straight through, which is how Java lets an
+    // array feed a varargs parameter.
+    var vaCount = 0
+    function emitVarargs(b, name, startIdx) {
+        var argsP = curF.Params[1]
+        var nameV = emitStr(b, name)
+        var lenV = callExt(b, "js_get", [argsP, emitStr(b, "length")])
+        callExt(b, "js_scope_decl", [curScopeV, nameV, callExt(b, "js_arr_new", [])])
+        var chkB = curF.NewBlock("")
+        var passB = curF.NewBlock("")
+        var collB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [lenV, emitNum(b, startIdx + 1)])), chkB, collB)
+        var soleV = callExt(chkB, "js_arg", [argsP, handle(startIdx)])
+        chkB.NewCondBr(truthy(chkB, callExt(chkB, "js_is_type", [soleV, emitStr(chkB, "Array")])), passB, collB)
+        callExt(passB, "js_scope_set", [curScopeV, emitStr(passB, name),
+                                        callExt(passB, "js_arg", [argsP, handle(startIdx)])])
+        passB.NewBr(doneB)
+        vaCount++
+        var iName = "$va" + vaCount
+        callExt(collB, "js_scope_decl", [curScopeV, emitStr(collB, iName), emitNum(collB, startIdx)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        collB.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, doneB)
+        var i2V = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        var arrV = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, name)])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [argsP, i2V])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        callExt(bodyB, "js_jadd", [i2V, emitNum(bodyB, 1)])])
+        bodyB.NewBr(headB)
+        return doneB
+    }
+
     // Emits one method/ctor as jsf_N(env, args). For instance functions args[0] is this.
     // fields != null marks a constructor: the field initializers run before the body.
     // The class whose body is currently being built (for super calls).
@@ -1559,6 +2069,10 @@ KwYield     = "yield" KwEnd ;
             off = 1
         }
         for (var i = 0; i < params.length; i++) {
+            if (typeof params[i] != "string") { // The varargs parameter, always last.
+                b = emitVarargs(b, params[i].rest, i + off)
+                continue
+            }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                          callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
         }
@@ -1682,9 +2196,42 @@ KwYield     = "yield" KwEnd ;
         return emitFunc([], body, true, null, undefined, null)
     }
 
+    // The name of the type declaration whose walk just finished (see makeNestedMember).
+    var lastTypeName = ""
+
     function buildClassStmt(name, members, recordParams) {
         classNames["$" + name] = true
+        userDeclared["$" + name] = true
+        lastTypeName = name
+        for (var u = 0; u < members.length; u++) {
+            if (members[u].ext != undefined) {
+                noteTypeUse(baseTypeName(members[u].ext))
+                classSuper["$" + name] = baseTypeName(members[u].ext)
+            }
+            if (members[u].impls != undefined && classSuper["$" + name] == undefined
+                && members[u].impls.length > 0) {
+                classSuper["$" + name] = baseTypeName(members[u].impls[0])
+            }
+            // The static/instance table an unqualified call resolves against.
+            if (members[u].kind == "method") {
+                methodKind["$" + name + "#" + members[u].name] = members[u].statik ? "static" : "instance"
+            }
+            if (members[u].kind == "abstract") {
+                methodKind["$" + name + "#" + members[u].name] = "instance"
+            }
+        }
+        if (recordParams != undefined) {
+            for (var rc = 0; rc < recordParams.length; rc++) {
+                if (methodKind["$" + name + "#" + recordParams[rc]] == undefined) {
+                    methodKind["$" + name + "#" + recordParams[rc]] = "instance"
+                }
+            }
+        }
         return function(b) {
+            // A local / anonymous class is built inside another function's emission;
+            // its own members decide `this` availability, so it is restored on the way
+            // out (see curHasThis).
+            var savedHasThis = curHasThis
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
@@ -1711,6 +2258,14 @@ KwYield     = "yield" KwEnd ;
             if (chained != null) {
                 callExt(b, "js_set", [clsV, emitStr(b, "__super"),
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, chained)])])
+            }
+            // Nested / inner types first: they are hoisted into this scope AND stored
+            // on the descriptor, so the enclosing class's own members can use them.
+            for (i = 0; i < members.length; i++) {
+                if (members[i].kind != "nested") { continue }
+                b = members[i].stmt(b)
+                callExt(b, "js_set", [clsV, emitStr(b, members[i].name),
+                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, members[i].name)])])
             }
             for (i = 0; i < members.length; i++) {
                 var mm = members[i]
@@ -1777,6 +2332,7 @@ KwYield     = "yield" KwEnd ;
                     if (ci.deleg.deleg == "this") { flds = null }
                 }
                 if (sup != null && interfaceNames["$" + sup] == true) { sup = null }
+                curHasThis = true
                 var cidx = emitFunc(ci.params, ci.body, true, flds, undefined, sup, false, pre)
                 var cclo = callExt(b, "js_closure", [handle(cidx), curScopeV])
                 callExt(b, "js_set", [clsV, emitStr(b, "__ctor#" + ci.params.length), cclo])
@@ -1795,6 +2351,7 @@ KwYield     = "yield" KwEnd ;
                 var m2 = members[i]
                 if (m2.kind == "method") {
                     declared["$" + m2.name] = true
+                    curHasThis = !m2.statik
                     var idx = emitFunc(m2.params, m2.body, !m2.statik, null, undefined)
                     callExt(b, "js_set", [clsV, emitStr(b, m2.name), callExt(b, "js_closure", [handle(idx), curScopeV])])
                 }
@@ -1825,6 +2382,7 @@ KwYield     = "yield" KwEnd ;
                     callExt(b, "js_set", [clsV, emitStr(b, "equals"), callExt(b, "js_closure", [handle(eqidx), curScopeV])])
                 }
             }
+            curHasThis = savedHasThis
             return b
         }
     }
@@ -1832,7 +2390,83 @@ KwYield     = "yield" KwEnd ;
         return buildClassStmt(items[0], items.slice(1), undefined)
     }
     function makeRecordStmt(items) {
+        recordComponents["$" + items[0]] = items[1].rparams
         return buildClassStmt(items[0], items.slice(2), items[1].rparams)
+    }
+
+    // ----- The java.lang throwable hierarchy -----
+    // The standard exception classes are not declared by the program, so the compile
+    // provides them: a descriptor with the usual __super chain, a constructor taking
+    // an optional message and getMessage(). Only the ones a program actually names
+    // (as a superclass or a `new` target), plus their ancestors, are emitted.
+    var builtinExcOrder = ["Throwable", "Exception", "Error", "RuntimeException",
+                           "IllegalArgumentException", "IllegalStateException",
+                           "NullPointerException", "ArithmeticException",
+                           "IndexOutOfBoundsException", "ArrayIndexOutOfBoundsException",
+                           "ClassCastException", "UnsupportedOperationException",
+                           "NumberFormatException", "InterruptedException", "IOException"]
+    var builtinExcParent = {"$Throwable": "", "$Exception": "Throwable", "$Error": "Throwable",
+                            "$RuntimeException": "Exception",
+                            "$IllegalArgumentException": "RuntimeException",
+                            "$IllegalStateException": "RuntimeException",
+                            "$NullPointerException": "RuntimeException",
+                            "$ArithmeticException": "RuntimeException",
+                            "$IndexOutOfBoundsException": "RuntimeException",
+                            "$ArrayIndexOutOfBoundsException": "IndexOutOfBoundsException",
+                            "$ClassCastException": "RuntimeException",
+                            "$UnsupportedOperationException": "IllegalArgumentException",
+                            "$NumberFormatException": "IllegalArgumentException",
+                            "$InterruptedException": "Exception", "$IOException": "Exception"}
+    var neededExc = {}
+    var userDeclared = {}
+    for (var bx = 0; bx < builtinExcOrder.length; bx++) { classNames["$" + builtinExcOrder[bx]] = true }
+    // Records that `name` is used as a type, so its builtin descriptor (and every
+    // ancestor's) has to be emitted.
+    function noteTypeUse(name) {
+        var n = name
+        while (n != undefined && n != "" && builtinExcParent["$" + n] != undefined) {
+            neededExc["$" + n] = true
+            n = builtinExcParent["$" + n]
+        }
+    }
+    function emitBuiltinExc(b) {
+        var ctor1 = emitFunc([], function(bb) {
+            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            callExt(bb, "js_set", [tV, emitStr(bb, "__msg"), callExt(bb, "js_arg", [curF.Params[1], handle(1)])])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        var ctor0 = emitFunc([], function(bb) {
+            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            callExt(bb, "js_set", [tV, emitStr(bb, "__msg"), hNull])
+            bb.NewRet(hUndef)
+            return deadBlock()
+        }, false, null)
+        var getMsg = emitFunc([], function(bb) {
+            var tV = callExt(bb, "js_arg", [curF.Params[1], handle(0)])
+            bb.NewRet(callExt(bb, "js_get", [tV, emitStr(bb, "__msg")]))
+            return deadBlock()
+        }, false, null)
+        for (var i = 0; i < builtinExcOrder.length; i++) {
+            var name = builtinExcOrder[i]
+            if (neededExc["$" + name] != true) { continue }
+            if (userDeclared["$" + name] == true) { continue }
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            var par = builtinExcParent["$" + name]
+            if (par != "" && neededExc["$" + par] == true && userDeclared["$" + par] != true) {
+                callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, par)])])
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor#0"), callExt(b, "js_closure", [handle(ctor0), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor#1"), callExt(b, "js_closure", [handle(ctor1), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
+                                  callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1])), curScopeV])])
+            callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])
+        }
+        return b
     }
 
     // ----- Interfaces -----
@@ -1873,6 +2507,212 @@ KwYield     = "yield" KwEnd ;
     function buildInterfaceStmt(name, members) {
         var inner = buildClassStmt(name, members, undefined)
         return inner
+    }
+
+    // A nested / inner type member: the walk of the inner declaration has just left
+    // its statement thunk on the stack, and lastTypeName holds its name (the walk is
+    // a single ordered pass, so it is the one that just finished).
+    function makeNestedMember(stmt) {
+        return {kind: "nested", stmt: stmt, name: lastTypeName}
+    }
+
+    // @interface M { ... }: an empty descriptor under the annotation's name.
+    function makeAnnotationTypeStmt(items) {
+        var name = items[0]
+        interfaceNames["$" + name] = true
+        interfaceMethodNames["$" + name] = []
+        interfaceAbstracts["$" + name] = []
+        return buildClassStmt(name, [], undefined)
+    }
+
+    // ----- Enums -----
+    // Which enum owns a bare constant name, so an unqualified `case S ->` in a switch
+    // over that enum resolves (Java lets the label drop the type name). Decided when
+    // the label is EMITTED, which is after every declaration has been walked.
+    var enumConstOwner = {}
+    function makeEnumConst(items) {
+        var name = items[0]
+        var args = []
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].ebody != undefined) { body = items[i].ebody } else { args.push(items[i]) }
+        }
+        return {econst: true, name: name, args: args, body: body}
+    }
+    // One helper method on the enum descriptor. `name`/`ordinal` are instance methods
+    // (the receiver arrives as argument 0); `values`/`valueOf` are static and read the
+    // descriptor back out of the captured scope.
+    function emitEnumHelper(kind, ename) {
+        var body = function(b) {
+            var a0 = callExt(b, "js_arg", [curF.Params[1], handle(0)])
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ename)])
+            if (kind == "name") { b.NewRet(callExt(b, "js_get", [a0, emitStr(b, "__ename")])) }
+            else if (kind == "ordinal") { b.NewRet(callExt(b, "js_get", [a0, emitStr(b, "__eord")])) }
+            else if (kind == "values") { b.NewRet(callExt(b, "js_get", [clsV, emitStr(b, "__values")])) }
+            else { b.NewRet(callExt(b, "js_get", [clsV, a0])) }
+            return deadBlock()
+        }
+        return emitFunc([], body, false, null)
+    }
+    function makeEnumStmt(items) {
+        var name = items[0]
+        var consts = []
+        var members = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].econst != undefined) { consts.push(items[i]) } else { members.push(items[i]) }
+        }
+        for (var k = 0; k < consts.length; k++) { enumConstOwner["$" + consts[k].name] = name }
+        // A constant BODY is an anonymous subclass of the enum; build it up front so
+        // the walk-time registration (class names) happens here too.
+        var subs = []
+        for (var s = 0; s < consts.length; s++) {
+            if (consts[s].body == null) { subs.push(null); continue }
+            subs.push(buildClassStmt(name + "$" + consts[s].name, [{ext: name}].concat(consts[s].body), undefined))
+        }
+        var clsStmt = buildClassStmt(name, members, undefined)
+        lastTypeName = name
+        return function(b) {
+            b = clsStmt(b)
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            var kinds = ["name", "ordinal", "values", "valueOf"]
+            for (var h = 0; h < kinds.length; h++) {
+                callExt(b, "js_set", [clsV, emitStr(b, kinds[h]),
+                                      callExt(b, "js_closure", [handle(emitEnumHelper(kinds[h], name)), curScopeV])])
+            }
+            var valsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__values"), valsV])
+            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
+            for (var q = 0; q < consts.length; q++) {
+                var descV = clsV
+                if (subs[q] != null) {
+                    b = subs[q](b)
+                    descV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name + "$" + consts[q].name)])
+                }
+                var objV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [objV, emitStr(b, "__class"), descV])
+                callExt(b, "js_set", [objV, emitStr(b, "__ename"), emitStr(b, consts[q].name)])
+                callExt(b, "js_set", [objV, emitStr(b, "__eord"), emitNum(b, q)])
+                var argsV = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [argsV, objV])
+                for (var a = 0; a < consts[q].args.length; a++) {
+                    var r = consts[q].args[a](b)
+                    b = r.b
+                    callExt(b, "js_arr_push", [argsV, r.v])
+                }
+                callExt(b, "js_call", [ctorV, hUndef, argsV])
+                callExt(b, "js_set", [clsV, emitStr(b, consts[q].name), objV])
+                callExt(b, "js_arr_push", [valsV, objV])
+            }
+            return b
+        }
+    }
+    // ----- Patterns (pattern switch and the instanceof record form) -----
+    // The component names of every record, so a deconstruction pattern knows which
+    // members its sub-patterns describe.
+    var recordComponents = {}
+    // A pattern is {ty, bind, subs}: subs != null makes it a record deconstruction.
+    // `var` and the primitive type names carry no run-time test - inside a record
+    // pattern the component's type is already fixed by the record declaration.
+    function patNeedsTest(ty) {
+        if (ty == "var" || ty == "int" || ty == "long" || ty == "short" || ty == "byte"
+            || ty == "double" || ty == "float" || ty == "char" || ty == "boolean") { return false }
+        return true
+    }
+    function patParts(items) {
+        var ty = ""
+        var bind = null
+        var subs = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].pty != undefined) { ty = baseTypeName(items[i].pty); continue }
+            if (items[i].pbind != undefined) { bind = items[i].pbind; continue }
+            subs.push(items[i])
+        }
+        return {ty: ty, bind: bind, subs: subs}
+    }
+    function makeTypePattern(items) {
+        var p = patParts(items)
+        return {ty: p.ty, bind: p.bind, subs: null}
+    }
+    function makeRecPattern(items) {
+        var p = patParts(items)
+        return {ty: p.ty, bind: p.bind, subs: p.subs}
+    }
+    function makePatLabel(items) {
+        var pat = null
+        var guard = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].pwhen != undefined) { guard = items[i].pwhen } else { pat = items[i] }
+        }
+        return patternTest(pat, guard)
+    }
+    // Emits the test for one pattern against `val`, branching to failB as soon as a
+    // component does not match; bindings are declared as they are reached (looser than
+    // Java's flow scoping, like the plain instanceof binding above).
+    function emitPattern(b, val, pat, failB) {
+        if (patNeedsTest(pat.ty)) {
+            var okB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [val, emitStr(b, pat.ty)])), okB, failB)
+            b = okB
+        }
+        if (pat.bind != null) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.bind), val])
+        }
+        if (pat.subs != null) {
+            var comps = recordComponents["$" + pat.ty]
+            if (comps == undefined) { comps = [] }
+            for (var i = 0; i < pat.subs.length && i < comps.length; i++) {
+                b = emitPattern(b, callExt(b, "js_get", [val, emitStr(b, comps[i])]), pat.subs[i], failB)
+            }
+        }
+        return b
+    }
+    // The whole label as a predicate on the scrutinee: the pattern, then the optional
+    // `when` guard. The outcome travels in a hidden scope variable, so the two paths
+    // meet without a phi over the whole component chain.
+    var patCount = 0
+    function patternTest(pat, guard) {
+        return function(b, val) {
+            patCount++
+            var rName = "$pm" + patCount
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rName), hFalse])
+            var failB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            var okB = emitPattern(b, val, pat, failB)
+            if (guard != null) {
+                var g = guard(okB)
+                var gB = curF.NewBlock("")
+                g.b.NewCondBr(truthy(g.b, g.v), gB, failB)
+                okB = gB
+            }
+            callExt(okB, "js_scope_set", [curScopeV, emitStr(okB, rName), hTrue])
+            okB.NewBr(doneB)
+            failB.NewBr(doneB)
+            return {b: doneB, v: callExt(doneB, "js_scope_get", [curScopeV, emitStr(doneB, rName)])}
+        }
+    }
+    // An arrow label is either a value to compare with or a pattern to test.
+    function makeArrowLabel(x, text) {
+        if (x != undefined && x.plab != undefined) { return {test: x.plab} }
+        return {v: enumLabel(x, text)}
+    }
+
+    // A bare-name switch label: the three keyword literals are themselves, everything
+    // else is a name (an enum constant, resolved by enumLabel, or a variable).
+    function makeLabelName(name) {
+        if (name == "null") { return makeConst(null) }
+        if (name == "true") { return makeConst(true) }
+        if (name == "false") { return makeConst(false) }
+        return makeVarRef(name)
+    }
+    // A switch label that is a bare identifier naming a constant of some enum reads
+    // that constant; every other label keeps its own expression.
+    function enumLabel(t, text) {
+        return function(b) {
+            var owner = enumConstOwner["$" + text]
+            if (owner == undefined) { return t(b) }
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, owner)])
+            return {b: b, v: callExt(b, "js_get", [clsV, emitStr(b, text)])}
+        }
     }
 
     // ----- Anonymous classes -----
@@ -1949,6 +2789,7 @@ KwYield     = "yield" KwEnd ;
         callExt(b, "js_set", [sysV, emitStr(b, "out"), outV])
         callExt(b, "js_set", [sysV, emitStr(b, "exit"), callExt(b, "js_scope_get", [curScopeV, emitStr(b, "exit")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "System"), sysV])
+        b = emitBuiltinExc(b)
         b = emitImported(b)
         b = makeSeq(items)(b)
         // The entry defaults to Main.main but -main (c.mainName) can name another static

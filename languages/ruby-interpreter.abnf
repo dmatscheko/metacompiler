@@ -70,7 +70,8 @@ ParamDSplat <~~ var n = takeAll(); notImpl("double-splat parameter (**kw)", up.p
             = "**" [ Name <~~ push(up.in) ~~> ] ;
 ParamSplat  <~~ var n = takeAll(); notImpl("splat parameter (*args)", up.pos); push({param: n.length > 0 ? n[0] : "$rest"}) ~~>
             = "*" [ Name <~~ push(up.in) ~~> ] ;
-ParamBlock  <~~ notImpl("block parameter (&blk)", up.pos); push({param: pop()}) ~~>
+// &blk: the block the call was given, received as an ordinary named parameter.
+ParamBlock  <~~ push({param: pop()}) ~~>
             = "&" Name <~~ push(up.in) ~~> ;
 ParamKw     <~~ var n = takeAll(); notImpl("keyword parameter (name:)", up.pos); push({param: n[0]}) ~~>
             = Name <~~ push(up.in) ~~> ":" [ Expression ] ;
@@ -85,7 +86,7 @@ MethodName  = Id [ "?" | "!" ] ;
 // A superclass (class D < Base) is accepted but not implemented (no inheritance);
 // the class body still runs as its own methods.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Name <~~ push(up.in) ~~> [ Superclass ] { Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
+            = KwClass Name <~~ push(up.in) ~~> [ Superclass ] { Semi | Def <~~ push({method: pop()}) ~~> | AttrDecl } End ;
 Superclass  <~~ notImpl("class superclass (< Base)", up.pos) ~~>
             = "<" ScopedName ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
@@ -106,7 +107,11 @@ Body        <~~ push({body: makeBody(takeAll())}) ~~>
 // COND). A modifier only binds when its keyword sits on the SAME source line as
 // the statement (SameLine), so a block 'if'/'while' that opens the next line stays
 // a separate statement.
-Statement   = Require | DoWhileStmt | ModStmt ;
+// A bare ';' is an empty statement: Ruby uses it as a statement separator, and it
+// appears immediately after a def / class / module header (def f(x); BODY; end).
+// Semi pushes nothing, so a body simply skips it.
+Statement   = Semi | Require | DoWhileStmt | ModStmt ;
+Semi        = ";" ;
 DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
             = KwBegin Body End SameLine DoWhileKw Expression ;
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
@@ -141,7 +146,15 @@ DqPathChar  = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" | @"\t" 
 // Kept at statement level (needs a comma after the first target) so it never
 // interferes with a nested expression.
 MultiAssign <~~ push(makeMultiAssign(takeAll())) ~~>
-            = Target "," Target { "," Target } "=" Expression { "," Expression } [ ";" ] ;
+            = MTarget "," MTarget { "," MTarget } "=" Expression { "," Expression } [ ";" ] ;
+// A multiple-assignment target: a splat target (*rest, which collects the leftover
+// values into an array), a parenthesized nested group ((m, n), o = [5, 6], 7) or an
+// ordinary target. Longest first, so *x and (x, y) are not read as a plain Target.
+MTarget     = MSplat | MGroup | Target ;
+MSplat      <~~ push({splat: pop()}) ~~>
+            = "*" Target ;
+MGroup      <~~ push({group: takeAll()}) ~~>
+            = "(" MTarget "," MTarget { "," MTarget } ")" ;
 
 // puts / print command form: puts x, puts a, b, puts (no args), puts(x).
 PutsStmt    <~~ push(makePuts(takeAll())) ~~>
@@ -187,10 +200,14 @@ RangeExpr   <~~ push(makeRange(takeAll())) ~~>
 // (so a << b << c chains). Binds tighter than range/comparison, looser than +.
 ShiftExpr   <~~ push(makeShift(takeAll())) ~~>
             = AddExpr { "<<" AddExpr } ;
+// The LineCont guard is what keeps `first, *rest = [1, 2, 3]' followed by a line
+// that OPENS with `*init, last = ...' from reading as one multiplication: in Ruby a
+// newline ends the statement once the expression is complete, so a binary operator
+// that starts a fresh source line never continues the previous expression.
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { LineCont ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = UnaryExpr { LineCont ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Neg | PostfixExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
@@ -208,8 +225,10 @@ FieldSfx    = "." MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
 SafeMethodSfx <~~ push({kind: "smcall", name: popName(), args: takeAll()}) ~~>
             = "&." MethodName <~~ push({mname: up.in}) ~~> MArgs ;
 SafeFieldSfx = "&." MethodName <~~ push({kind: "sfield", name: up.in}) ~~> ;
+// The LineCont guard keeps a line that OPENS with an array literal from being read
+// as an index of the previous expression (`txt = ""' then `[[1, 2]].each ...').
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = LineCont "[" Expression "]" ;
 MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
 
 // A call argument: an ordinary expression, or one of the forms accepted for
@@ -221,7 +240,9 @@ KwArg       <~~ takeAll(); push(notImplExpr("keyword argument (name:)", up.pos))
             = SymName ":" Expression ;
 SplatArg    <~~ takeAll(); push(notImplExpr("splat argument (* / **)", up.pos)) ~~>
             = ( "**" | "*" ) Expression ;
-BlockArg    <~~ takeAll(); push(notImplExpr("block argument (&)", up.pos)) ~~>
+// &expr: pass expr as the call's block. A Proc is passed straight through; a symbol
+// becomes the "call this method on each element" proc (`[1, 2].map(&:to_s)`).
+BlockArg    <~~ push({blkT: makeBlockArg(pop())}) ~~>
             = "&" Expression ;
 
 // A block passed to a method call: a real closure over the current scope.
@@ -229,32 +250,50 @@ Block       <~~ push(makeBlock(takeAll())) ~~>
             = KwDo [ BlockParams ] Body End
             | "{" [ BlockParams ] Body "}" ;
 BlockParams <~~ push({bparams: takeAll()}) ~~>
-            = "|" [ Param { "," Param } ] "|" ;
+            = "|" [ BParam { "," BParam } ] "|" ;
+// A block parameter may be a parenthesized group that destructures one element:
+// `[[1, [2, 3]]].each { |a, (b, c)| ... }`.
+BParam      = BGroup | Param ;
+BGroup      <~~ push({pgroup: takeAll()}) ~~>
+            = "(" BParam { "," BParam } ")" ;
 
 Primary     = "(" Expression ")"
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
-            | ReturnExpr | BreakExpr | NextExpr | RaiseExpr | YieldExpr
-            | DqStr | SqStr | PercentLit | FloatLit | IntLit | SymLit
+            | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RaiseExpr | YieldExpr
+            | DqStr | SqStr | PercentLit
+            | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
+            | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
             | IvarRef | ScopedConst | Call | VarRef ;
 
-// for VAR in COLL ... end: accepted but not implemented (needs loop-variable
-// binding we do not model); parses the collection and body, warns, and is inert.
-ForExpr     <~~ takeAll(); push(notImplExpr("for-in loop", up.pos)) ~~>
+// for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
+// loop variable stays visible after the loop (Ruby), so it is written with the same
+// assignment path as an ordinary local. Several variables destructure each element.
+ForExpr     <~~ push(makeForIn(takeAll())) ~~>
             = KwFor ForVars KwIn Expression [ KwDo ] Body End ;
-ForVars     = Name { "," Name } ;
+ForVars     = Name <~~ push({fvar: up.in}) ~~> { "," Name <~~ push({fvar: up.in}) ~~> } ;
 
 // yield / yield(args) / yield args: accepted but not implemented (no block passing);
 // warns and yields a placeholder value.
-YieldExpr   <~~ takeAll(); push(notImplExpr("yield", up.pos)) ~~>
+YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
             = KwYield [ "(" [ Arg { "," Arg } ] ")" | SameLine Arg { "," Arg } ] ;
 
-// A floating point literal 3.14 / 1.0e9: accepted but not implemented (the runtime
-// is 32-bit integer only); warns and yields a placeholder value.
-FloatLit    <~~ push(notImplExpr("float literal", up.pos)) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "." "0"..."9" { "0"..."9" } [ FloatExp ] :whitespace(Whitespace) ;
-FloatExp    = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+// The numeric tower. Integers are exact (hex 0xff, binary 0b1010, octal 0o17 and
+// Ruby's bare-zero form 017, decimal with '_' separators, all via lib/numbers.abnf
+// except the bare-zero octal below). A float 1.5 / 1e3 / 25e-2 is a BOXED value so
+// it stays distinguishable from an integer - Ruby needs 7 / 2 == 3 AND 7.0 / 2 ==
+// 3.5, which one JS number cannot express. 3r is a Rational, 2i an imaginary
+// Complex; both are boxes too. The prefixed / suffixed forms come first (PEG).
+Oct0Lit     <~~ push(makeConst(parseInt(up.in.split("_").join("").substring(1), 8))) ~~>
+            = "0" :whitespace() "0"..."7" { "0"..."7" | "_" } :whitespace(Whitespace) ;
+RatLit      <~~ push(makeConst(mkRat(parseInt(up.in.split("_").join("")), 1))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "r" :whitespace(Whitespace) ;
+ImagLit     <~~ push(makeConst(mkCpx(0, parseInt(up.in.split("_").join(""))))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" } "i" :whitespace(Whitespace) ;
+FloatLit    <~~ push(makeConst(mkFlo(parseFloat(up.in.split("_").join(""))))) ~~>
+            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" | "_" }
+              ( "." "0"..."9" { "0"..."9" | "_" } [ NumExp ] | NumExp ) :whitespace(Whitespace) ;
 
 // A scoped constant Foo::Bar: accepted but not implemented (no namespaces); warns
 // and yields a placeholder value.
@@ -317,11 +356,15 @@ ErrList     = Name { "," Name } ;
 // NoModKw guard it parses as a block-if argument expression and swallows the loop's
 // `end`.
 ReturnExpr  <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ NoModKw Expression ] ;
+            = KwReturn [ NoModKw Expression { "," Expression } ] ;
 BreakExpr   <~~ push(makeBreak(takeAll())) ~~>
             = KwBreak [ NoModKw Expression ] ;
 NextExpr    <~~ push(makeNext(takeAll())) ~~>
             = KwNext [ NoModKw Expression ] ;
+// redo re-runs the current block body with the same element, without advancing the
+// iteration (it travels to the iterating method as its own control signal).
+RedoExpr    <~~ push(makeRedo(up.pos)) ~~>
+            = KwRedo ;
 
 // raise [EXPR[, EXPR]]: raise the first expression's value (a bare raise re-raise is
 // approximated as raising nil); a trailing message argument is parsed and ignored.
@@ -329,8 +372,22 @@ RaiseExpr   <~~ push(makeRaise(takeAll(), up.pos)) ~~>
             = KwRaise [ Expression { "," Expression } ] ;
 
 // f(args): a top level method or a class (for C.new the .new is a method suffix).
+// A call may carry a trailing block, with or without parentheses (`loop { ... }`,
+// `s13_blk(5) { |v| ... }`), and a predicate/bang method may be called bare
+// (`block_given?`). BareName is a non-keyword identifier that may end in ? or !;
+// the longest form comes first, so `x ? a : b` only reaches the ternary after the
+// call alternatives have failed and rolled back.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Name <~~ push(up.in) ~~> "(" [ Arg { "," Arg } ] ")" ;
+            = BareName <~~ push(up.in) ~~> "(" [ Arg { "," Arg } ] ")" [ Block ]
+            | BareName <~~ push(up.in) ~~> Block
+            | PredName <~~ push(up.in) ~~> ;
+BareName    = NotKw Id [ "?" | "!" ] ;
+// A bare predicate/bang call has to be told apart from `a != b` and from the ternary
+// `x ? a : b`, so the suffix character is checked with whitespace skipping OFF: a `!`
+// may not be followed by `=`, and a `?` may not be followed by whitespace (Ruby uses
+// exactly that spacing rule to separate `foo?` from `foo ? a : b`).
+PredName    = PredOk NotKw Id :whitespace() PredSfx :whitespace(Whitespace) ;
+PredSfx     = "?" | "!" ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Name ;
@@ -339,12 +396,19 @@ Self        <~~ push(makeSelf()) ~~>    = KwSelf ;
 Nil         <~~ push(makeConst(null)) ~~> = "nil" KwEnd ;
 
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
-            = "[" [ Expression { "," Expression } ] "]" ;
+            = "[" [ ArrElem { "," ArrElem } ] "]" ;
+// An array element may be splatted: [0, *[1, 2], 3] splices the inner array in.
+ArrElem     = ArrSplat | Expression ;
+ArrSplat    <~~ push({splat: pop()}) ~~>
+            = "*" !"*" Expression ;
 HashLit     <~~ push(makeHash(takeAll())) ~~>
             = "{" [ HashEntry { "," HashEntry } ] "}" ;
 // { k => v } (arrow) and { name: v } (symbol key, genuinely lowered - name: is the
 // symbol :name, which the runtime already represents as the string "name").
-HashEntry   = HashColon | HashArrow ;
+HashEntry   = HashDSplat | HashColon | HashArrow ;
+// {**other, k: v} merges another hash in.
+HashDSplat  <~~ push({hsplat: pop()}) ~~>
+            = "**" Expression ;
 HashArrow   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
 HashColon   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
@@ -395,7 +459,8 @@ NotKw       = :script(~~
         var kws = ["def", "end", "if", "elsif", "else", "unless", "while", "until",
                    "do", "then", "return", "break", "next", "class", "module", "for",
                    "self", "nil", "true", "false", "and", "or", "not", "case", "when",
-                   "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print"]
+                   "in", "yield", "begin", "rescue", "ensure", "raise", "puts", "print",
+                   "redo"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -424,6 +489,60 @@ NoModKw     = :script(~~
         if (s === "if" || s === "unless" || s === "while" || s === "until") {
             return abnf.newToken("\x01modkw", 0)
         }
+        return undefined
+    })()
+~~) ;
+
+// PredOk succeeds (matching empty) only where a bare predicate/bang call really is
+// one: an identifier immediately followed by '?' or '!', where the '!' is not the
+// '!=' operator and the '?' is not the ternary (Ruby separates `foo?` from
+// `foo ? a : b` by exactly that spacing). Pure function of (source, position).
+PredOk      = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (true) {
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        if (!((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95)) { return abnf.newToken("\x01no", 0) }
+        while ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var nx = c.peek(i + 1)
+        if (cc === 33) {                                  // '!'
+            if (nx === 61) { return abnf.newToken("\x01no", 0) }
+            return undefined
+        }
+        if (cc === 63) {                                  // '?'
+            if (nx === 61 || nx === 32 || nx === 9 || nx === 13 || nx === 10) {
+                return abnf.newToken("\x01no", 0)
+            }
+            return undefined
+        }
+        return abnf.newToken("\x01no", 0)
+    })()
+~~) ;
+
+// LineCont succeeds (matching empty) only when the position does NOT start a fresh
+// source line, i.e. the token just before it is on the same line. It gates the
+// binary operators that can equally open a statement (*, +, -), so a line beginning
+// with one of them is a new statement rather than a continuation. Pure function of
+// (source, position), like the other guards here.
+LineCont    = :script(~~
+    (function() {
+        // Whitespace is skipped before tokens but not before a script, so the newline
+        // that would separate the two statements is still AHEAD of this position.
+        var i = -1
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13) { i = i - 1; cc = c.peek(i) }
+        if (cc === 10) { return abnf.newToken("\x01nl", 0) }
+        var j = 0
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd === 10 || dd === 35 || dd === -1) { return abnf.newToken("\x01nl", 0) }
         return undefined
     })()
 ~~) ;
@@ -471,6 +590,7 @@ KwRaise     = "raise" KwEnd ;
 KwReturn    = "return" KwEnd ;
 KwBreak     = "break" KwEnd ;
 KwNext      = "next" KwEnd ;
+KwRedo      = "redo" KwEnd ;
 KwSelf      = "self" KwEnd ;
 KwPuts      = ( "puts" | "print" ) KwEnd ;
 
@@ -489,7 +609,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // travel as marker objects that a body or loop intercepts. -----
     function isSig(r) {
         return r !== null && r !== undefined && typeof r == "object"
-            && (r.ret === true || r.brk === true || r.cont === true)
+            && (r.ret === true || r.brk === true || r.cont === true || r.redo === true)
     }
     function makeBody(items) {
         return function() {
@@ -504,7 +624,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return last
         }
     }
+    // return with several values yields an array (Ruby: `return 3, 4` -> [3, 4]).
     function makeReturn(items) {
+        if (items.length > 1) {
+            return function() {
+                var a = []
+                for (var i = 0; i < items.length; i++) { a.push(items[i]()) }
+                return {ret: true, v: a}
+            }
+        }
         var t = items.length > 0 ? items[0] : null
         return function() { return {ret: true, v: t != null ? t() : null} }
     }
@@ -612,6 +740,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
+    // for VAR[, VAR] in COLL ... end. `for` does not open a scope, so the loop variable
+    // is written with the ordinary local-assignment rule and outlives the loop.
+    function makeForIn(items) {
+        var names = []
+        var collT = null
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].fvar != undefined) { names.push(items[i].fvar) }
+            else if (items[i].body != undefined) { body = items[i].body }
+            else { collT = items[i] }
+        }
+        return function() {
+            var coll = anytype
+            coll = collT()
+            var seq = []
+            if (Array.isArray(coll)) { seq = coll }
+            else if (isDict(coll)) { for (var d = 0; d < coll.keys.length; d++) { seq.push([coll.keys[d], coll.vals[d]]) } }
+            else { fail("for-in needs an array or a hash") }
+            for (var i = 0; i < seq.length; i++) {
+                if (names.length == 1) { rubySet(names[0], seq[i]) }
+                else {
+                    var el = anytype
+                    el = seq[i]
+                    for (var j = 0; j < names.length; j++) {
+                        rubySet(names[j], Array.isArray(el) && j < el.length ? el[j] : null)
+                    }
+                }
+                var st = runLoopBody(body)
+                if (st.sig != undefined) { return st.sig }
+                if (st.stop) { return st.v }
+            }
+            return null
+        }
+    }
+
     function makeRange(items) {
         if (items.length == 1) { return items[0] }
         var loT = items[0]
@@ -626,17 +789,33 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return out
         }
     }
+    // [a, *b, c]: a splat element splices an array in (a non-array splats as itself).
     function makeArray(items) {
         return function() {
             var out = []
-            for (var i = 0; i < items.length; i++) { out.push(items[i]()) }
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].splat != undefined) {
+                    var sv = anytype
+                    sv = items[i].splat()
+                    if (Array.isArray(sv)) { for (var j = 0; j < sv.length; j++) { out.push(sv[j]) } }
+                    else { out.push(sv) }
+                } else { out.push(items[i]()) }
+            }
             return out
         }
     }
+    // {**other, k: v}: a double-splat entry merges another hash in, left to right.
     function makeHash(items) {
         return function() {
             var d = {__dict: true, keys: [], vals: []}
             for (var i = 0; i < items.length; i++) {
+                if (items[i].hsplat != undefined) {
+                    var src = items[i].hsplat()
+                    if (isDict(src)) {
+                        for (var j = 0; j < src.keys.length; j++) { dictSet(d, src.keys[j], src.vals[j]) }
+                    }
+                    continue
+                }
                 var k = items[i].hk()
                 var v = items[i].hv()
                 dictSet(d, k, v)
@@ -726,7 +905,32 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- Method dispatch (js_mcall equivalent) -----
-    function mcall(target, name, args) {
+    function mcall(target, name, args, blk) {
+        // A Proc / block closure: Proc#call, and the two call shorthands p.(x) and p[x].
+        if (typeof target == "function") {
+            if (name == "call" || name == "()" || name == "[]" || name == "yield") {
+                return blockCall(target, args)
+            }
+            if (name == "to_proc") { return target }
+            fail("unknown Proc method: " + name)
+        }
+        if (typeof target == "number") {
+            if (name == "to_s" || name == "inspect") { return "" + target }
+            if (name == "to_i") { return target | 0 }
+            if (name == "abs") { return target < 0 ? (0 - target) | 0 : target }
+            if (name == "zero?") { return target == 0 }
+            if (name == "even?") { return (target % 2) == 0 }
+            if (name == "odd?") { return (target % 2) != 0 }
+            if (name == "times") {
+                for (var ni = 0; ni < target; ni++) { blockCall(blk, [ni]) }
+                return target
+            }
+            fail("unknown Integer method: " + name)
+        }
+        if (target === true || target === false) {
+            if (name == "to_s" || name == "inspect") { return target ? "true" : "false" }
+            fail("unknown Boolean method: " + name)
+        }
         if (typeof target == "string") {
             if (name == "length" || name == "size") { return target.length }
             if (name == "to_s") { return target }
@@ -741,37 +945,54 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "values") { return target.vals.slice(0) }
             if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
             if (name == "each") {
-                for (var di = 0; di < target.keys.length; di++) { args[0](target.keys[di], target.vals[di]) }
+                for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [target.keys[di], target.vals[di]]) }
                 return target
             }
             fail("unknown Hash method: " + name)
         }
         if (target === null || target === undefined) { fail("method ." + name + " on nil") }
-        if (Array.isArray(target)) { return arrayMethod(target, name, args) }
+        if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
         if (target.__class != undefined) {
             if (name == "class") { return target.__class }
             // Own-property read: a bare [name] resolved inherited Object.prototype
             // members (toString, valueOf, ...) under a host JS engine.
             var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
             if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
-            return m.apply(undefined, concat2impl([target], args))
+            // The block is BOTH put on blockStack (so `yield` in the body finds it) and
+            // appended as the last positional argument, which is how a method that names
+            // it as an ordinary parameter receives it. invokeRuby binds only as many
+            // arguments as the method has parameters, so the extra one is harmless.
+            blockStack.push(blk)
+            var mr = anytype
+            mr = m.apply(undefined, blk == null ? concat2impl([target], args)
+                                                : concat2impl([target], concat2impl(args, [blk])))
+            blockStack.pop()
+            return mr
         }
         if (target.__isclass === true) {
             if (name == "new") {
                 var obj = {__class: target}
                 if (typeof target["initialize"] == "function") {
+                    blockStack.push(blk)
                     target["initialize"].apply(undefined, concat2impl([obj], args))
+                    blockStack.pop()
                 }
                 return obj
             }
             if (name == "name") { return target.__name }
             var sm = hasOwn(target, name) ? target[name] : undefined
-            if (typeof sm == "function") { return sm.apply(undefined, args) }
+            if (typeof sm == "function") {
+                blockStack.push(blk)
+                var sr = anytype
+                sr = sm.apply(undefined, blk == null ? args : concat2impl(args, [blk]))
+                blockStack.pop()
+                return sr
+            }
             fail("unknown class method '" + name + "'")
         }
         fail("unknown method '" + name + "'")
     }
-    function arrayMethod(t, name, args) {
+    function arrayMethod(t, name, args, blk) {
         var i
         if (name == "size" || name == "length") { return t.length }
         if (name == "push" || name == "append" || name == "add") { t.push(args[0]); return t }
@@ -780,22 +1001,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
         if (name == "include?" || name == "contains") { return t.indexOf(args[0]) >= 0 }
         if (name == "to_a") { return t.slice(0) }
-        if (name == "each") { for (i = 0; i < t.length; i++) { args[0](t[i]) } return t }
-        if (name == "each_with_index") { for (i = 0; i < t.length; i++) { args[0](t[i], i) } return t }
+        if (name == "each") { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i]]) } return t }
+        if (name == "each_with_index") { for (i = 0; i < t.length; i++) { blockCall(blk, [t[i], i]) } return t }
         var out
         if (name == "map" || name == "collect") {
             out = []
-            for (i = 0; i < t.length; i++) { out.push(args[0](t[i])) }
+            for (i = 0; i < t.length; i++) { out.push(blockCall(blk, [t[i]])) }
             return out
         }
         if (name == "select" || name == "filter") {
             out = []
-            for (i = 0; i < t.length; i++) { if (rtest(args[0](t[i]))) { out.push(t[i]) } }
+            for (i = 0; i < t.length; i++) { if (rtest(blockCall(blk, [t[i]]))) { out.push(t[i]) } }
             return out
         }
         if (name == "reject") {
             out = []
-            for (i = 0; i < t.length; i++) { if (!rtest(args[0](t[i]))) { out.push(t[i]) } }
+            for (i = 0; i < t.length; i++) { if (!rtest(blockCall(blk, [t[i]]))) { out.push(t[i]) } }
             return out
         }
         if (name == "sum") {
@@ -804,6 +1025,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return s
         }
         fail("unknown Array method: " + name)
+    }
+
+    // One .method(args) [block] suffix. A call that was handed a block also catches the
+    // block's non-local break, whose value becomes the value of THIS call.
+    function invokeMcall(recv, s) {
+        var sp = splitBlock(s.args)
+        var argv = []
+        for (var j = 0; j < sp.args.length; j++) { argv.push(sp.args[j]()) }
+        if (sp.blk == null) { return mcall(recv, s.name, argv, null) }
+        var bf = sp.blk()
+        return catchBlkBreak(function() { return mcall(recv, s.name, argv, bf) })
     }
 
     // A member chain: primary followed by .method(args)/.field/[index] suffixes.
@@ -817,16 +1049,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "mcall") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) { argv.push(s.args[j]()) }
-                    cur = mcall(cur, s.name, argv)
+                    cur = invokeMcall(cur, s)
                 } else if (s.kind == "smcall") {
                     if (cur === null || cur === undefined) { cur = null }
-                    else {
-                        var sargv = []
-                        for (var sj = 0; sj < s.args.length; sj++) { sargv.push(s.args[sj]()) }
-                        cur = mcall(cur, s.name, sargv)
-                    }
+                    else { cur = invokeMcall(cur, s) }
                 } else if (s.kind == "field") {
                     if (s.name == "length" || s.name == "size") { cur = rlen(cur) }
                     else if (s.name == "to_s") { cur = rstr(cur) }
@@ -845,6 +1071,26 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // A block passed to a method: a real closure over the current scope.
+    //
+    // Control flow OUT of a block is non-local in Ruby: `break v` inside a block ends
+    // the whole method call the block was given to and makes that call yield v, and
+    // `redo` re-runs the block body with the same element. Neither can be expressed by
+    // returning a value to the iterating method (which would just see a block result),
+    // so both leave the block as a host throw that the call site (blockCall / makeCall /
+    // foldCallMember) intercepts. `next` is local and simply ends this block run.
+    function blkBind(params, args) {
+        for (var i = 0; i < params.length; i++) {
+            var av = anytype
+            av = i < args.length ? args[i] : null
+            if (params[i].pgroup != undefined) {
+                var vv = []
+                if (Array.isArray(av)) { vv = av } else { vv = [av] }
+                blkBind(params[i].pgroup, vv)
+            } else {
+                declVar(params[i].param, av)
+            }
+        }
+    }
     function makeBlock(items) {
         var params = []
         var body = null
@@ -852,21 +1098,75 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (items[i].body != undefined) { body = items[i].body }
             else { params = items[i].bparams }
         }
-        return function() {
+        return {blkT: function() {
             var captured = scopes.slice(0)
-            return function() {
-                var args = arguments
+            var f = function() {
+                var args = []
+                for (var k = 0; k < arguments.length; k++) { args.push(arguments[k]) }
+                // A single array argument spreads over several block parameters
+                // (`hash.each { |k, v| }`, `[[1, 2]].each { |a, b| }`).
+                if (args.length == 1 && params.length > 1 && Array.isArray(args[0])) { args = args[0] }
                 var saved = scopes
                 scopes = captured.slice(0)
                 scopes.push({})
-                for (var i = 0; i < params.length; i++) {
-                    declVar(params[i].param, i < args.length ? args[i] : null)
-                }
-                var r = body()
+                blkBind(params, args)
+                var r = anytype
+                r = body()
                 scopes = saved
-                if (isSig(r)) { return r.v }   // next/break value; non-local return not supported
+                if (isSig(r)) {
+                    if (r.brk === true) { throw {__blkbrk: true, v: r.v} }
+                    if (r.redo === true) { throw {__blkredo: true} }
+                    if (r.ret === true) { throw {__blkret: true, v: r.v} }
+                    return r.v                 // next VALUE is this run's result
+                }
                 return r
             }
+            return f
+        }}
+    }
+    // splitBlock separates a call's block marker (pushed by makeBlock or by an `&blk`
+    // argument) from its ordinary argument thunks. Done once, at build time.
+    function splitBlock(args) {
+        var plain = []
+        var blk = null
+        for (var i = 0; i < args.length; i++) {
+            if (args[i].blkT != undefined) { blk = args[i].blkT } else { plain.push(args[i]) }
+        }
+        return {args: plain, blk: blk}
+    }
+    // blockCall runs one block invocation and turns a `redo` into a re-run.
+    function blockCall(f, args) {
+        while (true) {
+            try {
+                return f.apply(undefined, args)
+            } catch (e) {
+                if (e !== null && e !== undefined && e.__blkredo === true) { continue }
+                throw e
+            }
+        }
+    }
+    // A call that was given a block catches the non-local break: the CALL yields the
+    // break value (`[1, 2, 3].each { |v| break v * 10 if v == 2 }` is 20).
+    function catchBlkBreak(f) {
+        try {
+            return f()
+        } catch (e) {
+            if (e !== null && e !== undefined && e.__blkbrk === true) { return e.v }
+            throw e
+        }
+    }
+    function makeRedo(pos) { return function() { return {redo: true} } }
+    // &expr as an argument: a Proc passes straight through, a symbol becomes the
+    // "send this message to each element" proc that Symbol#to_proc builds in Ruby.
+    function makeBlockArg(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (typeof v == "function") { return v }
+            if (typeof v == "string") {
+                return function(x) { return mcall(x, v, [], null) }
+            }
+            fail("& needs a proc or a symbol")
         }
     }
 
@@ -970,18 +1270,49 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- Calls, defs and classes -----
+    // blockStack carries the block a method call was given, so `yield` and
+    // `block_given?` inside the method body can find it (Ruby's implicit block).
+    var blockStack = []
+    function currentBlock() {
+        if (blockStack.length == 0) { return null }
+        return blockStack[blockStack.length - 1]
+    }
     function makeCall(items) {
         var name = items[0]
-        var args = items.slice(1)
+        var sp = splitBlock(items.slice(1))
+        var args = sp.args
+        var blkT = sp.blk
         return function() {
+            // block_given? asks whether the ENCLOSING method received a block.
+            if (name == "block_given?") { return getVar("$blk") != null }
             var argv = []
             for (var i = 0; i < args.length; i++) { argv.push(args[i]()) }
-            var f = getVar(name)
+            var bf = null
+            if (blkT != null) { bf = blkT() }
+            var f = anytype
+            f = getVar(name)
             if (f != undefined && f != null && f.__isclass === true) {
-                return mcall(f, "new", argv)
+                if (bf == null) { return mcall(f, "new", argv, null) }
+                return catchBlkBreak(function() { return mcall(f, "new", argv, bf) })
             }
             if (typeof f != "function") { fail("call of a non function: " + name) }
-            return f.apply(undefined, argv)
+            if (bf == null) { return f.apply(undefined, argv) }
+            blockStack.push(bf)
+            var r = anytype
+            r = catchBlkBreak(function() { return f.apply(undefined, concat2impl(argv, [bf])) })
+            blockStack.pop()
+            return r
+        }
+    }
+    // yield [args]: run the block the current method was given.
+    function makeYield(items, pos) {
+        return function() {
+            var blk = anytype
+            blk = getVar("$blk")
+            if (blk == null || blk == undefined) { fail("no block given (yield)") }
+            var argv = []
+            for (var i = 0; i < items.length; i++) { argv.push(items[i]()) }
+            return blockCall(blk, argv)
         }
     }
     function makeFun(items) {
@@ -1017,10 +1348,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var saved = scopes
         scopes = [globalScope, {}]
         if (self !== undefined && self !== null) { declVar("self", self) }
+        declVar("$blk", currentBlock())
         for (var i = 0; i < fn.params.length; i++) {
             declVar(fn.params[i], i < args.length ? args[i] : null)
         }
-        var r = fn.body()
+        var r = anytype
+        // `return` inside a block returns from the enclosing METHOD, so the block's
+        // host throw is caught here rather than by the iterating call.
+        try {
+            r = fn.body()
+        } catch (e) {
+            scopes = saved
+            if (e !== null && e !== undefined && e.__blkret === true) { return e.v }
+            throw e
+        }
         scopes = saved
         if (isSig(r)) { return r.v }
         return r
@@ -1040,8 +1381,30 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return invokeRuby(fn, self, args)
         }
     }
+    // Ruby has no bare method references: an identifier that is not a local variable
+    // is a parenthesis-less call of the method of that name (`pa, qa = s08_pair`).
+    // rubyMethods records every name introduced by a top-level def, so makeVarRef can
+    // tell a method from an ordinary local (a local always wins, as in Ruby).
+    // Only a ZERO parameter method is auto-called: a bare name for a method that takes
+    // arguments is an error in Ruby anyway, and the feature-matrix file uses that shape
+    // to pass a method around as a value.
+    var rubyMethods = {}
     function makeDefStmt(fn) {
+        if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
         return function() { declVar(fn.name, makeFunClosure(fn)); return null }
+    }
+    makeVarRef = function(name) {
+        return function() {
+            for (var i = scopes.length - 1; i >= 1; i--) {
+                if (hasOwn(scopes[i], name)) { return scopes[i][name] }
+            }
+            if (rubyMethods["$" + name] === true) {
+                var f = anytype
+                f = hasOwn(globalScope, name) ? globalScope[name] : undefined
+                if (typeof f == "function") { return f() }
+            }
+            return getVar(name)
+        }
     }
     function makeClassStmt(items) {
         var name = items[0]
@@ -1216,6 +1579,39 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var p = resolveRefRuby(ref)
         if (isDict(p.obj)) { dictSet(p.obj, p.key, v) } else { p.obj[p.key] = v }
     }
+    // A multiple-assignment target list may hold a splat target (*rest) and nested
+    // groups ((m, n), o). destructure writes one value list into one target list:
+    // the targets before the splat take the leading values, the ones after it the
+    // trailing values, and the splat collects whatever is left (possibly nothing).
+    function assignOne(tgt, v) {
+        if (tgt.group != undefined) {
+            var vv = []
+            if (Array.isArray(v)) { vv = v } else { vv = [v] }
+            destructure(tgt.group, vv)
+            return
+        }
+        assignTargetRef(tgt, v)
+    }
+    function destructure(targets, vals) {
+        var si = -1
+        var i
+        for (i = 0; i < targets.length; i++) { if (targets[i].splat != undefined) { si = i } }
+        if (si < 0) {
+            for (i = 0; i < targets.length; i++) { assignOne(targets[i], i < vals.length ? vals[i] : null) }
+            return
+        }
+        var after = targets.length - si - 1
+        var stop = vals.length - after
+        if (stop < si) { stop = si }
+        for (i = 0; i < si; i++) { assignOne(targets[i], i < vals.length ? vals[i] : null) }
+        var mid = []
+        for (i = si; i < stop; i++) { mid.push(vals[i]) }
+        assignOne(targets[si].splat, mid)
+        for (i = 0; i < after; i++) {
+            var idx = stop + i
+            assignOne(targets[si + 1 + i], idx < vals.length ? vals[idx] : null)
+        }
+    }
     function makeMultiAssign(items) {
         var targets = []
         var values = []
@@ -1226,12 +1622,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function() {
             var vals = []
             if (values.length == 1 && targets.length > 1) {
-                var it = values[0]()
-                for (var j = 0; j < it.length; j++) { vals.push(it[j]) }
+                var it = anytype
+                it = values[0]()
+                if (Array.isArray(it)) { for (var j = 0; j < it.length; j++) { vals.push(it[j]) } }
+                else { vals.push(it) }
             } else {
                 for (var k = 0; k < values.length; k++) { vals.push(values[k]()) }
             }
-            for (var m = 0; m < targets.length; m++) { assignTargetRef(targets[m], m < vals.length ? vals[m] : null) }
+            destructure(targets, vals)
             return vals
         }
     }
@@ -1304,6 +1702,34 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     hostGlobals["exit"] = function(code) { exit(code === undefined ? 0 : code | 0) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
     hostGlobals["rand"] = function() { return 0 }
+    // Kernel#loop: an endless loop whose only exit is a break out of the block (which
+    // arrives here as the non-local break makeCall catches, so `loop { break 42 }` is 42).
+    hostGlobals["loop"] = function(blk) {
+        while (true) { blockCall(blk, []) }
+    }
+
+    // ----- Equality: Ruby's Array#== / Hash#== compare structurally (element by
+    // element / key by key), while every other value compares by identity. -----
+    function rubyEq(l, r) {
+        if (l === r) { return true }
+        if (Array.isArray(l) && Array.isArray(r)) {
+            if (l.length != r.length) { return false }
+            for (var i = 0; i < l.length; i++) { if (!rubyEq(l[i], r[i])) { return false } }
+            return true
+        }
+        if (isDict(l) && isDict(r)) {
+            if (l.keys.length != r.keys.length) { return false }
+            for (var j = 0; j < l.keys.length; j++) {
+                var di = dictFind(r, l.keys[j])
+                if (di < 0) { return false }
+                if (!rubyEq(l.vals[j], r.vals[di])) { return false }
+            }
+            return true
+        }
+        return false
+    }
+    binOps["=="] = function(l, r) { return rubyEq(l, r) }
+    binOps["!="] = function(l, r) { return !rubyEq(l, r) }
 
     // ----- Core config -----
     core.lang = "ruby"
