@@ -172,7 +172,7 @@ CloseAhead  = :script(~~
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(up.in) ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(noteFnName(up.in)) ~~> ParamList [ ReturnType ] Block ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
@@ -182,7 +182,14 @@ ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // ('__construct(public int $x)' declares and assigns $this->x), so it is captured
 // rather than skipped; makeFun turns each promoted parameter into one prologue
 // assignment. On any other function a modifier is meaningless and simply ignored.
-Param       = [ AttrGrp ] { ParamMod } [ TypeHint ] [ "&" ] [ "..." ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+Param       = [ AttrGrp ] { ParamMod } [ TypeHint ] [ ParamRef ] [ ParamRest ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+// 'function f(&$n)': the argument is passed by REFERENCE. The callee simply keeps the
+// cell in its parameter slot (every read dereferences, every write writes through);
+// it is the CALL SITE that has to hand a cell over, which is why makeDefStmt records
+// each function's by-reference positions for makeCall to read back.
+ParamRef    <~~ noteRef(); push({pref: true}) ~~> = "&" ;
+// 'function f(...$rest)': every remaining argument collected into one PHP array.
+ParamRest   <~~ push({prest: true}) ~~> = "..." ;
 ParamMod    <~~ push({pmod: up.in}) ~~> = Modifier ;
 // A default value is kept: it becomes a small prologue in the emitted body that
 // substitutes the default when the argument was not passed (see paramDefaults).
@@ -201,12 +208,11 @@ ImplNames   = ImplName { "," ImplName } ;
 ImplName    <~~ push({impl: up.in}) ~~> = ExtName ;
 ClassMod    = ( "abstract" | "final" | "readonly" ) KwEnd ;
 ExtName     = [ "\\" ] Id { "\\" Id } ;
-ImplList    = ExtName { "," ExtName } ;
 Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: modifiers and a reference-return '&' are accepted and ignored; an
 // abstract/interface method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = [ AttrGrp ] { Modifier } KwFunction [ "&" ] MethodName <~~ push(up.in) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { Modifier } KwFunction [ "&" ] MethodName <~~ push(noteFnName(up.in)) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants: 'const A = 1, B = 2;', with PHP 8.3's typed form ('const int
 // SIZE = 4') and any modifier (final/public/...). They are published on the class
 // descriptor under a 'k:' key and resolved by walking __super, so a subclass and an
@@ -222,8 +228,22 @@ CItem       <~~ push(makeCItem(takeAll())) ~~>
 // ("intSIZE"), since the capture drops the skipped whitespace.
 CIds        = CWord { CWord } ;
 CWord       <~~ push({cname: up.in}) ~~> = Id ;
-UseTrait    <~~ notImpl("trait use", up.pos); push({prop: true}) ~~>
-            = KwUse ImplList ( ";" | SkipBlock ) ;
+// use T1, T2 { ... } inside a class body: the members of each trait are FLATTENED
+// into the class. The adaptation block resolves the conflicts a flat copy would
+// create: 'A::m insteadof B' drops B's m, and 'T::m as alias' adds a second name for
+// one (an optional visibility word in front is accepted and ignored).
+UseTrait    <~~ push(makeUseTrait(takeAll())) ~~>
+            = KwUse ImplNames ( ";" | TraitAdapt ) ;
+TraitAdapt  = "{" { TraitRule } "}" ;
+TraitRule   = TraitInsteadof | TraitAs ;
+TraitInsteadof <~~ push(makeInsteadof(takeAll())) ~~>
+            = TraitRef KwInsteadof ImplNames ";" ;
+TraitAs     <~~ push(makeTraitAs(takeAll())) ~~>
+            = TraitRef KwAs [ TraitVis ] [ TraitAlias ] ";" ;
+TraitRef    <~~ push({tref: stripWs(up.in)}) ~~> = Id [ "::" Id ] ;
+TraitAlias  <~~ push({alias: up.in}) ~~> = Id ;
+TraitVis    <~~ push({tvis: up.in}) ~~> = ( "public" | "private" | "protected" ) KwEnd ;
+KwInsteadof = "insteadof" KwEnd ;
 
 // interface I extends J, K { const C = 1; public function m(): T; }
 // An interface becomes a class descriptor with no method bodies: it carries its
@@ -233,8 +253,11 @@ UseTrait    <~~ notImpl("trait use", up.pos); push({prop: true}) ~~>
 TypeDecl    = IfaceDecl | TraitDecl ;
 IfaceDecl   <~~ push(makeIfaceStmt(takeAll())) ~~>
             = [ AttrGrp ] KwInterface Name <~~ push(up.in) ~~> [ KwExtends ImplNames ] "{" { Member } "}" ;
-TraitDecl   <~~ push(notImplStmt("trait declaration", up.pos)) ~~>
-            = [ AttrGrp ] KwTrait SkipHead SkipBlock ;
+// trait T { ... }: a compile-time bag of members, with no descriptor of its own -
+// PHP traits are a copy/paste unit, not a type - so the declaration emits nothing and
+// only records its member list for the classes that 'use' it.
+TraitDecl   <~~ push(makeTraitDecl(takeAll())) ~~>
+            = [ AttrGrp ] KwTrait Name <~~ push(up.in) ~~> "{" { Member } "}" ;
 // namespace N; and the BRACED form namespace N { ... } (and the global 'namespace {}').
 // Names are not qualified in this subset, so the declaration itself stays a no-op -
 // but the braced body is a top level of its own and its items are simply emitted in
@@ -245,19 +268,22 @@ NsBody      <~~ push({nsbody: makeBody(takeAll())}) ~~>
             = "{" { TopItem } "}" ;
 UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
             = KwUse { Id | "\\" } [ KwAs Id ] Semi ;
-// enum Name : backing-type implements I { case A; ... }: recognized structurally and
-// routed to notImplemented; the body (cases, methods, consts) is balanced-skipped.
-EnumDecl    <~~ push(notImplStmt("enum", up.pos)) ~~>
-            = [ AttrGrp ] KwEnum Name [ ":" TypeAtom ] [ KwImplements ImplList ] SkipBlock ;
-SkipHead    = { Id | "," | "\\" } ;
-SkipBlock   = "{" { SkipItem } "}" ;
-SkipItem    = SkipDq | SkipSq | SkipBlock | SkipOther ;
+// enum Name : backing-type implements I { case A = "a"; const C = 1; method... }
+// An enum is a CLASS whose cases are singleton instances published as class constants,
+// so 'E::A' is one constant read, 'E::A === E::A' is object identity (which is what
+// makes an enum usable as a match arm) and the methods, constants and interfaces are
+// the ordinary class machinery. cases() answers them in declaration order.
+EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = [ AttrGrp ] KwEnum Name <~~ push(up.in) ~~> [ ":" TypeAtom ] [ KwImplements ImplNames ]
+              "{" { EnumMember } "}" ;
+EnumMember  = EnumCase | Member ;
+EnumCase    <~~ push(makeEnumCase(takeAll())) ~~>
+            = KwCase Name <~~ push({ecase: up.in}) ~~> [ "=" Expression ] ";" ;
 SkipDq      = '"' :whitespace() { SkipStrEsc | SkipDqChar } '"' :whitespace(Whitespace) ;
 SkipSq      = "'" :whitespace() { SkipStrEsc | SkipSqChar } "'" :whitespace(Whitespace) ;
 SkipStrEsc  = "\\" "\x00"..."\U0010ffff" ;
 SkipDqChar  = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipSqChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
-SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 // A balanced ( ... ) run (switch/match subject, declare/while directive), parsed and
 // ignored; string literals inside are matched first so their parens never miscount.
 SkipParen   = "(" { SkipDq | SkipSq | SkipParen | SkipPOther } ")" ;
@@ -304,24 +330,49 @@ Block       <~~ push({body: makeBody(takeAll())}) ~~>
 // Every statement pushes exactly one thunk: function(block) -> block.
 // A declaration is a statement too: PHP allows `if (...) { class Foo {} }`, and a
 // conditionally declared class is common enough in real files to be worth parsing.
-Statement   = InlineHtml | ShortEcho | EchoStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
+Statement   = InlineHtml | ShortEcho | EchoStmt | GlobalStmt | UnsetStmt | StaticVarStmt | Block | If | While | ForEach | For
             | Switch | DoWhile | Try | Throw | Declare
             | ClassDecl | EnumDecl | TypeDecl | ConstDecl | NsDecl | UseDecl
-            | Return | Break | Continue | Empty | ExprStmt ;
+            | Return | Break | Continue | Goto | Label | Empty | ExprStmt ;
+// goto L; / L: -- a jump inside one function body. The label is a real basic block, so
+// the jump costs one branch; PHP's rule that a goto may LEAVE a block but never enter
+// one falls out of where the label's block is created (makeBody registers the labels
+// of its own statement run before it emits any of them).
+Goto        <~~ push(makeGoto(popLabel())) ~~>
+            = KwGoto Name <~~ push({lbl: up.in}) ~~> Semi ;
+Label       <~~ push(makeLabelStmt(popLabel())) ~~>
+            = Name <~~ push({lbl: up.in}) ~~> ":" !":" ;
+KwGoto      = "goto" KwEnd ;
 
 // ----- widened statement surface -----
-// switch / do-while / declare / static-locals: recognized structurally and routed to
-// notImplemented (no runtime model here). Braced bodies are balanced-skipped
-// (Switch/Declare) or parsed then dropped (DoWhile) so that a whole real-world file
-// parses; under -warn-unsupported each becomes a no-op. (try/catch/finally and throw
-// below are genuinely compiled, not notImplemented.)
-StaticVarStmt <~~ takeAll(); push(notImplStmt("static local variable", up.pos)) ~~>
-            = KwStatic DollarName [ "=" Expression ] { "," DollarName [ "=" Expression ] } Semi ;
-Switch      <~~ takeAll(); push(notImplStmt("switch", up.pos)) ~~>
-            = KwSwitch SkipParen ( SkipBlock | SwitchAlt ) ;
-SwitchAlt   = ":" { Statement } KwEndswitch Semi ;
-DoWhile     <~~ takeAll(); push(notImplStmt("do-while", up.pos)) ~~>
-            = KwDo Block KwWhile SkipParen Semi ;
+// declare() is still recognized structurally and routed to notImplemented (its
+// directives change nothing this subset models). switch, do-while and goto below are
+// genuinely compiled, as try/catch/finally and throw already were.
+// static $n = 0; -- a local whose storage SURVIVES the call. The slot is a reference
+// cell in the global scope, created once where the program starts (the initializer is
+// a constant expression, so evaluating it there is not observable), and the statement
+// binds the local name to that cell - so every read and write inside the function goes
+// through the same storage, which is exactly what the reference lowering already does.
+StaticVarStmt <~~ push(makeStaticVars(takeAll())) ~~>
+            = KwStatic StaticVarItem { "," StaticVarItem } Semi ;
+StaticVarItem <~~ push(makeStaticVarItem(takeAll())) ~~>
+            = DollarName [ "=" Expression ] ;
+// switch (e) { case a: ... case b: ... default: ... } and the colon/endswitch form.
+// A case FALLS THROUGH into the next one - the arms are chained blocks and only a
+// 'break' leaves them - and the labels are compared with PHP's loose '==', which is
+// what makes switch differ from match (that one compares with '===').
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" ( SwitchBlock | SwitchAlt ) ;
+SwitchBlock <~~ push({cases: takeAll()}) ~~> = "{" [ ";" ] { SwitchCase } "}" ;
+SwitchAlt   <~~ push({cases: takeAll()}) ~~> = ":" [ ";" ] { SwitchCase } KwEndswitch Semi ;
+SwitchCase  <~~ push(makeCase(takeAll())) ~~> = CaseLabel { Statement } ;
+CaseLabel   = CaseExpr | DefaultLabel ;
+CaseExpr    <~~ push({casecond: pop()}) ~~> = KwCase Expression ( ":" | ";" ) ;
+DefaultLabel <~~ push({casedflt: true}) ~~> = KwDefault ( ":" | ";" ) ;
+KwCase      = "case" KwEnd ;
+// do { ... } while (e); -- the body runs before the condition is ever tested.
+DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
+            = KwDo ( Block | BodyStmt ) KwWhile "(" Expression ")" Semi ;
 // try/catch/finally + throw are genuinely compiled: throw calls js_throw, each try/catch/
 // finally body compiles to its own closure handed to js_try, and a return/break/continue
 // leaving a try or catch body becomes a control signal that excDispatch re-issues in the
@@ -341,8 +392,11 @@ Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression Semi ;
 Declare     <~~ takeAll(); push(notImplStmt("declare", up.pos)) ~~>
             = KwDeclare SkipParen ( ";" | Block ) ;
-ConstDecl   <~~ takeAll(); push(notImplStmt("global const", up.pos)) ~~>
-            = KwConst Id { Id } [ "=" Expression ] { "," Id { Id } [ "=" Expression ] } Semi ;
+// const NAME = expr; -- a global constant. Constants live in the same flat name space
+// as classes and functions here (they carry no '$' sigil, so no PHP variable can
+// collide with one), which is what lets ConstRef resolve them with a plain scope read.
+ConstDecl   <~~ push(makeConstDecl(takeAll())) ~~>
+            = KwConst CItem { "," CItem } Semi ;
 CatchType   = CatchName { "|" CatchName } ;
 CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 
@@ -401,26 +455,47 @@ ForeachVars = DestructPat | ForeachKV ;
 ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
 ForeachV1   = [ FeRef ] DollarName <~~ push({v1: pop()}) ~~> ;
 ForeachV2   = [ FeRef ] DollarName <~~ push({v2: pop()}) ~~> ;
-// 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array.
-// There is no reference cell in this compiler's value model, so the form is
-// recognized and routed to notImplemented rather than compiled as a copy.
-FeRef       <~~ notImpl("foreach by reference", up.pos) ~~> = "&" ;
+// 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array: the
+// loop binds the variable to the element's storage CELL instead of to a copy of its
+// value.
+FeRef       <~~ noteRef(); push({feref: true}) ~~> = "&" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] Semi ;
+// 'break 2' / 'continue 2' leave that many enclosing loops (and switches). The level
+// is a literal integer in PHP - it has to be known where the jump is emitted - so it
+// is read from the token rather than compiled to a value.
 Break       <~~ push(makeBreak(takeAll())) ~~>
-            = KwBreak [ Expression ] Semi ;
+            = KwBreak [ JumpLevel ] Semi ;
 Continue    <~~ push(makeContinue(takeAll())) ~~>
-            = KwContinue [ Expression ] Semi ;
+            = KwContinue [ JumpLevel ] Semi ;
+JumpLevel   <~~ push({lvl: phpIntLit(up.in)}) ~~>
+            = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 
 // Every expression pushes exactly one thunk: function(block) -> {b, v}.
-Expression  = RefAssign | DestructAssign | Assignment | Ternary ;
+Expression  = RefAssign | DestructAssign | Assignment | YieldExpr | Ternary ;
 
-// $b = &$a : both names then share ONE storage cell. There is no reference cell in
-// this compiler's value model, so the form is recognized and routed to
-// notImplemented rather than silently compiled as a copy.
-RefAssign   <~~ takeAll(); push(notImplExpr("reference assignment", up.pos)) ~~>
-            = Target PlainEq "&" !"&" Target ;
+// yield / yield $v / yield $k => $v / yield from $it. A function whose body contains
+// one is a GENERATOR function: calling it does not run the body, it makes a generator
+// (js_genfn), and each yield suspends the body on its own goroutine - so these are
+// real generators, not a replayed list. A keyed yield hands its key over inside a
+// small marker record, since the runtime's yield protocol carries a value only.
+YieldExpr   <~~ push(makeYield(takeAll())) ~~>
+            = KwYield YieldFrom | KwYield YieldArg | KwYield ;
+YieldFrom   <~~ push({yfrom: pop()}) ~~> = KwFrom Expression ;
+YieldArg    <~~ push(makeYieldArg(takeAll())) ~~> = Ternary [ "=>" Ternary ] ;
+KwYield     = "yield" KwEnd ;
+KwFrom      = "from" KwEnd ;
+
+// $b = &$a : both names then share ONE storage CELL, so a write through either name
+// is visible through the other. The cell is the same one php-interpreter.abnf uses
+// (an object carrying __refcell and the value under "v"); it may sit in a scope slot
+// or in an array element, which is what makes $b = &$a and $el = &$a[0] one form.
+// RefAmp also arms the reference lowering for the whole program: a file with no '&'
+// emits not one dereference (see phDeref).
+RefAssign   <~~ push(makeRefAssign(takeAll())) ~~>
+            = Target PlainEq RefAmp Target ;
+RefAmp      <~~ noteRef() ~~> = "&" !"&" ;
 
 // list($a, $b) = e  /  [$a, $b] = e  -- array destructuring. A slot may be EMPTY
 // ([, $second]), KEYED (["y" => $py]) or itself a nested pattern ([[$m, $n], [$o]]).
@@ -481,7 +556,11 @@ StaticHead  <~~ push(makeStaticHead(takeAll())) ~~>
 BodyStmt    <~~ push({body: makeBody(takeAll())}) ~~>
             = Statement ;
 PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
-VarVarHead  <~~ takeAll(); notImpl("variable variable", up.pos); push({var: "\x00varvar"}) ~~>
+// $$name / ${expr}: the VARIABLE NAME is computed at run time. The head carries the
+// name thunk instead of a literal name, and every reader below asks refNameV for the
+// name handle - so the scope call is the same one a plain variable makes, with a
+// computed string in place of the constant.
+VarVarHead  <~~ push({varexpr: pop()}) ~~>
             = "$" ( VarRef | "{" Expression "}" ) ;
 ArrowField  = "->" MethodName <~~ push({key: up.in}) ~~> ;
 TIndex      <~~ push({idx: pop()}) ~~>
@@ -578,45 +657,59 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | DynMethodSfx | FieldSfx | DynFieldSfx | IndexSfx | CallSfx | StaticSfx } ;
-MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = ( "?->" | "->" ) MethodName <~~ push({mname: up.in}) ~~> "(" [ ArgList ] ")" ;
+// '->' and the NULLSAFE '?->'. A '?->' whose receiver is null makes the WHOLE chain
+// yield null without evaluating anything to its right - including the arguments of
+// the call it introduces - which foldCallMember implements as a branch to the chain's
+// end block (PHP's short circuit).
+Arrow       = NsArrow | "->" ;
+NsArrow     <~~ push({ns: true}) ~~> = "?->" ;
+MethodSfx   <~~ push(makeMethodSfx(takeAll())) ~~>
+            = Arrow MethodName <~~ push({mname: up.in}) ~~> "(" [ ArgList ] ")" ;
 // $o->$meth(...) / $o->{"add"}(...) / $o->$prop: the member name is computed at run
 // time. There is no dynamic-member dispatch here, so both forms are recognized and
 // routed to notImplemented; each still pushes exactly one chain suffix.
-DynMethodSfx <~~ takeAll(); push({kind: "field", name: "\x00dynamic"}); notImpl("dynamic method name", up.pos) ~~>
-            = ( "?->" | "->" ) DynName "(" [ ArgList ] ")" ;
-DynName     = VarRef | "{" Expression "}" ;
-DynFieldSfx <~~ takeAll(); push({kind: "field", name: "\x00dynamic"}); notImpl("dynamic property name", up.pos) ~~>
-            = ( "?->" | "->" ) DynName ;
-FieldSfx    = ( "?->" | "->" ) MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
+DynMethodSfx <~~ push(makeDynMethodSfx(takeAll())) ~~>
+            = Arrow DynName "(" [ ArgList ] ")" ;
+DynName     <~~ push({dynname: pop()}) ~~> = VarRef | "{" Expression "}" ;
+DynFieldSfx <~~ push(makeDynFieldSfx(takeAll())) ~~>
+            = Arrow DynName ;
+FieldSfx    <~~ push(makeFieldSfx(takeAll())) ~~>
+            = Arrow MethodName <~~ push({fname: up.in}) ~~> ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
             = "(" [ ArgList ] ")" ;
 // An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
 // first-class callable placeholder (strlen(...)), with an optional trailing comma.
-// Only the positional form has a runtime model here; each of the other three pushes
-// exactly one thunk, so every call site keeps its item count.
+// Each form pushes exactly ONE record, and emitPhArgs turns the run into the
+// positional list the runtime calls with - resolving a named argument against the
+// callee's parameter names, merging a spread (whose STRING keys are named arguments
+// of their own, which is what `f(...["w" => 1])` means) and handing a storage cell
+// over for a by-reference parameter.
+// PosArg also records its own source text: a call site can only pass a REFERENCE for
+// an argument that denotes one, and '$name' is exactly the spelling that does.
 ArgList     = Arg { "," Arg } [ "," ] ;
 Arg         = NamedArg | SpreadArg | FccArg | PosArg ;
-NamedArg    <~~ takeAll(); push(notImplExpr("named argument", up.pos)) ~~>
+NamedArg    <~~ push({aname: argLabel(up.in), pos: pop()}) ~~>
             = ArgLabel Expression ;
 ArgLabel    = Id ":" !":" ;
-SpreadArg   <~~ takeAll(); push(notImplExpr("spread argument", up.pos)) ~~>
+SpreadArg   <~~ push({aspread: pop()}) ~~>
             = "..." Expression ;
-FccArg      <~~ push(notImplExpr("first-class callable", up.pos)) ~~>
+FccArg      <~~ push({fcc: true}) ~~>
             = "..." ;
-PosArg      = Expression ;
+PosArg      <~~ push({pos: pop(), vtext: plainVarText(up.in)}) ~~>
+            = Expression ;
 // The same access as a chain SUFFIX ($obj::CONST, $obj::class, $obj::method()).
 StaticSfx   <~~ push(makeStaticSfx(takeAll())) ~~>
             = "::" StaticMember [ StaticArgs ] ;
 
 Primary     = "(" Expression ")"
+            | IssetExpr | EmptyExpr
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
             | IncludeExpr
             | HeredocLit | DqStr | SqStr | NumLit
             | True | False | Null
-            | VarRef | StaticExpr | Call | ConstRef ;
+            | VarRef | VarVarRef | StaticExpr | Call | ConstRef ;
 
 // include / require (and _once): a file-inclusion expression. A single-quoted string
 // literal operand ('geomlib.php') names a project file: its path is resolved and the
@@ -638,15 +731,43 @@ IncDyn      <~~ push({incdyn: pop()}) ~~>
 // UseDecl are notImplemented), so a qualified name resolves on its LAST segment,
 // which is what makes the common `\Exception` / `\strlen` spelling work.
 QName       = [ "\\" ] Name { "\\" MethodName } ;
-ConstRef    <~~ push(notImplExpr("constant reference", up.pos)) ~~>
+ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
             = QName ;
 
+// new C(...) / new static(...) / new $cn(...) / new ($expr)(...). The class may be
+// named, RELATIVE (self/static/parent - `new static()` is what a late-static-binding
+// factory returns) or computed at run time from a string or a descriptor. Declared
+// property defaults are replayed by the class's own __initprops hook, so the dynamic
+// forms get them too.
+// isset($a, $b["k"], $o->p): true when every operand is set AND not null. It is a
+// language construct, not a function - the operands are storage LOCATIONS, so a
+// missing variable or a missing array key answers false instead of aborting.
+// empty(e) is the negation of PHP truthiness, and unset() removes the binding.
+IssetExpr   <~~ push(makeIsset(takeAll())) ~~>
+            = KwIsset "(" Target { "," Target } [ "," ] ")" ;
+EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
+            = KwEmpty "(" Expression ")" ;
+UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
+            = KwUnset "(" Target { "," Target } [ "," ] ")" Semi ;
+KwIsset     = "isset" KwEnd ;
+KwEmpty     = "empty" KwEnd ;
+KwUnset     = "unset" KwEnd ;
+
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew QName <~~ push({cls: lastSeg(stripWs(up.in))}) ~~> [ "(" [ ArgList ] ")" ] ;
-// new class (args) extends B implements I { ... }: an anonymous class, recognized and
-// routed to notImplemented (constructor arguments and body are dropped).
-NewAnon     <~~ takeAll(); push(notImplExpr("anonymous class", up.pos)) ~~>
-            = KwNew KwClass [ "(" [ ArgList ] ")" ] [ KwExtends ExtName ] [ KwImplements ImplList ] SkipBlock ;
+            = KwNew NewTarget [ "(" [ ArgList ] ")" ] ;
+NewTarget   = NewRel | NewDyn | NewParen | NewName ;
+NewRel      <~~ push({crel: stripWs(up.in)}) ~~> = ( "static" | "self" | "parent" ) KwEnd ;
+NewDyn      <~~ push({cdyn: pop()}) ~~> = VarRef ;
+NewParen    <~~ push({cdyn: pop()}) ~~> = "(" Expression ")" ;
+NewName     <~~ push({cls: lastSeg(stripWs(up.in))}) ~~> = QName ;
+// new class (args) extends B implements I { ... }: an anonymous class. The body is
+// the ORDINARY class body, so it produces exactly the member records a named
+// declaration does and makeClassStmt builds the descriptor unchanged - the only
+// difference is that the declaration is emitted where the expression stands, under a
+// generated name, and the instantiation follows it.
+NewAnon     <~~ push(makeNewAnon(takeAll())) ~~>
+            = KwNew KwClass [ "(" [ ArgList ] ")" ] [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ]
+              [ KwImplements ImplNames ] "{" { Member } "}" ;
 
 // fn (params) => expr : an arrow function. It is a closure whose body is a single
 // expression that is RETURNED, and whose capture is automatic - which is exactly what
@@ -693,11 +814,12 @@ StaticArgs  <~~ push({sargs: takeAll()}) ~~>
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
             = [ AttrGrp ] [ "static" KwEnd ] KwFunction ParamList [ UseClause ] [ ReturnType ] Block ;
 UseClause   = KwUse "(" [ UseVar { "," UseVar } ] [ "," ] ")" ;
-// 'use (&$x)' captures the variable by REFERENCE, so a write inside the closure is
-// visible outside it. This subset captures the whole defining scope by value, so the
-// '&' is recognized and routed to notImplemented.
+// 'use ($x)' captures by VALUE - a snapshot taken where the closure is created, so a
+// later write to $x outside is not visible inside. 'use (&$x)' captures by REFERENCE,
+// which needs no snapshot at all: a closure here already closes over the defining
+// scope, so an unlisted name and a by-reference one both resolve to the live variable.
 UseVar      = [ UseRef ] DollarName <~~ push({use: pop()}) ~~> ;
-UseRef      <~~ notImpl("closure use by reference", up.pos) ~~> = "&" ;
+UseRef      <~~ push({useref: true}) ~~> = "&" ;
 
 // [1, 2] / [k => v] / array(1, 2). '=>' entries make an associative array
 // (ordered map); plain entries make an indexed array.
@@ -756,12 +878,14 @@ PhpInt      <~~ push(makeConst(phpIntLit(up.in))) ~~>
 
 VarRef      <~~ push(makeVarRef(pop())) ~~>
             = DollarName ;
+VarVarRef   <~~ push(makeVarVarRef(pop())) ~~>
+            = "$" ( VarRef | "{" Expression "}" ) ;
 Null        <~~ push(makeConst(null)) ~~> = "null" KwEnd ;
 
 // $name: the dollar sigil is part of the stored key (PHP variables and function
 // names live in separate namespaces). Attaching the capture to the whole
 // production keeps the '$' in up.in.
-DollarName  <~~ push(up.in) ~~>
+DollarName  <~~ push(noteVarName(up.in)) ~~>
             = "$" Id ;
 
 // Double quoted strings interpolate '$var' and '{$expr}'; single quoted are literal.
@@ -937,7 +1061,7 @@ NotKw       = :script(~~
                    // reserved, or AltBody's statement run parses 'endif' as a
                    // constant reference and eats the terminator.
                    "endif", "endwhile", "endfor", "endforeach", "endswitch",
-                   "insteadof", "goto"]
+                   "insteadof", "goto", "yield"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -984,7 +1108,9 @@ KwFinally   = "finally" KwEnd ;
 KwThrow     = "throw" KwEnd ;
 KwDeclare   = "declare" KwEnd ;
 KwMatch     = "match" KwEnd ;
-KwFn        = "fn" KwEnd ;
+// The tag fires BEFORE the parameter and body tags (they are further right in the
+// sequence), so it records where this arrow function's variable references start.
+KwFn        <~~ push({vmark: varMark()}) ~~> = "fn" KwEnd ;
 KwClone     = "clone" KwEnd ;
 KwInstanceof = "instanceof" KwEnd ;
 
@@ -1002,6 +1128,281 @@ KwInstanceof = "instanceof" KwEnd ;
     var hidCount = 0
 
     function fail(msg) { println("php compiler error: " + msg); exit(1) }
+
+    // ----- references: one storage CELL shared by two names ---------------------
+    // php-interpreter.abnf models a PHP reference as a CELL that a scope slot or an
+    // array element holds in PLACE of the value; every read dereferences and every
+    // write writes through it, so $b = &$a, use (&$v), a by-reference parameter and
+    // foreach (... as &$v) are all the same mechanism. The compiler uses the same
+    // model: a cell is an ordinary object carrying __refcell and the value under "v",
+    // built with js_obj_new / js_set, and the js_ph* array and comparison externals
+    // read through one (abnf/jsrtphp.go).
+    //
+    // The dereference is a BRANCH, so it is armed only for a program that actually
+    // writes a '&' somewhere: noteRef() is called from the four productions that can
+    // create a cell, and a file without one emits exactly the IR it did before
+    // references existed. Every tag has run by the time the first thunk emits
+    // anything (buildMain is the Program tag), so the flag is final at emit time.
+    var usesRefs = false
+    function noteRef() { usesRefs = true }
+    // The variable names the source mentions, in parse order. An arrow function
+    // captures its free variables BY VALUE, and this log plus the mark its 'fn'
+    // keyword records is what tells makeArrowFn which names its body could reach.
+    var varLog = []
+    function noteVarName(n) { varLog.push(n); return n }
+    function varMark() { return varLog.length }
+    function varsSince(mark, exclude) {
+        var out = []
+        for (var i = mark; i < varLog.length; i++) {
+            var n = varLog[i]
+            var skip = false
+            for (var j = 0; j < exclude.length; j++) { if (exclude[j] == n) { skip = true } }
+            for (var k = 0; k < out.length; k++) { if (out[k] == n) { skip = true } }
+            if (!skip) { out.push(n) }
+        }
+        return out
+    }
+    function newCell(b, v) {
+        var cell = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [cell, emitStr(b, "__refcell"), hTrue])
+        callExt(b, "js_set", [cell, emitStr(b, "v"), v])
+        return cell
+    }
+    // "does this slot hold a cell?". js_phisset answers false for every value that is
+    // not an object carrying that key and never aborts, so it is safe on an operand of
+    // unknown type - which js_has is not (see docs/abnf-dialect-gotchas.md).
+    function isCellV(b, v) {
+        return truthy(b, callExt(b, "js_phisset", [v, emitStr(b, "__refcell")]))
+    }
+    function phDeref(b, v) {
+        if (!usesRefs) { return {b: b, v: v} }
+        return {b: b, v: callExt(b, "js_phderef", [v])}
+    }
+    // The RAW slot of a variable - the cell itself when there is one - without
+    // aborting on a name that was never assigned (js_phclslookup walks the scope
+    // chain and answers null instead, which js_scope_get does not).
+    function rawVarV(b, nameV) {
+        return callExt(b, "js_phclslookup", [curScopeV, nameV])
+    }
+    function rawVar(b, name) { return rawVarV(b, emitStr(b, name)) }
+    // The NAME a target denotes, as a handle: a literal for '$x', and the run-time
+    // string "$" . (name expression) for the variable-variable form '$$x' / '${e}'.
+    function refNameV(b, ref) {
+        if (ref.nameT == null || ref.nameT == undefined) { return {b: b, v: emitStr(b, ref.name)} }
+        var r = ref.nameT(b)
+        return {b: r.b, v: callExt(r.b, "js_phcat", [emitStr(r.b, "$"), callExt(r.b, "js_phstr", [r.v])])}
+    }
+    makeVarRef = function(name) {
+        return function(b) {
+            return phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
+        }
+    }
+    // Write a variable, THROUGH its cell when the slot holds one. Returns the block to
+    // continue in, since the reference form branches.
+    function setVarV(b, nameV, v) {
+        if (!usesRefs) {
+            callExt(b, "js_pyset_var", [curScopeV, nameV, v])
+            return b
+        }
+        var raw = rawVarV(b, nameV)
+        var cellB = curF.NewBlock("")
+        var plainB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isCellV(b, raw), cellB, plainB)
+        callExt(cellB, "js_set", [raw, emitStr(cellB, "v"), v])
+        cellB.NewBr(mergeB)
+        callExt(plainB, "js_pyset_var", [curScopeV, nameV, v])
+        plainB.NewBr(mergeB)
+        return mergeB
+    }
+    function setVar(b, name, v) { return setVarV(b, emitStr(b, name), v) }
+    // The storage cell of a variable, creating it (and the variable) on demand.
+    function varCellV(b, nameV) {
+        var raw = rawVarV(b, nameV)
+        var haveB = curF.NewBlock("")
+        var makeB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isCellV(b, raw), haveB, makeB)
+        haveB.NewBr(mergeB)
+        var cell = newCell(makeB, raw)
+        callExt(makeB, "js_pyset_var", [curScopeV, nameV, cell])
+        makeB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(raw, haveB), llvm.ir.NewIncoming(cell, makeB)])}
+    }
+    function varCell(b, name) { return varCellV(b, emitStr(b, name)) }
+    // The storage cell of an array element. js_phcell creates it on demand and hands
+    // the EXISTING one back when the element already holds one, so two references to
+    // the same element share a cell; an ordinary value written to that slot afterwards
+    // goes THROUGH it (phpArrSet in abnf/jsrtphp.go).
+    function elemCell(b, arrV, keyV) {
+        return callExt(b, "js_phcell", [arrV, keyV])
+    }
+    // The cell a '&' target denotes: a variable, or an array element.
+    function targetCell(b, ref) {
+        if (ref.path.length == 0) {
+            if (ref.sbase != undefined) { return {b: b, v: hNull} }
+            var rn0 = refNameV(b, ref)
+            return varCellV(rn0.b, rn0.v)
+        }
+        var p = emitRefPath(b, ref)
+        b = p.b
+        if (p.kind == "append") {
+            callExt(b, "js_phpush", [p.obj, hNull])
+            var lastK = callExt(b, "js_phsub", [callExt(b, "js_phlen", [p.obj]), emitNum(b, 1)])
+            return {b: b, v: elemCell(b, p.obj, lastK)}
+        }
+        if (p.kind == "index") { return {b: b, v: elemCell(b, p.obj, p.key)} }
+        return {b: b, v: hNull}
+    }
+    // $b = &$a : bind the left name (or element) to the right side's cell.
+    function makeRefAssign(items) {
+        var lhs = items[0]
+        var rhs = items[1]
+        return function(b) {
+            var rc = targetCell(b, rhs)
+            b = rc.b
+            if (lhs.path.length == 0) {
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, lhs.name), rc.v])
+            } else {
+                var p = emitRefPath(b, lhs)
+                b = p.b
+                if (p.kind == "append") { callExt(b, "js_phpush", [p.obj, rc.v]) }
+                else if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, rc.v]) }
+                else { callExt(b, "js_set", [p.obj, p.key, rc.v]) }
+            }
+            return {b: b, v: callExt(b, "js_get", [rc.v, emitStr(b, "v")])}
+        }
+    }
+    // A closure's capture scope, built exactly the way php-interpreter.abnf's
+    // makeClosure builds its env: a by-VALUE name is snapshotted, a by-REFERENCE one
+    // binds the variable's storage CELL, and every other name keeps resolving through
+    // the parent (the defining scope), which is also what keeps functions, classes and
+    // constants visible.
+    //
+    // `raw` distinguishes the two by-value snapshots the interpreter takes:
+    //   - `use ($x)` copies the VALUE (its phpCopy(getVar(x)) dereferences first), so a
+    //     variable that some other closure holds by reference is still frozen here;
+    //   - an arrow function's automatic capture copies the scope SLOT as it stands, so
+    //     a slot that already holds a cell stays a cell and a nested `use (&$x)` keeps
+    //     writing where everyone else reads.
+    // Getting the first one wrong made `function () use ($k)` see a later write through
+    // an unrelated `use (&$k)`.
+    function emitCapture(b, byVal, byRef, raw) {
+        if (byVal.length == 0 && byRef.length == 0) { return {b: b, v: curScopeV} }
+        var env = callExt(b, "js_scope_new", [curScopeV])
+        for (var i = 0; i < byVal.length; i++) {
+            var slot = rawVar(b, byVal[i])
+            if (raw !== true) {
+                var rd = phDeref(b, slot)
+                b = rd.b
+                slot = rd.v
+            }
+            callExt(b, "js_scope_decl", [env, emitStr(b, byVal[i]), callExt(b, "js_phcopy", [slot])])
+        }
+        for (var k = 0; k < byRef.length; k++) {
+            var rc = varCell(b, byRef[k])
+            b = rc.b
+            callExt(b, "js_scope_decl", [env, emitStr(b, byRef[k]), rc.v])
+        }
+        return {b: b, v: env}
+    }
+
+    // ----- global constants, static locals, magic constants ---------------------
+    // Constants carry no '$' sigil, so they share the flat name space with classes and
+    // functions and never collide with a PHP variable.
+    function makeConstDecl(items) {
+        var cs = []
+        for (var i = 0; i < items.length; i++) { cs.push(items[i]) }
+        return function(b) {
+            for (var k = 0; k < cs.length; k++) {
+                var cv = hNull
+                if (cs[k].cinit != null) { var r = cs[k].cinit(b); b = r.b; cv = r.v }
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cs[k].cname), cv])
+            }
+            return b
+        }
+    }
+    // The name of the function whose body is being WALKED. The tag on a declaration's
+    // name fires before the body's tags, so a __FUNCTION__ inside it sees the right
+    // name. A closure keeps the enclosing name (PHP says "{closure}"), the one
+    // deviation.
+    var walkFnName = ""
+    function noteFnName(n) { walkFnName = n; return n }
+    // A bareword: a magic constant, or a global / already-declared constant. The lookup
+    // does NOT abort on an unknown name (js_phclslookup answers null), so a program
+    // that reads a constant this subset does not model degrades instead of failing.
+    function makeConstRef(name) {
+        if (name == "__FUNCTION__" || name == "__METHOD__") { return makeConst(walkFnName) }
+        if (name == "__CLASS__") {
+            return function(b) {
+                return {b: b, v: callExt(b, "js_get", [frameCls(b, "self"), emitStr(b, "__name")])}
+            }
+        }
+        return function(b) {
+            return {b: b, v: callExt(b, "js_phclslookup", [curScopeV, emitStr(b, name)])}
+        }
+    }
+    // static $n = 0: one reference cell per declaration SITE, created where the program
+    // starts and bound to the local name on every call.
+    var staticSlots = []
+    function makeStaticVarItem(items) {
+        var nm = ""
+        var init = null
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "string") { nm = items[i] }
+            else { init = items[i] }
+        }
+        return {svname: nm, svinit: init}
+    }
+    function makeStaticVars(items) {
+        noteRef()
+        var binds = []
+        for (var i = 0; i < items.length; i++) {
+            hidCount++
+            var hidden = "\x00sv" + hidCount + walkFnName + items[i].svname
+            staticSlots.push({hidden: hidden})
+            binds.push({hidden: hidden, name: items[i].svname, init: items[i].svinit})
+        }
+        return function(b) {
+            for (var k = 0; k < binds.length; k++) {
+                var cellV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, binds[k].hidden)])
+                // The initializer runs on the FIRST call, not where the program starts
+                // (php-interpreter.abnf's makeStaticVars builds its cells lazily too).
+                // The cell starts out holding undefined, which no PHP value is, so the
+                // test is exact: a static explicitly set to null stays null.
+                if (binds[k].init != null) {
+                    var initB = curF.NewBlock("")
+                    var doneB = curF.NewBlock("")
+                    var cur = callExt(b, "js_get", [cellV, emitStr(b, "v")])
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, cur, hUndef), initB, doneB)
+                    var ri = binds[k].init(initB)
+                    callExt(ri.b, "js_set", [cellV, emitStr(ri.b, "v"), callExt(ri.b, "js_phcopy", [ri.v])])
+                    ri.b.NewBr(doneB)
+                    b = doneB
+                }
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, binds[k].name), cellV])
+            }
+            return b
+        }
+    }
+    // The storage of every 'static $x' declaration site: one empty reference cell each,
+    // created where the program starts so the slot survives between calls. What it
+    // HOLDS is filled in by the declaration itself, on the first call.
+    function emitStaticSlots(b) {
+        for (var i = 0; i < staticSlots.length; i++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, staticSlots[i].hidden), newCell(b, hUndef)])
+        }
+        return b
+    }
+    // $$name as a VALUE. The name is "$" . the string the inner expression yields.
+    function makeVarVarRef(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var nameV = callExt(b, "js_phcat", [emitStr(b, "$"), callExt(b, "js_phstr", [r.v])])
+            return phDeref(b, callExt(b, "js_scope_get", [curScopeV, nameV]))
+        }
+    }
 
     // ----- literal builders -----
     // A float literal's text, with PHP 7.4 underscore separators (and any whitespace
@@ -1213,8 +1614,30 @@ KwInstanceof = "instanceof" KwEnd ;
 
     // ----- control flow (statement thunks: function(b) -> block) -----
     function makeBody(items) {
+        var labels = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].lblstmt != undefined) { labels.push(items[i].lblstmt) }
+        }
+        if (labels.length == 0) {
+            return function(b) {
+                for (var j = 0; j < items.length; j++) { b = items[j](b) }
+                return b
+            }
+        }
         return function(b) {
-            for (var i = 0; i < items.length; i++) { b = items[i](b) }
+            for (var k = 0; k < labels.length; k++) {
+                labelBlocks["$" + labels[k]] = curF.NewBlock("")
+            }
+            for (var q = 0; q < items.length; q++) {
+                var it = items[q]
+                if (it != undefined && it.lblstmt != undefined) {
+                    var lb = labelBlocks["$" + it.lblstmt]
+                    b.NewBr(lb)
+                    b = lb
+                } else {
+                    b = it(b)
+                }
+            }
             return b
         }
     }
@@ -1230,11 +1653,117 @@ KwInstanceof = "instanceof" KwEnd ;
     // break / continue go through emitBreak / emitContinue so a jump that leaves a try
     // body (with no loop of its own) becomes a control signal instead of an invalid
     // branch; outside a try body these are the same b.NewBr as before (byte-identical).
+    // 'break N' / 'continue N' name the N-th enclosing loop or switch, counted from the
+    // innermost - which is a direct branch to that level's exit / continue block.
+    function jumpLevel(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].lvl != undefined) { return items[i].lvl }
+        }
+        return 1
+    }
     makeBreak = function(items) {
-        return function(b) { emitBreak(b); return deadBlock() }
+        var n = jumpLevel(items)
+        return function(b) {
+            if (n > 1 && loopStack.length >= n) { b.NewBr(loopStack[loopStack.length - n].brk) }
+            else { emitBreak(b) }
+            return deadBlock()
+        }
     }
     makeContinue = function(items) {
-        return function(b) { emitContinue(b); return deadBlock() }
+        var n = jumpLevel(items)
+        return function(b) {
+            if (n > 1 && loopStack.length >= n) { b.NewBr(loopStack[loopStack.length - n].cont) }
+            else { emitContinue(b) }
+            return deadBlock()
+        }
+    }
+    // ----- switch / do-while / goto ---------------------------------------------
+    function makeCase(items) {
+        var cond = null
+        var isDflt = false
+        var stmts = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].casecond != undefined) { cond = items[i].casecond }
+            else if (items[i].casedflt != undefined) { isDflt = true }
+            else { stmts.push(items[i]) }
+        }
+        return {cond: cond, isDflt: isDflt, body: makeBody(stmts)}
+    }
+    function makeSwitch(items) {
+        var subj = items[0]
+        var cases = items[1].cases
+        return function(b) {
+            var rs = subj(b)
+            b = rs.b
+            var sv = rs.v
+            var exitB = curF.NewBlock("")
+            var bodyBs = []
+            var dflt = -1
+            for (var i = 0; i < cases.length; i++) {
+                bodyBs.push(curF.NewBlock(""))
+                if (cases[i].isDflt) { dflt = i }
+            }
+            for (var k = 0; k < cases.length; k++) {
+                if (cases[k].isDflt) { continue }
+                var rc = cases[k].cond(b)
+                b = rc.b
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_pheq", [sv, rc.v])), bodyBs[k], nextB)
+                b = nextB
+            }
+            b.NewBr(dflt >= 0 ? bodyBs[dflt] : exitB)
+            // 'break' leaves the switch; 'continue' keeps meaning the enclosing loop.
+            var contB = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : exitB
+            loopStack.push({cont: contB, brk: exitB})
+            for (var q = 0; q < cases.length; q++) {
+                var endb = cases[q].body(bodyBs[q])
+                endb.NewBr(q + 1 < cases.length ? bodyBs[q + 1] : exitB)
+            }
+            loopStack.pop()
+            return exitB
+        }
+    }
+    function makeDoWhile(items) {
+        var body = items[0].body
+        var cond = items[1]
+        return function(b) {
+            var bodyB = curF.NewBlock("")
+            var testB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(bodyB)
+            loopStack.push({cont: testB, brk: exitB})
+            body(bodyB).NewBr(testB)
+            loopStack.pop()
+            var rc = cond(testB)
+            rc.b.NewCondBr(truthy(rc.b, rc.v), bodyB, exitB)
+            return exitB
+        }
+    }
+    // The labels of the statement run currently being emitted, by name. makeBody
+    // registers its own before it emits anything, which is what lets a goto that sits
+    // EARLIER in the run branch to a label further down.
+    var labelBlocks = {}
+    function popLabel() {
+        var items = takeAll()
+        var nm = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].lbl != undefined) { nm = stripWs(items[i].lbl) }
+            else { push(items[i]) }
+        }
+        return nm
+    }
+    // A label is pushed as a RECORD, not a thunk: makeBody has to recognize it before
+    // it emits anything (to create its block), and a record survives the tag stack
+    // where a property hung on a function value would not.
+    function makeLabelStmt(name) { return {lblstmt: name} }
+    function makeGoto(name) {
+        return function(b) {
+            var lb = labelBlocks["$" + name]
+            if (lb == undefined) { fail("goto to an unknown label " + name) }
+            b.NewBr(lb)
+            return deadBlock()
+        }
     }
     // makeCatch is shared - see lib/compile-core.js.
     // try/catch/finally: each body compiles to its own IR closure handed to js_try. The
@@ -1379,13 +1908,20 @@ KwInstanceof = "instanceof" KwEnd ;
         var valName = null
         var pat = null
         var body = null
+        var byRef = false
         for (var i = 1; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].v1 != undefined) { valName = items[i].v1 }
             else if (items[i].v2 != undefined) { keyName = items[i].v2 }
             else if (items[i].pat != undefined) { pat = items[i].pat }
+            else if (items[i].feref != undefined) { byRef = true }
         }
+        // Which loop shape to emit is decided at EMIT time, not here: usesYield is only
+        // final once the whole program has been walked, and a foreach written BEFORE the
+        // first generator function in the file would otherwise get the plain index loop.
+        var genT = makeForeachGen(iterT, keyName, valName, pat, body, byRef)
         return function(b) {
+            if (usesYield) { return genT(b) }
             var ir = iterT(b)
             b = ir.b
             hidCount++
@@ -1405,13 +1941,23 @@ KwInstanceof = "instanceof" KwEnd ;
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var itV = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, itName)])
             var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var elemV = anytype
+            if (byRef) {
+                // 'as &$v' binds the variable to the element's storage cell, so a
+                // write to $v lands in the array.
+                elemV = elemCell(bodyB, itV, callExt(bodyB, "js_range_key", [itV, iB]))
+            } else {
+                var rel = phDeref(bodyB, callExt(bodyB, "js_range_val", [itV, iB]))
+                bodyB = rel.b
+                elemV = callExt(bodyB, "js_phcopy", [rel.v])
+            }
             if (pat != null) {
-                bodyB = emitBindPattern(bodyB, pat, callExt(bodyB, "js_range_val", [itV, iB]))
+                bodyB = emitBindPattern(bodyB, pat, elemV)
             } else if (keyName != null) {
                 callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, valName), callExt(bodyB, "js_range_key", [itV, iB])])
-                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, keyName), callExt(bodyB, "js_range_val", [itV, iB])])
+                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, keyName), elemV])
             } else {
-                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, valName), callExt(bodyB, "js_range_val", [itV, iB])])
+                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, valName), elemV])
             }
             loopStack.push({cont: postB, brk: exitB})
             body(bodyB).NewBr(postB)
@@ -1420,6 +1966,167 @@ KwInstanceof = "instanceof" KwEnd ;
             callExt(postB, "js_pyset_var", [curScopeV, emitStr(postB, iName),
                                             intWrap(postB, callExt(postB, "js_jadd", [iP, emitNum(postB, 1)]))])
             postB.NewBr(headB)
+            return exitB
+        }
+    }
+
+    // ----- generators -----------------------------------------------------------
+    // usesYield is program wide (it decides whether foreach has to be able to drive a
+    // generator at all); sawYield is per function body and tells the emitter of the
+    // function currently being built whether to wrap its closure in js_genfn.
+    var usesYield = false
+    var sawYield = false
+    var genClosure = false
+    function makeYieldArg(items) {
+        if (items.length == 1) { return {yval: items[0]} }
+        return {ykey: items[0], yval: items[1]}
+    }
+    function makeYield(items) {
+        usesYield = true
+        var fromT = null
+        var keyT = null
+        var valT = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].yfrom != undefined) { fromT = items[i].yfrom }
+            else if (items[i].yval != undefined) { valT = items[i].yval; keyT = items[i].ykey }
+        }
+        return function(b) {
+            sawYield = true
+            if (fromT != null) {
+                var rf = fromT(b)
+                b = rf.b
+                hidCount++
+                var aName = "\x00yf" + hidCount
+                var iName = "\x00yi" + hidCount
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), rf.v])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+                var headB = curF.NewBlock("")
+                var bodyB = curF.NewBlock("")
+                var exitB = curF.NewBlock("")
+                b.NewBr(headB)
+                var aH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+                var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+                headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, callExt(headB, "js_range_len", [aH])])), bodyB, exitB)
+                var aB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+                var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+                callExt(bodyB, "js_yield", [callExt(bodyB, "js_range_val", [aB, iB])])
+                callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                                intWrap(bodyB, callExt(bodyB, "js_jadd", [iB, emitNum(bodyB, 1)]))])
+                bodyB.NewBr(headB)
+                return {b: exitB, v: hNull}
+            }
+            var v = hNull
+            if (valT != null) { var rv = valT(b); b = rv.b; v = rv.v }
+            if (keyT != null) {
+                var rk = keyT(b)
+                b = rk.b
+                var pair = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [pair, emitStr(b, "__genkv"), hTrue])
+                callExt(b, "js_set", [pair, emitStr(b, "k"), rk.v])
+                callExt(b, "js_set", [pair, emitStr(b, "v"), v])
+                v = pair
+            }
+            return {b: b, v: callExt(b, "js_yield", [v])}
+        }
+    }
+
+    // foreach over something that MAY be a generator. One loop drives both: an array
+    // is walked by index, a generator by its next() handshake (so its body really is
+    // suspended and resumed, and a break leaves it parked rather than draining it).
+    // The generator's key is the one a 'yield k => v' put in the marker record, or the
+    // running count when the yield had no key - PHP's auto-keys.
+    // This shape is emitted only for a program that contains a yield somewhere;
+    // everything else keeps the plain index loop.
+    // One step of a generator: {value, done}. js_mcall dispatches a generator's own
+    // protocol (memberCall's *jsGenerator case), so this is an ordinary method call.
+    function genNext(b, genV) {
+        return callExt(b, "js_mcall", [genV, emitStr(b, "next"), callExt(b, "js_arr_new", [])])
+    }
+    function makeForeachGen(iterT, keyName, valName, pat, body, byRef) {
+        return function(b) {
+            var ir = iterT(b)
+            b = ir.b
+            hidCount++
+            var itN = "\x00fi" + hidCount
+            var ixN = "\x00fx" + hidCount
+            var stN = "\x00fs" + hidCount
+            var gnN = "\x00fg" + hidCount
+            var lnN = "\x00fl" + hidCount
+            var isGen = callExt(b, "js_phisa", [ir.v, emitStr(b, "Generator")])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, itN), ir.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, ixN), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, stN), hUndef])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, lnN), emitNum(b, 0)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, gnN), isGen])
+            var startG = curF.NewBlock("")
+            var startA = curF.NewBlock("")
+            var headB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, isGen), startG, startA)
+            callExt(startG, "js_scope_set", [curScopeV, emitStr(startG, stN), genNext(startG, ir.v)])
+            startG.NewBr(headB)
+            callExt(startA, "js_scope_set", [curScopeV, emitStr(startA, lnN),
+                                             callExt(startA, "js_range_len", [ir.v])])
+            startA.NewBr(headB)
+            var bodyB = curF.NewBlock("")
+            var postB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            var gHead = curF.NewBlock("")
+            var aHead = curF.NewBlock("")
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, gnN)])), gHead, aHead)
+            var stH = callExt(gHead, "js_scope_get", [curScopeV, emitStr(gHead, stN)])
+            gHead.NewCondBr(truthy(gHead, callExt(gHead, "js_get", [stH, emitStr(gHead, "done")])), exitB, bodyB)
+            var iH = callExt(aHead, "js_scope_get", [curScopeV, emitStr(aHead, ixN)])
+            var lH = callExt(aHead, "js_scope_get", [curScopeV, emitStr(aHead, lnN)])
+            aHead.NewCondBr(truthy(aHead, callExt(aHead, "js_lt", [iH, lH])), bodyB, exitB)
+            // key / value for this step
+            var gBody = curF.NewBlock("")
+            var aBody = curF.NewBlock("")
+            var kvB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, gnN)])), gBody, aBody)
+            var stB = callExt(gBody, "js_scope_get", [curScopeV, emitStr(gBody, stN)])
+            var rawV = callExt(gBody, "js_get", [stB, emitStr(gBody, "value")])
+            gBody.NewCondBr(truthy(gBody, callExt(gBody, "js_phisset", [rawV, emitStr(gBody, "__genkv")])), kvB, plainB)
+            var kvK = callExt(kvB, "js_get", [rawV, emitStr(kvB, "k")])
+            var kvV = callExt(kvB, "js_get", [rawV, emitStr(kvB, "v")])
+            kvB.NewBr(joinB)
+            var autoK = callExt(plainB, "js_scope_get", [curScopeV, emitStr(plainB, ixN)])
+            plainB.NewBr(joinB)
+            var gK = joinB.NewPhi([llvm.ir.NewIncoming(kvK, kvB), llvm.ir.NewIncoming(autoK, plainB)])
+            var gV = joinB.NewPhi([llvm.ir.NewIncoming(kvV, kvB), llvm.ir.NewIncoming(rawV, plainB)])
+            var bindB = curF.NewBlock("")
+            joinB.NewBr(bindB)
+            var itA = callExt(aBody, "js_scope_get", [curScopeV, emitStr(aBody, itN)])
+            var ixA = callExt(aBody, "js_scope_get", [curScopeV, emitStr(aBody, ixN)])
+            var aK = callExt(aBody, "js_range_key", [itA, ixA])
+            var aV = anytype
+            if (byRef) { aV = elemCell(aBody, itA, aK) }
+            else { aV = callExt(aBody, "js_phcopy", [callExt(aBody, "js_range_val", [itA, ixA])]) }
+            aBody.NewBr(bindB)
+            var keyV = bindB.NewPhi([llvm.ir.NewIncoming(gK, joinB), llvm.ir.NewIncoming(aK, aBody)])
+            var valV = bindB.NewPhi([llvm.ir.NewIncoming(gV, joinB), llvm.ir.NewIncoming(aV, aBody)])
+            var bb = bindB
+            if (pat != null) {
+                bb = emitBindPattern(bb, pat, valV)
+            } else if (keyName != null) {
+                callExt(bb, "js_pyset_var", [curScopeV, emitStr(bb, valName), keyV])
+                callExt(bb, "js_pyset_var", [curScopeV, emitStr(bb, keyName), valV])
+            } else {
+                callExt(bb, "js_pyset_var", [curScopeV, emitStr(bb, valName), valV])
+            }
+            loopStack.push({cont: postB, brk: exitB})
+            body(bb).NewBr(postB)
+            loopStack.pop()
+            var ixP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, ixN)])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, ixN),
+                                            intWrap(postB, callExt(postB, "js_jadd", [ixP, emitNum(postB, 1)]))])
+            var gPost = curF.NewBlock("")
+            postB.NewCondBr(truthy(postB, callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, gnN)])), gPost, headB)
+            var itP = callExt(gPost, "js_scope_get", [curScopeV, emitStr(gPost, itN)])
+            callExt(gPost, "js_scope_set", [curScopeV, emitStr(gPost, stN), genNext(gPost, itP)])
+            gPost.NewBr(headB)
             return exitB
         }
     }
@@ -1518,11 +2225,11 @@ KwInstanceof = "instanceof" KwEnd ;
             } else {
                 var ref = sl.val.dt
                 if (ref.path.length == 0) {
-                    callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), elem])
+                    var rn1 = refNameV(b, ref)
+                    b = setVarV(rn1.b, rn1.v, callExt(rn1.b, "js_phcopy", [elem]))
                 } else {
                     var p = emitRefPath(b, ref)
-                    b = p.b
-                    writeRefSlot(b, p, elem)
+                    b = writeRefSlot(p.b, p, elem)
                 }
             }
         }
@@ -1753,8 +2460,8 @@ KwInstanceof = "instanceof" KwEnd ;
         if (prop != null) {
             var pn = prop.substring(2)
             return function(b) {
-                var ov = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
-                return {b: b, v: callExt(b, "js_get", [ov, emitStr(b, pn)])}
+                var rov = phDeref(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]))
+                return emitPropGet(rov.b, rov.v, emitStr(rov.b, pn))
             }
         }
         return makeVarRef(name)
@@ -1774,26 +2481,112 @@ KwInstanceof = "instanceof" KwEnd ;
     }
 
     // ----- member chains: ->method(args), ->field, [index], (call), ::static -----
+    // One chain suffix, with the nullsafe flag its arrow carried.
+    function sfxNs(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ns != undefined) { return true }
+        }
+        return false
+    }
+    function sfxRest(items) {
+        var out = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it != undefined && (it.ns != undefined || it.mname != undefined
+                                    || it.fname != undefined || it.dynname != undefined)) { continue }
+            out.push(it)
+        }
+        return out
+    }
+    function sfxNamed(items, key) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i][key] != undefined) { return items[i][key] }
+        }
+        return undefined
+    }
+    function makeMethodSfx(items) {
+        return {kind: "mcall", name: sfxNamed(items, "mname"), args: sfxRest(items), nullsafe: sfxNs(items)}
+    }
+    function makeFieldSfx(items) {
+        return {kind: "field", name: sfxNamed(items, "fname"), nullsafe: sfxNs(items)}
+    }
+    // $o->$meth(...) / $o->{"add"}(...): the member NAME is computed at run time.
+    function makeDynMethodSfx(items) {
+        return {kind: "dyncall", nameT: sfxNamed(items, "dynname"), args: sfxRest(items), nullsafe: sfxNs(items)}
+    }
+    function makeDynFieldSfx(items) {
+        return {kind: "dynfield", nameT: sfxNamed(items, "dynname"), nullsafe: sfxNs(items)}
+    }
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
         var suffixes = items.slice(1)
+        var hasNs = false
+        for (var q = 0; q < suffixes.length; q++) {
+            if (suffixes[q].nullsafe === true) { hasNs = true }
+        }
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
+            // A '?->' anywhere in the chain gives it an end block that every null
+            // receiver jumps straight to, so nothing to its right is evaluated.
+            var endB = hasNs ? curF.NewBlock("") : null
+            var incs = []
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
-                if (s.kind == "mcall") {
-                    var ea = emitArgs(b, s.args)
+                if (s.nullsafe === true) {
+                    var contB = curF.NewBlock("")
+                    b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, cur, hNull), endB, contB)
+                    incs.push(llvm.ir.NewIncoming(hNull, b))
+                    b = contB
+                }
+                if (s.kind == "dyncall") {
+                    var rn = s.nameT(b)
+                    b = rn.b
+                    var ed = emitPhArgs(b, s.args, null)
+                    b = ed.b
+                    var rdm = emitMethodCall(b, cur, callExt(b, "js_phstr", [rn.v]), ed.v)
+                    b = rdm.b
+                    cur = rdm.v
+                } else if (s.kind == "dynfield") {
+                    var rf = s.nameT(b)
+                    b = rf.b
+                    var rdf = emitPropGet(b, cur, callExt(b, "js_phstr", [rf.v]))
+                    b = rdf.b
+                    cur = rdf.v
+                } else if (s.kind == "mcall") {
+                    // $o->m(...): a callable bound to this receiver.
+                    if (hasFcc(s.args)) { cur = emitMethodFcc(b, cur, s.name); continue }
+                    var ea = emitPhArgs(b, s.args, methSigOf(s.name))
                     b = ea.b
-                    cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                    var rm = emitMethodCall(b, cur, emitStr(b, s.name), ea.v)
+                    b = rm.b
+                    cur = rm.v
                 } else if (s.kind == "field") {
-                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                    var rg = emitPropGet(b, cur, emitStr(b, s.name))
+                    b = rg.b
+                    cur = rg.v
                 } else if (s.kind == "call") {
-                    var ea2 = emitArgs(b, s.args)
+                    var ea2 = emitPhArgs(b, s.args, null)
                     b = ea2.b
-                    cur = callExt(b, "js_call", [cur, hUndef, ea2.v])
+                    var rc2 = callableV(ea2.b, cur)
+                    b = rc2.b
+                    if (magicInvoke) {
+                        // An INSTANCE used as a callable runs its __invoke method.
+                        var invB = curF.NewBlock("")
+                        var fnB = curF.NewBlock("")
+                        var endI = curF.NewBlock("")
+                        b.NewCondBr(emitIsObj(b, rc2.v), invB, fnB)
+                        var iv = callExt(invB, "js_mcall", [rc2.v, emitStr(invB, "__invoke"), ea2.v])
+                        invB.NewBr(endI)
+                        var fv = callExt(fnB, "js_call", [rc2.v, hUndef, ea2.v])
+                        fnB.NewBr(endI)
+                        b = endI
+                        cur = endI.NewPhi([llvm.ir.NewIncoming(iv, invB), llvm.ir.NewIncoming(fv, fnB)])
+                    } else {
+                        cur = callExt(b, "js_call", [rc2.v, hUndef, ea2.v])
+                    }
                 } else if (s.kind == "static") {
                     var curV = cur
                     var rs = emitStaticAccess(function(bb) { return {b: bb, v: curV} }, s.sfxMem, s.sfxArgs)(b)
@@ -1805,7 +2598,204 @@ KwInstanceof = "instanceof" KwEnd ;
                     cur = callExt(b, "js_phget", [cur, ir.v])
                 }
             }
-            return {b: b, v: cur}
+            if (!hasNs) { return {b: b, v: cur} }
+            incs.push(llvm.ir.NewIncoming(cur, b))
+            b.NewBr(endB)
+            return {b: endB, v: endB.NewPhi(incs)}
+        }
+    }
+    // ----- magic methods --------------------------------------------------------
+    // __get / __set / __isset / __call / __invoke are FALLBACKS: they run only where an
+    // ordinary member access finds nothing. Each therefore costs a branch at every
+    // property read, property write or method call - so, exactly like the operator
+    // overloading in csharp-to-llvm-ir.abnf, the branch is emitted only when some class
+    // in the program declares that hook. A program with no magic method emits the IR it
+    // did before they existed.
+    var magicGet = false
+    var magicSet = false
+    var magicIsset = false
+    var magicCall = false
+    var magicInvoke = false
+    function noteMagic(name) {
+        if (name == "__get") { magicGet = true }
+        else if (name == "__set") { magicSet = true }
+        else if (name == "__isset") { magicIsset = true }
+        else if (name == "__call") { magicCall = true }
+        else if (name == "__invoke") { magicInvoke = true }
+    }
+    // "is this an instance": js_phisset never aborts, and only an object built by `new`
+    // carries __class.
+    function emitIsObj(b, v) {
+        return truthy(b, callExt(b, "js_phisset", [v, emitStr(b, "__class")]))
+    }
+    // Does the value's class - or any of its bases - declare `name`? A runtime walk of
+    // the __super chain, since the receiver's class is not known here.
+    function emitHasMethod(b, objV, nameV) {
+        hidCount++
+        var cName = "\x00mc" + hidCount
+        var fName = "\x00mf" + hidCount
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName),
+                                     callExt(b, "js_get", [objV, emitStr(b, "__class")])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fName), hFalse])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var foundB = curF.NewBlock("")
+        var nextB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var curH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_phisset", [curH, emitStr(headB, "__isclass")])), bodyB, exitB)
+        var curB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, cName)])
+        bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_phisset", [curB, nameV])), foundB, nextB)
+        callExt(foundB, "js_scope_set", [curScopeV, emitStr(foundB, fName), hTrue])
+        foundB.NewBr(exitB)
+        callExt(nextB, "js_scope_set", [curScopeV, emitStr(nextB, cName),
+                                        callExt(nextB, "js_get", [curB, emitStr(nextB, "__super")])])
+        nextB.NewBr(headB)
+        return {b: exitB, v: callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, fName)])}
+    }
+    // $o->p, with __get as the fallback for a property the instance does not have.
+    function emitPropGet(b, objV, keyV) {
+        if (!magicGet) { return {b: b, v: callExt(b, "js_get", [objV, keyV])} }
+        var haveB = curF.NewBlock("")
+        var missB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phisset", [objV, keyV])), haveB, missB)
+        var plainV = callExt(haveB, "js_get", [objV, keyV])
+        haveB.NewBr(mergeB)
+        var hm = emitHasMethod(missB, objV, emitStr(missB, "__get"))
+        var magB = curF.NewBlock("")
+        var rawB = curF.NewBlock("")
+        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
+        var magV = callExt(magB, "js_mcall", [objV, emitStr(magB, "__get"), argList(magB, [keyV])])
+        magB.NewBr(mergeB)
+        var rawV = callExt(rawB, "js_get", [objV, keyV])
+        rawB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plainV, haveB),
+                                             llvm.ir.NewIncoming(magV, magB),
+                                             llvm.ir.NewIncoming(rawV, rawB)])}
+    }
+    // $o->p = v, with __set as the fallback for a property the instance does not have.
+    function emitPropSet(b, objV, keyV, valV) {
+        if (!magicSet) { callExt(b, "js_set", [objV, keyV, valV]); return b }
+        var haveB = curF.NewBlock("")
+        var missB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_phisset", [objV, keyV])), haveB, missB)
+        callExt(haveB, "js_set", [objV, keyV, valV])
+        haveB.NewBr(mergeB)
+        var hm = emitHasMethod(missB, objV, emitStr(missB, "__set"))
+        var magB = curF.NewBlock("")
+        var rawB = curF.NewBlock("")
+        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
+        callExt(magB, "js_mcall", [objV, emitStr(magB, "__set"), argList(magB, [keyV, valV])])
+        magB.NewBr(mergeB)
+        callExt(rawB, "js_set", [objV, keyV, valV])
+        rawB.NewBr(mergeB)
+        return mergeB
+    }
+    // isset($o->p), with __isset as the fallback.
+    function emitPropIsset(b, objV, keyV) {
+        var plain = callExt(b, "js_phisset", [objV, keyV])
+        if (!magicIsset) { return {b: b, v: plain} }
+        var missB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, plain), mergeB, missB)
+        var hm = emitHasMethod(missB, objV, emitStr(missB, "__isset"))
+        var magB = curF.NewBlock("")
+        var rawB = curF.NewBlock("")
+        hm.b.NewCondBr(truthy(hm.b, hm.v), magB, rawB)
+        var magV = callExt(magB, "js_phbool", [callExt(magB, "js_mcall", [objV, emitStr(magB, "__isset"), argList(magB, [keyV])])])
+        magB.NewBr(mergeB)
+        rawB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(plain, b),
+                                             llvm.ir.NewIncoming(magV, magB),
+                                             llvm.ir.NewIncoming(hFalse, rawB)])}
+    }
+    // $o->m(args), with __call($name, $args) as the fallback for a method the class
+    // chain does not declare.
+    function emitMethodCall(b, objV, nameV, argsV) {
+        if (!magicCall) { return {b: b, v: callExt(b, "js_mcall", [objV, nameV, argsV])} }
+        var hm = emitHasMethod(b, objV, nameV)
+        b = hm.b
+        var directB = curF.NewBlock("")
+        var magB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, hm.v), directB, magB)
+        var dv = callExt(directB, "js_mcall", [objV, nameV, argsV])
+        directB.NewBr(mergeB)
+        var mv = callExt(magB, "js_mcall", [objV, emitStr(magB, "__call"),
+                                            argList(magB, [nameV, phListOf(magB, argsV)])])
+        magB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dv, directB), llvm.ir.NewIncoming(mv, magB)])}
+    }
+
+    // ----- isset / empty / unset ------------------------------------------------
+    // A handle-level "is this null or undefined": both are interned constants, so the
+    // test is two integer comparisons and no runtime call.
+    function isSetHandle(b, v) {
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, v, hNull), hFalse,
+                           b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, v, hUndef), hFalse, hTrue))
+    }
+    // isset() of ONE storage location. A plain variable is read with the non-aborting
+    // scope probe (an undeclared name answers null, not an error); an element and a
+    // property go through js_phisset, which is false for a missing key AND for a null
+    // value - PHP's rule.
+    function emitIssetOne(b, ref) {
+        if (ref.path.length == 0) {
+            if (ref.sbase != undefined) {
+                var rb = ref.sbase(b)
+                b = rb.b
+                return {b: b, v: isSetHandle(b, callExt(b, "js_phsget", [rb.v, emitStr(b, ref.sname)]))}
+            }
+            var rn2 = refNameV(b, ref)
+            var rd = phDeref(rn2.b, rawVarV(rn2.b, rn2.v))
+            return {b: rd.b, v: isSetHandle(rd.b, rd.v)}
+        }
+        var p = emitRefPath(b, ref)
+        b = p.b
+        if (p.kind == "append") { return {b: b, v: hFalse} }
+        if (p.kind == "field") { return emitPropIsset(b, p.obj, p.key) }
+        return {b: b, v: callExt(b, "js_phisset", [p.obj, p.key])}
+    }
+    function makeIsset(refs) {
+        return function(b) {
+            var v = hTrue
+            for (var i = 0; i < refs.length; i++) {
+                var r = emitIssetOne(b, refs[i])
+                b = r.b
+                v = i == 0 ? r.v : b.NewSelect(truthy(b, v), r.v, hFalse)
+            }
+            return {b: b, v: v}
+        }
+    }
+    function makeEmpty(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_phnot", [r.v])}
+        }
+    }
+    // unset($x): drop the binding. A variable becomes undefined in its own slot - NOT
+    // through a cell, since unset() breaks the reference rather than clearing what it
+    // points at - an element is removed from the array and a property is cleared.
+    function makeUnset(refs) {
+        return function(b) {
+            for (var i = 0; i < refs.length; i++) {
+                var ref = refs[i]
+                if (ref.path.length == 0) {
+                    if (ref.sbase == undefined) {
+                        var rn3 = refNameV(b, ref)
+                        b = rn3.b
+                        callExt(b, "js_pyset_var", [curScopeV, rn3.v, hUndef])
+                    }
+                } else {
+                    var p = emitRefPath(b, ref)
+                    b = p.b
+                    if (p.kind == "index") { callExt(b, "js_phunset", [p.obj, p.key]) }
+                    else if (p.kind == "field") { callExt(b, "js_set", [p.obj, p.key, hUndef]) }
+                }
+            }
+            return b
         }
     }
     // items = [{cast}, operandThunk]
@@ -1845,7 +2835,10 @@ KwInstanceof = "instanceof" KwEnd ;
             var rb = baseT(b)
             b = rb.b
             if (args != null) {
-                var ea = emitArgs(b, args)
+                // C::m(...): the first-class callable form yields a closure that
+                // performs the static dispatch when it is finally called.
+                if (hasFcc(args)) { return {b: b, v: emitStaticFcc(b, rb.v, mem)} }
+                var ea = emitPhArgs(b, args, null)
                 b = ea.b
                 var thisV = callExt(b, "js_phthis", [curScopeV])
                 return {b: b, v: callExt(b, "js_phscall", [rb.v, emitStr(b, mem), thisV, ea.v])}
@@ -2021,18 +3014,25 @@ KwInstanceof = "instanceof" KwEnd ;
 
     // ----- closures (IR function closed over the defining scope via js_closure) -----
     function makeClosure(items) {
-        var params = []
-        var defs = []
+        var pl = paramList(items)
         var body = null
+        var byVal = []
+        var byRef = []
+        var pendingUseRef = false
         for (var i = 0; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].param != undefined) { params.push(items[i].param) }
-            else if (items[i].pdef != undefined) { defs.push({name: params[params.length - 1], init: items[i].pdef}) }
+            else if (items[i].useref != undefined) { pendingUseRef = true; noteRef() }
+            else if (items[i].use != undefined) {
+                if (pendingUseRef) { byRef.push(items[i].use) }
+                else { byVal.push(items[i].use) }
+                pendingUseRef = false
+            }
         }
-        body = paramDefaults(defs, body)
+        body = paramDefaults(pl.defs, variadicPrologue(pl, body))
         return function(b) {
-            var idx = emitFunc(params, body, false)
-            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+            var idx = emitFunc(pl.params, body, false)
+            var rc = emitCapture(b, byVal, byRef, false)
+            return {b: rc.b, v: closureV(rc.b, idx, rc.v)}
         }
     }
 
@@ -2040,59 +3040,87 @@ KwInstanceof = "instanceof" KwEnd ;
     // consists of one synthesized 'return $e' - so it inherits the closure's whole
     // capture, its parameter binding and its try-aware return in one step.
     function makeArrowFn(items) {
-        var params = []
-        var defs = []
+        var pl = paramList(items)
         var bodyT = null
+        var mark = 0
         for (var i = 0; i < items.length; i++) {
-            if (items[i].param != undefined) { params.push(items[i].param) }
-            else if (items[i].pdef != undefined) { defs.push({name: params[params.length - 1], init: items[i].pdef}) }
-            else if (items[i].arrowbody != undefined) { bodyT = items[i].arrowbody }
+            if (items[i].arrowbody != undefined) { bodyT = items[i].arrowbody }
+            else if (items[i].vmark != undefined) { mark = items[i].vmark }
         }
-        var body = paramDefaults(defs, makeBody([makeReturn([bodyT])]))
+        // An arrow function captures BY VALUE, automatically: every '$name' the body
+        // mentions (varLog since the 'fn' keyword, minus this function's own
+        // parameters) is snapshotted where the closure is created, so a later write
+        // to one of them outside is not visible inside.
+        var captured = varsSince(mark, pl.params)
+        var body = paramDefaults(pl.defs, variadicPrologue(pl, makeBody([makeReturn([bodyT])])))
         return function(b) {
-            var idx = emitFunc(params, body, false)
-            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+            var idx = emitFunc(pl.params, body, false)
+            var rc = emitCapture(b, captured, [], true)
+            return {b: rc.b, v: callExt(rc.b, "js_closure", [handle(idx), rc.v])}
         }
     }
 
     // ----- new C(...) -----
-    // Declared defaults are replayed base class FIRST, so a redeclared property in the
-    // subclass wins - PHP's rule. The chain is walked at compile time (classSuper), and a
-    // cycle or an unknown base simply stops the walk.
-    function emitPropDefaults(b, objV, name) {
-        var chain = []
-        var cur = name
-        var guard = 0
-        while (cur != "" && cur != undefined && guard < 64) {
-            if (classProps["$" + cur] == undefined) { break }
-            chain.push(cur)
-            cur = classSuper["$" + cur]
-            guard++
+    // Declared defaults are replayed by the class's own __initprops hook, which every
+    // class declaration emits (emitInitProps): it calls the PARENT's hook first and then
+    // assigns its own declared defaults, so a redeclared property in the subclass wins -
+    // PHP's rule - and a `new $cn()` whose class is only known at run time gets exactly
+    // the same treatment as a named one.
+    // The class descriptor a `new` names: a plain name, a RELATIVE keyword
+    // (self/static/parent) read out of the call frame, or a run-time value that is
+    // either a class name string or a descriptor (js_phcname normalizes both to the
+    // name, js_phclslookup turns that back into the descriptor).
+    function newClassV(b, target) {
+        if (target.cls != undefined) {
+            return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, target.cls)])}
         }
-        for (var i = chain.length - 1; i >= 0; i--) {
-            var ps = classProps["$" + chain[i]]
-            for (var k = 0; k < ps.length; k++) {
-                var pv = hNull
-                if (ps[k].init != null) { var r = ps[k].init(b); b = r.b; pv = r.v }
-                callExt(b, "js_set", [objV, emitStr(b, ps[k].name), pv])
+        if (target.crel != undefined) {
+            if (target.crel == "parent") {
+                return {b: b, v: callExt(b, "js_get", [frameCls(b, "self"), emitStr(b, "__super")])}
             }
+            return {b: b, v: frameCls(b, target.crel)}
         }
-        return b
+        var rd = target.cdyn(b)
+        b = rd.b
+        return {b: b, v: callExt(b, "js_phclslookup", [curScopeV, callExt(b, "js_phcname", [rd.v])])}
+    }
+    // An argument record (from ArgList) as opposed to a class-member record.
+    function isArgRec(it) {
+        if (it == undefined) { return false }
+        return it.pos != undefined || it.aname != undefined || it.aspread != undefined || it.fcc != undefined
+    }
+    var anonCount = 0
+    function makeNewAnon(items) {
+        anonCount++
+        var name = "class@anonymous" + anonCount
+        var classItems = [name]
+        var args = []
+        for (var i = 0; i < items.length; i++) {
+            if (isArgRec(items[i])) { args.push(items[i]) }
+            else { classItems.push(items[i]) }
+        }
+        var clsStmt = makeClassStmt(classItems)
+        var newItems = [{cls: name}]
+        for (var k = 0; k < args.length; k++) { newItems.push(args[k]) }
+        var newT = makeNew(newItems)
+        return function(b) {
+            b = clsStmt(b)
+            return newT(b)
+        }
     }
     function makeNew(items) {
-        var name = items[0].cls
+        var target = items[0]
         var args = items.slice(1)
         return function(b) {
-            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            var rc = newClassV(b, target)
+            b = rc.b
+            var clsV = rc.v
             var objV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
-            b = emitPropDefaults(b, objV, name)
-            var argsV = callExt(b, "js_arr_new", [])
-            for (var k = 0; k < args.length; k++) {
-                var ra = args[k](b)
-                b = ra.b
-                callExt(b, "js_arr_push", [argsV, ra.v])
-            }
+            callExt(b, "js_phscall", [clsV, emitStr(b, "__initprops"), objV, callExt(b, "js_pharr", [])])
+            var ean = emitPhArgs(b, args, ctorSig(target.cls))
+            b = ean.b
+            var argsV = ean.v
             // The constructor is resolved through the __super chain, not read off the
             // class with js_get: `class Boom extends Exception {}` declares no
             // __construct of its own, and the plain lookup answered undefined -
@@ -2148,7 +3176,8 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- assignment targets (locals via create-on-assign, ->field, [i], [] append) -----
     makeTargetRef = function(items) {
         var head = items[0]
-        return {name: head.var, path: items.slice(1), sbase: head.sbase, sname: head.sname}
+        return {name: head.var, nameT: head.varexpr == undefined ? null : head.varexpr,
+                path: items.slice(1), sbase: head.sbase, sname: head.sname}
     }
     // The value a target's PATH starts from: a plain variable, or a static property
     // (self::$rows[0] = e reads the property, then indexes it).
@@ -2157,7 +3186,8 @@ KwInstanceof = "instanceof" KwEnd ;
             var rb = ref.sbase(b)
             return {b: rb.b, v: callExt(rb.b, "js_phsget", [rb.v, emitStr(rb.b, ref.sname)])}
         }
-        return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
+        var rn = refNameV(b, ref)
+        return {b: rn.b, v: callExt(rn.b, "js_scope_get", [curScopeV, rn.v])}
     }
     function emitRefPath(b, ref) {
         var rr = refRoot(b, ref)
@@ -2174,15 +3204,54 @@ KwInstanceof = "instanceof" KwEnd ;
         var kr = last.idx(b)
         return {b: kr.b, obj: o, key: kr.v, kind: "index"}
     }
+    // Reading a slot can BRANCH (a property read falls back to __get), so it answers
+    // the block to continue in as well as the value.
     function readRefSlot(b, p) {
-        if (p.kind == "field") { return callExt(b, "js_get", [p.obj, p.key]) }
-        if (p.kind == "index") { return callExt(b, "js_phget", [p.obj, p.key]) }
-        return hNull
+        if (p.kind == "field") { return emitPropGet(b, p.obj, p.key) }
+        if (p.kind == "index") { return {b: b, v: callExt(b, "js_phget", [p.obj, p.key])} }
+        return {b: b, v: hNull}
     }
     function writeRefSlot(b, p, v) {
-        if (p.kind == "field") { callExt(b, "js_set", [p.obj, p.key, v]); return }
-        if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, v]); return }
+        if (p.kind == "field") { return emitPropSet(b, p.obj, p.key, v) }
+        if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, v]); return b }
         callExt(b, "js_phpush", [p.obj, v])
+        return b
+    }
+    // $s[0] = "H" on a STRING replaces one byte. A PHP string is a value, so there is
+    // nothing to write into: the new string is built byte by byte and assigned back to
+    // the variable. Only a single-index target on a plain variable can be one, which is
+    // also the only form PHP accepts.
+    function emitStrSplice(b, sV, kV, chV) {
+        hidCount++
+        var oName = "\x00so" + hidCount
+        var iName = "\x00si" + hidCount
+        var sName = "\x00ss" + hidCount
+        var lenV = callExt(b, "js_bytelen", [sV])
+        var kk = b.NewSelect(truthy(b, callExt(b, "js_phlt", [kV, emitNum(b, 0)])),
+                             callExt(b, "js_phadd", [kV, lenV]), kV)
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sName), sV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), emitStr(b, "")])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lenV])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, sName)])
+        var outB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, oName)])
+        var pieceV = bodyB.NewSelect(truthy(bodyB, callExt(bodyB, "js_phseq", [iB, kk])),
+                                     chV, callExt(bodyB, "js_phget", [srcB, iB]))
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, oName),
+                                        callExt(bodyB, "js_phcat", [outB, pieceV])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        intWrap(bodyB, callExt(bodyB, "js_jadd", [iB, emitNum(bodyB, 1)]))])
+        bodyB.NewBr(headB)
+        return {b: exitB, v: callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])}
+    }
+    function isStrTarget(ref) {
+        return ref.sbase == undefined && ref.path.length == 1 && ref.path[0].idx != undefined
     }
     function makeAssign(items) {
         var ref = items[0]
@@ -2199,20 +3268,47 @@ KwInstanceof = "instanceof" KwEnd ;
                 if (op != "=") { v = emitBin(b, op, callExt(b, "js_phsget", [rb.v, snV]), v) }
                 callExt(b, "js_phsset", [rb.v, snV, v])
             } else if (ref.path.length == 0) {
-                var nameV = emitStr(b, ref.name)
+                var rn4 = refNameV(b, ref)
+                b = rn4.b
+                var nameV = rn4.v
                 if (op != "=") {
-                    var oldl = callExt(b, "js_scope_get", [curScopeV, nameV])
-                    v = emitBin(b, op, oldl, v)
+                    var rold = phDeref(b, callExt(b, "js_scope_get", [curScopeV, nameV]))
+                    b = rold.b
+                    v = emitBin(b, op, rold.v, v)
+                } else {
+                    v = callExt(b, "js_phcopy", [v])
                 }
-                callExt(b, "js_pyset_var", [curScopeV, nameV, v])
+                b = setVarV(b, nameV, v)
+            } else if (op == "=" && isStrTarget(ref)) {
+                // $x[i] = e : an array element, or one byte of a string.
+                var rn6 = refNameV(b, ref)
+                b = rn6.b
+                var rcv = phDeref(b, callExt(b, "js_scope_get", [curScopeV, rn6.v]))
+                b = rcv.b
+                var rk6 = ref.path[0].idx(b)
+                b = rk6.b
+                var isStr6 = truthy(b, callExt(b, "js_phseq",
+                                               [callExt(b, "js_phcast", [emitStr(b, "string"), rcv.v]), rcv.v]))
+                var strB = curF.NewBlock("")
+                var arrB = curF.NewBlock("")
+                var endB6 = curF.NewBlock("")
+                b.NewCondBr(isStr6, strB, arrB)
+                var sp = emitStrSplice(strB, rcv.v, rk6.v, callExt(strB, "js_phstr", [v]))
+                setVarV(sp.b, rn6.v, sp.v).NewBr(endB6)
+                callExt(arrB, "js_phset", [rcv.v, rk6.v, callExt(arrB, "js_phcopy", [v])])
+                arrB.NewBr(endB6)
+                b = endB6
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
                 if (op != "=") {
-                    var old = readRefSlot(b, p)
-                    v = emitBin(b, op, old, v)
+                    var rold2 = readRefSlot(b, p)
+                    b = rold2.b
+                    v = emitBin(b, op, rold2.v, v)
+                } else {
+                    v = callExt(b, "js_phcopy", [v])
                 }
-                writeRefSlot(b, p, v)
+                b = writeRefSlot(b, p, v)
             }
             return {b: b, v: v}
         }
@@ -2231,17 +3327,21 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: b, v: isPre ? newS : oldS}
         }
         if (ref.path.length == 0) {
-            var nameV = emitStr(b, ref.name)
-            var oldV = callExt(b, "js_phnum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+            var rn5 = refNameV(b, ref)
+            var rcur = phDeref(rn5.b, callExt(rn5.b, "js_scope_get", [curScopeV, rn5.v]))
+            b = rcur.b
+            var oldV = callExt(b, "js_phnum", [rcur.v])
             var newV = callExt(b, ext, [oldV, emitNum(b, 1)])
-            callExt(b, "js_pyset_var", [curScopeV, nameV, newV])
+            b = setVarV(b, rn5.v, newV)
             return {b: b, v: isPre ? newV : oldV}
         }
         var p = emitRefPath(b, ref)
         b = p.b
-        var oldM = callExt(b, "js_phnum", [readRefSlot(b, p)])
+        var rslot = readRefSlot(b, p)
+        b = rslot.b
+        var oldM = callExt(b, "js_phnum", [rslot.v])
         var newM = callExt(b, ext, [oldM, emitNum(b, 1)])
-        writeRefSlot(b, p, newM)
+        b = writeRefSlot(b, p, newM)
         return {b: b, v: isPre ? newM : oldM}
     }
     function makeIncDec(items) {
@@ -2254,6 +3354,314 @@ KwInstanceof = "instanceof" KwEnd ;
         return function(b) { return incDec(b, ref, true, isInc) }
     }
 
+    // ----- argument lists -------------------------------------------------------
+    // 'h:' -> 'h'. The label is captured with its colon and any spacing.
+    function argLabel(t) {
+        var w = stripWs(t)
+        var out = ""
+        for (var i = 0; i < w.length; i++) {
+            if (w.charAt(i) == ":") { break }
+            out += w.charAt(i)
+        }
+        return out
+    }
+    // An argument that denotes a STORAGE LOCATION, so a by-reference parameter can bind
+    // to it: '$name', '$a[0]', '$a["k"]["j"]', '$o->p'. The text is recognized here and
+    // re-parsed as a Target (argTarget) - the same door heredoc interpolation uses to
+    // reach the grammar from a tag - which yields the very ref record makeAssign and
+    // targetCell already understand, so every assignable form is covered at once.
+    // Anything else answers null and is passed by value, exactly as before.
+    function trimWs(t) {
+        var a = 0
+        var z = t.length
+        while (a < z && isSpaceCh(t.charAt(a))) { a++ }
+        while (z > a && isSpaceCh(t.charAt(z - 1))) { z-- }
+        return t.substring(a, z)
+    }
+    function isSpaceCh(ch) { return ch == " " || ch == "\t" || ch == "\r" || ch == "\n" }
+    function plainVarText(t) {
+        var w = trimWs(t)
+        if (w.length < 2 || w.charAt(0) != "$") { return null }
+        if (!isNameStart(w.charAt(1))) { return null }
+        var i = 2
+        while (i < w.length && isNameChar(w.charAt(i))) { i++ }
+        // Any run of '[...]' and '->name' steps, with brackets balanced and string
+        // literals skipped so a ']' inside one cannot end the step early.
+        while (i < w.length) {
+            if (w.charAt(i) == "[") {
+                var depth = 0
+                while (i < w.length) {
+                    var ch = w.charAt(i)
+                    if (ch == "'" || ch == "\"") {
+                        var q = ch
+                        i++
+                        while (i < w.length && w.charAt(i) != q) {
+                            if (w.charAt(i) == "\\") { i++ }
+                            i++
+                        }
+                        if (i >= w.length) { return null }
+                    } else if (ch == "[") { depth++ }
+                    else if (ch == "]") {
+                        depth--
+                        if (depth == 0) { i++; break }
+                    }
+                    i++
+                }
+                if (depth != 0) { return null }
+                continue
+            }
+            if (w.charAt(i) == "-" && i + 2 < w.length && w.charAt(i + 1) == ">" && isNameStart(w.charAt(i + 2))) {
+                i += 2
+                while (i < w.length && isNameChar(w.charAt(i))) { i++ }
+                continue
+            }
+            return null
+        }
+        return w
+    }
+    // The ref record an assignable argument text denotes, parsed with the grammar
+    // itself. A text that does not parse as a Target is passed by value.
+    function argTarget(src) {
+        var frag = c.parseFrom(c.agrammar, src, "Target")
+        if (frag == null || frag == undefined) { return null }
+        return c.compile(frag).stack[0]
+    }
+    // The declared signature of every top-level function and method, by name, so a
+    // call site can resolve NAMED arguments and pass a CELL for a by-reference
+    // parameter. Filled while the tags run, read back at emit time (buildMain is the
+    // Program tag, so the whole program is recorded before the first call emits).
+    var funSigs = {}
+    function noteSig(name, fn) {
+        if (name == undefined || name == "") { return }
+        funSigs["$" + name] = {params: fn.params, byref: fn.byref, rest: fn.rest}
+    }
+    function sigOf(name) {
+        if (name == undefined) { return null }
+        var s2 = funSigs["$" + name]
+        return s2 == undefined ? null : s2
+    }
+    // Method signatures, by method NAME rather than by class: a call site does not know
+    // the receiver's class, so a named argument can only be placed when every class
+    // that declares a method of that name declares the SAME parameter names. Two
+    // declarations that disagree mark the name ambiguous and the call falls back to
+    // plain positional binding, which is what it did before named arguments existed.
+    // (php-interpreter.abnf has no such problem: it binds named arguments in the
+    // CALLEE, where the parameter list is always the right one.)
+    var methSigs = {}
+    function noteMethodSig(fn) {
+        if (fn.name == undefined || fn.name == "") { return }
+        var key = "$" + fn.name
+        var prev = methSigs[key]
+        if (prev == undefined) {
+            methSigs[key] = {params: fn.params, byref: fn.byref, rest: fn.rest}
+            return
+        }
+        if (prev == null) { return }
+        if (!sameParams(prev.params, fn.params) || prev.rest != fn.rest) { methSigs[key] = null }
+    }
+    function sameParams(a, b2) {
+        if (a.length != b2.length) { return false }
+        for (var i = 0; i < a.length; i++) { if (a[i] != b2[i]) { return false } }
+        return true
+    }
+    function methSigOf(name) {
+        if (name == undefined) { return null }
+        var s3 = methSigs["$" + name]
+        return s3 == undefined || s3 == null ? null : s3
+    }
+    // "every argument is an ordinary positional one". A NAMED argument carries a
+    // thunk under the same key, so it has to be excluded explicitly - without that
+    // check `f(2, scale: 10)` quietly passed 10 as the SECOND positional argument.
+    function argsArePlain(args) {
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (a == undefined || a.pos == undefined) { return false }
+            if (a.aname != undefined) { return false }
+        }
+        return true
+    }
+    function hasFcc(args) {
+        return args.length == 1 && args[0] != undefined && args[0].fcc != undefined
+    }
+    function byrefAt(sig, i) {
+        if (sig == null) { return false }
+        for (var k = 0; k < sig.byref.length; k++) { if (sig.byref[k] == i) { return true } }
+        return false
+    }
+    // The positional argument list a call is made with.
+    //
+    // The fast path - every argument positional, no by-reference parameter and no
+    // variadic tail - is the plain js_arr_new / js_arr_push run the compiler always
+    // emitted. Anything else is assembled through a PHP array first: positional
+    // arguments push, named ones store under their name, a spread MERGES (js_phmerge
+    // renumbers integer keys and keeps string ones, which is exactly PHP's unpacking
+    // rule), and the result is then read back into the parameter positions the callee
+    // declared.
+    function emitPhArgs(b, args, sig) {
+        var plain = argsArePlain(args)
+        var needsRef = false
+        var variadic = sig != null && sig.rest >= 0
+        if (sig != null) {
+            for (var i = 0; i < args.length; i++) { if (byrefAt(sig, i)) { needsRef = true } }
+        }
+        if (plain && !needsRef && !variadic) {
+            var argsV = callExt(b, "js_arr_new", [])
+            for (var j = 0; j < args.length; j++) {
+                var ar = args[j].pos(b)
+                b = ar.b
+                callExt(b, "js_arr_push", [argsV, ar.v])
+            }
+            return {b: b, v: argsV}
+        }
+        if (plain && needsRef) {
+            var av2 = callExt(b, "js_arr_new", [])
+            for (var k2 = 0; k2 < args.length; k2++) {
+                var vv = anytype
+                if (byrefAt(sig, k2) && args[k2].vtext != null) {
+                    var rc = targetCell(b, argTarget(args[k2].vtext))
+                    b = rc.b
+                    vv = rc.v
+                } else {
+                    var ar2 = args[k2].pos(b)
+                    b = ar2.b
+                    vv = ar2.v
+                }
+                callExt(b, "js_arr_push", [av2, vv])
+            }
+            return {b: b, v: av2}
+        }
+        // The general form: collect into a PHP array, then place by position / name.
+        var tmp = callExt(b, "js_pharr", [])
+        for (var q = 0; q < args.length; q++) {
+            var a = args[q]
+            if (a.aspread != undefined) {
+                var rs = a.aspread(b)
+                b = rs.b
+                callExt(b, "js_phmerge", [tmp, rs.v])
+            } else if (a.aname != undefined) {
+                var rn = a.pos(b)
+                b = rn.b
+                callExt(b, "js_phset", [tmp, emitStr(b, a.aname), rn.v])
+            } else if (a.pos != undefined) {
+                var rp = a.pos(b)
+                b = rp.b
+                callExt(b, "js_phpush", [tmp, rp.v])
+            }
+        }
+        var outV = callExt(b, "js_arr_new", [])
+        if (sig == null) {
+            // No declared signature: hand the collected values over in order.
+            return {b: emitArgSpill(b, tmp, outV, 0), v: outV}
+        }
+        var fixed = sig.rest >= 0 ? sig.rest : sig.params.length
+        for (var pi = 0; pi < fixed; pi++) {
+            var byPos = callExt(b, "js_phget", [tmp, emitNum(b, pi)])
+            var nm = sig.params[pi]
+            var byName = callExt(b, "js_phget", [tmp, emitStr(b, nm.substring(1))])
+            var v = b.NewSelect(truthy(b, callExt(b, "js_phisset", [tmp, emitNum(b, pi)])), byPos,
+                                b.NewSelect(truthy(b, callExt(b, "js_phisset", [tmp, emitStr(b, nm.substring(1))])),
+                                            byName, hUndef))
+            callExt(b, "js_arr_push", [outV, v])
+        }
+        if (sig.rest >= 0) {
+            // The variadic tail: everything from the last declared position on,
+            // collected into one PHP array the callee sees as its '...$rest'.
+            var restV = callExt(b, "js_pharr", [])
+            b = emitRestCollect(b, tmp, restV, fixed)
+            callExt(b, "js_arr_push", [outV, restV])
+        }
+        return {b: b, v: outV}
+    }
+    // Copy tmp[from..len) into the runtime argument list, at run time.
+    function emitArgSpill(b, tmp, outV, from) {
+        return emitIdxLoop(b, tmp, from, function(bb, itV, iV) {
+            callExt(bb, "js_arr_push", [outV, callExt(bb, "js_phget", [itV, iV])])
+            return bb
+        })
+    }
+    function emitRestCollect(b, tmp, restV, from) {
+        return emitIdxLoop(b, tmp, from, function(bb, itV, iV) {
+            callExt(bb, "js_phpush", [restV, callExt(bb, "js_phget", [itV, iV])])
+            return bb
+        })
+    }
+    // for (i = from; i < count(arr); i++) body(arr, i), as real IR.
+    function emitIdxLoop(b, arrV, from, body) {
+        hidCount++
+        var iName = "\x00ai" + hidCount
+        var aName = "\x00aa" + hidCount
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), arrV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, from)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var itV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_phlen", [itV])])), bodyB, exitB)
+        var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        bodyB = body(bodyB, itB, iB)
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        intWrap(bodyB, callExt(bodyB, "js_jadd", [iB, emitNum(bodyB, 1)]))])
+        bodyB.NewBr(headB)
+        return exitB
+    }
+
+    // ----- first-class callables and variable functions -------------------------
+    // $o->m(...) and C::m(...) yield a CALLABLE, not a call. Both become a small
+    // emitted function closed over a scope holding the receiver (or the class): when
+    // it is finally called, its own argument list - the args handle its frame was
+    // given - is forwarded to the dispatch unchanged.
+    function emitBoundFcc(b, recvV, name, ext, holder) {
+        var env = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [env, emitStr(b, holder), recvV])
+        funcCount++
+        var idx = funcCount
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedTag = curFTag
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = f
+        curFTag = idx
+        loopStack = []
+        var bb = f.NewBlock("entry")
+        curScopeV = callExt(bb, "js_scope_new", [f.Params[0]])
+        var selfV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, holder)])
+        var res = anytype
+        if (ext == "mcall") { res = callExt(bb, "js_mcall", [selfV, emitStr(bb, name), f.Params[1]]) }
+        else { res = callExt(bb, "js_phscall", [selfV, emitStr(bb, name), hUndef, phListOf(bb, f.Params[1])]) }
+        bb.NewRet(res)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return callExt(b, "js_closure", [handle(idx), env])
+    }
+    // js_phscall wants its arguments as a PHP array; a call frame hands them over as
+    // the runtime's plain list, so copy them across.
+    function phListOf(b, listV) {
+        var out = callExt(b, "js_pharr", [])
+        callExt(b, "js_phmerge", [out, listV])
+        return out
+    }
+    function emitMethodFcc(b, recvV, name) { return emitBoundFcc(b, recvV, name, "mcall", "\x00fccself") }
+    function emitStaticFcc(b, clsV, name) { return emitBoundFcc(b, clsV, name, "scall", "\x00fcccls") }
+    // $name(...) where $name holds the STRING "s12area": PHP's variable function. A
+    // string callee is resolved against the scope; anything else is already callable.
+    // The probe is a round trip through the string cast, which is an identity only
+    // for a value that IS a string.
+    function callableV(b, v) {
+        var isStr = truthy(b, callExt(b, "js_phseq", [callExt(b, "js_phcast", [emitStr(b, "string"), v]), v]))
+        var strB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(isStr, strB, mergeB)
+        var looked = callExt(strB, "js_phclslookup", [curScopeV, v])
+        strB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(v, b), llvm.ir.NewIncoming(looked, strB)])}
+    }
+
     // ----- calls, defs, classes -----
     function hasBuiltin(name) {
         return name == "count" || name == "strlen" || name == "in_array"
@@ -2262,7 +3670,7 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     function emitBuiltin(b, name, args) {
         var vs = []
-        for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b; vs.push(r.v) }
+        for (var i = 0; i < args.length; i++) { var r = args[i].pos(b); b = r.b; vs.push(r.v) }
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
         if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [vs[0]])} }
         if (name == "count") { return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
@@ -2281,9 +3689,14 @@ KwInstanceof = "instanceof" KwEnd ;
         var name = items[0]
         var args = items.slice(1)
         return function(b) {
+            // strlen(...): PHP 8.1's first-class callable syntax. The value of the
+            // expression IS the function, so there is nothing to call here.
+            if (hasFcc(args)) {
+                return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+            }
             if (hasBuiltin(name)) { return emitBuiltin(b, name, args) }
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
-            var ea = emitArgs(b, args)
+            var ea = emitPhArgs(b, args, sigOf(name))
             b = ea.b
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
         }
@@ -2327,8 +3740,12 @@ KwInstanceof = "instanceof" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                          callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
         }
+        var savedSaw = sawYield
+        sawYield = false
         var endB = bodyStmt(b)
         endB.NewRet(hNull)
+        genClosure = sawYield
+        sawYield = savedSaw
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -2336,22 +3753,55 @@ KwInstanceof = "instanceof" KwEnd ;
         curFTag = savedTag
         return idx
     }
-    function makeFun(items) {
-        var name = items[0]
+    // The parameter list of a function, closure or arrow function, reduced to the
+    // names, the defaults, the BY-REFERENCE positions (a call site has to hand a cell
+    // over for those) and the variadic tail, if any.
+    function paramList(items) {
         var params = []
         var defs = []
+        var byref = []
+        var rest = -1
+        var pendingRef = false
+        var pendingRest = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].pref != undefined) { pendingRef = true }
+            else if (items[i].prest != undefined) { pendingRest = true }
+            else if (items[i].param != undefined) {
+                if (pendingRef) { byref.push(params.length) }
+                if (pendingRest) { rest = params.length }
+                params.push(items[i].param)
+                pendingRef = false
+                pendingRest = false
+            }
+            else if (items[i].pdef != undefined && params.length > 0) {
+                defs.push({name: params[params.length - 1], init: items[i].pdef})
+            }
+        }
+        return {params: params, defs: defs, byref: byref, rest: rest}
+    }
+    // 'function f(...$rest)': the variadic parameter arrives as one argument holding
+    // the collected PHP array (emitPhArgs packs the tail), so no prologue is needed -
+    // this hook stays for symmetry with paramDefaults and simply passes the body on.
+    function variadicPrologue(pl, body) { return body }
+    function makeFun(items) {
+        var name = items[0]
+        var pl = paramList(items.slice(1))
+        var params = pl.params
+        var defs = pl.defs
         var promoted = []
         var pendingMod = false
         var body = null
+        var seen = 0
         for (var i = 1; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
             if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].pmod != undefined) { pendingMod = true }
             else if (items[i].param != undefined) {
-                params.push(items[i].param)
                 if (pendingMod) { promoted.push(items[i].param) }
                 pendingMod = false
+                seen = seen + 1
             }
-            else if (items[i].pdef != undefined) { defs.push({name: params[params.length - 1], init: items[i].pdef}) }
         }
         // Constructor property promotion: '__construct(public int $x = 7)' declares the
         // property and assigns it. The assignment has to sit BETWEEN the default-value
@@ -2364,7 +3814,8 @@ KwInstanceof = "instanceof" KwEnd ;
             stmts.push(inner)
             inner = makeBody(stmts)
         }
-        return {name: name, params: params, body: paramDefaults(defs, inner)}
+        return {name: name, params: params, byref: pl.byref, rest: pl.rest,
+                body: paramDefaults(defs, variadicPrologue(pl, inner))}
     }
     function makePromote(nm) {
         var pn = nm.substring(1)
@@ -2402,11 +3853,24 @@ KwInstanceof = "instanceof" KwEnd ;
             return b
         }
     }
+    var ctorSigs = {}
+    function ctorSig(name) {
+        if (name == undefined) { return null }
+        var cs = ctorSigs["$" + name]
+        return cs == undefined ? null : cs
+    }
+    // A closure value, wrapped in js_genfn when the body it came from yields: calling
+    // a generator function makes a generator instead of running the body.
+    function closureV(b, idx, envV) {
+        var clo = callExt(b, "js_closure", [handle(idx), envV])
+        if (genClosure) { clo = callExt(b, "js_genfn", [clo]) }
+        return clo
+    }
     function makeDefStmt(fn) {
+        noteSig(fn.name, fn)
         return function(b) {
             var idx = emitFunc(fn.params, fn.body, false)
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name),
-                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name), closureV(b, idx, curScopeV)])
             return b
         }
     }
@@ -2433,12 +3897,205 @@ KwInstanceof = "instanceof" KwEnd ;
         }
         return false
     }
+    // __initprops: the per-class hook that replays declared instance-property defaults
+    // onto a fresh instance. It calls the PARENT's hook first (so a redeclared property
+    // in the subclass wins) and then assigns its own. Emitting it as a METHOD instead of
+    // inlining the chain at every `new` is what lets `new $cn()` and an anonymous class
+    // - neither of which has a name at compile time - replay their defaults too. An array
+    // default is COPIED, since a PHP array is a value.
+    function emitInitProps(b, clsV, name, ext, props) {
+        var idx = emitFunc([], function(bb) {
+            if (ext != "") {
+                var sup = callExt(bb, "js_get", [frameCls(bb, "self"), emitStr(bb, "__super")])
+                callExt(bb, "js_phscall", [sup, emitStr(bb, "__initprops"),
+                                           callExt(bb, "js_phthis", [curScopeV]), callExt(bb, "js_pharr", [])])
+            }
+            var thisV = callExt(bb, "js_phthis", [curScopeV])
+            for (var k = 0; k < props.length; k++) {
+                var pv = hNull
+                if (props[k].init != null) {
+                    var r = props[k].init(bb)
+                    bb = r.b
+                    pv = callExt(bb, "js_phcopy", [r.v])
+                }
+                callExt(bb, "js_set", [thisV, emitStr(bb, props[k].name), pv])
+            }
+            return bb
+        }, true, false, name)
+        callExt(b, "js_set", [clsV, emitStr(b, "__initprops"),
+                              callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
+    }
     // Declared instance-property defaults, by class, plus the extends edge. Both maps are
     // filled while the tags run and read back at EMIT time (buildMain is the Program tag,
     // so every class in the program is already recorded when the first `new` is emitted),
     // which is what lets makeNew replay a base class's defaults without a runtime walk.
     var classProps = {}
     var classSuper = {}
+    // ----- traits ---------------------------------------------------------------
+    // A trait is a compile-time member list. `use T;` copies those members into the
+    // using class unless the class declares the same name itself, which is exactly
+    // PHP's precedence (own > trait > inherited).
+    var traitBodies = {}
+    function makeTraitDecl(items) {
+        var name = items[0]
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i].method != undefined) { noteMagic(items[i].method.name) }
+        }
+        traitBodies["$" + name] = items.slice(1)
+        return function(b) { return b }
+    }
+    function traitRefParts(t) {
+        for (var i = 0; i + 1 < t.length; i++) {
+            if (t.charAt(i) == ":" && t.charAt(i + 1) == ":") {
+                return {trait: t.substring(0, i), member: t.substring(i + 2)}
+            }
+        }
+        return {trait: "", member: t}
+    }
+    function makeInsteadof(items) {
+        var p = traitRefParts(items[0].tref)
+        var losers = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].impl != undefined) { losers.push(lastSeg(stripWs(items[i].impl))) }
+        }
+        return {excl: losers, member: p.member}
+    }
+    function makeTraitAs(items) {
+        var p = traitRefParts(items[0].tref)
+        var alias = ""
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].alias != undefined) { alias = items[i].alias }
+        }
+        // 'm as protected' with no new name only changes visibility, which this
+        // subset does not enforce - there is nothing to add then.
+        if (alias == "") { return {aliasnop: true} }
+        return {aliasFrom: p, aliasTo: alias}
+    }
+    function makeUseTrait(items) {
+        var names = []
+        var rules = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] == undefined) { continue }
+            if (items[i].impl != undefined) { names.push(lastSeg(stripWs(items[i].impl))) }
+            else { rules.push(items[i]) }
+        }
+        return {usetrait: names, traitrules: rules}
+    }
+    // The members a class gets from its traits, with the conflict rules applied.
+    // `have` is the set of names the class declares itself; a trait member never
+    // overrides one of those.
+    function traitMembers(uses, have) {
+        var out = {methods: [], props: [], statics: [], consts: []}
+        for (var u = 0; u < uses.length; u++) {
+            var names = uses[u].usetrait
+            var rules = uses[u].traitrules
+            for (var t = 0; t < names.length; t++) {
+                var body = traitBodies["$" + names[t]]
+                if (body == undefined) { fail("unknown trait " + names[t]) }
+                for (var i = 0; i < body.length; i++) {
+                    var it = body[i]
+                    if (it == undefined) { continue }
+                    if (it.method != undefined) {
+                        var mn = it.method.name
+                        if (traitExcluded(rules, names[t], mn)) { continue }
+                        if (hasOwnName(have, mn) || hasMethod(out.methods, mn)) { continue }
+                        out.methods.push(it.method)
+                    } else if (it.propdecl != undefined && it.propdecl != null) {
+                        if (it.propdecl.isStatic === true) { out.statics.push(it.propdecl) }
+                        else { out.props.push(it.propdecl) }
+                    } else if (it.cconsts != undefined) {
+                        for (var q = 0; q < it.cconsts.length; q++) { out.consts.push(it.cconsts[q]) }
+                    }
+                }
+            }
+            // Aliases are added after the copy, so 'T::m as alias' can name a member
+            // that an insteadof rule kept out of the class under its own name.
+            for (var r = 0; r < rules.length; r++) {
+                if (rules[r].aliasTo == undefined) { continue }
+                var src = findTraitMethod(names, rules[r].aliasFrom)
+                if (src == null) { fail("unknown trait method " + rules[r].aliasFrom.member) }
+                out.methods.push({name: rules[r].aliasTo, params: src.params, byref: src.byref,
+                                  rest: src.rest, body: src.body})
+            }
+        }
+        return out
+    }
+    function traitExcluded(rules, trait, member) {
+        for (var i = 0; i < rules.length; i++) {
+            if (rules[i].excl == undefined || rules[i].member != member) { continue }
+            for (var k = 0; k < rules[i].excl.length; k++) {
+                if (rules[i].excl[k] == trait) { return true }
+            }
+        }
+        return false
+    }
+    function findTraitMethod(names, from) {
+        for (var t = 0; t < names.length; t++) {
+            if (from.trait != "" && from.trait != names[t]) { continue }
+            var body = traitBodies["$" + names[t]]
+            if (body == undefined) { continue }
+            for (var i = 0; i < body.length; i++) {
+                if (body[i] != undefined && body[i].method != undefined && body[i].method.name == from.member) {
+                    return body[i].method
+                }
+            }
+        }
+        return null
+    }
+    function hasMethod(list, nm) {
+        for (var i = 0; i < list.length; i++) { if (list[i].name == nm) { return true } }
+        return false
+    }
+    function hasOwnName(names, nm) {
+        for (var i = 0; i < names.length; i++) { if (names[i] == nm) { return true } }
+        return false
+    }
+    function makeEnumCase(items) {
+        var nm = ""
+        var init = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ecase != undefined) { nm = items[i].ecase }
+            else { init = items[i] }
+        }
+        return {ecasename: nm, ecaseinit: init}
+    }
+    function makeEnumStmt(items) {
+        var name = items[0]
+        var cases = []
+        var classItems = [name]
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ecasename != undefined) { cases.push(items[i]) }
+            else { classItems.push(items[i]) }
+        }
+        var clsStmt = makeClassStmt(classItems)
+        return function(b) {
+            b = clsStmt(b)
+            var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+            var allV = callExt(b, "js_pharr", [])
+            for (var k = 0; k < cases.length; k++) {
+                var inst = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [inst, emitStr(b, "__class"), clsV])
+                callExt(b, "js_set", [inst, emitStr(b, "name"), emitStr(b, cases[k].ecasename)])
+                if (cases[k].ecaseinit != null) {
+                    var rv = cases[k].ecaseinit(b)
+                    b = rv.b
+                    callExt(b, "js_set", [inst, emitStr(b, "value"), rv.v])
+                }
+                callExt(b, "js_set", [clsV, emitStr(b, "k:" + cases[k].ecasename), inst])
+                callExt(b, "js_phpush", [allV, inst])
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, "__cases"), allV])
+            // E::cases(): the declaration-order list, as a fresh array each call.
+            var idx = emitFunc([], function(bb) {
+                return retStmt(bb, callExt(bb, "js_phcopy",
+                                           [callExt(bb, "js_get", [frameCls(bb, "self"), emitStr(bb, "__cases")])]))
+            }, true, false, name)
+            callExt(b, "js_set", [clsV, emitStr(b, "cases"),
+                                  callExt(b, "js_closure", [handle(idx), curScopeV])])
+            return b
+        }
+    }
     function makeClassStmt(items) {
         var name = items[0]
         var methods = []
@@ -2446,11 +4103,14 @@ KwInstanceof = "instanceof" KwEnd ;
         var statics = []
         var consts = []
         var ifaces = []
+        var uses = []
         var hasCtor = false
         var ext = ""
         for (var i = 1; i < items.length; i++) {
             if (items[i].method != undefined) {
                 methods.push(items[i].method)
+                noteMethodSig(items[i].method)
+                noteMagic(items[i].method.name)
                 if (items[i].method.name == "__construct") { hasCtor = true }
             }
             else if (items[i].ext != undefined) { ext = lastSeg(items[i].ext) }
@@ -2459,13 +4119,29 @@ KwInstanceof = "instanceof" KwEnd ;
                 var cs = items[i].cconsts
                 for (var q = 0; q < cs.length; q++) { consts.push(cs[q]) }
             }
+            else if (items[i].usetrait != undefined) { uses.push(items[i]) }
             else if (items[i].propdecl != undefined && items[i].propdecl != null) {
                 if (items[i].propdecl.isStatic === true) { statics.push(items[i].propdecl) }
                 else { props.push(items[i].propdecl) }
             }
         }
+        // Trait members are copied in where the class does not declare the name
+        // itself. The copy happens at WALK time, so the emitted class carries them
+        // exactly as if they had been written out in the body.
+        if (uses.length > 0) {
+            var own = []
+            for (var mn = 0; mn < methods.length; mn++) { own.push(methods[mn].name) }
+            var tm = traitMembers(uses, own)
+            for (var a = 0; a < tm.methods.length; a++) { methods.push(tm.methods[a]) }
+            for (var c = 0; c < tm.props.length; c++) { props.push(tm.props[c]) }
+            for (var d = 0; d < tm.statics.length; d++) { statics.push(tm.statics[d]) }
+            for (var e = 0; e < tm.consts.length; e++) { consts.push(tm.consts[e]) }
+        }
         classProps["$" + name] = props
         classSuper["$" + name] = ext
+        for (var mi = 0; mi < methods.length; mi++) {
+            if (methods[mi].name == "__construct") { ctorSigs["$" + name] = {params: methods[mi].params, byref: methods[mi].byref, rest: methods[mi].rest} }
+        }
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
@@ -2493,10 +4169,10 @@ KwInstanceof = "instanceof" KwEnd ;
                 if (statics[s1].init != null) { var rs2 = statics[s1].init(b); b = rs2.b; sv = rs2.v }
                 callExt(b, "js_set", [clsV, emitStr(b, "s:" + statics[s1].name), sv])
             }
+            b = emitInitProps(b, clsV, name, ext, props)
             for (var k = 0; k < methods.length; k++) {
                 var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name),
-                                      callExt(b, "js_closure", [handle(idx), curScopeV])])
+                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), closureV(b, idx, curScopeV)])
             }
             if (!hasCtor && ext == "") {
                 var emptyBody = function(bb) { return bb }
@@ -2591,6 +4267,9 @@ KwInstanceof = "instanceof" KwEnd ;
                                   callExt(b, "js_closure", [handle(emitExcGetter("message")), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getCode"),
                                   callExt(b, "js_closure", [handle(emitExcGetter("code")), curScopeV])])
+            // The root of the chain also carries the empty __initprops every `new`
+            // calls, so a user class extending Exception reaches one.
+            b = emitInitProps(b, clsV, name, "", [])
         }
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
         return b
@@ -2630,7 +4309,14 @@ KwInstanceof = "instanceof" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "max"), callExt(b, "js_get", [mathV, emitStr(b, "max")])])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "min"), callExt(b, "js_get", [mathV, emitStr(b, "min")])])
+        // The bareword spellings of the three literals (PHP's true/false/null are
+        // case insensitive) plus the handful of constants a program may read.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "TRUE"), hTrue])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "FALSE"), hFalse])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "NULL"), hNull])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "PHP_EOL"), emitStr(b, "\n")])
         b = emitExcClasses(b) // Exception / Error and their subclasses
+        b = emitStaticSlots(b) // one reference cell per 'static $x' declaration site
         b = emitImported(b)   // imported files' items, each under its own source
         b = makeSeq(items)(b)
         b.NewRet(handle(0))

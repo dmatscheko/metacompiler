@@ -29,12 +29,24 @@ if let x), compound comma conditions, if case / guard case patterns, a where
 clause on a binding, and for case PAT in xs. defer { ... } runs when its block
 is left - on the normal path, on a return and on a throw - in LIFO order. Int
 arithmetic is 32 bit and / truncates; + concatenates when a side is a String;
-== compares strings by value and objects by identity. A plain enum of bare cases
-becomes named string constants (Direction.north), with or without a conformance
-list. Error handling with do { STMTS } catch [pattern] { STMTS } and throw EXPR
-(no finally; the first catch wins, patterns are parsed but not discriminated, an
-unbound catch binds the implicit `error`); try/try?/try! are parsed and ignored
-(the throw happens inside the call). import resolves a project module to a file
+== compares strings by value and objects by identity. Enums with bare cases, raw
+values (E(rawValue:) and .rawValue) and associated values, plus enum methods and
+computed properties; an enum case is matched and compared by its case NAME, which
+is what makes the leading-dot form (.tails, .circle(r: 5)) work without a type
+checker. Computed properties and willSet/didSet observers, static and class
+members, subscripts (including multi-parameter and static ones), class
+inheritance with overrides, super.m() / super.p / super.init(), is / as? / as!,
+protocols whose extensions carry default implementations, extensions of a type
+(including Int/String/Array), nested types reached as Outer.Inner, initializer
+overloading and failable initializers, and struct VALUE semantics (a struct is
+copied on binding, assignment and argument passing; self = X inside a mutating
+method rewrites the value in place). switch matches PATTERNS: values, ranges
+(1...9, ..<0, 10...), tuples, enum cases with their associated values, bindings
+and a where guard, with fallthrough. Error handling with do { STMTS } catch
+PATTERN [where COND] { STMTS } and throw EXPR (no finally; the first clause whose
+pattern matches wins, an unmatched error keeps unwinding, an unbound catch binds
+the implicit `error`); try and try! are parsed and ignored (the throw happens
+inside the call) and try? yields nil instead of throwing. import resolves a project module to a file
 that is parsed and walked into the same scope. Conditional compilation
 (#if / #elseif / #else / #endif, at top level, in a block, in a type body, in a
 closure body and around the cases of a switch) is STRUCTURAL: the condition is
@@ -48,15 +60,13 @@ A declaration made under #if stays visible after the #endif. #available and
 
 Not in the subset (accepted structurally and reported as not implemented under
 -warn-unsupported, or simply not parsed): floating point (the runtime is 32-bit
-integer only), the numeric literal forms beyond plain decimals, the string
-literal forms beyond a double-quoted one with interpolation, protocols,
-extensions, generics (parsed and ignored), enums with raw or associated values,
-subscript declarations, computed properties and property observers, lazy and
-static members, property wrappers, initializer overloading and failable
-initializers, inheritance beyond a parsed superclass name, operator
-declarations, async/await, as/is casts, typed catch discrimination, struct value
-semantics (structs behave like classes) and bare (unqualified) method calls
-(methods are called via self.m() or obj.m()).
+integer only), the numeric literal forms beyond plain decimals (hexadecimal,
+octal, binary, digit group separators, exponents), the string literal forms
+beyond a double-quoted one with interpolation (unicode escapes, multi-line and
+raw strings), generics (parsed and ignored), lazy properties, property wrappers
+and their projected values, operator and precedencegroup declarations, operator
+overloading, the bitwise and overflow operators, and async/await (async and actor
+declarations are accepted and their bodies never awaited).
 
 Top level self checking programs count failures and end with exit(failures).") ;
 
@@ -155,12 +165,17 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
 // declaration keyword, so it is NOT in Modifier - a greedy Modifiers would eat the
 // `class` of `@objc class Cache { ... }` and leave nothing for ClassDecl. Member
 // tries the nested-type alternative first and only then this list.
-MemberModifiers = { Modifier | Attribute | ClassMod } ;
+// A member's modifiers push a marker for the ones the type builder needs (static /
+// class puts the member on the type descriptor instead of on instances); the rest
+// are parsed and dropped. A marker arrives ahead of the member's own record, in
+// source order, so splitMembers attaches it to the member that follows.
+MemberModifiers = { MemStatic | Modifier | Attribute | ClassMod } ;
+MemStatic   <~~ push({mstatic: 1}) ~~> = ( "static" | "class" ) KwEnd ;
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
 
 // A function/method/init body. Swift returns the value of a body that is a SINGLE
 // expression without writing `return`, so the one-expression form is tried first;
@@ -192,24 +207,29 @@ ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
 ParamAttr   = "@" Id <~~ push({pattr: up.in}) ~~> { "." Id } ;
 
 // class / struct with stored properties, methods and an explicit init.
-StructDecl  <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+StructDecl  <~~ push(makeStructStmt(takeAll())) ~~>
+            = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+            = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+// The inheritance clause: for a class its first entry may be the SUPERCLASS, and
+// every entry may be a protocol whose default implementations are mixed in. Each
+// name is kept as text and resolved when the type is created.
+InheritList = InheritName { "," InheritName } ;
+InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
 ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwActor Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+            = KwActor Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
 
 // A nested type is matched BEFORE the modifier-led members, so the `class` of
 // `class Inner {}` is read as the declaration keyword and the `class` of
 // `class var kind` as a modifier (ClassDecl fails on the `var` that follows).
-Member      = PoundIfMember | MemberDirective | MemberType | [ MemberModifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+Member      = PoundIfMember | MemberDirective | MemberType | [ MemberModifiers ] ( CaseDecl | InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
 // The nested declaration's own statement is dropped: a nested type is accepted
 // structurally, not yet reachable as Outer.Inner.
-MemberType  <~~ pop(); push({}) ~~>
+MemberType  <~~ push({nested: pop()}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
@@ -217,26 +237,67 @@ InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
 // deinit is accepted and ignored - this runtime is garbage collected, so there is
 // no deterministic point at which to run it.
 DeinitDecl  <~~ push({}) ~~> = KwDeinit SkipBlock ;
-SubscriptDecl <~~ notImpl("subscript", up.pos); push({}) ~~>
-            = KwSubscript [ SkipAngle ] SkipParen [ "->" Type ] SkipBlock ;
+// subscript(i: Int) -> Int { get { ... } set { ... } } becomes the pair of ordinary
+// methods __sub_get / __sub_set, which is what [i] reads and writes dispatch to. A
+// second subscript of a different arity is an overload of the same pair.
+SubscriptDecl <~~ var ms = makeSubscript(takeAll()); for (var i = 0; i < ms.length; i++) { push(ms[i]) } ~~>
+            = KwSubscript [ SkipAngle ] ParamList [ "->" AnnType ] [ GenWhere ] PropAccessors ;
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
 // var w = 2, h = 3 declares two stored properties; each binding pushes its own
 // {prop} record, so the type builder sees them in declaration order.
 PropDecl    = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
 PropBind    <~~ push(makeProp(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] ;
-// Computed properties and stored properties with willSet/didSet observers.
-ComputedProp <~~ notImpl("computed property or property observer", up.pos); push({}) ~~>
-            = ( "let" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] SkipBlock ;
+// A computed property (`var scaled: Int { get { ... } set { ... } }`, or the
+// getter-only shorthand `var family: String { "beast" }`) and a stored property
+// with willSet/didSet observers - the two share one syntax, told apart by which
+// accessors the braces hold. An observed property keeps its storage under a
+// hidden name and gets a generated getter/setter, so every property read and
+// write goes through the same accessor lookup.
+ComputedProp <~~ push(makeComputed(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" PropDefault ] PropAccessors ;
+PropDefault <~~ push({pdefault: pop()}) ~~> = Expression ;
+// The accessor list is tried first: `get` and `set` are ordinary identifiers, so a
+// getter-only body would otherwise read `get { ... }` as a trailing-closure call.
+// Each alternative carries its own braces, so a body that is NOT an accessor list
+// makes the whole alternative fail and the getter shorthand is reached (the same
+// shape FnBody uses - an ordered choice never retries a committed alternative).
+// A brace run this grammar cannot read as accessors (a coroutine accessor's
+// `_modify { yield &x }`, an unsupported effect specifier) is still ACCEPTED
+// structurally, as the last alternative: the declaration keeps its stored behavior
+// instead of failing the whole file.
+PropAccessors = AccessorBlock | ImplicitGetter | OpaqueAccessors ;
+OpaqueAccessors <~~ push({}) ~~> = SkipBlock ;
+AccessorBlock = "{" Accessor { Accessor } "}" ;
+Accessor    <~~ push(makeAccessor(takeAll())) ~~>
+            = [ Modifiers ] AccKind <~~ push({akind: up.in}) ~~> [ AccParam ] [ FnEffects ] AccBody ;
+AccKind     = ( "willSet" | "didSet" | "get" | "set" | "_modify" | "_read"
+              | "unsafeAddress" | "unsafeMutableAddress" ) KwEnd ;
+AccParam    = "(" Id <~~ push({aparam: up.in}) ~~> ")" ;
+AccBody     <~~ push({abody: pop()}) ~~> = FnBody ;
+// `var family: String { "beast" }` - the braces ARE the getter body.
+ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 
-// A plain enum of bare cases becomes named constants (Direction.north = "north").
-EnumDecl    = PlainEnum | ComplexEnum ;
-PlainEnum   <~~ push(makeEnumStmt(takeAll())) ~~>
-            = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { SimpleCase } "}" ;
-SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: up.in}) ~~> } [ ";" ] ;
-ComplexEnum <~~ push(notImplStmt("enum with raw or associated values", up.pos)) ~~>
-            = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
+// An enum declares cases (bare, with a raw value, or with associated values) and,
+// like a struct, methods / computed properties / static members. Its body is the
+// SAME Member list a struct has plus CaseDecl, so an enum method is built by the
+// very machinery a struct method is.
+EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
+// The FIRST entry of an enum's inheritance clause may be its raw-value type
+// (`: Int`, `: String`); anything else there is a protocol and is ignored.
+EnumConform = EnumRawType { "," Type } ;
+EnumRawType <~~ push({eraw: stripWs(up.in)}) ~~> = Type ;
+// case a, b  /  case two = "II"  /  case circle(r: Int)  /  case rect(Int, Int)
+CaseDecl    = KwCase ECase { "," ECase } [ ";" ] ;
+ECase       <~~ push({ecase: makeECase(takeAll())}) ~~>
+            = Id <~~ push({cname: up.in}) ~~> [ ECaseAssoc | "=" ECaseRaw ] ;
+ECaseAssoc  <~~ push({cassoc: takeAll()}) ~~>
+            = "(" [ ECaseParam { "," ECaseParam } ] ")" ;
+ECaseParam  <~~ push(makeECaseParam(takeAll())) ~~> = [ ECaseLabel ] Type ;
+ECaseLabel  = Id <~~ push({clabel: up.in}) ~~> ":" ;
+ECaseRaw    <~~ push({craw: pop()}) ~~> = Expression ;
 
 // protocol / extension / typealias: accepted structurally, not implemented.
 UnsupDecl   = ImportDecl | ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
@@ -251,10 +312,37 @@ ImportPath  <~~ push(stripWs(up.in)) ~~>
             = Id { "." ( Id | "*" ) } ;
 ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
               | "func" | "let" | "var" | "inout" ) KwEnd ;
-ProtocolDecl <~~ notImpl("protocol", up.pos) ~~>
-            = KwProtocol Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
-ExtensionDecl <~~ notImpl("extension", up.pos) ~~>
-            = KwExtension Type [ ":" TypeList ] SkipBlock ;
+// A protocol is a named member table: its REQUIREMENTS are recorded and dropped
+// (this front end does no conformance checking), and the default implementations an
+// extension of the protocol adds are what a conforming type inherits. A type's
+// inheritance clause adopts every protocol it names.
+ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
+            = KwProtocol Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
+              "{" { ProtoMember } "}" ;
+// A requirement has no body, so it is matched BEFORE the member forms: `var name:
+// String { get }` would otherwise read as a computed property whose getter returns
+// the value of a variable called `get`.
+ProtoMember = ProtoReq | Member ;
+ProtoReq    = AssocTypeDecl | [ MemberModifiers ] ( ProtoVar | ProtoFunc | ProtoInit | ProtoSubscript ) ;
+AssocTypeDecl <~~ push({}) ~~>
+            = "associatedtype" KwEnd Id [ ":" TypeList ] [ "=" Type ] [ GenWhere ] [ ";" ] ;
+ProtoVar    <~~ push({}) ~~>
+            = ( "let" | "var" ) KwEnd Id [ ":" Type ] "{" ProtoAcc { ProtoAcc } "}" ;
+ProtoAcc    = ( "get" | "set" | "async" | "throws" ) KwEnd ;
+ProtoFunc   <~~ push({}) ~~>
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] [ ";" ] ;
+ProtoInit   <~~ push({}) ~~>
+            = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] [ ";" ] ;
+ProtoSubscript <~~ push({}) ~~>
+            = KwSubscript [ SkipAngle ] SkipParen "->" Type "{" ProtoAcc { ProtoAcc } "}" ;
+
+// extension T { ... } adds members to an existing type - a struct/class/enum, a
+// protocol (whose members become the defaults of every conforming type) or a
+// builtin (Int, String, Array, ...), which keeps its members in a side table.
+// `extension T: P` additionally adopts P.
+ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
+            = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: types are parsed and ignored, so an alias needs nothing at run time.
 TypeAliasDecl <~~ push(function() {}) ~~>
             = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
@@ -340,21 +428,19 @@ LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 // `let NAME` binds the implicit name `error`. return/break/continue inside a do still
 // propagate to the enclosing loop or function. Each part is marked so excTry can tell
 // them apart on the stack. defer and fallthrough stay not implemented.
-Do          <~~ push(excTry(takeAll())) ~~>
+Do          <~~ push(swTry(takeAll())) ~~>
             = KwDo TryBody { CatchClause } ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
-CatchClause <~~ push(excCatch(takeAll())) ~~>
-            = KwCatch ( CatchLet | CatchPat ) Block ;
-// catch let e / catch let e as T / catch let e where c: bind e (the caught value).
-CatchLet    = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ "as" KwEnd Type ] [ KwWhere DiscardExpr ] ;
-// catch SomeError / catch .case / catch { }: no `let` binding, so the caught value
-// binds to the implicit name `error` (always pushed, so excCatch binds it).
-CatchPat    <~~ push("error") ~~>
-            = [ DropPattern ] [ KwWhere DiscardExpr ] ;
-// The clause's pattern is parsed but not discriminated yet, so its record is
-// dropped and the caught value binds to the implicit `error` either way.
-DropPattern <~~ pop() ~~> = Pattern ;
+// catch PATTERN[, PATTERN] [where COND] { ... }. The clause matches when one of its
+// patterns matches the thrown value (a clause with no pattern matches anything), and
+// that pattern's bindings - plus the implicit `error` - are live in the body. A bare
+// `catch let e` is the pattern `let e`, which binds and always matches; so is
+// `catch let VendErr.limit(k)`, which binds only for that case.
+CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
+            = KwCatch [ CatchPat { "," CatchPat } [ CatchWhere ] ] Block ;
+CatchPat    <~~ push({cpat: pop()}) ~~> = Pattern [ "as" KwEnd Type ] ;
+CatchWhere  <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 // defer { ... }: the block is registered on the enclosing function's defer frame
 // and runs when that function leaves - in LIFO order, on the normal path, on an
 // early return AND on the way out of a throw (makeFunBody runs the frame from a
@@ -363,7 +449,9 @@ Defer       <~~ push(makeDefer(pop())) ~~>
             = KwDefer Block ;
 Throw       <~~ push(excThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
-Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
+// fallthrough: continue into the NEXT case's body without re-testing its pattern.
+// It is a signal the enclosing switch consumes, like break/continue for a loop.
+Fallthrough <~~ push(makeFallthrough()) ~~>
             = KwFallthrough [ ";" ] ;
 
 // if / guard / while whose condition uses optional binding (if let x = ...),
@@ -402,7 +490,20 @@ BindName    <~~ push(up.in) ~~> = Wildcard | Id ;
 // reference otherwise, so matchCore carries that flag down the tree.
 Pattern     <~~ push(makePattern(takeAll())) ~~>
             = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
-PatCore     = PatLet | PatTuple | PatWild | PatEnum ;
+PatCore     = PatLet | PatTuple | PatWild | PatRange | PatEnum | PatExpr ;
+// Range patterns, including the one-sided forms: 1...9, 10..., ..<0. Tried before
+// PatEnum and PatExpr, both of which would match the lower bound on its own and
+// then leave the range operator behind.
+PatRange    = PatRangeCC | PatRangeUp | PatRangeDn ;
+PatRangeCC  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp PatOperand ;
+PatRangeUp  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp ;
+PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatOperand ;
+// A value pattern compares the subject with ==. Its operand is deliberately NOT the
+// full expression grammar: a `{ ... }` would be read as a closure and swallow the
+// body of `catch { ... }`, whose pattern is optional.
+PatExpr     <~~ push({pexpr: pop()}) ~~> = PatOperand ;
+PatOperand  = PatNegLit | Template | FloatLit | IntLit | True | False | Nil ;
+PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" ( FloatLit | IntLit ) ;
 PatLet      <~~ push({plet: pop()}) ~~> = ( "let" | "var" ) KwEnd Pattern ;
 PatTuple    <~~ push({ptup: takeAll()}) ~~> = "(" Pattern { "," Pattern } ")" ;
 PatWild     <~~ push({pwild: 1}) ~~> = Wildcard ;
@@ -474,9 +575,16 @@ Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = [ LoopLabel ] KwSwitch SwitchSubj "{" { PoundIfCase | CaseLabel | Statement } "}" ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = Expression ;
+// A case label is a comma-separated list of PATTERNS with an optional where guard:
+// values (case 1, 2), ranges (case 1...9, case ..<0), tuples (case (0, let y)),
+// enum cases with their associated values (case .rect(let w, let h)) and bindings
+// (case let (x, y) where x == y). Compound labels may bind the same name in each
+// alternative, so the bindings of whichever alternative matched are the live ones.
 CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
-            = ( KwCase Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+            = ( KwCase CaseItem { "," CaseItem } [ CaseWhere ]
               | KwDefault ) ":" ;
+CaseItem    <~~ push({cpat: pop()}) ~~> = Pattern ;
+CaseWhere   <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
@@ -509,8 +617,8 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
+            = "[" Expression { "," Expression } "]" ;
 
 // cond ? a : b (right associative). The ? cannot be confused with ?? (consumed
 // deeper, at Coalesce) or with an argument label's colon.
@@ -530,9 +638,10 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // cast operator it is a pure pass-through (a single item), so behavior is
 // unchanged for programs that do not cast.
 Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
-            = Coalesce { CastOp Type } ;
-CastOp      <~~ push({cast: 1}) ~~>
+            = Coalesce { CastOp CastType } ;
+CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
+CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
 // a ?? b yields a unless it is nil (short circuit; the nil-coalescing operator).
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = AddExpr { "??" AddExpr } ;
@@ -544,9 +653,12 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 UnaryExpr   = Neg | Not | TryExpr | Await | CallMember ;
 Neg         <~~ push(makeNeg(pop())) ~~>   = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
-// try / try? / try! : the prefix is parsed and ignored and the inner expression is
-// evaluated normally (a throw inside the call unwinds via excThrow regardless).
-TryExpr     = ( KwTry [ "?" | "!" ] ) UnaryExpr ;
+// try / try! : the prefix is parsed and ignored and the inner expression is evaluated
+// normally (a throw inside the call unwinds via excThrow regardless). try? SWALLOWS a
+// thrown error and yields nil instead, so it is a form of its own.
+TryExpr     = TryOpt | TryPlain ;
+TryOpt      <~~ push(makeTryOpt(pop())) ~~> = KwTry "?" UnaryExpr ;
+TryPlain    = KwTry [ "!" ] UnaryExpr ;
 // await: recognized as a prefix, routed to notImplExpr.
 Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
             = KwAwait UnaryExpr ;
@@ -577,8 +689,8 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+IndexSfx    <~~ push({kind:"index", idx: makeIndexKey(takeAll())}) ~~>
+            = "[" Expression { "," Expression } "]" ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
 // paren has to be ADJACENT: `print(x)` on one line and `(a, b) = (b, a)` on the
@@ -590,7 +702,64 @@ NoSpaceParen = :script(~~
         return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
     })()
 ~~) ;
-MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ TrailArg { LabTrail } ] | TrailArg { LabTrail } ;
+MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
+            | NoTrailCtx TrailArg { LabTrail } ;
+// A zero-width guard that FAILS when the `{` ahead is the BODY of an
+// if / while / switch / for / guard rather than a trailing closure. Swift resolves
+// this ambiguity with a parser flag ("no trailing closure in a condition"); a guard
+// here has to re-derive the same answer from (source, position) alone, so it walks
+// BACKWARDS to the start of the enclosing statement - tracking bracket depth, and
+// answering "allowed" the moment it leaves an unclosed ( or [ , which is what makes
+// `check(xs.map { $0 })` inside a condition still work - and looks at the first word
+// it finds there. Without it, `if case .p = E.c(3) { body }` reads `{ body }` as a
+// trailing closure of E.c(3) and the if has no block left.
+NoTrailCtx  = :script(~~
+    (function() {
+        var j = 0
+        var ch = c.peek(j)
+        while (ch === 32 || ch === 9 || ch === 10 || ch === 13) { j++; ch = c.peek(j) }
+        if (ch !== 123) { return undefined }
+        var depth = 0
+        var i = -1
+        var steps = 0
+        var start = 0
+        var found = false
+        while (steps < 20000) {
+            steps++
+            var b = c.peek(i)
+            if (b < 0) { start = i + 1; found = true; break }
+            if (b === 41 || b === 93 || b === 125) { depth++ }
+            else if (b === 40 || b === 91) {
+                if (depth === 0) { return undefined }
+                depth--
+            } else if (b === 123) {
+                if (depth === 0) { start = i + 1; found = true; break }
+                depth--
+            } else if (depth === 0 && (b === 59 || b === 10 || b === 13)) {
+                start = i + 1; found = true; break
+            }
+            i--
+        }
+        if (!found) { return undefined }
+        var k = start
+        var w = ""
+        var rounds = 0
+        while (rounds < 4) {
+            rounds++
+            var cc = c.peek(k)
+            while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { k++; cc = c.peek(k) }
+            w = ""
+            while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+                w = w + String.fromCharCode(cc); k++; cc = c.peek(k)
+            }
+            if (w !== "else") { break }
+        }
+        if (w === "if" || w === "while" || w === "switch" || w === "for" || w === "guard") {
+            return abnf.newToken("\x01trailing-closure-in-condition", 0)
+        }
+        return undefined
+    })()
+~~) ;
 // A trailing closure is the callee's last argument; the second and further ones
 // carry their argument label (Swift 5.3 multiple trailing closures).
 TrailArg    <~~ push(makeTrailArg(pop())) ~~> = Closure ;
@@ -609,7 +778,24 @@ ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
 InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
 Primary     = Paren | Template | FloatLit | IntLit | True | False | Nil
-            | PoundExpr | Closure | DictLit | ArrayLit | Shorthand | MultiTrail | Call | VarRef ;
+            | PoundExpr | SuperRef | DotMember | Closure | DictLit | ArrayLit
+            | Shorthand | MultiTrail | Call | VarRef ;
+
+// `super.m(...)` / `super.p` / `super.init(...)`: a marker value whose member lookup
+// starts at the SUPERCLASS of the type the running method was declared in, with the
+// same self. (The declaring type is what makes a three-level hierarchy behave: the
+// lookup base is not self's own type.)
+SuperRef    <~~ push(makeSuperRef()) ~~> = KwSuper ;
+
+// An implicit member expression: `.tails`, `.circle(r: 5)`. Swift resolves the
+// leading dot against the expected TYPE; this front end has no type checker, so it
+// builds an unqualified enum case value carrying only the case name and, if given,
+// its associated values. Matching and == compare enum cases by NAME, so an
+// unqualified `.tails` and a qualified `Coin06.tails` are the same value.
+DotMember   <~~ push(makeDotMember(takeAll())) ~~>
+            = "." Id <~~ push({dname: up.in}) ~~> [ DotArgs ] ;
+DotArgs     <~~ push({dargs: takeAll()}) ~~>
+            = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" ;
 
 // The # expression literals. #available / #unavailable answer a constant (this
 // runtime has no platform to compare against, and the guarded code is the code
@@ -676,7 +862,7 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
 
 // f(args): a global function or a struct/class constructor (calls init).
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ TrailArg { LabTrail } ] ;
+            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with two or more trailing closures and no
 // parentheses. Only the MULTI-closure form is accepted without parentheses - a bare
 // `name { ... }` would make `if cond { ... }` parse as a call of cond.
@@ -718,6 +904,8 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 DiscardExpr <~~ pop() ~~> = Expression ;
 
 KwFunc      = "func" KwEnd ;
+// A function name is an identifier or, for an operator declaration, the operator.
+FuncName    = Id <~~ push(up.in) ~~> ;
 KwImport    = "import" KwEnd ;
 KwWhere     = "where" KwEnd ;
 KwDeinit    = "deinit" KwEnd ;
@@ -728,6 +916,7 @@ KwDefer     = "defer" KwEnd ;
 KwThrow     = "throw" KwEnd ;
 KwFallthrough = "fallthrough" KwEnd ;
 KwTry       = "try" KwEnd ;
+KwSuper     = "super" KwEnd ;
 KwAwait     = "await" KwEnd ;
 KwStruct    = "struct" KwEnd ;
 KwClass     = "class" KwEnd ;
@@ -781,10 +970,31 @@ KwContinue  = "continue" KwEnd ;
     function swGetField(o, name) {
         if (name == "count") { return swlen(o) }
         if (o === undefined || o === null) { fail("field ." + name + " of nil") }
+        if (typeof o == "object" && o.__superref === true) {
+            var sbase = superBase()
+            var self0 = findThis()
+            var sg = sbase == null ? null : classFind(sbase, "__get_" + name)
+            if (typeof sg == "function") { return sg(self0) }
+            if (self0 != undefined && self0 !== null && hasOwn(self0, name)) { return self0[name] }
+            return undefined
+        }
+        if (typeof o == "object" && o.__ecase === true) {
+            if (name == "rawValue") { return o.__raw }
+            var lb = o.__labels
+            if (lb != null) {
+                for (var i = 0; i < lb.length; i++) { if (lb[i] == name) { return o.__vals[i] } }
+            }
+        }
         if (hasOwn(o, name)) { return o[name] }
+        // A computed property (or an observed stored one) is read through the
+        // generated getter on the value's member table.
+        var g = findAccessor(o, "__get_" + name)
+        if (g != null) { return g(o) }
         return undefined
     }
     function swIndex(o, i) {
+        var sg = subAccessor(o, "__sub_get")
+        if (sg != null) { return sg.apply(undefined, concat2impl([o], idxArgs(i))) }
         if (isDict(o)) {
             var di = dictFind(o, i)
             if (di < 0) { fail("no value for dictionary key") }
@@ -811,11 +1021,24 @@ KwContinue  = "continue" KwEnd ;
             o[i] = v
             return
         }
+        if (typeof o == "object") {
+            var ss = subAccessor(o, "__sub_set")
+            if (ss != null) { ss.apply(undefined, concat2impl(concat2impl([o], idxArgs(k)), [v])); return }
+            if (!hasOwn(o, k)) {
+                var s = findAccessor(o, "__set_" + k)
+                if (s != null) { s(o, v); return }
+            }
+        }
         o[k] = v
     }
     function getElemP(o, k) {
         if (isDict(o)) { var di = dictFind(o, k); return di < 0 ? undefined : o.vals[di] }
-        return hasOwn(o, k) ? o[k] : undefined
+        var sg2 = subAccessor(o, "__sub_get")
+        if (sg2 != null) { return sg2.apply(undefined, concat2impl([o], idxArgs(k))) }
+        if (hasOwn(o, k)) { return o[k] }
+        var g = findAccessor(o, "__get_" + k)
+        if (g != null) { return g(o) }
+        return undefined
     }
 
     // ----- Builtins available to the running program -----
@@ -827,6 +1050,14 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Method dispatch (the js_mcall equivalent) -----
     function mcall(target, name, args) {
+        // A method an `extension Int { ... }` / `extension String { ... }` added lives
+        // in the builtin's side table; it wins over nothing but is tried first because
+        // the builtin method lists below abort on an unknown name.
+        var bt = builtinTableFor(target)
+        if (bt != null) {
+            var bm = classFind(bt, name)
+            if (typeof bm == "function") { return bm.apply(undefined, concat2impl([target], args)) }
+        }
         if (typeof target == "string") {
             if (name == "count") { return target.length }
             if (name == "uppercased") { return target.toUpperCase() }
@@ -843,10 +1074,32 @@ KwContinue  = "continue" KwEnd ;
         }
         if (target === null || target === undefined) { fail("method ." + name + " on nil") }
         if (Array.isArray(target)) { return arrayMethod(target, name, args) }
+        // super.m(args): resolve from the superclass of the DECLARING type, same self.
+        if (isSuperRef(target)) {
+            var base = superBase()
+            var sm = base == null ? null : classFind(base, name)
+            if (typeof sm != "function") { fail("unknown super method '" + name + "'") }
+            return sm.apply(undefined, concat2impl([findThis()], args))
+        }
+        // Enum.case(args) constructs a case with associated values; Type.m(args) on a
+        // type descriptor calls a static member.
+        if (target.__isenum === true && hasOwn(target, name) && typeof target[name] == "function") {
+            return target[name].apply(undefined, args)
+        }
+        if (target.__isenum === true || target.__isclass === true || target.__isprotocol === true) {
+            var tt = accTable(target)
+            var sf = tt == null ? null : classFind(tt, "__static_" + name)
+            if (typeof sf == "function") { return sf.apply(undefined, concat2impl([target], args)) }
+            // Outer.Inner(...): a NESTED type reached through its enclosing one.
+            var nt = tt == null ? null : classFind(tt, name)
+            if (nt != undefined && nt !== null && typeof nt == "object" && nt.__isclass === true) {
+                return constructInstance(nt, args, null)
+            }
+        }
         if (target.__class != undefined) {
             // Own-property read: a bare [name] resolved inherited Object.prototype
             // members (toString, valueOf, ...) under a host JS engine.
-            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
+            var m = classFind(target.__class, name)
             if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
             return m.apply(undefined, concat2impl([target], args))
         }
@@ -879,12 +1132,49 @@ KwContinue  = "continue" KwEnd ;
 
     // ----- Expression thunks -----
 
-    // e as/as?/as! T and e is T carry a {cast:1} marker per operator. With no
-    // marker the single operand thunk passes through unchanged; a cast is not
-    // implemented (the runtime has no dynamic types), so it becomes a placeholder.
+    // e is T answers the dynamic type test, e as? T answers the value or nil, and
+    // e as / e as! T pass the value through - this value model has one representation
+    // per value, so an upcast and a forced downcast are both identities.
+    function swIsType(v, tname) {
+        if (isCaseVal(v)) {
+            var t = tname
+            if (t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1) }
+            return t == "Any" || t == "Error" || v.__etype === t
+        }
+        return rtIsType(v, tname)
+    }
+    function makeCastOne(t, op, tname) {
+        if (op == "is") { return function() { return swIsType(t(), tname) } }
+        if (op == "as?") { return function() { var v = t(); return swIsType(v, tname) ? v : null } }
+        return t
+    }
     function makeCast(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("type cast (as / is)", pos)
+        var t = items[0]
+        for (var i = 1; i + 1 < items.length; i = i + 2) {
+            t = makeCastOne(t, items[i].cast, items[i + 1].ctype)
+        }
+        return t
+    }
+
+    // ----- Struct value semantics -----
+    // A struct instance is copied whenever it is bound to a new name, assigned or
+    // passed as an argument, so `var b = a; b.x = 1` leaves a alone. A class instance
+    // is a reference and is never copied.
+    function isStructVal(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__struct === true
+    }
+    function swCopy(v) {
+        if (!isStructVal(v)) { return v }
+        var cls = v.__class
+        if (cls == undefined || cls === null) { return v }
+        var ks = cls.__fields
+        if (ks == undefined || ks == null) { return v }
+        var out = {__struct: true, __class: cls}
+        for (var i = 0; i < ks.length; i++) {
+            if (hasOwn(v, ks[i])) { scopePut(out, ks[i], swCopy(v[ks[i]])) }
+        }
+        return out
     }
 
     // ----- Tuples -----
@@ -997,6 +1287,16 @@ KwContinue  = "continue" KwEnd ;
     }
     // [ "." ] path [ ( subpatterns ) ] - an enum case reference, or (under a `let`)
     // a plain name to bind.
+    // items = [loThunk?, {rop}, hiThunk?] - a range pattern, one-sided when a bound
+    // is missing (`10...`, `..<0`).
+    function makePatRange(items) {
+        var lo = null
+        var k = 0
+        if (typeof items[0] == "function") { lo = items[0]; k = 1 }
+        var rop = items[k].rop
+        var hi = items.length > k + 1 ? items[k + 1] : null
+        return {prange: {lo: lo, hi: hi, rop: rop}}
+    }
     function makePatEnum(items) {
         var dot = false
         var path = ""
@@ -1018,6 +1318,17 @@ KwContinue  = "continue" KwEnd ;
     }
     function matchCore(k, v, binding) {
         if (k.pwild != undefined) { return true }
+        if (k.pexpr != undefined) { return swEq(v, k.pexpr()) }
+        if (k.prange != undefined) {
+            var rg = k.prange
+            if (rg.lo != null && !(v >= rg.lo())) { return false }
+            if (rg.hi != null) {
+                var hi = rg.hi()
+                if (rg.rop == "..<") { if (!(v < hi)) { return false } }
+                else if (!(v <= hi)) { return false }
+            }
+            return true
+        }
         if (k.plet != undefined) { return matchPat(k.plet, v, true) }
         if (k.ptup != undefined) {
             var subs = k.ptup
@@ -1031,15 +1342,30 @@ KwContinue  = "continue" KwEnd ;
         if (binding && simple) { declVar(k.ppath, v); return true }
         return matchEnumCase(k, v, binding)
     }
-    // A plain enum's cases are named string constants, so a case pattern is an
-    // equality test against that constant; `.name` (leading dot) has no type to
-    // resolve against and compares the case NAME directly.
+    // An enum case pattern matches by case NAME (a leading `.` has no type to resolve
+    // against, and a qualified path names the same case), then matches each
+    // sub-pattern against the corresponding associated value.
     function matchEnumCase(k, v, binding) {
         var last = k.ppath
         var cut = -1
         for (var i = 0; i < last.length; i++) { if (last.charAt(i) == ".") { cut = i } }
         var caseName = cut < 0 ? last : last.substring(cut + 1)
+        if (isCaseVal(v)) {
+            if (v.__ename !== caseName) { return false }
+            if (k.pargs == null) { return true }
+            var vals = v.__vals == null ? [] : v.__vals
+            for (var j = 0; j < k.pargs.length; j++) {
+                if (!matchPat(k.pargs[j], vals[j], binding)) { return false }
+            }
+            return true
+        }
         if (k.pargs != null && k.pargs.length > 0) { return false }
+        // A bare name with no enum value behind it is a value pattern: compare with
+        // whatever the name holds, and fall back to the case name when it holds nothing.
+        if (cut < 0 && !k.pdot) {
+            var h = lookupOrNull(last)
+            if (h != null) { return swEq(v, h.v) }
+        }
         return v === caseName
     }
 
@@ -1156,6 +1482,76 @@ KwContinue  = "continue" KwEnd ;
                 if (a == 3) { res = r; break }
             }
             return res
+        }
+    }
+
+    // ----- do / catch -----
+    // items = [{cpat}..., {cwhere}?, bodyThunk]
+    function makeCatchClause(items) {
+        var pats = []
+        var whereT = null
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (typeof it == "function") { body = it }
+            else if (it.cpat != undefined) { pats.push(it.cpat) }
+            else if (it.cwhere != undefined) { whereT = it.cwhere }
+        }
+        return {catchbody: body, pats: pats, whereT: whereT}
+    }
+    function catchMatches(cl, v) {
+        if (cl.pats.length == 0) { return cl.whereT == null || core.test(cl.whereT()) }
+        for (var i = 0; i < cl.pats.length; i++) {
+            if (matchPat(cl.pats[i], v, false)) {
+                return cl.whereT == null || core.test(cl.whereT())
+            }
+        }
+        return false
+    }
+    // Swift has no finally; the FIRST clause whose pattern matches wins, and an
+    // unmatched error keeps unwinding so an outer do can still see it.
+    function swTry(items) {
+        var tryT = null
+        var clauses = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].catchbody != undefined) { clauses.push(items[i]) }
+        }
+        return function() {
+            var savedChain = scopes.slice(0)
+            var sig = undefined
+            try {
+                sig = tryT()
+            } catch (e) {
+                scopes = savedChain.slice(0)
+                if (!excIsUser(e)) { throw e }
+                var hit = null
+                scopes.push({})
+                for (var k = 0; k < clauses.length && hit == null; k++) {
+                    scopes[scopes.length - 1] = {}
+                    if (catchMatches(clauses[k], e.v)) { hit = clauses[k] }
+                }
+                if (hit == null) { scopes = savedChain.slice(0); throw e }
+                if (!hasOwn(scopes[scopes.length - 1], "error")) { declVar("error", e.v) }
+                sig = hit.catchbody()
+                scopes.pop()
+            }
+            scopes = savedChain.slice(0)
+            return sig
+        }
+    }
+    // try? EXPR: nil instead of the thrown error.
+    function makeTryOpt(t) {
+        return function() {
+            var savedChain = scopes.slice(0)
+            try {
+                return t()
+            } catch (e) {
+                scopes = savedChain.slice(0)
+                if (!excIsUser(e)) { throw e }
+                return null
+            }
         }
     }
 
@@ -1400,7 +1796,7 @@ KwContinue  = "continue" KwEnd ;
             } else if (recs[i].dflt != null) {
                 argv.push(recs[i].dflt())
             } else {
-                argv.push(recs[i].t())
+                argv.push(swCopy(recs[i].t()))
             }
         }
         return {argv: argv, boxes: boxes}
@@ -1436,6 +1832,22 @@ KwContinue  = "continue" KwEnd ;
         return {vals: vals, boxes: boxes}
     }
 
+    // Building an instance: __ctor lays down the default property values (the
+    // superclass's first), then init runs. A failable initializer that ran `return nil`
+    // makes the whole construction nil.
+    function constructInstance(f, argv, labels) {
+        var obj = f.__struct === true ? {__class: f, __struct: true} : {__class: f}
+        if (typeof f.__ctor == "function") { f.__ctor(obj) }
+        var init = classFind(f, "init")
+        if (typeof init == "function") {
+            pendingLabels = labels
+            var ir = init.apply(undefined, concat2impl([obj], argv))
+            pendingLabels = null
+            if (ir === null) { return null }
+        }
+        return obj
+    }
+
     // f(args): a global function or a class/struct constructor (runs __ctor then init).
     function makeCall(items) {
         var name = items[0]
@@ -1444,11 +1856,14 @@ KwContinue  = "continue" KwEnd ;
             var ea = evalArgs(recs)
             var argv = ea.argv
             var f = getVar(name)
+            // E(rawValue: r): the failable initializer every raw-value enum gets for
+            // free - the case whose raw value is r, or nil.
+            if (f != undefined && f !== null && f.__isenum === true) {
+                writeBacks(ea.boxes)
+                return enumFromRaw(f, argv.length > 0 ? argv[0] : undefined)
+            }
             if (f != undefined && f !== null && f.__isclass === true) {
-                var obj = {__class: f}
-                if (typeof f.__ctor == "function") { f.__ctor(obj) }
-                var init = f["init"]
-                if (typeof init == "function") { init.apply(undefined, concat2impl([obj], argv)) }
+                var obj = constructInstance(f, argv, recLabels(recs))
                 writeBacks(ea.boxes)
                 return obj
             }
@@ -1475,7 +1890,9 @@ KwContinue  = "continue" KwEnd ;
                     // Force unwrap: the value is already the unwrapped one here.
                 } else if (s.kind == "mcall") {
                     var ea = evalArgs(s.args)
+                    pendingLabels = recLabels(s.args)
                     cur = mcall(cur, s.name, ea.argv)
+                    pendingLabels = null
                     writeBacks(ea.boxes)
                 } else if (s.kind == "call") {
                     var eac = evalArgs(s.args)
@@ -1500,9 +1917,12 @@ KwContinue  = "continue" KwEnd ;
         var op = items[1]
         var valT = items[2]
         return function() {
-            var v = valT()
+            var v = swCopy(valT())
             if (ref.path.length == 0) {
                 if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
+                // `self = X` inside a mutating method rewrites the value in place, so
+                // the caller's variable (which holds the same struct value) changes too.
+                if (ref.name == "self" && isStructVal(v)) { assignSelf(v); return v }
                 setVar(ref.name, v)
             } else {
                 var p = resolveRef(ref)
@@ -1511,6 +1931,17 @@ KwContinue  = "continue" KwEnd ;
             }
             return v
         }
+    }
+
+    // self = X in a mutating method: copy X's stored properties over the receiver's,
+    // so every reference to this struct value observes the change.
+    function assignSelf(v) {
+        var self = findThis()
+        if (self == undefined || self === null) { setVar("self", v); return }
+        var cls = v.__class
+        var ks = (cls == undefined || cls === null) ? null : cls.__fields
+        if (ks == null) { setVar("self", v); return }
+        for (var i = 0; i < ks.length; i++) { scopePut(self, ks[i], hasOwn(v, ks[i]) ? v[ks[i]] : undefined) }
     }
 
     // items = [{s: chunk} | {e: thunk}...] -> concatenation thunk.
@@ -1538,8 +1969,8 @@ KwContinue  = "continue" KwEnd ;
         // arrives by a later assignment (Swift's definite-initialization rule is
         // a type-checker job, and this front end does not enforce it).
         if (init == undefined) { return function() { declVar(name, null) } }
-        if (labels == null) { return function() { declVar(name, init()) } }
-        return function() { declVar(name, relabelTuple(init(), labels)) }
+        if (labels == null) { return function() { declVar(name, swCopy(init())) } }
+        return function() { declVar(name, relabelTuple(swCopy(init()), labels)) }
     }
     // Copies the element names of a tuple TYPE onto a tuple value.
     function relabelTuple(v, labels) {
@@ -1660,16 +2091,27 @@ KwContinue  = "continue" KwEnd ;
         }
     }
 
-    // A case label carries its value thunks (empty for default).
+    // A case label carries its patterns and its optional where guard (no patterns
+    // at all means `default`).
     function makeCaseLabel(items) {
-        var vals = []
-        for (var i = 0; i < items.length; i++) { vals.push(items[i].v) }
-        return {isDefault: items.length == 0, vals: vals}
+        var pats = []
+        var whereT = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.cpat != undefined) { pats.push(it.cpat) }
+            else if (it.cwhere != undefined) { whereT = it.cwhere }
+        }
+        return {isLabel: true, isDefault: pats.length == 0, pats: pats, whereT: whereT}
     }
+    // fallthrough: a signal the enclosing switch turns into "run the next case's body".
+    function makeFallthrough() { return function() { return {sig: "fall"} } }
     // items = [{subj}, label or statement thunk...]: the flat item list is regrouped
-    // so every statement belongs to the last label; no fallthrough. The subject is
-    // evaluated once and compared (==) to each case value in source order; a bare
-    // break ends the switch, other signals (return/continue) propagate.
+    // so every statement belongs to the last label. The subject is evaluated once and
+    // matched against each label's patterns in source order; the bindings of the
+    // alternative that matched are live in the body. A bare break ends the switch,
+    // fallthrough continues into the next case's body without re-testing it, and
+    // other signals (return/continue) propagate.
     function makeSwitch(items) {
         var subj = null
         var cases = []
@@ -1683,8 +2125,8 @@ KwContinue  = "continue" KwEnd ;
                 continue
             } else if (it.subj != undefined) {
                 subj = it.subj
-            } else {
-                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+            } else if (it.isLabel != undefined) {
+                cur = {isDefault: it.isDefault, pats: it.pats, whereT: it.whereT, body: []}
                 cases.push(cur)
             }
         }
@@ -1692,23 +2134,32 @@ KwContinue  = "continue" KwEnd ;
             var s = subj != null ? subj() : undefined
             var dflt = -1
             var hit = -1
+            scopes.push({})
             for (var i = 0; i < cases.length && hit < 0; i++) {
-                if (cases[i].isDefault) { dflt = i; continue }
-                for (var v = 0; v < cases[i].vals.length && hit < 0; v++) {
-                    var val = cases[i].vals[v]()
-                    if (s === val) { hit = i }
+                if (cases[i].isDefault) { if (dflt < 0) { dflt = i } continue }
+                for (var p = 0; p < cases[i].pats.length && hit < 0; p++) {
+                    scopes[scopes.length - 1] = {}
+                    if (matchPat(cases[i].pats[p], s, false)
+                        && (cases[i].whereT == null || core.test(cases[i].whereT()))) { hit = i }
                 }
             }
-            if (hit < 0) { hit = dflt }
-            if (hit < 0) { return undefined }
-            var body = cases[hit].body
-            for (var j = 0; j < body.length; j++) {
-                var r = body[j]()
-                var a = loopAct(r, swLbl)
-                if (a == 1) { return undefined }
-                if (a != 0) { return r }
+            if (hit < 0) { hit = dflt; if (hit >= 0) { scopes[scopes.length - 1] = {} } }
+            var out = undefined
+            while (hit >= 0 && hit < cases.length) {
+                var body = cases[hit].body
+                var next = -1
+                for (var j = 0; j < body.length; j++) {
+                    var r = body[j]()
+                    if (r != undefined && r.sig == "fall") { next = hit + 1; break }
+                    var a = loopAct(r, swLbl)
+                    if (a == 1) { hit = -1; break }
+                    if (a != 0) { out = r; hit = -1; break }
+                }
+                if (hit < 0) { break }
+                hit = next
             }
-            return undefined
+            scopes.pop()
+            return out
         }
     }
 
@@ -1834,65 +2285,364 @@ KwContinue  = "continue" KwEnd ;
             })
         }
     }
-    function makeMethodClosure(f) {
+    // A method value. owner is the type the method was DECLARED in; it is pushed for
+    // the duration of the call so a `super` inside the body resolves against the right
+    // level of the hierarchy even when the method was inherited.
+    function makeMethodClosure(f, owner) {
         return function() {
-            var call = [f, null, arguments[0]]
-            for (var i = 1; i < arguments.length; i++) { call.push(arguments[i]) }
-            return makeFunBody.apply(undefined, call)
+            var raw = arguments
+            var call = [f, null, raw[0]]
+            for (var i = 1; i < raw.length; i++) { call.push(raw[i]) }
+            ownerStack.push(owner)
+            try {
+                return makeFunBody.apply(undefined, call)
+            } finally {
+                ownerStack.pop()
+            }
         }
     }
+    // Installing a method that already exists on this very table is an OVERLOAD (two
+    // inits, two methods of the same name): the name resolves to a dispatcher that
+    // picks the first candidate whose parameter list accepts the actual arguments.
+    function addMethod(cls, name, fn, params) {
+        var key = "__ov_" + name
+        if (!hasOwn(cls, name)) {
+            tput(cls, name, fn)
+            tput(cls, key, [{fn: fn, params: params}])
+            return
+        }
+        var lst = hasOwn(cls, key) ? cls[key] : [{fn: cls[name], params: []}]
+        lst.push({fn: fn, params: params})
+        tput(cls, key, lst)
+        tput(cls, name, function() {
+            var labels = pendingLabels
+            pendingLabels = null
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            var pick = lst[0].fn
+            for (var k = 0; k < lst.length; k++) {
+                if (overloadFits(lst[k].params, args) && labelsFit(lst[k].params, labels)) { pick = lst[k].fn; break }
+            }
+            return pick.apply(undefined, arguments)
+        })
+    }
+    // The argument LABELS of the call currently being made, handed to an overload
+    // dispatcher so `Meter15(feet: 2)` picks the extension initializer rather than the
+    // memberwise one (which takes the same number of arguments). Set immediately
+    // before the call and consumed by the dispatcher, so nothing can nest in between.
+    var pendingLabels = null
+    function recLabels(recs) {
+        var out = []
+        for (var i = 0; i < recs.length; i++) {
+            var l = recs[i].lbl
+            out.push(l == undefined ? null : l)
+        }
+        return out
+    }
+    function labelsFit(params, labels) {
+        if (labels == null) { return true }
+        if (labels.length > params.length) { return false }
+        for (var i = 0; i < labels.length; i++) {
+            if (labels[i] == null || labels[i] == "") { continue }
+            if (params[i] == undefined || params[i].label != labels[i]) { return false }
+        }
+        return true
+    }
+
+    // A multi-parameter subscript index (`g[r, c]`) travels as one {__idxs} value, so
+    // every existing single-key path (arrays, dictionaries, strings) is untouched.
+    function makeIndexKey(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var vals = []
+            for (var i = 0; i < items.length; i++) { vals.push(items[i]()) }
+            return {__idxs: vals}
+        }
+    }
+    // A type descriptor uses its STATIC subscript; an instance its own. Without the
+    // split, Grid12[4] would find the instance subscript on the descriptor and run it
+    // with the descriptor as self.
+    function subAccessor(o, key) {
+        if (o !== null && o !== undefined && typeof o == "object"
+            && (o.__isclass === true || o.__isenum === true)) {
+            return findAccessor(o, "__static_" + key)
+        }
+        return findAccessor(o, key)
+    }
+    function idxArgs(i) {
+        if (i !== null && i !== undefined && typeof i == "object" && i.__idxs != undefined) { return i.__idxs }
+        return [i]
+    }
+    // items = [{params}, {acc}...] -> the __sub_get / __sub_set method records.
+    function makeSubscript(items) {
+        var params = items[0].params
+        var get = null
+        var set = null
+        var setP = "newValue"
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it.acc == undefined) { continue }
+            var a = it.acc
+            if (a.kind == "get" || a.kind == "_read") { get = a.body }
+            else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
+        }
+        var out = []
+        if (get != null) { out.push({method: {name: "__sub_get", params: params, body: get}}) }
+        if (set != null) {
+            var sp = []
+            for (var k = 0; k < params.length; k++) { sp.push(params[k]) }
+            sp.push(plainParam(setP))
+            out.push({method: {name: "__sub_set", params: sp, body: set}})
+        }
+        return out
+    }
+
     function makeProp(items) {
         if (items.length > 1) { return {prop: items[0], hasInit: true, init: items[1]} }
         return {prop: items[0], hasInit: false, init: null}
     }
+    // A parameter record with no label, type, default or inout - what a generated
+    // accessor (a setter's newValue, an observer's oldValue) needs.
+    function plainParam(n) {
+        return {name: n, label: n, type: "", variadic: false, auto: false,
+                inout: false, hasDefault: false, dflt: null}
+    }
 
-    // items = [name, ({prop}|{method})...] -> a statement that registers the type in
-    // the scope it is declared in (so a nested type is local to its body).
-    function makeClassStmt(items) {
+    // ----- Computed properties and property observers -----
+    // Both are written `var x [: T] [= e] { ACCESSORS }`; which accessors the braces
+    // hold decides which one it is. A computed property becomes a pair of ordinary
+    // methods `__get_x` / `__set_x` on the type; an OBSERVED stored property keeps
+    // its value under the hidden name `__v_x` and gets the same generated pair, so
+    // every read and write in the program goes through one accessor lookup.
+    function makeAccessor(items) {
+        var kind = ""
+        var param = null
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.akind != undefined) { kind = stripWs(it.akind) }
+            else if (it.aparam != undefined) { param = it.aparam }
+            else if (it.abody != undefined) { body = it.abody }
+        }
+        return {acc: {kind: kind, param: param, body: body}}
+    }
+    function makeImplicitGetter(body) { return {acc: {kind: "get", param: null, body: body}} }
+    function makeComputed(items) {
         var name = items[0]
-        var props = []
-        var stored = []
-        var methods = []
-        var hasInit = false
+        var dflt = null
+        var get = null
+        var set = null
+        var setP = "newValue"
+        var will = null
+        var willP = "newValue"
+        var did = null
+        var didP = "oldValue"
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
+            if (it == undefined) { continue }
+            if (it.pdefault != undefined) { dflt = it.pdefault; continue }
+            if (it.acc == undefined) { continue }
+            var a = it.acc
+            if (a.kind == "get" || a.kind == "_read") { get = a.body }
+            else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
+            else if (a.kind == "willSet") { will = a.body; if (a.param != null) { willP = a.param } }
+            else if (a.kind == "didSet") { did = a.body; if (a.param != null) { didP = a.param } }
+        }
+        return {cprop: {name: name, get: get, set: set, setP: setP, will: will, willP: willP,
+                        did: did, didP: didP, observed: (will != null || did != null), dflt: dflt}}
+    }
+    // The generated getter/setter of an observed stored property: the value lives
+    // under __v_<name>, willSet sees the incoming value and didSet the previous one.
+    // Neither observer fires for the initial value (Swift does not call them during
+    // initialization), because __ctor and the memberwise init write the storage name.
+    function observedAccessors(cp, cls) {
+        var store = "__v_" + cp.name
+        var willC = cp.will == null ? null : makeMethodClosure({name: "__will_" + cp.name, params: [plainParam(cp.willP)], body: cp.will}, cls)
+        var didC = cp.did == null ? null : makeMethodClosure({name: "__did_" + cp.name, params: [plainParam(cp.didP)], body: cp.did}, cls)
+        tput(cls, "__get_" + cp.name, function(self) { return hasOwn(self, store) ? self[store] : undefined })
+        tput(cls, "__set_" + cp.name, function(self, v) {
+            var old = hasOwn(self, store) ? self[store] : undefined
+            if (willC != null) { willC(self, v) }
+            scopePut(self, store, v)
+            if (didC != null) { didC(self, old) }
+        })
+    }
+    // Installs one computed/observed property's accessors on a type descriptor.
+    function installComputed(cp, cls) {
+        if (cp.observed) { observedAccessors(cp, cls); return }
+        if (cp.get != null) {
+            tput(cls, "__get_" + cp.name, makeMethodClosure({name: "__get_" + cp.name, params: [], body: cp.get}, cls))
+        }
+        if (cp.set != null) {
+            tput(cls, "__set_" + cp.name, makeMethodClosure({name: "__set_" + cp.name, params: [plainParam(cp.setP)], body: cp.set}, cls))
+        }
+    }
+    // The member table a value dispatches through: an instance uses its __class, a
+    // type descriptor (used for a static member) uses itself, an enum descriptor its
+    // shared member table.
+    function accTable(o) {
+        if (o === null || o === undefined) { return null }
+        if (typeof o != "object") { return builtinTableFor(o) }
+        if (o.__isenum === true) { return o.__members == undefined ? null : o.__members }
+        if (o.__isprotocol === true) { return o.__members == undefined ? null : o.__members }
+        if (o.__isclass === true) { return o }
+        var cls = o.__class
+        if (cls != undefined && cls !== null) { return cls }
+        return builtinTableFor(o)
+    }
+    // Reads an accessor (a function) off a value's member table, walking the
+    // superclass chain, or null.
+    function findAccessor(o, key) {
+        var t = accTable(o)
+        if (t == null) { return null }
+        var f = classFind(t, key)
+        return typeof f == "function" ? f : null
+    }
+
+    // ----- The member list of a struct / class / actor / enum -----
+    // One pass over the member records, attaching the modifiers that precede a
+    // member to it: MemberModifiers pushes its own markers, in source order, ahead
+    // of the member's record. Answers the pieces every type builder needs.
+    function splitMembers(items, from) {
+        var mem = {raw: "", inherits: [], cases: [], nested: [], fields: [], initProps: [],
+                   methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
+                   hasInit: false}
+        var isStatic = false
+        for (var i = from; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.mstatic != undefined) { isStatic = true; continue }
+            if (it.nested != undefined) { mem.nested.push(it.nested); continue }
+            if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
+            if (it.eraw != undefined) { mem.raw = it.eraw; continue }
+            if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
-                stored.push(it)
-                if (it.hasInit) { props.push(it) }
+                var f = {name: it.prop, store: it.prop, hasInit: it.hasInit, init: it.init}
+                if (isStatic) { mem.statProps.push(f) } else {
+                    mem.fields.push(f)
+                    if (it.hasInit) { mem.initProps.push(f) }
+                }
+            } else if (it.cprop != undefined) {
+                var cp = it.cprop
+                if (isStatic) { mem.statComps.push(cp) } else {
+                    mem.comps.push(cp)
+                    if (cp.observed) {
+                        var of = {name: cp.name, store: "__v_" + cp.name, hasInit: cp.dflt != null, init: cp.dflt}
+                        mem.fields.push(of)
+                        if (of.hasInit) { mem.initProps.push(of) }
+                    }
+                }
+            } else if (it.method != undefined) {
+                if (isStatic) { mem.statMethods.push(it.method) } else {
+                    mem.methods.push(it.method)
+                    if (it.method.name == "init") { mem.hasInit = true }
+                }
             }
-            if (it.method != undefined) {
-                methods.push(it.method)
-                if (it.method.name == "init") { hasInit = true; regSig(name, it.method.params) }
-            }
+            isStatic = false
         }
-        // The memberwise initializer a struct without an explicit init gets for free:
-        // one labelled parameter per stored property, in declaration order, defaulting
-        // to the property's own initial value where it has one.
+        return mem
+    }
+    // The memberwise initializer a struct without an explicit init gets for free:
+    // one labelled parameter per stored property, in declaration order, defaulting
+    // to the property's own initial value where it has one.
+    function memberwiseParams(fields) {
         var mparams = []
-        if (!hasInit) {
-            for (var s = 0; s < stored.length; s++) {
-                mparams.push({name: stored[s].prop, label: stored[s].prop, type: "",
-                              variadic: false, auto: false, inout: false,
-                              hasDefault: stored[s].hasInit, dflt: stored[s].init})
-            }
-            regSig(name, mparams)
+        for (var s = 0; s < fields.length; s++) {
+            mparams.push({name: fields[s].store, label: fields[s].name, type: "",
+                          variadic: false, auto: false, inout: false,
+                          hasDefault: fields[s].hasInit, dflt: fields[s].init})
         }
+        return mparams
+    }
+    // Installs the shared part of a type descriptor: methods, accessors and the
+    // static members (which live on the descriptor object itself).
+    // A member table remembers the names it holds in __keys: the frozen engine has no
+    // for...in, so copying a protocol's defaults needs an explicit key list.
+    function tput(cls, name, value) {
+        if (!hasOwn(cls, name)) {
+            var ks = cls.__keys
+            if (ks == undefined || ks == null) { ks = []; cls.__keys = ks }
+            ks.push(name)
+        }
+        scopePut(cls, name, value)
+    }
+    function installMembers(cls, mem) {
+        for (var m = 0; m < mem.methods.length; m++) {
+            addMethod(cls, mem.methods[m].name, makeMethodClosure(mem.methods[m], cls), mem.methods[m].params)
+        }
+        for (var c2 = 0; c2 < mem.comps.length; c2++) { installComputed(mem.comps[c2], cls) }
+        for (var sm = 0; sm < mem.statMethods.length; sm++) {
+            tput(cls, "__static_" + mem.statMethods[sm].name, makeMethodClosure(mem.statMethods[sm], cls))
+        }
+        for (var sc = 0; sc < mem.statComps.length; sc++) {
+            var sp = mem.statComps[sc]
+            if (sp.get != null) { tput(cls, "__get_" + sp.name, makeMethodClosure({name: "__get_" + sp.name, params: [], body: sp.get}, cls)) }
+            if (sp.set != null) { tput(cls, "__set_" + sp.name, makeMethodClosure({name: "__set_" + sp.name, params: [plainParam(sp.setP)], body: sp.set}, cls)) }
+        }
+        for (var st = 0; st < mem.statProps.length; st++) {
+            tput(cls, mem.statProps[st].name, mem.statProps[st].init == null ? null : mem.statProps[st].init())
+        }
+        // A nested type declares itself into the surrounding scope (which is how it
+        // stays reachable unqualified inside the body) and is ALSO installed on the
+        // enclosing descriptor, so Outer.Inner() and Outer.Mode.fast resolve.
+        for (var nt = 0; nt < mem.nested.length; nt++) {
+            lastType = null
+            mem.nested[nt]()
+            if (lastType != null) { tput(cls, lastType.name, lastType.v) }
+        }
+    }
+
+    // items = [name, {inherit}..., ({prop}|{cprop}|{method}|{mstatic})...] -> a
+    // statement that registers the type in the scope it is declared in (so a nested
+    // type is local to its body).
+    function makeStructStmt(items) { return makeTypeStmt(items, true) }
+    function makeClassStmt(items) { return makeTypeStmt(items, false) }
+    function makeTypeStmt(items, isStruct) {
+        var name = items[0]
+        var mem = splitMembers(items, 1)
+        for (var i = 0; i < mem.methods.length; i++) {
+            if (mem.methods[i].name == "init") { regSig(name, mem.methods[i].params) }
+        }
+        var mparams = []
+        if (!mem.hasInit) { mparams = memberwiseParams(mem.fields); regSig(name, mparams) }
+        var fieldNames = []
+        for (var fi = 0; fi < mem.fields.length; fi++) { fieldNames.push(mem.fields[fi].store) }
         return function() {
-            var cls = {__isclass: true, __name: name}
+            var cls = {__isclass: true, __name: name, __struct: isStruct, __fields: fieldNames}
+            // The inheritance clause: a name that resolves to a class is the
+            // SUPERCLASS (its members are found by walking __super); a name that
+            // resolves to a protocol contributes its default implementations.
+            for (var h = 0; h < mem.inherits.length; h++) {
+                var sup = lookupOrNull(baseTypeName(mem.inherits[h]))
+                if (sup == null || sup.v == undefined || sup.v === null) { continue }
+                if (sup.v.__isclass === true) { cls.__super = sup.v }
+                else if (sup.v.__isprotocol === true) { adoptProtocol(cls, sup.v) }
+            }
+            if (cls.__super != undefined && cls.__super !== null) {
+                var inh = cls.__super.__fields
+                if (inh != undefined && inh != null) {
+                    for (var q = 0; q < inh.length; q++) { fieldNames.push(inh[q]) }
+                }
+            }
             // __ctor sets the default valued stored properties on a fresh instance,
-            // before init runs.
+            // before init runs - the superclass's first. An observed property is
+            // written under its storage name, so its observers do not fire for the
+            // initial value.
             cls.__ctor = function(self) {
+                var sc = cls.__super
+                if (sc != undefined && sc !== null && typeof sc.__ctor == "function") { sc.__ctor(self) }
                 var saved = scopes
                 scopes = [globalScope, {}]
                 declVar("this", self)
                 declVar("self", self)
-                for (var p = 0; p < props.length; p++) { self[props[p].prop] = props[p].init() }
+                for (var p = 0; p < mem.initProps.length; p++) {
+                    scopePut(self, mem.initProps[p].store, mem.initProps[p].init())
+                }
                 scopes = saved
             }
-            for (var m2 = 0; m2 < methods.length; m2++) {
-                scopePut(cls, methods[m2].name, makeMethodClosure(methods[m2]))
-            }
-            if (!hasInit) {
+            installMembers(cls, mem)
+            if (!mem.hasInit) {
                 scopePut(cls, "init", function() {
                     var self = arguments[0]
                     var args = []
@@ -1903,22 +2653,274 @@ KwContinue  = "continue" KwEnd ;
                     }
                 })
             }
-            declVar(name, cls)
+            declType(name, cls)
+        }
+    }
+    // ----- Protocols and extensions -----
+    // A protocol carries a member table of DEFAULT implementations (contributed by
+    // `extension P { ... }`) plus the protocols it inherits. Adopting one copies the
+    // defaults it does not already have - the conforming type's own members win.
+    function makeProtocolStmt(items) {
+        var name = items[0]
+        var mem = splitMembers(items, 1)
+        return function() {
+            var p = {__isprotocol: true, __name: name, __inherits: mem.inherits}
+            var tbl = {__name: name}
+            installMembers(tbl, mem)
+            p.__members = tbl
+            declType(name, p)
+        }
+    }
+    function copyDefaults(cls, tbl) {
+        var ks = tbl.__keys
+        if (ks == undefined || ks == null) { return }
+        for (var i = 0; i < ks.length; i++) {
+            if (!hasOwn(cls, ks[i])) { scopePut(cls, ks[i], tbl[ks[i]]) }
+        }
+    }
+    function adoptProtocol(cls, p) {
+        var inh = p.__inherits
+        if (inh != undefined && inh != null) {
+            for (var i = 0; i < inh.length; i++) {
+                var up2 = lookupOrNull(baseTypeName(inh[i]))
+                if (up2 != null && up2.v != undefined && up2.v !== null && up2.v.__isprotocol === true) {
+                    adoptProtocol(cls, up2.v)
+                }
+            }
+        }
+        copyDefaults(cls, p.__members)
+    }
+    // The member tables of the builtin types, so `extension Int { ... }` has
+    // somewhere to put its members and mcall/getField somewhere to find them.
+    var builtinExt = {}
+    function builtinTable(name, make) {
+        var key = "$" + name
+        if (!hasOwn(builtinExt, key)) {
+            if (!make) { return null }
+            scopePut(builtinExt, key, {__name: name, __keys: []})
+        }
+        return builtinExt[key]
+    }
+    function builtinTableFor(v) {
+        if (typeof v == "number") { return builtinTable("Int", false) }
+        if (typeof v == "string") { return builtinTable("String", false) }
+        if (typeof v == "boolean") { return builtinTable("Bool", false) }
+        if (Array.isArray(v)) { return builtinTable("Array", false) }
+        if (isDict(v)) { return builtinTable("Dictionary", false) }
+        return null
+    }
+    function isBuiltinTypeName(n) {
+        return n == "Int" || n == "Int8" || n == "Int16" || n == "Int32" || n == "Int64"
+            || n == "UInt" || n == "Double" || n == "Float" || n == "String" || n == "Character"
+            || n == "Bool" || n == "Array" || n == "Dictionary"
+    }
+    function makeExtensionStmt(items) {
+        var tname = ""
+        var k = 0
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].extname != undefined) { tname = items[i].extname; k = i + 1 }
+        }
+        var base = baseTypeName(tname)
+        var mem = splitMembers(items, k)
+        return function() {
+            var h = lookupOrNull(base)
+            var target = null
+            if (h != null && h.v != undefined && h.v !== null && typeof h.v == "object") {
+                if (h.v.__isprotocol === true) { target = h.v.__members }
+                else if (h.v.__isenum === true) { target = h.v.__members }
+                else if (h.v.__isclass === true) { target = h.v }
+            }
+            if (target == null) {
+                if (!isBuiltinTypeName(base)) { return }
+                target = builtinTable(base == "Character" ? "String" : base, true)
+            }
+            installMembers(target, mem)
+            // Extension-declared stored fields do not exist in Swift, but a
+            // conformance in the clause does apply.
+            for (var j = 0; j < mem.inherits.length; j++) {
+                var pr = lookupOrNull(baseTypeName(mem.inherits[j]))
+                if (pr != null && pr.v != undefined && pr.v !== null && pr.v.__isprotocol === true) {
+                    adoptProtocol(target, pr.v)
+                }
+            }
         }
     }
 
-    // items = [name, {ecase}...] -> an object of name -> caseName constants.
+    // Every type declaration goes through declType, so the enclosing type builder can
+    // pick a nested declaration up by name without enumerating a scope.
+    var lastType = null
+    function declType(name, v) { lastType = {name: name, v: v}; declVar(name, v) }
+
+    // `Crate15<Int>` / `Beast13` -> the bare type name an inheritance entry names.
+    function baseTypeName(t) {
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "<" || ch == "?" || ch == "!" || ch == "&") { return t.substring(0, i) }
+        }
+        return t
+    }
+    // A member table read that walks the superclass chain.
+    function classFind(cls, key) {
+        var c2 = cls
+        var n = 0
+        while (c2 != undefined && c2 !== null && n < 64) {
+            if (hasOwn(c2, key)) { return c2[key] }
+            c2 = c2.__super
+            n++
+        }
+        return null
+    }
+    // ----- super -----
+    // ownerStack carries the type each running method was DECLARED in, which is what
+    // `super` resolves against (self's own type would loop on an inherited method).
+    var ownerStack = []
+    function curOwner() { return ownerStack.length > 0 ? ownerStack[ownerStack.length - 1] : null }
+    function superBase() {
+        var o = curOwner()
+        if (o == null || o.__super == undefined || o.__super === null) { return null }
+        return o.__super
+    }
+    function makeSuperRef() { return function() { return {__superref: true} } }
+    function isSuperRef(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__superref === true
+    }
+
+    // ----- Enums -----
+    // An enum value is {__ecase, __etype, __ename, __raw, __vals, __labels, __class}:
+    // its case NAME identifies it, its associated values ride along, and __class is
+    // the enum's member table, so a method call or a computed property on an enum
+    // value dispatches exactly like one on a struct. == compares the name and the
+    // associated values, which is what makes the leading-dot form (whose type is
+    // unknown to this front end) compare equal to the qualified one.
+    function makeECaseParam(items) {
+        var lbl = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].clabel != undefined) { lbl = items[i].clabel }
+        }
+        return {clabel: lbl}
+    }
+    function makeECase(items) {
+        var cname = ""
+        var assoc = null
+        var rawT = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.cname != undefined) { cname = it.cname }
+            else if (it.cassoc != undefined) { assoc = it.cassoc }
+            else if (it.craw != undefined) { rawT = it.craw }
+        }
+        return {cname: cname, cassoc: assoc, craw: rawT}
+    }
+    // Only a real raw-value type gives the cases implicit raw values; the rest of an
+    // enum's inheritance clause (Error, a protocol, ...) does not.
+    function rawKind(t) {
+        if (t == "Int" || t == "Int8" || t == "Int16" || t == "Int32" || t == "Int64"
+            || t == "UInt" || t == "UInt8" || t == "UInt16" || t == "UInt32" || t == "UInt64") { return "int" }
+        if (t == "String" || t == "Character") { return "str" }
+        return ""
+    }
+    function newCaseVal(etype, cname, raw, vals, labels, cls) {
+        return {__ecase: true, __etype: etype, __ename: cname, __raw: raw,
+                __vals: vals, __labels: labels, __class: cls}
+    }
+    function makeCaseCtor(etype, cs, cls) {
+        var labels = []
+        for (var i = 0; i < cs.cassoc.length; i++) { labels.push(cs.cassoc[i].clabel) }
+        var cname = cs.cname
+        return function() {
+            var vals = []
+            for (var j = 0; j < arguments.length; j++) { vals.push(arguments[j]) }
+            return newCaseVal(etype, cname, undefined, vals, labels, cls)
+        }
+    }
     function makeEnumStmt(items) {
         var name = items[0]
-        var cases = []
-        for (var i = 1; i < items.length; i++) { cases.push(items[i].ecase) }
+        var mem = splitMembers(items, 1)
+        var kind = rawKind(mem.raw)
         return function() {
-            var e = {__enum: true, __name: name}
-            for (var k = 0; k < cases.length; k++) { scopePut(e, cases[k], cases[k]) }
-            declVar(name, e)
+            var e = {__isenum: true, __enum: true, __name: name}
+            var tbl = {__name: name}
+            installMembers(tbl, mem)
+            e.__members = tbl
+            var order = []
+            var nextRaw = 0
+            for (var k = 0; k < mem.cases.length; k++) {
+                var cs = mem.cases[k]
+                order.push(cs.cname)
+                if (cs.cassoc != null) { scopePut(e, cs.cname, makeCaseCtor(name, cs, tbl)); continue }
+                var rv = undefined
+                if (cs.craw != null) {
+                    rv = cs.craw()
+                    if (typeof rv == "number") { nextRaw = (rv + 1) | 0 }
+                } else if (kind == "int") { rv = nextRaw; nextRaw = (nextRaw + 1) | 0 }
+                else if (kind == "str") { rv = cs.cname }
+                scopePut(e, cs.cname, newCaseVal(name, cs.cname, rv, null, null, tbl))
+            }
+            e.__cases = order
+            declType(name, e)
         }
     }
+    // `.tails` / `.circle(r: 5)`: an enum case with no type to resolve against.
+    function makeDotMember(items) {
+        var dname = ""
+        var args = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.dname != undefined) { dname = it.dname }
+            else if (it.dargs != undefined) { args = it.dargs }
+        }
+        if (args == null) { return function() { return newCaseVal(null, dname, undefined, null, null, undefined) } }
+        var recs = args
+        return function() {
+            var ea = evalArgs(recs)
+            return newCaseVal(null, dname, undefined, ea.argv, null, undefined)
+        }
+    }
+    // Enum case equality: the case NAME plus the associated values, so a leading-dot
+    // case and a qualified one of the same enum compare equal.
+    function enumFromRaw(e, raw) {
+        var order = e.__cases
+        if (order == undefined || order == null) { return null }
+        for (var i = 0; i < order.length; i++) {
+            var cv = e[order[i]]
+            if (cv != undefined && cv !== null && typeof cv == "object" && cv.__ecase === true && cv.__raw === raw) { return cv }
+        }
+        return null
+    }
+    function isCaseVal(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__ecase === true
+    }
+    // A scope-chain read that answers null instead of aborting on an unknown name.
+    function lookupOrNull(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { return {v: scopes[i][name]} }
+        }
+        return null
+    }
+    function swEq(l, r) {
+        if (isCaseVal(l) && isCaseVal(r)) {
+            if (l.__ename !== r.__ename) { return false }
+            var a = l.__vals
+            var b = r.__vals
+            if (a == null || b == null) { return (a == null) && (b == null) }
+            if (a.length != b.length) { return false }
+            for (var i = 0; i < a.length; i++) { if (!swEq(a[i], b[i])) { return false } }
+            return true
+        }
+        return l === r
+    }
 
+    // An unqualified method reference inside a method body: the method with self
+    // already bound, so `noise()` works like `self.noise()`.
+    function bindSelf(m, self) {
+        return function() {
+            var args = [self]
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return m.apply(undefined, args)
+        }
+    }
     function findThis() {
         for (var i = scopes.length - 1; i >= 0; i--) {
             if (hasOwn(scopes[i], "self")) { return scopes[i]["self"] }
@@ -1930,20 +2932,36 @@ KwContinue  = "continue" KwEnd ;
     // === / !== compare identity; with reference objects that is strict equality.
     binOps["==="] = function(l, r) { return l === r }
     binOps["!=="] = function(l, r) { return l !== r }
+    // == / != understand enum case values (name plus associated values); everything
+    // else keeps the identity/value comparison it had.
+    binOps["=="] = function(l, r) { return swEq(l, r) }
+    binOps["!="] = function(l, r) { return !swEq(l, r) }
 
     core.lang = "swift"
+    // `_` is the discard name: `_ = expr` evaluates and throws the value away.
+    core.blank = "_"
     core.add = swadd
     core.getField = swGetField
     core.getIndex = swIndex
     // Unqualified names fall back to properties of the enclosing self.
     core.varMiss = function(name) {
         var self = findThis()
-        if (self != undefined && hasOwn(self, name)) { return {v: self[name]} }
+        if (self != undefined && self !== null) {
+            if (hasOwn(self, name)) { return {v: self[name]} }
+            var g = findAccessor(self, "__get_" + name)
+            if (g != null) { return {v: g(self)} }
+            var mm = self.__class == undefined ? null : classFind(self.__class, name)
+            if (typeof mm == "function") { return {v: bindSelf(mm, self)} }
+        }
         return null
     }
     core.setMiss = function(name, value) {
         var self = findThis()
-        if (self != undefined && hasOwn(self, name)) { self[name] = value; return true }
+        if (self != undefined && self !== null) {
+            var s = findAccessor(self, "__set_" + name)
+            if (s != null) { s(self, value); return true }
+            if (hasOwn(self, name)) { self[name] = value; return true }
+        }
         return false
     }
 

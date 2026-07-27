@@ -93,9 +93,43 @@ func phpIsArr(v interface{}) bool {
 	return ok
 }
 
+// ----- references ------------------------------------------------------------
+//
+// A PHP reference makes two names share ONE storage cell, and php-interpreter.abnf
+// models that with a cell object that a scope slot or an array element may hold in
+// place of the value. The compiler uses the same model: a CELL is a plain object
+// carrying __refcell = true and the value under "v", built by the emitted code
+// (js_obj_new + js_set), so no new external is needed to make one.
+//
+// Everything below reads THROUGH a cell, which is what makes `$b = &$a`,
+// `foreach (... as &$v)`, `use (&$v)` and a by-reference parameter one mechanism.
+// A program that never writes a '&' creates no cell at all, so every phpDeref here
+// is a type assertion that fails immediately and the answers are the ones from
+// before references existed.
+func phpCellOf(v interface{}) *jsObject {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil
+	}
+	if t, has := o.props["__refcell"]; has && t == true {
+		return o
+	}
+	return nil
+}
+
+func phpDeref(v interface{}) interface{} {
+	if c := phpCellOf(v); c != nil {
+		return c.props["v"]
+	}
+	return v
+}
+
 func phpIsObj(v interface{}) bool {
 	o, ok := v.(*jsObject)
 	if !ok {
+		return false
+	}
+	if _, isCell := o.props["__refcell"]; isCell {
 		return false
 	}
 	if tag, isDict := o.props["__dict"]; isDict && tag == true {
@@ -400,7 +434,7 @@ func (rt *jsrt) phpIdentical(l, r interface{}) bool {
 			if !phpKeyEq(lk.elems[i], rk.elems[i]) {
 				return false
 			}
-			if !rt.phpIdentical(lv.elems[i], rv.elems[i]) {
+			if !rt.phpIdentical(phpDeref(lv.elems[i]), phpDeref(rv.elems[i])) {
 				return false
 			}
 		}
@@ -475,7 +509,7 @@ func (rt *jsrt) phpLoose(l, r interface{}) bool {
 			if j < 0 {
 				return false
 			}
-			if !rt.phpLoose(lv.elems[i], rv.elems[j]) {
+			if !rt.phpLoose(phpDeref(lv.elems[i]), phpDeref(rv.elems[j])) {
 				return false
 			}
 		}
@@ -613,7 +647,7 @@ func (rt *jsrt) phpCmp(l, r interface{}) float64 {
 			if j < 0 {
 				return 1
 			}
-			if cv := rt.phpCmp(lv.elems[i], rv.elems[j]); cv != 0 {
+			if cv := rt.phpCmp(phpDeref(lv.elems[i]), phpDeref(rv.elems[j])); cv != 0 {
 				return cv
 			}
 		}
@@ -673,6 +707,18 @@ func phpNormKey(v interface{}) interface{} {
 		return t
 	}
 	return v
+}
+
+// phpNumericKey answers whether a subscript addresses a string OFFSET: PHP indexes
+// a string by an integer (or an integer-ish string) only.
+func phpNumericKey(k interface{}) bool {
+	switch t := k.(type) {
+	case float64, jsPhpFlo, bool:
+		return true
+	case string:
+		return phpNumStrVal(t) != nil
+	}
+	return false
 }
 
 func phpIsCanonInt(s string) bool {
@@ -759,7 +805,11 @@ func (rt *jsrt) phpArrSet(av interface{}, k, v interface{}) {
 	vals, _ := o.props["vals"].(*jsArray)
 	nk := phpNormKey(k)
 	if i := phpKeyIndex(keys, nk); i >= 0 {
-		vals.elems[i] = v
+		if c := phpCellOf(vals.elems[i]); c != nil && phpCellOf(v) == nil {
+			c.set("v", v)
+		} else {
+			vals.elems[i] = v
+		}
 	} else {
 		keys.dropIdx()
 		vals.dropIdx()
@@ -789,7 +839,7 @@ func (rt *jsrt) phpArrPush(av interface{}, v interface{}) {
 func (rt *jsrt) phpArrGet(av interface{}, k interface{}) interface{} {
 	if keys, vals, ok := phpArrParts(av); ok {
 		if i := phpKeyIndex(keys, k); i >= 0 {
-			return vals.elems[i]
+			return phpDeref(vals.elems[i])
 		}
 		return jsNull
 	}
@@ -821,6 +871,9 @@ func (rt *jsrt) phpArrHas(av interface{}, k interface{}) bool {
 		return i >= 0 && !isNullish(vals.elems[i])
 	}
 	if s, ok := av.(string); ok {
+		if !phpNumericKey(k) {
+			return false
+		}
 		i := int(phpTrunc(phpNumOf(rt.phpToNum(k))))
 		return i >= 0 && i < len(s)
 	}
@@ -848,6 +901,38 @@ func (rt *jsrt) phpArrUnset(av interface{}, k interface{}) {
 	vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
 }
 
+// phpElemCell is the storage CELL of an array element, created on demand - the twin
+// of php-interpreter.abnf's arrCell. It must answer the SAME cell for the same
+// element every time: building a fresh one per '&' silently detaches every alias
+// taken earlier, so `$x = &$a[0]; $y = &$a[0]; $y = 9;` left $x behind.
+func (rt *jsrt) phpElemCell(av interface{}, k interface{}) interface{} {
+	keys, vals, ok := phpArrParts(av)
+	if !ok {
+		return jsNull
+	}
+	nk := phpNormKey(k)
+	i := phpKeyIndex(keys, nk)
+	if i < 0 {
+		rt.phpArrSet(av, nk, jsNull)
+		keys, vals, ok = phpArrParts(av)
+		if !ok {
+			return jsNull
+		}
+		i = phpKeyIndex(keys, nk)
+		if i < 0 {
+			return jsNull
+		}
+	}
+	if c := phpCellOf(vals.elems[i]); c != nil {
+		return c
+	}
+	cell := newJSObject()
+	cell.set("__refcell", true)
+	cell.set("v", vals.elems[i])
+	vals.elems[i] = cell
+	return cell
+}
+
 // phpArrCopy is PHP's value assignment: an array is copied (deeply, since a
 // nested array is a value too), an object is not.
 func (rt *jsrt) phpArrCopy(v interface{}) interface{} {
@@ -860,7 +945,7 @@ func (rt *jsrt) phpArrCopy(v interface{}) interface{} {
 	ov, _ := out.props["vals"].(*jsArray)
 	ok2.elems = append(ok2.elems, keys.elems...)
 	for _, e := range vals.elems {
-		ov.elems = append(ov.elems, rt.phpArrCopy(e))
+		ov.elems = append(ov.elems, rt.phpArrCopy(phpDeref(e)))
 	}
 	if o, isO := phpAsArr(v); isO {
 		out.set("__next", phpArrNext(o))
@@ -937,7 +1022,7 @@ func (rt *jsrt) phpValsOf(v interface{}) interface{} {
 	out := phpNewArr()
 	if _, vals, ok := phpArrParts(v); ok {
 		for _, e := range vals.elems {
-			rt.phpArrPush(out, e)
+			rt.phpArrPush(out, phpDeref(e))
 		}
 	}
 	return out
@@ -946,7 +1031,7 @@ func (rt *jsrt) phpValsOf(v interface{}) interface{} {
 func (rt *jsrt) phpInArray(needle, hay interface{}) bool {
 	if _, vals, ok := phpArrParts(hay); ok {
 		for _, e := range vals.elems {
-			if rt.phpLoose(e, needle) {
+			if rt.phpLoose(phpDeref(e), needle) {
 				return true
 			}
 		}
@@ -1065,6 +1150,12 @@ func (rt *jsrt) phpStaticSet(target interface{}, name string, v interface{}) {
 // matches the class itself, any base class, and any implemented interface (which
 // may itself extend others).
 func (rt *jsrt) phpIsA(v interface{}, name string) bool {
+	// A generator IS an instance of PHP's Generator class. It is not a *jsObject, so
+	// it carries no descriptor to walk - the name is answered directly, which also
+	// gives the compiler a safe "is this a generator" probe for foreach.
+	if _, isGen := v.(*jsGenerator); isGen {
+		return name == "Generator" || name == "Traversable" || name == "Iterator"
+	}
 	o, ok := v.(*jsObject)
 	if !ok {
 		return false

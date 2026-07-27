@@ -27,8 +27,19 @@ while let (including the Swift 5.7 shorthand if let x), compound comma
 conditions, if case / guard case patterns, a where clause on a binding, and
 for case PAT in xs. Int arithmetic is 32 bit and / truncates; + concatenates
 when a side is a String; == compares strings by value and objects by identity.
-A plain enum of bare cases becomes named string constants, with or without a
-conformance list.
+Enums with bare cases, raw values (E(rawValue:) and .rawValue) and associated
+values, plus enum methods and computed properties; an enum case is an object
+carrying its case name, its associated values and an __eqkey string, and == over
+enum cases compares that key - which is what makes the leading-dot form
+(.tails, .circle(r: 5)) work without a type checker. Computed properties and
+willSet/didSet observers, static and class members, subscripts (including
+multi-parameter and static ones), class inheritance with overrides, super.m() /
+super.p / super.init(), is / as? / as!, protocols whose extensions carry default
+implementations, extensions of a type (including Int/String/Array), nested types
+reached as Outer.Inner, initializer overloading and failable initializers, and
+struct VALUE semantics. switch matches PATTERNS: values, ranges, tuples, enum
+cases with their associated values, bindings and a where guard, with
+fallthrough.
 
 Functions, methods, init and closures become IR functions jsf_N(env, args)
 (methods and init get the instance prepended and bind both this and self, so
@@ -39,8 +50,11 @@ js_mcall, subscript through js_pyget/js_pyset, dictionaries through js_dict_new,
 and ?? compiles to a null test branching around the right side (a phi merges).
 A binding condition compiles to a nil test branching to the clause's failure
 block, and a pattern to a chain of such tests. throw calls js_throw and do/catch
-compiles each body to a js_closure handed to js_try (Swift has no finally; the
-first catch wins, an unbound catch binds `error`). defer compiles the rest of
+compiles the try body and the WHOLE catch chain to js_closures handed to js_try
+(Swift has no finally; the catch closure tests each clause's patterns in turn,
+runs the first that matches with its bindings live, and re-throws when none does;
+an unbound catch binds `error`). try? wraps its operand in a js_try whose catch
+answers nil. defer compiles the rest of
 its block into a js_try whose FINALLY closure is the defer body, so it runs on
 the normal path, on a return and on a throw, and nested defers unwind LIFO.
 The whole program becomes jsmain(env, args) executed in order.
@@ -55,15 +69,20 @@ first branch. A declaration made under #if stays visible after the #endif.
 #error / #warning / #assert are accepted and ignored, and a leading hashbang
 line is skipped.
 
+Overloaded members (two initializers, two subscripts) are stored under name,
+name$1, ... and picked at the CALL SITE, where the argument labels and count are
+known statically; a member read or write of a name some type COMPUTES goes
+through the generated __get_x / __set_x method (js_defprop accessors never see
+their receiver in a C-style emitter), and a program that computes no property
+emits exactly the IR it did before.
+
 Not in the subset (accepted structurally and reported as not implemented under
 -warn-unsupported, or simply not parsed): floating point (the runtime is 32-bit
 integer only), the numeric and string literal forms beyond plain decimals and a
-double-quoted string with interpolation, protocols, extensions, generics (parsed
-and ignored), enums with raw or associated values, subscript declarations,
-computed properties and property observers, lazy and static members, property
-wrappers, initializer overloading and failable initializers, inheritance beyond
-a parsed superclass name, operator declarations, async/await, as/is casts, typed
-catch discrimination and struct value semantics (structs behave like classes).
+double-quoted string with interpolation, generics (parsed and ignored), lazy
+properties, property wrappers and their projected values, operator and
+precedencegroup declarations, operator overloading, the bitwise and overflow
+operators, and async/await.
 
 Top level self checking programs count failures and end with exit(failures).
 The same language with the same semantics is interpreted directly by
@@ -159,12 +178,17 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
 // declaration keyword, so it is NOT in Modifier - a greedy Modifiers would eat the
 // `class` of `@objc class Cache { ... }` and leave nothing for ClassDecl. Member
 // tries the nested-type alternative first and only then this list.
-MemberModifiers = { Modifier | Attribute | ClassMod } ;
+// A member's modifiers push a marker for the ones the type builder needs (static /
+// class puts the member on the type descriptor instead of on instances); the rest
+// are parsed and dropped. A marker arrives ahead of the member's own record, in
+// source order, so splitMembers attaches it to the member that follows.
+MemberModifiers = { MemStatic | Modifier | Attribute | ClassMod } ;
+MemStatic   <~~ push({mstatic: 1}) ~~> = ( "static" | "class" ) KwEnd ;
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
-            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
 
 // A function/method/init body. Swift returns the value of a body that is a SINGLE
 // expression without writing `return`, so the one-expression form is tried first;
@@ -195,24 +219,29 @@ ParamDflt   <~~ push({pdflt: pop()}) ~~> = Expression ;
 ParamAttr   = "@" Id <~~ push({pattr: up.in}) ~~> { "." Id } ;
 
 // class / struct with stored properties, methods and an explicit init.
-StructDecl  <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+StructDecl  <~~ push(makeStructStmt(takeAll())) ~~>
+            = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+            = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+// The inheritance clause: for a class its first entry may be the SUPERCLASS, and
+// every entry may be a protocol whose default implementations are mixed in. Each
+// name is kept as text and resolved when the type is created.
+InheritList = InheritName { "," InheritName } ;
+InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
 ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwActor Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+            = KwActor Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
 KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
 
 // A nested type is matched BEFORE the modifier-led members, so the `class` of
 // `class Inner {}` is read as the declaration keyword and the `class` of
 // `class var kind` as a modifier (ClassDecl fails on the `var` that follows).
-Member      = PoundIfMember | MemberDirective | MemberType | [ MemberModifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+Member      = PoundIfMember | MemberDirective | MemberType | [ MemberModifiers ] ( CaseDecl | InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
 // The nested declaration's own statement is dropped: a nested type is accepted
 // structurally, not yet reachable as Outer.Inner.
-MemberType  <~~ pop(); push({}) ~~>
+MemberType  <~~ push({nested: pop()}) ~~>
             = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
@@ -221,26 +250,63 @@ InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
 // deinit is accepted and ignored - this runtime is garbage collected, so there is
 // no deterministic point at which to run it.
 DeinitDecl  <~~ push({}) ~~> = KwDeinit SkipBlock ;
-SubscriptDecl <~~ notImpl("subscript", up.pos); push({}) ~~>
-            = KwSubscript [ SkipAngle ] SkipParen [ "->" Type ] SkipBlock ;
+// subscript(i: Int) -> Int { get { ... } set { ... } } becomes the pair of ordinary
+// methods __sub_get / __sub_set, which is what [i] reads and writes dispatch to. A
+// second subscript of a different arity is an overload of the same pair.
+SubscriptDecl <~~ var ms = makeSubscript(takeAll()); for (var i = 0; i < ms.length; i++) { push(ms[i]) } ~~>
+            = KwSubscript [ SkipAngle ] ParamList [ "->" AnnType ] [ GenWhere ] PropAccessors ;
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
 // var w = 2, h = 3 declares two stored properties; each binding pushes its own
 // {prop} record, so the type builder sees them in declaration order.
 PropDecl    = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
 PropBind    <~~ push(makeProp(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] ;
-// Computed properties and stored properties with willSet/didSet observers.
-ComputedProp <~~ push(notImplStmt("computed property or property observer", up.pos)) ~~>
-            = ( "let" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] SkipBlock ;
+// A computed property (`var scaled: Int { get { ... } set { ... } }`, or the
+// getter-only shorthand `var family: String { "beast" }`) and a stored property
+// with willSet/didSet observers - the two share one syntax, told apart by which
+// accessors the braces hold. Both become the ordinary methods __get_x / __set_x on
+// the type, which is what a member read/write of x is emitted as; an observed
+// property keeps its storage under the hidden name __v_x.
+ComputedProp <~~ push(makeComputed(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" PropDefault ] PropAccessors ;
+PropDefault <~~ push({pdefault: pop()}) ~~> = Expression ;
+// The accessor list is tried first: `get` and `set` are ordinary identifiers, so a
+// getter-only body would otherwise read `get { ... }` as a trailing-closure call.
+// Each alternative carries its own braces, so a body that is NOT an accessor list
+// makes the whole alternative fail and the getter shorthand is reached (the same
+// shape FnBody uses - an ordered choice never retries a committed alternative).
+// A brace run this grammar cannot read as accessors (a coroutine accessor's
+// `_modify { yield &x }`) is still ACCEPTED structurally by the last alternative.
+PropAccessors = AccessorBlock | ImplicitGetter | OpaqueAccessors ;
+OpaqueAccessors <~~ push({}) ~~> = SkipBlock ;
+AccessorBlock = "{" Accessor { Accessor } "}" ;
+Accessor    <~~ push(makeAccessor(takeAll())) ~~>
+            = [ Modifiers ] AccKind <~~ push({akind: up.in}) ~~> [ AccParam ] [ FnEffects ] AccBody ;
+AccKind     = ( "willSet" | "didSet" | "get" | "set" | "_modify" | "_read"
+              | "unsafeAddress" | "unsafeMutableAddress" ) KwEnd ;
+AccParam    = "(" Id <~~ push({aparam: up.in}) ~~> ")" ;
+AccBody     <~~ push({abody: pop()}) ~~> = FnBody ;
+// `var family: String { "beast" }` - the braces ARE the getter body.
+ImplicitGetter <~~ push(makeImplicitGetter(pop())) ~~> = FnBody ;
 
-// A plain enum of bare cases becomes named string constants.
-EnumDecl    = PlainEnum | ComplexEnum ;
-PlainEnum   <~~ push(makeEnumStmt(takeAll())) ~~>
-            = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { SimpleCase } "}" ;
-SimpleCase  = KwCase Id <~~ push({ecase: up.in}) ~~> { "," Id <~~ push({ecase: up.in}) ~~> } [ ";" ] ;
-ComplexEnum <~~ push(notImplStmt("enum with raw or associated values", up.pos)) ~~>
-            = KwEnum Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
+// An enum declares cases (bare, with a raw value, or with associated values) and,
+// like a struct, methods / computed properties / static members. Its body is the
+// SAME Member list a struct has plus CaseDecl.
+EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = KwEnum Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" EnumConform ] [ GenWhere ] "{" { Member } "}" ;
+// The FIRST entry of an enum's inheritance clause may be its raw-value type
+// (`: Int`, `: String`); anything else there is a protocol and is ignored.
+EnumConform = EnumRawType { "," Type } ;
+EnumRawType <~~ push({eraw: stripWs(up.in)}) ~~> = Type ;
+CaseDecl    = KwCase ECase { "," ECase } [ ";" ] ;
+ECase       <~~ push({ecase: makeECase(takeAll())}) ~~>
+            = Id <~~ push({cname: up.in}) ~~> [ ECaseAssoc | "=" ECaseRaw ] ;
+ECaseAssoc  <~~ push({cassoc: takeAll()}) ~~>
+            = "(" [ ECaseParam { "," ECaseParam } ] ")" ;
+ECaseParam  <~~ push(makeECaseParam(takeAll())) ~~> = [ ECaseLabel ] Type ;
+ECaseLabel  = Id <~~ push({clabel: up.in}) ~~> ":" ;
+ECaseRaw    <~~ push({craw: pop()}) ~~> = Expression ;
 
 // protocol / extension / typealias: accepted structurally, not implemented.
 UnsupDecl   = ImportDecl | ProtocolDecl | ExtensionDecl | TypeAliasDecl ;
@@ -255,10 +321,35 @@ ImportPath  <~~ push(stripWs(up.in)) ~~>
             = Id { "." ( Id | "*" ) } ;
 ImportKind  = ( "typealias" | "struct" | "class" | "enum" | "protocol"
               | "func" | "let" | "var" | "inout" ) KwEnd ;
-ProtocolDecl <~~ push(notImplStmt("protocol", up.pos)) ~~>
-            = KwProtocol Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
-ExtensionDecl <~~ push(notImplStmt("extension", up.pos)) ~~>
-            = KwExtension Type [ ":" TypeList ] SkipBlock ;
+// A protocol is a named member table: its REQUIREMENTS are recorded and dropped
+// (this front end does no conformance checking), and the default implementations an
+// extension of the protocol adds are what a conforming type inherits.
+ProtocolDecl <~~ push(makeProtocolStmt(takeAll())) ~~>
+            = KwProtocol Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" InheritList ] [ GenWhere ]
+              "{" { ProtoMember } "}" ;
+// A requirement has no body, so it is matched BEFORE the member forms: `var name:
+// String { get }` would otherwise read as a computed property whose getter returns
+// the value of a variable called `get`.
+ProtoMember = ProtoReq | Member ;
+ProtoReq    = AssocTypeDecl | [ MemberModifiers ] ( ProtoVar | ProtoFunc | ProtoInit | ProtoSubscript ) ;
+AssocTypeDecl <~~ push({}) ~~>
+            = "associatedtype" KwEnd Id [ ":" TypeList ] [ "=" Type ] [ GenWhere ] [ ";" ] ;
+ProtoVar    <~~ push({}) ~~>
+            = ( "let" | "var" ) KwEnd Id [ ":" Type ] "{" ProtoAcc { ProtoAcc } "}" ;
+ProtoAcc    = ( "get" | "set" | "async" | "throws" ) KwEnd ;
+ProtoFunc   <~~ push({}) ~~>
+            = KwFunc FuncName [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] [ ";" ] ;
+ProtoInit   <~~ push({}) ~~>
+            = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] [ ";" ] ;
+ProtoSubscript <~~ push({}) ~~>
+            = KwSubscript [ SkipAngle ] SkipParen "->" Type "{" ProtoAcc { ProtoAcc } "}" ;
+
+// extension T { ... } adds members to an existing type - a struct/class/enum, a
+// protocol (whose members become the defaults of every conforming type) or a
+// builtin (Int, String, Array, ...), which keeps its members in a side table.
+ExtensionDecl <~~ push(makeExtensionStmt(takeAll())) ~~>
+            = KwExtension ExtType [ ":" InheritList ] [ GenWhere ] "{" { Member } "}" ;
+ExtType     <~~ push({extname: stripWs(up.in)}) ~~> = Type ;
 // typealias: types are parsed and ignored, so an alias needs nothing at run time.
 TypeAliasDecl <~~ push(function(b) { return b }) ~~>
             = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
@@ -350,17 +441,13 @@ Do          <~~ push(makeTry(takeAll())) ~~>
             = KwDo TryBody { CatchClause } ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
-CatchClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch ( CatchLet | CatchPat ) Block ;
-// catch let e / catch let e as T / catch let e where c: bind e (the caught value).
-CatchLet    = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ "as" KwEnd Type ] [ KwWhere DiscardExpr ] ;
-// catch SomeError / catch .case / catch { }: no `let` binding, so the caught value
-// binds to the implicit name `error` (always pushed, so makeCatch binds it).
-CatchPat    <~~ push("error") ~~>
-            = [ DropPattern ] [ KwWhere DiscardExpr ] ;
-// The clause's pattern is parsed but not discriminated yet, so its record is
-// dropped and the caught value binds to the implicit `error` either way.
-DropPattern <~~ pop() ~~> = Pattern ;
+// catch PATTERN[, PATTERN] [where COND] { ... }. The clause matches when one of its
+// patterns matches the thrown value (a clause with no pattern matches anything), and
+// that pattern's bindings - plus the implicit `error` - are live in the body.
+CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
+            = KwCatch [ CatchPat { "," CatchPat } [ CatchWhere ] ] Block ;
+CatchPat    <~~ push({cpat: pop()}) ~~> = Pattern [ "as" KwEnd Type ] ;
+CatchWhere  <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 // defer { ... }: everything AFTER it in its block is emitted into a js_try whose
 // FINALLY closure is the defer body, so it runs on the normal path, on a return (a
 // control signal that excDispatch re-issues) and on a throw (js_try re-panics after
@@ -369,7 +456,8 @@ Defer       <~~ push(makeDefer(pop())) ~~>
             = KwDefer Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
-Fallthrough <~~ push(notImplStmt("fallthrough", up.pos)) ~~>
+// fallthrough: continue into the NEXT case's body without re-testing its pattern.
+Fallthrough <~~ push(makeFallthrough()) ~~>
             = KwFallthrough [ ";" ] ;
 
 // if / guard / while whose condition uses optional binding (if let x = ...),
@@ -408,7 +496,20 @@ BindName    <~~ push(up.in) ~~> = Wildcard | Id ;
 // reference otherwise, so emitMatchCore carries that flag down the tree.
 Pattern     <~~ push(makePattern(takeAll())) ~~>
             = PatCore { NoSpace "?" <~~ push({popt: 1}) ~~> } ;
-PatCore     = PatLet | PatTuple | PatWild | PatEnum ;
+PatCore     = PatLet | PatTuple | PatWild | PatRange | PatEnum | PatExpr ;
+// Range patterns, including the one-sided forms: 1...9, 10..., ..<0. Tried before
+// PatEnum and PatExpr, both of which would match the lower bound on its own and
+// then leave the range operator behind.
+PatRange    = PatRangeCC | PatRangeUp | PatRangeDn ;
+PatRangeCC  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp PatOperand ;
+PatRangeUp  <~~ push(makePatRange(takeAll())) ~~> = PatOperand RangeOp ;
+PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatOperand ;
+// A value pattern compares the subject with ==. Its operand is deliberately NOT the
+// full expression grammar: a `{ ... }` would be read as a closure and swallow the
+// body of `catch { ... }`, whose pattern is optional.
+PatExpr     <~~ push({pexpr: pop()}) ~~> = PatOperand ;
+PatOperand  = PatNegLit | Template | FloatLit | IntLit | True | False | Nil ;
+PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" ( FloatLit | IntLit ) ;
 PatLet      <~~ push({plet: pop()}) ~~> = ( "let" | "var" ) KwEnd Pattern ;
 PatTuple    <~~ push({ptup: takeAll()}) ~~> = "(" Pattern { "," Pattern } ")" ;
 PatWild     <~~ push({pwild: 1}) ~~> = Wildcard ;
@@ -477,9 +578,15 @@ Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = [ LoopLabel ] KwSwitch SwitchSubj "{" { PoundIfCase | CaseLabel | Statement } "}" ;
 SwitchSubj  <~~ push({subj: pop()}) ~~>
             = Expression ;
+// A case label is a comma-separated list of PATTERNS with an optional where guard:
+// values (case 1, 2), ranges (case 1...9, case ..<0), tuples (case (0, let y)),
+// enum cases with their associated values (case .rect(let w, let h)) and bindings
+// (case let (x, y) where x == y).
 CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
-            = ( KwCase Expression <~~ push({v: pop()}) ~~> { "," Expression <~~ push({v: pop()}) ~~> }
+            = ( KwCase CaseItem { "," CaseItem } [ CaseWhere ]
               | KwDefault ) ":" ;
+CaseItem    <~~ push({cpat: pop()}) ~~> = Pattern ;
+CaseWhere   <~~ push({cwhere: pop()}) ~~> = KwWhere Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
@@ -512,8 +619,8 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
-TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+TIndex      <~~ push({idx: makeIndexKey(takeAll())}) ~~>
+            = "[" Expression { "," Expression } "]" ;
 
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "?" Expression ":" Ternary ] ;
@@ -531,9 +638,10 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // cast operator it is a pure pass-through (a single item), so byte output is
 // unchanged for programs that do not cast.
 Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
-            = Coalesce { CastOp Type } ;
-CastOp      <~~ push({cast: 1}) ~~>
+            = Coalesce { CastOp CastType } ;
+CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
+CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
 // a ?? b yields a unless it is nil (the nil-coalescing operator; b only runs then).
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = AddExpr { "??" AddExpr } ;
@@ -547,7 +655,9 @@ Neg         <~~ push(makeNeg(pop())) ~~>   = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
 // try / try? / try! : the prefix is parsed and ignored and the inner expression is
 // lowered normally (a throw inside the call unwinds via js_throw regardless).
-TryExpr     = ( KwTry [ "?" | "!" ] ) UnaryExpr ;
+TryExpr     = TryOpt | TryPlain ;
+TryOpt      <~~ push(makeTryOpt(pop())) ~~> = KwTry "?" UnaryExpr ;
+TryPlain    = KwTry [ "!" ] UnaryExpr ;
 // await: recognized as a prefix, routed to notImplExpr.
 Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
             = KwAwait UnaryExpr ;
@@ -577,8 +687,8 @@ FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 TupleSfx    = "." TupleIdx ;
 TupleIdx    <~~ push({kind:"field", name: up.in}) ~~>
             = "0"..."9" { "0"..."9" } ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+IndexSfx    <~~ push({kind:"index", idx: makeIndexKey(takeAll())}) ~~>
+            = "[" Expression { "," Expression } "]" ;
 // f(args) applied to whatever the chain produced so far - a closure out of an array
 // (queued[0]()), a function returned by a function, a computed member. The opening
 // paren has to be ADJACENT: `print(x)` on one line and `(a, b) = (b, a)` on the
@@ -590,7 +700,64 @@ NoSpaceParen = :script(~~
         return (c.peek(0) === 40) ? undefined : abnf.newToken("\x01space-before-paren", 0)
     })()
 ~~) ;
-MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ TrailArg { LabTrail } ] | TrailArg { LabTrail } ;
+MArgs       = "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ]
+            | NoTrailCtx TrailArg { LabTrail } ;
+// A zero-width guard that FAILS when the `{` ahead is the BODY of an
+// if / while / switch / for / guard rather than a trailing closure. Swift resolves
+// this ambiguity with a parser flag ("no trailing closure in a condition"); a guard
+// here has to re-derive the same answer from (source, position) alone, so it walks
+// BACKWARDS to the start of the enclosing statement - tracking bracket depth, and
+// answering "allowed" the moment it leaves an unclosed ( or [ , which is what makes
+// `check(xs.map { $0 })` inside a condition still work - and looks at the first word
+// it finds there. Without it, `if case .p = E.c(3) { body }` reads `{ body }` as a
+// trailing closure of E.c(3) and the if has no block left.
+NoTrailCtx  = :script(~~
+    (function() {
+        var j = 0
+        var ch = c.peek(j)
+        while (ch === 32 || ch === 9 || ch === 10 || ch === 13) { j++; ch = c.peek(j) }
+        if (ch !== 123) { return undefined }
+        var depth = 0
+        var i = -1
+        var steps = 0
+        var start = 0
+        var found = false
+        while (steps < 20000) {
+            steps++
+            var b = c.peek(i)
+            if (b < 0) { start = i + 1; found = true; break }
+            if (b === 41 || b === 93 || b === 125) { depth++ }
+            else if (b === 40 || b === 91) {
+                if (depth === 0) { return undefined }
+                depth--
+            } else if (b === 123) {
+                if (depth === 0) { start = i + 1; found = true; break }
+                depth--
+            } else if (depth === 0 && (b === 59 || b === 10 || b === 13)) {
+                start = i + 1; found = true; break
+            }
+            i--
+        }
+        if (!found) { return undefined }
+        var k = start
+        var w = ""
+        var rounds = 0
+        while (rounds < 4) {
+            rounds++
+            var cc = c.peek(k)
+            while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { k++; cc = c.peek(k) }
+            w = ""
+            while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) {
+                w = w + String.fromCharCode(cc); k++; cc = c.peek(k)
+            }
+            if (w !== "else") { break }
+        }
+        if (w === "if" || w === "while" || w === "switch" || w === "for" || w === "guard") {
+            return abnf.newToken("\x01trailing-closure-in-condition", 0)
+        }
+        return undefined
+    })()
+~~) ;
 // A trailing closure is the callee's last argument; the second and further ones
 // carry their argument label (Swift 5.3 multiple trailing closures).
 TrailArg    <~~ push(makeTrailArg(pop())) ~~> = Closure ;
@@ -608,7 +775,24 @@ ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
 InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
 Primary     = Paren | Template | FloatLit | IntLit | True | False | Nil
-            | PoundExpr | Closure | DictLit | ArrayLit | Shorthand | MultiTrail | Call | VarRef ;
+            | PoundExpr | SuperRef | DotMember | Closure | DictLit | ArrayLit
+            | Shorthand | MultiTrail | Call | VarRef ;
+
+// `super.m(...)` / `super.p` / `super.init(...)`: a marker value whose member lookup
+// starts at the SUPERCLASS of the type the running method was declared in, with the
+// same self. (The declaring type is what makes a three-level hierarchy behave: the
+// lookup base is not self's own type.)
+SuperRef    <~~ push(makeSuperRef()) ~~> = KwSuper ;
+
+// An implicit member expression: `.tails`, `.circle(r: 5)`. Swift resolves the
+// leading dot against the expected TYPE; this front end has no type checker, so it
+// builds an unqualified enum case value carrying only the case name and, if given,
+// its associated values. Matching and == compare enum cases by NAME, so an
+// unqualified `.tails` and a qualified `Coin06.tails` are the same value.
+DotMember   <~~ push(makeDotMember(takeAll())) ~~>
+            = "." Id <~~ push({dname: up.in}) ~~> [ DotArgs ] ;
+DotArgs     <~~ push({dargs: takeAll()}) ~~>
+            = NoSpaceParen "(" [ CallArg { "," CallArg } ] ")" ;
 
 // The # expression literals. #available / #unavailable answer a constant (this
 // runtime has no platform to compare against, and the guarded code is the code
@@ -670,7 +854,7 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ Expression { "," Expression } ] "]" ;
 
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ TrailArg { LabTrail } ] ;
+            = Id <~~ push(up.in) ~~> "(" [ CallArg { "," CallArg } ] ")" [ NoTrailCtx TrailArg { LabTrail } ] ;
 // f { ... } label: { ... }: a call written with two or more trailing closures and no
 // parentheses. Only the MULTI-closure form is accepted without parentheses - a bare
 // `name { ... }` would make `if cond { ... }` parse as a call of cond.
@@ -712,6 +896,8 @@ SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
 DiscardExpr <~~ pop() ~~> = Expression ;
 
 KwFunc      = "func" KwEnd ;
+// A function name is an identifier or, for an operator declaration, the operator.
+FuncName    = Id <~~ push(up.in) ~~> ;
 KwImport    = "import" KwEnd ;
 KwWhere     = "where" KwEnd ;
 KwDeinit    = "deinit" KwEnd ;
@@ -722,6 +908,7 @@ KwDefer     = "defer" KwEnd ;
 KwThrow     = "throw" KwEnd ;
 KwFallthrough = "fallthrough" KwEnd ;
 KwTry       = "try" KwEnd ;
+KwSuper     = "super" KwEnd ;
 KwAwait     = "await" KwEnd ;
 KwStruct    = "struct" KwEnd ;
 KwClass     = "class" KwEnd ;
@@ -802,12 +989,62 @@ KwContinue  = "continue" KwEnd ;
     // runs the try under a Go recover and routes a thrown value to the catch closure (a
     // one-parameter function bound to the catch name). The first catch clause wins.
     // makeCatch is shared - see lib/compile-core.js.
+    // items = [{cpat}..., {cwhere}?, bodyThunk]
+    function makeCatchClause(items) {
+        var pats = []
+        var whereT = null
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (typeof it == "function") { body = it }
+            else if (it.cpat != undefined) { pats.push(it.cpat) }
+            else if (it.cwhere != undefined) { whereT = it.cwhere }
+        }
+        return {catchbody: body, pats: pats, whereT: whereT}
+    }
+    // The whole catch chain becomes ONE catch closure taking `error`: it tests each
+    // clause's patterns in turn and runs the first that matches, and re-throws when
+    // none does so an outer do still sees the error. Swift has no finally.
     function makeTry(items) {
-        var tryT = anytype, catchT = anytype, catchName = anytype
+        var tryT = anytype
+        var clauses = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].catchbody != undefined) {
-                if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
+            else if (items[i].catchbody != undefined) { clauses.push(items[i]) }
+        }
+        var catchBody = null
+        if (clauses.length > 0) {
+            catchBody = function(b) {
+                var errV = callExt(b, "js_kget", [curScopeV, emitStr(b, "error")])
+                var rethrowB = curF.NewBlock("")
+                var doneB = curF.NewBlock("")
+                for (var k = 0; k < clauses.length; k++) {
+                    var cl = clauses[k]
+                    var runB = curF.NewBlock("")
+                    var nextB = curF.NewBlock("")
+                    if (cl.pats.length == 0) {
+                        b.NewBr(runB)
+                    } else {
+                        for (var q = 0; q < cl.pats.length; q++) {
+                            var tryNext = curF.NewBlock("")
+                            var okB = emitMatchPat(b, cl.pats[q], errV, false, tryNext)
+                            if (cl.whereT != null) {
+                                var rw = cl.whereT(okB)
+                                rw.b.NewCondBr(truthy(rw.b, rw.v), runB, tryNext)
+                            } else { okB.NewBr(runB) }
+                            b = tryNext
+                        }
+                        b.NewBr(nextB)
+                    }
+                    cl.catchbody(runB).NewBr(doneB)
+                    b = nextB
+                }
+                // No clause matched: keep unwinding so an outer do still sees it.
+                b.NewBr(rethrowB)
+                callExt(rethrowB, "js_throw", [errV])
+                rethrowB.NewBr(doneB)
+                return doneB
             }
         }
         return function(b) {
@@ -815,13 +1052,29 @@ KwContinue  = "continue" KwEnd ;
             // continue leaving them becomes a control signal that excDispatch re-issues.
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
             var catchClo = hUndef
-            if (catchT != undefined) {
-                var cn = (catchName != undefined) ? catchName : "error"
-                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false, true)), curScopeV])
+            if (catchBody != null) {
+                catchClo = callExt(b, "js_closure", [handle(emitFunc(["error"], catchBody, false, true)), curScopeV])
             }
-            // Swift has no finally, so the finally closure is always undefined.
             var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
             return excDispatch(b, ctl)
+        }
+    }
+    // try? EXPR: nil instead of the thrown error. The operand becomes a closure so
+    // js_try can wrap it, and its value is the result of the whole expression.
+    function makeTryOpt(t) {
+        return function(b) {
+            var bodyFn = function(bb) {
+                var r = t(bb)
+                r.b.NewRet(r.v)
+                return deadBlock()
+            }
+            var nilFn = function(bb) {
+                bb.NewRet(hNull)
+                return deadBlock()
+            }
+            var bodyClo = callExt(b, "js_closure", [handle(emitFunc([], bodyFn, false, false)), curScopeV])
+            var catchClo = callExt(b, "js_closure", [handle(emitFunc(["error"], nilFn, false, false)), curScopeV])
+            return {b: b, v: callExt(b, "js_try", [bodyClo, catchClo, hUndef])}
         }
     }
     // throw e: evaluate e and raise it with js_throw (a Go panic the runtime unwinds).
@@ -839,9 +1092,42 @@ KwContinue  = "continue" KwEnd ;
     // e as/as?/as! T and e is T carry a {cast:1} marker per operator. With no
     // marker the single operand thunk passes through unchanged; a cast is not
     // lowered (the runtime has no dynamic types), so it becomes a placeholder.
+    // e is T answers the dynamic type test (js_is_type, the Go twin of the
+    // interpreter's rtIsType), e as? T the value or nil, and e as / e as! T the value
+    // itself - the value model has one representation per value, so an upcast and a
+    // forced downcast are identities. An enum case answers to its enum's name.
+    function makeCastOne(t, op, tname) {
+        if (op != "is" && op != "as?") { return t }
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var isB = callExt(b, "js_is_type", [r.v, emitStr(b, tname)])
+            var elseB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            var fromB = b
+            b.NewCondBr(truthy(b, isB), joinB, elseB)
+            // A case value's type is its enum, which js_is_type does not know about.
+            var nm = elseB.NewCall(rtProbe("sw_etype", "__etype"), [r.v])
+            var alt = callExt(elseB, "js_seq", [nm, emitStr(elseB, tname)])
+            elseB.NewBr(joinB)
+            var hit = joinB.NewPhi([llvm.ir.NewIncoming(hTrue, fromB), llvm.ir.NewIncoming(alt, elseB)])
+            if (op == "is") { return {b: joinB, v: hit} }
+            var yB = curF.NewBlock("")
+            var nB = curF.NewBlock("")
+            var mB = curF.NewBlock("")
+            joinB.NewCondBr(truthy(joinB, hit), yB, nB)
+            yB.NewBr(mB)
+            nB.NewBr(mB)
+            return {b: mB, v: mB.NewPhi([llvm.ir.NewIncoming(r.v, yB), llvm.ir.NewIncoming(hNull, nB)])}
+        }
+    }
     function makeCast(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("type cast (as / is)", pos)
+        var t = items[0]
+        for (var i = 1; i + 1 < items.length; i = i + 2) {
+            t = makeCastOne(t, items[i].cast, items[i + 1].ctype)
+        }
+        return t
     }
 
     // ----- Tuples -----
@@ -1022,6 +1308,333 @@ KwContinue  = "continue" KwEnd ;
         return coreStmtPos(t)
     }
 
+    // An unqualified name inside a member body may be a computed property or a
+    // method of the enclosing type: js_kget only sees the scope chain and the
+    // receiver's OWN properties. When the name is one some type computes (or one some
+    // type declares as a method) and no local of that name is in scope, the read is a
+    // dispatch on self instead. Names no type uses this way keep the plain js_kget.
+    var coreMakeVarRef = makeVarRef
+    makeVarRef = function(name) {
+        var plain = coreMakeVarRef(name)
+        return function(b) {
+            if (!isComputedName(name) && !isMemberMethod(name)) { return plain(b) }
+            var t = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+            var localB = curF.NewBlock("")
+            var selfB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [t, emitStr(b, "undefined")])), selfB, localB)
+            var lv = callExt(localB, "js_kget", [curScopeV, emitStr(localB, name)])
+            localB.NewBr(joinB)
+            var selfV = callExt(selfB, "js_kget", [selfB == null ? curScopeV : curScopeV, emitStr(selfB, "self")])
+            var sv
+            if (isComputedName(name)) { sv = selfB.NewCall(rtGetProp(), [selfV, emitStr(selfB, name)]) }
+            else { sv = callExt(selfB, "js_get", [selfV, emitStr(selfB, name)]) }
+            selfB.NewBr(joinB)
+            return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])}
+        }
+    }
+
+    // ----- Emitted runtime helpers -----
+    // A handful of routines are too branchy to inline at every use site, so they are
+    // emitted ONCE as ordinary IR functions and called directly. rtFunc registers the
+    // function before emitting its body, so a helper may call itself.
+    var rtFuncs = {}
+    function rtFunc(name, nparams, bodyFn) {
+        if (hasOwn(rtFuncs, "$" + name)) { return rtFuncs["$" + name] }
+        var ps = []
+        for (var i = 0; i < nparams; i++) { ps.push(llvm.ir.NewParam("p" + i, i64)) }
+        var f = m.NewFunc(name, i64, ps)
+        rtFuncs["$" + name] = f
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedTag = curFTag
+        curF = f
+        loopStack = []
+        var b = f.NewBlock("entry")
+        bodyFn(b, f.Params)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return f
+    }
+    // A guarded property read: undefined for anything that is not a plain object, so
+    // it is safe to apply to a value of unknown type (js_get aborts on nil).
+    function rtProbe(name, prop) {
+        return rtFunc(name, 1, function(b, ps) {
+            var v = ps[0]
+            var noB = curF.NewBlock("")
+            var c1 = curF.NewBlock("")
+            var c2 = curF.NewBlock("")
+            var c3 = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, hNull])), noB, c1)
+            c1.NewCondBr(truthy(c1, callExt(c1, "js_seq", [v, hUndef])), noB, c2)
+            c2.NewCondBr(truthy(c2, callExt(c2, "js_seq", [callExt(c2, "js_typeof", [v]), emitStr(c2, "object")])), c3, noB)
+            c3.NewCondBr(truthy(c3, callExt(c3, "js_is_type", [v, emitStr(c3, "Array")])), noB, (function() {
+                var okB = curF.NewBlock("")
+                okB.NewRet(callExt(okB, "js_get", [v, emitStr(okB, prop)]))
+                return okB
+            })())
+            noB.NewRet(hUndef)
+        })
+    }
+    function rtEqKey() { return rtProbe("sw_eqkey", "__eqkey") }
+    // Finds a member on a value's type, walking the superclass chain, or undefined.
+    function rtFindM() {
+        return rtFunc("sw_findm", 2, function(b, ps) {
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "c"), b.NewCall(rtClassOf(), [ps[0]])])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewBr(headB)
+            var cV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "c")])
+            headB.NewCondBr(truthy(headB, cV), bodyB, missB)
+            var mV = callExt(bodyB, "js_get", [cV, ps[1]])
+            var hitB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, mV), hitB, stepB)
+            hitB.NewRet(mV)
+            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "c"),
+                                            callExt(stepB, "js_get", [callExt(stepB, "js_scope_get", [sc, emitStr(stepB, "c")]), emitStr(stepB, "__super")])])
+            stepB.NewBr(headB)
+            missB.NewRet(hUndef)
+        })
+    }
+    // A property read that goes through the generated getter when the value's type has
+    // one, and is a plain member read otherwise - so a name that is COMPUTED in one
+    // type and STORED in another still reads correctly in both.
+    function rtGetProp() {
+        return rtFunc("sw_getprop", 2, function(b, ps) {
+            var g = b.NewCall(rtFindM(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__get_"), ps[1]])])
+            var callB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, g), callB, plainB)
+            var args = callExt(callB, "js_arr_new", [])
+            callExt(callB, "js_arr_push", [args, ps[0]])
+            callB.NewRet(callExt(callB, "js_call", [g, hUndef, args]))
+            plainB.NewRet(callExt(plainB, "js_get", [ps[0], ps[1]]))
+        })
+    }
+    function rtSetProp() {
+        return rtFunc("sw_setprop", 3, function(b, ps) {
+            var g = b.NewCall(rtFindM(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__set_"), ps[1]])])
+            var callB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, g), callB, plainB)
+            var args = callExt(callB, "js_arr_new", [])
+            callExt(callB, "js_arr_push", [args, ps[0]])
+            callExt(callB, "js_arr_push", [args, ps[2]])
+            callB.NewRet(callExt(callB, "js_call", [g, hUndef, args]))
+            callExt(plainB, "js_set", [ps[0], ps[1], ps[2]])
+            plainB.NewRet(hUndef)
+        })
+    }
+    function rtEName() { return rtProbe("sw_ename", "__ename") }
+    function rtVals()  { return rtProbe("sw_vals", "__vals") }
+    function rtClassOf() { return rtProbe("sw_classof", "__class") }
+    // == over values that may be enum cases: two cases are equal when their case name
+    // and their associated values are (which is what the __eqkey string encodes), and
+    // anything else keeps the identity/value comparison js_seq gives.
+    function rtEq() {
+        return rtFunc("sw_eq", 2, function(b, ps) {
+            var ka = b.NewCall(rtEqKey(), [ps[0]])
+            var kb = b.NewCall(rtEqKey(), [ps[1]])
+            var t1 = curF.NewBlock("")
+            var t2 = curF.NewBlock("")
+            var plain = curF.NewBlock("")
+            b.NewCondBr(truthy(b, ka), t1, plain)
+            t1.NewCondBr(truthy(t1, kb), t2, plain)
+            t2.NewRet(callExt(t2, "js_seq", [ka, kb]))
+            plain.NewRet(callExt(plain, "js_seq", [ps[0], ps[1]]))
+        })
+    }
+    // The string an associated value contributes to its case's __eqkey.
+    function rtKey() {
+        return rtFunc("sw_key", 1, function(b, ps) {
+            var k = b.NewCall(rtEqKey(), [ps[0]])
+            var useB = curF.NewBlock("")
+            var strB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, k), useB, strB)
+            useB.NewRet(k)
+            strB.NewRet(callExt(strB, "js_jadd", [emitStr(strB, ""), ps[0]]))
+        })
+    }
+    // E(rawValue: r): the case of e whose __raw equals r, or nil.
+    function rtRawCase() {
+        return rtFunc("sw_rawcase", 2, function(b, ps) {
+            var e = ps[0]
+            var raw = ps[1]
+            var sc = callExt(b, "js_scope_new", [handle(0)])
+            var names = callExt(b, "js_get", [e, emitStr(b, "__cases")])
+            callExt(b, "js_scope_decl", [sc, emitStr(b, "i"), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var stepB = curF.NewBlock("")
+            var missB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [names])])), bodyB, missB)
+            var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
+            var cv = callExt(bodyB, "js_get", [e, callExt(bodyB, "js_pyget", [names, iV2])])
+            var hitB = curF.NewBlock("")
+            bodyB.NewCondBr(truthy(bodyB, callExt(bodyB, "js_seq", [callExt(bodyB, "js_get", [cv, emitStr(bodyB, "__raw")]), raw])), hitB, stepB)
+            hitB.NewRet(cv)
+            callExt(stepB, "js_scope_set", [sc, emitStr(stepB, "i"),
+                                            callExt(stepB, "js_jadd", [callExt(stepB, "js_scope_get", [sc, emitStr(stepB, "i")]), emitNum(stepB, 1)])])
+            stepB.NewBr(headB)
+            missB.NewRet(hNull)
+        })
+    }
+    // A struct value is copied whenever it is bound to a new name, assigned or passed
+    // as an argument; a class instance is a reference and is left alone. The field
+    // list to copy rides on the descriptor as __fields.
+    // self = X in a mutating method: copy X's stored properties over the receiver's,
+    // so every reference to this struct value observes the change.
+    function rtAssignSelf() {
+        return rtFunc("sw_assignself", 2, function(b, ps) {
+            var dst = ps[0]
+            var src = ps[1]
+            var cls = b.NewCall(rtClassOf(), [src])
+            var goB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, cls), goB, noB)
+            var flds = callExt(goB, "js_get", [cls, emitStr(goB, "__fields")])
+            var sc = callExt(goB, "js_scope_new", [handle(0)])
+            callExt(goB, "js_scope_decl", [sc, emitStr(goB, "i"), emitNum(goB, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            goB.NewCondBr(truthy(goB, flds), headB, noB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [flds])])), bodyB, doneB)
+            var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
+            var kk = callExt(bodyB, "js_pyget", [flds, iV2])
+            callExt(bodyB, "js_set", [dst, kk, callExt(bodyB, "js_get", [src, kk])])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(hUndef)
+            noB.NewRet(hUndef)
+        })
+    }
+    function rtCopy() {
+        return rtFunc("sw_copy", 1, function(b, ps) {
+            var v = ps[0]
+            var cls = b.NewCall(rtClassOf(), [v])
+            var c1 = curF.NewBlock("")
+            var asIs = curF.NewBlock("")
+            b.NewCondBr(truthy(b, cls), c1, asIs)
+            var c2 = curF.NewBlock("")
+            c1.NewCondBr(truthy(c1, callExt(c1, "js_get", [cls, emitStr(c1, "__struct")])), c2, asIs)
+            var flds = callExt(c2, "js_get", [cls, emitStr(c2, "__fields")])
+            var out = callExt(c2, "js_obj_new", [])
+            callExt(c2, "js_set", [out, emitStr(c2, "__class"), cls])
+            var sc = callExt(c2, "js_scope_new", [handle(0)])
+            callExt(c2, "js_scope_decl", [sc, emitStr(c2, "i"), emitNum(c2, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var doneB = curF.NewBlock("")
+            c2.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [flds])])), bodyB, doneB)
+            var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
+            var kk = callExt(bodyB, "js_pyget", [flds, iV2])
+            callExt(bodyB, "js_set", [out, kk, bodyB.NewCall(rtCopy(), [callExt(bodyB, "js_get", [v, kk])])])
+            callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            doneB.NewRet(out)
+            asIs.NewRet(v)
+        })
+    }
+    function emitCopy(b, v) {
+        if (!hasStructs) { return v }
+        return b.NewCall(rtCopy(), [v])
+    }
+    // The [i] read and the [i] = v write, once the program declares a subscript: an
+    // object whose type carries __sub_get / __sub_set dispatches there, everything
+    // else keeps the js_pyget / js_pyset path.
+    function rtSubGet() {
+        return rtFunc("sw_subget", 2, function(b, ps) {
+            var g = b.NewCall(rtSubLookup(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__sub_get"), b.NewCall(rtIdxArity(), [ps[1]])])])
+            var callB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, g), callB, plainB)
+            var args = callExt(callB, "js_arr_new", [])
+            callExt(callB, "js_arr_push", [args, ps[0]])
+            callB = emitSpreadIdx(callB, args, ps[1])
+            callB.NewRet(callExt(callB, "js_call", [g, hUndef, args]))
+            plainB.NewRet(callExt(plainB, core.indexExt, [ps[0], ps[1]]))
+        })
+    }
+    function rtSubSet() {
+        return rtFunc("sw_subset", 3, function(b, ps) {
+            var g = b.NewCall(rtSubLookup(), [ps[0], callExt(b, "js_jadd", [emitStr(b, "__sub_set"), b.NewCall(rtIdxArity(), [ps[1]])])])
+            var callB = curF.NewBlock("")
+            var plainB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, g), callB, plainB)
+            var args = callExt(callB, "js_arr_new", [])
+            callExt(callB, "js_arr_push", [args, ps[0]])
+            callB = emitSpreadIdx(callB, args, ps[1])
+            callExt(callB, "js_arr_push", [args, ps[2]])
+            callB.NewRet(callExt(callB, "js_call", [g, hUndef, args]))
+            callExt(plainB, "js_pyset", [ps[0], ps[1], ps[2]])
+            plainB.NewRet(hUndef)
+        })
+    }
+    // How many parameters this index carries (a multi-parameter subscript index
+    // travels as one {__idxs} value).
+    function rtIdxArity() {
+        return rtFunc("sw_idxarity", 1, function(b, ps) {
+            var many = b.NewCall(rtProbe("sw_idxs", "__idxs"), [ps[0]])
+            var manyB = curF.NewBlock("")
+            var oneB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, many), manyB, oneB)
+            manyB.NewRet(callExt(manyB, "js_pylen", [many]))
+            oneB.NewRet(emitNum(oneB, 1))
+        })
+    }
+    // Finds a subscript accessor on the value's type (an instance uses its __class, a
+    // type descriptor its own __static_ entry), or undefined.
+    function rtSubLookup() {
+        return rtFunc("sw_sublookup", 2, function(b, ps) {
+            var cls = b.NewCall(rtClassOf(), [ps[0]])
+            var instB = curF.NewBlock("")
+            var statB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, cls), instB, statB)
+            instB.NewRet(callExt(instB, "js_get", [cls, ps[1]]))
+            var isDesc = b.NewCall(rtProbe("sw_isclass", "__isclass"), [ps[0]])
+            var descB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            statB.NewCondBr(truthy(statB, isDesc), descB, noB)
+            descB.NewRet(callExt(descB, "js_get", [ps[0], callExt(descB, "js_jadd", [emitStr(descB, "__static_"), ps[1]])]))
+            noB.NewRet(hUndef)
+        })
+    }
+    // A multi-parameter subscript index travels as one {__idxs: [...]} value; this
+    // appends either its elements or the single index to the argument array.
+    function emitSpreadIdx(b, args, idxV) {
+        var many = b.NewCall(rtProbe("sw_idxs", "__idxs"), [idxV])
+        var manyB = curF.NewBlock("")
+        var oneB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, many), manyB, oneB)
+        var sc = callExt(manyB, "js_scope_new", [handle(0)])
+        callExt(manyB, "js_scope_decl", [sc, emitStr(manyB, "i"), emitNum(manyB, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        manyB.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [sc, emitStr(headB, "i")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, callExt(headB, "js_pylen", [many])])), bodyB, joinB)
+        var iV2 = callExt(bodyB, "js_scope_get", [sc, emitStr(bodyB, "i")])
+        callExt(bodyB, "js_arr_push", [args, callExt(bodyB, "js_pyget", [many, iV2])])
+        callExt(bodyB, "js_scope_set", [sc, emitStr(bodyB, "i"), callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
+        bodyB.NewBr(headB)
+        callExt(oneB, "js_arr_push", [args, idxV])
+        oneB.NewBr(joinB)
+        return joinB
+    }
+
     // ----- Patterns and binding conditions -----
     // A pattern is {opt: n, core: k}: n trailing `?` (an optional pattern, which
     // fails on nil and matches the unwrapped value) around one core form.
@@ -1061,6 +1674,29 @@ KwContinue  = "continue" KwEnd ;
     }
     function emitMatchCore(b, k, v, binding, failB) {
         if (k.pwild != undefined) { return b }
+        if (k.pexpr != undefined) {
+            var re = k.pexpr(b)
+            var okE = curF.NewBlock("")
+            re.b.NewCondBr(truthy(re.b, emitBin(re.b, "==", v, re.v)), okE, failB)
+            return okE
+        }
+        if (k.prange != undefined) {
+            var rg = k.prange
+            if (rg.lo != null) {
+                var rl = rg.lo(b)
+                var okL = curF.NewBlock("")
+                rl.b.NewCondBr(truthy(rl.b, callExt(rl.b, "js_ge", [v, rl.v])), okL, failB)
+                b = okL
+            }
+            if (rg.hi != null) {
+                var rh = rg.hi(b)
+                var okH = curF.NewBlock("")
+                var cmp = rg.rop == "..<" ? "js_lt" : "js_le"
+                rh.b.NewCondBr(truthy(rh.b, callExt(rh.b, cmp, [v, rh.v])), okH, failB)
+                b = okH
+            }
+            return b
+        }
         if (k.plet != undefined) { return emitMatchPat(b, k.plet, v, true, failB) }
         if (k.ptup != undefined) {
             var subs = k.ptup
@@ -1074,17 +1710,31 @@ KwContinue  = "continue" KwEnd ;
             if (k.ppath != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, k.ppath), v]) }
             return b
         }
-        // A plain enum's cases are named string constants, so a case pattern is an
-        // equality test against that constant; `.name` (leading dot) has no type to
-        // resolve against and compares the case NAME directly. A case that carries
-        // associated values has no runtime payload yet, so it never matches.
-        if (k.pargs != null && k.pargs.length > 0) {
-            b.NewBr(failB)
-            return curF.NewBlock("")
-        }
+        // An enum case pattern matches by case NAME (a leading `.` has no type to
+        // resolve against, and a qualified path names the same case); the sub-patterns
+        // then match the associated values in order. sw_ename answers undefined for a
+        // value that is not an enum case, so the test is safe for any subject.
         var okB = curF.NewBlock("")
-        b.NewCondBr(truthy(b, callExt(b, "js_seq", [v, emitStr(b, patCaseName(k))])), okB, failB)
-        return okB
+        var nm = b.NewCall(rtEName(), [v])
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [nm, emitStr(b, patCaseName(k))])), okB, failB)
+        b = okB
+        if (k.pargs != null && k.pargs.length > 0) {
+            var valsV = b.NewCall(rtVals(), [v])
+            for (var j = 0; j < k.pargs.length; j++) {
+                b = emitMatchPat(b, k.pargs[j], callExt(b, "js_pyget", [valsV, emitNum(b, j)]), binding, failB)
+            }
+        }
+        return b
+    }
+    // items = [loThunk?, {rop}, hiThunk?] - a range pattern, one-sided when a bound
+    // is missing (`10...`, `..<0`).
+    function makePatRange(items) {
+        var lo = null
+        var k = 0
+        if (typeof items[0] == "function") { lo = items[0]; k = 1 }
+        var rop = items[k].rop
+        var hi = items.length > k + 1 ? items[k + 1] : null
+        return {prange: {lo: lo, hi: hi, rop: rop}}
     }
     function patCaseName(k) {
         var path = k.ppath
@@ -1322,10 +1972,81 @@ KwContinue  = "continue" KwEnd ;
     // .count -> js_pylen (arrays, strings and dicts); other .name -> js_get;
     // [i] -> js_pyget (core.indexExt); .m(args) -> js_mcall.
     core.indexExt = "js_pyget"
+    // A member read: a computed property (or an observed stored one) is reached
+    // through the generated __get_x method, everything else is a plain js_get. The
+    // decision is by NAME, over the set of names some type in this program computes.
+    function emitFieldRead(b, cur, name) {
+        if (name == "count") { return callExt(b, "js_pylen", [cur]) }
+        if (name == "rawValue") { return callExt(b, "js_get", [cur, emitStr(b, "__raw")]) }
+        var bt = builtinCompOf(name)
+        if (bt != null) {
+            var ta = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [ta, cur])
+            var tbl = callExt(b, "js_kget", [curScopeV, emitStr(b, "$ext$" + bt)])
+            return callExt(b, "js_call", [callExt(b, "js_get", [tbl, emitStr(b, "__get_" + name)]), hUndef, ta])
+        }
+        if (isComputedName(name)) { return b.NewCall(rtGetProp(), [cur, emitStr(b, name)]) }
+        return callExt(b, "js_get", [cur, emitStr(b, name)])
+    }
+    function emitIndexRead(b, cur, idxV) {
+        if (!hasSubscript) { return callExt(b, core.indexExt, [cur, idxV]) }
+        return b.NewCall(rtSubGet(), [cur, idxV])
+    }
     foldCallMember = function(items) {
-        if (items.length == 1) { return items[0] }
+        if (items.length == 1) {
+            if (typeof items[0] != "function") { return function(b) { return {b: b, v: hUndef} } }
+            return items[0]
+        }
         var primary = items[0]
         var suffixes = items.slice(1)
+        // `super.m(args)` / `super.p`: resolved statically against the superclass of
+        // the type whose member is being emitted, with the same receiver.
+        if (typeof primary != "function" && primary.superref != undefined) {
+            return function(b) {
+                var t = curType()
+                var sname = (t == null || t.superName == null) ? null : t.superName
+                var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                if (sname == null) { return {b: b, v: hUndef} }
+                var sV = callExt(b, "js_kget", [curScopeV, emitStr(b, sname)])
+                var s0 = suffixes[0]
+                var cur
+                if (s0.kind == "mcall") {
+                    var sargs = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [sargs, thisV])
+                    var ea0 = emitArgRecsInto(b, s0.args, sargs)
+                    b = ea0.b
+                    var mkey = s0.name
+                    if (s0.name == "init") { mkey = pickOverload("init", typeRec(sname).inits, s0.args) }
+                    cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, emitStr(b, mkey)]), hUndef, sargs])
+                } else {
+                    var gargs = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [gargs, thisV])
+                    if (isComputedName(s0.name)) {
+                        cur = callExt(b, "js_call", [callExt(b, "js_get", [sV, emitStr(b, "__get_" + s0.name)]), hUndef, gargs])
+                    } else if (false) {} else {
+                        cur = callExt(b, "js_get", [thisV, emitStr(b, s0.name)])
+                    }
+                }
+                for (var i = 1; i < suffixes.length; i++) {
+                    var s = suffixes[i]
+                    if (s.kind == "mcall") {
+                        var ea = emitArgRecs(b, s.args)
+                        b = ea.b
+                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                    } else if (s.kind == "field") { cur = emitFieldRead(b, cur, s.name) }
+                    else if (s.kind == "call") {
+                        var eac = emitArgRecs(b, s.args)
+                        b = eac.b
+                        cur = callExt(b, "js_call", [cur, hUndef, eac.v])
+                    } else if (s.kind == "index") {
+                        var ri = s.idx(b)
+                        b = ri.b
+                        cur = emitIndexRead(b, cur, ri.v)
+                    }
+                }
+                return {b: b, v: cur}
+            }
+        }
         return function(b) {
             var r = primary(b)
             b = r.b
@@ -1344,10 +2065,29 @@ KwContinue  = "continue" KwEnd ;
                     b = contB
                 } else if (s.kind == "force") {
                     // Force unwrap: the value is already the unwrapped one here.
+                } else if (s.kind == "mcall" && builtinMethOf(s.name) != null) {
+                    // A method an extension of a builtin type added.
+                    var eb = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [eb, cur])
+                    var eab = emitArgRecsInto(b, s.args, eb)
+                    b = eab.b
+                    var btbl = callExt(b, "js_kget", [curScopeV, emitStr(b, "$ext$" + builtinMethOf(s.name))])
+                    cur = callExt(b, "js_call", [callExt(b, "js_get", [btbl, emitStr(b, s.name)]), hUndef, eb])
+                    emitWriteBacks(b, eab.boxes)
+                } else if (s.kind == "mcall" && classNames[s.name] == 1) {
+                    // Outer.Inner(...): a NESTED type reached through its enclosing one.
+                    var rc = emitConstruct(b, s.name, callExt(b, "js_get", [cur, emitStr(b, s.name)]), s.args)
+                    b = rc.b
+                    cur = rc.v
                 } else if (s.kind == "mcall") {
                     var ea = emitArgRecs(b, s.args)
                     b = ea.b
-                    cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                    var mname = s.name
+                    // self.init(...) picks the initializer overload by its labels.
+                    if (s.name == "init" && curType() != null) {
+                        mname = pickOverload("init", typeRec(curType().name).inits, s.args)
+                    }
+                    cur = callExt(b, "js_mcall", [cur, emitStr(b, mname), ea.v])
                     emitWriteBacks(b, ea.boxes)
                 } else if (s.kind == "call") {
                     var eac = emitArgRecs(b, s.args)
@@ -1355,12 +2095,11 @@ KwContinue  = "continue" KwEnd ;
                     cur = callExt(b, "js_call", [cur, hUndef, eac.v])
                     emitWriteBacks(b, eac.boxes)
                 } else if (s.kind == "field") {
-                    if (s.name == "count") { cur = callExt(b, "js_pylen", [cur]) }
-                    else { cur = callExt(b, "js_get", [cur, emitStr(b, s.name)]) }
+                    cur = emitFieldRead(b, cur, s.name)
                 } else {
                     var ir2 = s.idx(b)
                     b = ir2.b
-                    cur = callExt(b, core.indexExt, [cur, ir2.v])
+                    cur = emitIndexRead(b, cur, ir2.v)
                 }
             }
             if (nilExits.length == 0) { return {b: b, v: cur} }
@@ -1556,32 +2295,69 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // f(args): a struct/class constructor (known at compile time) or a function value.
+    // Emits a construction: __ctor lays down the default property values (the
+    // superclass's first), then the initializer runs. Which initializer is decided
+    // HERE, where the argument labels and count are known - overloads are stored under
+    // init, init$1, ... A failable initializer that returned nil makes the whole
+    // construction nil.
+    function emitConstruct(b, tname, clsV, args) {
+        var rec = typeRec(tname)
+        var objV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        var ctorArgs = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [ctorArgs, objV])
+        callExt(b, "js_call", [callExt(b, "js_get", [clsV, emitStr(b, "__ctor")]), hUndef, ctorArgs])
+        var initArgs = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [initArgs, objV])
+        var eai = emitArgRecsInto(b, args, initArgs)
+        b = eai.b
+        var key = pickOverload("init", rec.inits, args)
+        var initV = callExt(b, "js_get", [clsV, emitStr(b, key)])
+        var iret = callExt(b, "js_call", [initV, hUndef, initArgs])
+        emitWriteBacks(b, eai.boxes)
+        var nilB = curF.NewBlock("")
+        var okB = curF.NewBlock("")
+        var joinB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [iret, hNull])), nilB, okB)
+        nilB.NewBr(joinB)
+        okB.NewBr(joinB)
+        return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(hNull, nilB), llvm.ir.NewIncoming(objV, okB)])}
+    }
     function makeCall(items) {
         var name = items[0]
         var args = planArgs(name, items.slice(1))
         return function(b) {
+            // E(rawValue: r): the failable initializer every raw-value enum gets free.
+            if (enumNames[name] == 1) {
+                var eV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
+                var ear = emitArgRecs(b, args)
+                b = ear.b
+                return {b: b, v: b.NewCall(rtRawCase(), [eV, callExt(b, "js_pyget", [ear.v, emitNum(b, 0)])])}
+            }
             if (classNames[name] == 1) {
                 var clsV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
-                var objV = callExt(b, "js_obj_new", [])
-                callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
-                // __ctor(this) sets default valued properties.
-                var ctorArgs = callExt(b, "js_arr_new", [])
-                callExt(b, "js_arr_push", [ctorArgs, objV])
-                var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
-                callExt(b, "js_call", [ctorV, hUndef, ctorArgs])
-                // init(this, args)
-                var initArgs = callExt(b, "js_arr_new", [])
-                callExt(b, "js_arr_push", [initArgs, objV])
-                var eai = emitArgRecsInto(b, args, initArgs)
-                b = eai.b
-                var initV = callExt(b, "js_get", [clsV, emitStr(b, "init")])
-                callExt(b, "js_call", [initV, hUndef, initArgs])
-                emitWriteBacks(b, eai.boxes)
-                return {b: b, v: objV}
+                return emitConstruct(b, name, clsV, args)
             }
-            var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
             var ea = emitArgRecs(b, args)
             b = ea.b
+            // An unqualified call inside a member body may name a METHOD of the
+            // enclosing type, which lives on the type descriptor rather than in the
+            // scope chain. Only names some type declares as a method take the probe.
+            if (isMemberMethod(name)) {
+                var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])
+                var localB = curF.NewBlock("")
+                var selfB = curF.NewBlock("")
+                var joinB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [tv, emitStr(b, "undefined")])), selfB, localB)
+                var lv = callExt(localB, "js_call", [callExt(localB, "js_kget", [curScopeV, emitStr(localB, name)]), hUndef, ea.v])
+                localB.NewBr(joinB)
+                var sv = callExt(selfB, "js_mcall", [callExt(selfB, "js_kget", [curScopeV, emitStr(selfB, "self")]),
+                                                    emitStr(selfB, name), ea.v])
+                selfB.NewBr(joinB)
+                emitWriteBacks(joinB, ea.boxes)
+                return {b: joinB, v: joinB.NewPhi([llvm.ir.NewIncoming(lv, localB), llvm.ir.NewIncoming(sv, selfB)])}
+            }
+            var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
             var rv = callExt(b, "js_call", [fV, hUndef, ea.v])
             emitWriteBacks(b, ea.boxes)
             return {b: b, v: rv}
@@ -1595,13 +2371,13 @@ KwContinue  = "continue" KwEnd ;
         var o = callExt(b, "js_kget", [curScopeV, emitStr(b, ref.name)])
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
-            else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_pyget", [o, ri.v]) }
+            if (s.key != undefined) { o = emitFieldRead(b, o, s.key) }
+            else { var ri = s.idx(b); b = ri.b; o = emitIndexRead(b, o, ri.v) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), isField: true} }
+        if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), keyName: last.key, isField: true} }
         var kr = last.idx(b)
-        return {b: kr.b, obj: o, key: kr.v, isField: false}
+        return {b: kr.b, obj: o, key: kr.v, keyName: "", isField: false}
     }
     function makeAssign(items) {
         var ref = items[0]
@@ -1610,12 +2386,18 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             var r = valT(b)
             b = r.b
-            var v = r.v
+            var v = emitCopy(b, r.v)
             if (ref.path.length == 0) {
+                // `_ = expr` evaluates and throws the value away.
+                if (ref.name == "_") { return {b: b, v: v} }
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
                     var old = callExt(b, "js_kget", [curScopeV, nameV])
                     v = emitBin(b, op, old, v)
+                }
+                if (ref.name == "self" && hasStructs) {
+                    b.NewCall(rtAssignSelf(), [callExt(b, "js_kget", [curScopeV, emitStr(b, "this")]), v])
+                    return {b: b, v: v}
                 }
                 callExt(b, "js_kset", [curScopeV, nameV, v])
             } else {
@@ -1623,10 +2405,20 @@ KwContinue  = "continue" KwEnd ;
                 b = p.b
                 if (p.isField) {
                     if (op != "=") {
-                        var oldf = callExt(b, "js_get", [p.obj, p.key])
+                        var oldf = emitFieldRead(b, p.obj, p.keyName)
                         v = emitBin(b, op, oldf, v)
                     }
-                    callExt(b, "js_set", [p.obj, p.key, v])
+                    if (isSetterName(p.keyName)) {
+                        b.NewCall(rtSetProp(), [p.obj, p.key, v])
+                    } else {
+                        callExt(b, "js_set", [p.obj, p.key, v])
+                    }
+                } else if (hasSubscript) {
+                    if (op != "=") {
+                        var olds = b.NewCall(rtSubGet(), [p.obj, p.key])
+                        v = emitBin(b, op, olds, v)
+                    }
+                    b.NewCall(rtSubSet(), [p.obj, p.key, v])
                 } else {
                     if (op != "=") {
                         var oldm = callExt(b, "js_pyget", [p.obj, p.key])
@@ -1678,7 +2470,7 @@ KwContinue  = "continue" KwEnd ;
         return function(b) {
             var r = init(b)
             b = r.b
-            var v = r.v
+            var v = emitCopy(b, r.v)
             if (labels != null) { v = emitRelabel(b, v, labels) }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), v])
             return b
@@ -1892,10 +2684,27 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // A case label carries its value thunks (empty for default).
+    // A case label carries its patterns and its optional where guard (no patterns
+    // at all means `default`).
     function makeCaseLabel(items) {
-        var vals = []
-        for (var i = 0; i < items.length; i++) { vals.push(items[i].v) }
-        return {isDefault: items.length == 0, vals: vals}
+        var pats = []
+        var whereT = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.cpat != undefined) { pats.push(it.cpat) }
+            else if (it.cwhere != undefined) { whereT = it.cwhere }
+        }
+        return {isLabel: true, isDefault: pats.length == 0, pats: pats, whereT: whereT}
+    }
+    // fallthrough: a branch straight into the NEXT case's body block, which the switch
+    // emitter publishes on fallStack while it emits each body.
+    var fallStack = []
+    function makeFallthrough() {
+        return function(b) {
+            if (fallStack.length > 0) { b.NewBr(fallStack[fallStack.length - 1]) }
+            return deadBlock()
+        }
     }
     // items = [{subj}, label or statement thunk...]: the flat item list is regrouped
     // (every statement belongs to the last label). The dispatch compares (js_seq) the
@@ -1914,13 +2723,17 @@ KwContinue  = "continue" KwEnd ;
                 continue
             } else if (it.subj != undefined) {
                 subj = it.subj
-            } else {
-                cur = {isDefault: it.isDefault, vals: it.vals, body: []}
+            } else if (it.isLabel != undefined) {
+                cur = {isDefault: it.isDefault, pats: it.pats, whereT: it.whereT, body: []}
                 cases.push(cur)
             }
         }
         return function(b) {
-            var subjV = null
+            var savedScope = curScopeV
+            // The bindings a matched pattern declares are live in the body, so the
+            // test chain and the bodies share one child scope.
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var subjV = hUndef
             if (subj != null) {
                 var rs = subj(b)
                 b = rs.b
@@ -1931,16 +2744,19 @@ KwContinue  = "continue" KwEnd ;
             var dfltB = exitB
             for (var i = 0; i < cases.length; i++) {
                 bodyBs.push(curF.NewBlock(""))
-                if (cases[i].isDefault) { dfltB = bodyBs[i] }
+                if (cases[i].isDefault && dfltB == exitB) { dfltB = bodyBs[i] }
             }
             for (var i = 0; i < cases.length; i++) {
                 if (cases[i].isDefault) { continue }
-                for (var v = 0; v < cases[i].vals.length; v++) {
-                    var rv = cases[i].vals[v](b)
-                    b = rv.b
-                    var condV = subjV != null ? callExt(b, "js_seq", [subjV, rv.v]) : rv.v
+                for (var p = 0; p < cases[i].pats.length; p++) {
                     var nextB = curF.NewBlock("")
-                    b.NewCondBr(truthy(b, condV), bodyBs[i], nextB)
+                    var okB = emitMatchPat(b, cases[i].pats[p], subjV, false, nextB)
+                    if (cases[i].whereT != null) {
+                        var rw = cases[i].whereT(okB)
+                        rw.b.NewCondBr(truthy(rw.b, rw.v), bodyBs[i], nextB)
+                    } else {
+                        okB.NewBr(bodyBs[i])
+                    }
                     b = nextB
                 }
             }
@@ -1948,12 +2764,15 @@ KwContinue  = "continue" KwEnd ;
             var outerCont = loopStack.length > 0 ? loopStack[loopStack.length - 1].cont : null
             loopStack.push({cont: outerCont, brk: exitB, lbl: swLbl})
             for (var i = 0; i < cases.length; i++) {
+                fallStack.push(i + 1 < cases.length ? bodyBs[i + 1] : exitB)
                 var bb = bodyBs[i]
                 var body = cases[i].body
                 for (var j = 0; j < body.length; j++) { bb = body[j](bb) }
                 bb.NewBr(exitB)
+                fallStack.pop()
             }
             loopStack.pop()
+            curScopeV = savedScope
             return exitB
         }
     }
@@ -2056,7 +2875,7 @@ KwContinue  = "continue" KwEnd ;
     }
     // The default-property initializer: sets the properties that have a default
     // value on this, before init runs.
-    function emitCtor(props) {
+    function emitCtor(props, superName) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -2072,10 +2891,17 @@ KwContinue  = "continue" KwEnd ;
         var thisV = callExt(b, "js_arg", [f.Params[1], handle(0)])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), thisV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), thisV])
+        // The superclass lays its own default property values down first.
+        if (superName != undefined && superName != null) {
+            var sArgs = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [sArgs, thisV])
+            var sCls = callExt(b, "js_kget", [curScopeV, emitStr(b, superName)])
+            callExt(b, "js_call", [callExt(b, "js_get", [sCls, emitStr(b, "__ctor")]), hUndef, sArgs])
+        }
         for (var p = 0; p < props.length; p++) {
             var r = props[p].init(b)
             b = r.b
-            callExt(b, "js_set", [thisV, emitStr(b, props[p].prop), r.v])
+            callExt(b, "js_set", [thisV, emitStr(b, props[p].store), r.v])
         }
         b.NewRet(hUndef)
         curF = savedF
@@ -2225,50 +3051,382 @@ KwContinue  = "continue" KwEnd ;
         if (items.length > 1) { return {prop: items[0], hasInit: true, init: items[1]} }
         return {prop: items[0], hasInit: false, init: null}
     }
+    function plainParam(n) {
+        return {name: n, label: n, type: "", variadic: false, auto: false,
+                inout: false, hasDefault: false, dflt: null}
+    }
+    // A multi-parameter subscript index (`g[r, c]`) travels as one {__idxs} value, so
+    // every existing single-key path (arrays, dictionaries, strings) is untouched.
+    function makeIndexKey(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var arr = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [arr, r.v])
+            }
+            var o = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [o, emitStr(b, "__idxs"), arr])
+            return {b: b, v: o}
+        }
+    }
 
-    // items = [name, ({prop}|{method})...]
-    function makeClassStmt(items) {
+    // ----- Computed properties and property observers -----
+    // Both are written `var x [: T] [= e] { ACCESSORS }`; which accessors the braces
+    // hold decides which one it is. A computed property becomes a pair of ordinary
+    // methods `__get_x` / `__set_x` on the type (js_defprop accessors never see their
+    // receiver in a C-style emitter - see the gotchas doc); an OBSERVED stored
+    // property keeps its value under the hidden name `__v_x` and gets the same pair.
+    function makeAccessor(items) {
+        var kind = ""
+        var param = null
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.akind != undefined) { kind = stripWs(it.akind) }
+            else if (it.aparam != undefined) { param = it.aparam }
+            else if (it.abody != undefined) { body = it.abody }
+        }
+        return {acc: {kind: kind, param: param, body: body}}
+    }
+    function makeImplicitGetter(body) { return {acc: {kind: "get", param: null, body: body}} }
+    function makeComputed(items) {
         var name = items[0]
-        var props = []
-        var stored = []
-        var methods = []
-        var hasInit = false
+        var dflt = null
+        var get = null
+        var set = null
+        var setP = "newValue"
+        var will = null
+        var willP = "newValue"
+        var did = null
+        var didP = "oldValue"
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
+            if (it == undefined) { continue }
+            if (it.pdefault != undefined) { dflt = it.pdefault; continue }
+            if (it.acc == undefined) { continue }
+            var a = it.acc
+            if (a.kind == "get" || a.kind == "_read") { get = a.body }
+            else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
+            else if (a.kind == "willSet") { will = a.body; if (a.param != null) { willP = a.param } }
+            else if (a.kind == "didSet") { did = a.body; if (a.param != null) { didP = a.param } }
+        }
+        var observed = (will != null || did != null)
+        if (get != null || observed) { computedNames["$" + name] = 1 }
+        if (set != null || observed) { setterNames["$" + name] = 1 }
+        return {cprop: {name: name, get: get, set: set, setP: setP, will: will, willP: willP,
+                        did: did, didP: didP, observed: observed, dflt: dflt}}
+    }
+    // items = [{params}, {acc}...] -> the __sub_get / __sub_set method records.
+    function makeSubscript(items) {
+        hasSubscript = true
+        var params = items[0].params
+        var get = null
+        var set = null
+        var setP = "newValue"
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it.acc == undefined) { continue }
+            var a = it.acc
+            if (a.kind == "get" || a.kind == "_read") { get = a.body }
+            else if (a.kind == "set" || a.kind == "_modify") { set = a.body; if (a.param != null) { setP = a.param } }
+        }
+        var out = []
+        if (get != null) { out.push({method: {name: "__sub_get" + params.length, params: params, body: get}}) }
+        if (set != null) {
+            var sp = []
+            for (var k = 0; k < params.length; k++) { sp.push(params[k]) }
+            sp.push(plainParam(setP))
+            out.push({method: {name: "__sub_set" + params.length, params: sp, body: set}})
+        }
+        return out
+    }
+    // The property names some type computes, the ones it can set, and the method names
+    // some type declares. A member read/write or an unqualified name is emitted as an
+    // accessor/method dispatch exactly when the program uses that name that way, so a
+    // program that declares none emits precisely the IR it did before.
+    var computedNames = {}
+    var setterNames = {}
+    var memberMethods = {}
+    var hasSubscript = false
+    var hasStructs = false
+    var hasRichEnum = false
+    function isComputedName(n) { return hasOwn(computedNames, "$" + n) }
+    function isSetterName(n) { return hasOwn(setterNames, "$" + n) }
+    function isMemberMethod(n) { return hasOwn(memberMethods, "$" + n) }
+
+    // ----- The member list of a struct / class / actor / enum / protocol -----
+    // One pass over the member records, attaching the modifiers that precede a member
+    // to it: MemberModifiers pushes its markers, in source order, ahead of the
+    // member's record.
+    function splitMembers(items, from) {
+        var mem = {raw: "", inherits: [], cases: [], nested: [], fields: [], initProps: [],
+                   methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
+                   hasInit: false}
+        var isStatic = false
+        for (var i = from; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.mstatic != undefined) { isStatic = true; continue }
+            if (it.nested != undefined) { mem.nested.push(it.nested); continue }
+            if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
+            if (it.eraw != undefined) { mem.raw = it.eraw; continue }
+            if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
-                stored.push(it)
-                if (it.hasInit) { props.push(it) }
+                var f = {name: it.prop, store: it.prop, hasInit: it.hasInit, init: it.init}
+                if (isStatic) { mem.statProps.push(f) } else {
+                    mem.fields.push(f)
+                    if (it.hasInit) { mem.initProps.push(f) }
+                }
+            } else if (it.cprop != undefined) {
+                var cp = it.cprop
+                if (isStatic) { mem.statComps.push(cp) } else {
+                    mem.comps.push(cp)
+                    if (cp.observed) {
+                        var of = {name: cp.name, store: "__v_" + cp.name, hasInit: cp.dflt != null, init: cp.dflt}
+                        mem.fields.push(of)
+                        if (of.hasInit) { mem.initProps.push(of) }
+                    }
+                }
+            } else if (it.method != undefined) {
+                memberMethods["$" + it.method.name] = 1
+                if (isStatic) { mem.statMethods.push(it.method) } else {
+                    mem.methods.push(it.method)
+                    if (it.method.name == "init") { mem.hasInit = true }
+                }
             }
-            if (it.method != undefined) {
-                methods.push(it.method)
-                if (it.method.name == "init") { hasInit = true; regSig(name, it.method.params) }
-            }
+            isStatic = false
         }
-        // The memberwise initializer a struct without an explicit init gets for free:
-        // one labelled parameter per stored property, in declaration order, defaulting
-        // to the property's own initial value where it has one.
+        return mem
+    }
+    function memberwiseParams(fields) {
         var mparams = []
-        if (!hasInit) {
-            for (var s = 0; s < stored.length; s++) {
-                mparams.push({name: stored[s].prop, label: stored[s].prop, type: "",
-                              variadic: false, auto: false, inout: false,
-                              hasDefault: stored[s].hasInit, dflt: stored[s].init})
-            }
-            regSig(name, mparams)
+        for (var s = 0; s < fields.length; s++) {
+            mparams.push({name: fields[s].store, label: fields[s].name, type: "",
+                          variadic: false, auto: false, inout: false,
+                          hasDefault: fields[s].hasInit, dflt: fields[s].init})
         }
+        return mparams
+    }
+
+    // ----- Types -----
+    // A type descriptor is an object carrying its name, its members and (for a class)
+    // __super, which js_mcall and js_get already walk. A struct additionally carries
+    // __struct and __fields, which is what sw_copy uses to give it value semantics.
+    // Overloaded members (two inits, two subscripts of different arity) are stored
+    // under name, name$1, name$2 ... and picked at the CALL SITE, where the argument
+    // labels and count are known statically.
+    var typeInfo = {}
+    function typeRec(name) {
+        if (!hasOwn(typeInfo, "$" + name)) { typeInfo["$" + name] = {inits: [], superName: null} }
+        return typeInfo["$" + name]
+    }
+    function memberKey(name, n) { return n == 0 ? name : name + "$" + n }
+    // Picks the storage key of the overload that accepts these argument records.
+    function pickOverload(name, sigs, recs) {
+        for (var i = 0; i < sigs.length; i++) {
+            if (overloadFitsRecs(sigs[i], recs)) { return memberKey(name, i) }
+        }
+        return name
+    }
+    function overloadFitsRecs(params, recs) {
+        var req = 0
+        var varia = false
+        for (var i = 0; i < params.length; i++) {
+            if (params[i].variadic) { varia = true }
+            else if (!params[i].hasDefault) { req++ }
+        }
+        if (recs.length < req) { return false }
+        if (!varia && recs.length > params.length) { return false }
+        for (var j = 0; j < recs.length && j < params.length; j++) {
+            var l = recs[j].lbl
+            if (l == null || l == "") { continue }
+            if (params[j].label != l) { return false }
+        }
+        return true
+    }
+    // The type whose members are being emitted (for `super` and for self.init).
+    var typeStack = []
+    function curType() { return typeStack.length > 0 ? typeStack[typeStack.length - 1] : null }
+
+    function emitInstallMembers(b, tblV, statV, mem, tname) {
+        var seen = {}
+        for (var i = 0; i < mem.methods.length; i++) {
+            var mth = mem.methods[i]
+            var n = hasOwn(seen, "$" + mth.name) ? seen["$" + mth.name] : 0
+            seen["$" + mth.name] = n + 1
+            var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels)
+            callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
+                                  callExt(b, "js_closure", [handle(idx), curScopeV])])
+        }
+        for (var c = 0; c < mem.comps.length; c++) { b = emitComputed(b, tblV, mem.comps[c]) }
+        for (var sm = 0; sm < mem.statMethods.length; sm++) {
+            var st = mem.statMethods[sm]
+            // A static subscript is reached through the same [i] path as an instance
+            // one, which passes the receiver first, so it is emitted as an instance
+            // function whose `this` is the type descriptor.
+            var sidx = emitFunc(st.params, st.body, st.name.slice(0, 6) == "__sub_", false, st.rlabels)
+            var skey = st.name.slice(0, 6) == "__sub_" ? "__static_" + st.name : st.name
+            callExt(b, "js_set", [statV, emitStr(b, skey),
+                                  callExt(b, "js_closure", [handle(sidx), curScopeV])])
+        }
+        for (var sc = 0; sc < mem.statComps.length; sc++) {
+            var sp = mem.statComps[sc]
+            if (sp.get != null) {
+                callExt(b, "js_set", [statV, emitStr(b, "__get_" + sp.name),
+                                      callExt(b, "js_closure", [handle(emitFunc([], sp.get, false)), curScopeV])])
+            }
+            if (sp.set != null) {
+                callExt(b, "js_set", [statV, emitStr(b, "__set_" + sp.name),
+                                      callExt(b, "js_closure", [handle(emitFunc([plainParam(sp.setP)], sp.set, false)), curScopeV])])
+            }
+        }
+        for (var q = 0; q < mem.statProps.length; q++) {
+            var v = hNull
+            if (mem.statProps[q].init != null) {
+                var rv = mem.statProps[q].init(b)
+                b = rv.b
+                v = rv.v
+            }
+            callExt(b, "js_set", [statV, emitStr(b, mem.statProps[q].name), v])
+        }
+        // A nested type declares itself into the surrounding scope and is ALSO
+        // installed on the enclosing descriptor, so Outer.Inner() resolves.
+        for (var nt = 0; nt < mem.nested.length; nt++) {
+            lastTypeName = null
+            b = mem.nested[nt](b)
+            if (lastTypeName != null) {
+                callExt(b, "js_set", [statV, emitStr(b, lastTypeName),
+                                      callExt(b, "js_kget", [curScopeV, emitStr(b, lastTypeName)])])
+            }
+        }
+        return b
+    }
+    // The generated accessor pair. An observed property's storage is __v_x and its
+    // observers are ordinary methods, so neither fires for the value __ctor lays down.
+    function emitComputed(b, tblV, cp) {
+        if (cp.observed) {
+            var store = "__v_" + cp.name
+            if (cp.will != null) {
+                callExt(b, "js_set", [tblV, emitStr(b, "__will_" + cp.name),
+                                      callExt(b, "js_closure", [handle(emitFunc([plainParam(cp.willP)], cp.will, true)), curScopeV])])
+            }
+            if (cp.did != null) {
+                callExt(b, "js_set", [tblV, emitStr(b, "__did_" + cp.name),
+                                      callExt(b, "js_closure", [handle(emitFunc([plainParam(cp.didP)], cp.did, true)), curScopeV])])
+            }
+            var getBody = function(bb) {
+                var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+                bb.NewRet(callExt(bb, "js_get", [thisV, emitStr(bb, store)]))
+                return deadBlock()
+            }
+            var hasWill = cp.will != null
+            var hasDid = cp.did != null
+            var name = cp.name
+            var setBody = function(bb) {
+                var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+                var newV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "$new")])
+                var oldV = callExt(bb, "js_get", [thisV, emitStr(bb, store)])
+                if (hasWill) {
+                    var wa = callExt(bb, "js_arr_new", [])
+                    callExt(bb, "js_arr_push", [wa, newV])
+                    callExt(bb, "js_mcall", [thisV, emitStr(bb, "__will_" + name), wa])
+                }
+                callExt(bb, "js_set", [thisV, emitStr(bb, store), newV])
+                if (hasDid) {
+                    var da = callExt(bb, "js_arr_new", [])
+                    callExt(bb, "js_arr_push", [da, oldV])
+                    callExt(bb, "js_mcall", [thisV, emitStr(bb, "__did_" + name), da])
+                }
+                bb.NewRet(hUndef)
+                return deadBlock()
+            }
+            callExt(b, "js_set", [tblV, emitStr(b, "__get_" + cp.name),
+                                  callExt(b, "js_closure", [handle(emitFunc([], getBody, true)), curScopeV])])
+            callExt(b, "js_set", [tblV, emitStr(b, "__set_" + cp.name),
+                                  callExt(b, "js_closure", [handle(emitFunc([plainParam("$new")], setBody, true)), curScopeV])])
+            return b
+        }
+        if (cp.get != null) {
+            callExt(b, "js_set", [tblV, emitStr(b, "__get_" + cp.name),
+                                  callExt(b, "js_closure", [handle(emitFunc([], cp.get, true)), curScopeV])])
+        }
+        if (cp.set != null) {
+            callExt(b, "js_set", [tblV, emitStr(b, "__set_" + cp.name),
+                                  callExt(b, "js_closure", [handle(emitFunc([plainParam(cp.setP)], cp.set, true)), curScopeV])])
+        }
+        return b
+    }
+    // The name of the type a declaration statement most recently created, so an
+    // enclosing type builder can pick a nested declaration up without enumerating.
+    var lastTypeName = null
+
+    function makeStructStmt(items) { return makeTypeStmt(items, true) }
+    function makeClassStmt(items) { return makeTypeStmt(items, false) }
+    function makeTypeStmt(items, isStruct) {
+        var name = items[0]
+        var mem = splitMembers(items, 1)
+        if (isStruct) { hasStructs = true }
+        var rec = typeRec(name)
+        for (var i = 0; i < mem.methods.length; i++) {
+            if (mem.methods[i].name == "init") { rec.inits.push(mem.methods[i].params); regSig(name, mem.methods[i].params) }
+        }
+        var superName = null
+        for (var h = 0; h < mem.inherits.length; h++) {
+            var bn = baseTypeName(mem.inherits[h])
+            if (classNames[bn] == 1) { superName = bn }
+        }
+        rec.superName = superName
+        var mparams = []
+        var mwIndex = -1
+        // The memberwise initializer's overload slot is fixed HERE, at walk time: an
+        // extension declared further down appends to the same list.
+        if (!mem.hasInit) {
+            mparams = memberwiseParams(mem.fields)
+            regSig(name, mparams)
+            mwIndex = rec.inits.length
+            rec.inits.push(mparams)
+        }
+        var fieldNames = []
+        for (var fi = 0; fi < mem.fields.length; fi++) { fieldNames.push(mem.fields[fi].store) }
+        if (superName != null && hasOwn(typeInfo, "$" + superName)) {
+            var sf = typeInfo["$" + superName].fields
+            if (sf != undefined && sf != null) {
+                for (var q2 = 0; q2 < sf.length; q2++) { fieldNames.push(sf[q2]) }
+            }
+        }
+        rec.fields = fieldNames
         classNames[name] = 1
         return function(b) {
+            typeStack.push({name: name, superName: superName})
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
-            var ctorIdx = emitCtor(props)
-            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
-            for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].rlabels)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            if (isStruct) {
+                callExt(b, "js_set", [clsV, emitStr(b, "__struct"), hTrue])
+                var fa = callExt(b, "js_arr_new", [])
+                for (var z = 0; z < fieldNames.length; z++) { callExt(b, "js_arr_push", [fa, emitStr(b, fieldNames[z])]) }
+                callExt(b, "js_set", [clsV, emitStr(b, "__fields"), fa])
             }
-            if (!hasInit) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            if (superName != null) {
+                callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                      callExt(b, "js_kget", [curScopeV, emitStr(b, superName)])])
+            }
+            // Every protocol in the clause contributes its default implementations.
+            for (var pi = 0; pi < mem.inherits.length; pi++) {
+                var pn = baseTypeName(mem.inherits[pi])
+                if (protoNames[pn] != 1) { continue }
+                callExt(b, "js_set", [clsV, emitStr(b, "__proto_" + pn),
+                                      callExt(b, "js_kget", [curScopeV, emitStr(b, pn)])])
+                b = emitAdoptProtocol(b, clsV, pn)
+            }
+            var ctorIdx = emitCtor(mem.initProps, superName)
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+            b = emitInstallMembers(b, clsV, clsV, mem, name)
+            if (!mem.hasInit) {
                 var mwBody = function(bb) {
                     var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
                     for (var q = 0; q < mparams.length; q++) {
@@ -2278,27 +3436,334 @@ KwContinue  = "continue" KwEnd ;
                     return bb
                 }
                 var iidx = emitFunc(mparams, mwBody, true)
-                callExt(b, "js_set", [clsV, emitStr(b, "init"), callExt(b, "js_closure", [handle(iidx), curScopeV])])
+                callExt(b, "js_set", [clsV, emitStr(b, memberKey("init", mwIndex)),
+                                      callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
+            typeStack.pop()
+            lastTypeName = name
             return b
         }
+    }
+    // `Crate15<Int>` / `Beast13` -> the bare type name an inheritance entry names.
+    function baseTypeName(t) {
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "<" || ch == "?" || ch == "!" || ch == "&") { return t.substring(0, i) }
+        }
+        return t
+    }
+    // A protocol's defaults are copied onto the conforming type at build time; the
+    // names are known statically, so no runtime enumeration is needed.
+    var protoNames = {}
+    var protoMembers = {}
+    // Members an `extension Int { ... }` added, by name -> builtin type.
+    var builtinComp = {}
+    var builtinMeth = {}
+    function builtinCompOf(n) { return hasOwn(builtinComp, "$" + n) ? builtinComp["$" + n] : null }
+    function builtinMethOf(n) { return hasOwn(builtinMeth, "$" + n) ? builtinMeth["$" + n] : null }
+    function isBuiltinTypeName(n) {
+        return n == "Int" || n == "Int8" || n == "Int16" || n == "Int32" || n == "Int64"
+            || n == "UInt" || n == "Double" || n == "Float" || n == "String" || n == "Character"
+            || n == "Bool" || n == "Array" || n == "Dictionary"
+    }
+    function emitAdoptProtocol(b, clsV, pn) {
+        var keys = protoMembers["$" + pn]
+        if (keys == undefined) { return b }
+        var pv = callExt(b, "js_kget", [curScopeV, emitStr(b, pn)])
+        for (var i = 0; i < keys.length; i++) {
+            var have = callExt(b, "js_get", [clsV, emitStr(b, keys[i])])
+            var setB = curF.NewBlock("")
+            var joinB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, have), joinB, setB)
+            callExt(setB, "js_set", [clsV, emitStr(setB, keys[i]), callExt(setB, "js_get", [pv, emitStr(setB, keys[i])])])
+            setB.NewBr(joinB)
+            b = joinB
+        }
+        return b
+    }
+    function protoKeys(pn) {
+        if (!hasOwn(protoMembers, "$" + pn)) { protoMembers["$" + pn] = [] }
+        return protoMembers["$" + pn]
+    }
+    function noteProtoKeys(pn, mem) {
+        var ks = protoKeys(pn)
+        for (var i = 0; i < mem.methods.length; i++) { ks.push(mem.methods[i].name) }
+        for (var j = 0; j < mem.comps.length; j++) {
+            if (mem.comps[j].get != null || mem.comps[j].observed) { ks.push("__get_" + mem.comps[j].name) }
+            if (mem.comps[j].set != null || mem.comps[j].observed) { ks.push("__set_" + mem.comps[j].name) }
+        }
+        protoMembers["$" + pn] = ks
+    }
+    function makeProtocolStmt(items) {
+        var name = items[0]
+        var mem = splitMembers(items, 1)
+        protoNames[name] = 1
+        noteProtoKeys(name, mem)
+        // Protocol inheritance: the parent's defaults become this protocol's too, so
+        // a type that conforms to the child inherits them in one copy.
+        for (var pk = 0; pk < mem.inherits.length; pk++) {
+            var pnm = baseTypeName(mem.inherits[pk])
+            if (protoNames[pnm] != 1) { continue }
+            var inks = protoMembers["$" + pnm]
+            var mine = protoKeys(name)
+            for (var z = 0; z < inks.length; z++) { mine.push(inks[z]) }
+            protoMembers["$" + name] = mine
+        }
+        return function(b) {
+            typeStack.push({name: name, superName: null})
+            var pV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [pV, emitStr(b, "__isprotocol"), hTrue])
+            callExt(b, "js_set", [pV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), pV])
+            for (var pi = 0; pi < mem.inherits.length; pi++) {
+                var pn = baseTypeName(mem.inherits[pi])
+                if (protoNames[pn] == 1) { b = emitAdoptProtocol(b, pV, pn) }
+            }
+            b = emitInstallMembers(b, pV, pV, mem, name)
+            typeStack.pop()
+            lastTypeName = name
+            return b
+        }
+    }
+    // extension T { ... } installs its members on the existing descriptor (a struct,
+    // class, enum or protocol). Extending a BUILTIN is not lowered.
+    function makeExtensionStmt(items) {
+        var tname = ""
+        var k = 0
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].extname != undefined) { tname = items[i].extname; k = i + 1 }
+        }
+        var base = baseTypeName(tname)
+        var mem = splitMembers(items, k)
+        if (protoNames[base] == 1) { noteProtoKeys(base, mem) }
+        var rec = typeRec(base)
+        // Each initializer an extension adds takes the next overload slot, decided at
+        // walk time so the emitter and the call sites agree.
+        var initIdxs = []
+        for (var q = 0; q < mem.methods.length; q++) {
+            if (mem.methods[q].name != "init") { continue }
+            initIdxs.push(rec.inits.length)
+            rec.inits.push(mem.methods[q].params)
+        }
+        var isKnown = classNames[base] == 1 || protoNames[base] == 1 || enumNames[base] == 1
+        // extension Int { ... } / extension String { ... }: a builtin has no
+        // descriptor to hang members on, so the extension gets a table of its own in
+        // the enclosing scope and its member NAMES are resolved statically at the use
+        // site (4.squared15, "x".trimmed()). A name a user type also declares stays on
+        // the ordinary dispatch path.
+        if (!isKnown) {
+            if (!isBuiltinTypeName(base)) { return notImplStmt("extension of an unknown type", up.pos) }
+            for (var ci = 0; ci < mem.comps.length; ci++) { builtinComp["$" + mem.comps[ci].name] = base }
+            for (var mi = 0; mi < mem.methods.length; mi++) { builtinMeth["$" + mem.methods[mi].name] = base }
+            return function(b) {
+                var tV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$ext$" + base), tV])
+                typeStack.push({name: base, superName: null})
+                b = emitExtMembers(b, tV, tV, mem, base, initIdxs)
+                typeStack.pop()
+                return b
+            }
+        }
+        return function(b) {
+            typeStack.push({name: base, superName: rec.superName})
+            var tV = callExt(b, "js_kget", [curScopeV, emitStr(b, base)])
+            var instV = tV
+            if (enumNames[base] == 1) { instV = callExt(b, "js_get", [tV, emitStr(b, "__members")]) }
+            if (protoNames[base] == 1) { instV = tV }
+            // The instance members of an extension keep the overload numbering the
+            // type already has, so a second init does not clobber the first.
+            b = emitExtMembers(b, instV, tV, mem, base, initIdxs)
+            for (var pi = 0; pi < mem.inherits.length; pi++) {
+                var pn = baseTypeName(mem.inherits[pi])
+                if (protoNames[pn] != 1) { continue }
+                b = emitAdoptProtocol(b, instV, pn)
+            }
+            typeStack.pop()
+            return b
+        }
+    }
+    // Like emitInstallMembers, but the overload counter starts past the members the
+    // type already has (an extension adds to them).
+    function emitExtMembers(b, tblV, statV, mem, tname, initIdxs) {
+        var nInit = 0
+        var seen = {}
+        for (var i = 0; i < mem.methods.length; i++) {
+            var mth = mem.methods[i]
+            var n
+            if (mth.name == "init") { n = initIdxs[nInit]; nInit++ }
+            else { n = hasOwn(seen, "$" + mth.name) ? seen["$" + mth.name] : 0; seen["$" + mth.name] = n + 1 }
+            var idx = emitFunc(mth.params, mth.body, true, false, mth.rlabels)
+            callExt(b, "js_set", [tblV, emitStr(b, memberKey(mth.name, n)),
+                                  callExt(b, "js_closure", [handle(idx), curScopeV])])
+        }
+        for (var c = 0; c < mem.comps.length; c++) { b = emitComputed(b, tblV, mem.comps[c]) }
+        var only = {raw: "", inherits: [], cases: [], nested: mem.nested, fields: [], initProps: [],
+                    methods: [], comps: [], statProps: mem.statProps, statMethods: mem.statMethods,
+                    statComps: mem.statComps, hasInit: false}
+        return emitInstallMembers(b, tblV, statV, only, tname)
+    }
+    function countInits(mem) {
+        var n = 0
+        for (var i = 0; i < mem.methods.length; i++) { if (mem.methods[i].name == "init") { n++ } }
+        return n
     }
 
-    // items = [name, {ecase}...] -> a descriptor object of caseName -> caseName.
+    // ----- Enums -----
+    // An enum value is an object {__ecase, __ename, __raw, __vals, __class, __eqkey}:
+    // its case NAME identifies it, its associated values ride along, __class is the
+    // enum's member table (so js_mcall dispatches a method on an enum value exactly
+    // like one on a struct) and __eqkey is what sw_eq compares - which is what makes
+    // the leading-dot form, whose type this front end cannot know, compare equal to
+    // the qualified one.
+    var enumNames = {}
+    function makeECaseParam(items) {
+        var lbl = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].clabel != undefined) { lbl = items[i].clabel }
+        }
+        return {clabel: lbl}
+    }
+    function makeECase(items) {
+        var cname = ""
+        var assoc = null
+        var rawT = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.cname != undefined) { cname = it.cname }
+            else if (it.cassoc != undefined) { assoc = it.cassoc }
+            else if (it.craw != undefined) { rawT = it.craw }
+        }
+        return {cname: cname, cassoc: assoc, craw: rawT}
+    }
+    function rawKind(t) {
+        if (t == "Int" || t == "Int8" || t == "Int16" || t == "Int32" || t == "Int64"
+            || t == "UInt" || t == "UInt8" || t == "UInt16" || t == "UInt32" || t == "UInt64") { return "int" }
+        if (t == "String" || t == "Character") { return "str" }
+        return ""
+    }
+    // Builds a case value: the fixed fields plus the __eqkey string, whose pieces are
+    // appended one per associated value (their count is known statically).
+    function emitCaseObj(b, ename, cname, rawV, valsV, tblV, keyV) {
+        var o = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [o, emitStr(b, "__ecase"), hTrue])
+        callExt(b, "js_set", [o, emitStr(b, "__ename"), emitStr(b, cname)])
+        callExt(b, "js_set", [o, emitStr(b, "__etype"), ename == null ? hUndef : emitStr(b, ename)])
+        callExt(b, "js_set", [o, emitStr(b, "__raw"), rawV])
+        callExt(b, "js_set", [o, emitStr(b, "__vals"), valsV])
+        if (tblV != null) { callExt(b, "js_set", [o, emitStr(b, "__class"), tblV]) }
+        callExt(b, "js_set", [o, emitStr(b, "__eqkey"), keyV])
+        return o
+    }
     function makeEnumStmt(items) {
         var name = items[0]
-        var cases = []
-        for (var i = 1; i < items.length; i++) { cases.push(items[i].ecase) }
+        var mem = splitMembers(items, 1)
+        var kind = rawKind(mem.raw)
+        enumNames[name] = 1
+        hasRichEnum = true
         return function(b) {
+            typeStack.push({name: name, superName: null})
             var eV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [eV, emitStr(b, "__isenum"), hTrue])
             callExt(b, "js_set", [eV, emitStr(b, "__enum"), hTrue])
-            for (var k = 0; k < cases.length; k++) {
-                callExt(b, "js_set", [eV, emitStr(b, cases[k]), emitStr(b, cases[k])])
-            }
+            callExt(b, "js_set", [eV, emitStr(b, "__name"), emitStr(b, name)])
+            var tblV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [tblV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_set", [eV, emitStr(b, "__members"), tblV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), eV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$etbl$" + name), tblV])
+            for (var pi = 0; pi < mem.inherits.length; pi++) {
+                var pn = baseTypeName(mem.inherits[pi])
+                if (protoNames[pn] != 1) { continue }
+                b = emitAdoptProtocol(b, tblV, pn)
+            }
+            b = emitInstallMembers(b, tblV, eV, mem, name)
+            var namesArr = callExt(b, "js_arr_new", [])
+            var nrName = "$nr$" + name
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nrName), emitNum(b, 0)])
+            for (var k = 0; k < mem.cases.length; k++) {
+                var cs = mem.cases[k]
+                callExt(b, "js_arr_push", [namesArr, emitStr(b, cs.cname)])
+                if (cs.cassoc != null) {
+                    callExt(b, "js_set", [eV, emitStr(b, cs.cname),
+                                          callExt(b, "js_closure", [handle(emitCaseCtor(name, cs)), curScopeV])])
+                    continue
+                }
+                var rawV = hUndef
+                if (cs.craw != null) {
+                    var rr = cs.craw(b)
+                    b = rr.b
+                    rawV = rr.v
+                    callExt(b, "js_scope_set", [curScopeV, emitStr(b, nrName), callExt(b, "js_jadd", [rawV, emitNum(b, 1)])])
+                } else if (kind == "int") {
+                    rawV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nrName)])
+                    callExt(b, "js_scope_set", [curScopeV, emitStr(b, nrName), callExt(b, "js_jadd", [rawV, emitNum(b, 1)])])
+                } else if (kind == "str") {
+                    rawV = emitStr(b, cs.cname)
+                }
+                var cv = emitCaseObj(b, name, cs.cname, rawV, hNull, tblV, emitStr(b, cs.cname + "()"))
+                callExt(b, "js_set", [eV, emitStr(b, cs.cname), cv])
+            }
+            callExt(b, "js_set", [eV, emitStr(b, "__cases"), namesArr])
+            typeStack.pop()
+            lastTypeName = name
             return b
         }
     }
+    // The constructor of a case with associated values: Shape.circle(r: 5).
+    function emitCaseCtor(ename, cs) {
+        var n = cs.cassoc.length
+        var pnames = []
+        for (var i = 0; i < n; i++) { pnames.push("$a" + i) }
+        var cname = cs.cname
+        var body = function(b) {
+            var tblV = callExt(b, "js_kget", [curScopeV, emitStr(b, "$etbl$" + ename)])
+            var vals = callExt(b, "js_arr_new", [])
+            var key = emitStr(b, cname + "(")
+            for (var i = 0; i < n; i++) {
+                var av = callExt(b, "js_kget", [curScopeV, emitStr(b, pnames[i])])
+                callExt(b, "js_arr_push", [vals, av])
+                key = callExt(b, "js_jadd", [key, b.NewCall(rtKey(), [av])])
+                key = callExt(b, "js_jadd", [key, emitStr(b, ",")])
+            }
+            key = callExt(b, "js_jadd", [key, emitStr(b, ")")])
+            b.NewRet(emitCaseObj(b, ename, cname, hUndef, vals, tblV, key))
+            return deadBlock()
+        }
+        return emitFunc(pnames, body, false)
+    }
+    // `.tails` / `.circle(r: 5)`: an enum case with no type to resolve against. Its
+    // __eqkey is what makes it compare equal to the qualified case of the same name.
+    function makeDotMember(items) {
+        var dname = ""
+        var args = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.dname != undefined) { dname = it.dname }
+            else if (it.dargs != undefined) { args = it.dargs }
+        }
+        hasRichEnum = true
+        return function(b) {
+            if (args == null) {
+                return {b: b, v: emitCaseObj(b, null, dname, hUndef, hNull, null, emitStr(b, dname + "()"))}
+            }
+            var vals = callExt(b, "js_arr_new", [])
+            var key = emitStr(b, dname + "(")
+            for (var j = 0; j < args.length; j++) {
+                var r = args[j].t(b)
+                b = r.b
+                callExt(b, "js_arr_push", [vals, r.v])
+                key = callExt(b, "js_jadd", [key, b.NewCall(rtKey(), [r.v])])
+                key = callExt(b, "js_jadd", [key, emitStr(b, ",")])
+            }
+            key = callExt(b, "js_jadd", [key, emitStr(b, ")")])
+            return {b: b, v: emitCaseObj(b, null, dname, hUndef, vals, null, key)}
+        }
+    }
+    // `super`: a marker the member chain resolves statically against the superclass of
+    // the type whose member is being emitted.
+    function makeSuperRef() { return {superref: 1} }
 
     // The program: jsmain(env, args) declares the builtins, then runs the top
     // level statements in order (they include the final exit(failures)).
@@ -2326,6 +3791,20 @@ KwContinue  = "continue" KwEnd ;
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(handle(0))
+    }
+
+    // == / != understand enum case values (name plus associated values); everything
+    // else keeps the identity/value comparison js_seq gives. The helper is only
+    // reached in a program that declares an enum or writes a leading-dot case, so a
+    // program that does neither emits exactly the IR it did before.
+    var coreEmitBin = emitBin
+    emitBin = function(b, op, l, r) {
+        if (hasRichEnum && (op == "==" || op == "!=")) {
+            var v = b.NewCall(rtEq(), [l, r])
+            if (op == "!=") { v = callExt(b, "js_not", [v]) }
+            return v
+        }
+        return coreEmitBin(b, op, l, r)
     }
 
     // ----- Core library config (see lib/compile-core.js) -----
