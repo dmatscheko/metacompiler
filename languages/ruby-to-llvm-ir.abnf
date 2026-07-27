@@ -57,8 +57,9 @@ BodyItem    = Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | St
 // so any defs/classes/calls stay visible. A nested module recurses.
 ModuleDecl  <~~ push(makeModuleStmt(takeAll())) ~~>
             = KwModule ScopedName <~~ push(up.in) ~~>
-              { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop()}) ~~>
-              | ModuleDecl <~~ push({nested: pop()}) ~~> | AliasStmt | ClassBodyStmt } End ;
+              { Semi | Def <~~ push({method: pop()}) ~~> | ClassDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~>
+              | ModuleDecl <~~ push({nested: pop(), nestedName: lastDeclName}) ~~> | AliasStmt | AliasMethodStmt
+              | DefineMethodStmt | MixinStmt | VisStmt | ClassBodyStmt } End ;
 // A constant path Foo::Bar::Baz (module / class name or a scoped reference).
 ScopedName  = Name { "::" Name } ;
 
@@ -116,7 +117,8 @@ OpMethodName = "[]=" | "[]" | "<=>" | "===" | "==" | "!=" | "<<" | ">>" | "<=" |
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = KwClass Name <~~ push(up.in) ~~> [ Superclass ]
               { Semi | SingletonBlock | Def <~~ push({method: pop()}) ~~> | AttrDecl
-              | AliasStmt | ClassBodyStmt } End ;
+              | AliasStmt | AliasMethodStmt | DefineMethodStmt | MixinStmt | VisStmt
+              | ClassBodyStmt } End ;
 // class << self ... end: every def inside it is a method of the class object.
 SingletonBlock <~~ push({sblock: takeAll()}) ~~>
             = KwClass "<<" KwSelf { Semi | Def <~~ push({method: pop()}) ~~> } End ;
@@ -124,6 +126,33 @@ SingletonBlock <~~ push({sblock: takeAll()}) ~~>
 AliasStmt   <~~ push({alias: takeAll()}) ~~>
             = KwAlias AliasName AliasName ;
 AliasName   = ":" SymName <~~ push(up.in) ~~> | MethodName <~~ push(up.in) ~~> ;
+// The other class/module body declarations that RECONFIGURE the type rather than
+// run as a statement. They are productions of their own (and not ClassBodyStmt
+// calls) because makeClassStmt has to see them IN ORDER: a `private` on a line of
+// its own applies to every def after it.
+AliasMethodStmt <~~ push({alias: takeAll()}) ~~>
+            = "alias_method" KwEnd AliasName "," AliasName ;
+// define_method(:name) { |x| ... }: the block is the METHOD BODY, so its params and
+// body are taken apart here and rebuilt as an ordinary method descriptor - emitting
+// the block as a closure instead would give it the block calling convention, and the
+// receiver would arrive where the first parameter belongs.
+DefineMethodStmt <~~ push(makeDefineMethod(takeAll())) ~~>
+            = "define_method" KwEnd DmName DmBody ;
+DmBody      = KwDo [ BlockParams ] BlockBody End
+            | "{" [ BlockParams ] BlockBody "}" ;
+DmName      = "(" DmSym ")" | DmSym ;
+DmSym       = ":" SymName <~~ push(up.in) ~~> ;
+// include M / extend M / prepend M.
+MixinStmt   <~~ var n = takeAll(); push({mixkind: n[0], mixname: n[1]}) ~~>
+            = MixKind MixName ;
+MixKind     <~~ push(up.in) ~~> = MixWord KwEnd ;
+MixWord     = "include" | "extend" | "prepend" ;
+MixName     <~~ push(up.in) ~~> = ScopedName ;
+// A visibility keyword on a line of ITS OWN (the `private :name` and `private def`
+// argument forms are a different construct and stay ordinary statements), which is
+// what LineEnd checks.
+VisStmt     <~~ push({vis: up.in}) ~~> = VisWord KwEnd LineEnd ;
+VisWord     = "private" | "protected" | "public" | "module_function" ;
 // class D < Base: real inheritance (method lookup walks __super, and `super` calls
 // the overridden method).
 Superclass  = "<" Name <~~ push({supername: up.in}) ~~> ;
@@ -159,7 +188,12 @@ DoWhileStmt <~~ push(makeDoWhile(takeAll())) ~~>
 DoWhileKw   = KwWhile <~~ push({dw: "while"}) ~~> | KwUntil <~~ push({dw: "until"}) ~~> ;
 ModStmt     <~~ push(applyMod(takeAll())) ~~>
             = SimpleStmt [ SameLine ModKw Expression ] ;
-SimpleStmt  = PutsStmt | MultiAssign | AppendStmt | CommandStmt | ExprStmt ;
+SimpleStmt  = PutsStmt | MultiAssign | AppendStmt | CommandStmt | PatAssign | ExprStmt ;
+// EXPR => PATTERN: Ruby 3's rightward assignment / destructuring statement. It raises
+// when the pattern does not match, so it is a statement and not a test. FatArrowAhead
+// is a cheap fast-fail: without it EVERY statement would parse its expression twice.
+PatAssign   <~~ push(makePatAssign(takeAll())) ~~>
+            = FatArrowAhead Expression "=>" Pattern [ ";" ] ;
 // NAME arg[, arg] [block]: the parenthesis-less command call (`describe "x" do .. end`,
 // `include Comparable`, `alias_method :other, :real`). It lives at STATEMENT level
 // only: inside an argument list `f(double, 21)` a bare name is a VALUE, not a call of
@@ -230,7 +264,11 @@ LowOr       <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = LowAnd { OrWord LowAnd } ;
 LowAnd      <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = LowNot { AndWord LowNot } ;
-LowNot      = LowNotOp | RescueMod ;
+LowNot      = LowNotOp | PatTest ;
+// EXPR in PATTERN is a boolean test (Ruby 3.0). SameLine is what keeps the `in` of a
+// `case SUBJ` newline `in ...' clause from being read as a test on the subject.
+PatTest     <~~ push(makePatTest(takeAll())) ~~>
+            = RescueMod [ SameLine KwIn Pattern ] ;
 // EXPR rescue FALLBACK: the expression modifier form of rescue. SameLine keeps it
 // clear of a def-level `rescue` clause that opens the next line.
 RescueMod   <~~ push(makeRescueMod(takeAll())) ~~>
@@ -249,7 +287,16 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
             = Target AssignOp <~~ push(up.in) ~~> AssignExpr ;
 // ||= and &&= (conditional assignment) are accepted but not implemented (no short
 // circuit); makeAssign warns and falls back to a plain assignment.
-AssignOp    = "||=" | "&&=" | "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ;
+// NotTilde is what keeps `s =~ /re/` out of the assignment path: `=` followed by
+// `~` is the match operator, not an assignment of a bitwise-not. It has to be a
+// :script rather than a `!"~"` lookahead, because a lookahead SKIPS the whitespace
+// in front of it and would then also reject the perfectly good `x = ~5`.
+AssignOp    = "||=" | "&&=" | "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" NotTilde ) ;
+NotTilde = :script(~~
+    (function() {
+        if (c.peek(0) === 126) { return abnf.newToken("\x01tilde", 0) }
+    })()
+~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win).
@@ -270,8 +317,10 @@ NotExpr     = NotOp | EqExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
             = "!" !"=" NotExpr ;
 
+// =~ and !~ are the regexp match operators; they sit at the equality level (Ruby),
+// and either operand may be the pattern.
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "===" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "==" | "=~" | "!=" | "!~" ) <~~ push(up.in) ~~> RelExpr } ;
 // <=> (the spaceship) is listed FIRST so "<=" cannot swallow its prefix.
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = BitOrExpr { ( "<=>" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitOrExpr } ;
@@ -364,8 +413,13 @@ LambdaBody  = KwDo Body End | "{" [ BlockParams ] Body "}" ;
 
 // A block passed to a method call: a real closure over the current scope.
 Block       <~~ push(makeBlock(takeAll())) ~~>
-            = KwDo [ BlockParams ] Body End
-            | "{" [ BlockParams ] Body "}" ;
+            = KwDo [ BlockParams ] BlockBody End
+            | "{" [ BlockParams ] BlockBody "}" ;
+// A parameterless block may still take arguments, under the numbered names _1.._9
+// (Ruby 2.7). Nothing in the parse tree records that they were USED, so makeBlock
+// scans this text - which is why the body is wrapped in a production of its own.
+BlockBody   <~~ var bb = pop(); push({body: bb.body, btext: up.in}) ~~>
+            = Body ;
 BlockParams <~~ push({bparams: takeAll()}) ~~>
 // The trailing comma is legal and meaningful: `{ |a, | ... }` forces the single
 // argument to be DESTRUCTURED rather than taken whole.
@@ -380,12 +434,12 @@ Primary     = "(" Expression ")" | LambdaLit
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
             | HeredocLit
-            | StrLit | CharLit | PercentLit
+            | StrLit | CharLit | PercentLit | RegexLit
             | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
             | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
-            | DefinedExpr | GvarRef | CvarRef | IvarRef | ScopedConst | Call | VarRef ;
+            | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | ScopedConst | Call | VarRef ;
 
 // for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
 // loop variable stays visible after the loop (Ruby), so it is written with the same
@@ -431,7 +485,7 @@ ScopedConst <~~ push(makeScopedConst(up.in)) ~~>
 // whitespace into an array of strings / symbols. Each form accepts the three usual
 // delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
 // because the dialect has no parameterized rules.
-PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctBare ;
+PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare ;
 PctQ        <~~ push(makeConst(unescapeSq(pctRawOf(takeAll())))) ~~>
             = "%q" :whitespace() PctRawBody :whitespace(Whitespace) ;
 PctW        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), false))) ~~>
@@ -589,6 +643,54 @@ HdScan = :script(~~
     })()
 ~~) ;
 
+// ----- Regular expression literals -----
+// /pattern/flags and %r{pattern}flags, matched by the shared engine in
+// lib/regex.js. The body is kept RAW - unlike a double-quoted string it is NOT
+// unescaped, because the regexp engine is the thing that reads the backslashes
+// (unescaping first would turn \d into a plain d). '#{}' interpolation still
+// applies, so the body is a template all the same; ReTplExpr restores the
+// no-whitespace-skipping mode the literal runs in when the expression ends.
+//
+// A `/` only starts a literal in VALUE position, which is exactly where Primary is
+// reached - so `8 / 2 / 2` still divides: after the 8 the parser is at the operator
+// level and never offers Primary a `/`.
+RegexLit    <~~ push(makeRegex(takeAll())) ~~>
+            = "/" :whitespace() { ReTplExpr | ReSlashChunk } "/" ReFlags :whitespace(Whitespace) ;
+PctR        <~~ push(makeRegex(takeAll())) ~~>
+            = "%r" :whitespace() ReBody ReFlags :whitespace(Whitespace) ;
+ReBody      = "{" { ReTplExpr | ReBrcChunk } "}"
+            | "(" { ReTplExpr | ReParChunk } ")"
+            | "[" { ReTplExpr | ReBrkChunk } "]"
+            | "<" { ReTplExpr | ReAngChunk } ">"
+            | "|" { ReTplExpr | RePipChunk } "|" ;
+ReTplExpr   <~~ push({e: pop()}) ~~>
+            = "#{" :whitespace(Whitespace) Expression "}" :whitespace() ;
+// The flag letters Ruby allows after a regexp. i / m / x change the match (mkRegex
+// maps them onto the engine's neutral letters); o / u / n / e / s are encoding and
+// once-only hints that do not, and are accepted and ignored.
+ReFlags     <~~ push({reflags: up.in}) ~~>
+            = { "i" | "m" | "x" | "o" | "u" | "n" | "e" | "s" } ;
+ReSlashChunk <~~ push({s: up.in}) ~~> = ReSlashCh { ReSlashCh } ;
+ReSlashCh   = ReEsc | HashChar | ReSlashPlain ;
+ReBrcChunk  <~~ push({s: up.in}) ~~> = ReBrcCh { ReBrcCh } ;
+ReBrcCh     = ReEsc | HashChar | ReBrcPlain ;
+ReParChunk  <~~ push({s: up.in}) ~~> = ReParCh { ReParCh } ;
+ReParCh     = ReEsc | HashChar | ReParPlain ;
+ReBrkChunk  <~~ push({s: up.in}) ~~> = ReBrkCh { ReBrkCh } ;
+ReBrkCh     = ReEsc | HashChar | ReBrkPlain ;
+ReAngChunk  <~~ push({s: up.in}) ~~> = ReAngCh { ReAngCh } ;
+ReAngCh     = ReEsc | HashChar | ReAngPlain ;
+RePipChunk  <~~ push({s: up.in}) ~~> = RePipCh { RePipCh } ;
+RePipCh     = ReEsc | HashChar | RePipPlain ;
+// An escape is carried through as the two characters it is written with.
+ReEsc       = "\\" "\x20"..."\U0010ffff" ;
+ReSlashPlain = "\x00"..."\x22" | "\x24"..."\x2e" | "\x30"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrcPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7c" | "\x7e"..."\U0010ffff" ;
+ReParPlain  = "\x00"..."\x22" | "\x24"..."\x28" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrkPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5e"..."\U0010ffff" ;
+ReAngPlain  = "\x00"..."\x22" | "\x24"..."\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
+RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
+
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
 CharLit     <~~ push(makeConst(charLitVal(up.in))) ~~>
@@ -611,7 +713,7 @@ UntilExpr   <~~ push(makeUntil(pop().body, pop())) ~~>
 // case SUBJ / when V1, V2 / else - lowered to a chain of == tests (a switch). A
 // subject-less case (case / when COND) tests each when expression for truthiness.
 CaseExpr    <~~ push(makeCase(takeAll())) ~~>
-            = KwCase [ Expression ] [ Semi ] { WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
+            = KwCase [ Expression ] [ Semi ] { InClause | WhenClause } [ KwElse Body <~~ push({els: pop().body}) ~~> ] End ;
 WhenClause  <~~ push(makeWhen(takeAll())) ~~>
             = KwWhen WhenVal { "," WhenVal } [ KwThen ] Body ;
 // A when value: a range LO..HI / LO...HI matches by membership (Range#===); any
@@ -624,6 +726,52 @@ RangeVal    <~~ push(makeRangeVal(takeAll())) ~~>
             = ShiftExpr ( "..." | ".." ) <~~ push(up.in) ~~> ShiftExpr ;
 ScalarVal   <~~ push({t: pop(), isRange: false}) ~~>
             = Expression ;
+
+// ----- Pattern matching (case/in, `expr => pattern', `expr in pattern') -----
+// A pattern is compiled to a function(value) -> bool that BINDS as it goes, exactly
+// like Ruby: every name in a pattern (except a pinned ^name and a Constant) is a
+// local that receives the matched part, and the bindings of a failed alternative
+// simply stay behind, which is what Ruby does too.
+InClause    <~~ push(makeIn(takeAll())) ~~>
+            = KwIn Pattern [ PatGuard ] [ KwThen ] Body ;
+PatGuard    = PatGuardIf | PatGuardUnless ;
+PatGuardIf  <~~ push({guard: pop(), gneg: false}) ~~> = KwIf Expression ;
+PatGuardUnless <~~ push({guard: pop(), gneg: true}) ~~> = KwUnless Expression ;
+
+// PATTERN => name binds the whole matched value as well ({a: Integer} => whole).
+Pattern     <~~ push(makePatBind(takeAll())) ~~>
+            = PatAlt [ "=>" !">" PatBindName ] ;
+PatBindName <~~ push({bindname: up.in}) ~~> = Name ;
+PatAlt      <~~ push(makePatAlt(takeAll())) ~~>
+            = PatPrim { "|" !"|" PatPrim } ;
+// Order matters (PEG): the bracketed forms first, then a pinned name, then a bare
+// LOWER-case name (a binding), and only then a general expression - which is what a
+// Constant (Integer, String), a literal and a range all are.
+PatPrim     = PatArray | PatHash | PatPin | PatVar | PatValue ;
+PatPin      <~~ push(makePatPin(pop())) ~~>
+            = "^" PatPinName ;
+PatPinName  <~~ push(up.in) ~~> = Name ;
+PatArray    <~~ push(makePatArray(takeAll())) ~~>
+            = "[" [ PatArrElem { "," PatArrElem } ] "]" ;
+PatArrElem  = PatSplat | Pattern ;
+// [*pre, 42, *post]: a splat swallows any number of elements; two of them make the
+// FIND pattern, which searches for the middle anywhere in the array.
+PatSplat    <~~ var n = takeAll(); push({psplat: n.length > 0 ? n[0] : ""}) ~~>
+            = "*" !"*" [ PatSplatName ] ;
+PatSplatName <~~ push(up.in) ~~> = Name ;
+PatHash     <~~ push(makePatHash(takeAll())) ~~>
+            = "{" [ PatHashElem { "," PatHashElem } ] "}" ;
+PatHashElem = PatHashRest | PatHashPair ;
+PatHashRest <~~ var n = takeAll(); push({prest: n.length > 0 ? n[0] : ""}) ~~>
+            = "**" [ PatSplatName ] ;
+// `k: PATTERN' tests the value under :k; the value may be omitted (`r:'), which
+// binds the local r to it.
+PatHashPair <~~ push(makePatPair(takeAll())) ~~>
+            = PatKey [ Pattern ] ;
+PatKey      <~~ push({pkey: hashShortName(up.in)}) ~~> = SymName ":" !":" ;
+PatVar      <~~ push(makePatVar(up.in)) ~~> = NotKw LcId ;
+LcId        = ( "a"..."z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+PatValue    <~~ push(makePatValue(pop())) ~~> = RangeExpr ;
 
 // begin / rescue / else / ensure: genuinely executed (like Python try/except/else/
 // finally). A raise in the body unwinds to the first rescue (exception types are
@@ -688,6 +836,13 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 IvarRef     = "@" Id <~~ push(makeIvarRef(up.in)) ~~> ;
 // $global and @@classvar reads (their writes go through TargetHead above).
 GvarRef     = "$" Id <~~ push(makeGvarRef(up.in)) ~~> ;
+// The regexp match globals: $1..$9 are the capture groups of the last match, $~ the
+// MatchData and $& the whole match. They are ordinary entries in the global table,
+// so they only need their own spelling here (Id does not start with a digit).
+// (GvarNumCh is a production of its own because a Command followed by a GROUP is
+// read as a repetition - see the Times trap in docs/abnf-dialect-gotchas.md.)
+GvarNum     = "$" :whitespace() GvarNumCh <~~ push(makeGvarRef(up.in)) ~~> :whitespace(Whitespace) ;
+GvarNumCh   = "1"..."9" | "~" | "&" ;
 CvarRef     = "@@" Id <~~ push(makeCvarRef(up.in)) ~~> ;
 // defined?(X) answers what kind of thing X is - or nil when it is nothing. Its
 // argument is NOT evaluated, so the production keeps only the source text and
@@ -709,7 +864,11 @@ HashLit     <~~ push(makeHash(takeAll())) ~~>
             = "{" [ HashEntry { "," HashEntry } ] "}" ;
 // { k => v } (arrow) and { name: v } (symbol key, genuinely lowered - name: is the
 // symbol :name, which the runtime already represents as the string "name").
-HashEntry   = HashDSplat | HashColon | HashArrow ;
+// HashShort is the Ruby 3.1 value omission {x:, y:} - the value is the local (or
+// method) of the same name. It comes AFTER HashColon so the form WITH a value wins.
+HashEntry   = HashDSplat | HashColon | HashShort | HashArrow ;
+HashShort   <~~ var n = hashShortName(up.in); push({hk: makeConst(mkSym(n)), hv: makeVarRef(n)}) ~~>
+            = SymName ":" !":" ;
 // {**other, k: v} merges another hash in.
 HashDSplat  <~~ push({hsplat: pop()}) ~~>
             = "**" Expression ;
@@ -869,6 +1028,67 @@ LineCont    = :script(~~
 // position. It gates the statement modifiers and the post-condition loop keyword,
 // so a block 'if'/'while'/'until' opening the next line is never read as a modifier.
 // Runs at parse time; peeks the raw source both backward and forward, self contained.
+// LineEnd succeeds only when nothing but whitespace or a comment follows on this
+// line: it is what separates a bare `private` from `private :name` / `private def`.
+// A :script sees the RAW input, so the blanks have to be stepped over here.
+LineEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 13) { i = i + 1; cc = c.peek(i) }
+        if (cc === 10 || cc === 35 || cc === 59 || cc === -1) { return undefined }
+        return abnf.newToken("\x01notlineend", 0)
+    })()
+~~) ;
+
+FatArrowAhead = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01nofatarrow", 0)
+        var i = 0
+        var depth = 0
+        var steps = 0
+        // Whitespace is NOT skipped before a script, so the blank lines and comments
+        // that separate this statement from the previous one are still ahead: step
+        // over them first, or the scan would stop at the very first newline.
+        var lead = c.peek(i)
+        while (steps < 4000) {
+            steps = steps + 1
+            if (lead === 32 || lead === 9 || lead === 13 || lead === 10) { i = i + 1; lead = c.peek(i); continue }
+            if (lead === 35) { while (lead !== 10 && lead !== -1) { i = i + 1; lead = c.peek(i) } continue }
+            break
+        }
+        while (steps < 4000) {
+            steps = steps + 1
+            var cc = c.peek(i)
+            if (cc < 0 || cc === 10 || cc === 35) { return no }
+            if (cc === 59 && depth === 0) { return no }          // ';' ends the statement
+            if (cc === 40 || cc === 91 || cc === 123) { depth = depth + 1; i = i + 1; continue }
+            if (cc === 41 || cc === 93 || cc === 125) {
+                if (depth === 0) { return no }
+                depth = depth - 1
+                i = i + 1
+                continue
+            }
+            if (cc === 34 || cc === 39) {                        // skip over a string
+                var q = cc
+                i = i + 1
+                var dd = c.peek(i)
+                while (dd >= 0 && dd !== q && dd !== 10) {
+                    if (dd === 92) { i = i + 1 }
+                    i = i + 1
+                    dd = c.peek(i)
+                }
+                if (dd !== q) { return no }
+                i = i + 1
+                continue
+            }
+            if (cc === 61 && c.peek(i + 1) === 62 && depth === 0) { return undefined }
+            i = i + 1
+        }
+        return no
+    })()
+~~) ;
+
 SameLine    = :script(~~
     (function() {
         var i = -1
@@ -972,6 +1192,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // lowering is defined below; every thunk here is expression-shaped:
     // function(block) -> {b, v} (b = the block to continue in, v = the value).
     include("lib/compile-core.js")
+
+    // The shared regular-expression engine. The COMPILED program matches through the
+    // Go twin (abnf/jsrtregex.go, reached by the js_rx* externs); this copy is here
+    // so a regexp literal can be checked for validity while the tags run.
+    include("lib/regex.js")
+    rxFail = function (msg) { println("ruby compiler error: " + msg); exit(1) }
 
     var hidCount = 0
     // The argument array of the function being emitted (js_rblock reads the block out
@@ -1410,7 +1636,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     binExt["%="] = "js_rmod"
     binExt["=="] = "js_req"
     binExt["!="] = "js_rne"
-    binExt["==="] = "js_rcase"
+    binExt["==="] = "js_rxcase"
+    // =~ / !~ : the match operators. js_rxmatch answers the INDEX of the match (not
+    // a boolean) or nil, which is what `("zzz" =~ /b/) == nil` needs.
+    binExt["=~"] = "js_rxmatch"
+    binExt["!~"] = "js_rxnmatch"
     binExt["<"] = "js_rlt"
     binExt[">"] = "js_rgt"
     binExt["<="] = "js_rle"
@@ -1432,7 +1662,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
 
-    core.indexExt = "js_rget"    // [i] over arrays, strings and hashes; nil when absent
+    // js_rxget is js_rget plus MatchData indexing (m[1], m[:name]); it delegates to
+    // js_rget for every other receiver, so nothing else changes.
+    core.indexExt = "js_rxget"   // [i] over arrays, strings, hashes and MatchData
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
         var primary = items[0]
@@ -1460,14 +1692,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         var rw = emitBlkBreakCall(b, function(bb) {
                             var recvV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, recvName)])
                             var ia = emitArgs(bb, margsT)
-                            return {b: ia.b, v: callExt(ia.b, "js_rmcall", [recvV, emitStr(ia.b, mname), ia.v])}
+                            return {b: ia.b, v: callExt(ia.b, "js_rxmcall", [recvV, emitStr(ia.b, methodKey(mname)), ia.v])}
                         })
                         b = rw.b
                         cur = rw.v
                     } else {
                         var ea = emitArgs(b, unwrapArgs(s.args))
                         b = ea.b
-                        cur = callExt(b, "js_rmcall", [cur, emitStr(b, s.name), ea.v])
+                        cur = callExt(b, "js_rxmcall", [cur, emitStr(b, methodKey(s.name)), ea.v])
                     }
                 } else if (s.kind == "smcall" || s.kind == "sfield") {
                     // Safe navigation: guard on nil (skip the call, keep nil) via a
@@ -1482,13 +1714,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (s.kind == "smcall") {
                         var sea = emitArgs(callBk, unwrapArgs(s.args))
                         callBk = sea.b
-                        snRes = callExt(callBk, "js_rmcall", [cur, emitStr(callBk, s.name), sea.v])
+                        snRes = callExt(callBk, "js_rxmcall", [cur, emitStr(callBk, methodKey(s.name)), sea.v])
                     } else if (s.name == "length" || s.name == "size") {
                         snRes = callExt(callBk, "js_pylen", [cur])
                     } else if (s.name == "to_s") {
                         snRes = callExt(callBk, "js_jadd", [emitStr(callBk, ""), cur])
                     } else {
-                        snRes = callExt(callBk, "js_rmcall", [cur, emitStr(callBk, s.name), callExt(callBk, "js_arr_new", [])])
+                        snRes = callExt(callBk, "js_rxmcall", [cur, emitStr(callBk, methodKey(s.name)), callExt(callBk, "js_arr_new", [])])
                     }
                     callExt(callBk, "js_scope_set", [curScopeV, emitStr(callBk, snName), snRes])
                     callBk.NewBr(snEnd)
@@ -1509,7 +1741,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     } else {
                         // A bare .name is a zero argument method call (Ruby getters,
                         // pop, keys, ...); routed through js_rmcall like the interpreter.
-                        cur = callExt(b, "js_rmcall", [cur, emitStr(b, s.name), callExt(b, "js_arr_new", [])])
+                        cur = callExt(b, "js_rxmcall", [cur, emitStr(b, methodKey(s.name)), callExt(b, "js_arr_new", [])])
                     }
                 } else {
                     var ir = s.idx(b)
@@ -1558,8 +1790,37 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: deadBlock(), v: hNull}
         }
     }
+    // The numbered block parameters _1 .. _9: the highest one that appears in the
+    // body text (as a whole word, not as a field or part of a longer name) fixes how
+    // many parameters an otherwise parameterless block takes.
+    function numberedParamCount(src) {
+        var maxN = 0
+        for (var i = 0; i + 1 < src.length; i++) {
+            if (src.charCodeAt(i) != 95) { continue }
+            var d = src.charCodeAt(i + 1)
+            if (d < 49 || d > 57) { continue }
+            if (i + 2 < src.length && isIdentByte(src.charCodeAt(i + 2))) { continue }
+            if (i > 0 && (isIdentByte(src.charCodeAt(i - 1)) || src.charCodeAt(i - 1) == 46)) { continue }
+            var n = d - 48
+            if (n > maxN) { maxN = n }
+        }
+        return maxN
+    }
+    function isIdentByte(ch) {
+        return (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57) || ch == 95
+    }
+    function blockText(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].btext != undefined) { return items[i].btext }
+        }
+        return ""
+    }
     function makeBlock(items) {
         var params = blockParams(items)
+        if (params.length == 0) {
+            var np = numberedParamCount(blockText(items))
+            for (var q = 1; q <= np; q++) { params.push(paramDesc({param: "_" + q})) }
+        }
         var bodyStmt = blockBodyOf(items)
         return {blkT: function(b) {
             var idx = emitFunc(params, bodyStmt, false, false, true)
@@ -1852,15 +2113,348 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // case SUBJ / when V.. / else - a switch built from == tests. A subject-less
     // case tests each when expression for truthiness instead. The branch value
     // travels through a hidden result var (like makeIf).
+
+    // ----- Pattern matching (case/in, `expr => pattern', `expr in pattern') -----
+    // A pattern compiles to  p(b, valV, failB) -> b'  : it emits its tests into b,
+    // branches to failB the moment one of them says no, and answers the block the
+    // match continues in. Nothing needs a phi that way - only alternation joins - and
+    // the bindings are ordinary js_scope_set writes, emitted where the interpreter
+    // would call rubySet.
+    //
+    // Ruby leaves the bindings of a FAILED alternative behind, so binding eagerly (as
+    // this does) is not an approximation: it is the semantics.
+
+    // The runtime type NAME of any value. Object#class is answered for every kind of
+    // value (rubyClassName in abnf/jsrt.go), which makes this the one probe that
+    // works on a number, a string, an Array, a Hash and a user object alike -
+    // js_is_type only knows the names its own value model uses, and js_has aborts
+    // outright on a number.
+    function typeNameV(b, valV) {
+        var clsV = callExt(b, "js_rxmcall", [valV, emitStr(b, "class"), callExt(b, "js_arr_new", [])])
+        return callExt(b, "js_get", [clsV, emitStr(b, "__name")])
+    }
+    function isTypeNamed(b, valV, nm) {
+        return callExt(b, "js_seq", [typeNameV(b, valV), emitStr(b, nm)])
+    }
+    // The classes of the program that declare `mname` (#deconstruct /
+    // #deconstruct_keys). Emitting one js_is_type probe per declaring class is the
+    // shape docs/abnf-dialect-gotchas.md recommends for a runtime dispatch: a program
+    // that declares none emits exactly the IR it did before.
+    function classesDeclaring(mname) {
+        var out = []
+        for (var i = 0; i < declaredClassNames.length; i++) {
+            if (classHasMethod(declaredClassNames[i], mname)) { out.push(declaredClassNames[i]) }
+        }
+        return out
+    }
+    // A counted loop: for (i = fromV; i < toV; i++) body(b, iV).
+    function emitCountLoop(b, fromV, toV, body) {
+        hidCount++
+        var iv = "$pi" + hidCount
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iv), fromV])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var doneB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iv)])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_rlt", [iV, toV])), bodyB, doneB)
+        var bb = body(bodyB, callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iv)]))
+        var nV = callExt(bb, "js_radd", [callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iv)]), emitNum(bb, 1)])
+        callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, iv), nV])
+        bb.NewBr(headB)
+        return doneB
+    }
+    // A fresh scope slot; pattern code keeps its intermediate values in the scope
+    // rather than in SSA registers, so a value stays readable across basic blocks.
+    function patTemp(b, initV) {
+        hidCount++
+        var nm = "$pt" + hidCount
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nm), initV])
+        return nm
+    }
+    function patRead(b, nm) { return callExt(b, "js_scope_get", [curScopeV, emitStr(b, nm)]) }
+    function patWrite(b, nm, v) { callExt(b, "js_scope_set", [curScopeV, emitStr(b, nm), v]) }
+
+    // deconstructInto turns the subject into the Array (#deconstruct) or Hash
+    // (#deconstruct_keys) an array / hash pattern needs, or branches to failB.
+    function deconstructInto(b, valV, kindName, mname, failB) {
+        var nm = patTemp(b, hNull)
+        var doneB = curF.NewBlock("")
+        var kindB = curF.NewBlock("")
+        var elseB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, isTypeNamed(b, valV, kindName)), kindB, elseB)
+        patWrite(kindB, nm, valV)
+        kindB.NewBr(doneB)
+        var cur = elseB
+        var owners = classesDeclaring(mname)
+        for (var i = 0; i < owners.length; i++) {
+            var hitB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            cur.NewCondBr(truthy(cur, callExt(cur, "js_is_type", [valV, emitStr(cur, owners[i])])), hitB, nextB)
+            var argsV = callExt(hitB, "js_arr_new", [])
+            if (mname == "deconstruct_keys") { callExt(hitB, "js_arr_push", [argsV, hNull]) }
+            patWrite(hitB, nm, callExt(hitB, "js_rxmcall", [valV, emitStr(hitB, mname), argsV]))
+            hitB.NewBr(doneB)
+            cur = nextB
+        }
+        cur.NewBr(failB)
+        return {b: doneB, name: nm}
+    }
+    // arr[from .. to) as a fresh Array - what a *rest / *pre / *post binding takes.
+    function sliceInto(b, arrName, fromV, toV) {
+        var outNm = patTemp(b, callExt(b, "js_arr_new", []))
+        var an = arrName
+        var doneB = emitCountLoop(b, fromV, toV, function(bb, iV) {
+            callExt(bb, "js_arr_push", [patRead(bb, outNm), callExt(bb, "js_rget", [patRead(bb, an), iV])])
+            return bb
+        })
+        return {b: doneB, name: outNm}
+    }
+
+    function makePatVar(name) {
+        return function(b, valV, failB) {
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), valV])
+            return b
+        }
+    }
+    // ^name: match against the CURRENT value of the local, never rebind it.
+    function makePatPin(name) {
+        return function(b, valV, failB) {
+            var okB = curF.NewBlock("")
+            var eqV = callExt(b, "js_req", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)]), valV])
+            b.NewCondBr(truthy(b, eqV), okB, failB)
+            return okB
+        }
+    }
+    // A constant, a literal or a range: Ruby uses === here, which is class membership
+    // for a Constant, range cover for a range and == for everything else - js_rcase.
+    function makePatValue(t) {
+        return function(b, valV, failB) {
+            var r = t(b)
+            var okB = curF.NewBlock("")
+            r.b.NewCondBr(truthy(r.b, callExt(r.b, "js_rxcase", [r.v, valV])), okB, failB)
+            return okB
+        }
+    }
+    function makePatAlt(items) {
+        if (items.length == 1) { return items[0] }
+        var alts = items
+        return function(b, valV, failB) {
+            var joinB = curF.NewBlock("")
+            var cur = b
+            for (var i = 0; i < alts.length; i++) {
+                var thisFail = i < alts.length - 1 ? curF.NewBlock("") : failB
+                var okB = alts[i](cur, valV, thisFail)
+                okB.NewBr(joinB)
+                cur = thisFail
+            }
+            return joinB
+        }
+    }
+    function makePatBind(items) {
+        var pat = items[0]
+        if (items.length == 1) { return pat }
+        var nm = items[1].bindname
+        return function(b, valV, failB) {
+            var okB = pat(b, valV, failB)
+            callExt(okB, "js_pyset_var", [curScopeV, emitStr(okB, nm), valV])
+            return okB
+        }
+    }
+    function makePatArray(items) {
+        var parts = items
+        var splats = []
+        for (var i = 0; i < parts.length; i++) { if (parts[i].psplat != undefined) { splats.push(i) } }
+        return function(b, valV, failB) {
+            var d = deconstructInto(b, valV, "Array", "deconstruct", failB)
+            b = d.b
+            var an = d.name
+            var lenV = callExt(b, "js_rxmcall", [patRead(b, an), emitStr(b, "length"), callExt(b, "js_arr_new", [])])
+            var lenNm = patTemp(b, lenV)
+            if (splats.length == 0) {
+                var okB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_req", [patRead(b, lenNm), emitNum(b, parts.length)])), okB, failB)
+                b = okB
+                for (var i2 = 0; i2 < parts.length; i2++) {
+                    b = parts[i2](b, callExt(b, "js_rget", [patRead(b, an), emitNum(b, i2)]), failB)
+                }
+                return b
+            }
+            if (splats.length == 1) {
+                var s = splats[0]
+                var post = parts.length - s - 1
+                var okB2 = curF.NewBlock("")
+                var minV = emitNum(b, s + post)
+                b.NewCondBr(truthy(b, callExt(b, "js_rge", [patRead(b, lenNm), minV])), okB2, failB)
+                b = okB2
+                for (var a = 0; a < s; a++) {
+                    b = parts[a](b, callExt(b, "js_rget", [patRead(b, an), emitNum(b, a)]), failB)
+                }
+                for (var p2 = 0; p2 < post; p2++) {
+                    var offV = callExt(b, "js_rsub", [patRead(b, lenNm), emitNum(b, post - p2)])
+                    b = parts[s + 1 + p2](b, callExt(b, "js_rget", [patRead(b, an), offV]), failB)
+                }
+                if (parts[s].psplat != "" && parts[s].psplat != undefined) {
+                    var sl = sliceInto(b, an, emitNum(b, s), callExt(b, "js_rsub", [patRead(b, lenNm), emitNum(b, post)]))
+                    b = sl.b
+                    callExt(b, "js_pyset_var", [curScopeV, emitStr(b, parts[s].psplat), patRead(b, sl.name)])
+                }
+                return b
+            }
+            // The FIND pattern [*pre, MIDDLE.., *post]: slide the middle over the
+            // array and take the first position that matches.
+            if (splats.length != 2 || splats[0] != 0 || splats[1] != parts.length - 1) {
+                b.NewBr(failB)
+                return curF.NewBlock("")
+            }
+            var mid = parts.length - 2
+            var startNm = patTemp(b, emitNum(b, 0))
+            var hitB = curF.NewBlock("")
+            var headB = curF.NewBlock("")
+            b.NewBr(headB)
+            var limV = callExt(headB, "js_rsub", [patRead(headB, lenNm), emitNum(headB, mid)])
+            var tryB = curF.NewBlock("")
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_rle", [patRead(headB, startNm), limV])), tryB, failB)
+            var nextB = curF.NewBlock("")
+            var cur = tryB
+            for (var m = 0; m < mid; m++) {
+                var idxV = callExt(cur, "js_radd", [patRead(cur, startNm), emitNum(cur, m)])
+                cur = parts[1 + m](cur, callExt(cur, "js_rget", [patRead(cur, an), idxV]), nextB)
+            }
+            cur.NewBr(hitB)
+            patWrite(nextB, startNm, callExt(nextB, "js_radd", [patRead(nextB, startNm), emitNum(nextB, 1)]))
+            nextB.NewBr(headB)
+            b = hitB
+            if (parts[0].psplat != "" && parts[0].psplat != undefined) {
+                var pre = sliceInto(b, an, emitNum(b, 0), patRead(b, startNm))
+                b = pre.b
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, parts[0].psplat), patRead(b, pre.name)])
+            }
+            var lastP = parts[parts.length - 1]
+            if (lastP.psplat != "" && lastP.psplat != undefined) {
+                var fromV = callExt(b, "js_radd", [patRead(b, startNm), emitNum(b, mid)])
+                var pst = sliceInto(b, an, fromV, patRead(b, lenNm))
+                b = pst.b
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, lastP.psplat), patRead(b, pst.name)])
+            }
+            return b
+        }
+    }
+    // A hash pattern is NON-exhaustive in Ruby: the listed keys must be present and
+    // match, extra keys are ignored unless **rest collects them.
+    function makePatHash(items) {
+        var pairs = []
+        var restName = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].prest != undefined) { restName = items[i].prest }
+            else { pairs.push(items[i]) }
+        }
+        return function(b, valV, failB) {
+            var d = deconstructInto(b, valV, "Hash", "deconstruct_keys", failB)
+            b = d.b
+            var hn = d.name
+            for (var i2 = 0; i2 < pairs.length; i2++) {
+                var keyV = callExt(b, "js_sym", [emitStr(b, pairs[i2].pkey)])
+                var hasArgs = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [hasArgs, keyV])
+                var okB = curF.NewBlock("")
+                var hasV = callExt(b, "js_rxmcall", [patRead(b, hn), emitStr(b, "key?"), hasArgs])
+                b.NewCondBr(truthy(b, hasV), okB, failB)
+                b = okB
+                var gotV = callExt(b, "js_rget", [patRead(b, hn), callExt(b, "js_sym", [emitStr(b, pairs[i2].pkey)])])
+                if (pairs[i2].pval != null) { b = pairs[i2].pval(b, gotV, failB) }
+                else { callExt(b, "js_pyset_var", [curScopeV, emitStr(b, pairs[i2].pkey), gotV]) }
+            }
+            if (restName != null && restName != "" && restName != undefined) {
+                var restNm = patTemp(b, callExt(b, "js_dict_new", []))
+                var keysV = callExt(b, "js_rxmcall", [patRead(b, hn), emitStr(b, "keys"), callExt(b, "js_arr_new", [])])
+                var keysNm = patTemp(b, keysV)
+                var nkV = callExt(b, "js_rxmcall", [patRead(b, keysNm), emitStr(b, "length"), callExt(b, "js_arr_new", [])])
+                var claimed = pairs
+                var hn2 = hn
+                b = emitCountLoop(b, emitNum(b, 0), nkV, function(bb, iV) {
+                    var kV = callExt(bb, "js_rget", [patRead(bb, keysNm), iV])
+                    var kNm = patTemp(bb, kV)
+                    var addB = curF.NewBlock("")
+                    var skipB = curF.NewBlock("")
+                    var cur = bb
+                    for (var q = 0; q < claimed.length; q++) {
+                        var contB = curF.NewBlock("")
+                        var sameV = callExt(cur, "js_req", [patRead(cur, kNm), callExt(cur, "js_sym", [emitStr(cur, claimed[q].pkey)])])
+                        cur.NewCondBr(truthy(cur, sameV), skipB, contB)
+                        cur = contB
+                    }
+                    cur.NewBr(addB)
+                    callExt(addB, "js_rset", [patRead(addB, restNm), patRead(addB, kNm),
+                                              callExt(addB, "js_rget", [patRead(addB, hn2), patRead(addB, kNm)])])
+                    addB.NewBr(skipB)
+                    return skipB
+                })
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, restName), patRead(b, restNm)])
+            }
+            return b
+        }
+    }
+    function makePatPair(items) {
+        return {pkey: items[0].pkey, pval: items.length > 1 ? items[1] : null}
+    }
+    function makeIn(items) {
+        var pat = items[0]
+        var guard = null
+        var gneg = false
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+            else if (items[i].guard != undefined) { guard = items[i].guard; gneg = items[i].gneg === true }
+        }
+        return {pat: pat, guard: guard, gneg: gneg, whenbody: body}
+    }
+    // EXPR in PATTERN - a boolean test, no raise.
+    function makePatTest(items) {
+        if (items.length == 1) { return items[0] }
+        var t = items[0]
+        var pat = items[1]
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var resNm = patTemp(b, hFalse)
+            var failB = curF.NewBlock("")
+            var endB = curF.NewBlock("")
+            var okB = pat(b, r.v, failB)
+            patWrite(okB, resNm, hTrue)
+            okB.NewBr(endB)
+            failB.NewBr(endB)
+            return {b: endB, v: patRead(endB, resNm)}
+        }
+    }
+    // EXPR => PATTERN - the rightward assignment; raises when it does not match.
+    function makePatAssign(items) {
+        var t = items[0]
+        var pat = items[1]
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var failB = curF.NewBlock("")
+            var okB = pat(b, r.v, failB)
+            callExt(failB, "js_rraise", [emitStr(failB, "NoMatchingPatternError"), hUndef])
+            failB.NewRet(hUndef)
+            return {b: okB, v: hNull}
+        }
+    }
+
     function makeCase(items) {
         var subject = null
         var whens = []
         var els = null
         var idx = 0
         if (items.length > 0 && typeof items[0] == "function") { subject = items[0]; idx = 1 }
+        var anyPat = false
         for (var i = idx; i < items.length; i++) {
             if (items[i].els != undefined) { els = items[i].els }
-            else { whens.push(items[i]) }
+            else {
+                if (items[i].pat != undefined) { anyPat = true }
+                whens.push(items[i])
+            }
         }
         return function(b) {
             hidCount++
@@ -1876,6 +2470,25 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             var endB = curF.NewBlock("")
             for (var w = 0; w < whens.length; w++) {
+                // `in PATTERN [if GUARD]': a pattern clause rather than a when list.
+                if (whens[w].pat != undefined) {
+                    var pFailB = curF.NewBlock("")
+                    var subjPV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, subjName)])
+                    var pOkB = whens[w].pat(b, subjPV, pFailB)
+                    var g = whens[w].guard
+                    if (g != null) {
+                        var rg = g(pOkB)
+                        var gBodyB = curF.NewBlock("")
+                        if (whens[w].gneg === true) { rg.b.NewCondBr(truthy(rg.b, rg.v), pFailB, gBodyB) }
+                        else { rg.b.NewCondBr(truthy(rg.b, rg.v), gBodyB, pFailB) }
+                        pOkB = gBodyB
+                    }
+                    var rp = whens[w].whenbody(pOkB)
+                    callExt(rp.b, "js_scope_set", [curScopeV, emitStr(rp.b, rName), rp.v])
+                    rp.b.NewBr(endB)
+                    b = pFailB
+                    continue
+                }
                 var vals = whens[w].vals
                 var bodyBk = curF.NewBlock("")
                 for (var k = 0; k < vals.length; k++) {
@@ -1888,9 +2501,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         // here) and a `when *arr` splat match by MEMBERSHIP, a class
                         // by is_a?, everything else by ==. js_rcase is all three.
                         if (vals[k].isRange || vals[k].isSplat === true) {
-                            testV = truthy(b, callExt(b, "js_rcase", [rv.v, subjV]))
+                            testV = truthy(b, callExt(b, "js_rxcase", [rv.v, subjV]))
                         }
-                        else { testV = truthy(b, callExt(b, "js_rwhen", [rv.v, subjV])) }
+                        else { testV = truthy(b, callExt(b, "js_rxwhen", [rv.v, subjV])) }
                     } else {
                         testV = truthy(b, rv.v)
                     }
@@ -1906,6 +2519,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 var re = els(b)
                 b = re.b
                 callExt(b, "js_scope_set", [curScopeV, emitStr(b, rName), re.v])
+            } else if (anyPat) {
+                // An unmatched case/in RAISES in Ruby (an unmatched case/when is nil).
+                callExt(b, "js_rraise", [emitStr(b, "NoMatchingPatternError"), hUndef])
+                b.NewRet(hUndef)
+                b = deadBlock()
             }
             b.NewBr(endB)
             var out = callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, rName)])
@@ -2377,13 +2995,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return emitBlkBreakCall(b, function(bb) {
                         var sV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "self")])
                         var ia = emitArgs(bb, args)
-                        return {b: ia.b, v: callExt(ia.b, "js_rmcall", [sV, emitStr(ia.b, name), ia.v])}
+                        return {b: ia.b, v: callExt(ia.b, "js_rxmcall", [sV, emitStr(ia.b, methodKey(name)), ia.v])}
                     })
                 }
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 var eam = emitArgs(b, args)
                 b = eam.b
-                return {b: b, v: callExt(b, "js_rmcall", [selfV, emitStr(b, name), eam.v])}
+                return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), eam.v])}
             }
             if (callHasBlk) {
                 return emitBlkBreakCall(b, function(bb) {
@@ -2583,6 +3201,73 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // against another Symbol - the same split the interpreter's {__sym: true, s} gives.
     // mkSym therefore hands makeConst a marker that the override below lowers.
     function mkSym(name) { return {__rsym: name} }
+
+    // ----- Regular expression literals -----
+    // The engine is the shared one: languages/lib/regex.js on the interpreter side,
+    // its Go twin abnf/jsrtregex.go here, reached through js_rxnew and the js_rx*
+    // wrappers. Ruby's flag letters are NOT the engine's - Ruby /m/ means "dot
+    // matches newline" (the engine spells that "s") and Ruby's ^ and $ are always
+    // line anchors, so the engine's multiline mode is unconditionally on. o/u/n/e/s
+    // are encoding and once-only hints that do not change the match; they are
+    // accepted and ignored.
+    function rubyReFlags(rflags) {
+        var out = "m"
+        for (var i = 0; i < rflags.length; i++) {
+            var f = rflags.charAt(i)
+            if (f == "i") { out += "i" }
+            if (f == "m") { out += "s" }
+            if (f == "x") { out += "x" }
+        }
+        return out
+    }
+    function makeRegex(items) {
+        var flags = ""
+        var parts = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].reflags != undefined) { flags = items[i].reflags } else { parts.push(items[i]) }
+        }
+        var allStatic = true
+        var lit = ""
+        for (var k = 0; k < parts.length; k++) {
+            if (parts[k].s == undefined) { allStatic = false } else { lit += parts[k].s }
+        }
+        var neutral = rubyReFlags(flags)
+        if (allStatic) {
+            // A literal with no '#{}' is validated HERE, while the tags run, so a bad
+            // pattern is a compile error with a source position rather than a
+            // surprise at run time.
+            var probe = rxCompile(lit, neutral)
+            if (!probe.ok) { println("ruby compiler error: invalid regexp /" + lit + "/: " + probe.err); exit(1) }
+            return function(b) {
+                return {b: b, v: callExt(b, "js_rxnew", [emitStr(b, lit), emitStr(b, neutral)])}
+            }
+        }
+        return function(b) {
+            var srcV = emitStr(b, "")
+            for (var j = 0; j < parts.length; j++) {
+                if (parts[j].s != undefined) { srcV = callExt(b, "js_radd", [srcV, emitStr(b, parts[j].s)]) }
+                else {
+                    var r = parts[j].e(b)
+                    b = r.b
+                    srcV = callExt(b, "js_radd", [srcV, callExt(b, "js_rstr", [r.v])])
+                }
+            }
+            return {b: b, v: callExt(b, "js_rxnew", [srcV, emitStr(b, neutral)])}
+        }
+    }
+    // The bare name in front of the ':' of a hash key or a pattern key: SymName can
+    // over-match into the ':' when a tag reads up.in, so the trailing punctuation is
+    // trimmed here.
+    function hashShortName(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charCodeAt(i)
+            var ok = (ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57) || ch == 95
+            if (!ok) { return out }
+            out += String.fromCharCode(ch)
+        }
+        return out
+    }
     function makeSymOf(t) {
         return function(b) {
             var r = t(b)
@@ -2868,7 +3553,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             else { argTs.push(items[i]) }
         }
         return function(b) {
-            if (curClsName == "" || classSupers["$" + curClsName] == undefined) {
+            if (curClsName == "" || (classSupers["$" + curClsName] == undefined
+                                     && classHasSuper["$" + curClsName] !== true)) {
                 return notImplExpr("super outside of a subclass", 0)(b)
             }
             var clsName = curClsName
@@ -2949,9 +3635,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return function(b) {
             // Inside a method body a bare name that is a method of the SAME class (or
             // of one above it) is a call on the implicit self - `def intro; speak; end'.
-            if (selfMethod(curClsName, name)) {
+            if (selfMethod(curClsName, name) || classHasSMethod(curClsName, name)) {
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-                return {b: b, v: callExt(b, "js_rmcall", [selfV, emitStr(b, name), callExt(b, "js_arr_new", [])])}
+                return {b: b, v: callExt(b, "js_rxmcall", [selfV, emitStr(b, methodKey(name)), callExt(b, "js_arr_new", [])])}
             }
             var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             if (rubyMethods["$" + name] === true) {
@@ -2963,10 +3649,28 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // The class registry: filled by makeClassStmt while the tags run, consulted while
     // the thunks EMIT, so every class of the file is known by then.
     var classMethods = {}
+    // The singleton (def self.x / class << self / module_function) method names of a
+    // class or module, so a bare call between two of them resolves on the class.
+    var classSMethods = {}
+    // Every class name the file declares, in order - what a runtime dispatch has to
+    // probe when it needs "the classes that declare #deconstruct".
+    var declaredClassNames = []
+    // A class that gets a synthetic ancestor from a `prepend` has a super to call
+    // even without a `< Base`.
+    var classHasSuper = {}
     var classSupers = {}
     // A parameter of the method being emitted is a LOCAL and wins over a method of the
     // same name - which is exactly what `def initialize(name); @name = name; end' needs
     // next to an `attr_reader :name'.
+    // A singleton method of the class being compiled: `class << self; def twice;
+    // kind + kind; end; end` calls `kind`, which is a method of the class OBJECT.
+    function classHasSMethod(clsName, name) {
+        for (var p = 0; p < curMethParams.length; p++) { if (curMethParams[p] == name) { return false } }
+        var ss = classSMethods["$" + clsName]
+        if (ss == undefined) { return false }
+        for (var i = 0; i < ss.length; i++) { if (ss[i] == name) { return true } }
+        return false
+    }
     function selfMethod(clsName, name) {
         for (var p = 0; p < curMethParams.length; p++) { if (curMethParams[p] == name) { return false } }
         return classHasMethod(clsName, name)
@@ -3045,90 +3749,294 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
         return ""
     }
-    function makeClassStmt(items) {
-        var name = items[0]
-        var methods = []
-        var cstmts = []
-        var hasInit = false
-        var superName = ""
-        for (var i = 1; i < items.length; i++) {
-            if (items[i].supername != undefined) { superName = items[i].supername }
-            else if (items[i].sblock != undefined) {
-                // class << self ... end: every def inside it is a class method.
-                var sb = items[i].sblock
+    // ----- Classes, modules, mixins and visibility -----
+    // A module is BOTH a runtime object (so `M.f`, `M::CONST` and `M::Inner` resolve)
+    // and a compile-time TEMPLATE: `include M` RE-EMITS M's method bodies into the
+    // including class rather than copying its closures. Re-emitting is what makes a
+    // mixin behave like a real ancestor here - the body is compiled with curClsName
+    // bound to the including class, so a bare self-call inside it resolves against
+    // that class and a `super` inside it walks that class's __super at run time.
+    var moduleDefs = {}       // module name -> instance method descriptors
+    var moduleSDefs = {}      // module name -> descriptors callable ON the module
+    var moduleConsts = {}     // module name -> the constant names its body assigns
+
+    // A nested `class X ... end` / `module X ... end` reaches the enclosing module as
+    // one opaque thunk, and the module has to publish it under its NAME. Tags run
+    // bottom up, so the inner declaration's tag has already set this when the
+    // enclosing item's tag reads it.
+    var lastDeclName = ""
+
+    // The visibility keyword that a `private` / `protected` line switches to.
+    function visWordOf(text) {
+        var t = text
+        while (t.length > 0 && (t.charAt(t.length - 1) == " " || t.charAt(t.length - 1) == "\t"
+                                || t.charAt(t.length - 1) == "\r" || t.charAt(t.length - 1) == "\n")) {
+            t = t.slice(0, t.length - 1)
+        }
+        return t
+    }
+    // A class-body statement that assigns a CONSTANT (WORD = "hi"): its name, or "".
+    // A module publishes those under $c$ so M::CONST can read them back.
+    function constAssignName(text) {
+        var t = text
+        while (t.length > 0 && (t.charAt(0) == " " || t.charAt(0) == "\t" || t.charAt(0) == "\n" || t.charAt(0) == "\r")) { t = t.slice(1) }
+        if (t.length == 0) { return "" }
+        var c0 = t.charAt(0)
+        if (!(c0 >= "A" && c0 <= "Z")) { return "" }
+        var i = 0
+        while (i < t.length && isIdentByte(t.charCodeAt(i))) { i = i + 1 }
+        var nm = t.slice(0, i)
+        while (i < t.length && (t.charAt(i) == " " || t.charAt(i) == "\t")) { i = i + 1 }
+        if (i >= t.length || t.charAt(i) != "=") { return "" }
+        if (i + 1 < t.length && t.charAt(i + 1) == "=") { return "" }
+        return nm
+    }
+
+    // Method visibility without a runtime visibility table: a private or protected
+    // method is stored under a MANGLED key ("$q$name") and the plain name is bound to
+    // a stub that raises. A call written inside the declaring class is emitted with
+    // the mangled key (methodKey below) and therefore reaches the real method, while
+    // every call from outside finds the stub - which is exactly the rule for private,
+    // and for protected as far as the "same class may call it" case goes.
+    var restrictedMethods = {}
+    function isRestricted(clsName, name) {
+        var r = restrictedMethods["$" + clsName]
+        if (r == undefined) { return false }
+        for (var i = 0; i < r.length; i++) { if (r[i] == name) { return true } }
+        return false
+    }
+    function methodKey(name) {
+        if (curClsName != "" && isRestricted(curClsName, name)) { return "$q$" + name }
+        return name
+    }
+    function restrictedStub(kind, name) {
+        return function(b) {
+            callExt(b, "js_rraise", [emitStr(b, kind + " method '" + name + "' called"), hUndef])
+            b.NewRet(hUndef)
+            return {b: deadBlock(), v: hNull}
+        }
+    }
+    // include Comparable on a class that defines <=>: the runtime already compares
+    // two such objects through their <=> (rubySpaceship in abnf/jsrt.go), so all the
+    // mixin still owes is #between?.
+    function comparableBetween() {
+        return {name: "between?", params: [paramDesc({param: "lo"}), paramDesc({param: "hi"})], body: function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            var loV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "lo")])
+            var hiV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "hi")])
+            var ltV = callExt(b, "js_rlt", [selfV, loV])
+            var lowB = curF.NewBlock("")
+            var restB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, ltV), lowB, restB)
+            lowB.NewRet(hFalse)
+            var gtV = callExt(restB, "js_rgt", [selfV, hiV])
+            var highB = curF.NewBlock("")
+            var inB = curF.NewBlock("")
+            restB.NewCondBr(truthy(restB, gtV), highB, inB)
+            highB.NewRet(hFalse)
+            return {b: inB, v: hTrue}
+        }}
+    }
+
+    // clsItems walks a class or module body ONCE, in order, and sorts its items into
+    // the lists the emitter needs. The order matters for exactly one thing - a
+    // `private` line applies to the defs that follow it - so it is tracked here and
+    // nowhere else.
+    function clsItems(items, from) {
+        var r = {supername: "", methods: [], sdefs: [], cstmts: [], consts: [],
+                 aliases: [], includes: [], prepends: [], extends: [], restricted: []}
+        var vis = "public"
+        for (var i = from; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.supername != undefined) { r.supername = it.supername; continue }
+            if (it.vis != undefined) { vis = visWordOf(it.vis); continue }
+            if (it.mixkind != undefined) {
+                if (it.mixkind == "include") { r.includes.push(it.mixname) }
+                else if (it.mixkind == "prepend") { r.prepends.push(it.mixname) }
+                else { r.extends.push(it.mixname) }
+                continue
+            }
+            if (it.alias != undefined) { r.aliases.push({to: it.alias[0], from: it.alias[1]}); continue }
+            if (it.defm != undefined) { r.methods.push({name: it.defm, params: it.defmparams, body: it.defmbody}); continue }
+            if (it.sblock != undefined) {
+                var sb = it.sblock
                 for (var q = 0; q < sb.length; q++) {
                     if (sb[q].method != undefined) {
                         var sm = sb[q].method
-                        methods.push({name: sm.name, params: sm.params, body: sm.body, singleton: true})
+                        r.sdefs.push({name: sm.name, params: sm.params, body: sm.body})
                     }
                 }
+                continue
             }
-            else if (items[i].alias != undefined) { notImpl("alias", 0) }
-            else if (items[i].cstmt != undefined) {
-                // A statement in a class body runs with `self` bound to the class
-                // object, which is what makes `@@count = 0` a class variable of it.
-                // The visibility and mixin DECLARATIONS (private, include M, ...) are
-                // not statements in that sense - they reconfigure the class - so they
-                // stay reported as unsupported instead of being run as calls.
-                if (classDeclWord(items[i].ctext)) { notImpl("class body declaration (" + classDeclWord(items[i].ctext) + ")", 0) }
-                else { cstmts.push(items[i].cstmt) }
-            }
-            else if (items[i].method != undefined) {
-                methods.push(items[i].method)
-                if (items[i].method.name == "initialize") { hasInit = true }
-            } else if (items[i].attr != undefined) {
-                var a = items[i].attr
-                for (var j = 0; j < a.names.length; j++) {
-                    if (a.kind == "attr_reader" || a.kind == "attr_accessor") { methods.push(attrGetterMethod(a.names[j])) }
-                    if (a.kind == "attr_writer" || a.kind == "attr_accessor") { methods.push(attrSetterMethod(a.names[j])) }
+            if (it.method != undefined) {
+                var fn = it.method
+                if (fn.singleton === true) { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body}) }
+                else {
+                    r.methods.push({name: fn.name, params: fn.params, body: fn.body})
+                    if (vis == "private" || vis == "protected") { r.restricted.push({name: fn.name, kind: vis}) }
+                    if (vis == "module_function") { r.sdefs.push({name: fn.name, params: fn.params, body: fn.body}) }
                 }
+                continue
+            }
+            if (it.attr != undefined) {
+                var a = it.attr
+                for (var j = 0; j < a.names.length; j++) {
+                    if (a.kind == "attr_reader" || a.kind == "attr_accessor") { r.methods.push(attrGetterMethod(a.names[j])) }
+                    if (a.kind == "attr_writer" || a.kind == "attr_accessor") { r.methods.push(attrSetterMethod(a.names[j])) }
+                }
+                continue
+            }
+            if (it.nested != undefined) { r.cstmts.push({t: it.nested, name: it.nestedName}); continue }
+            if (it.cstmt != undefined) {
+                var cn = constAssignName(it.ctext)
+                if (cn != "") { r.consts.push(cn) }
+                r.cstmts.push({t: it.cstmt, name: cn})
+                continue
             }
         }
-        var mnames = []
-        for (var mi = 0; mi < methods.length; mi++) {
-            if (methods[mi].singleton !== true) { mnames.push(methods[mi].name) }
+        return r
+    }
+
+    // emitMethods attaches one method list to a runtime object. `prefix` is "" for an
+    // instance method and "$s$" for one on the class/module object itself.
+    function emitMethods(b, dstV, list, prefix, owner, restrictedList) {
+        var savedMeth = curMethName
+        var savedParams = curMethParams
+        for (var k = 0; k < list.length; k++) {
+            var m = list[k]
+            var key = prefix + m.name
+            var rk = ""
+            for (var q = 0; q < restrictedList.length; q++) { if (restrictedList[q].name == m.name) { rk = restrictedList[q].kind } }
+            if (rk != "" && prefix == "") { key = "$q$" + m.name }
+            curMethName = m.name
+            curMethParams = paramNames(m.params)
+            var idx = emitFunc(m.params, m.body, true)
+            var fnV = callExt(b, "js_closure", [handle(idx), curScopeV])
+            callExt(b, "js_set", [dstV, emitStr(b, key), fnV])
+            if (rk != "" && prefix == "") {
+                var sidx = emitFunc([], restrictedStub(rk, m.name), true)
+                callExt(b, "js_set", [dstV, emitStr(b, m.name),
+                                      callExt(b, "js_closure", [handle(sidx), curScopeV])])
+            }
         }
+        curMethName = savedMeth
+        curMethParams = savedParams
+        return b
+    }
+
+    // The method descriptors an `include M` / `prepend M` / `extend M` contributes.
+    function mixinDefs(modName) {
+        var d = moduleDefs["$" + modName]
+        if (d == undefined) { return [] }
+        return d
+    }
+
+    function makeDefineMethod(items) {
+        var name = items[0]
+        var params = blockParams(items)
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].body != undefined) { body = items[i].body }
+        }
+        return {defm: name, defmparams: params, defmbody: body != null ? body : makeBody([])}
+    }
+    function makeClassStmt(items) {
+        var name = items[0]
+        lastDeclName = name
+        var r = clsItems(items, 1)
+        var superName = r.supername
+        // A mixin is spliced at BUILD time: an included module's methods go in FRONT
+        // of the class's own (so the class wins), a prepended module's behind them
+        // (so the module wins). `include Comparable` has no compiled module behind
+        // it; all it owes is #between?, since the runtime already compares through
+        // <=>.
+        var own = []
+        var mi = 0
+        for (mi = 0; mi < r.includes.length; mi++) {
+            var idefs = mixinDefs(r.includes[mi])
+            for (var a1 = 0; a1 < idefs.length; a1++) { own.push(idefs[a1]) }
+            if (r.includes[mi] == "Comparable") { own.push(comparableBetween()) }
+        }
+        for (var a2 = 0; a2 < r.methods.length; a2++) { own.push(r.methods[a2]) }
+        // The prepended methods sit on the CLASS itself while the class's own move
+        // into a synthetic ancestor, which is how a `super` inside a prepended method
+        // reaches the method it overrode.
+        var front = []
+        for (mi = 0; mi < r.prepends.length; mi++) {
+            var pdefs = mixinDefs(r.prepends[mi])
+            for (var a3 = 0; a3 < pdefs.length; a3++) { front.push(pdefs[a3]) }
+        }
+        var sdefs = []
+        for (mi = 0; mi < r.extends.length; mi++) {
+            var edefs = mixinDefs(r.extends[mi])
+            for (var a4 = 0; a4 < edefs.length; a4++) { sdefs.push(edefs[a4]) }
+        }
+        for (var a5 = 0; a5 < r.sdefs.length; a5++) { sdefs.push(r.sdefs[a5]) }
+        var hasInit = false
+        var mnames = []
+        for (var m1 = 0; m1 < own.length; m1++) {
+            mnames.push(own[m1].name)
+            if (own[m1].name == "initialize") { hasInit = true }
+        }
+        for (var m2 = 0; m2 < front.length; m2++) { mnames.push(front[m2].name) }
         classMethods["$" + name] = mnames
+        declaredClassNames.push(name)
+        var snames = []
+        for (var m3 = 0; m3 < sdefs.length; m3++) { snames.push(sdefs[m3].name) }
+        classSMethods["$" + name] = snames
+        var rnames = []
+        for (var m4 = 0; m4 < r.restricted.length; m4++) { rnames.push(r.restricted[m4].name) }
+        restrictedMethods["$" + name] = rnames
         if (superName != "") { classSupers["$" + name] = superName }
+        // A prepend gives the class a synthetic ancestor even without a superclass,
+        // so `super` inside the prepended method is a legal thing to emit.
+        if (front.length > 0 && superName == "") { classHasSuper["$" + name] = true }
+        var coreName = name + "$core"
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
-            // class D < Base: the descriptor's __super is what the runtime's member
-            // lookup, `instanceof' and js_supercall all walk.
+            var baseSet = false
+            var baseV = hNull
             if (superName != "") {
-                callExt(b, "js_set", [clsV, emitStr(b, "__super"),
-                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
+                baseV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])
+                baseSet = true
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
-            // The class body statements, with `self` bound to the class object: they
-            // are emitted as a zero parameter method of the class and called at once.
-            if (cstmts.length > 0) {
-                var cbIdx = emitFunc([], makeBody(cstmts), true)
+            var savedCls = curClsName
+            curClsName = name
+            // The class body statements, with `self` bound to the class object.
+            if (r.cstmts.length > 0) {
+                var bodyTs = []
+                for (var ci = 0; ci < r.cstmts.length; ci++) { bodyTs.push(r.cstmts[ci].t) }
+                var cbIdx = emitFunc([], makeBody(bodyTs), true)
                 var cbArgs = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [cbArgs, clsV])
                 callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])
             }
-            var savedCls = curClsName
-            var savedMeth = curMethName
-            var savedParams = curMethParams
-            curClsName = name
-            for (var k = 0; k < methods.length; k++) {
-                curMethName = methods[k].name
-                curMethParams = paramNames(methods[k].params)
-                var idx = emitFunc(methods[k].params, methods[k].body, true)
-                // A singleton method (def self.m / class << self) is a method of the
-                // CLASS OBJECT, so it is stored under a "$s$" prefixed key where it
-                // cannot collide with the instance method of the same name; js_rmcall
-                // looks that key up first when the receiver is a class (abnf/jsrt.go),
-                // exactly as ruby-interpreter.abnf does.
-                var mkey = methods[k].singleton === true ? "$s$" + methods[k].name : methods[k].name
-                callExt(b, "js_set", [clsV, emitStr(b, mkey),
-                                      callExt(b, "js_closure", [handle(idx), curScopeV])])
+            // With a prepend the class's OWN methods move one level down.
+            var ownDstV = clsV
+            if (front.length > 0) {
+                var coreV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [coreV, emitStr(b, "__isclass"), hTrue])
+                callExt(b, "js_set", [coreV, emitStr(b, "__name"), emitStr(b, coreName)])
+                if (baseSet) { callExt(b, "js_set", [coreV, emitStr(b, "__super"), baseV]) }
+                callExt(b, "js_set", [clsV, emitStr(b, "__super"), coreV])
+                ownDstV = coreV
+            } else if (baseSet) {
+                callExt(b, "js_set", [clsV, emitStr(b, "__super"), baseV])
+            }
+            b = emitMethods(b, ownDstV, own, "", name, r.restricted)
+            b = emitMethods(b, clsV, front, "", name, [])
+            b = emitMethods(b, clsV, sdefs, "$s$", name, [])
+            // alias / alias_method: the new name is bound to the SAME closure, after
+            // every method of the body exists.
+            for (var ai = 0; ai < r.aliases.length; ai++) {
+                callExt(b, "js_set", [ownDstV, emitStr(b, r.aliases[ai].to),
+                                      callExt(b, "js_get", [ownDstV, emitStr(b, r.aliases[ai].from)])])
             }
             curClsName = savedCls
-            curMethName = savedMeth
-            curMethParams = savedParams
             // A subclass with no initialize of its own INHERITS one, so the default is
             // only emitted when nothing above supplies it: a root class, or one whose
             // superclass is a BUILTIN (`class MyErr < StandardError'), which carries no
@@ -3143,19 +4051,90 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     return {b: bb, v: hNull}
                 }
                 var iidx = emitFunc([], emptyBody, true)
-                callExt(b, "js_set", [clsV, emitStr(b, "initialize"),
+                callExt(b, "js_set", [ownDstV, emitStr(b, "initialize"),
                                       callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
             return {b: b, v: hNull}
         }
     }
 
-    // module M ... end: not implemented (no namespacing). Emit the body items in
-    // sequence in the current scope so any defs / classes / calls stay visible.
-    // module M ... end: not lowered (the handle runtime has no namespaces). The body
-    // items still built, so the report names the module and not its contents.
-    function makeModuleStmt(items) { return notImplExpr("module", 0) }
-    function makeScopedConst(text) { return notImplExpr("scoped constant (::)", 0) }
+    // module M ... end. The body's defs are registered as a TEMPLATE for include /
+    // extend / prepend, and a runtime object is built as well so `M.f` (a def self.
+    // or a module_function), `M::CONST` and `M::Inner` all resolve.
+    function makeModuleStmt(items) {
+        var name = items[0]
+        lastDeclName = name
+        var r = clsItems(items, 1)
+        moduleDefs["$" + name] = r.methods
+        moduleSDefs["$" + name] = r.sdefs
+        moduleConsts["$" + name] = r.consts
+        var mnames = []
+        for (var m1 = 0; m1 < r.methods.length; m1++) { mnames.push(r.methods[m1].name) }
+        classMethods["$" + name] = mnames
+        var snames = []
+        for (var m3 = 0; m3 < r.sdefs.length; m3++) { snames.push(r.sdefs[m3].name) }
+        classSMethods["$" + name] = snames
+        restrictedMethods["$" + name] = []
+        // A module's instance methods are emitted onto the module object too (Ruby
+        // keeps them there), and one of them may call `super` - which only means
+        // anything once the module is mixed into a class. Allowing the emission here
+        // keeps the mixin copy compilable; the module-object copy simply is not the
+        // one anybody calls.
+        classHasSuper["$" + name] = true
+        return function(b) {
+            var modV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [modV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [modV, emitStr(b, "__ismodule"), hTrue])
+            callExt(b, "js_set", [modV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), modV])
+            var savedCls = curClsName
+            curClsName = name
+            // A module body's statements (constants, nested classes and modules) run
+            // in the CURRENT scope, so a name it introduces stays visible where the
+            // module was written - which is what lets a mixed-in method read a
+            // constant of its module. Each one is then published on the module under
+            // $c$ as well, for the M::NAME form.
+            for (var ci = 0; ci < r.cstmts.length; ci++) {
+                var res = r.cstmts[ci].t(b)
+                b = res.b
+                var cn = r.cstmts[ci].name
+                if (cn != undefined && cn != "") {
+                    callExt(b, "js_set", [modV, emitStr(b, "$c$" + cn),
+                                          callExt(b, "js_scope_get", [curScopeV, emitStr(b, cn)])])
+                }
+            }
+            b = emitMethods(b, modV, r.methods, "", name, [])
+            b = emitMethods(b, modV, r.sdefs, "$s$", name, [])
+            for (var ai = 0; ai < r.aliases.length; ai++) {
+                callExt(b, "js_set", [modV, emitStr(b, r.aliases[ai].to),
+                                      callExt(b, "js_get", [modV, emitStr(b, r.aliases[ai].from)])])
+            }
+            curClsName = savedCls
+            return {b: b, v: hNull}
+        }
+    }
+    // A::B::C - the head is a scope name, every further step a $c$ member of the
+    // module or class object before it.
+    function makeScopedConst(text) {
+        var parts = []
+        var cur = ""
+        for (var i = 0; i < text.length; i++) {
+            if (text.charAt(i) == ":") {
+                if (cur != "") { parts.push(cur); cur = "" }
+                continue
+            }
+            if (isIdentByte(text.charCodeAt(i))) { cur += text.charAt(i) }
+        }
+        if (cur != "") { parts.push(cur) }
+        return function(b) {
+            var v = callExt(b, "js_scope_get", [curScopeV, emitStr(b, parts[0])])
+            for (var k = 1; k < parts.length; k++) {
+                v = callExt(b, "js_get", [v, emitStr(b, "$c$" + parts[k])])
+            }
+            return {b: b, v: v}
+        }
+    }
+
 
     // ----- Project-file imports (require / require_relative) -----
     // A handful of stdlib names whose require is a no-op (the runtime provides them or

@@ -42,16 +42,27 @@ operator and range slicing, delegate { ... } without a parameter list, unsafe bl
 implicitly typed and sized-with-initializer arrays, nested and indexed member
 initializers, and explicitly implemented properties.
 
-Widened surface (parsed so a whole C# file is accepted): generics, nullable and array type
-suffixes are parsed and dropped; modifier keywords are parsed and ignored. Delegate
-declarations and LINQ query expressions are accepted and reported as not implemented;
--warn-unsupported downgrades that to a warning so call graphs / CFGs / traces still work
-on partly understood files.
+Also modelled: tuples (a tuple type, positional and named elements, value equality) and
+deconstruction ('var (a, b) = e', '(a, b) = e', a custom Deconstruct(out ...) and a
+record's positional members); the pattern grammar (constant, relational, type and
+declaration, var, discard, property, positional and list patterns, combined with and / or
+/ not) behind 'is' and behind the switch EXPRESSION with its 'when' guards; records
+('record R(int X);', 'record class', 'record struct') with value equality, deconstruction
+and the 'with' expression; delegates and events (method group conversion, anonymous
+methods, multicast '+=' / '-=' where the last result wins); and iterator blocks
+('yield return' / 'yield break') with foreach and GetEnumerator / MoveNext / Current.
 
-Not implemented yet (the full-syntax ratchet, tests/csharp-test-full.cs, lists them):
-tuples and deconstruction, patterns and switch expressions, records, delegates and
-events, and iterators and async. Out and ref parameters are parsed and dropped, so a
-custom Deconstruct is not reached.
+Widened surface (parsed so a whole C# file is accepted): generics, nullable and array type
+suffixes are parsed and dropped; modifier keywords are parsed and ignored. A delegate type
+declaration is accepted and dropped (a delegate value is the closure it names). LINQ query
+expressions are accepted and reported as not implemented; -warn-unsupported downgrades
+that to a warning so call graphs / CFGs / traces still work on partly understood files.
+
+Not modelled exactly: an iterator block is materialized EAGERLY (the body runs once into a
+hidden accumulator), so an endless iterator does not terminate; removing a delegate from an
+invocation list drops every occurrence of it rather than only the last; async members run
+synchronously. Out and ref parameters are ordinary locals, read back only by a
+deconstruction.
 
 Not genuinely modelled: method overloading, unqualified FIELD access (fields are reached
 via this.x or ClassName.x; only an unqualified CALL resolves against the enclosing class),
@@ -105,7 +116,9 @@ Namespace   <~~ takeAll() ~~>
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
             = [ ClassMods ] ClassKw ClassName [ ClassTPs ] [ PrimaryCtor ]
-              [ ":" BaseSpec [ SkipParen ] { "," Type [ SkipParen ] } ] { WhereClause } "{" { Member } "}" ;
+              [ ":" BaseSpec [ SkipParen ] { "," Type [ SkipParen ] } ] { WhereClause } ClassBody ;
+// A record may stand without a body ('record R(int X);').
+ClassBody   = "{" { Member } "}" | ";" ;
 // The modifiers before a type declaration. Only 'partial' is behavioral: the members of
 // every part of a partial class are merged into one class (see buildClass).
 ClassMods   <~~ push({cmods: stripWs(up.in)}) ~~>
@@ -127,7 +140,12 @@ BaseSpec    <~~ push({ext: csLastSeg(stripWs(up.in))}) ~~>
 // on a declaration whose declared type names it (C# value semantics) and has a zeroed
 // default instance.
 ClassKw     <~~ push({ckind: stripWs(up.in)}) ~~>
-            = ( "class" | "struct" | "interface" ) KwEnd ;
+            = RecordKw | ( "class" | "struct" | "interface" ) KwEnd ;
+// A record ('record R(int X);', 'record class', 'record struct'). It is built exactly
+// like the class / struct it names: the positional parameters are a primary constructor,
+// so they already become members. What a record adds is value equality, deconstruction
+// from those parameters, and the 'with' expression - see buildClassFrom.
+RecordKw    = "record" KwEnd [ ( "class" | "struct" ) KwEnd ] ;
 // The class name, and the class the enclosing member bodies belong to (curClassName, for
 // 'base.M()'): pushed on a stack so a nested class restores its outer name when it ends.
 ClassName   <~~ push(up.in); classStack.push(curClassName); curClassName = up.in ~~>
@@ -263,16 +281,21 @@ ParamsMod   <~~ push({paramsParam: true}) ~~>
 // The pointer suffix ('int*', 'S**') is accepted and dropped: unsafe code parses, and a
 // pointer behaves like the reference it names here.
 Type        = TypeName { "*" | "[" { "," } "]" } [ "?" ] ;
-TypeName    = PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "void" KwEnd
+TypeName    = TupleType | PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "void" KwEnd
             | "var" KwEnd | "dynamic" KwEnd | UserType ;
+// A tuple type ('(int, int)', '(int lo, int hi)'). It needs at least two elements, so a
+// parenthesized type is never read as one. The element names are part of the TYPE only;
+// the value carries the names its literal spells out (see makeTuple).
+TupleType   = "(" TupTyElem "," TupTyElem { "," TupTyElem } ")" ;
+TupTyElem   = Type [ Id ] ;
 PrimType    = ( "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "byte" | "sbyte"
               | "double" | "float" | "decimal" | "bool" | "char" ) KwEnd ;
 UserType    = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
-            | Goto | Try | Throw | UsingStmt | Lock | Checked | LocalFunc | Decl | Empty
-            | ExprStmt ;
+            | Goto | Try | Throw | UsingStmt | Lock | Checked | LocalFunc | YieldStmt
+            | Decon | Decl | Empty | ExprStmt ;
 
 // 'goto L;' travels as a {sig:"goto"} signal until a block that declares L catches it
 // and resumes there (the same shape go-interpreter.abnf uses); 'goto case c;' and
@@ -362,6 +385,19 @@ ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
 
+// An iterator block. A method whose body contains a 'yield' produces a SEQUENCE: the
+// body runs once with a hidden accumulator, every 'yield return e' appends to it and
+// 'yield break' ends it early, and the accumulator is what the call answers. The sequence
+// is therefore materialized eagerly - an endless iterator does not terminate here - which
+// is what makes 'foreach', LINQ-free enumeration and GetEnumerator/MoveNext/Current all
+// work on the ordinary array representation.
+YieldStmt   = YieldBreak | YieldReturn ;
+YieldReturn <~~ push(makeYieldReturn(pop())) ~~>
+            = KwYield KwReturn Expression ";" ;
+YieldBreak  <~~ push(makeYieldBreak()) ~~>
+            = KwYield KwBreak ";" ;
+KwYield     = "yield" KwEnd ;
+
 Break       <~~ push(makeBreak()) ~~>    = KwBreak ";" ;
 Continue    <~~ push(makeContinue()) ~~> = KwContinue ";" ;
 
@@ -381,6 +417,22 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // throw e; raises e; a bare throw; (rethrow) has no value here, so it raises undefined.
 Throw       <~~ push(excThrow(csThrowVal(takeAll()))) ~~>
             = KwThrow [ Expression ] ";" ;
+
+// A deconstruction statement: 'var (a, b) = e;' declares both names, '(a, b) = e;' assigns
+// to names that already exist, and a typed element ('(int q, string s) = e') declares that
+// one. The right side may be a tuple, or any object with a Deconstruct(out ...) method -
+// see csDeconstruct. Two elements at least, so '(x) = e' is never read as one.
+Decon       <~~ push(makeDecon(takeAll())) ~~>
+            = [ DeconVar ] "(" DeconTgt "," DeconTgt { "," DeconTgt } ")" "=" Expression ";" ;
+DeconVar    <~~ push({deconVar: true}) ~~>
+            = "var" KwEnd ;
+DeconTgt    = DeconTyped | DeconPlain ;
+DeconTyped  <~~ push({dtName: pop(), dtDecl: true}) ~~>
+            = Type DeconId ;
+DeconPlain  <~~ push({dtName: pop(), dtDecl: false}) ~~>
+            = DeconId ;
+DeconId     <~~ push(up.in) ~~>
+            = Id ;
 
 // A local declaration. The declared type reaches the declarators (DType), so a variable
 // without an initializer - and a bare '= default' - gets that type's default value.
@@ -464,26 +516,81 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // 'not'. 'e as T' yields e when it is a T and null otherwise. csIsType is the runtime type
 // test; a binding declares its name in the enclosing scope, as C# does.
 TypeTest    <~~ push(makeTypeTest(takeAll(), up.pos)) ~~>
-            = Shift [ IsAs ] ;
+            = Shift [ IsAs | SwitchExpr ] ;
 IsAs        = AsTest | IsTest ;
 AsTest      <~~ push({asty: pop()}) ~~>
             = KwAs TypeArg ;
-IsTest      <~~ push({ispat: makeIsPat(takeAll())}) ~~>
-            = KwIs IsPat ;
-IsPat       = [ IsNot ] IsPatCore ;
-IsNot       <~~ push({isnot: true}) ~~>
-            = "not" KwEnd ;
-IsPatCore   = IsNullP | IsTrueP | IsFalseP | IsTypeP ;
-IsNullP     <~~ push({isnull: true}) ~~>
+IsTest      <~~ push({ispat: pop()}) ~~>
+            = KwIs Pattern ;
+
+// The switch EXPRESSION ('n switch { > 8 => "A", _ => "C" }'): the first arm whose
+// pattern matches - and whose optional 'when' guard holds - supplies the value. It is a
+// suffix of the shift level, so 'e switch {...} == x' still compares the result.
+SwitchExpr  <~~ push({swarms: takeAll()}) ~~>
+            = KwSwitch "{" [ SwitchArm { "," SwitchArm } ] [ "," ] "}" ;
+SwitchArm   <~~ push(csSwitchArm(takeAll())) ~~>
+            = Pattern [ ArmGuard ] "=>" Expression ;
+ArmGuard    <~~ push({guard: pop()}) ~~>
+            = KwWhen Expression ;
+
+// ----- patterns -----
+// The C# pattern grammar: constant, relational, type / declaration, var, discard,
+// property, positional and list patterns, combined with 'and' / 'or' / 'not'. Every
+// production pushes exactly one pattern record; the matcher walks that record.
+Pattern     = OrPat ;
+OrPat       <~~ push(csPatOr(takeAll())) ~~>
+            = AndPat { KwOr AndPat } ;
+AndPat      <~~ push(csPatAnd(takeAll())) ~~>
+            = NotPat { KwAnd NotPat } ;
+NotPat      = NotForm | PrimPat ;
+NotForm     <~~ push(csPatNot(pop())) ~~>
+            = KwNot NotPat ;
+// Ordered longest-first: a property pattern and a positional pattern both BEGIN with a
+// type name, so the bare type pattern has to be tried after both of them - a PEG never
+// goes back. The constant pattern is last, because a type name reads as an expression too.
+PrimPat     = RelPat | NullPat | TruePat | FalsePat | DiscardPat | VarPat | ListPat
+            | PosPatT | PropPat | PosPat | ParenPat | TypePat | ConstPat ;
+RelPat      <~~ push(csPatRel(takeAll())) ~~>
+            = ( "<=" | ">=" | "<" | ">" ) <~~ push(stripWs(up.in)) ~~> Shift ;
+NullPat     <~~ push(csPatNull()) ~~>
             = "null" KwEnd ;
-IsTrueP     <~~ push({isconst: true}) ~~>
+TruePat     <~~ push(csPatConst(makeConst(true))) ~~>
             = "true" KwEnd ;
-IsFalseP    <~~ push({isconst: false}) ~~>
+FalsePat    <~~ push(csPatConst(makeConst(false))) ~~>
             = "false" KwEnd ;
-IsTypeP     <~~ push(makeIsTypePat(takeAll())) ~~>
-            = TypeArg [ IsBind ] ;
-IsBind      <~~ push({isbind: up.in}) ~~>
+DiscardPat  <~~ push(csPatDiscard()) ~~>
+            = "_" KwEnd ;
+VarPat      <~~ push(csPatVar(pop())) ~~>
+            = "var" KwEnd PatName ;
+PatName     <~~ push(up.in) ~~>
             = Id ;
+// A list pattern ('[1, _, 3]', '[1, ..]', '[.. var rest]'): a '..' element matches any
+// run of elements, and may itself carry a pattern for the slice it covers.
+ListPat     <~~ push(csPatList(takeAll())) ~~>
+            = "[" [ ListElem { "," ListElem } ] [ "," ] "]" [ PatBind ] ;
+ListElem    = SlicePat | Pattern ;
+SlicePat    <~~ push(csPatSlice(takeAll())) ~~>
+            = ".." [ Pattern ] ;
+PosPatT     <~~ push(csPatPos(takeAll())) ~~>
+            = PatType "(" Pattern { "," Pattern } ")" [ PatBind ] ;
+PropPat     <~~ push(csPatProp(takeAll())) ~~>
+            = [ PatType ] "{" [ PropSub { "," PropSub } ] [ "," ] "}" [ PatBind ] ;
+PropSub     <~~ push(csPatSub(takeAll())) ~~>
+            = PatName ":" !":" Pattern ;
+PosPat      <~~ push(csPatPos(takeAll())) ~~>
+            = "(" Pattern "," Pattern { "," Pattern } ")" [ PatBind ] ;
+ParenPat    = "(" Pattern ")" ;
+TypePat     <~~ push(csPatType(takeAll())) ~~>
+            = PatType [ PatBind ] ;
+ConstPat    <~~ push(csPatConst(pop())) ~~>
+            = Shift ;
+PatType     <~~ push({patty: stripWs(up.in)}) ~~>
+            = Type ;
+PatBind     <~~ push({patbind: up.in}) ~~>
+            = Id ;
+KwAnd       = "and" KwEnd ;
+KwOr        = "or" KwEnd ;
+KwNot       = "not" KwEnd ;
 
 Shift       <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
@@ -581,7 +688,11 @@ BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
 // '(args)' suffix invokes a delegate / lambda value (a closure call).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = CallSeed { MethodSfx | CallSfx | FieldSfx | IndexSfx
-                      | NCMethodSfx | NCFieldSfx | NCIndexSfx | NFSfx } ;
+                      | NCMethodSfx | NCFieldSfx | NCIndexSfx | NFSfx | WithSfx } ;
+// 'r with { Y = 9 }': a copy of the record with those members replaced.
+WithSfx     <~~ push({kind: "with", winits: pop()}) ~~>
+            = KwWith ObjInit ;
+KwWith      = "with" KwEnd ;
 // The null-forgiving operator 'e!': a compile-time assertion in C#, identity here. The
 // '=' lookahead keeps 'a != b' out.
 NFSfx       <~~ push({kind: "nfg"}) ~~>
@@ -656,9 +767,22 @@ CollElem    = SpreadElem | Expression ;
 SpreadElem  <~~ push({spread: pop()}) ~~>
             = ".." Expression ;
 
-Primary     = CollExpr | Lambda | AnonMethod | LinqQuery | "(" Expression ")"
+Primary     = CollExpr | Lambda | AnonMethod | LinqQuery | "(" Expression ")" | TupleExpr
             | RawStr | VerbatimStr | InterpStr | DqString | CharLit
             | CsNum | IntLit | True | False | Null ;
+
+// A tuple literal ('(1, "one")', '(lo: 3, hi: 9)'). It is listed AFTER the parenthesized
+// expression, so an ordinary '(e)' is parsed exactly once: only a form that carries a
+// top-level comma reaches this rule at all.
+TupleExpr   <~~ push(makeTuple(takeAll())) ~~>
+            = "(" TupItem "," TupItem { "," TupItem } ")" ;
+TupItem     = TupNamed | TupPlain ;
+TupNamed    <~~ push(csTupItem(takeAll())) ~~>
+            = TupName ":" !":" Expression ;
+TupName     <~~ push({tupname: up.in}) ~~>
+            = Id ;
+TupPlain    <~~ push(csTupItem(takeAll())) ~~>
+            = Expression ;
 
 // typeof(T) yields a small type token (a .Name / .FullName carrying object, never null);
 // nameof(x) is the last segment of its argument, resolved at parse time; sizeof(T) is the
@@ -849,7 +973,11 @@ EnumMem     <~~ push(makeEnumMem(takeAll())) ~~>
             = { AttrSection } Id <~~ push(up.in) ~~> [ EnumInit ] ;
 EnumInit    <~~ push({einit: pop()}) ~~>
             = "=" Expression ;
-DelegateDecl <~~ notImpl("delegate", up.pos) ~~>
+// A delegate type declaration ('delegate int Op(int x);'). A delegate value is just the
+// closure it names here, so the declaration itself carries no runtime meaning - it is
+// accepted and dropped. It does switch multicast combination on (csHasDeleg), so a
+// program that declares no delegate type keeps the plain arithmetic meaning of '+=' / '-='.
+DelegateDecl <~~ csNoteDeleg() ~~>
             = LeadMods KwDelegate Type Id [ SkipAngle ] SkipParen ";" ;
 
 // A delegate declaration is legal at file scope AND in a class body; it is listed in
@@ -929,7 +1057,29 @@ KwLet       = "let" KwEnd ;
         if (csIsChar(l) && typeof r == "string") { return r.length == 1 && r.charCodeAt(0) === l.__char }
         if (csIsChar(r) && typeof l == "string") { return l.length == 1 && l.charCodeAt(0) === r.__char }
         if (csIsChar(l) && csIsChar(r)) { return l.__char === r.__char }
-        return l === r
+        if (l === r) { return true }
+        // Records and tuples compare by VALUE in C#, not by identity.
+        if (csIsRecObj(l) && csIsRecObj(r)) { return csRecEq(l, r) }
+        if (csIsTuple(l) && csIsTuple(r)) { return csTupEq(l, r) }
+        return false
+    }
+    function csIsRecObj(v) {
+        return v !== null && v !== undefined && typeof v == "object"
+            && v.__class != undefined && v.__class.__isrecord === true
+    }
+    function csRecEq(l, r) {
+        if (l.__class !== r.__class) { return false }
+        var ks = l.__class.__fieldNames
+        for (var i = 0; i < ks.length; i++) { if (!csEq(l[ks[i]], r[ks[i]])) { return false } }
+        return true
+    }
+    function csTupEq(l, r) {
+        var n = l.__tuple
+        if (n !== r.__tuple) { return false }
+        for (var i = 0; i < n; i++) {
+            if (!csEq(l["Item" + (i + 1)], r["Item" + (i + 1)])) { return false }
+        }
+        return true
     }
     // up.in of a char literal is the whole 'x' form, quotes included (SkipChar keeps any
     // trailing layout, so cut between the first and the last quote rather than stripWs -
@@ -960,6 +1110,8 @@ KwLet       = "let" KwEnd ;
     // two int values, float add as soon as one side carries a fraction (doubles).
     function csAdd(l, r) {
         if (typeof l == "string" || typeof r == "string") return csStr2(l) + csStr2(r)
+        // 'f += g' on delegates combines their invocation lists.
+        if (csHasDeleg && csIsDelegVal(r)) { return csDelegAdd(l, r) }
         var a = anytype
         var b = anytype
         a = csNumV(l)
@@ -998,6 +1150,165 @@ KwLet       = "let" KwEnd ;
         return o[i]
     }
 
+    // ----- iterators ('yield return'), driven by REPLAY -----
+    // A method whose body contains a yield is an ITERATOR: calling it runs NOTHING and
+    // answers a generator object instead. There are no coroutines in this model - a thunk
+    // cannot be suspended half way - so every step re-runs the body from the top, skips
+    // the yields that have already been delivered and stops at the next one by throwing a
+    // signal csGenStep catches. That makes the sequence genuinely LAZY: an endless
+    // iterator that a foreach breaks out of terminates. A pure iterator behaves exactly
+    // right; one with side effects repeats them, which is the honest price of not having a
+    // stack to freeze (the same model languages/python-interpreter.abnf uses). csGenRuns is
+    // the stack of active replays, innermost last, so an iterator driven from inside
+    // another one still finds its own run.
+    //
+    // csYieldCount is the walk-time marker: makeParams records its value where a body
+    // begins, and the body's owner compares - and RESETS - it, so a yield inside a nested
+    // local function marks only that local function.
+    var csYieldCount = 0
+    var csGenRuns = []
+    function csGenCheck(pinfo) {
+        var was = (pinfo != undefined && pinfo != null && pinfo.ygen != undefined) ? pinfo.ygen : csYieldCount
+        var isGen = csYieldCount > was
+        csYieldCount = was
+        return isGen
+    }
+    function csNewGen(invoke) {
+        return {__csgen: true, invoke: invoke, count: 0, done: false, cur: undefined}
+    }
+    function csIsGen(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__csgen === true
+    }
+    // The value of one 'yield return': a replay of an already-delivered yield carries on,
+    // the one being produced now throws out to csGenStep.
+    function doCsYield(v) {
+        var run = csGenRuns[csGenRuns.length - 1]
+        if (run == undefined) { fail("'yield return' outside an iterator") }
+        if (run.k < run.target) { run.k = run.k + 1; return }
+        run.k = run.k + 1
+        throw {__csYield: true, v: v}
+    }
+    function makeYieldReturn(t) {
+        csYieldCount++
+        return function() { doCsYield(t()); return undefined }
+    }
+    // 'yield break' ends the sequence, which is what returning from the body does.
+    function makeYieldBreak() {
+        csYieldCount++
+        return function() { return {isRet: true, v: undefined} }
+    }
+    // One step. Answers whether a value was produced; g.cur then holds it.
+    function csGenStep(g) {
+        if (g.done) { return false }
+        var run = {target: g.count, k: 0}
+        csGenRuns.push(run)
+        var saved = scopes
+        var yielded = false
+        var out = anytype
+        out = undefined
+        try {
+            g.invoke()
+        } catch (e) {
+            // The yield signal is not a user exception, so a 'catch' inside the body
+            // rethrows it (excIsUser tests __exc) and it lands here.
+            if (e != undefined && e != null && e.__csYield == true) { yielded = true; out = e.v }
+            else { scopes = saved; csGenRuns.pop(); throw e }
+        }
+        scopes = saved
+        csGenRuns.pop()
+        if (!yielded) { g.done = true; return false }
+        g.count = g.count + 1
+        g.cur = out
+        return true
+    }
+    // Calling an iterator method: the body is not run, only captured.
+    function csRunIter(pinfo, body, self, args) {
+        return csNewGen(csIterThunk(pinfo, body, self, args))
+    }
+    function csIterThunk(pinfo, body, self, args) {
+        return function() { csInvoke(pinfo, body, self, args) }
+    }
+    // An array enumerated explicitly becomes a generator over its elements, so the cursor
+    // below has exactly one kind of source to drive.
+    function csArrayGen(a) {
+        return csNewGen(function() {
+            for (var i = 0; i < a.length; i++) { doCsYield(a[i]) }
+        })
+    }
+    // The cursor 'GetEnumerator()' answers: 'MoveNext()' advances it and '.Current' reads
+    // the value it stands on.
+    function csNewEnum(g) { return {__csenum: true, g: g, cur: undefined} }
+    function csIsEnum(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__csenum === true
+    }
+
+    // ----- delegates -----
+    // A delegate value IS the closure it names; a MULTICAST delegate ('f += g') is an
+    // array of closures, invoked in order with the last result winning. A list that falls
+    // back to one entry becomes that entry again, so a plain delegate is never an array.
+    // 'f -= g' removes the LAST run of g's own invocation list that occurs contiguously in
+    // f's, which is exactly what Delegate.Remove does - so removing a delegate that was
+    // added twice leaves one behind, and 'f -= (g + h)' removes the pair rather than the
+    // two entries wherever they sit.
+    var csHasDeleg = false
+    function csNoteDeleg() { csHasDeleg = true }
+    function csDelegParts(v, out) {
+        if (Array.isArray(v)) {
+            for (var i = 0; i < v.length; i++) { out.push(v[i]) }
+            return
+        }
+        if (v === null || v === undefined) { return }
+        out.push(v)
+    }
+    function csDelegNorm(parts) {
+        if (parts.length == 0) { return null }
+        if (parts.length == 1) { return parts[0] }
+        return parts
+    }
+    function csDelegAdd(l, r) {
+        var parts = []
+        csDelegParts(l, parts)
+        csDelegParts(r, parts)
+        return csDelegNorm(parts)
+    }
+    function csIsDelegVal(v) {
+        if (typeof v == "function") { return true }
+        return Array.isArray(v) && v.length > 0 && typeof v[0] == "function"
+    }
+    function csDelegSub(l, r) {
+        var src = []
+        var rem = []
+        var i
+        var j
+        csDelegParts(l, src)
+        csDelegParts(r, rem)
+        if (rem.length == 0) { return csDelegNorm(src) }
+        // The LAST position at which rem occurs as a contiguous run of src.
+        var at = -1
+        for (i = 0; i + rem.length <= src.length; i++) {
+            var ok = true
+            for (j = 0; j < rem.length; j++) { if (src[i + j] !== rem[j]) { ok = false } }
+            if (ok) { at = i }
+        }
+        if (at < 0) { return csDelegNorm(src) }
+        var out = []
+        for (i = 0; i < src.length; i++) {
+            if (i >= at && i < at + rem.length) { continue }
+            out.push(src[i])
+        }
+        return csDelegNorm(out)
+    }
+    function csDelegInvoke(f, argv) {
+        if (Array.isArray(f)) {
+            var res = anytype
+            res = undefined
+            for (var i = 0; i < f.length; i++) { res = f[i].apply(undefined, argv) }
+            return res
+        }
+        if (typeof f != "function") { fail("call of a non-delegate value") }
+        return f.apply(undefined, argv)
+    }
+
     // ----- Extension methods -----
     // A static method whose first parameter carries 'this' is callable as an instance
     // method on that first argument. The registry is filled while the classes are built,
@@ -1032,7 +1343,21 @@ KwLet       = "let" KwEnd ;
             if (name == "Count") return target.keys.length
             fail("unknown Dictionary method: " + name)
         }
+        if (csIsEnum(target)) {
+            if (name == "MoveNext") {
+                if (!csGenStep(target.g)) { return false }
+                target.cur = target.g.cur
+                return true
+            }
+            if (name == "Dispose") { return undefined }
+            fail("unknown enumerator method: " + name)
+        }
+        if (csIsGen(target)) {
+            if (name == "GetEnumerator") { return csNewEnum(target) }
+            fail("unknown iterator method: " + name)
+        }
         if (Array.isArray(target)) {
+            if (name == "GetEnumerator") { return csNewEnum(csArrayGen(target)) }
             if (name == "Add") { target.push(args[0]); return true }
             if (name == "Contains") return target.indexOf(args[0]) >= 0
             if (name == "Count") return target.length
@@ -1118,11 +1443,13 @@ KwLet       = "let" KwEnd ;
                     var cargs = sfxArgs[i]
                     var av = []
                     for (var k = 0; k < cargs.length; k++) av.push(cargs[k]())
-                    if (typeof cur != "function") fail("call of a non-delegate value")
-                    cur = cur.apply(undefined, av)
+                    cur = csDelegInvoke(cur, av)
                 } else if (s.kind == "field") {
                     if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
                     cur = core.getField(cur, s.name)
+                } else if (s.kind == "with") {
+                    var winit = s.winits
+                    cur = csWith(cur, winit.objinit)
                 } else if (s.kind == "slice") {
                     cur = csSlice(cur, s.lo, s.loEnd == true, s.hi, s.hiEnd == true)
                 } else {
@@ -1283,8 +1610,8 @@ KwLet       = "let" KwEnd ;
             if (kind == "instance") { return mcall(getVar("this"), name, argv) }
             if (kind == "static") { return mcall(getVar(defClass), name, argv) }
             var f = getVar(name)
-            if (typeof f != "function") { fail("call of a non-delegate value: " + name) }
-            return f.apply(undefined, argv)
+            if (typeof f != "function" && !Array.isArray(f)) { fail("call of a non-delegate value: " + name) }
+            return csDelegInvoke(f, argv)
         }
     }
 
@@ -1455,31 +1782,148 @@ KwLet       = "let" KwEnd ;
         }
         return false
     }
-    function makeIsTypePat(items) {
-        return {isty: items[0], isbind: items.length > 1 ? items[1].isbind : ""}
+    // ----- patterns -----
+    // Every pattern production builds one record; csMatchPat walks it. A binding is
+    // declared in the enclosing scope the moment it matches, as C# does ('o is string s'
+    // makes s usable in the rest of the expression and after it).
+    function csPatOr(items) { return items.length == 1 ? items[0] : {k: "or", ps: items} }
+    function csPatAnd(items) { return items.length == 1 ? items[0] : {k: "and", ps: items} }
+    function csPatNot(p) { return {k: "not", p: p} }
+    function csPatNull() { return {k: "null"} }
+    function csPatDiscard() { return {k: "discard"} }
+    function csPatRel(items) { return {k: "rel", op: items[0], t: items[1]} }
+    function csPatConst(t) { return {k: "const", t: t} }
+    function csPatVar(name) { return {k: "var", name: name} }
+    function csPatSub(items) { return {subname: items[0], subpat: items[1]} }
+    function csPatSlice(items) {
+        var s = {k: "slice", p: null}
+        if (items.length > 0) { s.p = items[0] }
+        return s
     }
-    function makeIsPat(items) {
-        var p = {kind: "type", not: false, ty: "", bind: "", val: null}
+    function csPatType(items) {
+        var p = {k: "type", ty: "", bind: ""}
         for (var i = 0; i < items.length; i++) {
-            var it = items[i]
-            if (it.isnot == true) { p.not = true; continue }
-            if (it.isnull == true) { p.kind = "null"; continue }
-            if (it.isconst != undefined) { p.kind = "const"; p.val = it.isconst; continue }
-            if (it.isty != undefined) { p.ty = it.isty; p.bind = it.isbind }
+            if (items[i].patty != undefined) { p.ty = items[i].patty; continue }
+            if (items[i].patbind != undefined) { p.bind = items[i].patbind }
         }
         return p
     }
-    // Matching a pattern binds its name in the enclosing scope, as C# does ('o is string s'
-    // makes s usable in the rest of the expression and after it).
-    function csMatch(p, v) {
-        var r = false
-        if (p.kind == "null") { r = (v === null || v === undefined) }
-        else if (p.kind == "const") { r = (v === p.val) }
-        else {
-            r = csIsType(v, p.ty)
-            if (r && p.bind != "") { declVar(p.bind, v) }
+    function csPatProp(items) {
+        var p = {k: "prop", ty: "", bind: "", subs: []}
+        var subs = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.patty != undefined) { p.ty = it.patty; continue }
+            if (it.patbind != undefined) { p.bind = it.patbind; continue }
+            subs.push(it)
         }
-        return p.not ? !r : r
+        p.subs = subs
+        return p
+    }
+    function csPatPos(items) {
+        var p = {k: "pos", ty: "", bind: "", subs: []}
+        var subs = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.patty != undefined) { p.ty = it.patty; continue }
+            if (it.patbind != undefined) { p.bind = it.patbind; continue }
+            subs.push(it)
+        }
+        p.subs = subs
+        return p
+    }
+    function csPatList(items) {
+        var p = {k: "list", bind: "", elems: []}
+        var el = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].patbind != undefined) { p.bind = items[i].patbind; continue }
+            el.push(items[i])
+        }
+        p.elems = el
+        return p
+    }
+    function csMatchPat(p, v) {
+        var i
+        if (p.k == "or") {
+            var po = p.ps
+            for (i = 0; i < po.length; i++) { if (csMatchPat(po[i], v)) { return true } }
+            return false
+        }
+        if (p.k == "and") {
+            var pa = p.ps
+            for (i = 0; i < pa.length; i++) { if (!csMatchPat(pa[i], v)) { return false } }
+            return true
+        }
+        if (p.k == "not") { return !csMatchPat(p.p, v) }
+        if (p.k == "discard") { return true }
+        if (p.k == "var") { declVar(p.name, v); return true }
+        if (p.k == "null") { return v === null || v === undefined }
+        if (p.k == "const") { return csEq(p.t(), v) }
+        if (p.k == "rel") { return binOp(p.op, v, p.t()) }
+        if (p.k == "type") {
+            if (p.ty != "" && !csIsType(v, p.ty)) { return false }
+            if (p.bind != "") { declVar(p.bind, v) }
+            return true
+        }
+        if (p.k == "prop") {
+            if (p.ty != "" && !csIsType(v, p.ty)) { return false }
+            if (v === undefined || v === null) { return false }
+            var subs = p.subs
+            for (i = 0; i < subs.length; i++) {
+                if (!csMatchPat(subs[i].subpat, core.getField(v, subs[i].subname))) { return false }
+            }
+            if (p.bind != "") { declVar(p.bind, v) }
+            return true
+        }
+        if (p.k == "pos") {
+            if (p.ty != "" && !csIsType(v, p.ty)) { return false }
+            if (v === undefined || v === null) { return false }
+            var sp = p.subs
+            var vals = csDeconstruct(v, sp.length)
+            for (i = 0; i < sp.length; i++) { if (!csMatchPat(sp[i], vals[i])) { return false } }
+            if (p.bind != "") { declVar(p.bind, v) }
+            return true
+        }
+        if (p.k == "list") { return csMatchList(p, v) }
+        return false
+    }
+    // A list pattern. Without a '..' element the lengths must agree; with one, the
+    // elements before it match from the front, those after it from the back, and the
+    // '..' itself may carry a pattern for the slice in between.
+    function csMatchList(p, v) {
+        if (!Array.isArray(v)) { return false }
+        var elems = p.elems
+        var n = v.length
+        var si = -1
+        var i
+        for (i = 0; i < elems.length; i++) { if (elems[i].k == "slice") { si = i } }
+        if (si < 0) {
+            if (n != elems.length) { return false }
+            for (i = 0; i < n; i++) { if (!csMatchPat(elems[i], v[i])) { return false } }
+            if (p.bind != "") { declVar(p.bind, v) }
+            return true
+        }
+        var head = si
+        var tail = elems.length - si - 1
+        if (n < head + tail) { return false }
+        for (i = 0; i < head; i++) { if (!csMatchPat(elems[i], v[i])) { return false } }
+        for (i = 0; i < tail; i++) { if (!csMatchPat(elems[si + 1 + i], v[n - tail + i])) { return false } }
+        var sub = elems[si].p
+        if (sub != null && sub != undefined) {
+            if (!csMatchPat(sub, v.slice(head, n - tail))) { return false }
+        }
+        if (p.bind != "") { declVar(p.bind, v) }
+        return true
+    }
+    // One arm of a switch expression: its pattern, its optional 'when' guard and the
+    // value it produces.
+    function csSwitchArm(items) {
+        var arm = {pat: items[0], guard: null, body: null}
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "function") { arm.body = items[i]; continue }
+            if (items[i].guard != undefined) { arm.guard = items[i].guard }
+        }
+        return arm
     }
     function makeTypeTest(items, pos) {
         if (items.length == 1) { return items[0] }
@@ -1493,8 +1937,22 @@ KwLet       = "let" KwEnd ;
                 return csIsType(v, ty) ? v : null
             }
         }
+        if (m.swarms != undefined) {
+            var arms = m.swarms
+            return function() {
+                var sv = anytype
+                sv = t()
+                for (var i = 0; i < arms.length; i++) {
+                    if (!csMatchPat(arms[i].pat, sv)) { continue }
+                    if (arms[i].guard != null && !core.test(arms[i].guard())) { continue }
+                    return arms[i].body()
+                }
+                fail("no switch arm matched")
+                return undefined
+            }
+        }
         var p = m.ispat
-        return function() { return csMatch(p, t()) }
+        return function() { return csMatchPat(p, t()) }
     }
 
     // Extended numeric literal text (whitespace and '_' removed) to a number: hex (0x),
@@ -1640,6 +2098,109 @@ KwLet       = "let" KwEnd ;
         o[k] = v
     }
 
+    // ----- tuples and deconstruction -----
+    // A tuple is a plain object carrying Item1..ItemN, plus the element names its literal
+    // spells out ('(lo: 3, hi: 9)' also answers .lo / .hi). '__tuple' holds the arity,
+    // which is what deconstruction and value equality read.
+    function csTupItem(items) {
+        if (items.length > 1) { return {tupname: items[0].tupname, tval: items[1]} }
+        return {tupname: "", tval: items[0]}
+    }
+    function makeTuple(items) {
+        return function() {
+            var o = {}
+            o["__tuple"] = items.length
+            for (var i = 0; i < items.length; i++) {
+                var v = anytype
+                v = items[i].tval()
+                o["Item" + (i + 1)] = v
+                if (items[i].tupname != "") { o[items[i].tupname] = v }
+            }
+            return o
+        }
+    }
+    function csIsTuple(v) {
+        return v !== null && v !== undefined && typeof v == "object" && hasOwn(v, "__tuple")
+    }
+    // The values a deconstruction takes apart: a tuple hands back Item1..ItemN, an object
+    // with a Deconstruct(out ...) method hands back what that method writes into its out
+    // parameters, and an array hands back its first n elements.
+    function csDeconstruct(v, n) {
+        var out = []
+        var i
+        if (csIsTuple(v)) {
+            for (i = 0; i < n; i++) { out.push(hasOwn(v, "Item" + (i + 1)) ? v["Item" + (i + 1)] : undefined) }
+            return out
+        }
+        var d = csFindAcc(v, "__deconstruct")
+        if (d != undefined) { return csInvokeOut(d.pinfo, d.body, v) }
+        // A record deconstructs into its positional parameters.
+        var rf = csFindAcc(v, "__recfields")
+        if (rf != undefined) {
+            for (i = 0; i < rf.length; i++) { out.push(v[rf[i]]) }
+            return out
+        }
+        if (v !== null && v !== undefined && typeof v == "object" && typeof v.length == "number") {
+            for (i = 0; i < n; i++) { out.push(v[i]) }
+            return out
+        }
+        fail("cannot deconstruct this value")
+        return out
+    }
+    // Runs a Deconstruct body and reads its parameters back out of the frame: an 'out'
+    // parameter is an ordinary local here, so the value the body assigned to it is still
+    // bound when the body returns.
+    function csInvokeOut(pinfo, body, self) {
+        var saved = scopes
+        scopes = [globalScope, {}]
+        declVar("this", self)
+        var i
+        for (i = 0; i < pinfo.params.length; i++) { declVar(pinfo.params[i], undefined) }
+        body()
+        var vals = []
+        for (i = 0; i < pinfo.params.length; i++) { vals.push(getVar(pinfo.params[i])) }
+        scopes = saved
+        return vals
+    }
+    // 'r with { Y = 9 }': a fresh object of the same class carrying the same members,
+    // with the listed ones replaced. A tuple copies its elements instead.
+    function csWith(o, ms) {
+        if (o === undefined || o === null || typeof o != "object") { fail("'with' needs an object") }
+        var n = {}
+        var i
+        if (csIsTuple(o)) {
+            var a = o.__tuple
+            n["__tuple"] = a
+            for (i = 0; i < a; i++) { n["Item" + (i + 1)] = o["Item" + (i + 1)] }
+        } else {
+            var cls = o.__class
+            if (cls == undefined) { fail("'with' needs a record") }
+            n["__class"] = cls
+            var ks = cls.__fieldNames
+            for (i = 0; i < ks.length; i++) { n[ks[i]] = o[ks[i]] }
+        }
+        csApplyInits(n, ms)
+        return n
+    }
+    function makeDecon(items) {
+        var declAll = false
+        var names = []
+        var decls = []
+        var valT = items[items.length - 1]
+        for (var i = 0; i < items.length - 1; i++) {
+            var it = items[i]
+            if (it.deconVar == true) { declAll = true; continue }
+            names.push(it.dtName)
+            decls.push(it.dtDecl == true)
+        }
+        return function() {
+            var vals = csDeconstruct(valT(), names.length)
+            for (var j = 0; j < names.length; j++) {
+                if (declAll || decls[j]) { declVar(names[j], vals[j]) } else { setVar(names[j], vals[j]) }
+            }
+        }
+    }
+
     // ----- collection expressions, ranges and index-from-end -----
     function makeCollection(items) {
         return function() {
@@ -1737,7 +2298,8 @@ KwLet       = "let" KwEnd ;
         var bodyT = anytype // A block statement thunk, or a synthesized 'return <expr>'.
         if (bm.body != undefined) { bodyT = bm.body }
         else { bodyT = makeArrowBody(bm.ebody) }
-        return function() { return makeCsClosure(pinfo, bodyT, scopes.slice(0)) }
+        var isGen = csGenCheck(pinfo)
+        return function() { return makeCsClosure(pinfo, bodyT, scopes.slice(0), isGen) }
     }
     // Binds a call's arguments to a parameter list: a missing argument takes the
     // parameter's default value, and a 'params' tail collects the rest into an array.
@@ -1757,19 +2319,26 @@ KwLet       = "let" KwEnd ;
             }
         }
     }
-    function makeCsClosure(pinfo, bodyT, defScopes) {
+    function makeCsClosure(pinfo, bodyT, defScopes, isGen) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            var saved = scopes
-            scopes = defScopes.slice(0)
-            var sc = {}
-            csBindArgs(sc, pinfo, args)
-            scopes.push(sc)
-            var r = bodyT()
-            scopes = saved
-            return (r != undefined && r.isRet) ? r.v : undefined
+            if (isGen === true) { return csNewGen(csClosureThunk(pinfo, bodyT, defScopes, args)) }
+            return csClosureCall(pinfo, bodyT, defScopes, args)
         }
+    }
+    function csClosureThunk(pinfo, bodyT, defScopes, args) {
+        return function() { csClosureCall(pinfo, bodyT, defScopes, args) }
+    }
+    function csClosureCall(pinfo, bodyT, defScopes, args) {
+        var saved = scopes
+        scopes = defScopes.slice(0)
+        var sc = {}
+        csBindArgs(sc, pinfo, args)
+        scopes.push(sc)
+        var r = bodyT()
+        scopes = saved
+        return (r != undefined && r.isRet) ? r.v : undefined
     }
     // A local function: a closure over the CURRENT scope chain, bound by name. The chain
     // is captured by reference, so the binding is visible to the body (recursion works).
@@ -1778,7 +2347,8 @@ KwLet       = "let" KwEnd ;
         var pinfo = items[2]
         var bodyT = items[3]
         csRegParams(name, pinfo)
-        return function() { declVar(name, makeCsClosure(pinfo, bodyT, scopes.slice(0))) }
+        var isGen = csGenCheck(pinfo)
+        return function() { declVar(name, makeCsClosure(pinfo, bodyT, scopes.slice(0), isGen)) }
     }
     function makeLinq(pos) { return notImplExpr("LINQ query", pos) }
 
@@ -1928,18 +2498,32 @@ KwLet       = "let" KwEnd ;
         return -1
     }
     // foreach (var x : coll) body -- pops reversed: body, coll, name.
+    // foreach (var x in coll) body. An iterator source is stepped ONE value at a time, so
+    // an endless iterator that the body breaks out of terminates.
     function makeForEach(bodyT, arrT, name) {
         return function() {
             var arr = arrT()
             scopes.push({})
             declVar(name, undefined)
             var res = undefined
-            for (var i = 0; i < arr.length; i++) {
-                setVar(name, arr[i])
-                var r = bodyT()
-                if (r != undefined) {
-                    if (r === BRK) break
-                    if (r !== CONT) { res = r; break }
+            var r = anytype
+            if (csIsGen(arr)) {
+                while (csGenStep(arr)) {
+                    setVar(name, arr.cur)
+                    r = bodyT()
+                    if (r != undefined) {
+                        if (r === BRK) break
+                        if (r !== CONT) { res = r; break }
+                    }
+                }
+            } else {
+                for (var i = 0; i < arr.length; i++) {
+                    setVar(name, arr[i])
+                    r = bodyT()
+                    if (r != undefined) {
+                        if (r === BRK) break
+                        if (r !== CONT) { res = r; break }
+                    }
                 }
             }
             scopes.pop()
@@ -2161,7 +2745,7 @@ KwLet       = "let" KwEnd ;
             if (it.paramsParam == true) { pendingParams = true; continue }
             if (it.pdflt != undefined && dflts.length > 0) { dflts[dflts.length - 1] = it.pdflt }
         }
-        return {params: names, dflts: dflts, ext: isExt, variadic: variadic}
+        return {params: names, dflts: dflts, ext: isExt, variadic: variadic, ygen: csYieldCount}
     }
 
     // A method call binds its arguments like a lambda does: a missing argument takes the
@@ -2194,7 +2778,7 @@ KwLet       = "let" KwEnd ;
         if (hides) { csHiddenNames[name] = true; csHasHidden = true }
         csRegParams(name, items[2])
         return {kind: "method", name: name, statik: isStatic, params: params, body: body,
-                pinfo: items[2], ext: items[2].ext == true}
+                pinfo: items[2], ext: items[2].ext == true, isGen: csGenCheck(items[2])}
     }
     // A member declared without a body (abstract, or an interface method with no default):
     // it contributes no callable member, but its NAME is a member of the class, so an
@@ -2207,6 +2791,7 @@ KwLet       = "let" KwEnd ;
     }
     function makeCtor(items) {
         csRegParams(items[0], items[1])
+        csGenCheck(items[1])
         return {kind: "ctor", name: items[0], params: items[1].params, pinfo: items[1], body: items[2]}
     }
     // 'public int X, Y;': one modifier/type prefix, several declarators. The group is
@@ -2399,7 +2984,10 @@ KwLet       = "let" KwEnd ;
     }
 
     function buildClassFrom(name, members, kind, primary, tparams) {
-        var cls = {__isclass: true, __name: name, __isstruct: kind == "struct"}
+        // 'record struct' is a struct AND a record; 'record' / 'record class' are classes.
+        var isStruct = (kind == "struct" || kind == "recordstruct")
+        var isRecord = (kind == "record" || kind == "recordclass" || kind == "recordstruct")
+        var cls = {__isclass: true, __name: name, __isstruct: isStruct, __isrecord: isRecord}
         if (tparams != undefined && tparams != null && tparams.length > 0) { csClassTParams[name] = tparams }
         var fields = []
         var ctorInfo = null
@@ -2453,13 +3041,19 @@ KwLet       = "let" KwEnd ;
             initFields(z)
             return z
         }
-        if (kind == "struct") { csStructs[name] = fnames }
+        if (isStruct) { csStructs[name] = fnames }
+        // A record deconstructs into its positional parameters, unless it declares a
+        // Deconstruct of its own (which csDeconstruct asks for first).
+        if (isRecord && primary != null && primary != undefined) { cls.__recfields = primary.params }
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
                 cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
                 // 'static T M(this X x, ...)' is also reachable as x.M(...).
                 if (m2.statik && m2.ext) { csExt[m2.name] = cls[m2.name] }
+                // A custom Deconstruct: kept in its raw form so a deconstruction can read
+                // the out parameters back out of the frame the body ran in.
+                if (m2.name == "Deconstruct") { cls.__deconstruct = {pinfo: m2.pinfo, body: m2.body} }
             }
             // A property with accessor bodies: '__get_X' / '__set_X' members.
             if (m2.kind == "prop") {
@@ -2530,6 +3124,7 @@ KwLet       = "let" KwEnd ;
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
+            if (m.isGen === true) { return csRunIter(m.pinfo, m.body, self, args) }
             return csInvoke(m.pinfo, m.body, self, args)
         }
     }
@@ -2537,6 +3132,7 @@ KwLet       = "let" KwEnd ;
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+            if (m.isGen === true) { return csRunIter(m.pinfo, m.body, undefined, args) }
             return csInvoke(m.pinfo, m.body, undefined, args)
         }
     }
@@ -2600,6 +3196,7 @@ KwLet       = "let" KwEnd ;
     core.lang = "csharp"
     core.add = csAdd
     core.getField = function(o, name) {
+        if (name == "Current" && csIsEnum(o)) { return o.cur }
         if (name == "Count" || name == "Length") return csLen(o)
         if (name == "Keys") return mcall(o, "keys", [])
         if (name == "Values") return mcall(o, "values", [])
@@ -2673,6 +3270,8 @@ KwLet       = "let" KwEnd ;
     }
     applyOp = function(op, a, b) {
         if (op == "+=") return core.add(a, b)
+        // 'f -= g' on delegates removes g from the invocation list.
+        if (op == "-=" && csHasDeleg && csIsDelegVal(b)) { return csDelegSub(a, b) }
         if (op == "-=") return (a - b) | 0
         if (op == "*=") return (a * b) | 0
         if (op == "/=") return (a / b) | 0

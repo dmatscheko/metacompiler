@@ -287,6 +287,58 @@ which makes it present as an operator-precedence bug somewhere else entirely.
 When the lookahead has to be anchored to the very next byte, test it with a
 `:script` on `c.peek(0)` rather than with `!"…"`.
 
+## An operator that is a longer spelling of an ASSIGNMENT operator
+
+Ruby's `=~` broke `AssignOp = ... | ( "=" !"=" )` in a way that never failed: the
+`=` matched, the `!"="` lookahead was happy (the next character is `~`), and the
+right-hand side then parsed **successfully** as the unary `~/re/`. So
+
+    s =~ /b+/
+
+quietly became `s = ~(/b+/)` — an assignment of a bitwise-not, no parse error
+anywhere. This is the `&` vs `&&` trap above, but with the extra twist that the
+obvious fix does not work: `( "=" !"=" !"~" )` **also rejects the perfectly good
+`x = ~5`**, because a negative lookahead is matched like a token and therefore
+steps over the space in front of the `~` first (see the `!"literal"` entry
+above).
+
+When the lookahead has to be anchored to the very next BYTE, it has to be a
+`:script` on `c.peek(0)`. Ruby's is:
+
+    AssignOp = ... | ( "=" !"=" NotTilde ) ;
+    NotTilde = :script(~~
+        (function() {
+            if (c.peek(0) === 126) { return abnf.newToken("\x01tilde", 0) }
+        })()
+    ~~) ;
+
+(Returning `undefined` means "match empty and SUCCEED"; returning an impossible
+token is how a `:script` fails.) The same shape is needed for any operator whose
+first character is an assignment operator: `=~`, `!~`, and `=>` next to `=`.
+
+## The Times trap also fires on a group of single-character alternatives
+
+The "a Command immediately followed by a group is read as a repetition" entry
+above is usually met while writing a lookahead. It fires just as readily on an
+ordinary character choice. Adding Ruby's `$1..$9` / `$~` / `$&` globals as
+
+    GvarNum = "$" :whitespace() ( "1"..."9" | "~" | "&" ) <~~ ... ~~> :whitespace(Whitespace) ;
+
+failed the whole grammar with
+
+    Only Command :number() can be used for Times. Command is: times{or{range "~&"}}
+
+— and, as the original entry warns, only when that rule is first REACHED, so it
+hid behind an otherwise green run and surfaced as a mid-file parse failure. The
+fix is the same one: hoist the group into a named production.
+
+    GvarNum   = "$" :whitespace() GvarNumCh <~~ ... ~~> :whitespace(Whitespace) ;
+    GvarNumCh = "1"..."9" | "~" | "&" ;
+
+Worth its own note because the group here is not a lookahead and looks nothing
+like a repetition — it is the ordinary way every other alternative in the file
+is spelled, just in the one position where it cannot be.
+
 ## A greedy modifier list eats the declaration keyword
 
 Adding `class` to a `Modifier` production (to allow Swift's `class var`) broke
@@ -375,3 +427,59 @@ struct failing with "duplicate field x", behind a green goja run.
 Until the rule carries a no-line-break guard, brace every value-less early
 return: `if (cond) { return }`. `if (cond) return value` is unaffected, which is
 why the valued form is used all over this tree without trouble.
+
+## A thunk crossing the tag stack loses its identity — under goja only
+
+A build-time side table keyed by a thunk's function identity works perfectly
+under `-frozen` and silently does nothing under goja. `push(v interface{})` in
+`abnf/compilerscript.go` exports the goja function value to a Go `interface{}`
+and re-imports it on the next `pop()`, so the parent tag receives a FRESH
+function object; the frozen engine passes a handle and preserves identity. A
+`table.indexOf(items[0])` therefore answers `-1` under goja and the right index
+under `-frozen`.
+
+The failure mode is the nasty one: no error, and the two engines print DIFFERENT
+answers. It was found in `go-interpreter.abnf` while making `float64(i)/2`
+divide as a float — goja kept printing `2` and `-241` while `-frozen` already
+printed `2.5` and `15`, which reads like a frozen bug and is the opposite.
+
+Key such a table by the END SOURCE POSITION of the node instead. `up.pos` is a
+node's end offset (not its start), so a rule that wants to recognize "this
+operand IS a conversion" tags every operand with its own `up.pos` and matches
+the conversion's recorded position exactly:
+
+    MulExpr <~~ push(goFold(takeAll())) ~~>
+            = UnaryExpr <~~ push({at: up.pos}) ~~>
+              { SameLine MulOp <~~ push(up.in) ~~> UnaryExpr <~~ push({at: up.pos}) ~~> } ;
+
+Positions are plain numbers, so they survive the round trip unchanged. Do not
+reach for a property on the thunk either: the frozen runtime rejects a non-index
+property on an array (`invalid array index goarr`), and a function property does
+not survive the goja round trip at all.
+
+## Go-style semicolon insertion applies at the BINARY OPERATOR level
+
+Go inserts a semicolon after a line whose last token is an identifier, a
+literal, `++`, `--`, `)`, `]` or `}`. A grammar that spells its arithmetic as
+`MulExpr = UnaryExpr { MulOp UnaryExpr }` has no such rule, so
+
+    p := 1
+    *p = 2
+
+parses as `p := 1 * p` — the short declaration swallows the `*p` on the NEXT
+line and the parse then dies on the `=`. The reported position is the `=`, which
+points at the assignment rather than at the expression that ate its left side,
+and `Target = { "*" } Id …` looks like the culprit even though it is correct.
+The same shape hides `&x`, `-x`, `+x`, `^x` and `<-ch` at the start of a line.
+
+The fix is one guard: the operator must be on the same line as the operand
+BEFORE it, which is exactly what `SameLine` already tests.
+
+    AddExpr = MulExpr { SameLine AddOp MulExpr } ;
+    MulExpr = UnaryExpr { SameLine MulOp UnaryExpr } ;
+
+This is not a restriction on multi-line expressions: Go puts the operator at the
+END of the continued line (`x := a +` / `b`), and there the `+` still sits on
+`a`'s line. `a +`, `b*`, `len(arr)-` and a parenthesized continuation all keep
+working; only an operator that OPENS a line is refused, which is what Go does.
+Worth two points of Go corpus coverage on its own.

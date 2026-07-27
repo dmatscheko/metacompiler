@@ -2586,6 +2586,18 @@ func (rt *jsrt) memberCall(target interface{}, name string, args []interface{}) 
 			return rt.call(m, jsUndef, args)
 		}
 		rt.fail("unknown method '%s'", name)
+	case *jsGenerator:
+		// A generator's protocol (next, return, ...) lives in its MEMBER TABLE - the
+		// *jsGenerator case of getMember - and not in a property map, so a method call
+		// resolves the member and calls it. Delegating rather than repeating the
+		// member names here keeps the two in step and stays language neutral: every
+		// member getMember exposes is callable as a method, in every grammar that
+		// emits js_mcall. Without it `g.next()` failed with "method call on a object"
+		// and each language had to spell the call out as js_get + js_call.
+		if m := rt.getMember(o, name); isCallable(m) {
+			return rt.call(m, jsUndef, args)
+		}
+		rt.fail("unknown method '%s' on a generator", name)
 	case *jsArray:
 		// Kotlin and Python style list methods.
 		switch name {
@@ -4442,7 +4454,7 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		return jsHFalse
 	}
 
-	return map[string]func(args []uint64) uint64{
+	m := map[string]func(args []uint64) uint64{
 		// Scopes.
 		"js_scope_new": func(a []uint64) uint64 {
 			return w(&jsScope{parent: rt.scopeOf(a[0])})
@@ -7435,6 +7447,10 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return rt.wrapNum(float64(len(rt.toString(u(a[0])))))
 		},
 	}
+	// The shared regular-expression engine (abnf/jsrtregex.go) adds its js_rx*
+	// externs here. Strictly additive: it registers new names and rebinds none.
+	rt.addRegexExterns(m)
+	return m
 }
 
 // ----------------------------------------------------------------------------

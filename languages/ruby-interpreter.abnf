@@ -256,7 +256,16 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
             = Target AssignOp <~~ push(up.in) ~~> AssignExpr ;
 // ||= and &&= (conditional assignment) are accepted but not implemented (no short
 // circuit); makeAssign warns and falls back to a plain assignment.
-AssignOp    = "||=" | "&&=" | "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" ) ;
+// NotTilde is what keeps `s =~ /re/` out of the assignment path: `=` followed by
+// `~` is the match operator, not an assignment of a bitwise-not. It has to be a
+// :script rather than a `!"~"` lookahead, because a lookahead SKIPS the whitespace
+// in front of it and would then also reject the perfectly good `x = ~5`.
+AssignOp    = "||=" | "&&=" | "+=" | "-=" | "*=" | "/=" | "%=" | ( "=" !"=" NotTilde ) ;
+NotTilde = :script(~~
+    (function() {
+        if (c.peek(0) === 126) { return abnf.newToken("\x01tilde", 0) }
+    })()
+~~) ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 // The '@@' alternative must come BEFORE '@' (PEG: the shorter one would win).
@@ -277,8 +286,10 @@ NotExpr     = NotOp | EqExpr ;
 NotOp       <~~ push(makeNot(pop())) ~~>
             = "!" !"=" NotExpr ;
 
+// =~ and !~ are the regexp match operators; they sit at the equality level (Ruby),
+// and either operand may be the pattern.
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "===" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "==" | "=~" | "!=" | "!~" ) <~~ push(up.in) ~~> RelExpr } ;
 // <=> (the spaceship) is listed FIRST so "<=" cannot swallow its prefix.
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = BitOrExpr { ( "<=>" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitOrExpr } ;
@@ -394,12 +405,12 @@ Primary     = "(" Expression ")" | LambdaLit
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
             | HeredocLit
-            | StrLit | CharLit | PercentLit
+            | StrLit | CharLit | PercentLit | RegexLit
             | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
             | SymLit
             | ArrayLit | HashLit
             | True | False | Nil | Self
-            | DefinedExpr | GvarRef | CvarRef | IvarRef | ScopedConst | Call | VarRef ;
+            | DefinedExpr | GvarNum | GvarRef | CvarRef | IvarRef | ScopedConst | Call | VarRef ;
 
 // for VAR[, VAR] in COLL ... end: unlike a block, `for` does NOT open a scope - the
 // loop variable stays visible after the loop (Ruby), so it is written with the same
@@ -566,7 +577,7 @@ HdScan = :script(~~
 // whitespace into an array of strings / symbols. Each form accepts the three usual
 // delimiter pairs ( ) [ ] { }; the body characters are spelled out per delimiter,
 // because the dialect has no parameterized rules.
-PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctBare ;
+PercentLit  = PctQ | PctW | PctI | PctBigQ | PctBigW | PctBigI | PctR | PctBare ;
 PctQ        <~~ push(makeConst(unescapeSq(pctRawOf(takeAll())))) ~~>
             = "%q" :whitespace() PctRawBody :whitespace(Whitespace) ;
 PctW        <~~ push(makeConst(pctWords(pctRawOf(takeAll()), false))) ~~>
@@ -602,6 +613,54 @@ PctBrkPlain = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
 PctBrcChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
 PctBrcTC    = TplEsc | HashChar | PctBrcPlain ;
 PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// ----- Regular expression literals -----
+// /pattern/flags and %r{pattern}flags, matched by the shared engine in
+// lib/regex.js. The body is kept RAW - unlike a double-quoted string it is NOT
+// unescaped, because the regexp engine is the thing that reads the backslashes
+// (unescaping first would turn \d into a plain d). '#{}' interpolation still
+// applies, so the body is a template all the same; ReTplExpr restores the
+// no-whitespace-skipping mode the literal runs in when the expression ends.
+//
+// A `/` only starts a literal in VALUE position, which is exactly where Primary is
+// reached - so `8 / 2 / 2` still divides: after the 8 the parser is at the operator
+// level and never offers Primary a `/`.
+RegexLit    <~~ push(makeRegex(takeAll())) ~~>
+            = "/" :whitespace() { ReTplExpr | ReSlashChunk } "/" ReFlags :whitespace(Whitespace) ;
+PctR        <~~ push(makeRegex(takeAll())) ~~>
+            = "%r" :whitespace() ReBody ReFlags :whitespace(Whitespace) ;
+ReBody      = "{" { ReTplExpr | ReBrcChunk } "}"
+            | "(" { ReTplExpr | ReParChunk } ")"
+            | "[" { ReTplExpr | ReBrkChunk } "]"
+            | "<" { ReTplExpr | ReAngChunk } ">"
+            | "|" { ReTplExpr | RePipChunk } "|" ;
+ReTplExpr   <~~ push({e: pop()}) ~~>
+            = "#{" :whitespace(Whitespace) Expression "}" :whitespace() ;
+// The flag letters Ruby allows after a regexp. i / m / x change the match (mkRegex
+// maps them onto the engine's neutral letters); o / u / n / e / s are encoding and
+// once-only hints that do not, and are accepted and ignored.
+ReFlags     <~~ push({reflags: up.in}) ~~>
+            = { "i" | "m" | "x" | "o" | "u" | "n" | "e" | "s" } ;
+ReSlashChunk <~~ push({s: up.in}) ~~> = ReSlashCh { ReSlashCh } ;
+ReSlashCh   = ReEsc | HashChar | ReSlashPlain ;
+ReBrcChunk  <~~ push({s: up.in}) ~~> = ReBrcCh { ReBrcCh } ;
+ReBrcCh     = ReEsc | HashChar | ReBrcPlain ;
+ReParChunk  <~~ push({s: up.in}) ~~> = ReParCh { ReParCh } ;
+ReParCh     = ReEsc | HashChar | ReParPlain ;
+ReBrkChunk  <~~ push({s: up.in}) ~~> = ReBrkCh { ReBrkCh } ;
+ReBrkCh     = ReEsc | HashChar | ReBrkPlain ;
+ReAngChunk  <~~ push({s: up.in}) ~~> = ReAngCh { ReAngCh } ;
+ReAngCh     = ReEsc | HashChar | ReAngPlain ;
+RePipChunk  <~~ push({s: up.in}) ~~> = RePipCh { RePipCh } ;
+RePipCh     = ReEsc | HashChar | RePipPlain ;
+// An escape is carried through as the two characters it is written with.
+ReEsc       = "\\" "\x20"..."\U0010ffff" ;
+ReSlashPlain = "\x00"..."\x22" | "\x24"..."\x2e" | "\x30"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrcPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7c" | "\x7e"..."\U0010ffff" ;
+ReParPlain  = "\x00"..."\x22" | "\x24"..."\x28" | "\x2a"..."\x5b" | "\x5d"..."\U0010ffff" ;
+ReBrkPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5e"..."\U0010ffff" ;
+ReAngPlain  = "\x00"..."\x22" | "\x24"..."\x3d" | "\x3f"..."\x5b" | "\x5d"..."\U0010ffff" ;
+RePipPlain  = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7b" | "\x7d"..."\U0010ffff" ;
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
@@ -749,6 +808,13 @@ VarRef      <~~ push(makeVarRef(up.in)) ~~>
 IvarRef     = "@" Id <~~ push(makeIvarRef(up.in)) ~~> ;
 // $global and @@classvar reads (their writes go through TargetHead above).
 GvarRef     = "$" Id <~~ push(makeGvarRef(up.in)) ~~> ;
+// The regexp match globals: $1..$9 are the capture groups of the last match and
+// $~ the MatchData itself. They are ordinary entries in the global table, so they
+// only need their own spelling here (Id does not start with a digit).
+// (GvarNumCh is a production of its own because a Command followed by a GROUP is
+// read as a repetition - see the Times trap in docs/abnf-dialect-gotchas.md.)
+GvarNum     = "$" :whitespace() GvarNumCh <~~ push(makeGvarRef(up.in)) ~~> :whitespace(Whitespace) ;
+GvarNumCh   = "1"..."9" | "~" | "&" ;
 CvarRef     = "@@" Id <~~ push(makeCvarRef(up.in)) ~~> ;
 // defined?(X) answers what kind of thing X is - or nil when it is nothing. Its
 // argument is NOT evaluated, so the production keeps only the source text and
@@ -1090,6 +1156,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // setVar, foldBinary/makeConst/makeNeg/makeNot). Ruby specific behavior is
     // defined below and configured on `core`.
     include("lib/interp-core.js")
+
+    // The shared regular-expression engine (rxCompile / rxSearch / rxGroup / ...).
+    // It is language neutral, so the Ruby flag letters are translated to its own in
+    // mkRegex below. rxFail is a KNOB, overridden by ASSIGNMENT (not by declaration,
+    // see docs/abnf-dialect-gotchas.md) so a bad pattern reports like every other
+    // Ruby runtime error.
+    include("lib/regex.js")
+    rxFail = function (msg) { fail(msg) }
 
     // ----- Control signals: everything is an expression, so a body threads the
     // value of its last statement (Ruby's implicit return). break / next / return
@@ -1637,6 +1711,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (isRat(v)) { return "" + v.n + "/" + v.d }
         if (isCpx(v)) { return "" + v.re + "+" + v.im + "i" }
         if (isRange(v)) { return rstr(v.lo) + (v.excl ? "..." : "..") + rstr(v.hi) }
+        // Regexp#to_s is the embeddable (?-mix:...) form, not the /.../ literal.
+        if (isRegex(v)) { return "(?-mix:" + v.src + ")" }
+        if (isMatchD(v)) { return rxGroup(v.rev.prog, v.text, v.m, 0) }
         if (Array.isArray(v)) { return rinspect(v) }
         if (isDict(v)) { return rinspect(v) }
         // to_s may be inherited (Exception#to_s lives on the base class), so the whole
@@ -1646,6 +1723,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function rinspect(v) {
         if (v === null || v === undefined) { return "nil" }
+        if (isRegex(v)) { return "/" + v.src + "/" + v.rflags }
+        if (isMatchD(v)) { return "#<MatchData " + rinspect(rxGroup(v.rev.prog, v.text, v.m, 0)) + ">" }
         if (typeof v == "string") { return "\"" + v + "\"" }
         if (isSym(v)) { return ":" + v.s }
         if (Array.isArray(v)) {
@@ -1955,6 +2034,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function rindex(o, i) {
         // p[x] calls a Proc, obj[i] a user-defined def [].
         if (typeof o == "function") { return blockCall(o, [i]) }
+        // m[1] / m[:name] on a MatchData reads a capture group.
+        if (isMatchD(o)) { return mdGet(o, i) }
         if (isRange(o)) { return rangeToA(o)[i] }
         if (isUserObj(o)) { return mcall(o, "[]", [i], null) }
         if (isDict(o)) {
@@ -1972,6 +2053,140 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return o[i]
     }
 
+    // ----- Regular expressions -----
+    // A Regexp value boxes the compiled program from lib/regex.js. regexCache keys
+    // on flags+source, so the same literal inside a loop is compiled once.
+    var regexCache = {}
+    function mkRegex(src, rflags) {
+        var key = "$" + rflags + "\x00" + src
+        if (hasOwn(regexCache, key)) { return regexCache[key] }
+        // Ruby's flag letters are NOT the engine's. Ruby /m/ means "dot matches
+        // newline" (the engine spells that "s"), and Ruby's ^ and $ are always line
+        // anchors, so the engine's multiline mode is unconditionally on.
+        var neutral = "m"
+        for (var i = 0; i < rflags.length; i++) {
+            var f = rflags.charAt(i)
+            if (f == "i") { neutral += "i" }
+            if (f == "m") { neutral += "s" }
+            if (f == "x") { neutral += "x" }
+        }
+        var prog = rxCompile(src, neutral)
+        if (!prog.ok) { fail("invalid regexp /" + src + "/: " + prog.err) }
+        var v = {__re: true, src: src, rflags: rflags, prog: prog}
+        regexCache[key] = v
+        return v
+    }
+    function isRegex(v) { return v !== null && v !== undefined && typeof v == "object" && v.__re === true }
+    function isMatchD(v) { return v !== null && v !== undefined && typeof v == "object" && v.__md === true }
+    // The literal's tag: a body with no '#{}' is compiled once, right here; an
+    // interpolating one is rebuilt (and cache-looked-up) on every evaluation.
+    function makeRegex(items) {
+        var flags = ""
+        var parts = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].reflags != undefined) { flags = items[i].reflags } else { parts.push(items[i]) }
+        }
+        var allStatic = true
+        var lit = ""
+        for (var k = 0; k < parts.length; k++) {
+            if (parts[k].s == undefined) { allStatic = false } else { lit += parts[k].s }
+        }
+        if (allStatic) {
+            var fixed = mkRegex(lit, flags)
+            return function() { return fixed }
+        }
+        return function() {
+            var s = ""
+            for (var j = 0; j < parts.length; j++) {
+                if (parts[j].s != undefined) { s += parts[j].s } else { s += rstr(parts[j].e()) }
+            }
+            return mkRegex(s, flags)
+        }
+    }
+    // A successful match sets $~, $& and $1..$9; a failed one clears them (Ruby).
+    function setLastMatch(md) {
+        scopePut(rubyGlobals, "~", md)
+        scopePut(rubyGlobals, "&", md === null ? null : rxGroup(md.rev.prog, md.text, md.m, 0))
+        for (var i = 1; i <= 9; i++) {
+            var g = anytype
+            g = null
+            if (md !== null) { g = rxGroup(md.rev.prog, md.text, md.m, i) }
+            scopePut(rubyGlobals, "" + i, g)
+        }
+    }
+    function reMatch(rv, s, from) {
+        var m = rxSearch(rv.prog, s, from)
+        if (m === null) { setLastMatch(null); return null }
+        var md = {__md: true, rev: rv, text: s, m: m}
+        setLastMatch(md)
+        return md
+    }
+    // =~ : either operand may be the pattern, and the answer is the INDEX of the
+    // match (not a boolean) or nil - which is why `("zzz" =~ /b/) == nil` holds.
+    function reMatchOp(l, r) {
+        var rv = anytype
+        var s = ""
+        if (isRegex(l)) { rv = l; s = r === null || r === undefined ? null : rstr(r) }
+        else if (isRegex(r)) { rv = r; s = l === null || l === undefined ? null : rstr(l) }
+        else { fail("=~ needs a Regexp on one side") }
+        if (s === null) { setLastMatch(null); return null }
+        var md = reMatch(rv, s, 0)
+        if (md === null) { return null }
+        return md.m.begin
+    }
+    function mdGet(md, k) {
+        if (typeof k == "number") { return rxGroup(md.rev.prog, md.text, md.m, k) }
+        return rxGroupNamed(md.rev.prog, md.text, md.m, isSym(k) ? k.s : rstr(k))
+    }
+    function mdCaptures(md, withWhole) {
+        var out = []
+        var i = withWhole ? 0 : 1
+        while (i <= md.rev.prog.ngroups) {
+            out.push(rxGroup(md.rev.prog, md.text, md.m, i))
+            i = i + 1
+        }
+        return out
+    }
+    // String#scan: with no group it collects the whole matches, with groups the
+    // capture list of each match (Ruby).
+    function reScan(rv, s, blk) {
+        var out = []
+        var at = 0
+        while (at <= s.length) {
+            var m = rxSearch(rv.prog, s, at)
+            if (m === null) { break }
+            var md = {__md: true, rev: rv, text: s, m: m}
+            setLastMatch(md)
+            var item = anytype
+            item = rv.prog.ngroups == 0 ? rxGroup(rv.prog, s, m, 0) : mdCaptures(md, false)
+            if (blk !== null && blk !== undefined) { blockCall(blk, [item]) } else { out.push(item) }
+            at = m.end == m.begin ? m.end + 1 : m.end
+        }
+        return out
+    }
+    // String#sub / #gsub. With a block the block produces the replacement; with a
+    // string it is expanded, and Ruby's \1 spelling is what lib/regex.js expands.
+    function reSub(rv, s, args, blk, all) {
+        if (blk !== null && blk !== undefined) {
+            var out = ""
+            var at = 0
+            var last = 0
+            while (at <= s.length) {
+                var m = rxSearch(rv.prog, s, at)
+                if (m === null) { break }
+                var md = {__md: true, rev: rv, text: s, m: m}
+                setLastMatch(md)
+                out += s.slice(last, m.begin) + rstr(blockCall(blk, [rxGroup(rv.prog, s, m, 0)]))
+                last = m.end
+                at = m.end == m.begin ? m.end + 1 : m.end
+                if (m.end == m.begin && m.begin < s.length) { out += s.charAt(m.begin); last = m.begin + 1 }
+                if (!all) { break }
+            }
+            return out + s.slice(last)
+        }
+        return rxReplace(rv.prog, s, rstr(args[1]), all)
+    }
+
     // ----- Method dispatch (js_mcall equivalent) -----
     // The class object of any value (Object#class), used by is_a? / instance_of? and
     // by the `when Integer` form of case.
@@ -1986,6 +2201,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (typeof v == "string") { return hostGlobals["String"] }
         if (isSym(v)) { return hostGlobals["Symbol"] }
         if (isRange(v)) { return hostGlobals["Range"] }
+        if (isRegex(v)) { return hostGlobals["Regexp"] }
+        if (isMatchD(v)) { return hostGlobals["MatchData"] }
         if (typeof v == "function") { return hostGlobals["Proc"] }
         if (Array.isArray(v)) { return hostGlobals["Array"] }
         if (isDict(v)) { return hostGlobals["Hash"] }
@@ -2050,6 +2267,42 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             fail("unknown Symbol method: " + name)
         }
         if (isRange(target)) { return rangeMethod(target, name, args, blk) }
+        if (isRegex(target)) {
+            if (name == "match?") { return rxSearch(target.prog, rstr(args[0]), 0) !== null }
+            if (name == "match") { return reMatch(target, rstr(args[0]), args.length > 1 ? toF(args[1]) : 0) }
+            if (name == "=~" || name == "===") {
+                var mi = reMatchOp(target, args[0])
+                return name == "===" ? mi !== null : mi
+            }
+            if (name == "source") { return target.src }
+            if (name == "options") { return 0 }
+            if (name == "names") { return target.prog.names.slice(0) }
+            if (name == "to_s") { return rstr(target) }
+            if (name == "inspect") { return rinspect(target) }
+            fail("unknown Regexp method: " + name)
+        }
+        if (isMatchD(target)) {
+            if (name == "[]") { return mdGet(target, args[0]) }
+            if (name == "to_a") { return mdCaptures(target, true) }
+            if (name == "captures") { return mdCaptures(target, false) }
+            if (name == "named_captures") {
+                var nd = {__dict: true, keys: [], vals: []}
+                for (var nci = 0; nci < target.rev.prog.names.length; nci++) {
+                    var nm = target.rev.prog.names[nci]
+                    dictSet(nd, nm, rxGroupNamed(target.rev.prog, target.text, target.m, nm))
+                }
+                return nd
+            }
+            if (name == "names") { return target.rev.prog.names.slice(0) }
+            if (name == "pre_match") { return target.text.slice(0, target.m.begin) }
+            if (name == "post_match") { return target.text.slice(target.m.end) }
+            if (name == "begin") { return target.m.caps[2 * (args.length > 0 ? toF(args[0]) : 0)] }
+            if (name == "end") { return target.m.caps[2 * (args.length > 0 ? toF(args[0]) : 0) + 1] }
+            if (name == "size" || name == "length") { return target.rev.prog.ngroups + 1 }
+            if (name == "to_s") { return rstr(target) }
+            if (name == "inspect") { return rinspect(target) }
+            fail("unknown MatchData method: " + name)
+        }
         if (typeof target == "number") {
             if (name == "to_s" || name == "inspect") { return args.length > 0 ? baseStr(target, toF(args[0])) : "" + target }
             if (name == "to_i" || name == "to_int" || name == "truncate" || name == "floor") { return Math.floor(target) }
@@ -2086,6 +2339,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             fail("unknown Boolean method: " + name)
         }
         if (typeof target == "string") {
+            // split and index take a plain string too, so they only route to the
+            // regexp engine when the argument really IS a pattern.
+            if (args.length > 0 && isRegex(args[0])) {
+                if (name == "split") { return rxSplit(args[0].prog, target) }
+                if (name == "index") { return reMatchOp(args[0], target) }
+            }
             if (name == "length" || name == "size") { return target.length }
             if (name == "to_s" || name == "to_str" || name == "dup" || name == "clone" || name == "freeze") { return target }
             if (name == "to_sym" || name == "intern") { return mkSym(target) }
@@ -2108,6 +2367,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "replace") { return rstr(args[0]) }
             if (name == "each_char") { for (var sc = 0; sc < target.length; sc++) { blockCall(blk, [target.charAt(sc)]) } return target }
             if (name == "include?") { return target.indexOf(rstr(args[0])) >= 0 }
+            // The pattern-taking String methods. match/match? accept a plain string
+            // too (Ruby compiles it to a Regexp), so the argument is normalized here.
+            if (name == "match" || name == "match?" || name == "=~" || name == "scan"
+                || name == "sub" || name == "gsub" || name == "sub!" || name == "gsub!") {
+                var rv = isRegex(args[0]) ? args[0] : mkRegex(rstr(args[0]), "")
+                if (name == "match") { return reMatch(rv, target, args.length > 1 ? toF(args[1]) : 0) }
+                if (name == "match?") { return rxSearch(rv.prog, target, 0) !== null }
+                if (name == "=~") { return reMatchOp(rv, target) }
+                if (name == "scan") { return reScan(rv, target, blk) }
+                return reSub(rv, target, args, blk, name == "gsub" || name == "gsub!")
+            }
             fail("unknown String method: " + name)
         }
         if (isDict(target)) {
@@ -3706,6 +3976,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (n == "Array") { return Array.isArray(v) }
             if (n == "Hash") { return isDict(v) }
             if (n == "Range") { return isRange(v) }
+            if (n == "Regexp") { return isRegex(v) }
+            if (n == "MatchData") { return isMatchD(v) }
             if (n == "Proc") { return typeof v == "function" }
             if (n == "NilClass") { return v === null || v === undefined }
             if (n == "TrueClass") { return v === true }
@@ -3730,7 +4002,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         return false
     }
     var builtinClassNames = ["Integer", "Float", "Rational", "Complex", "Numeric", "String",
-                             "Symbol", "Array", "Hash", "Range", "Proc", "NilClass",
+                             "Symbol", "Array", "Hash", "Range", "Regexp", "MatchData", "Proc", "NilClass",
                              "TrueClass", "FalseClass", "Object", "BasicObject", "Kernel",
                              "Comparable", "Enumerable", "Math"]
     for (var bci = 0; bci < builtinClassNames.length; bci++) {
@@ -3893,11 +4165,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // object, plain == otherwise. It is what `case/when` dispatches on.
     function caseEq(l, r) {
         if (isRange(l)) { return rangeCover(l, r) }
+        if (isRegex(l)) { return reMatchOp(l, r) !== null }
         if (l !== null && l !== undefined && typeof l == "object" && l.__isclass === true) { return valueIsA(r, l) }
         if (isUserObj(l) && typeof lookupMethod(l.__class, "===") == "function") { return rtest(mcall(l, "===", [r], null)) }
         return rubyEq(l, r)
     }
     binOps["==="] = function(l, r) { return caseEq(l, r) }
+    binOps["=~"] = function(l, r) { return reMatchOp(l, r) }
+    binOps["!~"] = function(l, r) { return reMatchOp(l, r) === null }
     binOps["<=>"] = function(l, r) { return spaceship(l, r) }
     binOps["<"]  = function(l, r) { return rcmp(l, r) < 0 }
     binOps[">"]  = function(l, r) { return rcmp(l, r) > 0 }
