@@ -90,10 +90,32 @@ The same language with the same semantics is interpreted directly by java-interp
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl | StraySemi } ;
+            = [ Package ] { Import } { ModuleDecl | UnsupType | ClassDecl | RecordDecl | StraySemi } ;
 // A stray ';' after a top-level type declaration (`class F { };`) is legal and
 // means nothing - the member-level form is EmptyMember below.
 StraySemi   = ";" ;
+
+// --- module-info.java: a JPMS module declaration (JLS 7.7). Modules are not
+// modelled, and there is nothing in one to compile, so the whole declaration is
+// pure syntax: no tag anywhere, so it pushes no statement and buildMain never
+// sees it. Kept identical to the interpreter half's copy.
+//
+// `module`, `open`, `requires`, `transitive`, `exports`, `opens`, `to`, `uses`,
+// `provides` and `with` are RESTRICTED keywords - ordinary identifiers
+// everywhere else in the language - so each is matched as a bare literal HERE
+// and is never added to ModKw or to any Kw* rule.
+ModuleDecl  = LeadMods [ "open" KwEnd ] "module" KwEnd ModName "{" { ModDirective } "}" ;
+// A module / package / service name is dotted, and nothing consumes it, so this
+// is QualName without QualName's push.
+ModName     = Id { "." Id } ;
+ModDirective = ModRequires | ModExports | ModOpens | ModUses | ModProvides | StraySemi ;
+ModRequires = "requires" KwEnd { ReqMod } ModName ";" ;
+ReqMod      = ( "transitive" | "static" ) KwEnd ;
+ModExports  = "exports" KwEnd ModName [ ModTo ] ";" ;
+ModOpens    = "opens" KwEnd ModName [ ModTo ] ";" ;
+ModTo       = "to" KwEnd ModName { "," ModName } ;
+ModUses     = "uses" KwEnd ModName ";" ;
+ModProvides = "provides" KwEnd ModName "with" KwEnd ModName { "," ModName } ";" ;
 
 // An optional package header (parsed and ignored) then repeated imports. Each
 // import path is resolved against the runtime builtins (core.stdlibImports); one
@@ -103,7 +125,13 @@ StraySemi   = ";" ;
 // Neither Package nor Import pushes a statement, so buildMain never sees them.
 // package-info.java carries its annotations on the package declaration.
 Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
-Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] QualName ";" ;
+// `import module java.base;` (JEP 476) imports every package a module exports.
+// It is the SECOND alternative on purpose: `module` is a restricted keyword, so
+// `import module.foo.Bar;` is still a legal ordinary import of a package called
+// `module`, and trying the plain form first keeps that reading.
+Import      <~~ resolveImport(pop(), up.pos) ~~>
+            = KwImport [ "static" KwEnd ] QualName ";"
+            | KwImport "module" KwEnd QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -545,7 +573,16 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { QNewSfx | MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx } ;
+// expr::m - a BOUND method reference whose receiver is an arbitrary expression:
+// `check()::ido`, `new Foo()::getA`, `((C) t)::m`. Like QNewSfx it is a SUFFIX
+// rather than a postfix form of its own, for the same reason: an alternative
+// starting with a Primary would parse the receiver twice and cost 2^depth on
+// nested calls. Java evaluates the receiver of a bound reference ONCE, where the
+// reference is written, which is exactly what folding it into the chain does.
+MRefSfx     <~~ push({kind:"mref", name: popName()}) ~~>
+            = "::" [ SkipAngle ] MRefName ;
+MRefName    <~~ push({mname: stripWs(up.in)}) ~~> = Id | KwNew ;
 // `o.new Inner(args)` - creation qualified by an enclosing instance, which the new
 // object records as __outer and `Outer.this` reads back. It is a SUFFIX of the
 // member chain, so the qualifier may be any expression (`new Outer().new Inner()`);
@@ -604,9 +641,16 @@ LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({lblock: pop()}) ~~> = Block ;
 LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
 // A method reference Recv::m becomes a closure that forwards its arguments to
-// Recv.m(...). Constructor references (::new) stay not implemented.
+// Recv.m(...). This form is the one whose receiver is a NAME - a class, a
+// variable, or a dotted path - resolved from the captured scope inside the
+// closure. Type arguments on either side (Foo<String>::new, r::<T>generic) are
+// parsed and erased like every other generic, and an ARRAY target (String[]::new,
+// int[]::clone) is recognised too; makeMethodRef strips both back off the text.
+// The receiver that is an arbitrary EXPRESSION - check()::m, new Foo()::m,
+// ((C) t)::m - is MRefSfx down in the member chain instead.
 MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
-            = Id { "." Id } "::" ( Id | KwNew ) ;
+            = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] { "[" "]" }
+              "::" [ SkipAngle ] ( Id | KwNew ) ;
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
@@ -1522,8 +1566,30 @@ KwYield     = "yield" KwEnd ;
     // the receiver kind). ::new is not modelled.
     function makeMethodRef(text, pos) {
         var sep = text.indexOf("::")
-        var tgtPath = text.slice(0, sep)
-        var methodPart = text.slice(sep + 2)
+        var tgtPath = jStripTargs(text.slice(0, sep))
+        var methodPart = jStripTargs(text.slice(sep + 2))
+        // String[]::new / int[]::clone - a reference over an ARRAY type. There is
+        // no class descriptor to look up, so these two are the whole set: ::new
+        // allocates a one-dimensional array of the length it is handed, ::clone is
+        // unbound and copies its first argument.
+        if (tgtPath.indexOf("[") >= 0) {
+            var fillFn = arrFillOf(jStripArr(tgtPath), false)
+            var arrName = methodPart
+            var arrBody = function(b) {
+                var a0 = callExt(b, "js_get", [curF.Params[1], emitNum(b, 0)])
+                if (arrName == "new") {
+                    var r = emitArrDims(b, [a0], 0, fillFn)
+                    r.b.NewRet(r.v)
+                    return deadBlock()
+                }
+                b.NewRet(callExt(b, "js_mcall", [a0, emitStr(b, arrName), callExt(b, "js_arr_new", [])]))
+                return deadBlock()
+            }
+            return function(b) {
+                var idx = emitFunc([], arrBody, false, null)
+                return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+            }
+        }
         // C::new -> a closure that builds a C from the arguments it is handed.
         if (methodPart == "new") {
             var cname = stripWs(tgtPath)
@@ -1576,6 +1642,48 @@ KwYield     = "yield" KwEnd ;
     }
     // Splits a dotted path "a.b.c" into ["a", "b", "c"].
     function splitDots(s) { return s.split(".") }
+    // Drops every balanced <...> run from a method-reference operand, so
+    // `Foo<String>` reads as `Foo` and `<@TA Object>generic` as `generic`.
+    // Generics are erased in this model, so this is all erasure needs. Written as
+    // an explicit depth scan rather than a regex or lastIndexOf: nested arguments
+    // (Map<K, List<V>>) must nest, and the frozen engine has no lastIndexOf.
+    function jStripTargs(s) {
+        var out = ""
+        var depth = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "<") { depth = depth + 1 }
+            else if (ch == ">") { depth = depth - 1 }
+            else if (depth == 0) { out = out + ch }
+        }
+        return out
+    }
+    // "String[][]" -> "String": the element type an array reference allocates.
+    function jStripArr(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "[" || ch == "]") { return out }
+            out = out + ch
+        }
+        return out
+    }
+    // expr::m - a bound method reference over an already-evaluated receiver. Java
+    // evaluates that receiver once, where the reference is written, so the value
+    // is parked in a fresh child scope under a name no source can spell and the
+    // emitted closure captures THAT scope; its body reads the receiver back and
+    // forwards the exact argument array to js_mcall.
+    function jEmitBoundMRef(b, recvV, name) {
+        var bodyStmt = function(bb) {
+            var recv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$mrecv")])
+            bb.NewRet(callExt(bb, "js_mcall", [recv, emitStr(bb, name), curF.Params[1]]))
+            return deadBlock()
+        }
+        var sc = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [sc, emitStr(b, "$mrecv"), recvV])
+        var idx = emitFunc([], bodyStmt, false, null)
+        return callExt(b, "js_closure", [handle(idx), sc])
+    }
     // A method call is a functional-interface invocation when the receiver is a
     // closure (a lambda / method reference): route it to js_call(receiver, args)
     // instead of js_mcall, which only dispatches named methods on objects/strings.
@@ -1612,6 +1720,8 @@ KwYield     = "yield" KwEnd ;
                     b = mergeB
                 } else if (s.kind == "field") {
                     cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                } else if (s.kind == "mref") {
+                    cur = jEmitBoundMRef(b, cur, s.name)
                 } else if (s.kind == "qnew") {
                     var qr = emitQualNew(b, cur, s.cname, s.args)
                     b = qr.b

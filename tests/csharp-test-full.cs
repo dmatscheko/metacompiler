@@ -26,7 +26,10 @@
 // feature matrix already carries), LINQ query syntax (it needs System.Linq),
 // await operands (they need System.Threading.Tasks; async members are covered
 // definition-only), unsafe code / pointers / stackalloc, ref structs,
-// preprocessor directives, assembly-level attributes, reflection, threads.
+// assembly-level attributes, reflection, threads. Preprocessor directives are
+// covered (section 26) as far as they go: they are skipped as trivia, and
+// conditional compilation is NOT evaluated, so the text of every #if branch is
+// parsed - section 26 says so and stays inside that limit.
 // 'string?' annotations outside a #nullable context are a warning, not an
 // error, and are used as such here.
 //
@@ -149,7 +152,22 @@ b";                                                   // verbatim keeps the newl
             int? d = null;
             d ??= 9;                                  // coalescing assignment
             Program.Check("nul6", d == 9);
+            // A CAST to a nullable type. The '?' is inside the parentheses, so this
+            // never collides with the conditional operator outside them.
+            object boxed = 255;
+            int? e = (int?) boxed;
+            Program.Check("nul7", e == 255 && (byte?) 7 == 7);
+            S05Pt? f = (S05Pt?) new S05Pt(2);
+            Program.Check("nul8", f.Value.N == 2);
+            // The nullable '?' also binds tighter than the array suffix: 'int?[]' is an
+            // array of nullable ints. Exactly one of the two positions may be used, so
+            // 'x is S05Pt? ? a : b' still reads its conditional.
+            int?[] g = { 1, null, 3 };
+            Program.Check("nul9", g.Length == 3 && g[1] == null && g[2] == 3);
+            object h = new S05Pt(4);
+            Program.Check("nul10", (h is S05Pt? ? 1 : 2) == 1);
         }
+        struct S05Pt { public int N; public S05Pt(int n) { this.N = n; } }
 
         // ===== SECTION 06: tuples and deconstruction =====
         static (int, int) S06DivMod(int n, int d) { return (n / d, n % d); }
@@ -354,6 +372,7 @@ b";                                                   // verbatim keeps the newl
         // ===== SECTION 13: delegates and events =====
         delegate int S13Op(int x);                    // own delegate type
         delegate void S13Note(string m);
+        delegate int S13Thunk();
         static string S13Log = "";
         static event S13Note S13Changed;              // own event
         static void S13OnChanged(string m) { Program.S13Log = Program.S13Log + m; }
@@ -364,6 +383,12 @@ b";                                                   // verbatim keeps the newl
             Program.Check("dlg1", f(5) == 7);
             f = delegate (int x) { return x * 3; };   // anonymous method
             Program.Check("dlg2", f(4) == 12);
+            // The parameter list may be EMPTY - 'delegate () { ... }' - and it may
+            // be omitted entirely; both are the same anonymous-method form.
+            S13Thunk t0 = delegate () { return 7; };
+            Program.Check("dlg2a", t0() == 7);
+            S13Thunk t1 = delegate { return 8; };
+            Program.Check("dlg2b", t1() == 8);
             S13Op g = x => x + 10;
             f += g;                                   // multicast: last result wins
             Program.Check("dlg3", f(1) == 11);
@@ -429,6 +454,11 @@ b";                                                   // verbatim keeps the newl
             public TA A; public TB B;
             public S16Pair(TA a) { this.A = a; this.B = new TB(); }
         }
+        class S16Static<T>
+        {
+            public static string Tag = "s16";
+            public static int Twice(int n) { return n * 2; }
+        }
         static T S16Pick<T>(T a, T b, bool first) where T : class { return first ? a : b; }
         static void S16()
         {
@@ -436,6 +466,10 @@ b";                                                   // verbatim keeps the newl
             Program.Check("gen1", (string)seq.Head() == "hi");
             S16Sink<string> sink = new S16AnyLen();   // contravariant assignment
             Program.Check("gen2", sink.Eat("abcd") == 9);
+            // A CONSTRUCTED type name as the receiver of a static member - both a field
+            // and a call. The type arguments are erased, so both reach the one class.
+            Program.Check("gen2a", S16Static<int>.Tag == "s16");
+            Program.Check("gen2b", S16Static<string>.Twice(21) == 42);
             var pr = new S16Pair<string, List<int>>("k");
             Program.Check("gen3", pr.A == "k" && pr.B.Count == 0);
             Program.Check("gen4", Program.S16Pick<string>("x", "y", false) == "y");
@@ -941,6 +975,36 @@ b";                                                   // verbatim keeps the newl
             Program.Check("num61", ls[1] == 9223372036854775806L && ("" + ls[0]) == "9223372036854775807");
         }
 
+        // ===== SECTION 26: preprocessor directives =====
+        static int S26Val = 0;
+        static void S26()
+        {
+#region S26 arithmetic
+            int a = 1;
+#pragma warning disable 219
+            int b = 2;
+#pragma warning restore 219
+            Program.Check("pp1", a + b == 3);
+#endregion
+#line 900 "s26.cs"
+            Program.Check("pp2", a == 1);
+#line default
+#if true
+            Program.S26Val = 1;
+#else
+            // Conditional compilation is NOT evaluated: this grammar skips the
+            // directives and parses the text of EVERY branch (see PPDirective in
+            // csharp-interpreter.abnf). So a branch here must stay free of
+            // declarations and statements that would collide with the live one -
+            // which is exactly what this comment demonstrates.
+#endif
+            Program.Check("pp3", Program.S26Val == 1);
+#nullable disable
+            string s = "x";
+#nullable restore
+            Program.Check("pp4", s == "x");
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -970,6 +1034,7 @@ b";                                                   // verbatim keeps the newl
             Program.S23(); // SECTION-CALL 23
             Program.S24(); // SECTION-CALL 24
             Program.S25(); // SECTION-CALL 25
+            Program.S26(); // SECTION-CALL 26
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

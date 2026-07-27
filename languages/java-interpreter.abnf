@@ -58,7 +58,9 @@ switch EXHAUSTIVENESS checking, method overloading by parameter type (constructo
 are picked by arity), the flow scoping of pattern variables (a binding outlives the
 test that introduced it), implicit FIELD access (a field is reached via this.x or
 ClassName.x, the explicit style many code bases enforce - only calls resolve
-unqualified), modules, threads and reflection.
+unqualified), threads and reflection. A JPMS module declaration (module-info.java,
+with requires / exports / opens / uses / provides, and 'import module M;') is PARSED
+and dropped - nothing here has a module system for it to describe.
 
 Fields live directly on the instance object, methods on the class descriptor.
 main(String[] args) of class Main is the entry point; its return is void, so self
@@ -79,8 +81,33 @@ checking programs end with System.exit(failures).") ;
 
 // A stray ';' after a type declaration (`class F { };`) is legal and means
 // nothing, at the top level and inside a class body alike.
-Program     = [ Package ] { Import } { UnsupType | ClassDecl | RecordDecl | StraySemi } ;
+Program     = [ Package ] { Import } { ModuleDecl | UnsupType | ClassDecl | RecordDecl | StraySemi } ;
 StraySemi   = ";" ;
+
+// --- module-info.java: a JPMS module declaration (JLS 7.7). Modules are not
+// modelled, and there is nothing in one to execute, so the whole declaration is
+// pure syntax: no tag anywhere, so it leaves the stack exactly as it found it
+// (the same treatment AnnotationDecl gets).
+//
+// `module`, `open`, `requires`, `transitive`, `exports`, `opens`, `to`, `uses`,
+// `provides` and `with` are RESTRICTED keywords - ordinary identifiers
+// everywhere else in the language - so each is matched as a bare literal HERE
+// and is never added to ModKw or to any Kw* rule. A file that is not a module
+// declaration cannot reach this rule's body: it is an ordered alternative that
+// only commits once `[open] module <name> {` has matched, and every other
+// top-level form fails at `module`.
+ModuleDecl  = LeadMods [ "open" KwEnd ] "module" KwEnd ModName "{" { ModDirective } "}" ;
+// A module / package / service name is dotted, and nothing consumes it, so this
+// is QualName without QualName's push.
+ModName     = Id { "." Id } ;
+ModDirective = ModRequires | ModExports | ModOpens | ModUses | ModProvides | StraySemi ;
+ModRequires = "requires" KwEnd { ReqMod } ModName ";" ;
+ReqMod      = ( "transitive" | "static" ) KwEnd ;
+ModExports  = "exports" KwEnd ModName [ ModTo ] ";" ;
+ModOpens    = "opens" KwEnd ModName [ ModTo ] ";" ;
+ModTo       = "to" KwEnd ModName { "," ModName } ;
+ModUses     = "uses" KwEnd ModName ";" ;
+ModProvides = "provides" KwEnd ModName "with" KwEnd ModName { "," ModName } ";" ;
 
 // An optional package header (parsed and ignored) then repeated imports. Each
 // import path is resolved against the runtime builtins (core.stdlibImports); one
@@ -90,7 +117,14 @@ StraySemi   = ";" ;
 // nor Import leaves a value on the stack.
 // package-info.java carries its annotations on the package declaration.
 Package     <~~ pop() ~~> = LeadMods KwPackage QualName ";" ;
-Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport [ "static" KwEnd ] QualName ";" ;
+// `import module java.base;` (JEP 476) imports every package a module exports.
+// It is the SECOND alternative on purpose: `module` is a restricted keyword, so
+// `import module.foo.Bar;` is still a legal ordinary import of a package called
+// `module`, and trying the plain form first keeps that reading. Either
+// alternative leaves exactly one name on the stack for resolveImport.
+Import      <~~ resolveImport(pop(), up.pos) ~~>
+            = KwImport [ "static" KwEnd ] QualName ";"
+            | KwImport "module" KwEnd QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
@@ -506,7 +540,17 @@ SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
 // A primary followed by method calls, field reads and indexing:
 // System.out.println(x), p.dist(), this.x, arr[i], Main.check(...).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { QNewSfx | MethodSfx | FieldSfx | IndexSfx } ;
+            = Primary { QNewSfx | MRefSfx | MethodSfx | FieldSfx | IndexSfx } ;
+// expr::m - a BOUND method reference whose receiver is an arbitrary expression:
+// `check()::ido`, `new Foo()::getA`, `((C) t)::m`, `sam.get()::get`. Like
+// QNewSfx it is a SUFFIX rather than a postfix form of its own, for the same
+// reason: an alternative starting with a Primary would parse the receiver twice
+// and cost 2^depth on nested calls. Java evaluates the receiver of a bound
+// reference ONCE, where the reference is written, which is exactly what folding
+// it into the chain does.
+MRefSfx     <~~ push({kind:"mref", name: popName()}) ~~>
+            = "::" [ SkipAngle ] MRefName ;
+MRefName    <~~ push({mname: stripWs(up.in)}) ~~> = Id | KwNew ;
 // o.new Inner(args) - creation qualified by an enclosing instance. It is a
 // SUFFIX of the member chain, not a postfix form of its own: an alternative
 // beginning with a Primary would parse the qualifier once for itself and once
@@ -590,9 +634,16 @@ LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({lblock: pop()}) ~~> = Block ;
 LamExpr     <~~ push({lexpr: pop()}) ~~> = Expression ;
 // A method reference Recv::m becomes a closure that forwards its arguments to
-// Recv.m(...). Constructor references (::new) stay not implemented.
+// Recv.m(...). This form is the one whose receiver is a NAME - a class, a
+// variable, or a dotted path - and it resolves that name lazily, inside the
+// closure. Type arguments on either side (Foo<String>::new, r::<T>generic) are
+// parsed and erased like every other generic, and an ARRAY target (String[]::new,
+// int[]::clone) is recognised too; makeMethodRef strips both back off the text.
+// The receiver that is an arbitrary EXPRESSION - check()::m, new Foo()::m,
+// ((C) t)::m - is MRefSfx down in the member chain instead.
 MethodRef   <~~ push(makeMethodRef(stripWs(up.in), up.pos)) ~~>
-            = Id { "." Id } "::" ( Id | KwNew ) ;
+            = ( PrimName KwEnd | Id { "." Id } ) [ SkipAngle ] { "[" "]" }
+              "::" [ SkipAngle ] ( Id | KwNew ) ;
 
 // Java's string literal. Same shape as lib/dq-strings.abnf, but decoded by
 // jUnescape, which knows Java's octal escapes ("A\102") and \s.
@@ -1887,8 +1938,22 @@ KwSync      = "synchronized" KwEnd ;
     // the this-binding from the receiver kind. ::new is not modelled.
     function makeMethodRef(text, pos) {
         var sep = text.indexOf("::")
-        var tgtPath = text.slice(0, sep)
-        var methodPart = text.slice(sep + 2)
+        var tgtPath = jStripTargs(text.slice(0, sep))
+        var methodPart = jStripTargs(text.slice(sep + 2))
+        // String[]::new / int[]::clone - a reference over an ARRAY type. There
+        // is no class descriptor to look up, so these two are the whole set:
+        // ::new allocates, ::clone is unbound and copies its first argument.
+        if (tgtPath.indexOf("[") >= 0) {
+            var elemDflt = jArrDefault(jStripArr(tgtPath))
+            if (methodPart == "new") {
+                return function() {
+                    return function(n) { return jAllocArr([n], 0, elemDflt) }
+                }
+            }
+            return function() {
+                return function(a) { return a == null ? null : a.slice(0) }
+            }
+        }
         var parts = splitDots(tgtPath)
         // Word::new - a constructor reference. It builds the instance the same way
         // NewObject does, with the reference's own arguments.
@@ -1927,6 +1992,44 @@ KwSync      = "synchronized" KwEnd ;
     }
     // Splits a dotted path "a.b.c" into ["a", "b", "c"].
     function splitDots(s) { return s.split(".") }
+    // Drops every balanced <...> run from a method-reference operand, so
+    // `Foo<String>` reads as `Foo` and `<@TA Object>generic` as `generic`.
+    // Generics are erased in this model, so this is all erasure needs. Written
+    // as an explicit depth scan rather than a regex or lastIndexOf: nested
+    // arguments (Map<K, List<V>>) must nest, and the frozen engine has no
+    // lastIndexOf.
+    function jStripTargs(s) {
+        var out = ""
+        var depth = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "<") { depth = depth + 1 }
+            else if (ch == ">") { depth = depth - 1 }
+            else if (depth == 0) { out = out + ch }
+        }
+        return out
+    }
+    // "String[][]" -> "String": the element type an array reference allocates.
+    function jStripArr(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "[" || ch == "]") { return out }
+            out = out + ch
+        }
+        return out
+    }
+    // expr::m - a bound method reference over an already-evaluated receiver.
+    // Java evaluates that receiver once, where the reference is written, so the
+    // closure captures the VALUE and forwards only its arguments.
+    function jBindMethodRef(recv, name) {
+        var bound = recv
+        return function() {
+            var argv = []
+            for (var a = 0; a < arguments.length; a++) { argv.push(arguments[a]) }
+            return mcall(bound, name, argv)
+        }
+    }
 
     // ----- Statement thunks -----
 
@@ -2979,6 +3082,8 @@ KwSync      = "synchronized" KwEnd ;
                 } else if (s.kind == "field") {
                     if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
                     cur = core.getField(cur, s.name)
+                } else if (s.kind == "mref") {
+                    cur = jBindMethodRef(cur, s.name)
                 } else if (s.kind == "qnew") {
                     var av = []
                     for (var k = 0; k < s.args.length; k++) { av.push(s.args[k]()) }

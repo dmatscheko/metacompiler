@@ -95,7 +95,34 @@ csharp-interpreter.abnf.") ;
 // --- main rules
 
 // Shared token productions (languages/lib).
-:include("lib/cstyle-comments.abnf") ;
+// C# whitespace is C's - blanks plus // and /* */ - PLUS the preprocessor. A
+// directive line is trivia as far as the parser is concerned, so it is skipped
+// wherever a comment would be. That is the one lexical difference from
+// lib/cstyle-comments.abnf, and it is why this grammar carries its own copy of
+// that fragment instead of including it: the shared lib stays untouched and no
+// other language is affected (the precedent is commit 0ed59ab, which did the
+// same for an Id that had to differ).
+Whitespace  = { @+" \t\r\n" | Comment | PPDirective } ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+
+// A preprocessor directive (ECMA-334 6.5): #define / #undef, #if / #elif /
+// #else / #endif, #line, #region / #endregion, #pragma, #error / #warning,
+// #nullable, #checksum. '#' is not an operator in C#, so anything from a '#' to
+// the end of its line is a directive and is skipped like a comment.
+//
+// CONDITIONAL COMPILATION IS NOT EVALUATED: the directives vanish and the text of
+// EVERY branch is parsed. That is deliberate and it is the honest limit of this
+// approach - two branches that each declare the same member both reach the
+// runtime, and an #if guarding a syntactically incomplete fragment still has to
+// parse. It is right for what this front end does (it recognises syntax; it does
+// not model build configurations), and it is what makes a file that merely wraps
+// a #region or a #pragma around ordinary code parse at all.
+PPDirective = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 :include("lib/ident.abnf") ;
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
@@ -105,17 +132,27 @@ csharp-interpreter.abnf.") ;
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = { Using } { TopDecl } ;
+            = { ExternAlias } { Using } { TopDecl } ;
 
 // A 'using' directive (also 'using static' and the 'using Alias = Path;' form) is
 // resolved against the runtime builtins (core.stdlibImports); one that does not resolve
 // aborts the compile, unless -warn-imports downgrades it to a warning. It pushes no
 // statement, so buildMain never sees it.
 Using       <~~ resolveImport(pop(), up.pos) ~~>
-            = [ "global" KwEnd ] KwUsing [ "static" KwEnd ] [ Id "=" ] QualName ";" ;
+            = [ "global" KwEnd ] KwUsing [ "unsafe" KwEnd ] [ "static" KwEnd ]
+              [ Id "=" ] UsingTarget ";" ;
+// The target of a using-ALIAS may be a constructed type ('using L = List<string>;',
+// 'using A = N.M<double>;'), which a plain QualName cannot spell. The type arguments
+// are dropped, like every other generic here, so the name that reaches resolveImport
+// is the same dotted path the non-generic form would have produced.
+UsingTarget <~~ push(csStripTargs(stripWs(up.in))) ~~>
+            = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } [ "." "*" ] ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id [ "::" Id ] { "." Id } [ "." "*" ] ;
 
-TopDecl     = ExternAlias | TopAttr | Namespace | FileNs | UnsupType | TypeDecl ;
+// A stray ';' after a type declaration (`class F { };`, `enum E { A };`) is legal and
+// means nothing - ECMA-334 13.7 lets a `;` stand as a whole namespace member.
+TopDecl     = ExternAlias | TopAttr | Namespace | FileNs | UnsupType | TypeDecl | TopSemi ;
+TopSemi     = ";" ;
 // 'extern alias X;': an assembly alias. There are no assemblies here, so it is parsed and
 // dropped; the 'X::Name' references it enables are read as plain qualified names.
 ExternAlias = "extern" KwEnd "alias" KwEnd Id ";" ;
@@ -155,7 +192,7 @@ PrimaryCtor <~~ push({primary: pop()}) ~~>
 // The first base type. A qualified name ('B.Inner') keeps its last segment, which is the
 // simple name every type is registered under.
 BaseSpec    <~~ push({ext: csLastSeg(stripWs(up.in))}) ~~>
-            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+            = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 // 'class' or 'struct': a struct is built exactly like a class, and additionally copies
 // on a declaration whose declared type names it (C# value semantics) and has a zeroed
 // default instance.
@@ -174,8 +211,11 @@ ClassName   <~~ push(up.in); classStack.push(curClassName); curClassName = up.in
 // A delegate declaration is legal at file scope AND in a class body; it is listed here
 // as well, so a nested one does not fall through to Method (which would then demand a
 // body).
+// MemberSemi is the stray ';' between members - after a nested type declaration
+// (`enum E { A, B };`) it is legal and means nothing, exactly like TopSemi above.
 Member      = NestedType | NestedUnsup | DelegateDecl | OperatorDecl | Finalizer | Ctor
-            | Method | AbstractMethod | IndexerDecl | Property | Field ;
+            | Method | AbstractMethod | IndexerDecl | Property | Field | MemberSemi ;
+MemberSemi  = ";" ;
 
 // A finalizer ('~X() { ... }'). There is no garbage collector to run it, so it is parsed
 // and dropped - it pushes nothing, and the class body simply skips it.
@@ -203,8 +243,17 @@ KwOperator  = "operator" KwEnd ;
 // An indexer ('public int this[int i] { get { ... } }'): its accessors become the
 // class' __index / __setindex members, which the index read and the index assignment
 // consult when the receiver is an instance of a class that declares one.
+// An indexer. The name may be qualified with the interface it explicitly implements
+// ('int IFoo<T>.this[int i] { get { ... } }'); there is one indexer per class here,
+// so the interface name is parsed and dropped. The body may be a block of accessors
+// or an expression, which is a get-only accessor - the same pair Property allows.
 IndexerDecl <~~ push(makeIndexer(takeAll())) ~~>
-            = Mods FType KwThis IdxParams PropAccs ;
+            = Mods FType [ IfaceQual ] KwThis IdxParams ( PropAccs | PropArrow ) ;
+// Each segment carries its OWN trailing dot. Written as `... { "." Id } "."` the
+// repetition is greedy and swallows the `.this`, and then the final "." has nothing
+// left to match, so the whole optional silently matched empty and `this` was never
+// reached.
+IfaceQual   = Id [ "::" Id ] [ SkipAngle ] "." { Id [ SkipAngle ] "." } ;
 IdxParams   <~~ push(makeParams(takeAll())) ~~>
             = "[" [ Param { "," Param } ] "]" ;
 
@@ -277,8 +326,15 @@ PropArrow   <~~ push({parrow: pop()}) ~~>
 // becomes a field of its own; buildClass flattens the group before the members are read.
 Field       <~~ push(makeFieldGroup(takeAll())) ~~>
             = Mods FType FieldDecl { "," FieldDecl } ";" ;
+// The '[n]' is the FIXED-SIZE BUFFER declarator ('public fixed int data[8];'), an
+// unsafe-only form. The length is a constant expression that nothing here reads, so
+// it is skipped rather than parsed, and the field is an ordinary one. The grammar
+// does not insist on the 'fixed' modifier: modifiers are collected generically, and
+// refusing the declarator without it would buy nothing this front end can use.
 FieldDecl   <~~ push({fdecl: takeAll()}) ~~>
-            = Id <~~ push(up.in) ~~> [ "=" InitVal ] ;
+            = Id <~~ push(up.in) ~~> [ FixedDim ] [ "=" InitVal ] ;
+FixedDim    = "[" { FixedDimCh } "]" ;
+FixedDimCh  = "\x00"..."\x5c" | "\x5e"..."\U0010ffff" ;
 // An initializer value. The braced array initializer ('int[] a = {1, 2};') is only legal
 // here and in a local declaration, so it is not part of Expression.
 InitVal     = ArrLit | Expression ;
@@ -299,7 +355,11 @@ FType       <~~ push({ty: up.in}) ~~>
 // marks the variadic tail, so both modifiers leave a marker; the rest are dropped.
 ParamList   <~~ push(makeParams(takeAll())) ~~>
             = "(" [ Param { "," Param } ] ")" ;
-Param       = { AttrSection } { ParamMod } Type [ "..." ] ParamName [ ParamDflt ] ;
+// '__arglist' is the variadic parameter of C#'s native-interop calling convention.
+// There is no way to read the extra arguments in this model, so it is parsed and
+// dropped: it pushes no name, and the method simply has one parameter fewer.
+Param       = ArglistParam | { AttrSection } { ParamMod } Type [ "..." ] ParamName [ ParamDflt ] ;
+ArglistParam = "__arglist" KwEnd ;
 ParamName   <~~ push(up.in) ~~>
             = Id ;
 ParamDflt   <~~ push({pdflt: pop()}) ~~>
@@ -314,7 +374,13 @@ ParamsMod   <~~ push({paramsParam: true}) ~~>
 // dotted names, array suffixes and the nullable '?' are accepted and dropped.
 // The pointer suffix ('int*', 'S**') is accepted and dropped: unsafe code parses, and a
 // pointer behaves like the reference it names here.
-Type        = TypeName { "*" | "[" { "," } "]" } [ "?" ] ;
+// The nullable '?' may sit BEFORE the array suffix ('int?[]' is an array of nullable
+// ints) or after it ('int[]?' is a nullable array); both are dropped. EXACTLY ONE of
+// them may match, which is why they are two alternatives rather than two optionals:
+// with both optional, `o is Program? ? 1 : 2` ate the ternary's '?' as a second
+// nullable suffix and the conditional behind it no longer parsed.
+Type        = TypeName ( "?" ArrSfxs | ArrSfxs [ "?" ] ) ;
+ArrSfxs     = { "*" | "[" { "," } "]" } ;
 TypeName    = TupleType | PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "void" KwEnd
             | "var" KwEnd | "dynamic" KwEnd | UserType ;
 // A tuple type ('(int, int)', '(int lo, int hi)'). It needs at least two elements, so a
@@ -331,8 +397,15 @@ UserType    = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 // Every statement production pushes exactly one thunk: function(block) -> nextBlock.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
-            | Goto | Try | Throw | UsingStmt | Lock | Checked | LocalFunc | YieldStmt
-            | Decon | Decl | Empty | ExprStmt ;
+            | Goto | Try | Throw | UsingStmt | Lock | Checked | FixedStmt | LocalFunc
+            | YieldStmt | Decon | Decl | Empty | ExprStmt ;
+
+// 'fixed (int* p = &v) stmt': pinning is not modelled (nothing here moves), so the
+// statement is exactly its declaration followed by its body, scoped together - which
+// is what a block of those two items already is. It precedes Decl because 'fixed' is
+// also a LOCAL MODIFIER, and Decl would take the keyword and then fail on the '('.
+FixedStmt   <~~ push(makeBlockStmt(takeAll())) ~~>
+            = "fixed" KwEnd "(" DeclCore ")" Statement ;
 
 // 'goto L;' is a branch to the basic block the enclosing statement list opened for L
 // (label-as-basic-block, like batch-to-llvm-ir.abnf); 'goto case c;' and 'goto default;'
@@ -554,15 +627,19 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = BitOr { "&&" BitOr } ;
 
-// The bitwise levels sit between && and equality (as in C#). A lone '|' that actually
-// begins '||' fails its right side, the iteration rolls back, and the '||' level above
-// picks it up (likewise '&' vs '&&').
+// The bitwise levels sit between && and equality (as in C#). The !"|" / !"&"
+// lookaheads make each level refuse the FIRST character of the doubled operator. This
+// used to be left to the right side failing and the iteration rolling back - which
+// worked only while nothing could start with '&': once AddrOf ('&x') existed,
+// `false && Bump()` parsed as `false & (&Bump())`, evaluated bitwise, and stopped
+// short-circuiting. Silently: it is a wrong ANSWER, not a parse error, and only the
+// logic-and-skipped assertion in csharp-test-features.cs caught it.
 BitOr       <~~ push(foldBinary(takeAll())) ~~>
-            = BitXor { "|" <~~ push("|") ~~> BitXor } ;
+            = BitXor { "|" !"|" <~~ push("|") ~~> BitXor } ;
 BitXor      <~~ push(foldBinary(takeAll())) ~~>
             = BitAnd { "^" <~~ push("^") ~~> BitAnd } ;
 BitAnd      <~~ push(foldBinary(takeAll())) ~~>
-            = EqExpr { "&" <~~ push("&") ~~> EqExpr } ;
+            = EqExpr { "&" !"&" <~~ push("&") ~~> EqExpr } ;
 
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
@@ -664,7 +741,14 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 // so await is the identity on its operand - which is what a synchronously completed task
 // means. It is a rule without a tag, so the operand's own thunk stands.
 // PreIncDec comes before Neg, or '--x' reads as the double negation '-(-x)'.
-UnaryExpr   = Await | PreIncDec | Cast | Neg | Not | BitNot | PostfixExpr ;
+// '&x' (address-of) and '*p' (dereference) are identity here: a pointer behaves like
+// the reference it names, so both operators pass their operand through untagged.
+// Neither shadows the BINARY '&' or '*', which are only reached after an operand has
+// already been parsed - but see the !"&" on the bitwise level above, which is what
+// keeps `a && b` from being read as `a & (&b)`.
+UnaryExpr   = Await | PreIncDec | Cast | Neg | Not | BitNot | AddrOf | Deref | PostfixExpr ;
+AddrOf      = "&" !"=" UnaryExpr ;
+Deref       = "*" !"=" UnaryExpr ;
 PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Await       = "await" KwEnd UnaryExpr ;
@@ -679,13 +763,15 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // unary operand; a reference cast excludes a leading '-'/'+' so '(a) - b' stays subtraction.
 Cast        = PrimCast | RefCast ;
 PrimCast    <~~ push(makeCast(pop(), pop())) ~~>
-            = "(" CastPrim { "*" | "[" "]" } ")" UnaryExpr ;
+            = "(" CastPrim { "*" | "[" "]" } [ "?" ] ")" UnaryExpr ;
 CastPrim    <~~ push({castty: stripWs(up.in)}) ~~>
             = PrimType ;
 RefCast     <~~ push(makeCast(pop())) ~~>
             = "(" RefType ")" UnaryNoPM ;
 UnaryNoPM   = Not | PostfixExpr ;
-RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "*" | "[" "]" } ;
+// The trailing '?' is the NULLABLE suffix of a cast target - '(MyStruct?) s'. It is
+// inside the parentheses, so the ternary '(cond) ? a : b' is untouched.
+RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "*" | "[" "]" } [ "?" ] ;
 
 // 'new C().m()' and 'base.M().n()' continue into the member chain, so an object
 // creation and a base call are SEEDS of the chain (CallSeed), not alternatives beside it.
@@ -709,7 +795,7 @@ NewObjInit  <~~ push(makeNew(takeAll())) ~~>
 // only the last segment is kept, which is the simple name every type is registered under.
 // The generic arguments are kept too (reified type arguments, see makeNew).
 NewName     <~~ push({cname: csSimpleName(up.in), targs: csTypeArgs(up.in)}) ~~>
-            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+            = Id [ "::" Id ] [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 // The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
             = KwNew Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
@@ -762,7 +848,40 @@ NFSfx       <~~ push({kind: "nfg"}) ~~>
 // otherwise it is an ordinary call of whatever the name holds (a lambda, a delegate).
 // typeof / nameof / sizeof / default look exactly like a bare call, so they are matched
 // before SelfCall.
-CallSeed    = KwExpr | NewExpr | BaseCall | SelfCall | Primary | VarSeed ;
+// Lambda and AnonMethod precede SelfCall, which is a bare `Id(args)` call: without
+// that order `delegate () { }` and `async () => e` are read as calls to variables
+// NAMED `delegate` and `async` (both match Id, and both are followed by `()`), the
+// call succeeds, and the block or the `=>` behind it is then left unparsed. Neither
+// new alternative can shadow anything: one demands the `delegate` keyword, the other
+// an `=>` after its head.
+CallSeed    = KwExpr | NewExpr | BaseCall | Lambda | AnonMethod
+            | AliasSeed | GenSeed | SelfCall | Primary | VarSeed ;
+// 'G<int>.Instance' / 'C<object>.Foo(x)' - a CONSTRUCTED type name as the receiver of
+// a static member. Type arguments are erased, so the seed is the plain class name and
+// the member behind it is an ordinary field or call suffix; GenSeed pushes both, which
+// is all foldCallMember needs.
+//
+// The '.' is consumed HERE rather than left to FieldSfx on purpose: a seed of
+// 'Id SkipAngle' alone would read the relational chain 'a < b > c' as a constructed
+// type, and a PEG never goes back. Requiring the '.' costs nothing real - a
+// constructed type is only ever a receiver - and keeps every comparison intact.
+GenSeed     = GenName "." GenMemb ;
+GenName     <~~ push(csGenSeed(csSimpleName(up.in))) ~~>
+            = Id SkipAngle ;
+GenMemb     = GenMCall | GenField ;
+GenMCall    <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
+GenField    = Id <~~ push({kind:"field", name: up.in}) ~~> ;
+// 'MyAssembly01::GlobalClass' - the namespace-alias qualifier an 'extern alias'
+// enables. There are no assemblies here, so the alias is dropped and the name behind
+// it seeds the chain exactly as a bare name would. It has to beat SelfCall and
+// VarSeed, which would both read the ALIAS as the name and stop at the '::'.
+AliasSeed   = Id "::" AliasTail ;
+AliasTail   = AliasCall | AliasVar ;
+AliasCall   <~~ push(makeSelfCall(popName(), takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
+AliasVar    <~~ push({seedvar: up.in, seedt: makeVarRef(up.in)}) ~~>
+            = Id ;
 // A bare name in SEED position. It pushes its own name beside its thunk, so the member
 // chain above it knows which variable it started at - which is what a call of a HIDDEN
 // method ('public new string Tag()') needs, since C# resolves that one by the DECLARED
@@ -3645,13 +3764,41 @@ KwLet       = "let" KwEnd ;
     // ----- Class building -----
 
     // The last segment of a dotted name ('ITag.Tag' -> 'Tag').
+    // Drops every balanced <...> run from a name, so a using-alias target
+    // 'System.Collections.Generic.List<string>' reads as the dotted path
+    // 'System.Collections.Generic.List'. Generics are erased in this model, so
+    // this is all erasure needs. Written as an explicit depth scan rather than a
+    // regex or lastIndexOf: nested arguments (Dictionary<K, List<V>>) must nest,
+    // and the frozen engine has no lastIndexOf.
+    function csStripTargs(s) {
+        var out = ""
+        var depth = 0
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "<") { depth = depth + 1 }
+            else if (ch == ">") { depth = depth - 1 }
+            else if (depth == 0) { out = out + ch }
+        }
+        return out
+    }
     function csLastSeg(s) {
-        var parts = s.split(".")
-        return parts[parts.length - 1]
+        // '.' and the alias qualifier '::' both start a new segment, so
+        // 'MyAssembly01::GlobalClass' and 'N.GlobalClass' both answer
+        // 'GlobalClass' - the simple name every type is registered under. A
+        // forward scan rather than a split, so the frozen engine can run it too.
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (ch == "." || ch == ":") { out = "" } else { out = out + ch }
+        }
+        return out
     }
     // The simple name of a possibly qualified, possibly generic type reference
     // ('System.Collections.Generic.List<int>' -> 'List'): the generic arguments are dropped
     // first (they may themselves be dotted), then the last segment is kept.
+    // The seed record for a constructed type used as a receiver: the erased class
+    // name, in the same shape VarSeed pushes for a bare name.
+    function csGenSeed(n) { return {seedvar: n, seedt: makeVarRef(n)} }
     function csSimpleName(s) {
         var t = stripWs(s)
         var out = ""
@@ -3975,6 +4122,7 @@ KwLet       = "let" KwEnd ;
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it.params != undefined) { pinfo = it; continue }
+            if (it.parrow != undefined) { getT = it.parrow; continue }   // '=> e' body
             if (it.accs != undefined) {
                 var accs = it.accs
                 for (var j = 0; j < accs.length; j++) {

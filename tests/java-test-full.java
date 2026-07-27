@@ -23,8 +23,9 @@
 // packages and imports - and with them the whole standard library beyond the
 // java.lang implicits the feature test already uses (String, Math, System and
 // friends); the functional interfaces here are declared locally instead of
-// importing java.util.function. Also out: modules (module-info), threads (and
-// synchronized), reflection, javadoc.
+// importing java.util.function. Also out: modules - a module-info.java IS parsed
+// (see ModuleDecl in the grammar) but is a file of its own, so it cannot be a
+// section here - threads (and synchronized), reflection, javadoc.
 //
 // Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 // code), organized after the Java Language Specification (SE 21) with the
@@ -469,8 +470,36 @@ class S15 {
         Maker mk = Word::new; // constructor reference
         Word made = mk.make("xy");
         Main.check("lam10", made.len() == 2);
+
+        // ----- the receiver of a BOUND reference may be any expression -----
+        // JLS 15.13: `expr::m` evaluates expr once, where the reference is
+        // written, and the closure then forwards only its own arguments.
+        Fetch<Integer> viaCall = S15.pick("abcde")::len;   // a call result
+        Main.check("lam11", viaCall.get() == 5);
+        Fetch<Integer> viaNew = new Word("hi")::len;       // a `new` expression
+        Main.check("lam12", viaNew.get() == 2);
+        Fetch<Integer> viaCast = ((Word) S15.pick("wxyz"))::len; // a parenthesized cast
+        Main.check("lam13", viaCast.get() == 4);
+        S15.evals = 0;
+        Fetch<Integer> once = S15.counted()::len;
+        once.get();
+        once.get();
+        Main.check("lam14", S15.evals == 1); // receiver evaluated ONCE, not per call
+
+        // ----- type arguments on either side of :: are parsed and erased -----
+        LenOf targs = Word::<Integer>len;
+        Main.check("lam15", targs.of(new Word("abc")) == 3);
+
+        // ----- an ARRAY constructor reference: String[]::new -----
+        ArrMaker am = String[]::new;
+        String[] fresh = am.make(3);
+        Main.check("lam16", fresh.length == 3 && fresh[0] == null);
     }
+    static int evals = 0;
+    static Word pick(String s) { return new Word(s); }
+    static Word counted() { S15.evals++; return new Word("z"); }
 }
+interface ArrMaker { String[] make(int n); }
 
 // ===== SECTION 16: nested and inner classes =====
 class Outer {
