@@ -3,13 +3,27 @@
 IR interpreter.
 
 The language is exactly the one of c-interpreter.abnf; see there for a description.
+The built-in IR interpreter decodes no floating-point instruction, so a double is
+carried as its IEEE-754 bit pattern in an i64 and the arithmetic is emitted as integer
+code - the soft-float library a compiler ships for a target without an FPU, written
+into the module itself (branchless helpers __mec_dadd / __mec_dmul / __mec_ddiv /
+__mec_i2d / __mec_d2i, comparisons inline). Two documented simplifications: the
+mantissa arithmetic truncates where IEEE rounds to nearest even, and infinities, NaNs
+and subnormals are not modelled; a float is computed at double precision, like in the
+interpreter. A constant expression still folds at compile time and never reaches a
+helper.
 Pointers compile to real addresses (alloca values), arrays to alloca [N x i32] plus
 getelementptr, globals to module globals. Structs become real LLVM struct types:
 member access is a getelementptr with a constant field index, nested structs and
 arrays of structs nest the types, and the built-in IR interpreter lays the fields
 out packed (ints 4 bytes, pointers 8). A union is an LLVM struct holding its widest
 member, which every one of its members selects, so they share one address; bit fields
-mask (or sign-extend) on every store. || and && short circuit through basic blocks,
+mask (or sign-extend) on every store. A struct returned by value uses the sret shape
+of a real C ABI: the caller allocates the destination and passes it as a hidden first
+pointer parameter. A function pointer is the callee identifier, an i32; since the
+built-in IR interpreter has no indirect call, an indirect call goes through a
+generated per-arity trampoline that compares the identifier against every
+address-taken function and calls it directly. || and && short circuit through basic blocks,
 the ternary operator merges with a phi. int is 32 bit, / and % truncate towards zero,
 >> is arithmetic.
 
@@ -32,9 +46,9 @@ The same language with the same semantics is interpreted directly by c-interpret
 :whitespace(Whitespace) ;
 
 Program     = { Include | PPLine | StaticAssert | EnumDef | UnionDef | UnionGDecl | UnionSkip
-              | TypedefDecl | GFloatDecl
+              | TypedefDecl
               | StructDef | GStructDefDecl | GUnionDefDecl | StructGDecl
-              | FuncDef | Proto | GAggDecl | GlobalDecl } ;
+              | FnPtrFuncDef | TdFuncDef | SProto | SFuncDef | FuncDef | Proto | GAggDecl | GlobalDecl } ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
 // #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
@@ -71,17 +85,72 @@ UnionGDecl  <~~ defineStructGlobals(takeAll()) ~~>
 UnionSkip   <~~ notImpl("anonymous union", up.pos) ~~>
             = KwUnion SkipBlock ";" ;
 
-// typedef <anything> Name; -- accepted and reported as not implemented (there is no
-// symbol table, so the introduced name cannot later be used as a type). The whole
-// declaration, including a braced struct/union/enum body, is skipped up to its ';'.
-TypedefDecl <~~ notImpl("typedef", up.pos) ~~>
-            = KwTypedef { SkipBlock | TdChar } ";" ;
-TdChar      = "\x00"..."\x3a" | "\x3c"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+// typedef: the introduced name becomes a real type name, usable wherever a
+// declaration base type may stand. Because a PEG guard cannot consult a symbol
+// table, the USE site is recognized by SHAPE - an identifier that is not a C
+// keyword, directly followed by a declarator - and the tag resolves the name in
+// the typedef table it filled here. That covers the ordinary forms:
+//   typedef int Int;  typedef Int Num;  typedef int Tri[3];
+//   typedef struct { int v; } Box;  typedef int (*Fn)(int);
+TypedefDecl <~~ defineTypedef(takeAll()) ~~>
+            = KwTypedef TdBase TdDeclr { "," TdDeclr } ";" ;
+// The tag-DEFINING forms come first: only what follows the tag tells
+// 'typedef struct S { ... } T;' from 'typedef struct S T;' apart.
+TdBase      = TdStructDef | TdUnionDef | TdEnumDef
+            | TypeInt <~~ push({tb: baseCtOf(up.in)}) ~~>
+            | KwStruct Id <~~ push({tb: ctStruct(up.in)}) ~~>
+            | KwUnion Id <~~ push({tb: ctStruct(uKey(up.in))}) ~~>
+            | EnumRef <~~ push({tb: ctInt}) ~~>
+            | TdRef ;
+TdRef       <~~ push({tref: up.in}) ~~> = NotCKw Id ;
+TdStructDef <~~ push({tb: tdTagDef(takeAll(), false)}) ~~>
+            = KwStruct [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" ;
+TdUnionDef  <~~ push({tb: tdTagDef(takeAll(), true)}) ~~>
+            = KwUnion [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" ;
+TdEnumDef   <~~ defineEnum(takeAll()); push({tb: ctInt}) ~~>
+            = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
+              "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
+TdDeclr     = TdFnPtr | TdPlain ;
+TdFnPtr     <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
+            = "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
+TdPlain     <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 
-// Global float/double declarations: accepted and reported as not implemented (the
-// emitted machine is integer only). The initializer / array size is skipped to ';'.
-GFloatDecl  <~~ notImpl("floating-point declaration", up.pos) ~~>
-            = KwFloating { SkipBlock | TdChar } ";" ;
+// A declaration (or a function definition) whose base type is a typedef name.
+TdDecl      <~~ push(makeTdDecl(takeAll())) ~~>
+            = TdName TdItem { "," TdItem } ";" ;
+TdFuncDef   <~~ buildTdFunc(takeAll()) ~~>
+            = TdName Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+TdName      <~~ push({tname: up.in}) ~~> = NotCKw Id ;
+TdItem      <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ "=" DInit ] ;
+// An identifier that is not one of C's own keywords. A typedef USE is recognized
+// by shape alone, so without this guard 'return x;' would read as a declaration.
+NotCKw = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var kws = ["auto", "break", "case", "char", "const", "continue", "default", "do",
+                   "double", "else", "enum", "extern", "float", "for", "goto", "if",
+                   "inline", "int", "long", "register", "restrict", "return", "short",
+                   "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+                   "unsigned", "void", "volatile", "while", "_Alignas", "_Alignof",
+                   "_Atomic", "_Bool", "_Complex", "_Generic", "_Noreturn",
+                   "_Static_assert", "_Thread_local"]
+        var hit = false
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(s + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01c-keyword", 0) : undefined
+    })()
+~~) ;
+
 
 // A balanced { ... } body consumed without interpreting it (string and char literals
 // are matched first so braces inside them are never miscounted). Copied from the
@@ -140,7 +209,7 @@ FieldType   = TypeInt <~~ push({bty: "int", raw: up.in}) ~~>
             | EnumRef <~~ push({bty: "int"}) ~~>
             | KwStruct Id <~~ push({bty: up.in}) ~~>
             | KwUnion Id <~~ push({bty: uKey(up.in)}) ~~> ;
-FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ BitWidth ] ;
+FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ BitWidth ] ;
 // 'unsigned a : 3' - the declared width in bits.
 BitWidth    <~~ push({bits: pop()}) ~~> = ":" Number ;
 // An UNNAMED bit field ('int : 3;', 'int : 0;') is pure padding: it is parsed, and
@@ -156,6 +225,27 @@ Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
 FuncDef     <~~ buildFunction() ~~>
             = TypeInt Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
+// A function whose RETURN type is a struct or union (by value, or a pointer to one).
+// A by-value struct return is lowered the way a C ABI does it: the caller allocates
+// the destination and passes it as a hidden FIRST pointer parameter, and 'return v'
+// copies into it. A prototype registers the same shape, so a call that precedes the
+// definition still emits the hidden argument.
+SFuncDef    <~~ buildSFunction(takeAll()) ~~>
+            = SRetType Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+SProto      <~~ registerSProto(takeAll()) ~~>
+            = SRetType Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
+SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
+            = ( KwStruct Id <~~ push(up.in) ~~> | KwUnion Id <~~ push(uKey(up.in)) ~~> ) [ Stars ] ;
+
+// 'int (*pick(int w))(int) { ... }' - a function RETURNING a function pointer. The
+// returned value is the callee's identifier, so the return type is an ordinary i32;
+// only the declarator syntax is unusual.
+FnPtrFuncDef <~~ buildFnPtrFunc(takeAll()) ~~>
+            = TypeInt "(" Stars Id <~~ push(up.in) ~~> ParamList ")" FnParams { Attr } Block ;
+// The parameter list of a function TYPE ('(int)', '(void)', '(int, char *)'): only
+// the arity of the call matters here, so the balanced run is parsed and ignored.
+FnParams    = SkipParen ;
+
 // Param is tried before the empty (void): 'void' as a base type only makes a
 // parameter with '*' (void *p); a bare '(void)' has no declarator, so Param fails
 // on the missing name and the '(void)' fallback matches. A trailing '...' (a
@@ -168,21 +258,27 @@ FuncDef     <~~ buildFunction() ~~>
 ParamList   <~~ push(takeAll()) ~~>
             = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
 VoidOnly    = "void" KwEnd !"*" ;
-ParamItem   = Param | ParamAbs ;
+ParamItem   = FnPtrParam | Param | ParamAbs ;
+// 'int (*f)(int)' as a parameter: one i32 holding a function identifier.
+FnPtrParam  <~~ push(makeFnPtrParam(takeAll())) ~~>
+            = ParamType "(" Stars Id <~~ push(up.in) ~~> ")" FnParams ;
 Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] Id <~~ push(up.in) ~~> ;
 // An abstract (unnamed) parameter: only its type matters, and nothing can read it.
 ParamAbs    <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] ;
-ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~>
+ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
             | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
 // Globals are registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
-            = BaseInt GDeclarator { "," GDeclarator } ";" ;
-GDeclarator <~~ push(makeGDecl(takeAll())) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArraySize | "=" Number <~~ push({init: pop()}) ~~> ] ;
+            = BaseTy GDeclarator { "," GDeclarator } ";" ;
+GDeclarator <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims | GInit ] ;
+GInit       <~~ push({gv: pop()}) ~~> = "=" Number ;
+// The declaration BASE type, kept as a real C type so that a char is one byte wide
+// and an unsigned int divides and compares unsigned. Pushes {bty: ct}.
+BaseTy      <~~ push({bty: baseCtOf(up.in)}) ~~> = TypeInt | EnumRef ;
 ArraySize   <~~ push({size: pop()}) ~~>
             = "[" Number "]" ;
 
@@ -192,12 +288,11 @@ StructGDecl <~~ defineStructGlobals(takeAll()) ~~>
 SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArraySize ] ;
 
-// Aggregate '= { ... }' initializers and multi-dimensional arrays are accepted and
-// reported as not implemented (the packed layout has no aggregate init and no nested
-// array type). AggForm matches only the unsupported shapes - a brace body, an empty
-// '[]', or two or more dimensions - so a plain 'int a[3];' still falls through to the
-// genuine declarators. The declarator, dimensions and '{ ... }' body are all skipped;
-// takeAll() drops whatever the dimension sizes pushed. GAggDecl is the top-level form.
+// Aggregate '= { ... }' initializers on GLOBALS are accepted and reported as not
+// implemented (a global is emitted at build time, where no initializer can run).
+// AggForm matches only the unsupported shapes, so a plain 'int a[3];' still falls
+// through to the genuine declarators. The declarator, dimensions and '{ ... }' body
+// are all skipped; takeAll() drops whatever the dimension sizes pushed.
 GAggDecl    <~~ takeAll(); notImpl("aggregate initializer", up.pos) ~~>
             = AggBase { PStars } Id AggForm ";" ;
 AggBase     = BaseInt | KwStruct Id | KwUnion Id ;
@@ -222,8 +317,8 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // more array dimensions, a braced scalar) still fall through to the AggDecl notImpl.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
             | AssertStmt | BoolDecl | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
-            | StaticDecl | StructDecl | UnionDecl | AggDecl | Decl | LFloatDecl
-            | Goto | PPStmt | Label | Empty | ExprStmt ;
+            | StaticDecl | StructDecl | UnionDecl | AggDecl | Decl
+            | Goto | PPStmt | Label | TdDecl | Empty | ExprStmt ;
 
 // A struct definition inside a function body. The layout is registered exactly like a
 // top-level one (the tag runs at build time), and the statement itself does nothing.
@@ -239,21 +334,19 @@ LUnionDef   <~~ defineUnion(takeAll()); push(function(b) { return b }) ~~>
 // A static local: the storage is allocated ONCE and survives across calls, unlike an
 // ordinary local. At the top level 'static' is just a linkage word on a global and is
 // parsed by TypeInt, so this form only ever claims a statement.
-StaticDecl  <~~ push(makeSeq(takeAll())) ~~>
-            = KwStatic BaseInt SInitDecl { "," SInitDecl } ";" ;
-SInitDecl   <~~ push(makeStaticDecl(takeAll())) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~> [ ArraySize | InferArr ] [ "=" DInit ] ;
+StaticDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
+            = KwStatic BaseTy SInitDecl { "," SInitDecl } ";" ;
+SInitDecl   <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims | InferArr ] [ "=" DInit ] ;
 
 // Local aggregate / multi-dimensional / brace-initialized declarations: the statement
 // form of GAggDecl (see there). Placed before StructDecl and Decl so it claims only
 // the unsupported shapes and leaves genuine 'int a[3];' / 'struct P p;' to them.
 AggDecl     <~~ takeAll(); push(notImplStmt("aggregate initializer", up.pos)) ~~>
             = AggBase { PStars } Id LAggForm ";" ;
-// The LOCAL shapes still unsupported: two or more array dimensions, and a brace
-// initializer on something that is not a one-dimensional array (a struct or a scalar).
-// A one-dimensional 'int a[3] = { ... }' / 'int a[] = { ... }' is a genuine Decl.
-LAggForm    = ArraySize ArraySize { ArraySize } [ "=" SkipBlock ]
-            | EmptyArr
+// The LOCAL shape still unsupported: a brace initializer on a SCALAR ('int x = { 1 };').
+// Arrays of any rank and structs are genuine declarators now.
+LAggForm    = EmptyArr
             | "=" SkipBlock ;
 
 // goto jumps to a label of an enclosing statement SEQUENCE: the goto yields a signal
@@ -288,10 +381,6 @@ NotSwitchKw = :script(~~
 // A preprocessor line inside a function body is skipped (no-op statement).
 PPStmt      <~~ push(function(b) { return b }) ~~>
             = PPLine ;
-
-// A local float/double declaration: accepted, reported as not implemented.
-LFloatDecl  <~~ push(notImplStmt("floating-point declaration", up.pos)) ~~>
-            = KwFloating { SkipBlock | TdChar } ";" ;
 
 // Local struct variables, struct pointers (with optional initializer) and struct arrays.
 // A struct value may carry a brace initializer, with '.field =' designators.
@@ -341,15 +430,33 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
 Decl        = DeclCore ";" ;
-DeclCore    <~~ push(makeSeq(takeAll())) ~~>
-            = BaseInt InitDecl { "," InitDecl } ;
-InitDecl    <~~ push(makeDecl(takeAll())) ~~>
+DeclCore    <~~ push(makeDeclSeq(takeAll(), false)) ~~>
+            = BaseTy DeclItem { "," DeclItem } ;
+// A parenthesized declarator: 'int (*pa)[3]' is a POINTER TO an array of 3 ints,
+// which is a different type from the 'int *pa[3]' array of pointers that InitDecl
+// reads. It has to be tried first - InitDecl cannot start with a '('.
+// FnPtrDecl comes first: both start '( * name', and only what follows the ')' tells
+// a function pointer ('(int)') from a pointer to an array ('[3]') apart.
+DeclItem    = FnPtrDecl | PtrArrDecl | InitDecl ;
+// 'int (*fp)(int)' - a pointer to a function - and 'int (*tab[2])(int)', an array
+// of them. A function pointer is one i32 holding the callee's identifier.
+FnPtrDecl   <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
+            = "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
+PtrArrDecl  <~~ push({dcl: makeDeclr(takeAll(), "ptrarr")}) ~~>
+            = "(" Stars Id <~~ push(up.in) ~~> ")" ArrDims [ "=" DInit ] ;
+InitDecl    <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArraySize | InferArr ] [ "=" DInit ] ;
+              [ ArrDims | InferArr ] [ "=" DInit ] ;
+// A declarator's array dimensions, outermost first: 'int m[2][3]' is an array of 2
+// arrays of 3 ints, and every dimension is one level of the {k:"arr"} C type.
+ArrDims     <~~ push({dims: takeAll()}) ~~> = ArrDim { ArrDim } ;
+ArrDim      = "[" Number "]" ;
 // 'int a[] = { ... }': the size comes from the initializer (-1 asks for that).
-InferArr    <~~ push({size: -1}) ~~> = "[" "]" ;
-// A declaration initializer: a brace list, or one ordinary expression.
-DInit       = BraceInit | AssignExpr ;
+InferArr    <~~ push({dims: [-1]}) ~~> = "[" "]" ;
+// A declaration initializer: a brace list, a string literal (which initializes a
+// char array element by element, C11 6.7.9p14), or one ordinary expression.
+DInit       = BraceInit | StrInit | AssignExpr ;
+StrInit     <~~ push(makeStrInit(up.in)) ~~> = StrTok { StrTok } ;
 // A brace initializer collects its items; a trailing comma is allowed.
 BraceInit   <~~ push({list: takeAll()}) ~~>
             = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
@@ -375,10 +482,40 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 
 // An lvalue thunk evaluates to an address value. A place is a variable followed by
 // any mix of indexing and struct member steps: a[i], p.x, r.min.y, head->next->value.
-// A parenthesized lvalue: '&(s.b)', '*(p)'. It takes no suffix chain of its own -
-// '(*p).f' still wants 'p->f' - but it makes every place form parenthesizable.
-Lvalue      = Deref | ParenPlace | VarPlace ;
+// A parenthesized lvalue may itself carry a suffix chain, so '(*pa)[1]' and '(*p).f'
+// are places like 'pa[1]' and 'p->f'.
+// DerefP ('*' of a PLACE) comes before the general Deref ('*' of any expression):
+// only the place form knows the C type of what it dereferences, which is what makes
+// '(*pa)[1]' step by whole rows of 'int (*pa)[3]'.
+Lvalue      = StrPlaceP | CompLitP | DerefP | Deref | ParenSfx | ParenPlace | VarPlace ;
+// A STRING LITERAL is an array object of static storage duration, so it is a place:
+// "abc"[1] indexes it, sizeof "abc" is its byte size, and reading it decays to a
+// pointer to its first character. Adjacent literals concatenate (C11 6.4.5p5); an
+// L / u / U / u8 prefix makes the elements wide.
+StrPlaceP   <~~ push(makeSfxChain(takeAll())) ~~>
+            = StrPlace { PlaceSfx } ;
+StrPlace    <~~ push(makeStrPlace(up.in)) ~~>
+            = StrTok { StrTok } ;
+StrTok      = [ StrPfx ] SkipStr ;
+StrPfx      = "u8" | "L" | "u" | "U" ;
+// A COMPOUND LITERAL '(Type){ ... }' (C11 6.5.2.5) is an unnamed object with
+// automatic storage - an lvalue - so it takes a suffix chain like any other place,
+// and '&' may be applied to it.
+CompLitP    <~~ push(makeSfxChain(takeAll())) ~~>
+            = CompLit { PlaceSfx } ;
+CompLit     <~~ push(makeCompLit(takeAll())) ~~>
+            = "(" CompType ")" BraceInit ;
+CompType    <~~ push({clt: makeCompDesc(takeAll())}) ~~>
+            = CompBase [ Stars ] [ ArrDims | InferArr ] ;
+CompBase    = TypeInt <~~ push({bs: baseCtOf(up.in)}) ~~>
+            | EnumRef <~~ push({bs: ctInt}) ~~>
+            | KwStruct Id <~~ push({bs: ctStruct(up.in)}) ~~>
+            | KwUnion Id <~~ push({bs: ctStruct(uKey(up.in))}) ~~> ;
+ParenSfx    <~~ push(makeSfxChain(takeAll())) ~~>
+            = "(" Lvalue ")" PlaceSfx { PlaceSfx } ;
 ParenPlace  = "(" Lvalue ")" ;
+DerefP      <~~ push(makeDerefP(pop())) ~~>
+            = "*" Lvalue ;
 Deref       <~~ push(makeDerefPlace(pop())) ~~>
             = "*" UnaryExpr ;
 VarPlace    <~~ push(makeVarPlace(takeAll())) ~~>
@@ -429,40 +566,52 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 
 // AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
 // function named _Alignof, and the general call seed would claim it first.
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | AlignOf | Cast | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | AlignOf | Generic | Cast | PostfixExpr ;
 
-// A cast '(Type)expr' is accepted and reported as not implemented (the integer
-// machine models one numeric type and uniform pointers, so a cast cannot change a
-// value). CastType requires a real type keyword, so '(expr)' still parses as a
-// parenthesized expression and only '(int)x' / '(struct P *)p' are taken as casts.
-Cast        <~~ pop(); push(cNIExpr("cast expression", up.pos)) ~~>
-            = "(" CastType ")" UnaryExpr ;
-CastType    = ( TypeInt | KwStruct Id | KwUnion Id | EnumRef ) { PStars } ;
+// A cast '(Type)expr' converts the value to the named type: an integer wraps to that
+// type's width and signedness, a float truncates towards zero on the way to an
+// integer, and a pointer cast only re-labels the address. TypeName requires a real
+// type keyword, so '(expr)' still parses as a parenthesized expression.
+Cast        <~~ push(makeCast(takeAll())) ~~>
+            = "(" TypeName ")" UnaryExpr ;
 
-// sizeof(type): a compile-time constant. Scalars are 4 bytes, any pointer 8, a struct
-// the packed sum and a union the maximum over its members; a sizeof over an expression
-// is answered with the size of int (the machine has one integer value type).
-Sizeof      = KwSizeof ( SizeofType | SizeofExpr ) ;
-SizeofType  <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
-            = "(" SizeName ")" ;
-// sizeof over an EXPRESSION: the machine has one integer value type, so the answer
-// is the size of int; an array or struct operand is not distinguished from it.
-SizeofExpr  <~~ pop(); push(makeInt(4)) ~~>
+// sizeof: the byte size the type model pins - char 1, short 2, int 4, any long and
+// any double 8, any pointer 8, a struct the packed sum, a union the maximum over its
+// members, an array its element count times the element size. Over an EXPRESSION the
+// answer is the size of that expression's type, which is what makes 'sizeof a' on a
+// char array answer its length.
+Sizeof      = KwSizeof ( SizeofType | SizeofPlace | SizeofExpr ) ;
+SizeofType  <~~ push(makeSizeof(pop())) ~~>
+            = "(" TypeName ")" ;
+SizeofPlace <~~ push(makeSizeofPlace(pop())) ~~>
+            = Lvalue ;
+SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
             = UnaryExpr ;
 // _Alignof(type): for the scalar types this machine models, the alignment equals the
 // size, and a pointer aligns to 8 like it is sized.
-AlignOf     <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
-            = KwAlignof "(" SizeName ")" ;
-SizeName    <~~ push(makeSizeName(takeAll())) ~~>
+AlignOf     <~~ push(makeSizeof(pop())) ~~>
+            = KwAlignof "(" TypeName ")" ;
+// A TYPE NAME: a scalar/struct/union/enum base plus a run of pointer stars.
+TypeName    <~~ push(makeTypeName(takeAll())) ~~>
             = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } ;
 SizeBase    = ScalarName
-            | EnumRef <~~ push({kind: "int", w: 4}) ~~>
-            | KwStruct Id <~~ push({kind: "struct", s: up.in}) ~~>
-            | KwUnion Id <~~ push({kind: "struct", s: uKey(up.in)}) ~~> ;
-// A scalar type name inside sizeof / _Alignof, kept keyword by keyword so the width
-// survives: char and _Bool are 1, short 2, any long (and double) 8, the rest 4.
+            | EnumRef <~~ push(ctInt) ~~>
+            | KwStruct Id <~~ push(ctStruct(up.in)) ~~>
+            | KwUnion Id <~~ push(ctStruct(uKey(up.in))) ~~> ;
+// A scalar type name, kept keyword by keyword so the width and the signedness both
+// survive.
 ScalarName  <~~ push(makeScalarName(takeAll())) ~~>
             = ScalarTok { ScalarTok } ;
+
+// _Generic(controlling, type: value, ..., default: value) - C11 6.5.1.1. The
+// association whose type name is the controlling expression's own type is the one
+// the whole construct yields; the type is known while the code is emitted, so only
+// the winning arm is ever emitted.
+Generic     <~~ push(makeGeneric(takeAll())) ~~>
+            = KwGeneric "(" AssignExpr "," GenAssoc { "," GenAssoc } ")" ;
+GenAssoc    <~~ push(makeGenAssoc(takeAll())) ~~>
+            = ( TypeName | KwDefault <~~ push("default") ~~> ) ":" AssignExpr ;
+KwGeneric   = "_Generic" KwEnd ;
 ScalarTok   <~~ push(up.in) ~~> = ScalarKw ;
 ScalarKw    = "char" KwEnd | "short" KwEnd | "int" KwEnd | "long" KwEnd
             | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
@@ -470,7 +619,7 @@ ScalarKw    = "char" KwEnd | "short" KwEnd | "int" KwEnd | "long" KwEnd
             | "const" KwEnd | "volatile" KwEnd ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Lvalue ;
-AddrOf      <~~ push(pop() /* The lvalue thunk already yields the address. */) ~~>
+AddrOf      <~~ push(makeAddrOf(pop())) ~~>
             = "&" Lvalue ;
 DerefLoad   <~~ push(makeLoadOf(makeDerefPlace(pop()))) ~~>
             = "*" UnaryExpr ;
@@ -481,24 +630,52 @@ Not         <~~ push(makeNot(pop())) ~~>
 BitNot      <~~ push(makeBitNot(pop())) ~~>
             = "~" UnaryExpr ;
 
-PostfixExpr = PostIncDec | Call | Primary ;
+PostfixExpr = PostIncDec | CallExpr | Primary ;
 PostIncDec  <~~ push(makePostIncDec(pop(), pop())) ~~>
             = Lvalue ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
-Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+// A call whose callee is an EXPRESSION: a bare name (the ordinary direct call, and
+// also a variable holding a function pointer), a parenthesized place ('(*fp)(4)'),
+// or a place path ('tab[0](3)'). Several argument lists chain, so 'pick(1)(5)' calls
+// what pick returned.
+CallExpr    <~~ push(makeCallExpr(takeAll())) ~~>
+            = CallSeed ArgList { ArgList } ;
+CallSeed    = ParenSfxRef | ParenPlaceRef | PlaceRef | NameSeed ;
+ParenPlaceRef <~~ push(makeLoadOf(pop())) ~~> = "(" Lvalue ")" ;
+NameSeed    <~~ push({fname: up.in}) ~~> = Id ;
+ArgList     <~~ push({args: takeAll()}) ~~>
+            = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
 // A place path as an expression (a[i], p.x, head->next) loads the resolved cell.
 // A string literal (with adjacent-literal concatenation) has no char* backing on the
 // integer machine, so it is accepted and reported as not implemented.
-Primary     = "(" Expression ")" | StrLit | NumberLit | CharLit | PlaceRef | VarRef ;
-StrLit      <~~ push(cNIExpr("string literal", up.pos)) ~~>
-            = SkipStr { SkipStr } ;
+// ParenSfxRef comes first: '(*pa)[1]' starts like a parenthesized expression, and the
+// general form would consume '(*pa)' and leave the '[1]' behind.
+// FloatLit comes before NumberLit: the integer form matches the '1' of '1e3' and a
+// PEG never goes back for the longer read.
+Primary     = CompLitRef | ParenSfxRef | "(" Expression ")" | StrRef | FloatLit | NumberLit | CharLit | PlaceRef | VarRef ;
+ParenSfxRef <~~ push(makeLoadOf(pop())) ~~> = ParenSfx ;
+CompLitRef  <~~ push(makeLoadOf(pop())) ~~> = CompLitP ;
+StrRef      <~~ push(makeLoadOf(pop())) ~~> = StrPlaceP ;
+// A floating constant: decimal or hexadecimal, with an optional exponent and an
+// optional f/F (float) or l/L (long double) suffix. The hexadecimal form REQUIRES
+// its binary exponent, so 0x1F stays an integer.
+FloatLit    <~~ push(makeFltLit(up.in)) ~~> = FloatNum ;
+FloatNum    = ( "0x" | "0X" ) :whitespace() HexDig { HexDig } [ "." { HexDig } ] BinExp [ FltSfx ] :whitespace(Whitespace)
+            | ( "0x" | "0X" ) :whitespace() "." HexDig { HexDig } BinExp [ FltSfx ] :whitespace(Whitespace)
+            | "0"..."9" :whitespace() { "0"..."9" } ( "." { "0"..."9" } [ DecExp ] | DecExp ) [ FltSfx ] :whitespace(Whitespace)
+            | "." :whitespace() "0"..."9" { "0"..."9" } [ DecExp ] [ FltSfx ] :whitespace(Whitespace) ;
+DecExp      = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+BinExp      = ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+FltSfx      = "f" | "F" | "l" | "L" ;
 PlaceRef    <~~ push(makeLoadOf(makeVarPlace(takeAll()))) ~~>
             = Id <~~ push(up.in) ~~> PlaceSfx { PlaceSfx } ;
-NumberLit   <~~ push(makeInt(pop())) ~~>
+NumberLit   <~~ push(makeNumLit(pop(), up.in)) ~~>
             = Number ;
-CharLit     = "'" :whitespace() CChar <~~ push(makeInt(cCharCode(up.in))) ~~> "'" :whitespace(Whitespace) ;
+// A character constant has type int (C11 6.4.4.4p10); a wide one (L, u, U) has the
+// width of its wide type, which this model pins at 4 like int.
+CharLit     = [ CharPfx ] "'" :whitespace() CChar <~~ push(makeNum(cCharCode(up.in), ctInt)) ~~> "'" :whitespace(Whitespace) ;
+CharPfx     = "L" | "u8" | "u" | "U" ;
 // One character constant body: a hex escape (backslash x plus hex digits), an octal
 // escape (backslash plus one to three octal digits), a simple escape, or a plain
 // character. The hex and octal forms come first so their digits are not cut short.
@@ -532,6 +709,7 @@ TypeElem    = TypeTok | Attr | AlignAs ;
 // _Alignas(8) / _Alignas(int): parsed and ignored (the layout is fixed).
 AlignAs     = "_Alignas" KwEnd SkipParen ;
 TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
+            | "float" KwEnd | "double" KwEnd
             | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
             | "const" KwEnd | "volatile" KwEnd
             | "static" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
@@ -577,7 +755,6 @@ KwSizeof    = "sizeof" KwEnd ;
 KwAlignof   = "_Alignof" KwEnd ;
 KwStaticAs  = "_Static_assert" KwEnd ;
 KwBool      = "_Bool" KwEnd ;
-KwFloating  = "float" KwEnd | "double" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
@@ -638,6 +815,78 @@ KwDefault   = "default" KwEnd ;
     // The value of one character-constant body, including the C escape sequences:
     // backslash x with hex digits, backslash with up to three octal digits, and the
     // simple escapes n t r v f a b 0, backslash, quote and double quote.
+    // A C floating constant: hexadecimal (mantissa times a power of two) or decimal.
+    function pow2(n) {
+        var r = 1
+        var k = n < 0 ? 0 - n : n
+        for (var i = 0; i < k; i++) r = r * 2
+        return n < 0 ? 1 / r : r
+    }
+    function parseCFloat(t) {
+        if (t.length > 1 && t.charCodeAt(0) == 48 && (t.charCodeAt(1) == 120 || t.charCodeAt(1) == 88)) {
+            var i = 2
+            var mant = 0
+            while (i < t.length && digVal(t.charCodeAt(i)) >= 0) { mant = mant * 16 + digVal(t.charCodeAt(i)); i = i + 1 }
+            if (i < t.length && t.charCodeAt(i) == 46) {
+                i = i + 1
+                var scale = 1
+                while (i < t.length && digVal(t.charCodeAt(i)) >= 0) {
+                    scale = scale / 16
+                    mant = mant + digVal(t.charCodeAt(i)) * scale
+                    i = i + 1
+                }
+            }
+            var ex = 0
+            var neg = false
+            if (i < t.length && (t.charCodeAt(i) == 112 || t.charCodeAt(i) == 80)) {
+                i = i + 1
+                if (t.charCodeAt(i) == 43) { i = i + 1 }
+                else if (t.charCodeAt(i) == 45) { neg = true; i = i + 1 }
+                while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) {
+                    ex = ex * 10 + (t.charCodeAt(i) - 48)
+                    i = i + 1
+                }
+            }
+            if (neg) { ex = 0 - ex }
+            return mant * pow2(ex)
+        }
+        return parseFloat(t)
+    }
+    // The bytes of a string-literal RUN (adjacent literals concatenate, C11 6.4.5p5),
+    // with the C escape sequences decoded and the terminating null appended. An
+    // L / u / U prefix makes the elements wide.
+    function cStrBytes(text) {
+        var bytes = []
+        var wide = false
+        var i = 0
+        while (i < text.length) {
+            var cc = text.charCodeAt(i)
+            if (cc == 117 && i + 1 < text.length && text.charCodeAt(i + 1) == 56) { i = i + 2; continue }
+            if (cc == 76 || cc == 117 || cc == 85) { wide = true; i = i + 1; continue }
+            if (cc != 34) { i = i + 1; continue }
+            i = i + 1
+            while (i < text.length && text.charCodeAt(i) != 34) {
+                if (text.charCodeAt(i) != 92) { bytes.push(text.charCodeAt(i)); i = i + 1; continue }
+                var j = i + 1
+                var e = text.charCodeAt(j)
+                if (e == 120 || e == 88) {
+                    j = j + 1
+                    while (j < text.length && digVal(text.charCodeAt(j)) >= 0) j = j + 1
+                } else if (e >= 48 && e <= 55) {
+                    j = j + 1
+                    var n = 1
+                    while (j < text.length && n < 3 && text.charCodeAt(j) >= 48 && text.charCodeAt(j) <= 55) { j = j + 1; n = n + 1 }
+                } else {
+                    j = j + 1
+                }
+                bytes.push(cCharCode(text.slice(i, j)))
+                i = j
+            }
+            i = i + 1
+        }
+        bytes.push(0)
+        return {str: bytes, wide: wide}
+    }
     function cCharCode(s) {
         if (s.charCodeAt(0) != 92) return s.charCodeAt(0)
         var e = s.charCodeAt(1)
@@ -669,6 +918,10 @@ KwDefault   = "default" KwEnd ;
 
 
     var funcs = {}
+    // Functions that return a struct or union BY VALUE, name -> the returned C type.
+    // Such a function takes a hidden first pointer parameter (the caller's destination)
+    // and still returns i32, exactly like a C ABI's sret convention.
+    var structRet = {}
     function getFunc(name, paramSpecs) {
         var f = hasOwn(funcs, name) ? funcs[name] : undefined
         if (f != undefined) return f
@@ -678,13 +931,65 @@ KwDefault   = "default" KwEnd ;
             f = m.NewFunc(name, i32, ps)
         } else {
             var params = []
+            if (hasOwn(structRet, name)) { params.push(llvm.ir.NewParam("", i32p)) }
             for (var i = 0; i < paramSpecs.length; i++) {
-                params.push(llvm.ir.NewParam("", paramSpecs[i].ptr ? i32p : i32))
+                var pct = paramSpecs[i].ct
+                params.push(llvm.ir.NewParam("", paramSpecs[i].ptr ? i32p
+                            : ((pct != undefined && pct.k == "flt") ? llvm.types.I64 : i32)))
             }
             f = m.NewFunc(name, i32, params)
         }
         funcs[name] = f
         return f
+    }
+    // A function POINTER is the function's identifier: a small positive integer that
+    // indexes funcNameById. 0 is no function, so a null function pointer is 0 like
+    // every other null pointer. The built-in IR interpreter has no indirect call, so
+    // an indirect call goes through a per-arity TRAMPOLINE - one function that
+    // compares the identifier against every address-taken function and calls it
+    // directly. The trampoline BODIES are emitted after the whole file is walked
+    // (finishTrampolines), because only then is the address-taken set complete.
+    var userFuncs = {}
+    var funcIdOf = {}
+    var funcNameById = [""]
+    var funcArity = [0]
+    function funcId(name, arity) {
+        if (hasOwn(funcIdOf, name)) return funcIdOf[name]
+        var id = funcNameById.length
+        funcNameById.push(name)
+        funcArity.push(arity)
+        funcIdOf[name] = id
+        return id
+    }
+    var trampolines = {}
+    var trampolineArities = []
+    function trampolineFor(arity) {
+        var key = "a" + arity
+        if (hasOwn(trampolines, key)) return trampolines[key]
+        var ps = [llvm.ir.NewParam("", i32)]
+        for (var i = 0; i < arity; i++) { ps.push(llvm.ir.NewParam("", i32)) }
+        var f = m.NewFunc("__mec_icall" + arity, i32, ps)
+        trampolines[key] = f
+        trampolineArities.push(arity)
+        return f
+    }
+    function finishTrampolines() {
+        for (var t = 0; t < trampolineArities.length; t++) {
+            var arity = trampolineArities[t]
+            var f = trampolines["a" + arity]
+            var b = f.NewBlock("entry")
+            for (var id = 1; id < funcNameById.length; id++) {
+                if (funcArity[id] != arity) { continue }
+                var hitB = f.NewBlock("")
+                var nextB = f.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, f.Params[0], llvm.constant.NewInt(i32, id)), hitB, nextB)
+                var args = []
+                for (var a = 0; a < arity; a++) { args.push(f.Params[a + 1]) }
+                hitB.NewRet(hitB.NewCall(funcs[funcNameById[id]], args))
+                b = nextB
+            }
+            b.NewRet(zero)
+        }
     }
     // Parameter counts of not yet defined callees: collect the arity from the call site.
     function getFuncByArity(name, arity) {
@@ -716,9 +1021,6 @@ KwDefault   = "default" KwEnd ;
 
     // enum constants: name -> integer value, filled by defineEnum, read in makeVarRef.
     var enumConsts = {}
-    // A C-appropriate placeholder for an unlowered expression: yields the i32 constant
-    // 0 (the shared notImplExpr returns the i64 handle hUndef, wrong for this IR).
-    function cNIExpr(construct, pos) { notImpl(construct, pos); return function(b) { return {b: b, v: zero} } }
     // A '*' run in a declarator: {ptr: levels}. Every level is one i32* cell, so int**
     // is an ordinary pointer slot whose value is the address of an int* slot.
     function makeStars(s, pos) {
@@ -758,21 +1060,65 @@ KwDefault   = "default" KwEnd ;
             return {b: b, v: v}
         }
     }
-    // A scalar type name, keyword by keyword -> {kind:"int", w: byte width}.
+    // A scalar type name, keyword by keyword -> the C type it names. LP64: long AND
+    // long long are 8 bytes, matching the 8-byte pointers this model already pins and
+    // cc on a 64-bit host (ul=8 l=8 ll=8 ptr=8 int=4). A long double is modelled as
+    // a double, and a plain char is signed like it is on this reference platform.
     function makeScalarName(items) {
-        var w = 4
         var nlong = 0
+        var uns = false
+        var isVoid = false
+        var isFloat = false
+        var isDouble = false
+        var isChar = false
+        var isShort = false
+        var isBool = false
         for (var i = 0; i < items.length; i++) {
             var t = items[i]
             if (t == "long") nlong = nlong + 1
-            else if (t == "char" || t == "_Bool" || t == "void") w = 1
-            else if (t == "short") w = 2
-            else if (t == "double") w = 8
+            else if (t == "unsigned") uns = true
+            else if (t == "void") isVoid = true
+            else if (t == "float") isFloat = true
+            else if (t == "double") isDouble = true
+            else if (t == "char") isChar = true
+            else if (t == "short") isShort = true
+            else if (t == "_Bool") isBool = true
         }
-        if (nlong > 0) w = 8   // LP64: long AND long long are 8, matching the
-                               // 8-byte pointers this model already pins, and cc
-                               // on a 64-bit host (ul=8 l=8 ll=8 ptr=8 int=4).
-        return {kind: "int", w: w}
+        if (isVoid) return ctVoid
+        if (isDouble) return ctF(8)
+        if (isFloat) return ctF(4)
+        if (isBool) return ctI(1, true)
+        if (isChar) return ctI(1, uns)
+        if (isShort) return ctI(2, uns)
+        if (nlong > 0) return ctI(8, uns)
+        return ctI(4, uns)
+    }
+    // The base type a declaration's specifier RUN names, read off its source text.
+    // up.in hands over the matched TOKENS with their separators removed - 'long
+    // double' arrives as 'longdouble' - so the run is scanned for the type keywords
+    // themselves instead of being split on whitespace. Everything else (an enum tag,
+    // a storage class, an __attribute__ body) contributes nothing and leaves int.
+    var baseKws = ["unsigned", "signed", "double", "float", "short", "_Bool",
+                   "char", "void", "long", "int"]
+    function baseCtOf(text) {
+        var toks = []
+        var i = 0
+        while (i < text.length) {
+            var hit = -1
+            for (var k = 0; k < baseKws.length; k++) {
+                if (hit < 0 && text.slice(i, i + baseKws[k].length) == baseKws[k]) { hit = k }
+            }
+            if (hit < 0) { i = i + 1; continue }
+            toks.push(baseKws[hit])
+            i = i + baseKws[hit].length
+        }
+        return makeScalarName(toks)
+    }
+    // A type NAME: the base type plus one pointer level per '*'.
+    function makeTypeName(items) {
+        var ct = items[0]
+        for (var i = 1; i < items.length; i++) ct = {k: "ptr", p: ct}
+        return ct
     }
     // A _Bool declarator: the initializer is normalized to 0 or 1.
     function makeBoolDecl(items) {
@@ -785,23 +1131,80 @@ KwDefault   = "default" KwEnd ;
                 b = r.b
                 b.NewStore(toInt(b, truthy(b, r.v)), ptr)
             }
-            declVar(name, {val: ptr, arr: false, load: i32, ct: ctInt})
+            declVar(name, {val: ptr, arr: false, load: i32, ct: ctI(1, true)})
             return b
         }
     }
     // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
     // into a constant thunk (pointer 8, scalar/enum 4) or a notImpl for a struct value.
-    function makeSizeName(items) { return {kind: items[0].kind, s: items[0].s, w: items[0].w, ptr: items.length > 1} }
-    function makeSizeof(items, pos) {
-        var d = items[0]
-        if (d.ptr) return makeInt(8)
-        // A struct/union tag: its packed byte size, looked up lazily so that a sizeof
-        // may name a tag defined further down the file.
-        if (d.kind == "struct") {
-            var key = d.s
-            return function(b) { return {b: b, v: llvm.constant.NewInt(i32, structOf(key).bytes)} }
+    // sizeof yields size_t, which is unsigned long here. A struct tag's size is read
+    // lazily, so a sizeof may name a tag defined further down the file.
+    function makeSizeof(ct) {
+        return function(b) { return {b: b, v: kint(ctBytes(ct)), ct: ctSizeT, cv: ctBytes(ct)} }
+    }
+    // sizeof over a PLACE needs its address, not its value - an array or a struct
+    // answers its whole size, which is what 'sizeof a' on a char array reports. The
+    // place is emitted and its value dropped; only its TYPE is used.
+    function makeSizeofPlace(placeT) {
+        return function(b) {
+            var p = placeT(b)
+            var n = ctBytes(p.ct != undefined ? p.ct : ctInt)
+            return {b: p.b, v: kint(n), ct: ctSizeT, cv: n}
         }
-        return makeInt(d.w)
+    }
+    function makeSizeofExpr(t) {
+        return function(b) {
+            var r = t(b)
+            var n = ctBytes(r.ct != undefined ? r.ct : ctInt)
+            return {b: r.b, v: kint(n), ct: ctSizeT, cv: n}
+        }
+    }
+    // A cast converts the value to the named type (C11 6.5.4).
+    function makeCast(items) {
+        var ct = items[0]
+        var t = items[1]
+        return function(b) {
+            var r = t(b)
+            var fct = r.ct != undefined ? r.ct : ctInt
+            if (ct.k == "void") return {b: r.b, v: zero, ct: ctVoid, cv: 0}
+            // A constant folds; that is also the only way a float reaches an integer.
+            if (r.cv != undefined) {
+                var cv = convertNum(ct, r.cv)
+                return {b: r.b, v: (ct.k == "flt") ? zero : kint(cv | 0), ct: ct, cv: cv}
+            }
+            if (isFlt(ct)) return {b: r.b, v: fltOperand(r.b, r, ct), ct: ct}
+            if (isFlt(fct)) return {b: r.b, v: emitConv(r.b, ct, emitD2I(r.b, dblOf(r.b, r))), ct: ct}
+            return {b: r.b, v: emitConv(r.b, ct, r.v), ct: ct}
+        }
+    }
+    // Narrowing to a type that is smaller than int: the value keeps only the bits
+    // that type has, sign-extended or zero-extended back into the i32 register.
+    function emitConv(b, ct, v) {
+        if (ct.k != "int") return v
+        if (ct.w == 1) return ct.u ? b.NewAnd(v, kint(255)) : b.NewAShr(b.NewShl(v, kint(24)), kint(24))
+        if (ct.w == 2) return ct.u ? b.NewAnd(v, kint(65535)) : b.NewAShr(b.NewShl(v, kint(16)), kint(16))
+        return v
+    }
+    // _Generic: the type of the controlling expression is known while the code is
+    // emitted, so only the winning association is emitted at all.
+    function makeGenAssoc(items) { return {gt: items[0], t: items[1]} }
+    function makeGeneric(items) {
+        var ctrl = items[0]
+        var assocs = items.slice(1)
+        return function(b) {
+            var r = ctrl(b)
+            b = r.b
+            var t = r.ct != undefined ? r.ct : ctInt
+            if (t.k == "arr") t = {k: "ptr", p: t.e}
+            var dflt = undefined
+            for (var i = 0; i < assocs.length; i++) {
+                var a = assocs[i]
+                if (a.gt == "default") { dflt = a.t; continue }
+                if (ctEq(a.gt, t)) return a.t(b)
+            }
+            if (dflt != undefined) return dflt(b)
+            fail("_Generic has no association for this type")
+        }
     }
 
     // ----- C types and struct layouts -----
@@ -810,8 +1213,91 @@ KwDefault   = "default" KwEnd ;
     // structs[name] = {lty: LLVM struct type, fields: {fname: {idx, ct}}}. Every
     // pointer is emitted as i32* (the interpreter only cares about its 8 byte size);
     // which struct a pointer points at lives in the ct and drives the getelementptrs.
-    var ctInt = {k: "int"}
+    // {k:"int", w: bytes, u: unsigned}  char / short / int / long, signed or not
+    // {k:"flt", w: bytes}                float / double / long double
+    // {k:"void"}                         only ever reached through a pointer
+    // {k:"ptr", p} | {k:"arr", n, e} | {k:"struct", s} | {k:"fnp"}
+    // Every integer VALUE lives in an i32 register and every integer CELL is an i32,
+    // whatever its declared width: the width and the signedness drive sizeof, the
+    // conversions, and the choice between the signed and the unsigned instruction.
+    function ctI(w, u) { return {k: "int", w: w, u: u} }
+    function ctF(w) { return {k: "flt", w: w} }
+    var ctInt  = ctI(4, false)
+    var ctUInt = ctI(4, true)
+    var ctChar = ctI(1, false)
+    var ctDbl  = ctF(8)
+    var ctVoid = {k: "void"}
+    var ctSizeT = {k: "int", w: 8, u: true}
+    // A FUNCTION POINTER cell. It holds the callee's identifier (see funcId below),
+    // which is an ordinary i32, so it needs no pointee type.
+    var ctFn = {k: "fnp"}
     var structs = {}
+    function isFlt(ct) { return ct.k == "flt" }
+    function pointeeOf(ct) { return ct.k == "ptr" ? ct.p : (ct.k == "arr" ? ct.e : undefined) }
+    // Truncation towards zero, which is what C's integer conversions and its
+    // float-to-integer conversion both do.
+    function trunc0(x) { return Math.trunc(x) }
+    // A COMPILE-TIME value given the representation its C type pins.
+    function convertNum(ct, x) {
+        if (ct.k == "flt") return x
+        if (ct.k == "int") {
+            var n = trunc0(x)
+            if (ct.w == 1) return ct.u ? (n & 255) : ((n << 24) >> 24)
+            if (ct.w == 2) return ct.u ? (n & 65535) : ((n << 16) >> 16)
+            if (ct.w >= 8) return n
+            return ct.u ? (n >>> 0) : (n | 0)
+        }
+        return trunc0(x)
+    }
+    // The integer promotions: anything narrower than int is evaluated as an int.
+    function promote(ct) { return (ct.k == "int" && ct.w < 4) ? ctInt : ct }
+    // The usual arithmetic conversions (C11 6.3.1.8).
+    function arithCt(a, b) {
+        if (isFlt(a) || isFlt(b)) return ctF((isFlt(a) ? a.w : 0) > (isFlt(b) ? b.w : 0)
+                                             ? a.w : (isFlt(b) ? b.w : a.w))
+        var x = promote(a)
+        var y = promote(b)
+        if (x.k != "int") return x
+        if (y.k != "int") return y
+        if (x.w == y.w) return ctI(x.w, x.u || y.u)
+        return (x.w > y.w) ? x : y
+    }
+    // Structural type identity, which is what _Generic needs.
+    function ctEq(a, b) {
+        if (a.k != b.k) return false
+        if (a.k == "int") return a.w == b.w && (a.u == true) == (b.u == true)
+        if (a.k == "flt") return a.w == b.w
+        if (a.k == "ptr") return ctEq(a.p, b.p)
+        if (a.k == "arr") return a.n == b.n && ctEq(a.e, b.e)
+        if (a.k == "struct") return a.s == b.s
+        return true
+    }
+    // An ARRAY C type: n elements of e. Arrays nest, so 'int m[2][3]' is
+    // arr(2, arr(3, int)) and every index step peels one level off.
+    function ctArr(n, e) { return {k: "arr", n: n, e: e} }
+    // The declared dimensions of a declarator, outermost first, wrapped around the
+    // base type. A -1 dimension ('int a[] = { ... }') takes its size from the
+    // initializer list.
+    function arrCt(dims, base, count) {
+        var ct = base
+        for (var k = dims.length - 1; k >= 0; k--) {
+            var n = dims[k] | 0
+            if (n < 0) { n = count | 0 }
+            ct = ctArr(n, ct)
+        }
+        return ct
+    }
+    // How many elements a brace list covers, honouring '[i] =' designators.
+    function initLen(list) {
+        var n = 0
+        var at = 0
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].at != undefined) { at = list[i].at | 0 }
+            at = at + 1
+            if (at > n) { n = at }
+        }
+        return n
+    }
     // A union tag lives in the same table as the struct tags, under a 'u:' prefixed
     // key - C keeps 'struct X' and 'union X' in one tag namespace but as distinct types,
     // and no C identifier can contain a ':', so the two can never collide.
@@ -834,8 +1320,19 @@ KwDefault   = "default" KwEnd ;
     // The BYTE size behind sizeof, matching the packed layout of the IR interpreter:
     // an int is 4, any pointer 8, an aggregate its own size.
     function ctBytes(ct) {
-        if (ct.k == "ptr") return 8
+        if (ct.k == "ptr" || ct.k == "fnp") return 8
         if (ct.k == "struct") return structOf(ct.s).bytes
+        if (ct.k == "arr") return ct.n * ctBytes(ct.e)
+        if (ct.k == "void") return 1    // GCC's sizeof(void), which cc also answers
+        return ct.w
+    }
+    // The size the IR INTERPRETER's packed layout gives a value, which is what
+    // pointer arithmetic steps by. Every integer is an i32 there, whatever C width
+    // its type carries.
+    function machBytes(ct) {
+        if (ct.k == "ptr" || ct.k == "flt") return 8
+        if (ct.k == "struct") return structOf(ct.s).bytes
+        if (ct.k == "arr") return ct.n * machBytes(ct.e)
         return 4
     }
     function ctStruct(sname) { return {k: "struct", s: sname} }
@@ -846,8 +1343,11 @@ KwDefault   = "default" KwEnd ;
         return ct
     }
     function ctLTy(ct) {
-        if (ct.k == "int") return i32
+        // A floating-point value is its IEEE-754 bit pattern in an i64.
+        if (ct.k == "flt") return llvm.types.I64
+        if (ct.k == "int" || ct.k == "fnp" || ct.k == "void") return i32
         if (ct.k == "ptr") return i32p
+        if (ct.k == "arr") return llvm.types.NewArray(ct.n, ctLTy(ct.e))
         return structOf(ct.s).lty
     }
     // A type-specifier run that contains 'unsigned': its bit fields WRAP where a signed
@@ -873,6 +1373,10 @@ KwDefault   = "default" KwEnd ;
                 fields[fields.length - 1].bits = it.bits | 0
                 continue
             }
+            if (it != undefined && it.dims != undefined) {
+                fields[fields.length - 1].dims = it.dims
+                continue
+            }
             fields.push({name: it, bty: bty, star: star, uns: uns})
             star = 0
         }
@@ -891,8 +1395,9 @@ KwDefault   = "default" KwEnd ;
     // later) struct; a member of struct/union VALUE type needs a complete tag.
     function fieldCt(f) {
         var base = (f.bty == "int") ? ctInt : ctStruct(f.bty)
-        if (f.star > 0) return ptrTo(f.star, base)
-        if (f.bty != "int") structOf(f.bty)
+        if (f.star > 0) { base = ptrTo(f.star, base) }
+        else if (f.bty != "int") { structOf(f.bty) }
+        if (f.dims != undefined) return arrCt(f.dims, base, 0)
         return base
     }
     // Give one named member its parent-level LLVM slot. An unnamed ':n' bit field is
@@ -1021,37 +1526,63 @@ KwDefault   = "default" KwEnd ;
     }
     function defineStruct(items) { defineTag(items, false) }
     function defineUnion(items) { defineTag(items, true) }
-    // A struct/union brace initializer -> [{f, t}] with f the FIELD descriptor, in
-    // declaration order. A '.field =' designator jumps to that field and the following
-    // positional items continue after it (C11 6.7.9); an unmentioned field keeps the
-    // zero that the aggregate is pre-filled with.
-    function structInitPlan(key, list, pos) {
-        var st = structOf(key)
-        var out = []
+    // Emit one brace initializer (or one scalar expression) into `addr`, driven by
+    // the C type it initializes. Arrays walk their elements, honouring '[i] ='
+    // designators; structs and unions walk their members in declaration order,
+    // honouring '.field =' designators (C11 6.7.9). Every position the list does not
+    // reach keeps the zero the pre-fill wrote. Nesting is simply recursion, which is
+    // what makes 'int m[2][3] = { { 1, 2, 3 }, ... }' and a struct holding an array work.
+    function emitInit(b, ct, init, addr) {
+        if (typeof init == "function") {
+            var r = init(b)
+            b = r.b
+            storeTo(b, ct, addr, coerce(b, ct, r))
+            return b
+        }
+        var list = init.list
+        if (ct.k == "arr") {
+            var aty = ctLTy(ct)
+            var at = 0
+            for (var i = 0; i < list.length; i++) {
+                var it = list[i]
+                if (it.at != undefined) { at = it.at | 0 }
+                if (at >= ct.n) fail("too many initializers for an array")
+                b = emitInit(b, ct.e, it.v, b.NewGetElementPtr(aty, addr, [zero, llvm.constant.NewInt(i32, at)]))
+                at = at + 1
+            }
+            return b
+        }
+        if (ct.k != "struct") fail("a scalar takes no brace initializer")
+        var st = structOf(ct.s)
         var idx = 0
-        for (var i = 0; i < list.length; i++) {
-            var it = list[i]
-            if (it.fld != undefined) {
+        for (var j = 0; j < list.length; j++) {
+            var iu = list[j]
+            if (iu.fld != undefined) {
                 var found = -1
-                for (var k = 0; k < st.order.length; k++) { if (st.order[k] == it.fld) found = k }
-                if (found < 0) fail(tagName(key) + " has no field " + it.fld)
+                for (var k = 0; k < st.order.length; k++) { if (st.order[k] == iu.fld) found = k }
+                if (found < 0) fail(tagName(ct.s) + " has no field " + iu.fld)
                 idx = found
             }
-            if (idx >= st.order.length) fail("too many initializers for " + tagName(key))
-            var f = fieldOf(key, st.order[idx])
-            var v = it.v
-            if (typeof v != "function") { notImpl("nested aggregate initializer", pos); v = undefined }
-            if (v != undefined) out.push({f: f, t: v})
+            if (idx >= st.order.length) fail("too many initializers for " + tagName(ct.s))
+            var f = fieldOf(ct.s, st.order[idx])
+            b = emitInit(b, f.ct, iu.v, b.NewGetElementPtr(st.lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)]))
             idx = idx + 1
         }
-        return out
+        return b
     }
     // Pre-fill an aggregate with zeroes (an alloca is not zeroed, and C requires every
     // field a brace initializer does not mention to be zero). A union is zeroed through
     // its widest member, which covers all of its storage.
     function zeroAggregate(b, ct, addr) {
+        if (ct.k == "arr") {
+            var aty = ctLTy(ct)
+            for (var e = 0; e < ct.n; e++) {
+                b = zeroAggregate(b, ct.e, b.NewGetElementPtr(aty, addr, [zero, llvm.constant.NewInt(i32, e)]))
+            }
+            return b
+        }
         if (ct.k != "struct") {
-            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : zero, addr)
+            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : (isFlt(ct) ? zero64 : zero), addr)
             return b
         }
         var st = structOf(ct.s)
@@ -1065,6 +1596,246 @@ KwDefault   = "default" KwEnd ;
             b = zeroAggregate(b, f.ct, slot)
         }
         return b
+    }
+
+    // An aggregate travels as the ADDRESS of its storage: an array decays to it in C,
+    // and a struct value uses it because a whole struct never lives in a register here.
+    // Whoever RECEIVES such a value copies the members out.
+    function isAggCt(ct) { return ct != undefined && (ct.k == "arr" || ct.k == "struct") }
+    // Copy one value of type ct from src to dst, member by member (a union through its
+    // widest member, which covers all of its storage).
+    function emitCopy(b, ct, dst, src) {
+        if (ct.k == "arr") {
+            var aty = ctLTy(ct)
+            for (var i = 0; i < ct.n; i++) {
+                var ci = llvm.constant.NewInt(i32, i)
+                b = emitCopy(b, ct.e, b.NewGetElementPtr(aty, dst, [zero, ci]),
+                                      b.NewGetElementPtr(aty, src, [zero, ci]))
+            }
+            return b
+        }
+        if (ct.k == "struct") {
+            var st = structOf(ct.s)
+            if (st.isUnion) {
+                return emitCopy(b, st.wideCt, b.NewGetElementPtr(st.lty, dst, [zero, zero]),
+                                              b.NewGetElementPtr(st.lty, src, [zero, zero]))
+            }
+            for (var j = 0; j < st.order.length; j++) {
+                var f = fieldOf(ct.s, st.order[j])
+                var cj = llvm.constant.NewInt(i32, f.idx)
+                b = emitCopy(b, f.ct, b.NewGetElementPtr(st.lty, dst, [zero, cj]),
+                                      b.NewGetElementPtr(st.lty, src, [zero, cj]))
+            }
+            return b
+        }
+        var lty = ctLTy(ct)
+        b.NewStore(b.NewLoad(lty, src), dst)
+        return b
+    }
+
+    // ----- Software floating point -----
+    // The IR interpreter (abnf/llvmmap.go) decodes no floating-point instruction, so
+    // a C double is carried as its IEEE-754 binary64 BIT PATTERN in an i64 and the
+    // arithmetic is emitted as integer code - the soft-float library a compiler ships
+    // for a target without an FPU, written straight into the module. Every helper is
+    // branchless (select instead of branches), so it needs no basic blocks of its own
+    // and can be emitted while another function is being built.
+    // Two documented simplifications: the mantissa arithmetic TRUNCATES where IEEE
+    // rounds to nearest even (so an inexact result can be one ulp low), and infinities,
+    // NaNs and subnormals are not modelled. A `float` is computed at double precision,
+    // exactly as the interpreter does.
+    var i64 = llvm.types.I64
+    function k64(n) { return llvm.constant.NewInt(i64, n) }
+    var zero64 = k64(0)
+    var one64 = k64(1)
+    var kM52 = k64(4503599627370495)      // 2^52 - 1, the stored mantissa field
+    var kB52 = k64(4503599627370496)      // 2^52, the implicit leading bit
+    var kB53 = k64(9007199254740992)      // 2^53
+    var kBias = k64(1023)
+    var kExpMask = k64(2047)
+    // The bit pattern of a JS double, split into its two 32-bit halves (a 64-bit
+    // integer is not exactly representable as a JS number, its halves are).
+    function dblBits(x) {
+        var s = 0
+        var v = x
+        if (v < 0) { s = 1; v = 0 - v }
+        if (v == 0) return {hi: s * 2147483648, lo: 0}
+        var e = 0
+        while (v >= 2) { v = v / 2; e = e + 1 }
+        while (v < 1) { v = v * 2; e = e - 1 }
+        var f = v - 1                                   // the fraction, in [0, 1)
+        var top = Math.floor(f * 1048576)               // its top 20 bits
+        var rest = f * 1048576 - top
+        var low = Math.floor(rest * 4294967296)         // the next 32 bits
+        return {hi: s * 2147483648 + (e + 1023) * 1048576 + top, lo: low}
+    }
+    function emitDblConst(b, x) {
+        var d = dblBits(x)
+        return b.NewOr(b.NewShl(b.NewZExt(kint(d.hi), i64), k64(32)), b.NewZExt(kint(d.lo), i64))
+    }
+    // The i64 bit pattern of a floating-point expression result.
+    function dblOf(b, r) { return (r.cv != undefined) ? emitDblConst(b, r.cv) : r.v }
+    // Shift `m` left until its highest set bit is bit 52, and subtract as much from
+    // `e`. Six conditional steps cover all 52 possible shifts without a loop.
+    function normLeft(b, m, e) {
+        var ks = [32, 16, 8, 4, 2, 1]
+        var lim = [2097152, 137438953472, 35184372088832, 562949953421312,
+                   2251799813685248, 4503599627370496]
+        for (var i = 0; i < 6; i++) {
+            var c = b.NewSelect(b.NewICmp(llvm.enum.IPredULT, m, k64(lim[i])), k64(ks[i]), zero64)
+            m = b.NewShl(m, c)
+            e = b.NewSub(e, c)
+        }
+        return {m: m, e: e}
+    }
+    // sign, biased exponent and mantissa WITH the implicit leading bit restored.
+    function unpack(b, a) {
+        var sg = b.NewLShr(a, k64(63))
+        var ex = b.NewAnd(b.NewLShr(a, k64(52)), kExpMask)
+        var mn = b.NewAnd(a, kM52)
+        mn = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, ex, zero64), b.NewOr(mn, kB52), mn)
+        return {s: sg, e: ex, m: mn}
+    }
+    function pack(b, sg, ex, mn) {
+        var ez = b.NewAnd(ex, kExpMask)
+        return b.NewOr(b.NewOr(b.NewShl(sg, k64(63)), b.NewShl(ez, k64(52))), b.NewAnd(mn, kM52))
+    }
+    var softFns = {}
+    function softFn(name, nargs, build) {
+        if (hasOwn(softFns, name)) return softFns[name]
+        var ps = []
+        for (var i = 0; i < nargs; i++) ps.push(llvm.ir.NewParam("", i64))
+        var f = m.NewFunc(name, i64, ps)
+        softFns[name] = f
+        var fb = f.NewBlock("entry")
+        fb.NewRet(build(fb, f))
+        return f
+    }
+    // a + b. The operands are ordered by exponent, the smaller mantissa is shifted
+    // into place, and the sum (or difference) is renormalized.
+    function buildDAdd(b, f) {
+        var A = unpack(b, f.Params[0])
+        var B = unpack(b, f.Params[1])
+        var aGe = b.NewICmp(llvm.enum.IPredUGE, A.e, B.e)
+        var e1 = b.NewSelect(aGe, A.e, B.e)
+        var m1 = b.NewSelect(aGe, A.m, B.m)
+        var s1 = b.NewSelect(aGe, A.s, B.s)
+        var e2 = b.NewSelect(aGe, B.e, A.e)
+        var m2 = b.NewSelect(aGe, B.m, A.m)
+        var s2 = b.NewSelect(aGe, B.s, A.s)
+        var d = b.NewSub(e1, e2)
+        var dc = b.NewSelect(b.NewICmp(llvm.enum.IPredUGT, d, k64(63)), k64(63), d)
+        var m2s = b.NewLShr(m2, dc)
+        var same = b.NewICmp(llvm.enum.IPredEQ, s1, s2)
+        var less = b.NewICmp(llvm.enum.IPredULT, m1, m2s)
+        var dif = b.NewSelect(less, b.NewSub(m2s, m1), b.NewSub(m1, m2s))
+        var mres = b.NewSelect(same, b.NewAdd(m1, m2s), dif)
+        var sres = b.NewSelect(same, s1, b.NewSelect(less, s2, s1))
+        var eres = e1
+        // A carry out of bit 52 costs one right shift; a cancelling subtraction can
+        // need up to 52 left shifts.
+        var over = b.NewICmp(llvm.enum.IPredUGE, mres, kB53)
+        mres = b.NewSelect(over, b.NewLShr(mres, one64), mres)
+        eres = b.NewSelect(over, b.NewAdd(eres, one64), eres)
+        var n = normLeft(b, mres, eres)
+        var res = pack(b, sres, n.e, n.m)
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, mres, zero64), zero64, res)
+    }
+    // a * b. The 106-bit product of the two mantissas is formed from 26-bit halves,
+    // of which only the top 53 bits are kept.
+    function buildDMul(b, f) {
+        var A = unpack(b, f.Params[0])
+        var B = unpack(b, f.Params[1])
+        var k26 = k64(26)
+        var mask26 = k64(67108863)
+        var ah = b.NewLShr(A.m, k26)
+        var al = b.NewAnd(A.m, mask26)
+        var bh = b.NewLShr(B.m, k26)
+        var bl = b.NewAnd(B.m, mask26)
+        var hh = b.NewMul(ah, bh)
+        var mid = b.NewAdd(b.NewAdd(b.NewMul(ah, bl), b.NewMul(al, bh)),
+                           b.NewLShr(b.NewMul(al, bl), k26))
+        var mres = b.NewAdd(hh, b.NewLShr(mid, k26))   // the product shifted right by 52
+        var eres = b.NewSub(b.NewAdd(A.e, B.e), kBias)
+        var over = b.NewICmp(llvm.enum.IPredUGE, mres, kB53)
+        mres = b.NewSelect(over, b.NewLShr(mres, one64), mres)
+        eres = b.NewSelect(over, b.NewAdd(eres, one64), eres)
+        // Either mantissa being zero makes the product zero. Testing their PRODUCT
+        // would not do: 2^52 * 2^52 is 0 modulo 2^64.
+        var az = b.NewICmp(llvm.enum.IPredEQ, A.m, zero64)
+        var isZero = b.NewICmp(llvm.enum.IPredEQ, b.NewSelect(az, zero64, B.m), zero64)
+        var res = pack(b, b.NewXor(A.s, B.s), eres, mres)
+        return b.NewSelect(isZero, zero64, res)
+    }
+    // a / b. Five unrolled long-division steps of 11 bits each give 55 quotient bits.
+    function buildDDiv(b, f) {
+        var A = unpack(b, f.Params[0])
+        var B = unpack(b, f.Params[1])
+        var k11 = k64(11)
+        var den = b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, B.m, zero64), one64, B.m)
+        var num = A.m
+        var acc = zero64
+        for (var i = 0; i < 5; i++) {
+            var sh = b.NewShl(num, k11)
+            acc = b.NewOr(b.NewShl(acc, k11), b.NewUDiv(sh, den))
+            num = b.NewURem(sh, den)
+        }
+        // acc is the quotient scaled by 2^55 and lies in (2^54, 2^56).
+        var c = b.NewSelect(b.NewICmp(llvm.enum.IPredUGE, acc, k64(36028797018963968)), k64(3), k64(2))
+        var mres = b.NewLShr(acc, c)
+        var eres = b.NewAdd(b.NewSub(b.NewAdd(b.NewSub(A.e, B.e), kBias), k64(3)), c)
+        var isZero = b.NewICmp(llvm.enum.IPredEQ, A.m, zero64)
+        var res = pack(b, b.NewXor(A.s, B.s), eres, mres)
+        return b.NewSelect(isZero, zero64, res)
+    }
+    // A signed 64-bit integer to a double.
+    function buildI2D(b, f) {
+        var x = f.Params[0]
+        var neg = b.NewICmp(llvm.enum.IPredSLT, x, zero64)
+        var ax = b.NewSelect(neg, b.NewSub(zero64, x), x)
+        var n = normLeft(b, ax, k64(1023 + 52))
+        var res = pack(b, b.NewSelect(neg, one64, zero64), n.e, n.m)
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ax, zero64), zero64, res)
+    }
+    // A double to a signed 64-bit integer, truncating towards zero.
+    function buildD2I(b, f) {
+        var A = unpack(b, f.Params[0])
+        var sh = b.NewSub(k64(52 + 1023), A.e)
+        var big = b.NewICmp(llvm.enum.IPredSGT, sh, k64(63))   // |value| < 1
+        var shc = b.NewSelect(big, k64(63), sh)
+        var neg = b.NewICmp(llvm.enum.IPredSLT, shc, zero64)   // |value| >= 2^52
+        var up = b.NewShl(A.m, b.NewSub(zero64, shc))
+        var down = b.NewLShr(A.m, shc)
+        var mag = b.NewSelect(neg, up, b.NewSelect(big, zero64, down))
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredNE, A.s, zero64), b.NewSub(zero64, mag), mag)
+    }
+    function emitDBin(b, op, x, y) {
+        if (op == "+") return b.NewCall(softFn("__mec_dadd", 2, buildDAdd), [x, y])
+        if (op == "-") return b.NewCall(softFn("__mec_dadd", 2, buildDAdd),
+                                        [x, b.NewXor(y, b.NewShl(one64, k64(63)))])
+        if (op == "*") return b.NewCall(softFn("__mec_dmul", 2, buildDMul), [x, y])
+        if (op == "/") return b.NewCall(softFn("__mec_ddiv", 2, buildDDiv), [x, y])
+        fail("operator " + op + " is not defined on floating-point operands")
+    }
+    // The IEEE ordering as an UNSIGNED integer ordering: flip every bit of a negative
+    // pattern, set the top bit of a positive one, and the bit patterns sort like the
+    // numbers they encode.
+    function dblKey(b, x) {
+        var top = b.NewShl(one64, k64(63))
+        return b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, x, zero64), b.NewXor(x, k64(-1)), b.NewOr(x, top))
+    }
+    function emitDCmp(b, op, x, y) {
+        var pred = { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredULT,
+                     ">": llvm.enum.IPredUGT, "<=": llvm.enum.IPredULE, ">=": llvm.enum.IPredUGE }[op]
+        return toInt(b, b.NewICmp(pred, dblKey(b, x), dblKey(b, y)))
+    }
+    // int -> double and double -> int, at the i32 boundary the rest of the model uses.
+    function emitI2D(b, ct, v) {
+        var w = (ct.k == "int" && ct.u == true) ? b.NewZExt(v, i64) : b.NewSExt(v, i64)
+        return b.NewCall(softFn("__mec_i2d", 1, buildI2D), [w])
+    }
+    function emitD2I(b, v) {
+        return b.NewTrunc(b.NewCall(softFn("__mec_d2i", 1, buildD2I), [v]), i32)
     }
 
     truthy = function(b, v) { return b.NewICmp(llvm.enum.IPredNE, v, zero) }
@@ -1116,22 +1887,68 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Expression thunks: function(block) -> {b, v} -----
 
-    function makeInt(n) {
-        var c = llvm.constant.NewInt(i32, n)
-        return function(b) { return {b: b, v: c} }
+    function kint(n) { return llvm.constant.NewInt(i32, n | 0) }
+    // Every expression thunk answers {b, v, ct, cv}: the block to continue in, the
+    // LLVM value, the C type, and - when the expression is a compile-time constant -
+    // its value. cv is what carries floating point, which the IR interpreter has no
+    // instruction for, through constant expressions, casts and comparisons.
+    function makeNum(n, ct) {
+        var cv = convertNum(ct, n)
+        if (ct.k == "flt") {
+            // The bit pattern is built where it is needed; until then the constant
+            // travels as cv, which is what lets a constant expression fold.
+            return function(b) { return {b: b, v: zero, ct: ct, cv: cv} }
+        }
+        var k = kint(cv)
+        return function(b) { return {b: b, v: k, ct: ct, cv: cv} }
+    }
+    function makeInt(n) { return makeNum(n, ctInt) }
+    // An integer constant carries the type its suffix names: u/U unsigned, l/L long.
+    function makeNumLit(n, text) { return makeNum(n, intCtOf(text)) }
+    function intCtOf(text) {
+        var nl = 0
+        var u = false
+        for (var i = 0; i < text.length; i++) {
+            var cc = text.charCodeAt(i)
+            if (cc == 108 || cc == 76) nl = nl + 1
+            else if (cc == 117 || cc == 85) u = true
+            else if (!((cc >= 48 && cc <= 57) || (cc >= 97 && cc <= 102) || (cc >= 65 && cc <= 70) || cc == 120 || cc == 88)) break
+        }
+        return ctI(nl > 0 ? 8 : 4, u)
+    }
+    // A floating constant: f/F makes it a float, l/L a long double (modelled as a
+    // double, like every long double here).
+    function makeFltLit(text) {
+        var t = text
+        var end = t.length
+        while (end > 0) {
+            var cc = t.charCodeAt(end - 1)
+            if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { end = end - 1; continue }
+            break
+        }
+        t = t.slice(0, end)
+        var ct = ctDbl
+        var last = t.charCodeAt(t.length - 1)
+        if (last == 102 || last == 70) { ct = ctF(4); t = t.slice(0, t.length - 1) }
+        else if (last == 108 || last == 76) { t = t.slice(0, t.length - 1) }
+        return makeNum(parseCFloat(t), ct)
     }
     // Bare name: int variable loads, array decays to the address of its first element.
     makeVarRef = function(name) {
         return function(b) {
             var e = lookupVar(name)
             if (e == undefined) {
-                if (hasOwn(enumConsts, name)) return {b: b, v: llvm.constant.NewInt(i32, enumConsts[name] | 0)}
+                if (hasOwn(enumConsts, name)) return {b: b, v: kint(enumConsts[name] | 0), ct: ctInt, cv: enumConsts[name] | 0}
+                // A bare function name is its address: the function pointer value.
+                if (hasOwn(userFuncs, name)) {
+                    return {b: b, v: llvm.constant.NewInt(i32, funcId(name, userFuncs[name])), ct: ctFn}
+                }
                 fail("variable not defined: " + name)
             }
             var ect = e.ct != undefined ? e.ct : ctInt
-            if (e.arr) return {b: b, v: b.NewGetElementPtr(e.ty, e.val, [zero, zero]), ct: {k: "ptr", p: ect}}
-            if (ect.k == "struct") fail("a whole struct cannot be read; use its fields: " + name)
-            return {b: b, v: b.NewLoad(e.load != undefined ? e.load : i32, e.val), ct: ect}
+            if (ect.k == "arr") return {b: b, v: b.NewGetElementPtr(ctLTy(ect), e.val, [zero, zero]), ct: {k: "ptr", p: ect.e}}
+            if (ect.k == "struct") return {b: b, v: e.val, ct: ect}
+            return {b: b, v: b.NewLoad(e.load != undefined ? e.load : ctLTy(ect), e.val), ct: ect}
         }
     }
     // A place path: the variable, then indexing and member steps. The walk keeps the
@@ -1139,49 +1956,122 @@ KwDefault   = "default" KwEnd ;
     // elements (the array in place, a pointer through its loaded base), .f selects
     // the field, ->f loads the pointer first. The extra ct in the result lets
     // makeLoadOf pick the loaded type.
+    // Step a place path from a starting {b, v, ct}: '[i]' peels one array or pointer
+    // level (and getelementptrs by whole elements), '.f' selects the field, '->f'
+    // loads the pointer first. The C type travels with the address, so nothing needs
+    // a separate 'is this an array' flag.
+    function emitPath(start, path, name) {
+        var b = start.b
+        var addr = start.v
+        var ct = start.ct != undefined ? start.ct : ctInt
+        var bf = undefined   // Set when the LAST step selected a bit field.
+        for (var i = 0; i < path.length; i++) {
+            var s = path[i]
+            bf = undefined
+            if (s.idx != undefined) {
+                var r = s.idx(b)
+                b = r.b
+                if (ct.k == "arr") {
+                    addr = b.NewGetElementPtr(ctLTy(ct), addr, [zero, r.v])
+                    ct = ct.e
+                } else if (ct.k == "ptr") {
+                    var base = b.NewLoad(i32p, addr)
+                    ct = ct.p
+                    addr = b.NewGetElementPtr(ctLTy(ct), base, [r.v])
+                } else fail("indexing needs an array or a pointer: " + name)
+            } else if (s.fld != undefined) {
+                if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
+                var f = fieldOf(ct.s, s.fld)
+                addr = b.NewGetElementPtr(structOf(ct.s).lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)])
+                ct = f.ct
+                bf = f.bf
+            } else {
+                if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
+                var base2 = b.NewLoad(i32p, addr)
+                var f2 = fieldOf(ct.p.s, s.arw)
+                addr = b.NewGetElementPtr(structOf(ct.p.s).lty, base2, [zero, llvm.constant.NewInt(i32, f2.idx)])
+                ct = f2.ct
+                bf = f2.bf
+            }
+        }
+        return {b: b, v: addr, ct: ct, bf: bf}
+    }
     function makeVarPlace(items) {
         var name = items[0]
         var path = items.slice(1)
         return function(b) {
             var e = findVar(name)
             var ct = e.ct != undefined ? e.ct : ctInt
-            if (path.length == 0) {
-                if (e.arr) fail("an array is not assignable: " + name)
-                return {b: b, v: e.val, ct: ct}
+            if (path.length == 0) return {b: b, v: e.val, ct: ct}
+            return emitPath({b: b, v: e.val, ct: ct}, path, name)
+        }
+    }
+    // A string literal is an unnamed array object with static storage duration: it
+    // becomes a module global. The module format has no array CONSTANT, so the
+    // contents are written by stores; they are idempotent, so the object keeps one
+    // address however often the literal is evaluated.
+    var strSeq = 0
+    function strLitPlace(d) {
+        var ct = ctArr(d.str.length, d.wide ? ctInt : ctChar)
+        var aty = ctLTy(ct)
+        strSeq = strSeq + 1
+        var g = m.NewGlobalDef(".str." + strSeq, llvm.constant.NewZeroInitializer(aty))
+        var bytes = d.str
+        return function(b) {
+            for (var i = 0; i < bytes.length; i++) {
+                b.NewStore(kint(bytes[i]), b.NewGetElementPtr(aty, g, [zero, kint(i)]))
             }
-            var addr = e.val
-            var arr = e.arr
-            var bf = undefined   // Set when the LAST step selected a bit field.
-            for (var i = 0; i < path.length; i++) {
-                var s = path[i]
-                bf = undefined
-                if (s.idx != undefined) {
-                    var r = s.idx(b)
-                    b = r.b
-                    if (arr) {
-                        addr = b.NewGetElementPtr(e.ty, addr, [zero, r.v])
-                    } else if (ct.k == "ptr") {
-                        var base = b.NewLoad(i32p, addr)
-                        ct = ct.p
-                        addr = b.NewGetElementPtr(ctLTy(ct), base, [r.v])
-                    } else fail("indexing needs an array or a pointer: " + name)
-                } else if (s.fld != undefined) {
-                    if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
-                    var f = fieldOf(ct.s, s.fld)
-                    addr = b.NewGetElementPtr(structOf(ct.s).lty, addr, [zero, llvm.constant.NewInt(i32, f.idx)])
-                    ct = f.ct
-                    bf = f.bf
-                } else {
-                    if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
-                    var base2 = b.NewLoad(i32p, addr)
-                    var f2 = fieldOf(ct.p.s, s.arw)
-                    addr = b.NewGetElementPtr(structOf(ct.p.s).lty, base2, [zero, llvm.constant.NewInt(i32, f2.idx)])
-                    ct = f2.ct
-                    bf = f2.bf
-                }
-                arr = false
-            }
-            return {b: b, v: addr, ct: ct, bf: bf}
+            return {b: b, v: g, ct: ct}
+        }
+    }
+    function makeStrPlace(text) { return strLitPlace(cStrBytes(text)) }
+    function makeStrInit(text) { return cStrBytes(text) }
+    // '(Type){ ... }': an unnamed object with automatic storage, initialized like a
+    // declared one. The place thunk allocates it and hands back its address, so a
+    // suffix chain, '&' and a decay to a pointer all work on it like on a variable.
+    function makeCompDesc(items) {
+        var d = {bs: items[0].bs, ptr: 0, dims: undefined}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].ptr != undefined) { d.ptr = items[i].ptr }
+            if (items[i].dims != undefined) { d.dims = items[i].dims }
+        }
+        return d
+    }
+    function compLitCt(d, init) {
+        var base = d.bs
+        if (d.ptr > 0) { base = ptrTo(d.ptr, base) }
+        if (d.dims != undefined) return arrCt(d.dims, base, initCount(init))
+        return base
+    }
+    function makeCompLit(items) {
+        var ct = compLitCt(items[0].clt, items[1])
+        var lty = ctLTy(ct)
+        var init = items[1]
+        return function(b) {
+            var a = b.NewAlloca(lty)
+            b = zeroAggregate(b, ct, a)
+            b = emitInit(b, ct, init, a)
+            return {b: b, v: a, ct: ct}
+        }
+    }
+    // '(place)[i]' / '(place).f': the parenthesized place, then its suffix chain.
+    function makeSfxChain(items) {
+        var placeT = items[0]
+        var path = items.slice(1)
+        return function(b) { return emitPath(placeT(b), path, "parenthesized place") }
+    }
+    // '*place': the pointer's VALUE is the address of the place, and the place's C
+    // type is the pointee. An ARRAY does not load at all - '*a' is 'a[0]'.
+    function makeDerefP(placeT) {
+        return function(b) {
+            var p = placeT(b)
+            var ct = p.ct != undefined ? p.ct : ctInt
+            if (ct.k == "arr") return {b: p.b, v: p.b.NewGetElementPtr(ctLTy(ct), p.v, [zero, zero]), ct: ct.e}
+            // '*fp' on a function pointer is the function designator, which decays
+            // straight back to the same pointer (C11 6.5.3.2p4).
+            if (ct.k == "fnp") return {b: p.b, v: p.v, ct: ct}
+            if (ct.k != "ptr") fail("'*' needs a pointer")
+            return {b: p.b, v: p.b.NewLoad(i32p, p.v), ct: ct.p}
         }
     }
     // '*e': the pointer VALUE is the address of the place, and the place's C type is
@@ -1193,75 +2083,195 @@ KwDefault   = "default" KwEnd ;
             return {b: r.b, v: r.v, ct: ct}
         }
     }
+    // The address of a place: the lvalue thunk already yields it, only the TYPE grows
+    // one pointer level.
+    function makeAddrOf(placeT) {
+        return function(b) {
+            var p = placeT(b)
+            return {b: p.b, v: p.v, ct: {k: "ptr", p: p.ct != undefined ? p.ct : ctInt}}
+        }
+    }
     // Load a place; the result carries the C type of the loaded VALUE, so a chain of
     // dereferences keeps picking the right load type.
     function makeLoadOf(placeT) {
         return function(b) {
             var r = placeT(b)
             var ct = r.ct != undefined ? r.ct : ctInt
-            if (ct.k == "struct") fail("a whole struct cannot be read; use its fields")
+            if (ct.k == "arr") return {b: r.b, v: r.b.NewGetElementPtr(ctLTy(ct), r.v, [zero, zero]), ct: {k: "ptr", p: ct.e}}
+            if (ct.k == "struct") return {b: r.b, v: r.v, ct: ct}
             return {b: r.b, v: r.b.NewLoad(ct.k == "ptr" ? i32p : i32, r.v), ct: ct}
         }
     }
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: r.b.NewSub(zero, r.v)}
+            var ct = promote(r.ct != undefined ? r.ct : ctInt)
+            if (r.cv != undefined) {
+                var cv = convertNum(ct, 0 - r.cv)
+                return {b: r.b, v: kint(isFlt(ct) ? 0 : cv), ct: ct, cv: cv}
+            }
+            // Negating a floating-point value only flips its sign bit.
+            if (isFlt(ct)) {
+                var d = fltOperand(r.b, r, ct)
+                return {b: r.b, v: r.b.NewXor(d, r.b.NewShl(one64, k64(63))), ct: ct}
+            }
+            return {b: r.b, v: emitConv(r.b, ct, r.b.NewSub(zero, r.v)), ct: ct}
         }
     }
     makeNot = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: toInt(r.b, r.b.NewICmp(llvm.enum.IPredEQ, r.v, zero))}
+            if (r.cv != undefined) {
+                var cv = (r.cv == 0) ? 1 : 0
+                return {b: r.b, v: kint(cv), ct: ctInt, cv: cv}
+            }
+            return {b: r.b, v: toInt(r.b, r.b.NewICmp(llvm.enum.IPredEQ, r.v, zero)), ct: ctInt}
         }
     }
     function makeBitNot(t) {
         var minusOne = llvm.constant.NewInt(i32, -1)
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: r.b.NewXor(r.v, minusOne)}
+            var ct = promote(r.ct != undefined ? r.ct : ctInt)
+            if (r.cv != undefined) {
+                var cv = convertNum(ct, ~r.cv)
+                return {b: r.b, v: kint(cv), ct: ct, cv: cv}
+            }
+            return {b: r.b, v: emitConv(r.b, ct, r.b.NewXor(r.v, minusOne)), ct: ct}
         }
     }
 
-    emitBin = function(b, op, l, r) {
-        // C pointer arithmetic: ptr +/- int steps whole elements (getelementptr).
-        if (op == "+" || op == "-") {
-            var lp = llvm.types.IsPointer(l.Type())
-            var rp = llvm.types.IsPointer(r.Type())
+    // The value of one binary operator on two COMPILE-TIME constants, in the common
+    // type the usual arithmetic conversions picked.
+    function constBin(op, ct, a, b) {
+        if (op == "==") return a == b ? 1 : 0
+        if (op == "!=") return a != b ? 1 : 0
+        if (op == "<")  return a < b ? 1 : 0
+        if (op == ">")  return a > b ? 1 : 0
+        if (op == "<=") return a <= b ? 1 : 0
+        if (op == ">=") return a >= b ? 1 : 0
+        if (op == "+") return convertNum(ct, a + b)
+        if (op == "-") return convertNum(ct, a - b)
+        if (op == "*") return convertNum(ct, a * b)
+        if (op == "/") return convertNum(ct, isFlt(ct) ? (a / b) : trunc0(a / b))
+        if (op == "%") return convertNum(ct, a % b)
+        if (op == "|") return convertNum(ct, a | b)
+        if (op == "^") return convertNum(ct, a ^ b)
+        if (op == "&") return convertNum(ct, a & b)
+        if (op == "<<") return convertNum(ct, a << (b & 31))
+        if (op == ">>") return convertNum(ct, ct.u ? (a >>> (b & 31)) : (a >> (b & 31)))
+        return 0
+    }
+    // One operand of a floating-point operation as its i64 bit pattern, converting
+    // an integer operand on the way (the usual arithmetic conversions already said
+    // the common type is floating point).
+    function fltOperand(b, r, ct) {
+        var rct = r.ct != undefined ? r.ct : ctInt
+        if (isFlt(rct)) return dblOf(b, r)
+        if (r.cv != undefined) return emitDblConst(b, r.cv)
+        return emitI2D(b, rct, r.v)
+    }
+    // One value as the representation the destination type needs: an integer becomes
+    // a double when the destination is floating point, and a double truncates to an
+    // integer when it is not.
+    function coerce(b, ct, r) {
+        var rct = r.ct != undefined ? r.ct : ctInt
+        if (ct != undefined && isFlt(ct)) return fltOperand(b, r, ct)
+        if (isFlt(rct)) return emitConv(b, ct != undefined ? ct : ctInt, emitD2I(b, dblOf(b, r)))
+        return r.v
+    }
+    function isCmpOp(op) {
+        return op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">="
+    }
+    // One binary operator on two typed values. Pointer arithmetic steps whole
+    // elements; everything else is evaluated in the usual arithmetic conversions'
+    // common type, which is what picks the unsigned divide, remainder, shift and
+    // compare over the signed one.
+    function emitBinC(b, op, lr, rr) {
+        var l = lr.v
+        var r = rr.v
+        var lct = lr.ct != undefined ? lr.ct : ctInt
+        var rct = rr.ct != undefined ? rr.ct : ctInt
+        var lp = pointeeOf(lct)
+        var rp = pointeeOf(rct)
+        if ((lp != undefined || rp != undefined) && (op == "+" || op == "-")) {
             // ptr - ptr is the element DISTANCE, not a byte difference.
-            if (lp && rp && op == "-") {
+            if (lp != undefined && rp != undefined && op == "-") {
                 var li = b.NewPtrToInt(l, llvm.types.I64)
                 var ri = b.NewPtrToInt(r, llvm.types.I64)
-                return b.NewTrunc(b.NewSDiv(b.NewSub(li, ri), llvm.constant.NewInt(llvm.types.I64, 4)), i32)
+                var d = b.NewTrunc(b.NewSDiv(b.NewSub(li, ri), llvm.constant.NewInt(llvm.types.I64, machBytes(lp))), i32)
+                return {b: b, v: d, ct: ctInt}
             }
-            if (lp || rp) {
-                var base = lp ? l : r
-                // The index is widened to i64 first: the IR interpreter scales a gep
-                // index as an UNSIGNED register, so a negative i32 index (p - 1) would
-                // wrap into a wild address instead of stepping backwards.
-                var off = b.NewSExt(lp ? r : l, llvm.types.I64)
-                if (op == "-") off = b.NewSub(llvm.constant.NewInt(llvm.types.I64, 0), off)
-                return b.NewGetElementPtr(i32, base, [off])
+            var base = (lp != undefined) ? l : r
+            var el = (lp != undefined) ? lp : rp
+            // The index is widened to i64 first: the IR interpreter scales a gep
+            // index as an UNSIGNED register, so a negative i32 index (p - 1) would
+            // wrap into a wild address instead of stepping backwards.
+            var off = b.NewSExt((lp != undefined) ? r : l, llvm.types.I64)
+            if (op == "-") off = b.NewSub(llvm.constant.NewInt(llvm.types.I64, 0), off)
+            var bct = (lp != undefined) ? lct : rct
+            return {b: b, v: b.NewGetElementPtr(ctLTy(el), base, [off]),
+                    ct: bct.k == "arr" ? {k: "ptr", p: el} : bct}
+        }
+        var ct = arithCt(lct, rct)
+        // A shift keeps the LEFT operand's promoted type (C11 6.5.7p3).
+        if (op == "<<" || op == ">>") { ct = promote(lct) }
+        var out = isCmpOp(op) ? ctInt : ct
+        if (lr.cv != undefined && rr.cv != undefined) {
+            var cv = constBin(op, ct, convertNum(ct, lr.cv), convertNum(op == "<<" || op == ">>" ? rct : ct, rr.cv))
+            return {b: b, v: kint(out.k == "flt" ? 0 : cv), ct: out, cv: cv}
+        }
+        if (isFlt(ct)) {
+            var xf = fltOperand(b, lr, ct)
+            var yf = fltOperand(b, rr, ct)
+            if (isCmpOp(op)) return {b: b, v: emitDCmp(b, op, xf, yf), ct: ctInt}
+            return {b: b, v: emitDBin(b, op, xf, yf), ct: ct}
+        }
+        var lv = emitConv(b, ct, l)
+        var rv = (op == "<<" || op == ">>") ? r : emitConv(b, ct, r)
+        if (isCmpOp(op)) {
+            // Pointer comparisons (p != 0, p == q): both operands become uniform i32*.
+            if (llvm.types.IsPointer(lv.Type()) || llvm.types.IsPointer(rv.Type())) {
+                lv = llvm.types.IsPointer(lv.Type()) ? b.NewBitCast(lv, i32p) : b.NewIntToPtr(lv, i32p)
+                rv = llvm.types.IsPointer(rv.Type()) ? b.NewBitCast(rv, i32p) : b.NewIntToPtr(rv, i32p)
+                var upred = { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredULT,
+                              ">": llvm.enum.IPredUGT, "<=": llvm.enum.IPredULE, ">=": llvm.enum.IPredUGE }[op]
+                return {b: b, v: toInt(b, b.NewICmp(upred, lv, rv)), ct: ctInt}
             }
+            var pred = ct.u == true
+                ? { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredULT,
+                    ">": llvm.enum.IPredUGT, "<=": llvm.enum.IPredULE, ">=": llvm.enum.IPredUGE }[op]
+                : { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredSLT,
+                    ">": llvm.enum.IPredSGT, "<=": llvm.enum.IPredSLE, ">=": llvm.enum.IPredSGE }[op]
+            return {b: b, v: toInt(b, b.NewICmp(pred, lv, rv)), ct: ctInt}
         }
-        if (op == "+") return b.NewAdd(l, r)
-        if (op == "-") return b.NewSub(l, r)
-        if (op == "*") return b.NewMul(l, r)
-        if (op == "/") return b.NewSDiv(l, r)
-        if (op == "%") return b.NewSRem(l, r)
-        if (op == "|") return b.NewOr(l, r)
-        if (op == "^") return b.NewXor(l, r)
-        if (op == "&") return b.NewAnd(l, r)
-        if (op == "<<") return b.NewShl(l, r)
-        if (op == ">>") return b.NewAShr(l, r)
-        var pred = { "==": llvm.enum.IPredEQ, "!=": llvm.enum.IPredNE, "<": llvm.enum.IPredSLT,
-                     ">": llvm.enum.IPredSGT, "<=": llvm.enum.IPredSLE, ">=": llvm.enum.IPredSGE }[op]
-        // Pointer comparisons (p != 0, p == q): both operands become uniform i32*.
-        if (llvm.types.IsPointer(l.Type()) || llvm.types.IsPointer(r.Type())) {
-            l = llvm.types.IsPointer(l.Type()) ? b.NewBitCast(l, i32p) : b.NewIntToPtr(l, i32p)
-            r = llvm.types.IsPointer(r.Type()) ? b.NewBitCast(r, i32p) : b.NewIntToPtr(r, i32p)
+        var v = undefined
+        if (op == "+") v = b.NewAdd(lv, rv)
+        else if (op == "-") v = b.NewSub(lv, rv)
+        else if (op == "*") v = b.NewMul(lv, rv)
+        else if (op == "/") v = ct.u == true ? b.NewUDiv(lv, rv) : b.NewSDiv(lv, rv)
+        else if (op == "%") v = ct.u == true ? b.NewURem(lv, rv) : b.NewSRem(lv, rv)
+        else if (op == "|") v = b.NewOr(lv, rv)
+        else if (op == "^") v = b.NewXor(lv, rv)
+        else if (op == "&") v = b.NewAnd(lv, rv)
+        else if (op == "<<") v = b.NewShl(lv, rv)
+        else if (op == ">>") v = ct.u == true ? b.NewLShr(lv, rv) : b.NewAShr(lv, rv)
+        return {b: b, v: emitConv(b, ct, v), ct: ct}
+    }
+    // The shared foldBinary drops the C type, so the C grammar keeps its own.
+    foldBinary = function(items) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = items[i + 1](b)
+                b = rr.b
+                r = emitBinC(b, items[i], r, rr)
+                b = r.b
+            }
+            return r
         }
-        return toInt(b, b.NewICmp(pred, l, r))
     }
     // Real C short circuit through basic blocks; the result is an i32 0/1 phi.
     makeOrAnd = function(items, isOr) {
@@ -1290,40 +2300,42 @@ KwDefault   = "default" KwEnd ;
         if (items.length == 1) return items[0]
         return function(b) {
             var r = items[0](b)
+            // A CONSTANT condition selects while the code is emitted, so only the
+            // winning arm is emitted at all - which is also what carries a
+            // floating-point arm (the IR interpreter has no float instruction).
+            if (r.cv != undefined) { return (r.cv != 0) ? items[1](r.b) : items[2](r.b) }
             var thenB = curF.NewBlock("")
             var elseB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             r.b.NewCondBr(truthy(r.b, r.v), thenB, elseB)
             var rt = items[1](thenB)
-            rt.b.NewBr(mergeB)
             var re = items[2](elseB)
+            // Both arms feed one phi, so both are brought to the balanced type first.
+            var ct = arithCt(rt.ct != undefined ? rt.ct : ctInt, re.ct != undefined ? re.ct : ctInt)
+            var vt = coerce(rt.b, ct, rt)
+            var ve = coerce(re.b, ct, re)
+            rt.b.NewBr(mergeB)
             re.b.NewBr(mergeB)
-            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(rt.v, rt.b), llvm.ir.NewIncoming(re.v, re.b)])
-            return {b: mergeB, v: phi}
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(vt, rt.b), llvm.ir.NewIncoming(ve, re.b)])
+            return {b: mergeB, v: phi, ct: ct}
         }
     }
-    function applyOp(b, op, a, v) {
-        if (op == "+=") return b.NewAdd(a, v)
-        if (op == "-=") return b.NewSub(a, v)
-        if (op == "*=") return b.NewMul(a, v)
-        if (op == "/=") return b.NewSDiv(a, v)
-        if (op == "%=") return b.NewSRem(a, v)
-        if (op == "&=") return b.NewAnd(a, v)
-        if (op == "^=") return b.NewXor(a, v)
-        if (op == "|=") return b.NewOr(a, v)
-        if (op == "<<=") return b.NewShl(a, v)
-        if (op == ">>=") return b.NewAShr(a, v)
-    }
+    // A compound assignment is the plain operator on the current value, converted
+    // back to the target's type (C11 6.5.16.2p3).
+    function applyOp(b, op, a, v) { return emitBinC(b, op.slice(0, op.length - 1), a, v) }
     // storeTo writes v to the given address. Every stored pointer is normalized to
     // i32* first (struct pointers are typed by their getelementptrs, but the cells
     // are uniform i32* slots - llir checks store operand types); into a pointer
     // place a plain integer (the 0 of 'p = 0') goes through inttoptr, so the store
     // covers all 8 bytes.
     function storeTo(b, ct, addr, v) {
+        if (ct != undefined && isFlt(ct)) { b.NewStore(v, addr); return v }
         if (llvm.types.IsPointer(v.Type())) {
             v = b.NewBitCast(v, i32p)
         } else if (ct != undefined && ct.k == "ptr") {
             v = b.NewIntToPtr(v, i32p)
+        } else if (ct != undefined) {
+            v = emitConv(b, ct, v)
         }
         b.NewStore(v, addr)
         return v
@@ -1336,48 +2348,125 @@ KwDefault   = "default" KwEnd ;
         return function(b) {
             var p = placeT(b)
             b = p.b
+            if (p.ct != undefined && p.ct.k == "arr") fail("an array is not assignable")
             var r = valT(b)
             b = r.b
             var v = r.v
-            if (op != "=") v = applyOp(b, op, b.NewLoad(i32, p.v), v)
+            // Assigning a whole struct or union copies its members (C11 6.5.16.1).
+            if (op == "=" && isAggCt(p.ct)) { return {b: emitCopy(b, p.ct, p.v, v), v: p.v, ct: p.ct} }
+            if (op != "=") {
+                var cur = {b: b, v: b.NewLoad(ctLTy(p.ct != undefined ? p.ct : ctInt), p.v), ct: p.ct}
+                var ra = applyOp(b, op, cur, r)
+                b = ra.b
+                v = ra.v
+            } else {
+                v = coerce(b, p.ct, r)
+            }
             v = bfNormV(b, p.bf, v)
             v = storeTo(b, p.ct, p.v, v)
-            return {b: b, v: v}
+            return {b: b, v: v, ct: p.ct}
         }
+    }
+    // ++ and -- step a POINTER by a whole element and anything else by one.
+    function incStepV(ct) { return kint(ct != undefined && ct.k == "ptr" ? machBytes(ct.p) : 1) }
+    function emitStep(b, ct, old, op) {
+        if (ct != undefined && ct.k == "ptr") {
+            var off = llvm.constant.NewInt(llvm.types.I64, (op == "++") ? 1 : -1)
+            return b.NewGetElementPtr(ctLTy(ct.p), old, [off])
+        }
+        return (op == "++") ? b.NewAdd(old, one) : b.NewSub(old, one)
     }
     function makePreIncDec(placeT, op) {
         return function(b) {
             var p = placeT(b)
             b = p.b
-            var old = b.NewLoad(i32, p.v)
-            var nv = bfNormV(b, p.bf, (op == "++") ? b.NewAdd(old, one) : b.NewSub(old, one))
-            b.NewStore(nv, p.v)
-            return {b: b, v: nv}
+            var lty = ctLTy(p.ct != undefined ? p.ct : ctInt)
+            var old = b.NewLoad(lty, p.v)
+            var nv = bfNormV(b, p.bf, emitStep(b, p.ct, old, op))
+            nv = storeTo(b, p.ct, p.v, nv)
+            return {b: b, v: nv, ct: p.ct}
         }
     }
     function makePostIncDec(op, placeT) {
         return function(b) {
             var p = placeT(b)
             b = p.b
-            var old = b.NewLoad(i32, p.v)
-            var nv = bfNormV(b, p.bf, (op == "++") ? b.NewAdd(old, one) : b.NewSub(old, one))
-            b.NewStore(nv, p.v)
-            return {b: b, v: old}
+            var lty = ctLTy(p.ct != undefined ? p.ct : ctInt)
+            var old = b.NewLoad(lty, p.v)
+            storeTo(b, p.ct, p.v, bfNormV(b, p.bf, emitStep(b, p.ct, old, op)))
+            return {b: b, v: old, ct: p.ct}
         }
     }
-    function makeCall(items) {
-        var name = items[0]
-        var args = items.slice(1)
+    // items = [seed, {args}...]. The seed is either {fname} (a bare name, resolved as
+    // a function or as a variable holding a function pointer) or an expression thunk
+    // yielding a function identifier. Every further argument list calls what the
+    // previous one returned, through the per-arity trampoline.
+    function makeCallExpr(items) {
+        var seed = items[0]
+        var lists = items.slice(1)
         return function(b) {
-            var argValues = []
-            for (var i = 0; i < args.length; i++) {
-                var r = args[i](b)
-                b = r.b
-                // Pointer arguments (&pt, &nodes[i]) become uniform i32* like the parameters.
-                argValues.push(llvm.types.IsPointer(r.v.Type()) ? b.NewBitCast(r.v, i32p) : r.v)
+            var v = zero
+            var vct = ctInt
+            var start = 0
+            if (typeof seed != "function") {
+                // A local or global VARIABLE shadows a function of the same name: it
+                // holds a function pointer and is called indirectly.
+                if (lookupVar(seed.fname) != undefined) {
+                    var rf = makeVarRef(seed.fname)(b)
+                    b = rf.b
+                    v = rf.v
+                    vct = rf.ct
+                } else {
+                    var rd = emitDirectCall(b, seed.fname, lists[0].args)
+                    b = rd.b
+                    v = rd.v
+                    vct = rd.ct
+                    start = 1
+                }
+            } else {
+                var rs = seed(b)
+                b = rs.b
+                v = rs.v
             }
-            return {b: b, v: b.NewCall(getFuncByArity(name, args.length), argValues)}
+            for (var i = start; i < lists.length; i++) {
+                var ri = emitIndirectCall(b, v, lists[i].args)
+                b = ri.b
+                v = ri.v
+                vct = ctInt
+            }
+            return {b: b, v: v, ct: vct}
         }
+    }
+    function emitCallArgs(b, args, into) {
+        for (var i = 0; i < args.length; i++) {
+            var r = args[i](b)
+            b = r.b
+            // Pointer arguments (&pt, &nodes[i]) become uniform i32* like the parameters;
+            // a floating-point argument travels as its i64 bit pattern.
+            if (r.ct != undefined && isFlt(r.ct)) { into.push(dblOf(b, r)); continue }
+            into.push(llvm.types.IsPointer(r.v.Type()) ? b.NewBitCast(r.v, i32p) : r.v)
+        }
+        return b
+    }
+    function emitDirectCall(b, name, args) {
+        var argValues = []
+        var sct = hasOwn(structRet, name) ? structRet[name] : undefined
+        var dest = undefined
+        if (sct != undefined) {
+            dest = b.NewAlloca(ctLTy(sct))
+            argValues.push(b.NewBitCast(dest, i32p))
+        }
+        b = emitCallArgs(b, args, argValues)
+        var cv = b.NewCall(getFuncByArity(name, args.length), argValues)
+        if (sct != undefined) return {b: b, v: dest, ct: sct}
+        return {b: b, v: cv, ct: ctInt}
+    }
+    function emitIndirectCall(b, idv, args) {
+        var argValues = []
+        b = emitCallArgs(b, args, argValues)
+        var all = [idv]
+        for (var i = 0; i < argValues.length; i++) { all.push(argValues[i]) }
+        return {b: b, v: b.NewCall(trampolineFor(args.length), all), ct: ctInt}
     }
 
     // ----- Statement thunks: function(block) -> block to continue in -----
@@ -1391,91 +2480,105 @@ KwDefault   = "default" KwEnd ;
         }
         return {v: items[0]}
     }
-    // A brace list -> a dense array of value thunks, honouring '[i] =' designators.
-    // A hole (a skipped index, or a shorter list than the array) stays undefined and
-    // keeps the zero of the zero-initialized alloca.
-    function spreadInit(list, pos) {
-        var out = []
-        var at = 0
-        for (var i = 0; i < list.length; i++) {
-            var it = list[i]
-            if (it.at != undefined) at = it.at | 0
-            while (out.length < at) out.push(undefined)
-            var v = it.v
-            if (typeof v != "function") { notImpl("nested aggregate initializer", pos); v = undefined }
-            if (out.length == at) out.push(v)
-            else out[at] = v
-            at = at + 1
+    // ----- Declarators -----
+    // One declarator, whatever its shape, collapses into a DESCRIPTOR; the enclosing
+    // declaration owns the base type and combines the two. That is what lets 'char',
+    // 'unsigned' and a typedef name all reach a declarator that only knows about its
+    // own stars, dimensions and initializer.
+    function makeDeclr(items, kind) {
+        var d = {name: "", ptr: 0, dims: undefined, init: undefined, gv: undefined, kind: kind}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) continue
+            if (typeof it == "string") { d.name = it; continue }
+            if (typeof it == "function") { d.init = it; continue }
+            if (it.ptr != undefined) { d.ptr = it.ptr; continue }
+            if (it.dims != undefined) { d.dims = it.dims; continue }
+            if (it.gv != undefined) { d.gv = it.gv; continue }
+            d.init = it            // {list: ...} or {str: ...}
         }
-        return out
+        return d
     }
-    // items = [{ptr}?, name, {size}?, init?]. init is either an expression thunk or
-    // {list} for a brace initializer; {size} marks an array, with -1 asking for the
-    // size to be taken from the initializer.
-    function makeDecl(items) {
-        var i = 0
-        var nstar = starsOf(items[i])
-        if (nstar > 0) i++
-        var isPtr = nstar > 0
-        var name = items[i]
-        i++
-        var dim = -2                  // -2: not an array at all.
-        if (items[i] != undefined && items[i].size != undefined) { dim = items[i].size | 0; i++ }
-        var opt = items[i]
-        var ct = ptrTo(nstar, ctInt)
-        if (dim > -2) {
-            var list = (opt != undefined && opt.list != undefined) ? opt.list : undefined
-            if (list == undefined && opt != undefined) fail("an array needs a brace initializer: " + name)
-            var elemTy = isPtr ? i32p : i32
-            return function(b) {
-                var vals = (list != undefined) ? spreadInit(list, 0) : []
-                var n = dim >= 0 ? dim : vals.length
-                if (n < vals.length) n = vals.length
-                var ty = llvm.types.NewArray(n, elemTy)
-                var a = b.NewAlloca(ty)
-                // Every element is written, so an uninitialized slot gets an explicit 0.
-                for (var k = 0; k < n; k++) {
-                    var slot = b.NewGetElementPtr(ty, a, [zero, llvm.constant.NewInt(i32, k)])
-                    if (k < vals.length && vals[k] != undefined) {
-                        var r = vals[k](b)
-                        b = r.b
-                        storeTo(b, ct, slot, r.v)
-                    } else {
-                        b.NewStore(isPtr ? llvm.constant.NewNull(i32p) : zero, slot)
-                    }
-                }
-                declVar(name, {val: a, arr: true, ty: ty, ct: ct})
-                return b
-            }
+    // How many elements an initializer covers, for an inferred array size.
+    function initCount(init) {
+        if (init == undefined || typeof init == "function") return 0
+        if (init.list != undefined) return initLen(init.list)
+        if (init.str != undefined) return init.str.length
+        return 0
+    }
+    // The C type that a base type plus one declarator name.
+    function declCt(base, d) {
+        if (d.kind == "fnptr") {
+            if (d.dims != undefined) return arrCt(d.dims, ctFn, initCount(d.init))
+            return ctFn
         }
+        // 'int (*pa)[3]' is a POINTER TO an array, so the dimensions sit INSIDE.
+        if (d.kind == "ptrarr") return ptrTo(d.ptr, arrCt(d.dims, base, 0))
+        var b = (d.ptr > 0) ? ptrTo(d.ptr, base) : base
+        if (d.dims != undefined) return arrCt(d.dims, b, initCount(d.init))
+        return b
+    }
+    // items = [{bty}, {dcl}...] -> one declaration statement.
+    function makeDeclSeq(items, isStatic) {
+        var base = items[0].bty
+        var thunks = []
+        for (var i = 1; i < items.length; i++) {
+            var d = items[i].dcl
+            var ct = declCt(base, d)
+            thunks.push(isStatic ? makeStaticOf(d.name, ct, d.init) : makeDeclOf(d.name, ct, d.init))
+        }
+        return makeSeq(thunks)
+    }
+    function makeDeclOf(name, ct, opt) {
+        var lty = ctLTy(ct)
+        var isPtr = ct.k == "ptr"
         return function(b) {
-            var ptr = b.NewAlloca(isPtr ? i32p : i32)
-            if (opt != undefined) {
-                var r = opt(b)
-                b = r.b
-                storeTo(b, ct, ptr, r.v)
-            }
-            declVar(name, {val: ptr, arr: false, load: isPtr ? i32p : i32, ct: ct})
+            var a = b.NewAlloca(lty)
+            // An alloca is not zeroed, and C requires every element a brace
+            // initializer does not mention to be zero.
+            if (isAggCt(ct)) { b = zeroAggregate(b, ct, a) }
+            if (opt != undefined) { b = initInto(b, ct, opt, a) }
+            declVar(name, {val: a, arr: ct.k == "arr", ty: lty, load: isPtr ? i32p : lty, ct: ct})
             return b
         }
+    }
+    // Write an initializer into a declared object: a brace list, a string literal, or
+    // one expression - which is COPIED when the object is an aggregate.
+    function initInto(b, ct, opt, a) {
+        if (typeof opt != "function") {
+            if (opt.str != undefined) return strInitInto(b, ct, opt, a)
+            return emitInit(b, ct, opt, a)
+        }
+        var r = opt(b)
+        b = r.b
+        if (isAggCt(ct)) return emitCopy(b, ct, a, r.v)
+        storeTo(b, ct, a, coerce(b, ct, r))
+        return b
+    }
+    // A string literal initializing a char ARRAY fills it element by element and
+    // leaves the rest at the zero the pre-fill wrote (C11 6.7.9p14); anywhere else
+    // it is the literal object itself, and what is stored is its address.
+    function strInitInto(b, ct, opt, a) {
+        if (ct.k == "arr") {
+            var aty = ctLTy(ct)
+            var n = opt.str.length < ct.n ? opt.str.length : ct.n
+            for (var i = 0; i < n; i++) {
+                b.NewStore(kint(convertNum(ct.e, opt.str[i])), b.NewGetElementPtr(aty, a, [zero, kint(i)]))
+            }
+            return b
+        }
+        var r = strLitPlace(opt)(b)
+        storeTo(r.b, ct, a, r.v)
+        return r.b
     }
     // A static local: the storage is a module GLOBAL, so it survives across calls, and
     // the declaration only re-binds that global into the current scope. The initializer
     // runs on the first execution only, guarded by a companion flag global (an ordinary
     // local alloca would be reset on every call).
     var staticSeq = 0
-    function makeStaticDecl(items) {
-        var i = 0
-        var nstar = starsOf(items[i])
-        if (nstar > 0) i++
-        var isPtr = nstar > 0
-        var name = items[i]
-        i++
-        if (items[i] != undefined && items[i].size != undefined) {
-            return makeDecl(items)  // A static array: not yet given persistent storage.
-        }
-        var opt = items[i]
-        var ct = ptrTo(nstar, ctInt)
+    function makeStaticOf(name, ct, opt) {
+        if (isAggCt(ct)) return makeDeclOf(name, ct, opt)  // Not yet persistent storage.
+        var isPtr = ct.k == "ptr"
         staticSeq = staticSeq + 1
         var gname = name + ".static." + staticSeq
         var g = m.NewGlobalDef(gname, isPtr ? llvm.constant.NewNull(i32p) : zero)
@@ -1487,13 +2590,20 @@ KwDefault   = "default" KwEnd ;
             var doB = curF.NewBlock("")
             var contB = curF.NewBlock("")
             b.NewCondBr(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, flag), zero), doB, contB)
-            var r = opt(doB)
-            storeTo(r.b, ct, g, r.v)
-            r.b.NewStore(one, flag)
-            r.b.NewBr(contB)
+            var db = initInto(doB, ct, opt, g)
+            db.NewStore(one, flag)
+            db.NewBr(contB)
             return contB
         }
     }
+    // 'int (*f)(int)' as a parameter: the base type is irrelevant, only the name is.
+    function makeFnPtrParam(items) {
+        var name = ""
+        for (var i = 0; i < items.length; i++) { if (typeof items[i] == "string") name = items[i] }
+        return {name: name, ptr: false, ct: ctFn}
+    }
+    // items = [{ptr}, name, [params...], bodyThunk].
+    function buildFnPtrFunc(items) { emitFunctionBody(items[1], items[2], items[3], undefined) }
     // SDeclarator/SGDecl items = ["*"?] name [{size}|initThunk] -> a plain descriptor.
     function makeSDecl(items) {
         var i = 0
@@ -1521,21 +2631,20 @@ KwDefault   = "default" KwEnd ;
                     }
                     declVar(d.name, {val: ptr, arr: false, load: i32p, ct: pct})
                 } else if (d.size != undefined) {
-                    var ty = llvm.types.NewArray(d.size, structOf(sname).lty)
-                    declVar(d.name, {val: b.NewAlloca(ty), arr: true, ty: ty, ct: ctStruct(sname)})
+                    var act = ctArr(d.size, ctStruct(sname))
+                    var ty = ctLTy(act)
+                    declVar(d.name, {val: b.NewAlloca(ty), arr: true, ty: ty, ct: act})
                 } else {
                     var st = structOf(sname)
                     var a = b.NewAlloca(st.lty)
                     if (d.init != undefined) {
-                        if (d.init.list == undefined) fail("a struct or union needs a brace initializer: " + d.name)
-                        b = zeroAggregate(b, ctStruct(sname), a)
-                        var plan = structInitPlan(sname, d.init.list, 0)
-                        for (var k = 0; k < plan.length; k++) {
-                            var fd = plan[k].f
-                            var slot = b.NewGetElementPtr(st.lty, a, [zero, llvm.constant.NewInt(i32, fd.idx)])
-                            var rr = plan[k].t(b)
-                            b = rr.b
-                            storeTo(b, fd.ct, slot, rr.v)
+                        // Either a brace initializer, or another struct VALUE, which is copied.
+                        if (d.init.list != undefined) {
+                            b = zeroAggregate(b, ctStruct(sname), a)
+                            b = emitInit(b, ctStruct(sname), d.init, a)
+                        } else {
+                            var ri = d.init(b)
+                            b = emitCopy(ri.b, ctStruct(sname), a, ri.v)
                         }
                     }
                     declVar(d.name, {val: a, arr: false, ct: ctStruct(sname)})
@@ -1554,9 +2663,10 @@ KwDefault   = "default" KwEnd ;
                 var g = m.NewGlobalDef(d.name, llvm.constant.NewNull(i32p))
                 declVar(d.name, {val: g, arr: false, load: i32p, ct: ptrTo(d.star, ctStruct(sname))})
             } else if (d.size != undefined) {
-                var ty = llvm.types.NewArray(d.size, structOf(sname).lty)
+                var gact = ctArr(d.size, ctStruct(sname))
+                var ty = ctLTy(gact)
                 var g2 = m.NewGlobalDef(d.name, llvm.constant.NewZeroInitializer(ty))
-                declVar(d.name, {val: g2, arr: true, ty: ty, ct: ctStruct(sname)})
+                declVar(d.name, {val: g2, arr: true, ty: ty, ct: gact})
             } else {
                 var g3 = m.NewGlobalDef(d.name, llvm.constant.NewZeroInitializer(structOf(sname).lty))
                 declVar(d.name, {val: g3, arr: false, ct: ctStruct(sname)})
@@ -1662,9 +2772,19 @@ KwDefault   = "default" KwEnd ;
     }
     function makeReturn(items) {
         var t = items.length > 0 ? items[0] : makeInt(0)
+        var hasVal = items.length > 0
         return function(b) {
+            // In a struct-returning function the value is copied into the caller's
+            // destination (the hidden first parameter) and the call itself yields it.
+            if (curSret != undefined && hasVal) {
+                var rs = t(b)
+                var eb = emitCopy(rs.b, curRetCt, curSret, rs.v)
+                eb.NewRet(zero)
+                return deadBlock()
+            }
             var r = t(b)
-            r.b.NewRet(r.v)
+            // Every function of this model returns an int.
+            r.b.NewRet(coerce(r.b, ctInt, r))
             return deadBlock()
         }
     }
@@ -1675,60 +2795,144 @@ KwDefault   = "default" KwEnd ;
     function makeParam(items) {
         var i = 0
         var sname
+        var base = ctInt
         if (items[i] != undefined && items[i].sname != undefined) { sname = items[i].sname; i++ }
+        else if (items[i] != undefined && items[i].bty != undefined) { base = items[i].bty; i++ }
         var ptr = starsOf(items[i])
         if (ptr > 0) i++
-        if (sname != undefined && ptr == 0) fail("struct parameters must be pointers (struct " + sname + " *)")
-        var ct = ptrTo(ptr, sname != undefined ? ctStruct(sname) : ctInt)
+        var ct = ptrTo(ptr, sname != undefined ? ctStruct(sname) : base)
         // An abstract parameter has no name: give it one nothing can spell, so that it
         // still occupies its argument slot.
         var pname = items[i]
         if (pname == undefined) { unnamedSeq = unnamedSeq + 1; pname = "$arg" + unnamedSeq }
-        return {name: pname, ptr: ptr > 0, ct: ct}
+        return {name: pname, ptr: ptr > 0 || isAggCt(ct), ct: ct}
     }
-    function makeGDecl(items) {
-        var i = 0
-        var nstar = starsOf(items[i])
-        if (nstar > 0) i++
-        var isPtr = nstar > 0
-        var name = items[i]
-        var opt = items[i + 1]
-        if (opt != undefined && opt.size != undefined) {
-            var ty = llvm.types.NewArray(opt.size, i32)
-            var g = m.NewGlobalDef(name, llvm.constant.NewZeroInitializer(ty))
-            declVar(name, {val: g, arr: true, ty: ty, ct: ctInt})
-        } else if (isPtr) {
-            // A pointer global is a full 8 byte slot (an i32 initializer would only cover half).
-            if (opt != undefined && opt.init != 0) fail("global pointers can only be initialized with 0: " + name)
-            var gp = m.NewGlobalDef(name, llvm.constant.NewNull(i32p))
-            declVar(name, {val: gp, arr: false, load: i32p, ct: ptrTo(nstar, ctInt)})
-        } else {
-            var init = (opt != undefined) ? opt.init : 0
-            var g2 = m.NewGlobalDef(name, llvm.constant.NewInt(i32, init))
-            declVar(name, {val: g2, arr: false, load: i32, ct: ctInt})
+    // items = [{bty}, {dcl}...]: globals are emitted at build time, so their
+    // initializer must be a constant (a full expression could not run yet).
+    function defineGlobals(items) {
+        var base = items[0].bty
+        for (var i = 1; i < items.length; i++) {
+            var d = items[i].dcl
+            var ct = declCt(base, d)
+            var lty = ctLTy(ct)
+            if (isAggCt(ct)) {
+                var g = m.NewGlobalDef(d.name, llvm.constant.NewZeroInitializer(lty))
+                declVar(d.name, {val: g, arr: ct.k == "arr", ty: lty, ct: ct})
+            } else if (ct.k == "ptr") {
+                // A pointer global is a full 8 byte slot (an i32 initializer would only cover half).
+                if (d.gv != undefined && d.gv != 0) fail("global pointers can only be initialized with 0: " + d.name)
+                var gp = m.NewGlobalDef(d.name, llvm.constant.NewNull(i32p))
+                declVar(d.name, {val: gp, arr: false, load: i32p, ct: ct})
+            } else if (isFlt(ct)) {
+                // A floating-point global is an i64 slot holding the bit pattern. The
+                // module format has no way to spell a 64-bit constant whose low half
+                // is non-zero, so such an initializer is reported instead.
+                var bits = dblBits(d.gv != undefined ? convertNum(ct, d.gv) : 0)
+                if (bits.lo != 0) { notImpl("floating-point global initializer", 0) }
+                var hb = bits.hi >= 2147483648 ? (bits.hi - 4294967296) : bits.hi
+                var gf = m.NewGlobalDef(d.name, k64(hb * 4294967296))
+                declVar(d.name, {val: gf, arr: false, load: llvm.types.I64, ct: ct})
+            } else {
+                var g2 = m.NewGlobalDef(d.name, kint(d.gv != undefined ? convertNum(ct, d.gv) : 0))
+                declVar(d.name, {val: g2, arr: false, load: i32, ct: ct})
+            }
         }
     }
-    function defineGlobals(items) {}
 
     function buildFunction() {
         var bodyT = pop()
         var params = pop()
         var name = pop()
+        emitFunctionBody(name, params, bodyT, undefined)
+    }
+    // The C type a 'struct S' / 'union U' / 'struct S *' return type names.
+    function makeRetCt(items) { return ptrTo(starsOf(items[1]), ctStruct(items[0])) }
+    // A prototype only fixes the calling convention (the hidden sret parameter).
+    function registerSProto(items) {
+        if (items[0].ret.k == "struct") { structRet[items[1]] = items[0].ret }
+    }
+    // items = [{ret}, name, [params...], bodyThunk].
+    function buildSFunction(items) {
+        registerSProto(items)
+        var rct = items[0].ret
+        emitFunctionBody(items[1], items[2], items[3], rct.k == "struct" ? rct : undefined)
+    }
+    // The current function's by-value struct destination, read by makeReturn.
+    var curSret = undefined
+    var curRetCt = undefined
+    function emitFunctionBody(name, params, bodyT, sretCt) {
+        if (sretCt != undefined) { structRet[name] = sretCt }
+        userFuncs[name] = params.length
         var f = getFunc(name, params)
         curF = f
         labelBlocks = {}   // Labels are function scoped.
         var b = f.NewBlock("entry")
         scopes.push({})
+        var off = 0
+        if (sretCt != undefined) { curSret = f.Params[0]; off = 1 } else { curSret = undefined }
+        curRetCt = sretCt
         for (var i = 0; i < params.length; i++) {
+            var pct = params[i].ct
+            if (isAggCt(pct)) {
+                // A struct parameter is passed BY VALUE: the argument is the address of
+                // the caller's object, and the callee gets its own copy.
+                var a = b.NewAlloca(ctLTy(pct))
+                b = emitCopy(b, pct, a, f.Params[i + off])
+                declVar(params[i].name, {val: a, arr: false, ct: pct})
+                continue
+            }
             var pty = params[i].ptr ? i32p : i32
             var ptr = b.NewAlloca(pty)
-            b.NewStore(f.Params[i], ptr)
-            declVar(params[i].name, {val: ptr, arr: false, load: pty, ct: params[i].ct})
+            b.NewStore(f.Params[i + off], ptr)
+            declVar(params[i].name, {val: ptr, arr: false, load: pty, ct: pct})
         }
         b = bodyT(b)
         b.NewRet(zero)
         scopes.pop()
+        curSret = undefined
+        curRetCt = undefined
     }
+
+    // ----- typedef -----
+    // name -> the C type it abbreviates. Filled by defineTypedef as the file is
+    // walked, read by makeTdDecl when a later declaration uses the name.
+    var typedefs = {}
+    function typedefOf(name) {
+        if (!hasOwn(typedefs, name)) fail("type not defined: " + name)
+        return typedefs[name]
+    }
+    // 'typedef struct { ... } Box;': the tag is defined here and its key returned.
+    function tdTagDef(items, isUnion) {
+        var key = anonTagName()
+        var tagItems = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tag != undefined) { key = isUnion ? uKey(items[i].tag) : items[i].tag }
+            else { tagItems.push(items[i]) }
+        }
+        var all = [key]
+        for (var j = 0; j < tagItems.length; j++) all.push(tagItems[j])
+        defineTag(all, isUnion)
+        return ctStruct(key)
+    }
+    // items = [{tb}|{tref}, {dcl}...].
+    function defineTypedef(items) {
+        var b = items[0]
+        var base = (b.tref != undefined) ? typedefOf(b.tref) : b.tb
+        for (var i = 1; i < items.length; i++) {
+            var d = items[i].dcl
+            typedefs[d.name] = declCt(base, d)
+        }
+    }
+    // items = [{tname}, {dcl}...] -> one declaration statement.
+    function makeTdDecl(items) {
+        var all = [{bty: typedefOf(items[0].tname)}]
+        for (var i = 1; i < items.length; i++) all.push(items[i])
+        return makeDeclSeq(all, false)
+    }
+    // items = [{tname}, name, [params...], bodyThunk]: a function whose return type
+    // is a typedef name. The value returned is one i32 like every other, so only the
+    // declarator syntax differs from an ordinary definition.
+    function buildTdFunc(items) { emitFunctionBody(items[1], items[2], items[3], undefined) }
 
     // System headers the runtime already provides; #include of anything else is an
     // external library we cannot resolve (see resolveImport in lib/compile-core.js).
@@ -1755,6 +2959,9 @@ KwDefault   = "default" KwEnd ;
     }
 
     c.compile(c.asg)
+    // Every address-taken function is known now, so the indirect-call trampolines
+    // can be given their dispatch bodies.
+    finishTrampolines()
 
     // The entry point defaults to main() but the -main flag (c.mainName) can name any
     // other defined function.

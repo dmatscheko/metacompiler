@@ -16,10 +16,23 @@ putchar()/getchar(). int is 32 bit, / and % truncate towards zero.
 unions (every member at offset 0, sizeof the widest one), bit fields and anonymous
 struct/union members, brace initializers for structs and unions with .field designators,
 and tag definitions that also declare objects (struct S { int x; } s;).
-Not in the subset: struct assignment, struct values as parameters or return types,
-(*p).f on struct pointers (use p->f), pointer arithmetic on struct pointers (index them
-instead), typedef, strings, casts, floating point, multi-dimensional arrays, function
-pointers and compound literals.
+Arrays of any rank (int m[2][3]) with nested brace initializers and [i] designators,
+pointers to arrays (int (*pa)[3]) and arrays of pointers; struct VALUES - copied on
+initialization and assignment, passed to and returned from functions - and struct
+members of array type; function pointers (declared, stored in arrays, passed, returned
+and called, including through an expression like tab[0](3) and pick(1)(5)); typedef,
+including array, struct and function-pointer typedefs; and compound literals
+((int[]){ 1, 2, 3 }, and the address of one).
+
+A real TYPE MODEL carries every expression: char, short, int and long with their own
+widths, signed and unsigned as distinct types, float and double, pointers, arrays,
+structs and function pointers. Every value is the number plus the C type it has, so
+the usual arithmetic conversions pick the common type of a binary operator, an
+unsigned divide, remainder, shift and comparison differ from the signed one, 0u - 1u
+wraps to 4294967295 where 0 - 1 is -1, a cast really converts, sizeof answers the size
+of what it is applied to (including a whole array or struct), string literals are char
+arrays that can be indexed and measured, and _Generic selects on the type.
+Not in the subset: aggregate initializers on globals, and variable-length arrays.
 
 The interpreter uses one flat, word addressed memory array: every variable lives at an
 address, scopes map names to addresses, and pointers are plain indexes; every int,
@@ -44,9 +57,9 @@ programs are self checking: they return 0 on success.") ;
 :whitespace(Whitespace) ;
 
 Program     = { Include | PPLine | StaticAssert | EnumDef | UnionDef | UnionGDecl | UnionSkip
-              | TypedefDecl | GFloatDecl
+              | TypedefDecl
               | StructDef | GStructDefDecl | GUnionDefDecl | StructGDecl
-              | FuncDef | Proto | GAggDecl | GlobalDecl } ;
+              | FnPtrFuncDef | TdFuncDef | SProto | SFuncDef | FuncDef | Proto | GAggDecl | GlobalDecl } ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
 // #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
@@ -82,17 +95,72 @@ UnionGDecl  <~~ defineStructGlobals(takeAll()) ~~>
 UnionSkip   <~~ notImpl("anonymous union", up.pos) ~~>
             = KwUnion SkipBlock ";" ;
 
-// typedef <anything> Name; -- accepted and reported as not implemented (there is no
-// symbol table, so the introduced name cannot later be used as a type). The whole
-// declaration, including a braced struct/union/enum body, is skipped up to its ';'.
-TypedefDecl <~~ notImpl("typedef", up.pos) ~~>
-            = KwTypedef { SkipBlock | TdChar } ";" ;
-TdChar      = "\x00"..."\x3a" | "\x3c"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+// typedef: the introduced name becomes a real type name, usable wherever a
+// declaration base type may stand. Because a PEG guard cannot consult a symbol
+// table, the USE site is recognized by SHAPE - an identifier that is not a C
+// keyword, directly followed by a declarator - and the tag resolves the name in
+// the typedef table it filled here. That covers the ordinary forms:
+//   typedef int Int;  typedef Int Num;  typedef int Tri[3];
+//   typedef struct { int v; } Box;  typedef int (*Fn)(int);
+TypedefDecl <~~ defineTypedef(takeAll()) ~~>
+            = KwTypedef TdBase TdDeclr { "," TdDeclr } ";" ;
+// The tag-DEFINING forms come first: only what follows the tag tells
+// 'typedef struct S { ... } T;' from 'typedef struct S T;' apart.
+TdBase      = TdStructDef | TdUnionDef | TdEnumDef
+            | TypeInt <~~ push({tb: baseCtOf(up.in)}) ~~>
+            | KwStruct Id <~~ push({tb: ctStruct(up.in)}) ~~>
+            | KwUnion Id <~~ push({tb: ctStruct(uKey(up.in))}) ~~>
+            | EnumRef <~~ push({tb: ctInt}) ~~>
+            | TdRef ;
+TdRef       <~~ push({tref: up.in}) ~~> = NotCKw Id ;
+TdStructDef <~~ push({tb: tdTagDef(takeAll(), false)}) ~~>
+            = KwStruct [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" ;
+TdUnionDef  <~~ push({tb: tdTagDef(takeAll(), true)}) ~~>
+            = KwUnion [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" ;
+TdEnumDef   <~~ defineEnum(takeAll()); push({tb: ctInt}) ~~>
+            = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
+              "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
+TdDeclr     = TdFnPtr | TdPlain ;
+TdFnPtr     <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
+            = "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
+TdPlain     <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 
-// Global float/double declarations: accepted and reported as not implemented (the
-// machine is integer only). The initializer / array size text is skipped to the ';'.
-GFloatDecl  <~~ notImpl("floating-point declaration", up.pos) ~~>
-            = KwFloating { SkipBlock | TdChar } ";" ;
+// A declaration (or a function definition) whose base type is a typedef name.
+TdDecl      <~~ push(makeTdDecl(takeAll())) ~~>
+            = TdName TdItem { "," TdItem } ";" ;
+TdFuncDef   <~~ defineTdFunc(takeAll()) ~~>
+            = TdName Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+TdName      <~~ push({tname: up.in}) ~~> = NotCKw Id ;
+TdItem      <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ "=" DInit ] ;
+// An identifier that is not one of C's own keywords. A typedef USE is recognized
+// by shape alone, so without this guard 'return x;' would read as a declaration.
+NotCKw = :script(~~
+    (function() {
+        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
+        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var kws = ["auto", "break", "case", "char", "const", "continue", "default", "do",
+                   "double", "else", "enum", "extern", "float", "for", "goto", "if",
+                   "inline", "int", "long", "register", "restrict", "return", "short",
+                   "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+                   "unsigned", "void", "volatile", "while", "_Alignas", "_Alignof",
+                   "_Atomic", "_Bool", "_Complex", "_Generic", "_Noreturn",
+                   "_Static_assert", "_Thread_local"]
+        var hit = false
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(s + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(s + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01c-keyword", 0) : undefined
+    })()
+~~) ;
+
 
 // A balanced { ... } body consumed without interpreting it (string and char literals
 // are matched first so braces inside them are never miscounted). Copied from the
@@ -151,7 +219,7 @@ FieldType   = TypeInt <~~ push({bty: "int", raw: up.in}) ~~>
             | EnumRef <~~ push({bty: "int"}) ~~>
             | KwStruct Id <~~ push({bty: up.in}) ~~>
             | KwUnion Id <~~ push({bty: uKey(up.in)}) ~~> ;
-FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ BitWidth ] ;
+FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ BitWidth ] ;
 // 'unsigned a : 3' - the declared width in bits.
 BitWidth    <~~ push({bits: pop()}) ~~> = ":" Number ;
 // An UNNAMED bit field ('int : 3;', 'int : 0;') is pure padding: it is parsed, and
@@ -167,6 +235,26 @@ Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
 FuncDef     <~~ defineFunction() ~~>
             = TypeInt Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
+// A function whose RETURN type is a struct or union (by value, or a pointer to one).
+// A struct value is an address into the flat memory, and the memory of a call frame
+// is never reused, so returning one is returning that address; whoever receives it
+// (a declaration, an assignment) copies the words out.
+SFuncDef    <~~ defineSFunction(takeAll()) ~~>
+            = SRetType Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+SProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
+            = SRetType Id ParamList { Attr } ";" ;
+SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
+            = ( KwStruct Id <~~ push(up.in) ~~> | KwUnion Id <~~ push(uKey(up.in)) ~~> ) [ Stars ] ;
+
+// 'int (*pick(int w))(int) { ... }' - a function RETURNING a function pointer. The
+// returned value is the callee's identifier, so the return type is an ordinary int
+// cell; only the declarator syntax is unusual.
+FnPtrFuncDef <~~ defineFnPtrFunc(takeAll()) ~~>
+            = TypeInt "(" Stars Id <~~ push(up.in) ~~> ParamList ")" FnParams { Attr } Block ;
+// The parameter list of a function TYPE ('(int)', '(void)', '(int, char *)'): only
+// the arity of the call matters here, so the balanced run is parsed and ignored.
+FnParams    = SkipParen ;
+
 // Param is tried before the empty (void): 'void' as a base type only makes a
 // parameter with '*' (void *p); a bare '(void)' has no declarator, so Param fails
 // on the missing name and the '(void)' fallback matches. A trailing '...' (a
@@ -179,21 +267,27 @@ FuncDef     <~~ defineFunction() ~~>
 ParamList   <~~ push(takeAll()) ~~>
             = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
 VoidOnly    = "void" KwEnd !"*" ;
-ParamItem   = Param | ParamAbs ;
+ParamItem   = FnPtrParam | Param | ParamAbs ;
+// 'int (*f)(int)' as a parameter: one cell holding a function identifier.
+FnPtrParam  <~~ push(makeFnPtrParam(takeAll())) ~~>
+            = ParamType "(" Stars Id <~~ push(up.in) ~~> ")" FnParams ;
 Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] Id <~~ push(up.in) ~~> ;
 // An abstract (unnamed) parameter: only its type matters, and nothing can read it.
 ParamAbs    <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] ;
-ParamType   = TypeInt | EnumRef | KwStruct Id <~~ push({sname: up.in}) ~~>
+ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
             | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
 // Globals are declared like locals but registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
-            = BaseInt GDeclarator { "," GDeclarator } ";" ;
-GDeclarator <~~ push(makeGDecl(takeAll())) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArraySize | "=" Number <~~ push({init: pop()}) ~~> ] ;
+            = BaseTy GDeclarator { "," GDeclarator } ";" ;
+GDeclarator <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims | GInit ] ;
+GInit       <~~ push({gv: pop()}) ~~> = "=" Number ;
+// The declaration BASE type, kept as a real C type so that a char is one byte wide
+// and an unsigned int divides and compares unsigned. Pushes {bty: ct}.
+BaseTy      <~~ push({bty: baseCtOf(up.in)}) ~~> = TypeInt | EnumRef ;
 ArraySize   <~~ push({size: pop()}) ~~>
             = "[" Number "]" ;
 
@@ -203,12 +297,11 @@ StructGDecl <~~ defineStructGlobals(takeAll()) ~~>
 SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArraySize ] ;
 
-// Aggregate '= { ... }' initializers and multi-dimensional arrays are accepted and
-// reported as not implemented (the flat one-word memory has no aggregate init and no
-// nested array layout). AggForm matches only the unsupported shapes - a brace body, an
-// empty '[]', or two or more dimensions - so a plain 'int a[3];' still falls through to
-// the genuine declarators. The declarator, dimensions and '{ ... }' body are all
-// skipped; takeAll() drops whatever the dimension sizes pushed. GAggDecl is top-level.
+// Aggregate '= { ... }' initializers on GLOBALS are accepted and reported as not
+// implemented (a global is registered at build time, where no initializer can run).
+// AggForm matches only the unsupported shapes, so a plain 'int a[3];' still falls
+// through to the genuine declarators. The declarator, dimensions and '{ ... }' body
+// are all skipped; takeAll() drops whatever the dimension sizes pushed.
 GAggDecl    <~~ takeAll(); notImpl("aggregate initializer", up.pos) ~~>
             = AggBase { PStars } Id AggForm ";" ;
 AggBase     = BaseInt | KwStruct Id | KwUnion Id ;
@@ -233,8 +326,8 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // more array dimensions, a braced scalar) still fall through to the AggDecl notImpl.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
             | AssertStmt | BoolDecl | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
-            | StaticDecl | StructDecl | UnionDecl | AggDecl | Decl | LFloatDecl
-            | Goto | PPStmt | Label | Empty | ExprStmt ;
+            | StaticDecl | StructDecl | UnionDecl | AggDecl | Decl
+            | Goto | PPStmt | Label | TdDecl | Empty | ExprStmt ;
 
 // A struct definition inside a function body. The layout is registered exactly like a
 // top-level one (the tag runs at build time), and the statement itself does nothing.
@@ -250,21 +343,19 @@ LUnionDef   <~~ defineUnion(takeAll()); push(function() {}) ~~>
 // A static local: the storage is allocated ONCE and survives across calls, unlike an
 // ordinary local. At the top level 'static' is just a linkage word on a global and is
 // parsed by TypeInt, so this form only ever claims a statement.
-StaticDecl  <~~ push(makeSeq(takeAll())) ~~>
-            = KwStatic BaseInt SInitDecl { "," SInitDecl } ";" ;
-SInitDecl   <~~ push(makeStaticDecl(takeAll())) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~> [ ArraySize | InferArr ] [ "=" DInit ] ;
+StaticDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
+            = KwStatic BaseTy SInitDecl { "," SInitDecl } ";" ;
+SInitDecl   <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims | InferArr ] [ "=" DInit ] ;
 
 // Local aggregate / multi-dimensional / brace-initialized declarations: the statement
 // form of GAggDecl (see there). Placed before StructDecl and Decl so it claims only
 // the unsupported shapes and leaves genuine 'int a[3];' / 'struct P p;' to them.
 AggDecl     <~~ takeAll(); push(notImplStmt("aggregate initializer", up.pos)) ~~>
             = AggBase { PStars } Id LAggForm ";" ;
-// The LOCAL shapes still unsupported: two or more array dimensions, and a brace
-// initializer on something that is not a one-dimensional array (a struct or a scalar).
-// A one-dimensional 'int a[3] = { ... }' / 'int a[] = { ... }' is a genuine Decl.
-LAggForm    = ArraySize ArraySize { ArraySize } [ "=" SkipBlock ]
-            | EmptyArr
+// The LOCAL shape still unsupported: a brace initializer on a SCALAR ('int x = { 1 };').
+// Arrays of any rank and structs are genuine declarators now.
+LAggForm    = EmptyArr
             | "=" SkipBlock ;
 
 // goto jumps to a label of an enclosing statement SEQUENCE: the goto yields a signal
@@ -299,10 +390,6 @@ NotSwitchKw = :script(~~
 // A preprocessor line inside a function body is skipped (no-op statement).
 PPStmt      <~~ push(function() {}) ~~>
             = PPLine ;
-
-// A local float/double declaration: accepted, reported as not implemented.
-LFloatDecl  <~~ push(notImplStmt("floating-point declaration", up.pos)) ~~>
-            = KwFloating { SkipBlock | TdChar } ";" ;
 
 // Local struct variables, struct pointers (with optional initializer) and struct arrays.
 // A struct value may carry a brace initializer, with '.field =' designators.
@@ -352,15 +439,33 @@ Default     <~~ push(makeDefault(takeAll())) ~~>
             = KwDefault ":" { Statement } ;
 
 Decl        = DeclCore ";" ;
-DeclCore    <~~ push(makeSeq(takeAll())) ~~>
-            = BaseInt InitDecl { "," InitDecl } ;
-InitDecl    <~~ push(makeDecl(takeAll())) ~~>
+DeclCore    <~~ push(makeDeclSeq(takeAll(), false)) ~~>
+            = BaseTy DeclItem { "," DeclItem } ;
+// A parenthesized declarator: 'int (*pa)[3]' is a POINTER TO an array of 3 ints,
+// which is a different type from the 'int *pa[3]' array of pointers that InitDecl
+// reads. It has to be tried first - InitDecl cannot start with a '('.
+// FnPtrDecl comes first: both start '( * name', and only what follows the ')' tells
+// a function pointer ('(int)') from a pointer to an array ('[3]') apart.
+DeclItem    = FnPtrDecl | PtrArrDecl | InitDecl ;
+// 'int (*fp)(int)' - a pointer to a function - and 'int (*tab[2])(int)', an array
+// of them. A function pointer is one cell holding the callee's identifier.
+FnPtrDecl   <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
+            = "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
+PtrArrDecl  <~~ push({dcl: makeDeclr(takeAll(), "ptrarr")}) ~~>
+            = "(" Stars Id <~~ push(up.in) ~~> ")" ArrDims [ "=" DInit ] ;
+InitDecl    <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArraySize | InferArr ] [ "=" DInit ] ;
+              [ ArrDims | InferArr ] [ "=" DInit ] ;
+// A declarator's array dimensions, outermost first: 'int m[2][3]' is an array of 2
+// arrays of 3 ints, and every dimension is one level of the {k:"arr"} C type.
+ArrDims     <~~ push({dims: takeAll()}) ~~> = ArrDim { ArrDim } ;
+ArrDim      = "[" Number "]" ;
 // 'int a[] = { ... }': the size comes from the initializer (-1 asks for that).
-InferArr    <~~ push({size: -1}) ~~> = "[" "]" ;
-// A declaration initializer: a brace list, or one ordinary expression.
-DInit       = BraceInit | AssignExpr ;
+InferArr    <~~ push({dims: [-1]}) ~~> = "[" "]" ;
+// A declaration initializer: a brace list, a string literal (which initializes a
+// char array element by element, C11 6.7.9p14), or one ordinary expression.
+DInit       = BraceInit | StrInit | AssignExpr ;
+StrInit     <~~ push(makeStrInit(up.in)) ~~> = StrTok { StrTok } ;
 // A brace initializer collects its items; a trailing comma is allowed.
 BraceInit   <~~ push({list: takeAll()}) ~~>
             = "{" [ DItem { "," DItem } [ "," ] ] "}" ;
@@ -387,10 +492,40 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 
 // An lvalue thunk evaluates to an address. A place is a variable followed by any
 // mix of indexing and struct member steps: a[i], p.x, r.min.y, head->next->value.
-// A parenthesized lvalue: '&(s.b)', '*(p)'. It takes no suffix chain of its own -
-// '(*p).f' still wants 'p->f' - but it makes every place form parenthesizable.
-Lvalue      = Deref | ParenPlace | VarPlace ;
+// A parenthesized lvalue may itself carry a suffix chain, so '(*pa)[1]' and '(*p).f'
+// are places like 'pa[1]' and 'p->f'.
+// DerefP ('*' of a PLACE) comes before the general Deref ('*' of any expression):
+// only the place form knows the C type of what it dereferences, which is what makes
+// '(*pa)[1]' step by whole rows of 'int (*pa)[3]'.
+Lvalue      = StrPlaceP | CompLitP | DerefP | Deref | ParenSfx | ParenPlace | VarPlace ;
+// A STRING LITERAL is an array object of static storage duration, so it is a place:
+// "abc"[1] indexes it, sizeof "abc" is its byte size, and reading it decays to a
+// pointer to its first character. Adjacent literals concatenate (C11 6.4.5p5); an
+// L / u / U / u8 prefix makes the elements wide.
+StrPlaceP   <~~ push(makeSfxChain(takeAll())) ~~>
+            = StrPlace { PlaceSfx } ;
+StrPlace    <~~ push(makeStrPlace(up.in)) ~~>
+            = StrTok { StrTok } ;
+StrTok      = [ StrPfx ] SkipStr ;
+StrPfx      = "u8" | "L" | "u" | "U" ;
+// A COMPOUND LITERAL '(Type){ ... }' (C11 6.5.2.5) is an unnamed object with
+// automatic storage - an lvalue - so it takes a suffix chain like any other place,
+// and '&' may be applied to it.
+CompLitP    <~~ push(makeSfxChain(takeAll())) ~~>
+            = CompLit { PlaceSfx } ;
+CompLit     <~~ push(makeCompLit(takeAll())) ~~>
+            = "(" CompType ")" BraceInit ;
+CompType    <~~ push({clt: makeCompDesc(takeAll())}) ~~>
+            = CompBase [ Stars ] [ ArrDims | InferArr ] ;
+CompBase    = TypeInt <~~ push({bs: baseCtOf(up.in)}) ~~>
+            | EnumRef <~~ push({bs: ctInt}) ~~>
+            | KwStruct Id <~~ push({bs: ctStruct(up.in)}) ~~>
+            | KwUnion Id <~~ push({bs: ctStruct(uKey(up.in))}) ~~> ;
+ParenSfx    <~~ push(makeSfxChain(takeAll())) ~~>
+            = "(" Lvalue ")" PlaceSfx { PlaceSfx } ;
 ParenPlace  = "(" Lvalue ")" ;
+DerefP      <~~ push(makeDerefP(pop())) ~~>
+            = "*" Lvalue ;
 Deref       <~~ push(makeDerefPlace(pop())) ~~>
             = "*" UnaryExpr ;
 VarPlace    <~~ push(makeVarPlace(takeAll())) ~~>
@@ -443,40 +578,52 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 // * dereferences (as an expression it loads the pointed to value).
 // AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
 // function named _Alignof, and the general call seed would claim it first.
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | AlignOf | Cast | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | AlignOf | Generic | Cast | PostfixExpr ;
 
-// A cast '(Type)expr' is accepted and reported as not implemented (the machine models
-// one numeric type and uniform pointers, so a cast cannot change a value). CastType
-// requires a real type keyword, so '(expr)' still parses as a parenthesized expression
-// and only '(int)x' / '(struct P *)p' are taken as casts.
-Cast        <~~ pop(); push(cNIExpr("cast expression", up.pos)) ~~>
-            = "(" CastType ")" UnaryExpr ;
-CastType    = ( TypeInt | KwStruct Id | KwUnion Id | EnumRef ) { PStars } ;
+// A cast '(Type)expr' converts the value to the named type: an integer wraps to that
+// type's width and signedness, a float truncates towards zero on the way to an
+// integer, and a pointer cast only re-labels the address. TypeName requires a real
+// type keyword, so '(expr)' still parses as a parenthesized expression.
+Cast        <~~ push(makeCast(takeAll())) ~~>
+            = "(" TypeName ")" UnaryExpr ;
 
-// sizeof(type): a compile-time constant. Scalars are 4 bytes, any pointer 8, a struct
-// the packed sum and a union the maximum over its members; a sizeof over an expression
-// is answered with the size of int (the machine has one integer value type).
-Sizeof      = KwSizeof ( SizeofType | SizeofExpr ) ;
-SizeofType  <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
-            = "(" SizeName ")" ;
-// sizeof over an EXPRESSION: the machine has one integer value type, so the answer
-// is the size of int; an array or struct operand is not distinguished from it.
-SizeofExpr  <~~ pop(); push(makeInt(4)) ~~>
+// sizeof: the byte size the type model pins - char 1, short 2, int 4, any long and
+// any double 8, any pointer 8, a struct the packed sum, a union the maximum over its
+// members, an array its element count times the element size. Over an EXPRESSION the
+// answer is the size of that expression's type, which is what makes 'sizeof a' on a
+// char array answer its length. SizeofPlace comes before SizeofExpr so that the
+// common 'sizeof name' shape needs no evaluation of anything but an address.
+Sizeof      = KwSizeof ( SizeofType | SizeofPlace | SizeofExpr ) ;
+SizeofType  <~~ push(makeSizeof(pop())) ~~>
+            = "(" TypeName ")" ;
+SizeofPlace <~~ push(makeSizeofPlace(pop())) ~~>
+            = Lvalue ;
+SizeofExpr  <~~ push(makeSizeofExpr(pop())) ~~>
             = UnaryExpr ;
 // _Alignof(type): for the scalar types this machine models, the alignment equals the
 // size, and a pointer aligns to 8 like it is sized.
-AlignOf     <~~ push(makeSizeof(takeAll(), up.pos)) ~~>
-            = KwAlignof "(" SizeName ")" ;
-SizeName    <~~ push(makeSizeName(takeAll())) ~~>
+AlignOf     <~~ push(makeSizeof(pop())) ~~>
+            = KwAlignof "(" TypeName ")" ;
+// A TYPE NAME: a scalar/struct/union/enum base plus a run of pointer stars.
+TypeName    <~~ push(makeTypeName(takeAll())) ~~>
             = SizeBase { "*" <~~ push("*") ~~> [ PtrQual ] } ;
 SizeBase    = ScalarName
-            | EnumRef <~~ push({kind: "int", w: 4}) ~~>
-            | KwStruct Id <~~ push({kind: "struct", s: up.in}) ~~>
-            | KwUnion Id <~~ push({kind: "struct", s: uKey(up.in)}) ~~> ;
-// A scalar type name inside sizeof / _Alignof, kept keyword by keyword so the width
-// survives: char and _Bool are 1, short 2, any long (and double) 8, the rest 4.
+            | EnumRef <~~ push(ctInt) ~~>
+            | KwStruct Id <~~ push(ctStruct(up.in)) ~~>
+            | KwUnion Id <~~ push(ctStruct(uKey(up.in))) ~~> ;
+// A scalar type name, kept keyword by keyword so the width and the signedness both
+// survive.
 ScalarName  <~~ push(makeScalarName(takeAll())) ~~>
             = ScalarTok { ScalarTok } ;
+
+// _Generic(controlling, type: value, ..., default: value) - C11 6.5.1.1. The
+// association whose type name is the controlling expression's own type is the one
+// the whole construct yields; the others are never evaluated.
+Generic     <~~ push(makeGeneric(takeAll())) ~~>
+            = KwGeneric "(" AssignExpr "," GenAssoc { "," GenAssoc } ")" ;
+GenAssoc    <~~ push(makeGenAssoc(takeAll())) ~~>
+            = ( TypeName | KwDefault <~~ push("default") ~~> ) ":" AssignExpr ;
+KwGeneric   = "_Generic" KwEnd ;
 ScalarTok   <~~ push(up.in) ~~> = ScalarKw ;
 ScalarKw    = "char" KwEnd | "short" KwEnd | "int" KwEnd | "long" KwEnd
             | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
@@ -495,25 +642,53 @@ Not         <~~ push(makeNot(pop())) ~~>
 BitNot      <~~ push(makeBitNot(pop())) ~~>
             = "~" UnaryExpr ;
 
-PostfixExpr = PostIncDec | Call | Primary ;
+PostfixExpr = PostIncDec | CallExpr | Primary ;
 PostIncDec  <~~ push(makePostIncDec(pop(), pop())) ~~>
             = Lvalue ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
-Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ AssignExpr { "," AssignExpr } ] ")" ;
+// A call whose callee is an EXPRESSION: a bare name (the ordinary direct call, and
+// also a variable holding a function pointer), a parenthesized place ('(*fp)(4)'),
+// or a place path ('tab[0](3)'). Several argument lists chain, so 'pick(1)(5)' calls
+// what pick returned.
+CallExpr    <~~ push(makeCallExpr(takeAll())) ~~>
+            = CallSeed ArgList { ArgList } ;
+CallSeed    = ParenSfxRef | ParenPlaceRef | PlaceRef | NameSeed ;
+ParenPlaceRef <~~ push(makeLoad(pop())) ~~> = "(" Lvalue ")" ;
+NameSeed    <~~ push({fname: up.in}) ~~> = Id ;
+ArgList     <~~ push({args: takeAll()}) ~~>
+            = "(" [ AssignExpr { "," AssignExpr } ] ")" ;
 
 // A plain variable reference loads the value; an array name yields its address.
 // A place path as an expression (a[i], p.x, head->next) loads the resolved cell.
 // A string literal (with adjacent-literal concatenation) has no char* backing on the
 // flat integer memory, so it is accepted and reported as not implemented.
-Primary     = "(" Expression ")" | StrLit | NumberLit | CharLit | PlaceRef | VarRef ;
-StrLit      <~~ push(cNIExpr("string literal", up.pos)) ~~>
-            = SkipStr { SkipStr } ;
+// ParenSfxRef comes first: '(*pa)[1]' starts like a parenthesized expression, and the
+// general form would consume '(*pa)' and leave the '[1]' behind.
+// FloatLit comes before NumberLit: the integer form matches the '1' of '1e3' and a
+// PEG never goes back for the longer read.
+Primary     = CompLitRef | ParenSfxRef | "(" Expression ")" | StrRef | FloatLit | NumberLit | CharLit | PlaceRef | VarRef ;
+ParenSfxRef <~~ push(makeLoad(pop())) ~~> = ParenSfx ;
+CompLitRef  <~~ push(makeLoad(pop())) ~~> = CompLitP ;
+StrRef      <~~ push(makeLoad(pop())) ~~> = StrPlaceP ;
+// A floating constant: decimal or hexadecimal, with an optional exponent and an
+// optional f/F (float) or l/L (long double) suffix. The hexadecimal form REQUIRES
+// its binary exponent, so 0x1F stays an integer.
+FloatLit    <~~ push(makeFltLit(up.in)) ~~> = FloatNum ;
+FloatNum    = ( "0x" | "0X" ) :whitespace() HexDig { HexDig } [ "." { HexDig } ] BinExp [ FltSfx ] :whitespace(Whitespace)
+            | ( "0x" | "0X" ) :whitespace() "." HexDig { HexDig } BinExp [ FltSfx ] :whitespace(Whitespace)
+            | "0"..."9" :whitespace() { "0"..."9" } ( "." { "0"..."9" } [ DecExp ] | DecExp ) [ FltSfx ] :whitespace(Whitespace)
+            | "." :whitespace() "0"..."9" { "0"..."9" } [ DecExp ] [ FltSfx ] :whitespace(Whitespace) ;
+DecExp      = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+BinExp      = ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } ;
+FltSfx      = "f" | "F" | "l" | "L" ;
 PlaceRef    <~~ push(makeLoad(makeVarPlace(takeAll()))) ~~>
             = Id <~~ push(up.in) ~~> PlaceSfx { PlaceSfx } ;
-NumberLit   <~~ push(makeInt(pop())) ~~>
+NumberLit   <~~ push(makeNumLit(pop(), up.in)) ~~>
             = Number ;
-CharLit     = "'" :whitespace() CChar <~~ push(makeInt(cCharCode(up.in))) ~~> "'" :whitespace(Whitespace) ;
+// A character constant has type int (C11 6.4.4.4p10); a wide one (L, u, U) has the
+// width of its wide type, which this model pins at 4 like int.
+CharLit     = [ CharPfx ] "'" :whitespace() CChar <~~ push(makeNum(cCharCode(up.in), ctInt)) ~~> "'" :whitespace(Whitespace) ;
+CharPfx     = "L" | "u8" | "u" | "U" ;
 // One character constant body: a hex escape (backslash x plus hex digits), an octal
 // escape (backslash plus one to three octal digits), a simple escape, or a plain
 // character. The hex and octal forms come first so their digits are not cut short.
@@ -547,6 +722,7 @@ TypeElem    = TypeTok | Attr | AlignAs ;
 // _Alignas(8) / _Alignas(int): parsed and ignored (the layout is fixed).
 AlignAs     = "_Alignas" KwEnd SkipParen ;
 TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
+            | "float" KwEnd | "double" KwEnd
             | "unsigned" KwEnd | "signed" KwEnd | "void" KwEnd
             | "const" KwEnd | "volatile" KwEnd
             | "static" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
@@ -592,7 +768,6 @@ KwSizeof    = "sizeof" KwEnd ;
 KwAlignof   = "_Alignof" KwEnd ;
 KwStaticAs  = "_Static_assert" KwEnd ;
 KwBool      = "_Bool" KwEnd ;
-KwFloating  = "float" KwEnd | "double" KwEnd ;
 KwIf        = "if" KwEnd ;
 KwElse      = "else" KwEnd ;
 KwWhile     = "while" KwEnd ;
@@ -643,6 +818,78 @@ KwDefault   = "default" KwEnd ;
     // The value of one character-constant body, including the C escape sequences:
     // backslash x with hex digits, backslash with up to three octal digits, and the
     // simple escapes n t r v f a b 0, backslash, quote and double quote.
+    // A C floating constant: hexadecimal (mantissa times a power of two) or decimal.
+    function pow2(n) {
+        var r = 1
+        var k = n < 0 ? 0 - n : n
+        for (var i = 0; i < k; i++) r = r * 2
+        return n < 0 ? 1 / r : r
+    }
+    function parseCFloat(t) {
+        if (t.length > 1 && t.charCodeAt(0) == 48 && (t.charCodeAt(1) == 120 || t.charCodeAt(1) == 88)) {
+            var i = 2
+            var mant = 0
+            while (i < t.length && digVal(t.charCodeAt(i)) >= 0) { mant = mant * 16 + digVal(t.charCodeAt(i)); i = i + 1 }
+            if (i < t.length && t.charCodeAt(i) == 46) {
+                i = i + 1
+                var scale = 1
+                while (i < t.length && digVal(t.charCodeAt(i)) >= 0) {
+                    scale = scale / 16
+                    mant = mant + digVal(t.charCodeAt(i)) * scale
+                    i = i + 1
+                }
+            }
+            var ex = 0
+            var neg = false
+            if (i < t.length && (t.charCodeAt(i) == 112 || t.charCodeAt(i) == 80)) {
+                i = i + 1
+                if (t.charCodeAt(i) == 43) { i = i + 1 }
+                else if (t.charCodeAt(i) == 45) { neg = true; i = i + 1 }
+                while (i < t.length && t.charCodeAt(i) >= 48 && t.charCodeAt(i) <= 57) {
+                    ex = ex * 10 + (t.charCodeAt(i) - 48)
+                    i = i + 1
+                }
+            }
+            if (neg) { ex = 0 - ex }
+            return mant * pow2(ex)
+        }
+        return parseFloat(t)
+    }
+    // The bytes of a string-literal RUN (adjacent literals concatenate, C11 6.4.5p5),
+    // with the C escape sequences decoded and the terminating null appended. An
+    // L / u / U prefix makes the elements wide.
+    function cStrBytes(text) {
+        var bytes = []
+        var wide = false
+        var i = 0
+        while (i < text.length) {
+            var cc = text.charCodeAt(i)
+            if (cc == 117 && i + 1 < text.length && text.charCodeAt(i + 1) == 56) { i = i + 2; continue }
+            if (cc == 76 || cc == 117 || cc == 85) { wide = true; i = i + 1; continue }
+            if (cc != 34) { i = i + 1; continue }
+            i = i + 1
+            while (i < text.length && text.charCodeAt(i) != 34) {
+                if (text.charCodeAt(i) != 92) { bytes.push(text.charCodeAt(i)); i = i + 1; continue }
+                var j = i + 1
+                var e = text.charCodeAt(j)
+                if (e == 120 || e == 88) {
+                    j = j + 1
+                    while (j < text.length && digVal(text.charCodeAt(j)) >= 0) j = j + 1
+                } else if (e >= 48 && e <= 55) {
+                    j = j + 1
+                    var n = 1
+                    while (j < text.length && n < 3 && text.charCodeAt(j) >= 48 && text.charCodeAt(j) <= 55) { j = j + 1; n = n + 1 }
+                } else {
+                    j = j + 1
+                }
+                bytes.push(cCharCode(text.slice(i, j)))
+                i = j
+            }
+            i = i + 1
+        }
+        bytes.push(0)
+        return {str: bytes, wide: wide}
+    }
     function cCharCode(s) {
         if (s.charCodeAt(0) != 92) return s.charCodeAt(0)
         var e = s.charCodeAt(1)
@@ -679,9 +926,11 @@ KwDefault   = "default" KwEnd ;
         if (addr <= 0 || addr >= mem.length) fail("invalid load at address " + addr)
         return mem[addr]
     }
-    function store(addr, v) {
+    // Storing converts to the destination's C type first, so a cell only ever holds
+    // a value its own type can represent.
+    function store(ct, addr, v) {
         if (addr <= 0 || addr >= mem.length) fail("invalid store at address " + addr)
-        mem[addr] = v | 0
+        mem[addr] = convert(ct, v)
         return mem[addr]
     }
 
@@ -706,9 +955,6 @@ KwDefault   = "default" KwEnd ;
 
     // enum constants: name -> integer value, filled by defineEnum, read in makeVarRef.
     var enumConsts = {}
-    // A C-appropriate placeholder for an unlowered expression: yields a constant 0
-    // (the shared notImplExpr returns undefined, which is not a valid C int value).
-    function cNIExpr(construct, pos) { notImpl(construct, pos); return function() { return 0 } }
     // A '*' run in a declarator: {ptr: levels}. Every level is one word holding an
     // address, so int** is an ordinary cell whose value is the address of an int cell.
     function makeStars(s, pos) {
@@ -739,26 +985,70 @@ KwDefault   = "default" KwEnd ;
     function makeComma(items) {
         if (items.length == 1) return items[0]
         return function() {
-            var v = 0
+            var v = val(0, ctInt)
             for (var i = 0; i < items.length; i++) v = items[i]()
             return v
         }
     }
-    // A scalar type name, keyword by keyword -> {kind:"int", w: byte width}.
+    // A scalar type name, keyword by keyword -> the C type it names. LP64: long AND
+    // long long are 8 bytes, matching the 8-byte pointers this model already pins and
+    // cc on a 64-bit host (ul=8 l=8 ll=8 ptr=8 int=4). A long double is modelled as
+    // a double, and a plain char is signed like it is on this reference platform.
     function makeScalarName(items) {
-        var w = 4
         var nlong = 0
+        var uns = false
+        var isVoid = false
+        var isFloat = false
+        var isDouble = false
+        var isChar = false
+        var isShort = false
+        var isBool = false
         for (var i = 0; i < items.length; i++) {
             var t = items[i]
             if (t == "long") nlong = nlong + 1
-            else if (t == "char" || t == "_Bool" || t == "void") w = 1
-            else if (t == "short") w = 2
-            else if (t == "double") w = 8
+            else if (t == "unsigned") uns = true
+            else if (t == "void") isVoid = true
+            else if (t == "float") isFloat = true
+            else if (t == "double") isDouble = true
+            else if (t == "char") isChar = true
+            else if (t == "short") isShort = true
+            else if (t == "_Bool") isBool = true
         }
-        if (nlong > 0) w = 8   // LP64: long AND long long are 8, matching the
-                               // 8-byte pointers this model already pins, and cc
-                               // on a 64-bit host (ul=8 l=8 ll=8 ptr=8 int=4).
-        return {kind: "int", w: w}
+        if (isVoid) return ctVoid
+        if (isDouble) return ctF(8)
+        if (isFloat) return ctF(4)
+        if (isBool) return ctI(1, true)
+        if (isChar) return ctI(1, uns)
+        if (isShort) return ctI(2, uns)
+        if (nlong > 0) return ctI(8, uns)
+        return ctI(4, uns)
+    }
+    // The base type a declaration's specifier RUN names, read off its source text.
+    // up.in hands over the matched TOKENS with their separators removed - 'long
+    // double' arrives as 'longdouble' - so the run is scanned for the type keywords
+    // themselves instead of being split on whitespace. Everything else (an enum tag,
+    // a storage class, an __attribute__ body) contributes nothing and leaves int.
+    var baseKws = ["unsigned", "signed", "double", "float", "short", "_Bool",
+                   "char", "void", "long", "int"]
+    function baseCtOf(text) {
+        var toks = []
+        var i = 0
+        while (i < text.length) {
+            var hit = -1
+            for (var k = 0; k < baseKws.length; k++) {
+                if (hit < 0 && text.slice(i, i + baseKws[k].length) == baseKws[k]) { hit = k }
+            }
+            if (hit < 0) { i = i + 1; continue }
+            toks.push(baseKws[hit])
+            i = i + baseKws[hit].length
+        }
+        return makeScalarName(toks)
+    }
+    // A type NAME: the base type plus one pointer level per '*'.
+    function makeTypeName(items) {
+        var ct = items[0]
+        for (var i = 1; i < items.length; i++) ct = {k: "ptr", p: ct}
+        return ct
     }
     // A _Bool declarator: the initializer is normalized to 0 or 1.
     function makeBoolDecl(items) {
@@ -766,20 +1056,60 @@ KwDefault   = "default" KwEnd ;
         var opt = items[1]
         return function() {
             var a = alloc(1)
-            if (opt != undefined) mem[a] = (opt() != 0) ? 1 : 0
-            declVar(name, a, false, ctInt)
+            if (opt != undefined) mem[a] = (opt().v != 0) ? 1 : 0
+            declVar(name, a, false, ctI(1, true))
         }
     }
     // sizeof: SizeName items = [{kind}, "*"...] -> {kind, ptr}. makeSizeof turns it
     // into a constant thunk (pointer 8, scalar/enum 4) or a notImpl for a struct value.
-    function makeSizeName(items) { return {kind: items[0].kind, s: items[0].s, w: items[0].w, ptr: items.length > 1} }
-    function makeSizeof(items, pos) {
-        var d = items[0]
-        if (d.ptr) return function() { return 8 }
-        // A struct/union tag: its packed byte size, looked up lazily so that a sizeof
-        // may name a tag defined further down the file.
-        if (d.kind == "struct") { var key = d.s; return function() { return structOf(key).bytes } }
-        return function() { return d.w }
+    // sizeof yields size_t, which is unsigned long here. A struct tag's size is read
+    // lazily, so a sizeof may name a tag defined further down the file.
+    var ctSizeT = {k: "int", w: 8, u: true}
+    function makeSizeof(ct) { return function() { return val(ctBytes(ct), ctSizeT) } }
+    // sizeof over a PLACE needs its address, not its value - an array or a struct
+    // answers its whole size, which is what 'sizeof a' on a char array reports.
+    function makeSizeofPlace(placeT) {
+        return function() {
+            var p = placeT()
+            return val(ctBytes(p.ct != undefined ? p.ct : ctInt), ctSizeT)
+        }
+    }
+    // sizeof over any other expression: the size of the type that expression has.
+    function makeSizeofExpr(t) {
+        return function() { return val(ctBytes(t().t), ctSizeT) }
+    }
+    // A cast converts the value to the named type (C11 6.5.4): an integer wraps to
+    // that type's width and signedness, a float truncates towards zero on the way to
+    // an integer, and a pointer cast only re-labels the address.
+    function makeCast(items) {
+        var ct = items[0]
+        var t = items[1]
+        return function() {
+            var r = t()
+            if (ct.k == "void") return val(0, ctVoid)
+            return val(convert(ct, r.v), ct)
+        }
+    }
+    // _Generic: the association whose type name IS the controlling expression's type
+    // wins, otherwise the 'default' one. The controlling expression is evaluated to
+    // learn its type - C says it is not evaluated, which only differs for an operand
+    // with side effects.
+    function makeGenAssoc(items) { return {gt: items[0], t: items[1]} }
+    function makeGeneric(items) {
+        var ctrl = items[0]
+        var assocs = items.slice(1)
+        return function() {
+            var t = ctrl().t
+            if (t.k == "arr") t = {k: "ptr", p: t.e}
+            var dflt = undefined
+            for (var i = 0; i < assocs.length; i++) {
+                var a = assocs[i]
+                if (a.gt == "default") { dflt = a.t; continue }
+                if (ctEq(a.gt, t)) return a.t()
+            }
+            if (dflt != undefined) return dflt()
+            fail("_Generic has no association for this type")
+        }
     }
 
     // ----- C types and struct layouts -----
@@ -787,10 +1117,102 @@ KwDefault   = "default" KwEnd ;
     // pointee of a pointer is a ct in turn, so int** is ptr(ptr(int)) and nests freely.
     // structs[name] = {size: words, fields: {fname: {off, ct}}}; fields lie back to
     // back, ints and pointers take one word each (matching the compiled layout).
-    var ctInt = {k: "int"}
+    // {k:"int", w: bytes, u: unsigned}  char / short / int / long, signed or not
+    // {k:"flt", w: bytes}                float / double / long double
+    // {k:"void"}                         only ever reached through a pointer
+    // {k:"ptr", p} | {k:"arr", n, e} | {k:"struct", s} | {k:"fnp"}
+    function ctI(w, u) { return {k: "int", w: w, u: u} }
+    function ctF(w) { return {k: "flt", w: w} }
+    var ctInt  = ctI(4, false)
+    var ctUInt = ctI(4, true)
+    var ctChar = ctI(1, false)
+    var ctDbl  = ctF(8)
+    var ctVoid = {k: "void"}
+    // A FUNCTION POINTER cell. It holds the callee's identifier (see funcId below),
+    // which is one word like every other value, so it needs no pointee type.
+    var ctFn = {k: "fnp"}
     var structs = {}
-    function ctSize(ct) { return ct.k == "struct" ? structOf(ct.s).size : 1 }
+    function ctSize(ct) {
+        if (ct.k == "struct") return structOf(ct.s).size
+        if (ct.k == "arr") return ct.n * ctSize(ct.e)
+        return 1
+    }
     function ctStruct(sname) { return {k: "struct", s: sname} }
+    function isFlt(ct) { return ct.k == "flt" }
+    function isNum(ct) { return ct.k == "int" || ct.k == "flt" }
+    function isPtrLike(ct) { return ct.k == "ptr" || ct.k == "arr" }
+
+    // ----- Values -----
+    // Every expression thunk answers a VALUE: the number itself plus the C type it
+    // has. The type is what makes 0u - 1u wrap to 4294967295 where 0 - 1 is -1, what
+    // makes p + 1 step a whole element, and what _Generic and sizeof select on.
+    function val(v, t) { return {v: v, t: t} }
+    // Truncation towards zero, which is what C's integer conversions and its
+    // float-to-integer conversion both do.
+    function trunc0(x) { return Math.trunc(x) }
+    // Give a value the representation its C type pins: an integer wraps to its
+    // declared width and signedness (C11 6.3.1.3), a float keeps its value.
+    function convert(ct, x) {
+        if (ct.k == "flt") return x
+        if (ct.k == "int") {
+            var n = trunc0(x)
+            if (ct.w == 1) return ct.u ? (n & 255) : ((n << 24) >> 24)
+            if (ct.w == 2) return ct.u ? (n & 65535) : ((n << 16) >> 16)
+            if (ct.w >= 8) return n     // 64 bit values ride on the JS double
+            return ct.u ? (n >>> 0) : (n | 0)
+        }
+        return trunc0(x)                // pointers and function pointers: addresses
+    }
+    // The integer promotions: anything narrower than int is evaluated as an int.
+    function promote(ct) { return (ct.k == "int" && ct.w < 4) ? ctInt : ct }
+    // The usual arithmetic conversions (C11 6.3.1.8): the common type of a binary
+    // operator's two operands.
+    function arithCt(a, b) {
+        if (isFlt(a) || isFlt(b)) return ctF((isFlt(a) ? a.w : 0) > (isFlt(b) ? b.w : 0)
+                                             ? a.w : (isFlt(b) ? b.w : a.w))
+        var x = promote(a)
+        var y = promote(b)
+        if (x.k != "int") return x
+        if (y.k != "int") return y
+        if (x.w == y.w) return ctI(x.w, x.u || y.u)
+        return (x.w > y.w) ? x : y
+    }
+    // Structural type identity, which is what _Generic and a cast comparison need.
+    function ctEq(a, b) {
+        if (a.k != b.k) return false
+        if (a.k == "int") return a.w == b.w && (a.u == true) == (b.u == true)
+        if (a.k == "flt") return a.w == b.w
+        if (a.k == "ptr") return ctEq(a.p, b.p)
+        if (a.k == "arr") return a.n == b.n && ctEq(a.e, b.e)
+        if (a.k == "struct") return a.s == b.s
+        return true
+    }
+    // An ARRAY C type: n elements of e. Arrays nest, so 'int m[2][3]' is
+    // arr(2, arr(3, int)) and every index step peels one level off.
+    function ctArr(n, e) { return {k: "arr", n: n, e: e} }
+    // The declared dimensions of a declarator, outermost first, wrapped around the
+    // base type. A -1 dimension ('int a[] = { ... }') takes its size from the
+    // initializer list.
+    function arrCt(dims, base, count) {
+        var ct = base
+        for (var k = dims.length - 1; k >= 0; k--) {
+            var n = dims[k] | 0
+            if (n < 0) { n = count | 0 }
+            ct = ctArr(n, ct)
+        }
+        return ct
+    }
+    // How many elements a brace list covers, honouring '[i] =' designators.
+    function initLen(list) {
+        var n = 0
+        var at = 0
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].at != undefined) { at = list[i].at | 0 }
+            at = at + 1
+            if (at > n) { n = at }
+        }
+        return n
+    }
     // A union tag lives in the same table as the struct tags, under a 'u:' prefixed
     // key - C keeps 'struct X' and 'union X' in one tag namespace but as distinct types,
     // and no C identifier can contain a ':', so the two can never collide.
@@ -802,9 +1224,11 @@ KwDefault   = "default" KwEnd ;
     // The BYTE size behind sizeof: an int is 4, any pointer 8, an aggregate its own
     // packed size (the flat memory itself is word addressed - see ctSize).
     function ctBytes(ct) {
-        if (ct.k == "ptr") return 8
+        if (ct.k == "ptr" || ct.k == "fnp") return 8
         if (ct.k == "struct") return structOf(ct.s).bytes
-        return 4
+        if (ct.k == "arr") return ct.n * ctBytes(ct.e)
+        if (ct.k == "void") return 1    // GCC's sizeof(void), which cc also answers
+        return ct.w
     }
     // n levels of pointer around a base ct (0 levels yields the base itself).
     function ptrTo(n, base) {
@@ -846,6 +1270,10 @@ KwDefault   = "default" KwEnd ;
                 fields[fields.length - 1].bits = it.bits | 0
                 continue
             }
+            if (it != undefined && it.dims != undefined) {
+                fields[fields.length - 1].dims = it.dims
+                continue
+            }
             fields.push({name: it, bty: bty, star: star, uns: uns})
             star = 0
         }
@@ -872,8 +1300,9 @@ KwDefault   = "default" KwEnd ;
     // later) struct; a member of struct/union VALUE type needs a complete tag.
     function fieldCt(f) {
         var base = (f.bty == "int") ? ctInt : ctStruct(f.bty)
-        if (f.star > 0) return ptrTo(f.star, base)
-        if (f.bty != "int") structOf(f.bty)
+        if (f.star > 0) { base = ptrTo(f.star, base) }
+        else if (f.bty != "int") { structOf(f.bty) }
+        if (f.dims != undefined) return arrCt(f.dims, base, 0)
         return base
     }
     // Lay a run of member GROUPS - ordinary declarator lines and anonymous struct/union
@@ -931,7 +1360,7 @@ KwDefault   = "default" KwEnd ;
     // A bit field holds only its declared width: an unsigned one WRAPS, a signed one
     // sign-extends. Normalizing on every STORE keeps reads plain loads.
     function bfNorm(bf, v) {
-        if (bf == undefined) return v | 0
+        if (bf == undefined) return v
         var w = bf.w
         if (w <= 0 || w >= 32) return v | 0
         if (bf.sign) return (v << (32 - w)) >> (32 - w)
@@ -962,55 +1391,106 @@ KwDefault   = "default" KwEnd ;
     }
     function defineStruct(items) { defineTag(items, false) }
     function defineUnion(items) { defineTag(items, true) }
-    // A struct/union brace initializer -> [{f, t}] with f the FIELD descriptor, in
-    // declaration order. Items are laid on the fields in declaration order; a '.field =' designator jumps to that field
-    // and the following positional items continue after it (C11 6.7.9). A field that
-    // no item reaches keeps the zero the fresh memory already holds.
-    function structInitPlan(key, list, pos) {
-        var st = structOf(key)
-        var out = []
+    // Write one brace initializer (or one scalar expression) into memory at `base`,
+    // driven by the C type it initializes. Arrays walk their elements, honouring
+    // '[i] =' designators; structs and unions walk their members in declaration
+    // order, honouring '.field =' designators (C11 6.7.9), and every position the
+    // list does not reach keeps the zero the fresh memory already holds. Nesting is
+    // simply recursion, which is what makes 'int m[2][3] = { { 1, 2, 3 }, ... }' and
+    // a struct holding an array work.
+    function runInit(ct, init, base) {
+        if (typeof init == "function") {
+            if (ct.k == "arr" || ct.k == "struct") fail("an aggregate needs a brace initializer")
+            mem[base] = convert(ct, init().v)
+            return
+        }
+        if (init.str != undefined) { strInitInto(ct, init, base); return }
+        var list = init.list
+        if (ct.k == "arr") {
+            var at = 0
+            for (var i = 0; i < list.length; i++) {
+                var it = list[i]
+                if (it.at != undefined) { at = it.at | 0 }
+                if (at >= ct.n) fail("too many initializers for an array")
+                runInit(ct.e, it.v, base + at * ctSize(ct.e))
+                at = at + 1
+            }
+            return
+        }
+        if (ct.k != "struct") fail("a scalar takes no brace initializer")
+        var st = structOf(ct.s)
         var idx = 0
-        for (var i = 0; i < list.length; i++) {
-            var it = list[i]
-            if (it.fld != undefined) {
+        for (var j = 0; j < list.length; j++) {
+            var iu = list[j]
+            if (iu.fld != undefined) {
                 var found = -1
-                for (var k = 0; k < st.order.length; k++) { if (st.order[k] == it.fld) found = k }
-                if (found < 0) fail(tagName(key) + " has no field " + it.fld)
+                for (var k = 0; k < st.order.length; k++) { if (st.order[k] == iu.fld) found = k }
+                if (found < 0) fail(tagName(ct.s) + " has no field " + iu.fld)
                 idx = found
             }
-            if (idx >= st.order.length) fail("too many initializers for " + tagName(key))
-            var f = fieldOf(key, st.order[idx])
-            var v = it.v
-            if (typeof v != "function") { notImpl("nested aggregate initializer", pos); v = undefined }
-            if (v != undefined) out.push({f: f, t: v})
+            if (idx >= st.order.length) fail("too many initializers for " + tagName(ct.s))
+            var f = fieldOf(ct.s, st.order[idx])
+            runInit(f.ct, iu.v, base + f.off)
             idx = idx + 1
         }
-        return out
     }
 
     // All user defined functions by name: {params: [{name, ptr}...], body: thunk}.
     var funcs = {}
 
+    // A function POINTER is the function's identifier: a small positive integer that
+    // indexes funcNameById. 0 is no function, so a null function pointer is 0 like
+    // every other null pointer.
+    var funcIdOf = {}
+    var funcNameById = [""]
+    function funcId(name) {
+        if (hasOwn(funcIdOf, name)) return funcIdOf[name]
+        var id = funcNameById.length
+        funcNameById.push(name)
+        funcIdOf[name] = id
+        return id
+    }
+    function funcNameOf(v) {
+        if (v <= 0 || v >= funcNameById.length) fail("not a function pointer: " + v)
+        return funcNameById[v]
+    }
+
     function callFunction(name, argValues) {
         if (name == "putchar") {
-            printf("%c", argValues[0] & 255)
+            printf("%c", argValues[0].v & 255)
             return argValues[0]
         }
         if (name == "getchar") {
-            return -1 // No stdin in the interpreter run (matches llvm.Run without input).
+            return val(-1, ctInt) // No stdin in the interpreter run (matches llvm.Run without input).
         }
         var f = hasOwn(funcs, name) ? funcs[name] : undefined
-        if (f == undefined) fail("function not defined: " + name)
+        if (f == undefined) {
+            // Not a function name: a VARIABLE holding a function pointer, called
+            // through its own name ('fp(4)').
+            var lv = lookupVar(name)
+            if (lv != undefined) return callFunction(funcNameOf(load(lv.addr)), argValues)
+            fail("function not defined: " + name)
+        }
         var callerScopes = scopes
         scopes = [globalScope, {}]
         for (var i = 0; i < f.params.length; i++) {
+            var pct = f.params[i].ct
+            var av = (i < argValues.length) ? argValues[i].v : 0
+            if (isAggCt(pct)) {
+                // A struct parameter is passed BY VALUE: the argument is the address of
+                // the caller's object, and the callee gets its own copy.
+                var pa = alloc(ctSize(pct))
+                copyCt(pct, pa, av)
+                declVar(f.params[i].name, pa, false, pct)
+                continue
+            }
             var a = alloc(1)
-            mem[a] = (i < argValues.length ? argValues[i] : 0) | 0
-            declVar(f.params[i].name, a, false, f.params[i].ct)
+            mem[a] = convert(pct, av)   // The argument converts to the parameter's type.
+            declVar(f.params[i].name, a, false, pct)
         }
         var r = f.body()
         scopes = callerScopes
-        return (r != undefined && r.isRet) ? r.v : 0
+        return (r != undefined && r.isRet) ? r.v : val(0, ctInt)
     }
 
     // ----- goto and labels -----
@@ -1049,111 +1529,280 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Expression thunks: function() -> 32 bit int. Lvalue thunks -> address. -----
 
-    function makeInt(n) { return function() { return n | 0 } }
+    function makeNum(n, ct) { var v = convert(ct, n); return function() { return val(v, ct) } }
+    function makeInt(n) { return makeNum(n, ctInt) }
+    // An integer constant carries the type its suffix names: u/U unsigned, l/L long.
+    function makeNumLit(n, text) { return makeNum(n, intCtOf(text)) }
+    function intCtOf(text) {
+        var nl = 0
+        var u = false
+        for (var i = 0; i < text.length; i++) {
+            var cc = text.charCodeAt(i)
+            if (cc == 108 || cc == 76) nl = nl + 1
+            else if (cc == 117 || cc == 85) u = true
+            else if (!((cc >= 48 && cc <= 57) || (cc >= 97 && cc <= 102) || (cc >= 65 && cc <= 70) || cc == 120 || cc == 88)) break
+        }
+        return ctI(nl > 0 ? 8 : 4, u)
+    }
+    // A floating constant: f/F makes it a float, l/L a long double (modelled as a
+    // double, like every long double here).
+    function makeFltLit(text) {
+        var t = text
+        var end = t.length
+        while (end > 0) {
+            var cc = t.charCodeAt(end - 1)
+            if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { end = end - 1; continue }
+            break
+        }
+        t = t.slice(0, end)
+        var ct = ctDbl
+        var last = t.charCodeAt(t.length - 1)
+        if (last == 102 || last == 70) { ct = ctF(4); t = t.slice(0, t.length - 1) }
+        else if (last == 108 || last == 76) { t = t.slice(0, t.length - 1) }
+        return makeNum(parseCFloat(t), ct)
+    }
     makeVarRef = function(name) {
         return function() {
+            // An array name decays to the address of its first element, and a struct
+            // (or union) VALUE is likewise handed on as the address of its storage.
             var v = lookupVar(name)
-            if (v != undefined) return v.arr ? v.addr : load(v.addr) // An array name decays to its address.
-            if (hasOwn(enumConsts, name)) return enumConsts[name] | 0
+            if (v != undefined) {
+                var ct = v.ct != undefined ? v.ct : ctInt
+                if (ct.k == "arr") return val(v.addr, {k: "ptr", p: ct.e})
+                if (ct.k == "struct") return val(v.addr, ct)
+                return val(load(v.addr), ct)
+            }
+            if (hasOwn(enumConsts, name)) return val(enumConsts[name] | 0, ctInt)
+            // A bare function name is its address: the function pointer value.
+            if (hasOwn(funcs, name)) return val(funcId(name), ctFn)
             fail("variable not defined: " + name)
         }
+    }
+    // An aggregate is passed around by the ADDRESS of its storage: an array decays to
+    // it in C, and a struct value uses it because this flat memory is never reused, so
+    // whoever receives the value copies the words out while the source is still live.
+    function isAggCt(ct) { return ct != undefined && (ct.k == "arr" || ct.k == "struct") }
+    // Copy a whole aggregate (or one word for a scalar) from src to dst.
+    function copyCt(ct, dst, src) {
+        var n = ctSize(ct)
+        for (var i = 0; i < n; i++) mem[dst + i] = mem[src + i]
     }
     // A place path: the variable, then indexing and member steps. The walk keeps the
     // address of the current place and its C type: a[i] steps by whole elements (the
     // array in place, a pointer through its loaded base), .f adds the field offset,
     // ->f loads the pointer and adds the field offset. The result is the final address.
+    // Step a place path from a starting {a, ct}: '[i]' peels one array or pointer
+    // level (and steps by whole elements), '.f' adds the field offset, '->f' loads
+    // the pointer first. The C type travels with the address, so nothing needs a
+    // separate 'is this an array' flag.
+    function walkPath(start, path, name) {
+        var addr = start.a
+        var ct = start.ct != undefined ? start.ct : ctInt
+        var bf = undefined   // Set when the LAST step selected a bit field.
+        for (var i = 0; i < path.length; i++) {
+            var s = path[i]
+            bf = undefined
+            if (s.idx != undefined) {
+                var idx = s.idx().v
+                if (ct.k == "arr") { ct = ct.e; addr = addr + idx * ctSize(ct) }
+                else if (ct.k == "ptr") { ct = ct.p; addr = load(addr) + idx * ctSize(ct) }
+                else fail("indexing needs an array or a pointer: " + name)
+            } else if (s.fld != undefined) {
+                if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
+                var f = fieldOf(ct.s, s.fld)
+                addr = addr + f.off
+                ct = f.ct
+                bf = f.bf
+            } else {
+                if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
+                var f2 = fieldOf(ct.p.s, s.arw)
+                addr = load(addr) + f2.off
+                ct = f2.ct
+                bf = f2.bf
+            }
+        }
+        return {a: addr, ct: ct, bf: bf}
+    }
     function makeVarPlace(items) {
         var name = items[0]
         var path = items.slice(1)
         return function() {
             var v = findVar(name)
-            if (path.length == 0) {
-                if (v.arr) fail("an array is not assignable: " + name)
-                return {a: v.addr}
-            }
-            var addr = v.addr
             var ct = v.ct != undefined ? v.ct : ctInt
-            var arr = v.arr
-            var bf = undefined   // Set when the LAST step selected a bit field.
-            for (var i = 0; i < path.length; i++) {
-                var s = path[i]
-                bf = undefined
-                if (s.idx != undefined) {
-                    var idx = s.idx()
-                    if (arr) { addr = addr + idx * ctSize(ct) }
-                    else if (ct.k == "ptr") { ct = ct.p; addr = load(addr) + idx * ctSize(ct) }
-                    else fail("indexing needs an array or a pointer: " + name)
-                } else if (s.fld != undefined) {
-                    if (ct.k != "struct") fail("'.' needs a struct value: ." + s.fld)
-                    var f = fieldOf(ct.s, s.fld)
-                    addr += f.off
-                    ct = f.ct
-                    bf = f.bf
-                } else {
-                    if (ct.k != "ptr" || ct.p.k != "struct") fail("'->' needs a struct pointer: ->" + s.arw)
-                    var f2 = fieldOf(ct.p.s, s.arw)
-                    addr = load(addr) + f2.off
-                    ct = f2.ct
-                    bf = f2.bf
-                }
-                arr = false
-            }
-            return {a: addr, bf: bf}
+            if (path.length == 0) return {a: v.addr, ct: ct}
+            return walkPath({a: v.addr, ct: ct}, path, name)
         }
     }
-    // Every lvalue thunk answers {a: address, bf: bit-field descriptor or undefined}.
-    function makeDerefPlace(t) { return function() { return {a: t()} } }
-    function makeAddrOf(placeT) { return function() { return placeT().a } }
-    function makeLoad(placeT) { return function() { return load(placeT().a) } }
-    makeNot = function(t) { return function() { return t() == 0 ? 1 : 0 } }
-    function makeBitNot(t) { return function() { return ~t() } }
+    // A string literal is an unnamed array object with static storage duration: it is
+    // allocated once, on first use, and every evaluation yields that same address.
+    function makeStrPlace(text) {
+        var d = cStrBytes(text)
+        var ct = ctArr(d.str.length, d.wide ? ctInt : ctChar)
+        var bytes = d.str
+        var addr = -1
+        return function() {
+            if (addr < 0) { addr = strLitAddr(bytes) }
+            return {a: addr, ct: ct}
+        }
+    }
+    function makeStrInit(text) { return cStrBytes(text) }
+    // '(Type){ ... }': an unnamed object with automatic storage, initialized like a
+    // declared one. The place thunk allocates it and hands back its address, so a
+    // suffix chain, '&' and a decay to a pointer all work on it like on a variable.
+    function makeCompDesc(items) {
+        var d = {bs: items[0].bs, ptr: 0, dims: undefined}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].ptr != undefined) { d.ptr = items[i].ptr }
+            if (items[i].dims != undefined) { d.dims = items[i].dims }
+        }
+        return d
+    }
+    function compLitCt(d, init) {
+        var base = d.bs
+        if (d.ptr > 0) { base = ptrTo(d.ptr, base) }
+        if (d.dims != undefined) return arrCt(d.dims, base, initCount(init))
+        return base
+    }
+    function makeCompLit(items) {
+        var ct = compLitCt(items[0].clt, items[1])
+        var init = items[1]
+        return function() {
+            var a = alloc(ctSize(ct))
+            runInit(ct, init, a)
+            return {a: a, ct: ct}
+        }
+    }
+    // '(place)[i]' / '(place).f': the parenthesized place, then its suffix chain.
+    function makeSfxChain(items) {
+        var placeT = items[0]
+        var path = items.slice(1)
+        return function() { return walkPath(placeT(), path, "parenthesized place") }
+    }
+    // '*place': the pointer's VALUE is the address of the place, and the place's C
+    // type is the pointee. An ARRAY does not load at all - '*a' is 'a[0]'.
+    function makeDerefP(placeT) {
+        return function() {
+            var p = placeT()
+            var ct = p.ct != undefined ? p.ct : ctInt
+            if (ct.k == "arr") return {a: p.a, ct: ct.e}
+            // '*fp' on a function pointer is the function designator, which decays
+            // straight back to the same pointer (C11 6.5.3.2p4).
+            if (ct.k == "fnp") return {a: p.a, ct: ct}
+            if (ct.k != "ptr") fail("'*' needs a pointer")
+            return {a: load(p.a), ct: ct.p}
+        }
+    }
+    // Every lvalue thunk answers {a: address, ct: C type, bf: bit field or undefined}.
+    function makeDerefPlace(t) {
+        return function() {
+            var r = t()
+            var ct = (r.t != undefined && r.t.k == "ptr") ? r.t.p : ctInt
+            return {a: r.v, ct: ct}
+        }
+    }
+    function makeAddrOf(placeT) {
+        return function() {
+            var p = placeT()
+            return val(p.a, {k: "ptr", p: p.ct != undefined ? p.ct : ctInt})
+        }
+    }
+    // Reading a place loads its cell - except an ARRAY place, which decays to the
+    // address of its first element ('m[0]' used as an int*).
+    function makeLoad(placeT) {
+        return function() {
+            var p = placeT()
+            var ct = p.ct != undefined ? p.ct : ctInt
+            if (ct.k == "arr") return val(p.a, {k: "ptr", p: ct.e})
+            if (ct.k == "struct") return val(p.a, ct)
+            return val(load(p.a), ct)
+        }
+    }
+    makeNot = function(t) { return function() { return val(t().v == 0 ? 1 : 0, ctInt) } }
+    makeNeg = function(t) {
+        return function() {
+            var r = t()
+            var ct = promote(r.t)
+            return val(convert(ct, 0 - r.v), ct)
+        }
+    }
+    function makeBitNot(t) {
+        return function() {
+            var r = t()
+            var ct = promote(r.t)
+            return val(convert(ct, ~r.v), ct)
+        }
+    }
 
+    // The element a pointer (or a decayed array) steps by.
+    function pointeeOf(ct) { return ct.k == "ptr" ? ct.p : (ct.k == "arr" ? ct.e : undefined) }
+    // One binary operator on two typed values. Pointer arithmetic steps whole
+    // elements; everything else is evaluated in the usual arithmetic conversions'
+    // common type, which is what makes an unsigned divide, remainder, shift and
+    // comparison differ from the signed one and a float operand pull the whole
+    // operation into floating point.
     binOp = function(op, l, r) {
-        if (op == "+") return (l + r) | 0
-        if (op == "-") return (l - r) | 0
-        if (op == "*") return Math.imul(l, r)
-        if (op == "/") return (l / r) | 0
-        if (op == "%") return (l % r) | 0
-        if (op == "==") return (l == r) ? 1 : 0
-        if (op == "!=") return (l != r) ? 1 : 0
-        if (op == "<")  return (l < r) ? 1 : 0
-        if (op == ">")  return (l > r) ? 1 : 0
-        if (op == "<=") return (l <= r) ? 1 : 0
-        if (op == ">=") return (l >= r) ? 1 : 0
-        if (op == "|")  return l | r
-        if (op == "^")  return l ^ r
-        if (op == "&")  return l & r
-        if (op == "<<") return l << r
-        if (op == ">>") return l >> r
+        var lp = pointeeOf(l.t)
+        var rp = pointeeOf(r.t)
+        if (lp != undefined || rp != undefined) {
+            if (op == "-" && lp != undefined && rp != undefined) {
+                return val(trunc0((l.v - r.v) / ctSize(lp)), ctInt)
+            }
+            if (op == "+" || op == "-") {
+                var base = (lp != undefined) ? l : r
+                var off = (lp != undefined) ? r.v : l.v
+                var el = (lp != undefined) ? lp : rp
+                if (op == "-") off = 0 - off
+                return val(base.v + off * ctSize(el), base.t.k == "arr" ? {k: "ptr", p: el} : base.t)
+            }
+        }
+        var ct = arithCt(l.t, r.t)
+        var a = convert(ct, l.v)
+        var b = convert(ct, r.v)
+        if (op == "==") return val(a == b ? 1 : 0, ctInt)
+        if (op == "!=") return val(a != b ? 1 : 0, ctInt)
+        if (op == "<")  return val(a < b ? 1 : 0, ctInt)
+        if (op == ">")  return val(a > b ? 1 : 0, ctInt)
+        if (op == "<=") return val(a <= b ? 1 : 0, ctInt)
+        if (op == ">=") return val(a >= b ? 1 : 0, ctInt)
+        if (op == "+") return val(convert(ct, a + b), ct)
+        if (op == "-") return val(convert(ct, a - b), ct)
+        if (op == "*") return val(convert(ct, a * b), ct)
+        if (op == "/") return val(convert(ct, isFlt(ct) ? (a / b) : trunc0(a / b)), ct)
+        if (op == "%") return val(convert(ct, a % b), ct)
+        // The bitwise operators take integers only; the shift count keeps the LEFT
+        // operand's type (C11 6.5.7p3), so it is not part of the common type.
+        if (op == "|")  return val(convert(ct, a | b), ct)
+        if (op == "^")  return val(convert(ct, a ^ b), ct)
+        if (op == "&")  return val(convert(ct, a & b), ct)
+        var sct = promote(l.t)
+        var sv = convert(sct, l.v)
+        if (op == "<<") return val(convert(sct, sv * Math.pow(2, r.v & 31)), sct)
+        if (op == ">>") return val(convert(sct, sct.u ? (sv >>> (r.v & 31)) : (sv >> (r.v & 31))), sct)
     }
     // Real C short circuit: the right side only runs if it can still change the result.
     makeOrAnd = function(items, op) {
         if (items.length == 1) return items[0]
         return function() {
-            var v = items[0]() != 0
+            var v = items[0]().v != 0
             for (var i = 1; i < items.length; i++) {
-                if (op == "||") { if (v) return 1; v = items[i]() != 0 }
-                else            { if (!v) return 0; v = items[i]() != 0 }
+                if (op == "||") { if (v) return val(1, ctInt); v = items[i]().v != 0 }
+                else            { if (!v) return val(0, ctInt); v = items[i]().v != 0 }
             }
-            return v ? 1 : 0
+            return val(v ? 1 : 0, ctInt)
         }
     }
+    // The conditional operator's two arms are balanced by the usual arithmetic
+    // conversions, so '1 ? 2 : 2.5' has type double and yields 2.0 (C11 6.5.15p5).
     function makeCond(items) {
         if (items.length == 1) return items[0]
-        return function() { return items[0]() != 0 ? items[1]() : items[2]() }
+        return function() {
+            var r = items[0]().v != 0 ? items[1]() : items[2]()
+            return r
+        }
     }
-    applyOp = function(op, a, b) {
-        if (op == "+=") return (a + b) | 0
-        if (op == "-=") return (a - b) | 0
-        if (op == "*=") return Math.imul(a, b)
-        if (op == "/=") return (a / b) | 0
-        if (op == "%=") return (a % b) | 0
-        if (op == "&=") return a & b
-        if (op == "^=") return a ^ b
-        if (op == "|=") return a | b
-        if (op == "<<=") return a << b
-        if (op == ">>=") return a >> b
-    }
+    // A compound assignment is the plain operator on the current value, converted
+    // back to the target's type (C11 6.5.16.2p3).
+    applyOp = function(op, a, b) { return binOp(op.slice(0, op.length - 1), a, b) }
     // items = [placeThunk, opString, valueThunk]. Value of the assignment: the stored value.
     function makeAssign(items) {
         var placeT = items[0]
@@ -1161,16 +1810,22 @@ KwDefault   = "default" KwEnd ;
         var valT = items[2]
         return function() {
             var p = placeT()
-            var v = valT()
-            if (op != "=") v = applyOp(op, load(p.a), v)
-            return store(p.a, bfNorm(p.bf, v))
+            if (p.ct != undefined && p.ct.k == "arr") fail("an array is not assignable")
+            var r = valT()
+            // Assigning a whole struct or union copies its words (C11 6.5.16.1).
+            if (op == "=" && isAggCt(p.ct)) { copyCt(p.ct, p.a, r.v); return val(p.a, p.ct) }
+            var nv = r
+            if (op != "=") nv = applyOp(op, val(load(p.a), p.ct), r)
+            return val(store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, nv.v))), p.ct)
         }
     }
+    // ++ and -- step a POINTER by a whole element and anything else by one.
+    function incStep(ct) { return ct.k == "ptr" ? ctSize(ct.p) : 1 }
     function makePreIncDec(placeT, op) {
         var d = (op == "++") ? 1 : -1
         return function() {
             var p = placeT()
-            return store(p.a, bfNorm(p.bf, load(p.a) + d))
+            return val(store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, load(p.a) + d * incStep(p.ct)))), p.ct)
         }
     }
     function makePostIncDec(op, placeT) {
@@ -1178,18 +1833,35 @@ KwDefault   = "default" KwEnd ;
         return function() {
             var p = placeT()
             var old = load(p.a)
-            store(p.a, bfNorm(p.bf, old + d))
-            return old
+            store(p.ct, p.a, bfNorm(p.bf, convert(p.ct, old + d * incStep(p.ct))))
+            return val(old, p.ct)
         }
     }
-    // items = [name, argThunk...].
-    function makeCall(items) {
-        var name = items[0]
-        var args = items.slice(1)
+    function evalArgs(args) {
+        var vals = []
+        for (var i = 0; i < args.length; i++) vals.push(args[i]())
+        return vals
+    }
+    // items = [seed, {args}...]. The seed is either {fname} (a bare name, resolved as
+    // a function or as a variable holding a function pointer) or an expression thunk
+    // yielding a function identifier. Every further argument list calls what the
+    // previous one returned.
+    function makeCallExpr(items) {
+        var seed = items[0]
+        var lists = items.slice(1)
         return function() {
-            var argValues = []
-            for (var i = 0; i < args.length; i++) argValues.push(args[i]())
-            return callFunction(name, argValues)
+            var v = val(0, ctInt)
+            var start = 0
+            if (typeof seed != "function") {
+                v = callFunction(seed.fname, evalArgs(lists[0].args))
+                start = 1
+            } else {
+                v = seed()
+            }
+            for (var i = start; i < lists.length; i++) {
+                v = callFunction(funcNameOf(v.v), evalArgs(lists[i].args))
+            }
+            return v
         }
     }
 
@@ -1204,64 +1876,95 @@ KwDefault   = "default" KwEnd ;
         }
         return {v: items[0]}
     }
-    // A brace list -> a dense array of value thunks, honouring '[i] =' designators.
-    // A hole (a skipped index, or a shorter list than the array) stays undefined and
-    // is left at the zero the fresh memory already holds.
-    function spreadInit(list, pos) {
-        var out = []
-        var at = 0
-        for (var i = 0; i < list.length; i++) {
-            var it = list[i]
-            if (it.at != undefined) at = it.at | 0
-            while (out.length < at) out.push(undefined)
-            var v = it.v
-            if (typeof v != "function") { notImpl("nested aggregate initializer", pos); v = undefined }
-            if (out.length == at) out.push(v)
-            else out[at] = v
-            at = at + 1
+    // ----- Declarators -----
+    // One declarator, whatever its shape, collapses into a DESCRIPTOR; the enclosing
+    // declaration owns the base type and combines the two. That is what lets 'char',
+    // 'unsigned' and a typedef name all reach a declarator that only knows about its
+    // own stars, dimensions and initializer.
+    function makeDeclr(items, kind) {
+        var d = {name: "", ptr: 0, dims: undefined, init: undefined, gv: undefined, kind: kind}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) continue
+            if (typeof it == "string") { d.name = it; continue }
+            if (typeof it == "function") { d.init = it; continue }
+            if (it.ptr != undefined) { d.ptr = it.ptr; continue }
+            if (it.dims != undefined) { d.dims = it.dims; continue }
+            if (it.gv != undefined) { d.gv = it.gv; continue }
+            d.init = it            // {list: ...} or {str: ...}
         }
-        return out
+        return d
     }
-    // items = [{ptr}?, name, {size}?, init?] -> declaration thunk. init is either an
-    // expression thunk or {list} for a brace initializer; {size} marks an array, with
-    // -1 asking for the size to be taken from the initializer.
-    function makeDecl(items) {
-        var i = 0
-        var nstar = starsOf(items[i]) // A pointer is a one word cell holding an address.
-        if (nstar > 0) i++
-        var name = items[i]
-        i++
-        var dim = -2                  // -2: not an array at all.
-        if (items[i] != undefined && items[i].size != undefined) { dim = items[i].size | 0; i++ }
-        var opt = items[i]
-        var ct = ptrTo(nstar, ctInt)
-        if (dim > -2) {
-            var list = (opt != undefined && opt.list != undefined) ? opt.list : undefined
-            if (list == undefined && opt != undefined) fail("an array needs a brace initializer: " + name)
-            return function() {
-                var vals = (list != undefined) ? spreadInit(list, 0) : []
-                var n = dim >= 0 ? dim : vals.length
-                if (n < vals.length) n = vals.length
-                var base = alloc(n)   // Fresh memory is zeroed, so holes stay 0.
-                for (var k = 0; k < vals.length; k++) {
-                    if (vals[k] != undefined) mem[base + k] = vals[k]() | 0
-                }
-                declVar(name, base, true, ct)
-            }
+    // How many elements an initializer covers, for an inferred array size.
+    function initCount(init) {
+        if (init == undefined || typeof init == "function") return 0
+        if (init.list != undefined) return initLen(init.list)
+        if (init.str != undefined) return init.str.length
+        return 0
+    }
+    // The C type that a base type plus one declarator name.
+    function declCt(base, d) {
+        if (d.kind == "fnptr") {
+            if (d.dims != undefined) return arrCt(d.dims, ctFn, initCount(d.init))
+            return ctFn
         }
+        // 'int (*pa)[3]' is a POINTER TO an array, so the dimensions sit INSIDE.
+        if (d.kind == "ptrarr") return ptrTo(d.ptr, arrCt(d.dims, base, 0))
+        var b = (d.ptr > 0) ? ptrTo(d.ptr, base) : base
+        if (d.dims != undefined) return arrCt(d.dims, b, initCount(d.init))
+        return b
+    }
+    // items = [{bty}, {dcl}...] -> one declaration statement.
+    function makeDeclSeq(items, isStatic) {
+        var base = items[0].bty
+        var thunks = []
+        for (var i = 1; i < items.length; i++) {
+            var d = items[i].dcl
+            var t = makeDeclOf(d.name, declCt(base, d), d.init)
+            thunks.push(isStatic ? makeStaticOf(d.name, t) : t)
+        }
+        return makeSeq(thunks)
+    }
+    // One declared object: fresh (zeroed) storage plus, if there is one, its
+    // initializer written into it.
+    function makeDeclOf(name, ct, opt) {
         return function() {
-            var a = alloc(1)
-            if (opt != undefined) mem[a] = opt() | 0
-            declVar(name, a, false, ct)
+            var a = alloc(ctSize(ct))
+            if (opt != undefined) initInto(ct, opt, a)
+            declVar(name, a, ct.k == "arr", ct)
         }
     }
-    // A static local: makeDecl's thunk runs ONCE (allocating and initializing the cell);
-    // every later execution only re-binds that same cell into the fresh scope.
-    function makeStaticDecl(items) {
-        var inner = makeDecl(items)
-        var i = 0
-        if (starsOf(items[i]) > 0) i++
-        var name = items[i]
+    // Write an initializer into a fresh object: a brace list, a string literal, or
+    // one expression - which is COPIED when the object is an aggregate.
+    function initInto(ct, opt, a) {
+        if (typeof opt != "function") {
+            if (opt.str != undefined) { strInitInto(ct, opt, a); return }
+            runInit(ct, opt, a)
+            return
+        }
+        var r = opt()
+        if (isAggCt(ct)) { copyCt(ct, a, r.v); return }
+        mem[a] = convert(ct, r.v)
+    }
+    // A string literal initializing a char ARRAY fills it element by element and
+    // leaves the rest at the zero the fresh memory holds (C11 6.7.9p14); anywhere
+    // else it is the literal object itself, and what is stored is its address.
+    function strInitInto(ct, opt, a) {
+        if (ct.k == "arr") {
+            var n = opt.str.length < ct.n ? opt.str.length : ct.n
+            for (var i = 0; i < n; i++) mem[a + i] = convert(ct.e, opt.str[i])
+            return
+        }
+        mem[a] = convert(ct, strLitAddr(opt.str))
+    }
+    function strLitAddr(bytes) {
+        var base = alloc(bytes.length)
+        for (var i = 0; i < bytes.length; i++) mem[base + i] = bytes[i]
+        return base
+    }
+    // A static local: the storage is allocated ONCE and survives across calls; every
+    // later execution only re-binds that same cell into the fresh scope.
+    function makeStaticOf(name, inner) {
         var cell = undefined
         return function() {
             if (cell == undefined) {
@@ -1272,6 +1975,14 @@ KwDefault   = "default" KwEnd ;
             }
         }
     }
+    // 'int (*f)(int)' as a parameter: the base type is irrelevant, only the name is.
+    function makeFnPtrParam(items) {
+        var name = ""
+        for (var i = 0; i < items.length; i++) { if (typeof items[i] == "string") name = items[i] }
+        return {name: name, ptr: false, ct: ctFn}
+    }
+    // items = [{ptr}, name, [params...], bodyThunk].
+    function defineFnPtrFunc(items) { funcs[items[1]] = {params: items[2], body: items[3]} }
     // SDeclarator/SGDecl items = ["*"?] name [{size}|initThunk] -> a plain descriptor.
     function makeSDecl(items) {
         var i = 0
@@ -1285,17 +1996,19 @@ KwDefault   = "default" KwEnd ;
     // One declared struct entity: struct S v / struct S *p (= expr) / struct S a[N].
     function declStructVar(sname, d) {
         if (d.star > 0) {
+            var pct = ptrTo(d.star, ctStruct(sname))
             var a = alloc(1)
-            if (d.init != undefined) mem[a] = d.init() | 0
-            declVar(d.name, a, false, ptrTo(d.star, ctStruct(sname)))
+            if (d.init != undefined) mem[a] = convert(pct, d.init().v)
+            declVar(d.name, a, false, pct)
         } else if (d.size != undefined) {
-            declVar(d.name, alloc(d.size * structOf(sname).size), true, ctStruct(sname))
+            var act = ctArr(d.size, ctStruct(sname))
+            declVar(d.name, alloc(ctSize(act)), true, act)
         } else {
             var base = alloc(structOf(sname).size)   // Fresh memory is zeroed.
             if (d.init != undefined) {
-                if (d.init.list == undefined) fail("a struct or union needs a brace initializer: " + d.name)
-                var plan = structInitPlan(sname, d.init.list, 0)
-                for (var i = 0; i < plan.length; i++) mem[base + plan[i].f.off] = plan[i].t() | 0
+                // Either a brace initializer, or another struct VALUE, which is copied.
+                if (d.init.list != undefined) { runInit(ctStruct(sname), d.init, base) }
+                else { copyCt(ctStruct(sname), base, d.init().v) }
             }
             declVar(d.name, base, false, ctStruct(sname))
         }
@@ -1325,7 +2038,7 @@ KwDefault   = "default" KwEnd ;
                     if (r === BRK) break
                     if (r !== CONT) return r
                 }
-            } while (condT() != 0)
+            } while (condT().v != 0)
         }
     }
     function makeFor(items) {
@@ -1340,7 +2053,7 @@ KwDefault   = "default" KwEnd ;
             scopes.push({})
             var res = undefined
             if (init != null) init()
-            while (cond == null || cond() != 0) {
+            while (cond == null || cond().v != 0) {
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
@@ -1360,12 +2073,12 @@ KwDefault   = "default" KwEnd ;
         var scrut = items[0]
         var cases = items.slice(1)
         return function() {
-            var v = scrut()
+            var v = scrut().v
             var start = -1
             var dflt = -1
             for (var i = 0; i < cases.length; i++) {
                 if (cases[i].isDefault) { dflt = i; continue }
-                if (start < 0 && cases[i].v() == v) { start = i }
+                if (start < 0 && cases[i].v().v == v) { start = i }
             }
             if (start < 0) { start = dflt }
             if (start < 0) { return undefined }
@@ -1391,11 +2104,12 @@ KwDefault   = "default" KwEnd ;
     function makeParam(items) {
         var i = 0
         var sname
+        var base = ctInt
         if (items[i] != undefined && items[i].sname != undefined) { sname = items[i].sname; i++ }
+        else if (items[i] != undefined && items[i].bty != undefined) { base = items[i].bty; i++ }
         var ptr = starsOf(items[i])
         if (ptr > 0) i++
-        if (sname != undefined && ptr == 0) fail("struct parameters must be pointers (struct " + sname + " *)")
-        var ct = ptrTo(ptr, sname != undefined ? ctStruct(sname) : ctInt)
+        var ct = ptrTo(ptr, sname != undefined ? ctStruct(sname) : base)
         // An abstract parameter has no name: give it one nothing can spell, so that it
         // still occupies its argument slot.
         var pname = items[i]
@@ -1403,22 +2117,18 @@ KwDefault   = "default" KwEnd ;
         return {name: pname, ptr: ptr > 0, ct: ct}
     }
     // Global declarator: ["*"?] name [{size}|{init: n}] -> registered immediately.
-    function makeGDecl(items) {
-        var i = 0
-        var nstar = starsOf(items[i])
-        if (nstar > 0) i++
-        var name = items[i]
-        var opt = items[i + 1]
-        var ct = ptrTo(nstar, ctInt)
-        if (opt != undefined && opt.size != undefined) {
-            declVar(name, alloc(opt.size), true, ct)
-        } else {
-            var a = alloc(1)
-            if (opt != undefined) mem[a] = opt.init | 0
-            declVar(name, a, false, ct)
+    // items = [{bty}, {dcl}...]: globals are registered at build time, so their
+    // initializer must be a constant (a full expression could not run yet).
+    function defineGlobals(items) {
+        var base = items[0].bty
+        for (var i = 1; i < items.length; i++) {
+            var d = items[i].dcl
+            var ct = declCt(base, d)
+            var a = alloc(ctSize(ct))
+            if (d.gv != undefined) mem[a] = convert(ct, d.gv)
+            declVar(d.name, a, ct.k == "arr", ct)
         }
     }
-    function defineGlobals(items) {} // makeGDecl already registered them.
 
     function defineFunction() {
         var bodyT = pop()
@@ -1426,10 +2136,57 @@ KwDefault   = "default" KwEnd ;
         var name = pop()
         funcs[name] = {params: params, body: bodyT}
     }
+    // The C type a 'struct S' / 'union U' / 'struct S *' return type names.
+    function makeRetCt(items) { return ptrTo(starsOf(items[1]), ctStruct(items[0])) }
+    // items = [{ret}, name, [params...], bodyThunk].
+    function defineSFunction(items) {
+        funcs[items[1]] = {params: items[2], body: items[3], ret: items[0].ret}
+    }
+
+    // ----- typedef -----
+    // name -> the C type it abbreviates. Filled by defineTypedef as the file is
+    // walked, read by makeTdDecl when a later declaration uses the name.
+    var typedefs = {}
+    function typedefOf(name) {
+        if (!hasOwn(typedefs, name)) fail("type not defined: " + name)
+        return typedefs[name]
+    }
+    // 'typedef struct { ... } Box;': the tag is defined here and its key returned.
+    function tdTagDef(items, isUnion) {
+        var key = anonTagName()
+        var tagItems = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tag != undefined) { key = isUnion ? uKey(items[i].tag) : items[i].tag }
+            else { tagItems.push(items[i]) }
+        }
+        var all = [key]
+        for (var j = 0; j < tagItems.length; j++) all.push(tagItems[j])
+        defineTag(all, isUnion)
+        return ctStruct(key)
+    }
+    // items = [{tb}|{tref}, {dcl}...].
+    function defineTypedef(items) {
+        var b = items[0]
+        var base = (b.tref != undefined) ? typedefOf(b.tref) : b.tb
+        for (var i = 1; i < items.length; i++) {
+            var d = items[i].dcl
+            typedefs[d.name] = declCt(base, d)
+        }
+    }
+    // items = [{tname}, {dcl}...] -> one declaration statement.
+    function makeTdDecl(items) {
+        var all = [{bty: typedefOf(items[0].tname)}]
+        for (var i = 1; i < items.length; i++) all.push(items[i])
+        return makeDeclSeq(all, false)
+    }
+    // items = [{tname}, name, [params...], bodyThunk]: a function whose return type
+    // is a typedef name. The value returned is one word like every other, so only the
+    // declarator syntax differs from an ordinary definition.
+    function defineTdFunc(items) { funcs[items[1]] = {params: items[2], body: items[3]} }
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "c"
-    core.test = function(v) { return v != 0 } // C conditions: any nonzero int.
+    core.test = function(v) { return v.v != 0 } // C conditions: any nonzero value.
     // System headers the runtime already provides; #include of anything else is an
     // external library we cannot resolve (see resolveImport in lib/interp-core.js).
     core.stdlibImports = ["stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h", "stdbool.h", "stdint.h", "stddef.h", "limits.h", "assert.h", "stdarg.h"]
@@ -1466,7 +2223,7 @@ KwDefault   = "default" KwEnd ;
         scopes = [globalScope, {}]
         var r = runMainSnippet(entry, "Statement")
         scopes = callerScopes
-        var sret = (r != undefined && r.isRet) ? r.v : 0
+        var sret = (r != undefined && r.isRet) ? (r.v.v | 0) : 0
         println("c interpreter: -main snippet returned " + sret)
         exit(sret)
     }
@@ -1474,7 +2231,7 @@ KwDefault   = "default" KwEnd ;
         println("Error: C programs need a " + entry + "() function.")
         exit(1)
     }
-    var ret = callFunction(entry, [])
+    var ret = callFunction(entry, []).v | 0
     println("c interpreter: " + entry + "() returned " + ret)
     exit(ret)
 
