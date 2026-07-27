@@ -311,6 +311,11 @@ type jsrt struct {
 
 	root *jsScope
 
+	// phpLsb is PHP's late-static-binding class: the class a C::m() call named,
+	// so `static::` inside an inherited static method resolves to it. Only
+	// js_phscall writes it (saved and restored around the call); see jsrtphp.go.
+	phpLsb *jsObject
+
 	// retSlot holds the completion value of the running program: js_setret is
 	// emitted for every expression statement, so after a run the slot holds the
 	// value of the last executed expression statement - the same thing that a
@@ -869,6 +874,8 @@ func (rt *jsrt) truthy(v interface{}) bool {
 		return t
 	case float64:
 		return t != 0 && t == t
+	case jsPhpFlo: // PHP's boxed float (see jsrtphp.go); 0.0 is falsy.
+		return t.f != 0
 	case string:
 		return len(t) > 0
 	case *jsBigInt:
@@ -883,6 +890,8 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	case jsChar: // Kotlin's Char does arithmetic and compares as its code.
 		return float64(t.code)
 	case jsFlo: // Ruby's boxed Float / Rational / Complex are numbers.
+		return t.f
+	case jsPhpFlo: // PHP's boxed float.
 		return t.f
 	case jsRat:
 		return t.n / t.d
@@ -957,6 +966,8 @@ func (rt *jsrt) toString(v interface{}) string {
 		return t.s
 	case jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
 		return rubyFloStr(t.f)
+	case jsPhpFlo: // PHP prints a float without a fraction as an integer ((string)3.0 == "3").
+		return phpFloStr(t.f)
 	case jsRat:
 		return jsNumString(t.n) + "/" + jsNumString(t.d)
 	case jsCpx:
@@ -1008,6 +1019,8 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 		return t.s
 	case jsFlo, jsRat, jsCpx: // print/println show Ruby's rendering (1000.0, 1/2, 0+2i).
 		return rt.rubyStr(v)
+	case jsPhpFlo: // print/println show PHP's rendering (3.0 prints as 3).
+		return phpFloStr(t.f)
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -5465,6 +5478,217 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 			}
 			return w(out)
+		},
+		// ----- PHP's value model (see jsrtphp.go) -----
+		// Only php-to-llvm-ir.abnf emits these. They give the compiler the value
+		// model php-interpreter.abnf already has: a BOXED float (so 3.0 !== 3),
+		// PHP truthiness ("0" is falsy), PHP's == / === / <=> and the one ordered
+		// array type whose === compares the keys and their order.
+		"js_phflo":   func(a []uint64) uint64 { return w(phpMkFlo(rt.toNumber(u(a[0])))) },
+		"js_phtruthy": func(a []uint64) uint64 {
+			if rt.phpTest(u(a[0])) {
+				return 1
+			}
+			return 0
+		},
+		"js_phbool": func(a []uint64) uint64 { return boolH(rt.phpTest(u(a[0]))) },
+		"js_phnot":  func(a []uint64) uint64 { return boolH(!rt.phpTest(u(a[0]))) },
+		"js_phstr":  func(a []uint64) uint64 { return rt.wrapStr(rt.phpStr(u(a[0]))) },
+		"js_phcat":  func(a []uint64) uint64 { return rt.wrapStr(rt.phpStr(u(a[0])) + rt.phpStr(u(a[1]))) },
+		"js_pheq":   func(a []uint64) uint64 { return boolH(rt.phpLoose(u(a[0]), u(a[1]))) },
+		"js_phne":   func(a []uint64) uint64 { return boolH(!rt.phpLoose(u(a[0]), u(a[1]))) },
+		"js_phseq":  func(a []uint64) uint64 { return boolH(rt.phpIdentical(u(a[0]), u(a[1]))) },
+		"js_phsne":  func(a []uint64) uint64 { return boolH(!rt.phpIdentical(u(a[0]), u(a[1]))) },
+		"js_phcmp":  func(a []uint64) uint64 { return rt.wrapNum(rt.phpCmp(u(a[0]), u(a[1]))) },
+		"js_phlt":   func(a []uint64) uint64 { return boolH(rt.phpCmp(u(a[0]), u(a[1])) < 0) },
+		"js_phgt":   func(a []uint64) uint64 { return boolH(rt.phpCmp(u(a[0]), u(a[1])) > 0) },
+		"js_phle":   func(a []uint64) uint64 { return boolH(rt.phpCmp(u(a[0]), u(a[1])) <= 0) },
+		"js_phge":   func(a []uint64) uint64 { return boolH(rt.phpCmp(u(a[0]), u(a[1])) >= 0) },
+		"js_phadd":  func(a []uint64) uint64 { return w(rt.phpArith("+", u(a[0]), u(a[1]))) },
+		"js_phsub":  func(a []uint64) uint64 { return w(rt.phpArith("-", u(a[0]), u(a[1]))) },
+		"js_phmul":  func(a []uint64) uint64 { return w(rt.phpArith("*", u(a[0]), u(a[1]))) },
+		"js_phdiv":  func(a []uint64) uint64 { return w(rt.phpArith("/", u(a[0]), u(a[1]))) },
+		"js_phmod":  func(a []uint64) uint64 { return w(rt.phpArith("%", u(a[0]), u(a[1]))) },
+		"js_phpow":  func(a []uint64) uint64 { return w(rt.phpArith("**", u(a[0]), u(a[1]))) },
+		"js_phneg":  func(a []uint64) uint64 { return w(rt.phpArith("-", float64(0), u(a[0]))) },
+		"js_phband": func(a []uint64) uint64 { return w(rt.phpBit("&", u(a[0]), u(a[1]))) },
+		"js_phbor":  func(a []uint64) uint64 { return w(rt.phpBit("|", u(a[0]), u(a[1]))) },
+		"js_phbxor": func(a []uint64) uint64 { return w(rt.phpBit("^", u(a[0]), u(a[1]))) },
+		"js_phshl":  func(a []uint64) uint64 { return w(rt.phpBit("<<", u(a[0]), u(a[1]))) },
+		"js_phshr":  func(a []uint64) uint64 { return w(rt.phpBit(">>", u(a[0]), u(a[1]))) },
+		"js_phbnot": func(a []uint64) uint64 {
+			return rt.wrapNum(float64(^int32(int64(phpTrunc(phpNumOf(rt.phpToNum(u(a[0]))))))))
+		},
+		"js_phnum":  func(a []uint64) uint64 { return w(rt.phpToNum(u(a[0]))) },
+		"js_phcast": func(a []uint64) uint64 { return w(rt.phpCast(rt.toString(u(a[0])), u(a[1]))) },
+		// The one array type: an ordered key->value map with __next, the next
+		// automatic integer key. The shape is the runtime's __dict, so js_range_len /
+		// js_range_key / js_range_val iterate it unchanged.
+		"js_pharr": func(a []uint64) uint64 { return w(phpNewArr()) },
+		"js_phset": func(a []uint64) uint64 {
+			rt.phpArrSet(u(a[0]), u(a[1]), u(a[2]))
+			return 0
+		},
+		"js_phpush": func(a []uint64) uint64 {
+			rt.phpArrPush(u(a[0]), u(a[1]))
+			return 0
+		},
+		"js_phget":   func(a []uint64) uint64 { return w(rt.phpArrGet(u(a[0]), u(a[1]))) },
+		"js_phisset": func(a []uint64) uint64 { return boolH(rt.phpArrHas(u(a[0]), u(a[1]))) },
+		"js_phunset": func(a []uint64) uint64 {
+			rt.phpArrUnset(u(a[0]), u(a[1]))
+			return 0
+		},
+		"js_phmerge": func(a []uint64) uint64 { // [...$a]: integer keys renumber, string keys stay
+			if keys, vals, ok := phpArrParts(u(a[1])); ok {
+				for i := range keys.elems {
+					if _, isNum := keys.elems[i].(float64); isNum {
+						rt.phpArrPush(u(a[0]), vals.elems[i])
+					} else {
+						rt.phpArrSet(u(a[0]), keys.elems[i], vals.elems[i])
+					}
+				}
+			}
+			return 0
+		},
+		"js_phcopy": func(a []uint64) uint64 { return w(rt.phpArrCopy(u(a[0]))) },
+		"js_phlen":  func(a []uint64) uint64 { return rt.wrapNum(rt.phpLen(u(a[0]))) },
+		"js_phkeys": func(a []uint64) uint64 { return w(rt.phpKeysOf(u(a[0]))) },
+		"js_phvals": func(a []uint64) uint64 { return w(rt.phpValsOf(u(a[0]))) },
+		"js_phin":   func(a []uint64) uint64 { return boolH(rt.phpInArray(u(a[0]), u(a[1]))) },
+		// ----- classes: '::' constants, static properties and static dispatch -----
+		"js_phconst": func(a []uint64) uint64 { return w(rt.phpConst(u(a[0]), rt.toString(u(a[1])))) },
+		"js_phsget":  func(a []uint64) uint64 { return w(rt.phpStaticGet(u(a[0]), rt.toString(u(a[1])))) },
+		"js_phsset": func(a []uint64) uint64 {
+			rt.phpStaticSet(u(a[0]), rt.toString(u(a[1])), u(a[2]))
+			return 0
+		},
+		"js_phcname": func(a []uint64) uint64 { // C::class / $o::class
+			if s, isStr := u(a[0]).(string); isStr {
+				return rt.wrapStr(s)
+			}
+			return w(rt.phpClassOf(u(a[0])).props["__name"])
+		},
+		// instanceof. The right side is a NAME, but it may also arrive as a class
+		// descriptor or an instance ($x instanceof $cn), so resolve it first.
+		"js_phclone": func(a []uint64) uint64 { return w(rt.phpClone(u(a[0]))) },
+		// Does the caught value match one of a catch clause's types? \Throwable
+		// catches everything, exactly as php-interpreter.abnf's excMatches has it.
+		"js_phcatch": func(a []uint64) uint64 {
+			if _, vals, ok := phpArrParts(u(a[1])); ok {
+				for _, t := range vals.elems {
+					n := rt.phpStr(t)
+					if n == "Throwable" || rt.phpIsA(u(a[0]), n) {
+						return boolH(true)
+					}
+				}
+			}
+			return boolH(false)
+		},
+		// A class descriptor by name, or null when nothing of that name is declared
+		// yet - an interface list must not abort on a forward reference.
+		"js_phclslookup": func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+				if v, ok := sc.get(name); ok {
+					return w(v)
+				}
+			}
+			return jsHNull
+		},
+		"js_phisa": func(a []uint64) uint64 {
+			name := ""
+			if o, ok := u(a[1]).(*jsObject); ok {
+				name = rt.phpStr(rt.phpClassOf(o).props["__name"])
+			} else {
+				name = rt.phpStr(u(a[1]))
+			}
+			return boolH(rt.phpIsA(u(a[0]), name))
+		},
+		// $this inside a method, or undefined in a static one. A plain js_scope_get
+		// would abort on the name; this probe answers undefined instead.
+		"js_phthis": func(a []uint64) uint64 {
+			for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+				if v, ok := sc.get("$this"); ok {
+					return w(v)
+				}
+			}
+			return jsHUndefined
+		},
+		// C::m($this, args): the method is resolved through the __super chain, and
+		// the class the CALL named becomes the late-static-binding class for the
+		// duration - which is what makes `static::who()` inside an inherited static
+		// method dispatch to the subclass.
+		"js_phscall": func(a []uint64) uint64 {
+			cls := rt.phpClassOf(u(a[0]))
+			name := rt.toString(u(a[1]))
+			owner := phpOwner(cls, name)
+			if owner == nil {
+				// __callStatic($name, $args) is PHP's fallback for a missing
+				// static method, exactly as __call is for an instance method.
+				if cs := phpOwner(cls, "__callStatic"); cs != nil {
+					args := &jsArray{}
+					if _, vals, ok := phpArrParts(u(a[3])); ok {
+						args.elems = append(args.elems, vals.elems...)
+					}
+					saved := rt.phpLsb
+					rt.phpLsb = cls
+					defer func() { rt.phpLsb = saved }()
+					return w(rt.call(cs.props["__callStatic"], jsUndef,
+						[]interface{}{u(a[2]), name, args}))
+				}
+				rt.fail("undefined method %s::%s", rt.phpStr(cls.props["__name"]), name)
+			}
+			args := []interface{}{u(a[2])}
+			if _, vals, ok := phpArrParts(u(a[3])); ok {
+				args = append(args, vals.elems...)
+			}
+			saved := rt.phpLsb
+			rt.phpLsb = cls
+			defer func() { rt.phpLsb = saved }()
+			return w(rt.call(owner.props[name], jsUndef, args))
+		},
+		// The 'static::' class inside a method body: the runtime class of $this when
+		// there is one, else the class the static call named, else 'self'.
+		"js_phlsb": func(a []uint64) uint64 {
+			if o, ok := u(a[0]).(*jsObject); ok {
+				if cls, has := o.props["__class"]; has {
+					return w(cls)
+				}
+			}
+			if rt.phpLsb != nil {
+				return w(rt.phpLsb)
+			}
+			return a[1]
+		},
+		// The few builtins whose result must keep PHP's int/float distinction:
+		// abs(-3.5) is a float, intdiv() truncates, max/min pick with PHP's own
+		// comparison and hand the ORIGINAL value back.
+		"js_phintdiv": func(a []uint64) uint64 {
+			y := phpTrunc(phpNumOf(rt.phpToNum(u(a[1]))))
+			if y == 0 {
+				rt.fail("division by zero")
+			}
+			return rt.wrapNum(phpTrunc(phpTrunc(phpNumOf(rt.phpToNum(u(a[0])))) / y))
+		},
+		"js_phabs": func(a []uint64) uint64 {
+			n := rt.phpToNum(u(a[0]))
+			if phpNumOf(n) < 0 {
+				return w(rt.phpArith("-", float64(0), n))
+			}
+			return w(n)
+		},
+		"js_phmax": func(a []uint64) uint64 {
+			if rt.phpCmp(u(a[0]), u(a[1])) > 0 {
+				return a[0]
+			}
+			return a[1]
+		},
+		"js_phmin": func(a []uint64) uint64 {
+			if rt.phpCmp(u(a[0]), u(a[1])) < 0 {
+				return a[0]
+			}
+			return a[1]
 		},
 		// ----- Kotlin's Char (see the jsChar type) -----
 		// A Char from its code. The Kotlin grammars' char literals compile to this.

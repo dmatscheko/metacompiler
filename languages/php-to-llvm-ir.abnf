@@ -18,14 +18,28 @@ with $this->prop / ->method() / new C(...), indexed and associative arrays ([...
 array(...)), $a[] append, the builtins count/strlen/in_array/array_keys/array_values/
 array_push/abs/max/min, and echo/print.
 
+PHP's VALUE MODEL is the one php-interpreter.abnf documents, and the two must agree:
+an int is a plain number, a float is BOXED (so 3.0 is not identical to 3 and match(3.0)
+picks the float arm), a string is byte based, and an array is ONE ordered key/value map
+with a next-automatic-index, so === compares the keys and their order while == does not.
+Truthiness is PHP's (false, 0, 0.0, the empty string, the string zero, the empty array
+and null are falsy), == is PHP 8 loose equality and the whole operator ladder, the casts
+and count/strlen/in_array/abs/max/min go through the js_ph* externals (abnf/jsrtphp.go),
+each the twin of the like-named function in the interpreter.
+
+Classes carry class CONSTANTS and STATIC properties in two prefixed key spaces on the
+descriptor, both resolved by walking the inheritance chain - so a subclass shares its
+parent's single static storage. self:: and static:: live in the CALL FRAME, not in
+globals, so the scope-chain snapshot a try restores covers them; static:: is the runtime
+class of this, or the class a C::m() call named (late static binding).
+
 Locals, functions, methods and closures lower to the MetaJS handle runtime: scopes via
 js_scope_new / js_pyset_var (PHP create-on-assign) / js_scope_get, closures via js_closure
 + js_call, objects/properties via js_obj_new / js_get / js_set, method dispatch via
 js_mcall (instances carry a __class descriptor; new C() runs __construct with the instance
-bound to $this), arrays via js_arr_new / js_arr_push, associative arrays via js_dict_new,
-indexing via js_pyget / js_pyset, foreach via js_range_len / js_range_key / js_range_val
-(uniform over indexed arrays and ordered maps). '.' concatenation coerces via js_jadd on
-an empty-string seed; && || coerce to booleans. The whole program becomes phpmain(env,
+bound to $this), arrays via js_pharr / js_phset / js_phpush, indexing via js_phget,
+foreach via js_range_len / js_range_key / js_range_val over that same ordered map.
+'.' concatenation coerces via js_phcat; && || coerce to booleans with js_phbool. The whole program becomes phpmain(env,
 args); a self checking program ends with exit(failures). The same subset is interpreted
 directly by php-interpreter.abnf, and the two must agree.") ;
 
@@ -164,7 +178,12 @@ ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
 // name are accepted and dropped (dynamic, create-on-assign); the default expression
 // is parsed then popped so only {param} reaches makeFun.
-Param       = [ AttrGrp ] { Modifier } [ TypeHint ] [ "&" ] [ "..." ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+// A modifier on a constructor parameter is PHP 8's property PROMOTION
+// ('__construct(public int $x)' declares and assigns $this->x), so it is captured
+// rather than skipped; makeFun turns each promoted parameter into one prologue
+// assignment. On any other function a modifier is meaningless and simply ignored.
+Param       = [ AttrGrp ] { ParamMod } [ TypeHint ] [ "&" ] [ "..." ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+ParamMod    <~~ push({pmod: up.in}) ~~> = Modifier ;
 // A default value is kept: it becomes a small prologue in the emitted body that
 // substitutes the default when the argument was not passed (see paramDefaults).
 ParamDefault <~~ push({pdef: pop()}) ~~> = PlainEq Expression ;
@@ -174,7 +193,12 @@ ReturnType  = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ] [ KwImplements ImplList ] "{" { Member } "}" ;
+            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ] [ KwImplements ImplNames ] "{" { Member } "}" ;
+// The implements list of a real class declaration, captured by name (ImplList itself
+// stays item-neutral: interface/trait/enum/anonymous-class all reference it and pop a
+// fixed number of items).
+ImplNames   = ImplName { "," ImplName } ;
+ImplName    <~~ push({impl: up.in}) ~~> = ExtName ;
 ClassMod    = ( "abstract" | "final" | "readonly" ) KwEnd ;
 ExtName     = [ "\\" ] Id { "\\" Id } ;
 ImplList    = ExtName { "," ExtName } ;
@@ -183,18 +207,34 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // abstract/interface method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
             = [ AttrGrp ] { Modifier } KwFunction [ "&" ] MethodName <~~ push(up.in) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
-// Class constants and 'use Trait;' adaptations: recognized and routed to
-// notImplemented (no static/const model). They push a {prop} marker makeClassStmt
-// ignores, exactly like a property declaration.
-ClassConst  <~~ takeAll(); notImpl("class constant", up.pos); push({prop: true}) ~~>
-            = [ AttrGrp ] { Modifier } KwConst Id { Id } [ "=" Expression ] { "," Id { Id } [ "=" Expression ] } ";" ;
+// Class constants: 'const A = 1, B = 2;', with PHP 8.3's typed form ('const int
+// SIZE = 4') and any modifier (final/public/...). They are published on the class
+// descriptor under a 'k:' key and resolved by walking __super, so a subclass and an
+// implementing class inherit them. An initializer may read 'self::' - makeClassStmt
+// binds the class as self BEFORE evaluating them, in declaration order, which is what
+// makes 'const TWICE = self::SIZE * 2' work.
+ClassConst  <~~ push({cconsts: takeAll()}) ~~>
+            = [ AttrGrp ] { Modifier } KwConst CItem { "," CItem } ";" ;
+CItem       <~~ push(makeCItem(takeAll())) ~~>
+            = CIds [ "=" Expression ] ;
+// 'const int SIZE' is a TYPED constant: the last word is the name. Each word pushes
+// its own record - up.in of the whole run would concatenate them without a separator
+// ("intSIZE"), since the capture drops the skipped whitespace.
+CIds        = CWord { CWord } ;
+CWord       <~~ push({cname: up.in}) ~~> = Id ;
 UseTrait    <~~ notImpl("trait use", up.pos); push({prop: true}) ~~>
             = KwUse ImplList ( ";" | SkipBlock ) ;
 
-// interface / trait / namespace / use-import: accepted structurally and routed to
-// notImplemented (no runtime model for them in this subset).
-TypeDecl    <~~ push(notImplStmt("interface/trait declaration", up.pos)) ~~>
-            = [ AttrGrp ] ( KwInterface | KwTrait ) SkipHead SkipBlock ;
+// interface I extends J, K { const C = 1; public function m(): T; }
+// An interface becomes a class descriptor with no method bodies: it carries its
+// constants and its parent interfaces, which is exactly what instanceof, a typed
+// catch and 'I::CONST' need. A trait has no runtime model here (its members would
+// have to be flattened into every using class) and stays notImplemented.
+TypeDecl    = IfaceDecl | TraitDecl ;
+IfaceDecl   <~~ push(makeIfaceStmt(takeAll())) ~~>
+            = [ AttrGrp ] KwInterface Name <~~ push(up.in) ~~> [ KwExtends ImplNames ] "{" { Member } "}" ;
+TraitDecl   <~~ push(notImplStmt("trait declaration", up.pos)) ~~>
+            = [ AttrGrp ] KwTrait SkipHead SkipBlock ;
 // namespace N; and the BRACED form namespace N { ... } (and the global 'namespace {}').
 // Names are not qualified in this subset, so the declaration itself stays a no-op -
 // but the braced body is a top level of its own and its items are simply emitted in
@@ -233,8 +273,9 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
 // A property declaration 'public $x;' or 'public int $x = e;'. The type hint is
 // dropped (dynamic), but the DEFAULT VALUE is kept: makeNew replays the declared
 // defaults down the inheritance chain, so "$o->val" reads 7 before anything is
-// assigned. A 'static' property has no runtime model here and is dropped, which
-// is why the modifier text is captured rather than skipped.
+// assigned. A 'static' property is stored on the CLASS descriptor instead (under an
+// 's:' key), and because js_phsset walks __super to the declaring class, a subclass
+// shares its parent's single storage - PHP's rule.
 PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
             = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ( ";" | PropHooks ) ;
 // PHP 8.4 property hooks: 'public int $x { get => e; set { ... } }' (and the bodyless
@@ -284,8 +325,9 @@ DoWhile     <~~ takeAll(); push(notImplStmt("do-while", up.pos)) ~~>
 // try/catch/finally + throw are genuinely compiled: throw calls js_throw, each try/catch/
 // finally body compiles to its own closure handed to js_try, and a return/break/continue
 // leaving a try or catch body becomes a control signal that excDispatch re-issues in the
-// enclosing frame. The first catch wins (the type list, including multi-catch A | B, is
-// parsed but not discriminated; the catch variable is optional). A PHP Block is
+// enclosing frame. Every catch clause is compiled and the first MATCHING one wins: the
+// type list (including the multi-catch A | B) is tested with js_phcatch, and a value no
+// clause matches is re-thrown. The catch variable is optional. A PHP Block is
 // {body: thunk}, so the marked sub-rules unwrap it (pop().body).
 Try         <~~ push(makeTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
@@ -301,7 +343,8 @@ Declare     <~~ takeAll(); push(notImplStmt("declare", up.pos)) ~~>
             = KwDeclare SkipParen ( ";" | Block ) ;
 ConstDecl   <~~ takeAll(); push(notImplStmt("global const", up.pos)) ~~>
             = KwConst Id { Id } [ "=" Expression ] { "," Id { Id } [ "=" Expression ] } Semi ;
-CatchType   = ExtName { "|" ExtName } ;
+CatchType   = CatchName { "|" CatchName } ;
+CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 
 // echo e, e, e;  /  print e;
 EchoStmt    <~~ push(makeEcho(takeAll())) ~~>
@@ -428,9 +471,11 @@ Target      <~~ push(makeTargetRef(takeAll())) ~~>
 // {var} record a plain variable does, so makeTargetRef is unchanged. The static form
 // must be tried FIRST or PlainHead never sees it.
 TargetHead  = StaticHead | PlainHead | VarVarHead ;
-StaticHead  <~~ takeAll(); notImpl("static property target", up.pos); push({var: "\x00static"}) ~~>
-            = StaticBase "::" DollarName ;
-StaticBase  = ExtName | DollarName ;
+// self::$made = e / C::$made++ : a static property as an assignment target. The head
+// carries the base thunk and the property name; makeAssign and incDec route those to
+// js_phsget / js_phsset instead of the scope.
+StaticHead  <~~ push(makeStaticHead(takeAll())) ~~>
+            = StaticBaseRef "::" StaticMember ;
 // A single-statement body ('while (...) $i++;', 'foreach (...) ;'). It pushes the
 // same {body} record a Block does, so every loop builder is reused unchanged.
 BodyStmt    <~~ push({body: makeBody(takeAll())}) ~~>
@@ -498,21 +543,28 @@ PowExpr     <~~ push(foldPow(takeAll())) ~~>
 // throw is an EXPRESSION since PHP 8 ($x ?? throw new E, fn() => throw new E).
 ThrowExpr   <~~ push(makeThrowExpr(pop())) ~~>
             = KwThrow Expression ;
-// (int)$x / (string)$y / (array)$z ...: a type cast, recognized and routed to
-// notImplemented. The operand is parsed then dropped. A parenthesized group '($x)'
-// is not a cast (the inner is not a cast keyword) and falls through to Primary.
-Cast        <~~ takeAll(); push(notImplExpr("type cast", up.pos)) ~~>
+// (int)$x / (string)$y / (array)$z ...: a type cast, lowered to js_phcast - the same
+// conversion table php-interpreter.abnf's phpCast has, so (int)3.9 is 3, (float)5 is
+// the boxed 5.0 and (array)5 is [5]. A parenthesized group '($x)' is not a cast (the
+// inner is not a cast keyword) and falls through to Primary.
+Cast        <~~ push(makeCast(takeAll())) ~~>
             = "(" CastKw ")" UnaryExpr ;
-CastKw      = ( "int" | "integer" | "bool" | "boolean" | "float" | "double" | "real"
+CastKw      <~~ push({cast: stripWs(up.in)}) ~~>
+            = ( "int" | "integer" | "bool" | "boolean" | "float" | "double" | "real"
               | "string" | "array" | "object" | "unset" | "binary" ) KwEnd ;
-Clone       <~~ takeAll(); push(notImplExpr("clone", up.pos)) ~~>
+// clone $o : a copy of the instance whose __clone hook, when the class has one,
+// runs on the COPY. Array properties are values, so they are copied along.
+Clone       <~~ push(makeClone(pop())) ~~>
             = KwClone UnaryExpr ;
-// $x instanceof Foo : recognized and routed to notImplemented. Tried before the plain
+// $x instanceof Foo : the runtime type test (js_phisa), which matches the class
+// itself, every base class and every implemented interface. Tried before the plain
 // unary path; if no 'instanceof' follows, this alternative fails and rolls back, so an
-// ordinary unary keeps its exact original parse (byte-identical).
-InstanceofExpr <~~ takeAll(); push(notImplExpr("instanceof", up.pos)) ~~>
+// ordinary unary keeps its exact original parse.
+InstanceofExpr <~~ push(makeInstanceof(takeAll())) ~~>
             = PostfixExpr KwInstanceof InstRef ;
-InstRef     = DollarName | ExtName ;
+InstRef     = InstDyn | InstName ;
+InstDyn     <~~ push({idyn: makeVarRef(pop())}) ~~> = DollarName ;
+InstName    <~~ push({iname: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeNeg(pop())) ~~>
@@ -555,8 +607,9 @@ SpreadArg   <~~ takeAll(); push(notImplExpr("spread argument", up.pos)) ~~>
 FccArg      <~~ push(notImplExpr("first-class callable", up.pos)) ~~>
             = "..." ;
 PosArg      = Expression ;
-StaticSfx   <~~ push(makeStatic(takeAll(), up.pos)) ~~>
-            = "::" MethodName [ "(" [ ArgList ] ")" ] ;
+// The same access as a chain SUFFIX ($obj::CONST, $obj::class, $obj::method()).
+StaticSfx   <~~ push(makeStaticSfx(takeAll())) ~~>
+            = "::" StaticMember [ StaticArgs ] ;
 
 Primary     = "(" Expression ")"
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
@@ -605,13 +658,35 @@ ArrowFn     <~~ push(makeArrowFn(takeAll())) ~~>
             = [ AttrGrp ] [ "static" KwEnd ] KwFn [ "&" ] ParamList [ ReturnType ] "=>" ArrowBody ;
 ArrowBody   <~~ push({arrowbody: pop()}) ~~>
             = Expression ;
-Match       <~~ push(notImplExpr("match expression", up.pos)) ~~>
-            = KwMatch SkipParen SkipBlock ;
+// match (subject) { c1, c2 => e, default => e } : PHP 8's match EXPRESSION. Each arm
+// compares with '===' (js_phseq), which is why it needed the boxed float first:
+// match (3.0) tells 3 and 3.0 apart. Arms are tried in order and the first hit wins;
+// with no arm and no default PHP raises UnhandledMatchError - this lowering yields
+// null instead, the one documented deviation.
+Match       <~~ push(makeMatch(takeAll())) ~~>
+            = KwMatch "(" Expression ")" "{" [ MatchArm { "," MatchArm } [ "," ] ] "}" ;
+MatchArm    <~~ push(makeArm(takeAll())) ~~>
+            = ( MatchDflt | MatchConds ) "=>" MatchBody ;
+MatchDflt   <~~ push({mdflt: true}) ~~> = KwDefault ;
+MatchConds  = MatchCond { "," MatchCond } ;
+MatchCond   <~~ push({mcond: pop()}) ~~> = Expression ;
+MatchBody   <~~ push({mbody: pop()}) ~~> = Expression ;
+KwDefault   = "default" KwEnd ;
 
-// Class::CONST / Class::method() / Class::$prop / static::/self::/parent:: : accepted
-// structurally and routed to notImplemented.
-StaticExpr  <~~ takeAll(); push(notImplExpr("static / :: access", up.pos)) ~~>
-            = ( "static" KwEnd | QName ) "::" ( MethodName | DollarName ) [ "(" [ ArgList ] ")" ] ;
+// Class::CONST / Class::method() / Class::$prop / Class::class, and the three
+// relative bases. 'self' is the class the method was DECLARED in, 'static' is the
+// late-static-binding class and 'parent' is self's __super. self and static live in
+// the CALL FRAME (the hidden "self" / "static" scope entries emitFunc declares), not
+// in globals, so the scope-chain snapshot makeTry restores covers them and an
+// exception can never leave them pointing at the wrong class.
+StaticExpr  <~~ push(makeStaticExpr(takeAll())) ~~>
+            = StaticBaseRef "::" StaticMember [ StaticArgs ] ;
+StaticBaseRef <~~ push({sbase: stripWs(up.in)}) ~~>
+            = ( "static" KwEnd | QName ) ;
+StaticMember <~~ push({smem: up.in}) ~~>
+            = MethodName | DollarName ;
+StaticArgs  <~~ push({sargs: takeAll()}) ~~>
+            = "(" [ ArgList ] ")" ;
 
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
@@ -630,10 +705,10 @@ ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ ArrayItem { "," ArrayItem } [ "," ] ] "]"
             | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
 ArrayItem   = SpreadItem | KeyedItem | PlainItem ;
-// [...$a] merges another array in; array(&$a) makes the element a reference. Both
-// are recognized and routed to notImplemented (no spread and no reference cell in
-// this value model), and each still pushes exactly one item.
-SpreadItem  <~~ takeAll(); push({elem: notImplExpr("array spread", up.pos)}) ~~>
+// [...$a] merges another array in (integer keys renumber, string keys are kept);
+// array(&$a) makes the element a reference, which has no cell in this value model
+// and stays notImplemented. Each item pushes exactly one record.
+SpreadItem  <~~ push({spread: pop()}) ~~>
             = "..." Expression ;
 KeyedItem   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
@@ -660,7 +735,7 @@ Call        <~~ push(makeCall(takeAll())) ~~>
 // same thing. '_' separators are stripped by the builders. Mirrors NumLit in the
 // interpreter grammar.
 NumLit      = PhpFloat | PhpHex | PhpBin | PhpOct | PhpLegOct | PhpInt ;
-PhpFloat    <~~ push(makeConst(phpFloatLit(up.in))) ~~>
+PhpFloat    <~~ push(makeFloat(phpFloatLit(up.in))) ~~>
             = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ ExpPart ] :whitespace(Whitespace)
             | "0"..."9" :whitespace() { "0"..."9" | "_" } FloatTail :whitespace(Whitespace) ;
 FloatTail   = "." { "0"..."9" | "_" } [ ExpPart ] | ExpPart ;
@@ -930,8 +1005,11 @@ KwInstanceof = "instanceof" KwEnd ;
 
     // ----- literal builders -----
     // A float literal's text, with PHP 7.4 underscore separators (and any whitespace
-    // the token carries) stripped before parseFloat. Floats are plain numbers here -
-    // unlike the interpreter, which boxes them so 1.0 !== 1 stays observable.
+    // the token carries) stripped before parseFloat. A float is BOXED (js_phflo), the
+    // same way the interpreter boxes it, so 1.0 !== 1 and match(3.0) stay observable.
+    function makeFloat(n) {
+        return function(b) { return {b: b, v: callExt(b, "js_phflo", [emitNum(b, n)])} }
+    }
     function stripUnd(t) {
         var out = ""
         for (var i = 0; i < t.length; i++) {
@@ -1163,21 +1241,59 @@ KwInstanceof = "instanceof" KwEnd ;
     // try and catch bodies are ctl closures, so a return/break/continue leaving them
     // becomes a control signal that excDispatch re-issues here; the finally is a plain
     // closure (its value is discarded by js_try). The first catch wins.
+    // A catch clause carries its type list, so the clauses can be discriminated.
+    makeCatch = function(items) {
+        var types = []
+        var nm = anytype
+        var body = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].ctype != undefined) { types.push(items[i].ctype) }
+            else if (typeof items[i] == "string") { nm = items[i] }
+            else { body = items[i] }
+        }
+        return {catchbody: body, catchname: nm, catchtype: types}
+    }
+    // All catch clauses become ONE closure: it tests each clause's type list in order,
+    // binds the clause's variable and runs its body; a value that matches none is
+    // re-thrown, which is what makes an outer try see it.
+    function makeCatchDispatch(catches) {
+        return function(b) {
+            var caught = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "0caught")])
+            var endB = curF.NewBlock("")
+            for (var i = 0; i < catches.length; i++) {
+                var tv = callExt(b, "js_pharr", [])
+                var ts = catches[i].catchtype
+                for (var k = 0; k < ts.length; k++) {
+                    callExt(b, "js_phpush", [tv, emitStr(b, ts[k])])
+                }
+                var thenB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_phcatch", [caught, tv])), thenB, nextB)
+                if (catches[i].catchname != undefined) {
+                    callExt(thenB, "js_pyset_var", [curScopeV, emitStr(thenB, catches[i].catchname), caught])
+                }
+                catches[i].catchbody(thenB).NewBr(endB)
+                b = nextB
+            }
+            callExt(b, "js_throw", [caught])
+            b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            return endB
+        }
+    }
     function makeTry(items) {
-        var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
+        var tryT = anytype, finallyT = anytype
+        var catches = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].catchbody != undefined) {
-                if (catchT == undefined) { catchT = items[i].catchbody; catchName = items[i].catchname }
-            }
+            else if (items[i].catchbody != undefined) { catches.push(items[i]) }
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
         return function(b) {
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
             var catchClo = hUndef
-            if (catchT != undefined) {
-                var cn = (catchName != undefined) ? catchName : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false, true)), curScopeV])
+            if (catches.length > 0) {
+                catchClo = callExt(b, "js_closure",
+                                   [handle(emitFunc(["0caught"], makeCatchDispatch(catches), false, true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
@@ -1396,7 +1512,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 keyV = emitNum(b, pos)
                 pos = pos + 1
             }
-            var elem = callExt(b, "js_pyget", [arrV, keyV])
+            var elem = callExt(b, "js_phget", [arrV, keyV])
             if (sl.val.pat != undefined) {
                 b = emitBindPattern(b, sl.val.pat, elem)
             } else {
@@ -1445,58 +1561,86 @@ KwInstanceof = "instanceof" KwEnd ;
                 b = mergeB
                 v = phi
             }
-            var boolV = callExt(b, "js_not", [callExt(b, "js_not", [v])])
+            var boolV = callExt(b, "js_phbool", [v])
             return {b: b, v: boolV}
         }
     }
 
-    // ----- concatenation and === / !== on the shared binary fold -----
-    binExt["==="] = "js_seq"
-    binExt["!=="] = "js_sne"
-    // PHP's "/" is FLOAT division: 7 / 2 is 3.5 and -7 / 2 is -3.5; it yields an int
-    // only when the division comes out even, which plain IEEE division already does.
-    // The C-family default in compile-core.js truncates the quotient to 32 bit
-    // (intWrap), which is intdiv() and not "/", so switch both forms off. (Dart made
-    // exactly this correction for its own "/" vs "~/" pair.)
+    // ----- PHP's value model: the whole operator ladder goes through js_ph* -------
+    // The handle runtime's default operators are JavaScript's, and PHP's are not:
+    // '==' is loose, '"0"' is falsy, a float is a distinct type from an int, and an
+    // array is one ordered map whose '===' compares the keys AND their order. Each
+    // js_ph* external below is the Go twin of the like-named function in
+    // php-interpreter.abnf (phpLoose / phpIdentical / phpCmp / phpArith / phptest /
+    // phpStr), so the interpreter stays the reference implementation and the two
+    // engines answer the same thing. See abnf/jsrtphp.go.
+    core.truthyExt = "js_phtruthy"
+    binExt["==="] = "js_phseq"
+    binExt["!=="] = "js_phsne"
+    binExt["=="] = "js_pheq"
+    binExt["!="] = "js_phne"
+    binExt["<>"] = "js_phne"
+    binExt["<"] = "js_phlt"
+    binExt[">"] = "js_phgt"
+    binExt["<="] = "js_phle"
+    binExt[">="] = "js_phge"
+    binExt["+"] = "js_phadd"
+    binExt["-"] = "js_phsub"
+    binExt["*"] = "js_phmul"
+    binExt["/"] = "js_phdiv"
+    binExt["%"] = "js_phmod"
+    binExt["+="] = "js_phadd"
+    binExt["-="] = "js_phsub"
+    binExt["*="] = "js_phmul"
+    binExt["/="] = "js_phdiv"
+    binExt["%="] = "js_phmod"
+    // js_ph* already answers in PHP's own type (an int stays an int, any float
+    // operand makes the result a float), so the C-family 32-bit truncation the
+    // shared emitBin applies must be off for every one of them. PHP integers are
+    // 64 bit and '/' is float division (7 / 2 is 3.5), which intWrap destroyed.
     wraps["/"] = 0
     wraps["/="] = 0
-    // Unary minus for the same reason: the shared makeNeg truncates its result to
-    // 32 bit, which turned the literal -3.5 into -3. PHP integers are 64 bit, so the
-    // truncation is wrong for them too.
+    wraps["-"] = 0
+    wraps["-="] = 0
+    wraps["*"] = 0
+    wraps["*="] = 0
+    wraps["%"] = 0
+    wraps["%="] = 0
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_neg", [r.v])}
+            return {b: r.b, v: callExt(r.b, "js_phneg", [r.v])}
         }
     }
-    // The rest of PHP's binary ladder. The bitwise / shift externals already exist in
-    // the handle runtime; '<>' is PHP's other spelling of '!='.
-    binExt["&"] = "js_band"
-    binExt["|"] = "js_bor"
-    binExt["^"] = "js_bxor"
-    binExt["<<"] = "js_shl"
-    binExt[">>"] = "js_shr"
-    binExt["<>"] = "js_sne"
-    binExt["&="] = "js_band"
-    binExt["|="] = "js_bor"
-    binExt["^="] = "js_bxor"
-    binExt["<<="] = "js_shl"
-    binExt[">>="] = "js_shr"
+    // '!' is PHP truthiness, not JS truthiness ('!"0"' is true).
+    makeNot = function(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_phnot", [r.v])}
+        }
+    }
+    // The rest of PHP's binary ladder. The bitwise / shift forms truncate to a
+    // 32-bit integer, which is what phpBit does in the interpreter.
+    binExt["&"] = "js_phband"
+    binExt["|"] = "js_phbor"
+    binExt["^"] = "js_phbxor"
+    binExt["<<"] = "js_phshl"
+    binExt[">>"] = "js_phshr"
+    binExt["&="] = "js_phband"
+    binExt["|="] = "js_phbor"
+    binExt["^="] = "js_phbxor"
+    binExt["<<="] = "js_phshl"
+    binExt[">>="] = "js_phshr"
     emitBin = function(b, op, l, r) {
         if (op == "." || op == ".=") {
-            return callExt(b, "js_jadd", [callExt(b, "js_jadd", [emitStr(b, ""), l]), r])
+            return callExt(b, "js_phcat", [l, r])
         }
-        // '**' has no external of its own; it is Math.pow, which the handle runtime
-        // already carries (buildMain binds Math into phpmain's scope).
         if (op == "**" || op == "**=") {
-            var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
-            var powV = callExt(b, "js_get", [mathV, emitStr(b, "pow")])
-            return callExt(b, "js_call", [powV, hUndef, argList(b, [l, r])])
+            return callExt(b, "js_phpow", [l, r])
         }
-        // '<=>' as (l > r) - (l < r): the two comparisons are booleans, and the
-        // subtraction coerces them, so the result is exactly -1 / 0 / 1.
+        // '<=>' answers exactly -1 / 0 / 1 from PHP's own comparison.
         if (op == "<=>") {
-            return callExt(b, "js_sub", [callExt(b, "js_gt", [l, r]), callExt(b, "js_lt", [l, r])])
+            return callExt(b, "js_phcmp", [l, r])
         }
         // '$a ??= $b' keeps $a when it is set and not null. The right-hand side is
         // already evaluated at this point, so - unlike PHP - it is not short-circuited;
@@ -1521,11 +1665,11 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: rr.b, v: emitBin(rr.b, "**", rl.v, rr.v)}
         }
     }
-    // ~x is x XOR -1 (two's complement), which needs no external of its own.
+    // ~x on PHP's own integer coercion (phpBit in the interpreter).
     function makeBitNot(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_bxor", [r.v, emitNum(r.b, -1)])}
+            return {b: r.b, v: callExt(r.b, "js_phbnot", [r.v])}
         }
     }
     // throw as an EXPRESSION (PHP 8): it never produces a value, so the block it ends
@@ -1539,31 +1683,30 @@ KwInstanceof = "instanceof" KwEnd ;
         }
     }
 
-    // ----- arrays and associative arrays -----
+    // ----- arrays: ONE type, the ordered key/value map ---------------------------
+    // PHP has a single array type: [1, 2, 3] IS the map 0=>1, 1=>2, 2=>3, which is why
+    // $a === $b compares the keys and their ORDER while $a == $b ignores it, and why
+    // [5 => "x"] followed by $m[] = "y" lands at key 6. The compiler used to build an
+    // indexed literal as a runtime LIST and a keyed one as a dict, so the two spellings
+    // of the same value were different types. js_pharr / js_phset / js_phpush build the
+    // one map (the __dict shape js_range_* already iterates), carrying __next - the
+    // next automatic integer key - exactly like the interpreter's newArr/arrPush.
+    // A '...$a' spread merges another array in: its INTEGER keys are renumbered and its
+    // string keys are kept, PHP's rule for the array-unpacking operator.
     function makeArray(items) {
-        var hasKeys = false
-        for (var i = 0; i < items.length; i++) { if (items[i].hk != undefined) { hasKeys = true } }
         return function(b) {
-            if (!hasKeys) {
-                var arrV = callExt(b, "js_arr_new", [])
-                for (var j = 0; j < items.length; j++) {
-                    var r = items[j].elem(b)
-                    b = r.b
-                    callExt(b, "js_arr_push", [arrV, r.v])
-                }
-                return {b: b, v: arrV}
-            }
-            var d = callExt(b, "js_dict_new", [])
-            var idx = 0
+            var d = callExt(b, "js_pharr", [])
             for (var k = 0; k < items.length; k++) {
                 if (items[k].hk != undefined) {
                     var rk = items[k].hk(b); b = rk.b
                     var rv = items[k].hv(b); b = rv.b
-                    callExt(b, "js_pyset", [d, rk.v, rv.v])
+                    callExt(b, "js_phset", [d, rk.v, rv.v])
+                } else if (items[k].spread != undefined) {
+                    var rs = items[k].spread(b); b = rs.b
+                    callExt(b, "js_phmerge", [d, rs.v])
                 } else {
                     var re = items[k].elem(b); b = re.b
-                    callExt(b, "js_pyset", [d, emitNum(b, idx), re.v])
-                    idx = (idx + 1) | 0
+                    callExt(b, "js_phpush", [d, re.v])
                 }
             }
             return {b: b, v: d}
@@ -1577,7 +1720,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 var pv
                 if (items[i].s != undefined) { pv = emitStr(b, items[i].s) }
                 else { var r = items[i].e(b); b = r.b; pv = r.v }
-                v = callExt(b, "js_jadd", [v, pv])
+                v = callExt(b, "js_phcat", [v, pv])
             }
             return {b: b, v: v}
         }
@@ -1604,7 +1747,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 if (itxt.charAt(0) == "$") { kv = callExt(b, "js_scope_get", [curScopeV, emitStr(b, itxt)]) }
                 else if (isCanonInt(itxt)) { kv = emitNum(b, parseInt(itxt, 10)) }
                 else { kv = emitStr(b, itxt) }
-                return {b: b, v: callExt(b, "js_pyget", [ov, kv])}
+                return {b: b, v: callExt(b, "js_phget", [ov, kv])}
             }
         }
         if (prop != null) {
@@ -1652,22 +1795,215 @@ KwInstanceof = "instanceof" KwEnd ;
                     b = ea2.b
                     cur = callExt(b, "js_call", [cur, hUndef, ea2.v])
                 } else if (s.kind == "static") {
-                    var rs = s.run(b)
+                    var curV = cur
+                    var rs = emitStaticAccess(function(bb) { return {b: bb, v: curV} }, s.sfxMem, s.sfxArgs)(b)
                     b = rs.b
                     cur = rs.v
                 } else {
                     var ir = s.idx(b)
                     b = ir.b
-                    cur = callExt(b, "js_pyget", [cur, ir.v])
+                    cur = callExt(b, "js_phget", [cur, ir.v])
                 }
             }
             return {b: b, v: cur}
         }
     }
-    function makeStatic(items, pos) {
-        notImpl("static / :: access", pos)
-        return {kind: "static", run: function(b) { return {b: b, v: hNull} }}
+    // items = [{cast}, operandThunk]
+    function makeCast(items) {
+        var kind = items[0].cast
+        var t = items[1]
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_phcast", [emitStr(r.b, kind), r.v])}
+        }
     }
+    // ----- '::' : class constants, static properties, static dispatch -----------
+    // The base of a '::' is a class descriptor at run time. 'self' and 'static' are
+    // read out of the CALL FRAME (emitFunc declares them per method), which is what
+    // keeps them correct across a try/catch: makeTry restores the scope chain, and
+    // they ride along in it.
+    function staticBaseThunk(name) {
+        var n = lastSeg(name)
+        if (n == "self") { return function(b) { return {b: b, v: frameCls(b, "self")} } }
+        if (n == "static") { return function(b) { return {b: b, v: frameCls(b, "static")} } }
+        if (n == "parent") {
+            return function(b) {
+                return {b: b, v: callExt(b, "js_get", [frameCls(b, "self"), emitStr(b, "__super")])}
+            }
+        }
+        return function(b) { return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, n)])} }
+    }
+    // The hidden call-frame entries. The names start with a NUL so no PHP identifier
+    // and no '$variable' can collide with them.
+    function frameClsName(which) { return "\x00" + which }
+    function frameCls(b, which) {
+        return callExt(b, "js_scope_get", [curScopeV, emitStr(b, frameClsName(which))])
+    }
+    // baseT :: member, with or without an argument list.
+    function emitStaticAccess(baseT, mem, args) {
+        return function(b) {
+            var rb = baseT(b)
+            b = rb.b
+            if (args != null) {
+                var ea = emitArgs(b, args)
+                b = ea.b
+                var thisV = callExt(b, "js_phthis", [curScopeV])
+                return {b: b, v: callExt(b, "js_phscall", [rb.v, emitStr(b, mem), thisV, ea.v])}
+            }
+            if (mem.charAt(0) == "$") {
+                return {b: b, v: callExt(b, "js_phsget", [rb.v, emitStr(b, mem.substring(1))])}
+            }
+            // C::class is the class NAME, not a constant lookup.
+            if (mem == "class") { return {b: b, v: callExt(b, "js_phcname", [rb.v])} }
+            return {b: b, v: callExt(b, "js_phconst", [rb.v, emitStr(b, mem)])}
+        }
+    }
+    function staticParts(items) {
+        var out = {base: null, mem: "", args: null}
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].sbase != undefined) { out.base = staticBaseThunk(items[i].sbase) }
+            else if (items[i].smem != undefined) { out.mem = items[i].smem }
+            else if (items[i].sargs != undefined) { out.args = items[i].sargs }
+        }
+        return out
+    }
+    // One match arm: the conditions it answers to (empty for 'default') and its body.
+    function makeArm(items) {
+        var conds = []
+        var body = null
+        var isDflt = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].mdflt != undefined) { isDflt = true }
+            else if (items[i].mcond != undefined) { conds.push(items[i].mcond) }
+            else if (items[i].mbody != undefined) { body = items[i].mbody }
+        }
+        return {conds: conds, body: body, isDflt: isDflt}
+    }
+    function makeMatch(items) {
+        var subj = items[0]
+        var arms = items.slice(1)
+        return function(b) {
+            var rs = subj(b)
+            b = rs.b
+            var sv = rs.v
+            var mergeB = curF.NewBlock("")
+            var incs = []
+            var dflt = null
+            for (var d = 0; d < arms.length; d++) { if (arms[d].isDflt) { dflt = arms[d] } }
+            for (var a = 0; a < arms.length; a++) {
+                if (arms[a].isDflt) { continue }
+                var bodyB = curF.NewBlock("")
+                for (var k = 0; k < arms[a].conds.length; k++) {
+                    var rc = arms[a].conds[k](b)
+                    b = rc.b
+                    var nextB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, callExt(b, "js_phseq", [sv, rc.v])), bodyB, nextB)
+                    b = nextB
+                }
+                var rb = arms[a].body(bodyB)
+                rb.b.NewBr(mergeB)
+                incs.push(llvm.ir.NewIncoming(rb.v, rb.b))
+            }
+            if (dflt != null) {
+                var rd = dflt.body(b)
+                rd.b.NewBr(mergeB)
+                incs.push(llvm.ir.NewIncoming(rd.v, rd.b))
+            } else {
+                incs.push(llvm.ir.NewIncoming(hNull, b))
+                b.NewBr(mergeB)
+            }
+            return {b: mergeB, v: mergeB.NewPhi(incs)}
+        }
+    }
+    function makeStaticExpr(items) {
+        var p = staticParts(items)
+        return emitStaticAccess(p.base, p.mem, p.args)
+    }
+    // As a chain suffix the base is whatever the chain produced so far.
+    function makeStaticSfx(items) {
+        var p = staticParts(items)
+        var mem = p.mem
+        var args = p.args
+        return {kind: "static", run: function(b) { return {b: b, v: hNull} }, sfxMem: mem, sfxArgs: args}
+    }
+    function makeStaticHead(items) {
+        var p = staticParts(items)
+        return {var: "\x00staticprop", sbase: p.base, sname: p.mem.charAt(0) == "$" ? p.mem.substring(1) : p.mem}
+    }
+    function makeClone(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_phclone", [r.v])}
+        }
+    }
+    // An interface: a descriptor with __isiface, its parent interfaces and its
+    // constants. Methods are declarations only and are not emitted - dispatch always
+    // walks the instance's own class chain, never an interface.
+    function makeIfaceStmt(items) {
+        var name = items[0]
+        var parents = []
+        var consts = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].impl != undefined) { parents.push(lastSeg(stripWs(items[i].impl))) }
+            else if (items[i].cconsts != undefined) {
+                var cs = items[i].cconsts
+                for (var q = 0; q < cs.length; q++) { consts.push(cs[q]) }
+            }
+        }
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isiface"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            b = emitIfaceList(b, clsV, parents)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), clsV])
+            for (var c1 = 0; c1 < consts.length; c1++) {
+                var cv = hNull
+                if (consts[c1].cinit != null) { var rc = consts[c1].cinit(b); b = rc.b; cv = rc.v }
+                callExt(b, "js_set", [clsV, emitStr(b, "k:" + consts[c1].cname), cv])
+            }
+            return b
+        }
+    }
+    // The implemented / extended interfaces, as DESCRIPTORS: js_phisa then matches an
+    // interface that itself extends others, and js_phconst can inherit a constant
+    // through them. A name that is not declared yet resolves to null and simply never
+    // matches, so a forward reference degrades instead of aborting.
+    function emitIfaceList(b, clsV, names) {
+        if (names.length == 0) { return b }
+        var ifV = callExt(b, "js_pharr", [])
+        for (var q = 0; q < names.length; q++) {
+            callExt(b, "js_phpush", [ifV, callExt(b, "js_phclslookup", [curScopeV, emitStr(b, names[q])])])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, "__ifaces"), ifV])
+        return b
+    }
+    function makeInstanceof(items) {
+        var left = items[0]
+        var nm = items[1].iname
+        var dyn = items[1].idyn
+        return function(b) {
+            var r = left(b)
+            b = r.b
+            if (nm != undefined) { return {b: b, v: callExt(b, "js_phisa", [r.v, emitStr(b, nm)])} }
+            var rd = dyn(b)
+            b = rd.b
+            return {b: b, v: callExt(b, "js_phisa", [r.v, rd.v])}
+        }
+    }
+    // One class-constant item: 'A = 1', or the typed 'int SIZE = 4' (CIds keeps the
+    // LAST word, which is the name).
+    function makeCItem(items) {
+        var nm = ""
+        var init = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].cname != undefined) { nm = items[i].cname }
+            else { init = items[i] }
+        }
+        return {cname: nm, cinit: init}
+    }
+
 
     // include / require: a single-quoted literal path is resolved to a project file
     // (resolveImport -> core.importFile below, whose thunks are stashed for phpmain); a
@@ -1752,14 +2088,18 @@ KwInstanceof = "instanceof" KwEnd ;
             callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
             b = emitPropDefaults(b, objV, name)
             var argsV = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [argsV, objV])
             for (var k = 0; k < args.length; k++) {
                 var ra = args[k](b)
                 b = ra.b
                 callExt(b, "js_arr_push", [argsV, ra.v])
             }
-            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__construct")])
-            callExt(b, "js_call", [ctorV, hUndef, argsV])
+            // The constructor is resolved through the __super chain, not read off the
+            // class with js_get: `class Boom extends Exception {}` declares no
+            // __construct of its own, and the plain lookup answered undefined -
+            // which is why every subclass of the built-in exceptions failed to
+            // instantiate. js_phscall also makes the NAMED class the late-static-
+            // binding class, so `new static()` inside the constructor is right.
+            callExt(b, "js_phscall", [clsV, emitStr(b, "__construct"), objV, argsV])
             return {b: b, v: objV}
         }
     }
@@ -1793,7 +2133,7 @@ KwInstanceof = "instanceof" KwEnd ;
             for (var i = 0; i < args.length; i++) {
                 var r = args[i](b)
                 b = r.b
-                var sv = callExt(b, "js_jadd", [emitStr(b, ""), r.v])
+                var sv = callExt(b, "js_phstr", [r.v])
                 callExt(b, "js_call", [printV, hUndef, argList(b, [sv])])
             }
             return b
@@ -1808,14 +2148,25 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- assignment targets (locals via create-on-assign, ->field, [i], [] append) -----
     makeTargetRef = function(items) {
         var head = items[0]
-        return {name: head.var, path: items.slice(1)}
+        return {name: head.var, path: items.slice(1), sbase: head.sbase, sname: head.sname}
+    }
+    // The value a target's PATH starts from: a plain variable, or a static property
+    // (self::$rows[0] = e reads the property, then indexes it).
+    function refRoot(b, ref) {
+        if (ref.sbase != undefined) {
+            var rb = ref.sbase(b)
+            return {b: rb.b, v: callExt(rb.b, "js_phsget", [rb.v, emitStr(rb.b, ref.sname)])}
+        }
+        return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
     }
     function emitRefPath(b, ref) {
-        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var rr = refRoot(b, ref)
+        b = rr.b
+        var o = rr.v
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
-            else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_pyget", [o, ri.v]) }
+            else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_phget", [o, ri.v]) }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.append === true) { return {b: b, obj: o, kind: "append"} }
@@ -1825,13 +2176,13 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     function readRefSlot(b, p) {
         if (p.kind == "field") { return callExt(b, "js_get", [p.obj, p.key]) }
-        if (p.kind == "index") { return callExt(b, "js_pyget", [p.obj, p.key]) }
+        if (p.kind == "index") { return callExt(b, "js_phget", [p.obj, p.key]) }
         return hNull
     }
     function writeRefSlot(b, p, v) {
         if (p.kind == "field") { callExt(b, "js_set", [p.obj, p.key, v]); return }
-        if (p.kind == "index") { callExt(b, "js_pyset", [p.obj, p.key, v]); return }
-        callExt(b, "js_arr_push", [p.obj, v])
+        if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, v]); return }
+        callExt(b, "js_phpush", [p.obj, v])
     }
     function makeAssign(items) {
         var ref = items[0]
@@ -1841,7 +2192,13 @@ KwInstanceof = "instanceof" KwEnd ;
             var r = valT(b)
             b = r.b
             var v = r.v
-            if (ref.path.length == 0) {
+            if (ref.sbase != undefined && ref.path.length == 0) {
+                var rb = ref.sbase(b)
+                b = rb.b
+                var snV = emitStr(b, ref.sname)
+                if (op != "=") { v = emitBin(b, op, callExt(b, "js_phsget", [rb.v, snV]), v) }
+                callExt(b, "js_phsset", [rb.v, snV, v])
+            } else if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
                     var oldl = callExt(b, "js_scope_get", [curScopeV, nameV])
@@ -1863,18 +2220,27 @@ KwInstanceof = "instanceof" KwEnd ;
 
     // ++ / -- (postfix yields the old value, prefix the new one).
     function incDec(b, ref, isPre, isInc) {
-        var ext = isInc ? "js_jadd" : "js_sub"
+        var ext = isInc ? "js_phadd" : "js_phsub"
+        if (ref.sbase != undefined && ref.path.length == 0) {
+            var rb = ref.sbase(b)
+            b = rb.b
+            var snV = emitStr(b, ref.sname)
+            var oldS = callExt(b, "js_phnum", [callExt(b, "js_phsget", [rb.v, snV])])
+            var newS = callExt(b, ext, [oldS, emitNum(b, 1)])
+            callExt(b, "js_phsset", [rb.v, snV, newS])
+            return {b: b, v: isPre ? newS : oldS}
+        }
         if (ref.path.length == 0) {
             var nameV = emitStr(b, ref.name)
-            var oldV = callExt(b, "js_tonum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
-            var newV = intWrap(b, callExt(b, ext, [oldV, emitNum(b, 1)]))
+            var oldV = callExt(b, "js_phnum", [callExt(b, "js_scope_get", [curScopeV, nameV])])
+            var newV = callExt(b, ext, [oldV, emitNum(b, 1)])
             callExt(b, "js_pyset_var", [curScopeV, nameV, newV])
             return {b: b, v: isPre ? newV : oldV}
         }
         var p = emitRefPath(b, ref)
         b = p.b
-        var oldM = callExt(b, "js_tonum", [readRefSlot(b, p)])
-        var newM = intWrap(b, callExt(b, ext, [oldM, emitNum(b, 1)]))
+        var oldM = callExt(b, "js_phnum", [readRefSlot(b, p)])
+        var newM = callExt(b, ext, [oldM, emitNum(b, 1)])
         writeRefSlot(b, p, newM)
         return {b: b, v: isPre ? newM : oldM}
     }
@@ -1892,18 +2258,24 @@ KwInstanceof = "instanceof" KwEnd ;
     function hasBuiltin(name) {
         return name == "count" || name == "strlen" || name == "in_array"
             || name == "array_push" || name == "array_keys" || name == "array_values" || name == "intdiv"
+            || name == "abs" || name == "max" || name == "min"
     }
     function emitBuiltin(b, name, args) {
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i](b); b = r.b; vs.push(r.v) }
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
         if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [vs[0]])} }
-        if (name == "count") { return {b: b, v: callExt(b, "js_pylen", [vs[0]])} }
-        if (name == "in_array") { return {b: b, v: callExt(b, "js_mcall", [vs[1], emitStr(b, "contains"), argList(b, [vs[0]])])} }
-        if (name == "array_push") { callExt(b, "js_arr_push", [vs[0], vs[1]]); return {b: b, v: callExt(b, "js_pylen", [vs[0]])} }
-        if (name == "array_keys") { return {b: b, v: callExt(b, "js_mcall", [vs[0], emitStr(b, "keys"), callExt(b, "js_arr_new", [])])} }
-        if (name == "array_values") { return {b: b, v: callExt(b, "js_mcall", [vs[0], emitStr(b, "values"), callExt(b, "js_arr_new", [])])} }
-        return {b: b, v: intWrap(b, callExt(b, "js_div", [vs[0], vs[1]]))}
+        if (name == "count") { return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
+        if (name == "in_array") { return {b: b, v: callExt(b, "js_phin", [vs[0], vs[1]])} }
+        if (name == "array_push") { callExt(b, "js_phpush", [vs[0], vs[1]]); return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
+        if (name == "array_keys") { return {b: b, v: callExt(b, "js_phkeys", [vs[0]])} }
+        if (name == "array_values") { return {b: b, v: callExt(b, "js_phvals", [vs[0]])} }
+        // abs/max/min go through PHP's own coercion so a float argument stays a float
+        // and max("10", 9) uses PHP's comparison, not JavaScript's.
+        if (name == "abs") { return {b: b, v: callExt(b, "js_phabs", [vs[0]])} }
+        if (name == "max") { return {b: b, v: callExt(b, "js_phmax", [vs[0], vs[1]])} }
+        if (name == "min") { return {b: b, v: callExt(b, "js_phmin", [vs[0], vs[1]])} }
+        return {b: b, v: callExt(b, "js_phintdiv", [vs[0], vs[1]])}
     }
     function makeCall(items) {
         var name = items[0]
@@ -1921,7 +2293,7 @@ KwInstanceof = "instanceof" KwEnd ;
     // curFTag is saved/restored for EVERY function so a return inside a function defined
     // inside a try body targets that inner function, not the try (this is the only
     // function-body emitter in this grammar).
-    function emitFunc(params, bodyStmt, isMethod, isCtl) {
+    function emitFunc(params, bodyStmt, isMethod, isCtl, selfName) {
         funcCount++
         var idx = funcCount
         var savedTag = curFTag
@@ -1940,6 +2312,17 @@ KwInstanceof = "instanceof" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "$this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
         }
+        // self:: and static:: are CALL FRAME entries, not globals: 'self' is the class
+        // this method was declared in, 'static' is the late-static-binding class (the
+        // runtime class of $this, or the class a C::m() call named). Keeping them in
+        // the frame is what makes them survive a try/catch unharmed - makeTry restores
+        // the scope chain, and they ride along with it.
+        if (isMethod && selfName != undefined && selfName != "") {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, selfName)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), selfV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("static")),
+                                         callExt(b, "js_phlsb", [callExt(b, "js_phthis", [curScopeV]), selfV])])
+        }
         for (var i = 0; i < params.length; i++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                          callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
@@ -1957,14 +2340,40 @@ KwInstanceof = "instanceof" KwEnd ;
         var name = items[0]
         var params = []
         var defs = []
+        var promoted = []
+        var pendingMod = false
         var body = null
         for (var i = 1; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].param != undefined) { params.push(items[i].param) }
+            else if (items[i].pmod != undefined) { pendingMod = true }
+            else if (items[i].param != undefined) {
+                params.push(items[i].param)
+                if (pendingMod) { promoted.push(items[i].param) }
+                pendingMod = false
+            }
             else if (items[i].pdef != undefined) { defs.push({name: params[params.length - 1], init: items[i].pdef}) }
         }
-        return {name: name, params: params,
-                body: paramDefaults(defs, body != null ? body : makeBody([]))}
+        // Constructor property promotion: '__construct(public int $x = 7)' declares the
+        // property and assigns it. The assignment has to sit BETWEEN the default-value
+        // prologue and the body - paramDefaults substitutes a missing argument, and
+        // promoting before that would store undefined.
+        var inner = body != null ? body : makeBody([])
+        if (promoted.length > 0) {
+            var stmts = []
+            for (var k = 0; k < promoted.length; k++) { stmts.push(makePromote(promoted[k])) }
+            stmts.push(inner)
+            inner = makeBody(stmts)
+        }
+        return {name: name, params: params, body: paramDefaults(defs, inner)}
+    }
+    function makePromote(nm) {
+        var pn = nm.substring(1)
+        return function(b) {
+            var thisV = callExt(b, "js_phthis", [curScopeV])
+            callExt(b, "js_set", [thisV, emitStr(b, pn),
+                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, nm)])])
+            return b
+        }
     }
     // A parameter default becomes a prologue statement: the parameter was already
     // declared from js_arg, which answers undefined when the call passed nothing, so
@@ -2015,8 +2424,8 @@ KwInstanceof = "instanceof" KwEnd ;
             else if (typeof items[i] == "string") { pname = items[i].substring(1) }
             else { init = items[i] }
         }
-        if (isStatic || pname == "") { return null }
-        return {name: pname, init: init}
+        if (pname == "") { return null }
+        return {name: pname, init: init, isStatic: isStatic}
     }
     function hasWord(s, w) {
         for (var i = 0; i + w.length <= s.length; i++) {
@@ -2034,6 +2443,9 @@ KwInstanceof = "instanceof" KwEnd ;
         var name = items[0]
         var methods = []
         var props = []
+        var statics = []
+        var consts = []
+        var ifaces = []
         var hasCtor = false
         var ext = ""
         for (var i = 1; i < items.length; i++) {
@@ -2042,8 +2454,14 @@ KwInstanceof = "instanceof" KwEnd ;
                 if (items[i].method.name == "__construct") { hasCtor = true }
             }
             else if (items[i].ext != undefined) { ext = lastSeg(items[i].ext) }
+            else if (items[i].impl != undefined) { ifaces.push(lastSeg(stripWs(items[i].impl))) }
+            else if (items[i].cconsts != undefined) {
+                var cs = items[i].cconsts
+                for (var q = 0; q < cs.length; q++) { consts.push(cs[q]) }
+            }
             else if (items[i].propdecl != undefined && items[i].propdecl != null) {
-                props.push(items[i].propdecl)
+                if (items[i].propdecl.isStatic === true) { statics.push(items[i].propdecl) }
+                else { props.push(items[i].propdecl) }
             }
         }
         classProps["$" + name] = props
@@ -2059,14 +2477,30 @@ KwInstanceof = "instanceof" KwEnd ;
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, ext)])])
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            // The implemented interfaces, by name: instanceof and a typed catch walk
+            // them (js_phisa), which is all an interface means without a body model.
+            b = emitIfaceList(b, clsV, ifaces)
+            // Bind 'self' for the initializers below: a class constant may read
+            // self::OTHER, and they are evaluated here, in declaration order.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, frameClsName("self")), clsV])
+            for (var c1 = 0; c1 < consts.length; c1++) {
+                var cv = hNull
+                if (consts[c1].cinit != null) { var rc = consts[c1].cinit(b); b = rc.b; cv = rc.v }
+                callExt(b, "js_set", [clsV, emitStr(b, "k:" + consts[c1].cname), cv])
+            }
+            for (var s1 = 0; s1 < statics.length; s1++) {
+                var sv = hNull
+                if (statics[s1].init != null) { var rs2 = statics[s1].init(b); b = rs2.b; sv = rs2.v }
+                callExt(b, "js_set", [clsV, emitStr(b, "s:" + statics[s1].name), sv])
+            }
             for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true)
+                var idx = emitFunc(methods[k].params, methods[k].body, true, false, name)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name),
                                       callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
             if (!hasCtor && ext == "") {
                 var emptyBody = function(bb) { return bb }
-                var iidx = emitFunc([], emptyBody, true)
+                var iidx = emitFunc([], emptyBody, true, false, name)
                 callExt(b, "js_set", [clsV, emitStr(b, "__construct"),
                                       callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
