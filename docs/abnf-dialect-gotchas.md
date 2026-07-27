@@ -606,3 +606,25 @@ This generalises to any language with trailing closures, or with a brace that ca
 open either a block or a literal: Kotlin's `if (c) f { }`, Ruby's `do`/`{` blocks,
 and any grammar where a statement keyword is followed by an expression and then a
 brace.
+
+## A keyword-rejecting guard must skip COMMENTS, not just whitespace
+
+The forward-scan entry above is about a lookahead that answers "is there a `=>` on
+this statement". The same omission has a second, quieter shape: a guard whose job
+is to REFUSE something. `NotCKw` rejects an identifier that is one of C's keywords,
+so that a typedef use recognized by shape (`Name name;`) cannot swallow
+`return x;`. It skipped spaces, tabs and newlines — but not comments. After
+
+    int putchar(int c);             /* Prototypes are parsed and ignored. */
+
+    int nfail = 0;
+
+the guard's own position is the byte after the `;`, the scan stops at the `/` of
+the comment, finds no keyword there, and SUCCEEDS. The `Id` that follows is matched
+after real whitespace skipping, so it is `int` — and the declaration `int nfail = 0;`
+was read as a typedef use of a type named `int`.
+
+A refusing guard that skips too little says yes, which is the unsafe direction. It
+presented as "the whole file fails, but the same two lines in a probe file work",
+because the probe had no comment. Give any guard that scans forward the full skip:
+spaces, tabs, CR, LF, form feed, `//` to end of line, and `/* */`.

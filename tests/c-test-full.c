@@ -20,8 +20,9 @@
 // feature-matrix file: id = section * 100 + ordinal, printed as 'FAIL <id>'.
 //
 // Deliberately out of scope (not core syntax, or unrunnable in this harness):
-// the preprocessor (a separate c-preprocessor.abnf grammar exists; this file
-// uses zero directives), the standard library (only the putchar prototype, as
+// macro EXPANSION (a name standing for its body in ordinary code - a separate
+// c-preprocessor.abnf grammar does that, and is piped in; conditional
+// compilation itself IS in scope, see section 26), the standard library (only the putchar prototype, as
 // in the feature-matrix file), variadic functions (need the stdarg.h macros),
 // VLAs (optional in C11), flexible array members, _Atomic and threads, setjmp,
 // wide-character semantics (wide literals appear via sizeof only), K&R-style
@@ -544,6 +545,104 @@ int s24(void) {
     return 0;
 }
 
+// ===== SECTION 25: file-scope objects and their initializers =====
+// A static object's initializer is a constant expression, so it is evaluated
+// before main() runs. Every declarator shape a local has is available here too.
+int s25_arr[4] = { 1, 2, 3 };            /* partial init zeroes the rest */
+int s25_inf[] = { 7, 8 };                /* size from the initializer */
+int s25_grid[2][2] = { { 1, 2 }, { 3, 4 } };
+char s25_str[] = "hi";
+char s25_pad[5] = "ab";                  /* array longer than the literal */
+int s25_desig[4] = { [3] = 9 };          /* designated initializer */
+struct S25P { int x; int y; };
+struct S25P s25_pt = { .y = 2, .x = 1 };
+struct S25P s25_pts[2] = { { 1, 2 }, { 3, 4 } };
+union S25U { int i; unsigned u; } s25_un = { .u = 3u };
+int s25_scalar = { 5 };                  /* a braced scalar initializer */
+int s25_zero;                            /* no initializer: zero */
+static int s25_stat = 7;
+int *s25_ptr = &s25_arr[1];              /* an address constant */
+int s25_expr = 2 * 3 + 1;
+double s25_d = 1.5;
+int (*s25_fp)(int);                      /* a function-pointer global */
+int s25_id(int v) { return v; }
+int s25(void) {
+    check(2501, s25_arr[0] == 1 && s25_arr[2] == 3 && s25_arr[3] == 0);
+    check(2502, s25_inf[1] == 8 && sizeof s25_inf == 8);
+    check(2503, s25_grid[1][0] == 3 && s25_grid[0][1] == 2);
+    check(2504, s25_str[0] == 'h' && s25_str[2] == 0 && sizeof s25_str == 3);
+    check(2505, s25_pad[2] == 0 && s25_pad[4] == 0 && sizeof s25_pad == 5);
+    check(2506, s25_desig[0] == 0 && s25_desig[3] == 9);
+    check(2507, s25_pt.x == 1 && s25_pt.y == 2 && s25_pts[1].x == 3 && s25_un.u == 3u);
+    check(2508, s25_scalar == 5 && s25_zero == 0 && s25_stat == 7);
+    check(2509, *s25_ptr == 2 && s25_expr == 7 && s25_d * 2.0 == 3.0);
+    s25_fp = s25_id;
+    check(2510, s25_fp(4) == 4);
+    return 0;
+}
+
+// ===== SECTION 26: conditional compilation =====
+// #if / #ifdef / #ifndef / #elif / #else / #endif, with the object-like #define and
+// #undef the conditions read. Only the live branch is compiled; a dead branch is not
+// even parsed, which is what lets it hold text that is not C at all. Macro
+// EXPANSION - a name standing for its body in ordinary code - is a separate pass
+// (languages/c-preprocessor.abnf, -pipe) and stays out of scope here.
+#define S26_ON 1
+#define S26_ZERO 0
+#define S26_TWO 2
+#undef S26_GONE
+
+#if S26_ON
+int s26_g = 5;
+#else
+int s26_g = 500;
+#endif
+
+#ifdef S26_GONE
+int s26_h = 700;
+#else
+#ifdef S26_ON
+int s26_h = 7;
+#endif
+#endif
+
+int s26(void) {
+    int n = 0;
+#if S26_ON
+    n = n + 1;
+#else
+    n = n + 100;
+#endif
+#if S26_ZERO
+    n = n + 100;
+#elif S26_ON
+    n = n + 2;
+#else
+    n = n + 100;
+#endif
+#ifdef S26_ON
+    n = n + 4;
+#endif
+#ifndef S26_GONE
+    n = n + 8;
+#endif
+#if defined(S26_ON) && !defined(S26_GONE)
+    n = n + 16;
+#endif
+#if S26_TWO * 2 > 3 && S26_ZERO == 0
+    n = n + 32;
+#endif
+#if 0
+    this text is not C at all, and is never parsed
+#if 1
+    neither is this
+#endif
+#endif
+    check(2601, n == 63);
+    check(2602, s26_g == 5 && s26_h == 7);
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -571,6 +670,8 @@ int main() {
     s22(); // SECTION-CALL 22
     s23(); // SECTION-CALL 23
     s24(); // SECTION-CALL 24
+    s25(); // SECTION-CALL 25
+    s26(); // SECTION-CALL 26
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

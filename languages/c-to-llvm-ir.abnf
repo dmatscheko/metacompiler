@@ -45,10 +45,11 @@ The same language with the same semantics is interpreted directly by c-interpret
 :startRule(Program) ;
 :whitespace(Whitespace) ;
 
-Program     = { Include | PPLine | StaticAssert | EnumDef | UnionDef | UnionGDecl | UnionSkip
+Program     = { TopItem } ;
+TopItem     = Include | PPCond | PPLine | StaticAssert | EnumDef | UnionDef | UnionGDecl | TagSkip
               | TypedefDecl
-              | StructDef | GStructDefDecl | GUnionDefDecl | StructGDecl
-              | FnPtrFuncDef | TdFuncDef | SProto | SFuncDef | FuncDef | Proto | GAggDecl | GlobalDecl } ;
+              | StructDef | GStructDefDecl | GUnionDefDecl | TagFwd | StructGDecl
+              | FnPtrFuncDef | TdProto | TdFuncDef | TdGlobalDecl | SProto | SFuncDef | FuncDef | Proto | GlobalDecl ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
 // #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
@@ -77,13 +78,16 @@ EnumInit    <~~ push({val: makeEnumVal(takeAll())}) ~~>
 // distinct C tag namespaces.
 UnionDef    <~~ defineUnion(takeAll()) ~~>
             = KwUnion Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" ";" ;
-// Global union variables, pointers and arrays (zero initialized like all globals).
-UnionGDecl  <~~ defineStructGlobals(takeAll()) ~~>
-            = KwUnion Id <~~ push(uKey(up.in)) ~~> SGDecl { "," SGDecl } ";" ;
-// An ANONYMOUS union at file scope (union { ... };) introduces no tag and no object,
-// so there is nothing to lay out; it is accepted and reported as not implemented.
-UnionSkip   <~~ notImpl("anonymous union", up.pos) ~~>
-            = KwUnion SkipBlock ";" ;
+// Global union variables, pointers and arrays, with the same declarator syntax as
+// everything else - the tag only supplies the base type.
+UnionGDecl  <~~ defineGlobals(takeAll()) ~~>
+            = [ TypeInt ] KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
+// An ANONYMOUS struct or union at file scope introduces no tag and no object, so
+// it declares nothing at all - cc says "declaration does not declare anything" and
+// compiles it. It is accepted and ignored. A tagged definition and a definition that
+// also declares objects both keep their own productions: SkipBlock has to start at
+// the '{' and the ';' has to follow the '}', so neither shape can reach here.
+TagSkip     = ( KwUnion | KwStruct ) SkipBlock ";" ;
 
 // typedef: the introduced name becomes a real type name, usable wherever a
 // declaration base type may stand. Because a PEG guard cannot consult a symbol
@@ -112,24 +116,43 @@ TdEnumDef   <~~ defineEnum(takeAll()); push({tb: ctInt}) ~~>
               "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
 TdDeclr     = TdFnPtr | TdPlain ;
 TdFnPtr     <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
-            = "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
+            = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
 TdPlain     <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 
 // A declaration (or a function definition) whose base type is a typedef name.
-TdDecl      <~~ push(makeTdDecl(takeAll())) ~~>
-            = TdName TdItem { "," TdItem } ";" ;
+TdDecl      <~~ push(makeDeclSeq(tdBase(takeAll()), false)) ~~>
+            = TdName DeclItem { "," DeclItem } ";" ;
 TdFuncDef   <~~ buildTdFunc(takeAll()) ~~>
-            = TdName Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = TdName [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+TdProto     <~~ takeAll() /* A prototype needs no lowering. */ ~~>
+            = TdName [ Stars ] Id ParamList { Attr } ";" ;
+// A file-scope object whose base type is a typedef name.
+TdGlobalDecl <~~ defineGlobals(tdBase(takeAll())) ~~>
+            = TdName DeclItem { "," DeclItem } ";" ;
 TdName      <~~ push({tname: up.in}) ~~> = NotCKw Id ;
-TdItem      <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ "=" DInit ] ;
+
 // An identifier that is not one of C's own keywords. A typedef USE is recognized
 // by shape alone, so without this guard 'return x;' would read as a declaration.
 NotCKw = :script(~~
     (function() {
-        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
-        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s += 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s += 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s += 2
+                continue
+            }
+            break
+        }
         var kws = ["auto", "break", "case", "char", "const", "continue", "default", "do",
                    "double", "else", "enum", "extern", "float", "for", "goto", "if",
                    "inline", "int", "long", "register", "restrict", "return", "short",
@@ -151,6 +174,356 @@ NotCKw = :script(~~
     })()
 ~~) ;
 
+
+// ----- Conditional compilation -----
+// #if / #ifdef / #ifndef ... #elif ... #else ... #endif. Only the LIVE branch is
+// parsed as source; every dead branch is consumed as raw lines, so no tag of a dead
+// branch ever runs - which is the whole difficulty, because this grammar's top level
+// EXECUTES as it walks (see docs/abnf-dialect-gotchas.md). The macros a condition
+// reads are the object-like #define / #undef lines before it; the full expansion of
+// macro BODIES is a separate pass (languages/c-preprocessor.abnf, -pipe).
+PPCond      = PPCondFalse PPIfLine PPDeadBody PPDeadChain
+            | PPIfLine { PPBodyItem } PPAfterLive ;
+// Nothing has been taken yet, so an #else here is live.
+PPDeadChain = PPEndifLine
+            | PPCondFalse PPElifLine PPDeadBody PPDeadChain
+            | PPElifLine { PPBodyItem } PPAfterLive
+            | PPElseLine { PPBodyItem } PPEndifLine ;
+// A branch WAS taken, so every later branch is dead whatever its condition says.
+PPAfterLive = PPEndifLine
+            | PPMidLine PPDeadBody PPAfterLive ;
+PPMidLine   = PPElifLine | PPElseLine ;
+// An item of a LIVE branch. It may open a nested conditional, but it must not run
+// into the #elif / #else / #endif that ends the branch it is in - PPLine would
+// happily skip that as just another directive line.
+PPBodyItem  = NotPPEnd TopItem ;
+PPBodyStmt  = NotPPEnd Statement ;
+PPDeadBody  = { PPNestCond | PPDeadLine } ;
+PPNestCond  = PPIfLine PPDeadBody PPAfterLive ;
+// One line of a dead branch, consumed as text. The first character is matched with
+// whitespace skipping in force, so empty lines and comments are stepped over; the
+// guard runs before that and looks at the line the parser will actually reach.
+PPDeadLine  = NotPPBranch PPDeadTxt ;
+PPDeadTxt   = PPChar :whitespace() { PPChar } "\n" :whitespace(Whitespace) ;
+PPIfLine    = "#" :whitespace() { PPSp } PPIfKw { PPCont | PPChar } :whitespace(Whitespace) ;
+PPElifLine  = "#" :whitespace() { PPSp } "elif" { PPCont | PPChar } :whitespace(Whitespace) ;
+PPElseLine  = "#" :whitespace() { PPSp } "else" { PPCont | PPChar } :whitespace(Whitespace) ;
+PPEndifLine = "#" :whitespace() { PPSp } "endif" { PPCont | PPChar } :whitespace(Whitespace) ;
+PPIfKw      = "ifdef" | "ifndef" | "if" ;
+PPSp        = " " | "\t" ;
+
+// The guard that decides a conditional: it SUCCEEDS when the directive's condition
+// is FALSE. That is what makes the dead reading the FIRST alternative of PPCond and
+// the live one what is left, so a live body that does not parse stays a parse error
+// instead of being silently swallowed as dead text. Being a guard it consumes
+// nothing, and being pure it re-derives the macro table from the text before it on
+// every call (a :script cannot see the tag scripts' state, and must not keep any).
+PPCondFalse = :script(~~
+    (function () {
+        var CAP = 500000
+        var pos = 0
+        function isIdCh(cc) { return (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122) }
+        function isSp(cc) { return cc === 32 || cc === 9 || cc === 13 }
+        function skipSp() { while (isSp(c.peek(pos))) { pos = pos + 1 } }
+        function wordAt(p, w) {
+            for (var k = 0; k < w.length; k++) { if (c.peek(p + k) !== w.charCodeAt(k)) { return false } }
+            return !isIdCh(c.peek(p + w.length))
+        }
+        function nameLenAt(p) { var n = 0; while (isIdCh(c.peek(p + n))) { n = n + 1 } return n }
+        function sameId(a, alen, b) {
+            if (nameLenAt(b) !== alen) { return false }
+            for (var k = 0; k < alen; k++) { if (c.peek(a + k) !== c.peek(b + k)) { return false } }
+            return true
+        }
+        // An integer constant at p (decimal or hexadecimal); 0 when there is none.
+        function intAt(p) {
+            var q = p
+            var base = 10
+            if (c.peek(q) === 48 && (c.peek(q + 1) === 120 || c.peek(q + 1) === 88)) { base = 16; q = q + 2 }
+            var v = 0
+            while (true) {
+                var d = -1
+                var cc = c.peek(q)
+                if (cc >= 48 && cc <= 57) { d = cc - 48 }
+                else if (base === 16 && cc >= 97 && cc <= 102) { d = cc - 87 }
+                else if (base === 16 && cc >= 65 && cc <= 70) { d = cc - 55 }
+                if (d < 0 || d >= base) { break }
+                v = v * base + d
+                q = q + 1
+            }
+            return v
+        }
+        // [defined, value] of one macro, from every #define / #undef before this
+        // directive - the last one that mentions the name wins.
+        function macroOf(at, alen) {
+            var st = 0
+            var g = 0
+            while (g < CAP && c.peek(st - 1) >= 0) { st = st - 1; g = g + 1 }
+            var def = 0
+            var val = 0
+            var p = st
+            g = 0
+            while (p < 0 && g < CAP) {
+                g = g + 1
+                var q = p
+                while (isSp(c.peek(q))) { q = q + 1 }
+                if (c.peek(q) === 35) {
+                    var d = q + 1
+                    while (isSp(c.peek(d))) { d = d + 1 }
+                    var isD = wordAt(d, "define")
+                    var isU = wordAt(d, "undef")
+                    if (isD || isU) {
+                        var n = isD ? d + 6 : d + 5
+                        while (isSp(c.peek(n))) { n = n + 1 }
+                        if (sameId(at, alen, n)) {
+                            if (isU) { def = 0; val = 0 }
+                            else {
+                                def = 1
+                                var v2 = n + alen
+                                while (isSp(c.peek(v2))) { v2 = v2 + 1 }
+                                val = intAt(v2)
+                            }
+                        }
+                    }
+                }
+                while (p < 0 && c.peek(p) !== 10) { p = p + 1 }
+                p = p + 1
+            }
+            return [def, val]
+        }
+        // The condition expression, by precedence. An undefined identifier is 0,
+        // which is what the standard says a #if sees.
+        function primary() {
+            skipSp()
+            var cc = c.peek(pos)
+            if (cc === 33) { pos = pos + 1; return primary() === 0 ? 1 : 0 }
+            if (cc === 40) {
+                pos = pos + 1
+                var v = orE()
+                skipSp()
+                if (c.peek(pos) === 41) { pos = pos + 1 }
+                return v
+            }
+            if (cc === 45) { pos = pos + 1; return 0 - primary() }
+            if (cc === 43) { pos = pos + 1; return primary() }
+            if (cc >= 48 && cc <= 57) {
+                var n = intAt(pos)
+                while (isIdCh(c.peek(pos))) { pos = pos + 1 }
+                return n
+            }
+            if (!isIdCh(cc)) { return 0 }
+            if (wordAt(pos, "defined")) {
+                pos = pos + 7
+                skipSp()
+                var paren = false
+                if (c.peek(pos) === 40) { paren = true; pos = pos + 1; skipSp() }
+                var a = pos
+                var al = nameLenAt(a)
+                pos = pos + al
+                if (paren) { skipSp(); if (c.peek(pos) === 41) { pos = pos + 1 } }
+                return macroOf(a, al)[0]
+            }
+            var b = pos
+            var bl = nameLenAt(b)
+            pos = pos + bl
+            return macroOf(b, bl)[1]
+        }
+        function mulE() {
+            var v = primary()
+            while (true) {
+                skipSp()
+                var cc = c.peek(pos)
+                if (cc === 42) { pos = pos + 1; v = v * primary(); continue }
+                if (cc === 47) { pos = pos + 1; var r = primary(); v = (r === 0) ? 0 : ((v / r) | 0); continue }
+                if (cc === 37) { pos = pos + 1; var r2 = primary(); v = (r2 === 0) ? 0 : (v % r2); continue }
+                break
+            }
+            return v
+        }
+        function addE() {
+            var v = mulE()
+            while (true) {
+                skipSp()
+                var cc = c.peek(pos)
+                if (cc === 43) { pos = pos + 1; v = v + mulE(); continue }
+                if (cc === 45) { pos = pos + 1; v = v - mulE(); continue }
+                break
+            }
+            return v
+        }
+        function shE() {
+            var v = addE()
+            while (true) {
+                skipSp()
+                var cc = c.peek(pos)
+                var c2 = c.peek(pos + 1)
+                if (cc === 60 && c2 === 60) { pos = pos + 2; v = v << addE(); continue }
+                if (cc === 62 && c2 === 62) { pos = pos + 2; v = v >> addE(); continue }
+                break
+            }
+            return v
+        }
+        function relE() {
+            var v = shE()
+            while (true) {
+                skipSp()
+                var cc = c.peek(pos)
+                var c2 = c.peek(pos + 1)
+                if (cc === 60 && c2 === 61) { pos = pos + 2; v = (v <= shE()) ? 1 : 0; continue }
+                if (cc === 62 && c2 === 61) { pos = pos + 2; v = (v >= shE()) ? 1 : 0; continue }
+                if (cc === 60 && c2 !== 60) { pos = pos + 1; v = (v < shE()) ? 1 : 0; continue }
+                if (cc === 62 && c2 !== 62) { pos = pos + 1; v = (v > shE()) ? 1 : 0; continue }
+                break
+            }
+            return v
+        }
+        function eqE() {
+            var v = relE()
+            while (true) {
+                skipSp()
+                var cc = c.peek(pos)
+                var c2 = c.peek(pos + 1)
+                if (cc === 61 && c2 === 61) { pos = pos + 2; v = (v === relE()) ? 1 : 0; continue }
+                if (cc === 33 && c2 === 61) { pos = pos + 2; v = (v !== relE()) ? 1 : 0; continue }
+                break
+            }
+            return v
+        }
+        function andE() {
+            var v = eqE()
+            while (true) {
+                skipSp()
+                if (c.peek(pos) === 38 && c.peek(pos + 1) === 38) { pos = pos + 2; var r = eqE(); v = (v !== 0 && r !== 0) ? 1 : 0; continue }
+                break
+            }
+            return v
+        }
+        function orE() {
+            var v = andE()
+            while (true) {
+                skipSp()
+                if (c.peek(pos) === 124 && c.peek(pos + 1) === 124) { pos = pos + 2; var r = andE(); v = (v !== 0 || r !== 0) ? 1 : 0; continue }
+                break
+            }
+            return v
+        }
+        // Which directive is here? Whitespace AND comments are still ahead.
+        var i = 0
+        while (true) {
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i = i + 1; continue }
+            if (ch === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i = i + 1 }
+                i = i + 2
+                continue
+            }
+            break
+        }
+        if (c.peek(i) !== 35) { return abnf.newToken("\x01not-a-directive", 0) }
+        var dd = i + 1
+        while (isSp(c.peek(dd))) { dd = dd + 1 }
+        var res = -1
+        if (wordAt(dd, "ifdef")) {
+            pos = dd + 5
+            skipSp()
+            res = macroOf(pos, nameLenAt(pos))[0]
+        } else if (wordAt(dd, "ifndef")) {
+            pos = dd + 6
+            skipSp()
+            res = (macroOf(pos, nameLenAt(pos))[0] === 0) ? 1 : 0
+        } else if (wordAt(dd, "if")) {
+            pos = dd + 2
+            res = (orE() === 0) ? 0 : 1
+        } else if (wordAt(dd, "elif")) {
+            pos = dd + 4
+            res = (orE() === 0) ? 0 : 1
+        }
+        if (res < 0) { return abnf.newToken("\x01not-a-conditional", 0) }
+        return (res === 0) ? undefined : abnf.newToken("\x01condition-holds", 0)
+    })()
+~~) ;
+
+// A line inside a dead branch must not be one of the directives that structure the
+// conditional: those belong to the productions around it.
+NotPPBranch = :script(~~
+    (function () {
+        var s = 0
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s = s + 1; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s = s + 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s = s + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s = s + 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s = s + 1 }
+                s = s + 2
+                continue
+            }
+            break
+        }
+        if (c.peek(s) !== 35) { return undefined }
+        var d = s + 1
+        while (c.peek(d) === 32 || c.peek(d) === 9) { d = d + 1 }
+        var kws = ["ifdef", "ifndef", "if", "elif", "else", "endif"]
+        var hit = false
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(d + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(d + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01branch-directive", 0) : undefined
+    })()
+~~) ;
+
+NotPPEnd = :script(~~
+    (function () {
+        var s = 0
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s = s + 1; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s = s + 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s = s + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s = s + 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s = s + 1 }
+                s = s + 2
+                continue
+            }
+            break
+        }
+        if (c.peek(s) !== 35) { return undefined }
+        var d = s + 1
+        while (c.peek(d) === 32 || c.peek(d) === 9) { d = d + 1 }
+        var kws = ["elif", "else", "endif"]
+        var hit = false
+        for (var k = 0; k < kws.length; k++) {
+            var w = kws[k]
+            var ok = true
+            for (var i = 0; i < w.length; i++) { if (c.peek(d + i) !== w.charCodeAt(i)) { ok = false } }
+            if (ok) {
+                var cc = c.peek(d + w.length)
+                if (!((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || (cc >= 97 && cc <= 122))) { hit = true }
+            }
+        }
+        return hit ? abnf.newToken("\x01branch-directive", 0) : undefined
+    })()
+~~) ;
 
 // A balanced { ... } body consumed without interpreting it (string and char literals
 // are matched first so braces inside them are never miscounted). Copied from the
@@ -196,20 +569,37 @@ StructDef   <~~ defineStruct(takeAll()) ~~>
 // A member line is either an ANONYMOUS struct/union member (C11 6.7.2.1p13: its
 // members are addressed as members of the enclosing tag) or an ordinary declarator
 // list, whose declarators may carry a ':width' bit-field size.
-FieldLine   = AnonMember | PlainField ;
+FieldLine   = AnonMember | TagFieldDef | PlainField ;
 PlainField  <~~ push(makeFieldLine(takeAll())) ~~>
-            = FieldType ( AnonBits | FDecl { "," FDecl } ) ";" ;
+            = FieldType ( AnonBits | FieldDecl { "," FieldDecl } ) ";" ;
+// 'struct { int y; int z; } nest;' / 'struct S1 { ... } a, *b;' as a MEMBER: the tag
+// is defined here (with a synthetic name if it has none) and the declarators that
+// follow are ordinary members of that type.
+TagFieldDef <~~ push(makeTagField(takeAll())) ~~>
+            = AnonKind [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
+              FieldDecl { "," FieldDecl } ";" ;
 AnonMember  <~~ push(makeAnonMember(takeAll())) ~~>
             = AnonKind "{" { FieldLine } "}" ";" ;
 AnonKind    = KwUnion <~~ push({anon: true, u: true}) ~~>
             | KwStruct <~~ push({anon: true, u: false}) ~~> ;
 // The base type text is kept so that an UNSIGNED bit field can wrap where a signed
 // one sign-extends; everything else about the width still collapses to the int model.
-FieldType   = TypeInt <~~ push({bty: "int", raw: up.in}) ~~>
-            | EnumRef <~~ push({bty: "int"}) ~~>
-            | KwStruct Id <~~ push({bty: up.in}) ~~>
-            | KwUnion Id <~~ push({bty: uKey(up.in)}) ~~> ;
+FieldType   = TypeInt <~~ push({bty: baseCtOf(up.in), raw: up.in}) ~~>
+            | FieldEnumDef
+            | EnumRef <~~ push({bty: ctInt}) ~~>
+            | KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~>
+            | KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~>
+            | TdFieldTy ;
+// 'enum { X } x;' as a member: the constants are registered, the member is an int.
+FieldEnumDef <~~ defineEnum(takeAll()); push({bty: ctInt}) ~~>
+            = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
+              "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
+TdFieldTy   <~~ push({bty: typedefOf(up.in)}) ~~> = NotCKw Id ;
+FieldDecl   = FnPtrField | FDecl ;
 FDecl       = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ BitWidth ] ;
+// 'int (*fptr)();' as a member: one cell holding a function identifier.
+FnPtrField  <~~ push({fnp: makeDeclr(takeAll(), "fnptr")}) ~~>
+            = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams ;
 // 'unsigned a : 3' - the declared width in bits.
 BitWidth    <~~ push({bits: pop()}) ~~> = ":" Number ;
 // An UNNAMED bit field ('int : 3;', 'int : 0;') is pure padding: it is parsed, and
@@ -223,7 +613,7 @@ Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
 
 // The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
 FuncDef     <~~ buildFunction() ~~>
-            = TypeInt Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = TypeInt [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
 // A function whose RETURN type is a struct or union (by value, or a pointer to one).
 // A by-value struct return is lowered the way a C ABI does it: the caller allocates
@@ -258,49 +648,44 @@ FnParams    = SkipParen ;
 ParamList   <~~ push(takeAll()) ~~>
             = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
 VoidOnly    = "void" KwEnd !"*" ;
-ParamItem   = FnPtrParam | Param | ParamAbs ;
+ParamItem   = FnPtrParam | TdParam | ParenParam | Param | ParamAbs ;
+// 'int (* const x)': a pointer parameter written with redundant parentheses.
+ParenParam  <~~ push(makeParam(takeAll())) ~~>
+            = ParamType "(" Stars Id <~~ push(up.in) ~~> ")" ;
+// A parameter whose type is a typedef name. Two identifiers in a row cannot be
+// anything else, which is what keeps this away from a K&R identifier list.
+TdParam     <~~ push(makeTdParam(takeAll())) ~~>
+            = TdName [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 // 'int (*f)(int)' as a parameter: one i32 holding a function identifier.
 FnPtrParam  <~~ push(makeFnPtrParam(takeAll())) ~~>
             = ParamType "(" Stars Id <~~ push(up.in) ~~> ")" FnParams ;
+// An array parameter is adjusted to a pointer to its element type (C11 6.7.6.3p7),
+// so 'int x[100]' and 'int *x' declare the same thing.
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = ParamType [ Stars ] Id <~~ push(up.in) ~~> ;
+            = ParamType [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 // An abstract (unnamed) parameter: only its type matters, and nothing can read it.
+// An abstract parameter: only its type matters. 'int ()' is a function type, which
+// as a parameter is adjusted to a pointer to that function.
 ParamAbs    <~~ push(makeParam(takeAll())) ~~>
-            = ParamType [ Stars ] ;
+            = ParamType [ Stars ] [ ArrDims | AbsFnTy ] ;
+AbsFnTy     <~~ push({fnabs: true}) ~~> = FnParams ;
 ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
             | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
 // Globals are registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
-            = BaseTy GDeclarator { "," GDeclarator } ";" ;
-GDeclarator <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims | GInit ] ;
-GInit       <~~ push({gv: pop()}) ~~> = "=" Number ;
+            = BaseTy DeclItem { "," DeclItem } ";" ;
 // The declaration BASE type, kept as a real C type so that a char is one byte wide
 // and an unsigned int divides and compares unsigned. Pushes {bty: ct}.
-BaseTy      <~~ push({bty: baseCtOf(up.in)}) ~~> = TypeInt | EnumRef ;
-ArraySize   <~~ push({size: pop()}) ~~>
-            = "[" Number "]" ;
+BaseTy      <~~ push({bty: baseCtOf(up.in)}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] | TypeInt ;
+// 'struct T;' / 'union U;' / 'enum E;' - a declaration of the TAG alone. It makes
+// the type name available; the layout comes from the definition, wherever that is.
+// GCC accepts the enum form too, which the corpus relies on.
+TagFwd      = ( KwStruct | KwUnion | KwEnum ) Id ";" ;
 
-// Global struct variables, pointers and arrays (zero initialized like all globals).
-StructGDecl <~~ defineStructGlobals(takeAll()) ~~>
-            = KwStruct Id <~~ push(up.in) ~~> SGDecl { "," SGDecl } ";" ;
-SGDecl      <~~ push(makeSDecl(takeAll())) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~> [ ArraySize ] ;
-
-// Aggregate '= { ... }' initializers on GLOBALS are accepted and reported as not
-// implemented (a global is emitted at build time, where no initializer can run).
-// AggForm matches only the unsupported shapes, so a plain 'int a[3];' still falls
-// through to the genuine declarators. The declarator, dimensions and '{ ... }' body
-// are all skipped; takeAll() drops whatever the dimension sizes pushed.
-GAggDecl    <~~ takeAll(); notImpl("aggregate initializer", up.pos) ~~>
-            = AggBase { PStars } Id AggForm ";" ;
-AggBase     = BaseInt | KwStruct Id | KwUnion Id ;
-AggForm     = EmptyArr [ "=" SkipBlock ]
-            | ArraySize ArraySize { ArraySize } [ "=" SkipBlock ]
-            | ArraySize "=" SkipBlock
-            | "=" SkipBlock ;
-EmptyArr    = "[" "]" ;
+// Global struct variables, pointers and arrays.
+StructGDecl <~~ defineGlobals(takeAll()) ~~>
+            = [ TypeInt ] KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 
 // A '*' run in a position that pushes nothing (prototypes, casts, sizeof names).
 PStars      = "*" { PtrQual | "*" } ;
@@ -312,21 +697,20 @@ Stars       <~~ push(makeStars(up.in, up.pos)) ~~> = "*" { PtrQual | "*" } ;
 PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" KwEnd ;
 
 // Every statement production pushes exactly one thunk: function(block) -> nextBlock.
-// StructDecl / UnionDecl come BEFORE AggDecl: a 'struct P p = { ... }' brace
-// initializer is genuinely lowered now, and only the shapes those two decline (two or
-// more array dimensions, a braced scalar) still fall through to the AggDecl notImpl.
+// StructDecl / UnionDecl come BEFORE Decl: they own the 'struct'/'union' base type,
+// which BaseTy does not read.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
-            | AssertStmt | BoolDecl | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
-            | StaticDecl | StructDecl | UnionDecl | AggDecl | Decl
-            | Goto | PPStmt | Label | TdDecl | Empty | ExprStmt ;
+            | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
+            | StaticDecl | StructDecl | UnionDecl | Decl
+            | Goto | PPCondStmt | PPStmt | Label | TdDecl | Empty | ExprStmt ;
 
 // A struct definition inside a function body. The layout is registered exactly like a
 // top-level one (the tag runs at build time), and the statement itself does nothing.
 LStructDef  <~~ defineStruct(takeAll()); push(function(b) { return b }) ~~>
             = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
 // A tag definition that also declares locals, and its union twin.
-StructDefDecl <~~ push(makeStructDecl(tagDefDecl(takeAll(), false))) ~~> = StructDefBody ;
-UnionDefDecl  <~~ push(makeStructDecl(tagDefDecl(takeAll(), true))) ~~>  = UnionDefBody ;
+StructDefDecl <~~ push(makeDeclSeq(tagDefDecl(takeAll(), false), false)) ~~> = StructDefBody ;
+UnionDefDecl  <~~ push(makeDeclSeq(tagDefDecl(takeAll(), true), false)) ~~>  = UnionDefBody ;
 // The same for a union definition inside a function body.
 LUnionDef   <~~ defineUnion(takeAll()); push(function(b) { return b }) ~~>
             = KwUnion Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" ";" ;
@@ -337,17 +721,7 @@ LUnionDef   <~~ defineUnion(takeAll()); push(function(b) { return b }) ~~>
 StaticDecl  <~~ push(makeDeclSeq(takeAll(), true)) ~~>
             = KwStatic BaseTy SInitDecl { "," SInitDecl } ";" ;
 SInitDecl   <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims | InferArr ] [ "=" DInit ] ;
-
-// Local aggregate / multi-dimensional / brace-initialized declarations: the statement
-// form of GAggDecl (see there). Placed before StructDecl and Decl so it claims only
-// the unsupported shapes and leaves genuine 'int a[3];' / 'struct P p;' to them.
-AggDecl     <~~ takeAll(); push(notImplStmt("aggregate initializer", up.pos)) ~~>
-            = AggBase { PStars } Id LAggForm ";" ;
-// The LOCAL shape still unsupported: a brace initializer on a SCALAR ('int x = { 1 };').
-// Arrays of any rank and structs are genuine declarators now.
-LAggForm    = EmptyArr
-            | "=" SkipBlock ;
+            = [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] [ "=" DInit ] ;
 
 // goto jumps to a label of an enclosing statement SEQUENCE: the goto yields a signal
 // (interpreter) resp. branches to the label's basic block (compiler), which covers
@@ -361,8 +735,23 @@ Label       <~~ push(makeLabel(takeAll())) ~~>
             = NotSwitchKw Id <~~ push(up.in) ~~> ":" Statement ;
 NotSwitchKw = :script(~~
     (function() {
-        var s = 0 // Whitespace is not skipped before a :script, so scan past it first.
-        while (c.peek(s) === 32 || c.peek(s) === 9 || c.peek(s) === 10 || c.peek(s) === 13) { s++ }
+        var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s += 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s += 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s += 2
+                continue
+            }
+            break
+        }
         var kws = ["case", "default"]
         var hit = false
         for (var k = 0; k < kws.length; k++) {
@@ -378,20 +767,36 @@ NotSwitchKw = :script(~~
     })()
 ~~) ;
 
+// A conditional inside a function body. It pushes ONE thunk like every other
+// statement, so the statement sequence around it needs to know nothing about it.
+PPCondStmt  <~~ push(makeSeq(takeAll())) ~~> = PPCondS ;
+PPCondS     = PPCondFalse PPIfLine PPDeadBody PPDeadChainS
+            | PPIfLine { PPBodyStmt } PPAfterLive ;
+PPDeadChainS = PPEndifLine
+            | PPCondFalse PPElifLine PPDeadBody PPDeadChainS
+            | PPElifLine { PPBodyStmt } PPAfterLive
+            | PPElseLine { PPBodyStmt } PPEndifLine ;
+
+// A function PROTOTYPE inside a function body: legal C, and a no-op here like the
+// file-scope one (callees are resolved by name).
+LProto      <~~ takeAll(); push(function(b) { return b }) ~~>
+            = TypeInt [ PStars ] Id ParamList { Attr } ";" ;
+
+// A forward tag declaration inside a function body.
+LTagFwd     <~~ push(function(b) { return b }) ~~> = TagFwd ;
+
 // A preprocessor line inside a function body is skipped (no-op statement).
 PPStmt      <~~ push(function(b) { return b }) ~~>
             = PPLine ;
 
-// Local struct variables, struct pointers (with optional initializer) and struct arrays.
-// A struct value may carry a brace initializer, with '.field =' designators.
-StructDecl  <~~ push(makeStructDecl(takeAll())) ~~>
-            = KwStruct Id <~~ push(up.in) ~~> SDeclarator { "," SDeclarator } ";" ;
-// The same shapes for a union: 'union U u;', 'union U *p = q;', 'union U u = { .f = v };'.
-UnionDecl   <~~ push(makeStructDecl(takeAll())) ~~>
-            = KwUnion Id <~~ push(uKey(up.in)) ~~> SDeclarator { "," SDeclarator } ";" ;
-SDeclarator <~~ push(makeSDecl(takeAll())) ~~>
-            = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArraySize | "=" DInit ] ;
+// Local struct and union variables, pointers and arrays. The tag supplies the base
+// type and the ordinary declarator syntax does the rest, so every shape a scalar
+// declarator has - stars, any number of dimensions, brace and expression
+// initializers, a parenthesized pointer-to-array - is available here too.
+StructDecl  <~~ push(makeDeclSeq(takeAll(), false)) ~~>
+            = [ TypeInt ] KwStruct Id <~~ push({bty: ctStruct(up.in)}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
+UnionDecl   <~~ push(makeDeclSeq(takeAll(), false)) ~~>
+            = [ TypeInt ] KwUnion Id <~~ push({bty: ctStruct(uKey(up.in))}) ~~> [ TypeInt ] DeclItem { "," DeclItem } ";" ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -441,18 +846,21 @@ DeclItem    = FnPtrDecl | PtrArrDecl | InitDecl ;
 // 'int (*fp)(int)' - a pointer to a function - and 'int (*tab[2])(int)', an array
 // of them. A function pointer is one i32 holding the callee's identifier.
 FnPtrDecl   <~~ push({dcl: makeDeclr(takeAll(), "fnptr")}) ~~>
-            = "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
+            = [ PStars ] "(" Stars Id <~~ push(up.in) ~~> [ ArrDims ] ")" FnParams [ "=" DInit ] ;
 PtrArrDecl  <~~ push({dcl: makeDeclr(takeAll(), "ptrarr")}) ~~>
             = "(" Stars Id <~~ push(up.in) ~~> ")" ArrDims [ "=" DInit ] ;
 InitDecl    <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
             = [ Stars ] Id <~~ push(up.in) ~~>
-              [ ArrDims | InferArr ] [ "=" DInit ] ;
+              [ ArrDims ] [ "=" DInit ] ;
 // A declarator's array dimensions, outermost first: 'int m[2][3]' is an array of 2
-// arrays of 3 ints, and every dimension is one level of the {k:"arr"} C type.
-ArrDims     <~~ push({dims: takeAll()}) ~~> = ArrDim { ArrDim } ;
-ArrDim      = "[" Number "]" ;
-// 'int a[] = { ... }': the size comes from the initializer (-1 asks for that).
-InferArr    <~~ push({dims: [-1]}) ~~> = "[" "]" ;
+// arrays of 3 ints, and every dimension is one level of the {k:"arr"} C type. Only
+// the OUTERMOST may be left empty ('int a[] = { ... }', 'int m[][3][5] = ...'), where
+// -1 asks for the size to come from the initializer. A dimension may carry the
+// qualifiers a parameter is allowed to write there (int x[const 5]).
+ArrDims     <~~ push({dims: takeAll()}) ~~> = ( ArrDim | InferDim ) { ArrDim } ;
+ArrDim      = "[" { ArrQual } Number "]" ;
+InferDim    <~~ push(-1) ~~> = "[" "]" ;
+ArrQual     = PtrQual | "static" KwEnd ;
 // A declaration initializer: a brace list, a string literal (which initializes a
 // char array element by element, C11 6.7.9p14), or one ordinary expression.
 DInit       = BraceInit | StrInit | AssignExpr ;
@@ -506,16 +914,46 @@ CompLitP    <~~ push(makeSfxChain(takeAll())) ~~>
 CompLit     <~~ push(makeCompLit(takeAll())) ~~>
             = "(" CompType ")" BraceInit ;
 CompType    <~~ push({clt: makeCompDesc(takeAll())}) ~~>
-            = CompBase [ Stars ] [ ArrDims | InferArr ] ;
+            = CompBase [ Stars ] [ ArrDims ] ;
 CompBase    = TypeInt <~~ push({bs: baseCtOf(up.in)}) ~~>
             | EnumRef <~~ push({bs: ctInt}) ~~>
             | KwStruct Id <~~ push({bs: ctStruct(up.in)}) ~~>
-            | KwUnion Id <~~ push({bs: ctStruct(uKey(up.in))}) ~~> ;
+            | KwUnion Id <~~ push({bs: ctStruct(uKey(up.in))}) ~~>
+            | TdCompTy ;
+// '(Name){ ... }' with a typedef type name. The '{' that has to follow makes this
+// unambiguous, unlike a cast, where '(x) - 1' could be either reading.
+TdCompTy    <~~ push({bs: typedefOf(up.in)}) ~~> = NotCKw Id ;
 ParenSfx    <~~ push(makeSfxChain(takeAll())) ~~>
             = "(" Lvalue ")" PlaceSfx { PlaceSfx } ;
 ParenPlace  = "(" Lvalue ")" ;
 DerefP      <~~ push(makeDerefP(pop())) ~~>
-            = "*" Lvalue ;
+            = "*" Lvalue NotIncDec ;
+// A place followed by '++' or '--' is '*(p++)', not '(*p)++', so the typed place
+// form has to decline it and leave the general '*' of an expression its turn.
+NotIncDec = :script(~~
+    (function() {
+        var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
+            if (ch === 47 && c.peek(s + 1) === 47) {
+                s += 2
+                while (c.peek(s) >= 0 && c.peek(s) !== 10) { s++ }
+                continue
+            }
+            if (ch === 47 && c.peek(s + 1) === 42) {
+                s += 2
+                while (c.peek(s) >= 0 && !(c.peek(s) === 42 && c.peek(s + 1) === 47)) { s++ }
+                s += 2
+                continue
+            }
+            break
+        }
+        var cc = c.peek(s)
+        return ((cc === 43 && c.peek(s + 1) === 43) || (cc === 45 && c.peek(s + 1) === 45))
+            ? abnf.newToken("\x01postfix-follows", 0) : undefined
+    })()
+~~) ;
 Deref       <~~ push(makeDerefPlace(pop())) ~~>
             = "*" UnaryExpr ;
 VarPlace    <~~ push(makeVarPlace(takeAll())) ~~>
@@ -715,8 +1153,6 @@ TypeTok     = "int" KwEnd | "char" KwEnd | "short" KwEnd | "long" KwEnd
             | "static" KwEnd | "extern" KwEnd | "register" KwEnd | "auto" KwEnd
             | "inline" KwEnd | "restrict" KwEnd | "_Bool" KwEnd | "_Complex" KwEnd
             | "_Noreturn" KwEnd | "_Atomic" KwEnd | "_Thread_local" KwEnd ;
-// A declaration base type: a scalar, or an enum tag used as an int. Pushes nothing.
-BaseInt     = TypeInt | EnumRef ;
 EnumRef     = KwEnum Id ;
 
 
@@ -726,11 +1162,11 @@ EnumRef     = KwEnum Id ;
 // syntax; the four wrappers differ only in whether the objects become locals or
 // globals, and whether the tag is a struct or a union.
 StructDefBody = KwStruct [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
-                SDeclarator { "," SDeclarator } ";" ;
+                DeclItem { "," DeclItem } ";" ;
 UnionDefBody  = KwUnion [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}"
-                SDeclarator { "," SDeclarator } ";" ;
-GStructDefDecl <~~ defineStructGlobals(tagDefDecl(takeAll(), false)) ~~> = StructDefBody ;
-GUnionDefDecl  <~~ defineStructGlobals(tagDefDecl(takeAll(), true)) ~~>  = UnionDefBody ;
+                DeclItem { "," DeclItem } ";" ;
+GStructDefDecl <~~ defineGlobals(tagDefDecl(takeAll(), false)) ~~> = StructDefBody ;
+GUnionDefDecl  <~~ defineGlobals(tagDefDecl(takeAll(), true)) ~~>  = UnionDefBody ;
 
 KwStruct    = "struct" KwEnd ;
 KwStatic    = "static" KwEnd ;
@@ -1377,10 +1813,36 @@ KwDefault   = "default" KwEnd ;
                 fields[fields.length - 1].dims = it.dims
                 continue
             }
+            // A function-pointer member brings its own base type with it.
+            if (it != undefined && it.fnp != undefined) {
+                fields.push({name: it.fnp.name, bty: ctFn, star: 0, dims: it.fnp.dims, uns: false})
+                star = 0
+                continue
+            }
             fields.push({name: it, bty: bty, star: star, uns: uns})
             star = 0
         }
         return {fields: fields}
+    }
+    // 'struct { ... } name;' as a member: the tag is defined here and the declarators
+    // that follow become members of that type, like any other member line.
+    function makeTagField(items) {
+        var isUnion = items[0].u
+        var key = anonTagName()
+        var groups = []
+        var decls = []
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it != undefined && it.tag != undefined) { key = isUnion ? uKey(it.tag) : it.tag; continue }
+            if (it != undefined && (it.fields != undefined || it.anonFields != undefined)) { groups.push(it); continue }
+            decls.push(it)
+        }
+        var all = [key]
+        for (var j = 0; j < groups.length; j++) all.push(groups[j])
+        defineTag(all, isUnion)
+        var line = [{bty: ctStruct(key)}]
+        for (var q = 0; q < decls.length; q++) line.push(decls[q])
+        return makeFieldLine(line)
     }
     // An anonymous struct/union member: its own member groups, spliced into the
     // enclosing tag at the slot the member itself occupies.
@@ -1394,9 +1856,9 @@ KwDefault   = "default" KwEnd ;
     // The C type of one declared member. A POINTER field may point at any (even a
     // later) struct; a member of struct/union VALUE type needs a complete tag.
     function fieldCt(f) {
-        var base = (f.bty == "int") ? ctInt : ctStruct(f.bty)
+        var base = f.bty
         if (f.star > 0) { base = ptrTo(f.star, base) }
-        else if (f.bty != "int") { structOf(f.bty) }
+        else if (base.k == "struct") { structOf(base.s) }   // a VALUE member needs a complete tag
         if (f.dims != undefined) return arrCt(f.dims, base, 0)
         return base
     }
@@ -1507,22 +1969,23 @@ KwDefault   = "default" KwEnd ;
     function anonTagName() { anonSeq = anonSeq + 1; return "$anon" + anonSeq }
     // Split the items of a 'struct S { ... } a, *b;' into the tag definition and the
     // declarator list, register the layout, and return the [key, descriptor...] list
-    // that makeStructDecl / defineStructGlobals expect.
+    // that makeDeclSeq / defineGlobals expect.
     function tagDefDecl(items, isUnion) {
         var key = anonTagName()
-        if (items.length > 0 && items[0].tag != undefined) {
-            key = isUnion ? uKey(items[0].tag) : items[0].tag
-        }
-        var tagItems = [key]
-        var declItems = [key]
+        var tagItems = []
+        var declItems = []
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.tag != undefined) { continue }
-            if (it.name != undefined) { declItems.push(it) }
-            else { tagItems.push(it) }
+            if (it.tag != undefined) { key = isUnion ? uKey(it.tag) : it.tag; continue }
+            if (it.dcl != undefined) { declItems.push(it); continue }
+            tagItems.push(it)
         }
-        defineTag(tagItems, isUnion)
-        return declItems
+        var all = [key]
+        for (var j = 0; j < tagItems.length; j++) all.push(tagItems[j])
+        defineTag(all, isUnion)
+        var out = [{bty: ctStruct(key)}]
+        for (var q = 0; q < declItems.length; q++) out.push(declItems[q])
+        return out
     }
     function defineStruct(items) { defineTag(items, false) }
     function defineUnion(items) { defineTag(items, true) }
@@ -1552,7 +2015,12 @@ KwDefault   = "default" KwEnd ;
             }
             return b
         }
-        if (ct.k != "struct") fail("a scalar takes no brace initializer")
+        // 'int x = { 1 };': a scalar may be brace-initialized by one item (C11 6.7.9p11).
+        if (ct.k != "struct") {
+            if (list.length > 1) fail("too many initializers for a scalar")
+            if (list.length == 1) { return emitInit(b, ct, list[0].v, addr) }
+            return b
+        }
         var st = structOf(ct.s)
         var idx = 0
         for (var j = 0; j < list.length; j++) {
@@ -2604,75 +3072,6 @@ KwDefault   = "default" KwEnd ;
     }
     // items = [{ptr}, name, [params...], bodyThunk].
     function buildFnPtrFunc(items) { emitFunctionBody(items[1], items[2], items[3], undefined) }
-    // SDeclarator/SGDecl items = ["*"?] name [{size}|initThunk] -> a plain descriptor.
-    function makeSDecl(items) {
-        var i = 0
-        var star = starsOf(items[i])
-        if (star > 0) i++
-        var name = items[i]
-        var opt = items[i + 1]
-        if (opt != undefined && opt.size != undefined) return {name: name, star: star, size: opt.size}
-        return {name: name, star: star, init: opt}
-    }
-    // StructDecl items = [structName, descriptor...] -> declaration thunk.
-    function makeStructDecl(items) {
-        var sname = items[0]
-        var decls = items.slice(1)
-        return function(b) {
-            for (var i = 0; i < decls.length; i++) {
-                var d = decls[i]
-                if (d.star > 0) {
-                    var pct = ptrTo(d.star, ctStruct(sname))
-                    var ptr = b.NewAlloca(i32p)
-                    if (d.init != undefined) {
-                        var r = d.init(b)
-                        b = r.b
-                        storeTo(b, pct, ptr, r.v)
-                    }
-                    declVar(d.name, {val: ptr, arr: false, load: i32p, ct: pct})
-                } else if (d.size != undefined) {
-                    var act = ctArr(d.size, ctStruct(sname))
-                    var ty = ctLTy(act)
-                    declVar(d.name, {val: b.NewAlloca(ty), arr: true, ty: ty, ct: act})
-                } else {
-                    var st = structOf(sname)
-                    var a = b.NewAlloca(st.lty)
-                    if (d.init != undefined) {
-                        // Either a brace initializer, or another struct VALUE, which is copied.
-                        if (d.init.list != undefined) {
-                            b = zeroAggregate(b, ctStruct(sname), a)
-                            b = emitInit(b, ctStruct(sname), d.init, a)
-                        } else {
-                            var ri = d.init(b)
-                            b = emitCopy(ri.b, ctStruct(sname), a, ri.v)
-                        }
-                    }
-                    declVar(d.name, {val: a, arr: false, ct: ctStruct(sname)})
-                }
-            }
-            return b
-        }
-    }
-    // StructGDecl: like makeStructDecl, but as zero initialized module globals.
-    function defineStructGlobals(items) {
-        var sname = items[0]
-        for (var i = 1; i < items.length; i++) {
-            var d = items[i]
-            if (d.init != undefined) fail("global struct pointers take no initializer: " + d.name)
-            if (d.star > 0) {
-                var g = m.NewGlobalDef(d.name, llvm.constant.NewNull(i32p))
-                declVar(d.name, {val: g, arr: false, load: i32p, ct: ptrTo(d.star, ctStruct(sname))})
-            } else if (d.size != undefined) {
-                var gact = ctArr(d.size, ctStruct(sname))
-                var ty = ctLTy(gact)
-                var g2 = m.NewGlobalDef(d.name, llvm.constant.NewZeroInitializer(ty))
-                declVar(d.name, {val: g2, arr: true, ty: ty, ct: gact})
-            } else {
-                var g3 = m.NewGlobalDef(d.name, llvm.constant.NewZeroInitializer(structOf(sname).lty))
-                declVar(d.name, {val: g3, arr: false, ct: ctStruct(sname)})
-            }
-        }
-    }
     makeBlockStmt = function(items) {
         var seq = makeSeq(items)
         return function(b) {
@@ -2792,51 +3191,79 @@ KwDefault   = "default" KwEnd ;
 
     var unnamedSeq = 0
     // Param items = [{sname}?, "*"?, name]: int, int*, or a struct pointer.
+    // One parameter descriptor. An ARRAY parameter is adjusted to a pointer to its
+    // element type (C11 6.7.6.3p7), and a struct or union VALUE parameter travels as
+    // the address of the caller's object, which the callee copies.
+    function paramOf(name, ct) {
+        if (ct.k == "arr") { ct = {k: "ptr", p: ct.e} }
+        var pname = name
+        if (pname == undefined || pname == "") { unnamedSeq = unnamedSeq + 1; pname = "$arg" + unnamedSeq }
+        return {name: pname, ptr: ct.k == "ptr" || isAggCt(ct), ct: ct}
+    }
+    // Param / ParamAbs items = [{bty}|{sname}, {ptr}?, name?, {dims}?].
     function makeParam(items) {
         var i = 0
-        var sname
         var base = ctInt
-        if (items[i] != undefined && items[i].sname != undefined) { sname = items[i].sname; i++ }
+        if (items[i] != undefined && items[i].sname != undefined) { base = ctStruct(items[i].sname); i++ }
         else if (items[i] != undefined && items[i].bty != undefined) { base = items[i].bty; i++ }
-        var ptr = starsOf(items[i])
-        if (ptr > 0) i++
-        var ct = ptrTo(ptr, sname != undefined ? ctStruct(sname) : base)
-        // An abstract parameter has no name: give it one nothing can spell, so that it
-        // still occupies its argument slot.
-        var pname = items[i]
-        if (pname == undefined) { unnamedSeq = unnamedSeq + 1; pname = "$arg" + unnamedSeq }
-        return {name: pname, ptr: ptr > 0 || isAggCt(ct), ct: ct}
+        for (var k = i; k < items.length; k++) {
+            if (items[k] != undefined && items[k].fnabs == true) return paramOf("", ctFn)
+        }
+        var d = makeDeclr(items.slice(i), "plain")
+        return paramOf(d.name, declCt(base, d))
     }
-    // items = [{bty}, {dcl}...]: globals are emitted at build time, so their
-    // initializer must be a constant (a full expression could not run yet).
+    // Every global starts as a zeroed slot, and its initializer is emitted into the
+    // module's global-initializer function (see buildGlobalInit): the module format
+    // has no way to spell an aggregate constant - llvm.constant has no NewArray - and
+    // the entry point is wrapped so the function runs before anything else does.
+    var globalInits = []
+    function newGlobal(name, ct) {
+        var lty = ctLTy(ct)
+        var g = m.NewGlobalDef(name, ct.k == "ptr" ? llvm.constant.NewNull(i32p)
+                                                   : llvm.constant.NewZeroInitializer(lty))
+        declVar(name, {val: g, arr: ct.k == "arr", ty: lty,
+                       load: ct.k == "ptr" ? i32p : lty, ct: ct})
+        return g
+    }
+    // items = [{bty}, {dcl}...].
     function defineGlobals(items) {
         var base = items[0].bty
         for (var i = 1; i < items.length; i++) {
             var d = items[i].dcl
             var ct = declCt(base, d)
-            var lty = ctLTy(ct)
-            if (isAggCt(ct)) {
-                var g = m.NewGlobalDef(d.name, llvm.constant.NewZeroInitializer(lty))
-                declVar(d.name, {val: g, arr: ct.k == "arr", ty: lty, ct: ct})
-            } else if (ct.k == "ptr") {
-                // A pointer global is a full 8 byte slot (an i32 initializer would only cover half).
-                if (d.gv != undefined && d.gv != 0) fail("global pointers can only be initialized with 0: " + d.name)
-                var gp = m.NewGlobalDef(d.name, llvm.constant.NewNull(i32p))
-                declVar(d.name, {val: gp, arr: false, load: i32p, ct: ct})
-            } else if (isFlt(ct)) {
-                // A floating-point global is an i64 slot holding the bit pattern. The
-                // module format has no way to spell a 64-bit constant whose low half
-                // is non-zero, so such an initializer is reported instead.
-                var bits = dblBits(d.gv != undefined ? convertNum(ct, d.gv) : 0)
-                if (bits.lo != 0) { notImpl("floating-point global initializer", 0) }
-                var hb = bits.hi >= 2147483648 ? (bits.hi - 4294967296) : bits.hi
-                var gf = m.NewGlobalDef(d.name, k64(hb * 4294967296))
-                declVar(d.name, {val: gf, arr: false, load: llvm.types.I64, ct: ct})
-            } else {
-                var g2 = m.NewGlobalDef(d.name, kint(d.gv != undefined ? convertNum(ct, d.gv) : 0))
-                declVar(d.name, {val: g2, arr: false, load: i32, ct: ct})
-            }
+            var g = newGlobal(d.name, ct)
+            if (d.init != undefined) globalInits.push({g: g, ct: ct, init: d.init})
         }
+    }
+    // The module's global-initializer function: every global's initializer, in
+    // declaration order, exactly as C requires.
+    function buildGlobalInit() {
+        if (globalInits.length == 0) return undefined
+        var f = m.NewFunc("__mec_ginit", i32, [])
+        curF = f
+        var b = f.NewBlock("entry")
+        for (var i = 0; i < globalInits.length; i++) {
+            var gi = globalInits[i]
+            b = initInto(b, gi.ct, gi.init, gi.g)
+        }
+        b.NewRet(zero)
+        return f
+    }
+    // The entry point becomes a wrapper that runs the global initializers first and
+    // then the user's function under its original name, so both llvm.Run and a
+    // clang-linked executable (-exe, which enters at main) see the initialized data.
+    function wrapEntry(name, ginit) {
+        var uf = funcs[name]
+        uf.SetName("__mec_body_" + name)
+        var w = m.NewFunc(name, i32, [])
+        var wb = w.NewBlock("entry")
+        wb.NewCall(ginit, [])
+        var args = []
+        for (var i = 0; i < uf.Params.length; i++) {
+            args.push(llvm.types.IsPointer(uf.Params[i].Type()) ? llvm.constant.NewNull(i32p) : zero)
+        }
+        wb.NewRet(wb.NewCall(uf, args))
+        funcs[name] = w
     }
 
     function buildFunction() {
@@ -2897,6 +3324,34 @@ KwDefault   = "default" KwEnd ;
     // name -> the C type it abbreviates. Filled by defineTypedef as the file is
     // walked, read by makeTdDecl when a later declaration uses the name.
     var typedefs = {}
+    // The names the standard headers of core.stdlibImports introduce. Those headers
+    // are no-ops here (the runtime provides what they declare), so the typedefs they
+    // would define are predefined - a file that includes stdint.h and writes uint16_t
+    // means the same thing whether or not the header text was read.
+    function stdTypedefs() {
+        typedefs["size_t"] = ctI(8, true)
+        typedefs["ssize_t"] = ctI(8, false)
+        typedefs["ptrdiff_t"] = ctI(8, false)
+        typedefs["intptr_t"] = ctI(8, false)
+        typedefs["uintptr_t"] = ctI(8, true)
+        typedefs["intmax_t"] = ctI(8, false)
+        typedefs["uintmax_t"] = ctI(8, true)
+        typedefs["wchar_t"] = ctI(4, false)
+        typedefs["wint_t"] = ctI(4, false)
+        typedefs["char16_t"] = ctI(2, true)
+        typedefs["char32_t"] = ctI(4, true)
+        typedefs["int8_t"] = ctI(1, false)
+        typedefs["uint8_t"] = ctI(1, true)
+        typedefs["int16_t"] = ctI(2, false)
+        typedefs["uint16_t"] = ctI(2, true)
+        typedefs["int32_t"] = ctI(4, false)
+        typedefs["uint32_t"] = ctI(4, true)
+        typedefs["int64_t"] = ctI(8, false)
+        typedefs["uint64_t"] = ctI(8, true)
+        typedefs["int_fast8_t"] = ctI(1, false)
+        typedefs["int_least8_t"] = ctI(1, false)
+    }
+    stdTypedefs()
     function typedefOf(name) {
         if (!hasOwn(typedefs, name)) fail("type not defined: " + name)
         return typedefs[name]
@@ -2923,11 +3378,17 @@ KwDefault   = "default" KwEnd ;
             typedefs[d.name] = declCt(base, d)
         }
     }
-    // items = [{tname}, {dcl}...] -> one declaration statement.
-    function makeTdDecl(items) {
+    // items = [{tname}, {dcl}...] -> the [{bty}, {dcl}...] shape every declaration
+    // maker reads, with the typedef name resolved to the type it abbreviates.
+    function tdBase(items) {
         var all = [{bty: typedefOf(items[0].tname)}]
         for (var i = 1; i < items.length; i++) all.push(items[i])
-        return makeDeclSeq(all, false)
+        return all
+    }
+    // A parameter of typedef type: [{tname}, {ptr}?, name, {dims}?].
+    function makeTdParam(items) {
+        var d = makeDeclr(items.slice(1), "plain")
+        return paramOf(d.name, declCt(typedefOf(items[0].tname), d))
     }
     // items = [{tname}, name, [params...], bodyThunk]: a function whose return type
     // is a typedef name. The value returned is one i32 like every other, so only the
@@ -2962,6 +3423,7 @@ KwDefault   = "default" KwEnd ;
     // Every address-taken function is known now, so the indirect-call trampolines
     // can be given their dispatch bodies.
     finishTrampolines()
+    var ginitF = buildGlobalInit()
 
     // The entry point defaults to main() but the -main flag (c.mainName) can name any
     // other defined function.
@@ -2975,6 +3437,7 @@ KwDefault   = "default" KwEnd ;
         var sf = m.NewFunc("__mecmain__", i32, [])
         curF = sf
         var sb = sf.NewBlock("entry")
+        if (ginitF != undefined) { sb.NewCall(ginitF, []) }
         scopes.push({})
         sb = thunk(sb)
         sb.NewRet(zero)
@@ -2989,6 +3452,7 @@ KwDefault   = "default" KwEnd ;
         println("Error: C programs need a " + entry + "() function.")
         exit(1)
     }
+    if (ginitF != undefined) { wrapEntry(entry, ginitF) }
 
     // With -exe PATH, link the module into a native executable (clang) instead of running
     // it. main() returns int and output goes through putchar, so the binary prints and
