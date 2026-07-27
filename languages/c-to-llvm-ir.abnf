@@ -25,7 +25,12 @@ built-in IR interpreter has no indirect call, an indirect call goes through a
 generated per-arity trampoline that compares the identifier against every
 address-taken function and calls it directly. || and && short circuit through basic blocks,
 the ternary operator merges with a phi. int is 32 bit, / and % truncate towards zero,
->> is arithmetic.
+>> is arithmetic. long and long long are REAL i64 in the module (LP64): an alloca, a
+load, a store, a struct field, a parameter and a return value are all 8 bytes wide,
+the arithmetic is emitted at i64, and an exact 64-bit literal reaches the module
+through its two 32-bit halves rather than through a JS double, which stops being an
+exact integer at 2^53. Constant folding is switched off for the 64-bit types for
+exactly that reason - the module carries real i64 instructions instead.
 
 Every tag composes a small code generator thunk. Expression thunks get the current basic
 block and return {b: endBlock, v: LLVM value}; lvalue thunks return {b, v: address};
@@ -608,12 +613,15 @@ AnonBits    <~~ push({padBits: pop()}) ~~> = ":" Number ;
 
 // A function prototype (int putchar(int c);) is accepted and ignored: the callees
 // are resolved by name anyway. It keeps the test programs valid for a real C compiler.
-Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
-            = TypeInt [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
+Proto       <~~ registerProto() ~~>
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> [ PStars <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
 
-// The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
+// The merged pushes: [{ret}, "*"?, name, [params...], bodyThunk]. A parameter is
+// {name, ptr, sname?}. The RETURN type is carried so that a function declared to
+// return a long returns an i64 (see funcRetCt); a pointer return keeps the model's
+// single i32 return, so its '*' only marks the base type as not applying.
 FuncDef     <~~ buildFunction() ~~>
-            = TypeInt [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> [ PStars <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
 // A function whose RETURN type is a struct or union (by value, or a pointer to one).
 // A by-value struct return is lowered the way a C ABI does it: the caller allocates
@@ -1240,13 +1248,32 @@ KwDefault   = "default" KwEnd ;
             else if (c1 == 98 || c1 == 66) { base = 2; i = 2 }
             else { base = 8; i = 1 }
         }
-        var v = 0
+        var p = u64Make(0, 0)
         for (; i < s.length; i++) {
             var d = digVal(s.charCodeAt(i))
             if (d < 0 || d >= base) break   // The u/U/l/L suffix run ends the digits.
-            v = v * base + d
+            p = u64MulAdd(p, base, d)
         }
-        return v | 0
+        return u64Num(p, false)             // exact through 2^63 - 1, and wraps beyond
+    }
+    // The same digits as the EXACT 64-bit pair, which is what a 64-bit literal needs:
+    // parseCInt's reading is a double and stops being exact at 2^53.
+    function parseCInt64(s) {
+        var base = 10
+        var i = 0
+        if (s.length > 1 && s.charCodeAt(0) == 48) {
+            var c1 = s.charCodeAt(1)
+            if (c1 == 120 || c1 == 88) { base = 16; i = 2 }
+            else if (c1 == 98 || c1 == 66) { base = 2; i = 2 }
+            else { base = 8; i = 1 }
+        }
+        var p = u64Make(0, 0)
+        for (; i < s.length; i++) {
+            var d = digVal(s.charCodeAt(i))
+            if (d < 0 || d >= base) break
+            p = u64MulAdd(p, base, d)
+        }
+        return p
     }
     // The value of one character-constant body, including the C escape sequences:
     // backslash x with hex digits, backslash with up to three octal digits, and the
@@ -1354,6 +1381,30 @@ KwDefault   = "default" KwEnd ;
 
 
     var funcs = {}
+    // The declared RETURN type of a function, and the declared types of its
+    // parameters, by name - filled by a prototype and by a definition, whichever the
+    // walk meets first. They exist for exactly one reason: a 64-bit C type is a real
+    // i64 in the module, so a function taking or returning one has to say so in its
+    // signature or the call would truncate. Everything else stays the model's i32.
+    var funcRetCt = {}
+    var funcParamCts = {}
+    function noteRetCt(name, ct) {
+        if (ct != undefined && ct.k == "int" && ct.w >= 8 && !hasOwn(funcs, name)) { funcRetCt[name] = ct }
+    }
+    function noteParamCts(name, params) {
+        var cts = []
+        var any = false
+        if (hasOwn(funcs, name)) { return }
+        for (var i = 0; i < params.length; i++) {
+            var pct = params[i].ct
+            if (pct != undefined && pct.k == "int" && pct.w >= 8 && params[i].ptr != true) { any = true }
+            cts.push(pct)
+        }
+        if (any) { funcParamCts[name] = cts }
+    }
+    // The parameter types a call should convert its arguments to, or undefined when
+    // the function has none that is wider than the model's i32.
+    function paramCtsOf(name) { return hasOwn(funcParamCts, name) ? funcParamCts[name] : undefined }
     // Functions that return a struct or union BY VALUE, name -> the returned C type.
     // Such a function takes a hidden first pointer parameter (the caller's destination)
     // and still returns i32, exactly like a C ABI's sret convention.
@@ -1368,12 +1419,15 @@ KwDefault   = "default" KwEnd ;
         } else {
             var params = []
             if (hasOwn(structRet, name)) { params.push(llvm.ir.NewParam("", i32p)) }
+            var known = paramCtsOf(name)
             for (var i = 0; i < paramSpecs.length; i++) {
                 var pct = paramSpecs[i].ct
+                if (known != undefined && i < known.length && pct == undefined) { pct = known[i] }
                 params.push(llvm.ir.NewParam("", paramSpecs[i].ptr ? i32p
-                            : ((pct != undefined && pct.k == "flt") ? llvm.types.I64 : i32)))
+                            : ((pct != undefined && pct.k == "flt") ? llvm.types.I64
+                               : ((pct != undefined && pct.k == "int" && pct.w >= 8) ? llvm.types.I64 : i32))))
             }
-            f = m.NewFunc(name, i32, params)
+            f = m.NewFunc(name, hasOwn(funcRetCt, name) ? llvm.types.I64 : i32, params)
         }
         funcs[name] = f
         return f
@@ -1605,21 +1659,43 @@ KwDefault   = "default" KwEnd ;
             if (ct.k == "void") return {b: r.b, v: zero, ct: ctVoid, cv: 0}
             // A constant folds; that is also the only way a float reaches an integer.
             if (r.cv != undefined) {
+                // A 64-bit destination folds in the EXACT two-half domain: convertNum
+                // works on a double, which cannot spell (unsigned long)-1 at all.
+                if (ct.k == "int" && ct.w >= 8) {
+                    var p64 = u64FromNum(trunc0(r.cv))
+                    return {b: r.b, v: k64exact(p64), ct: ct, cv: u64Num(p64, ct.u == true)}
+                }
                 var cv = convertNum(ct, r.cv)
                 return {b: r.b, v: (ct.k == "flt") ? zero : kint(cv | 0), ct: ct, cv: cv}
             }
             if (isFlt(ct)) return {b: r.b, v: fltOperand(r.b, r, ct), ct: ct}
-            if (isFlt(fct)) return {b: r.b, v: emitConv(r.b, ct, emitD2I(r.b, dblOf(r.b, r))), ct: ct}
-            return {b: r.b, v: emitConv(r.b, ct, r.v), ct: ct}
+            if (isFlt(fct)) return {b: r.b, v: emitConv(r.b, ct, emitD2I(r.b, dblOf(r.b, r)), ctI(8, false)), ct: ct}
+            return {b: r.b, v: emitConv(r.b, ct, r.v, fct), ct: ct}
         }
     }
-    // Narrowing to a type that is smaller than int: the value keeps only the bits
-    // that type has, sign-extended or zero-extended back into the i32 register.
-    function emitConv(b, ct, v) {
+    // The LLVM register width a value currently occupies: an i64 or an i32. A pointer
+    // is left to the callers that know it is one.
+    function llIs64(v) { return llvm.types.Equal(v.Type(), llvm.types.I64) }
+    // Move a value between the i32 and the i64 register widths. Widening honours the
+    // SOURCE type's signedness - that is the whole of C's integer conversion rank
+    // rule at this boundary - so (long)(unsigned)-1 is 4294967295 and (long)-1 is -1.
+    function emitWiden(b, v, fromU, want64) {
+        var is64 = llIs64(v)
+        if (is64 == want64) return v
+        if (want64) return fromU ? b.NewZExt(v, llvm.types.I64) : b.NewSExt(v, llvm.types.I64)
+        return b.NewTrunc(v, i32)
+    }
+    // Give a value the representation its C type pins: the LLVM register width first
+    // (i64 for long / long long, i32 for everything narrower), then - for a type
+    // smaller than int - the bits that type has, sign- or zero-extended back into the
+    // register. fct is the type the value HAD, and only its signedness is read.
+    function emitConv(b, ct, v, fct) {
         if (ct.k != "int") return v
-        if (ct.w == 1) return ct.u ? b.NewAnd(v, kint(255)) : b.NewAShr(b.NewShl(v, kint(24)), kint(24))
-        if (ct.w == 2) return ct.u ? b.NewAnd(v, kint(65535)) : b.NewAShr(b.NewShl(v, kint(16)), kint(16))
-        return v
+        var fromU = (fct != undefined && fct.k == "int") ? (fct.u == true) : false
+        var v2 = emitWiden(b, v, fromU, ct.w >= 8)
+        if (ct.w == 1) return ct.u ? b.NewAnd(v2, kint(255)) : b.NewAShr(b.NewShl(v2, kint(24)), kint(24))
+        if (ct.w == 2) return ct.u ? b.NewAnd(v2, kint(65535)) : b.NewAShr(b.NewShl(v2, kint(16)), kint(16))
+        return v2
     }
     // _Generic: the type of the controlling expression is known while the code is
     // emitted, so only the winning association is emitted at all.
@@ -1769,6 +1845,9 @@ KwDefault   = "default" KwEnd ;
         if (ct.k == "ptr" || ct.k == "flt") return 8
         if (ct.k == "struct") return structOf(ct.s).bytes
         if (ct.k == "arr") return ct.n * machBytes(ct.e)
+        // A 64-bit integer occupies a whole i64 cell, which is what a pointer
+        // difference over a long array has to divide by.
+        if (ct.k == "int" && ct.w >= 8) return 8
         return 4
     }
     function ctStruct(sname) { return {k: "struct", s: sname} }
@@ -1781,6 +1860,11 @@ KwDefault   = "default" KwEnd ;
     function ctLTy(ct) {
         // A floating-point value is its IEEE-754 bit pattern in an i64.
         if (ct.k == "flt") return llvm.types.I64
+        // long / long long / unsigned long are REAL i64 in the module: the whole
+        // width model rides on the LLVM type, so a load, a store, an alloca, a
+        // struct field and an array element are all 8 bytes wide without any further
+        // arrangement, and the arithmetic below is emitted at i64.
+        if (ct.k == "int" && ct.w >= 8) return llvm.types.I64
         if (ct.k == "int" || ct.k == "fnp" || ct.k == "void") return i32
         if (ct.k == "ptr") return i32p
         if (ct.k == "arr") return llvm.types.NewArray(ct.n, ctLTy(ct.e))
@@ -2050,7 +2134,7 @@ KwDefault   = "default" KwEnd ;
             return b
         }
         if (ct.k != "struct") {
-            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : (isFlt(ct) ? zero64 : zero), addr)
+            b.NewStore(ct.k == "ptr" ? llvm.constant.NewNull(i32p) : (isFlt(ct) ? zero64 : kct(ct, 0)), addr)
             return b
         }
         var st = structOf(ct.s)
@@ -2114,6 +2198,61 @@ KwDefault   = "default" KwEnd ;
     // exactly as the interpreter does.
     var i64 = llvm.types.I64
     function k64(n) { return llvm.constant.NewInt(i64, n) }
+
+    // ----- exact 64-bit integer constants -----
+    // A JS number is an IEEE double, so it stops being an exact integer at 2^53 and a
+    // literal like 18446744073709551615 would arrive already rounded. A 64-bit
+    // constant is therefore carried as its two 32-bit HALVES all the way to the
+    // module, where llir spells it with the unsigned-hexadecimal notation LLVM
+    // accepts (u0x...); nothing about it ever passes through a double.
+    function u64Make(hi, lo) { return {hi: hi >>> 0, lo: lo >>> 0} }
+    // p * m + d, with m and d small (a digit and its base), on the two halves.
+    function u64MulAdd(p, m, d) {
+        var l0 = (p.lo & 65535) * m + d
+        var l1 = (p.lo >>> 16) * m + (l0 >>> 16)
+        var h0 = (p.hi & 65535) * m + (l1 >>> 16)
+        var h1 = (p.hi >>> 16) * m + (h0 >>> 16)
+        return u64Make(((h1 & 65535) << 16) | (h0 & 65535), ((l1 & 65535) << 16) | (l0 & 65535))
+    }
+    var hexDigits = "0123456789ABCDEF"
+    function u64Hex8(x) {
+        var s = ""
+        for (var i = 7; i >= 0; i--) { s = s + hexDigits.charAt((x >>> (i * 4)) & 15) }
+        return s
+    }
+    function k64exact(p) { return llvm.constant.NewIntFromString(i64, "u0x" + u64Hex8(p.hi) + u64Hex8(p.lo)) }
+    // The double a 64-bit pair READS as, signed or unsigned. Exact below 2^53 and the
+    // nearest double above it; it is only ever used as the folding value cv, and
+    // folding is switched off for the 64-bit types (see emitBinC).
+    function u64Num(p, u) {
+        if (!u && (p.hi & 2147483648) != 0) {
+            var nhi = (~p.hi) >>> 0
+            var nlo = ((~p.lo) >>> 0) + 1
+            if (nlo > 4294967295) { nlo = nlo - 4294967296; nhi = nhi + 1 }
+            return 0 - (nhi * 4294967296 + nlo)
+        }
+        return p.hi * 4294967296 + p.lo
+    }
+    // The exact pair a JS integer denotes (used where the value came from a place that
+    // never exceeded 2^53: an enum constant, a size, a folded narrow constant).
+    function u64FromNum(n) {
+        var x = Math.trunc(n)
+        var neg = x < 0
+        if (neg) { x = 0 - x }
+        var hi = Math.floor(x / 4294967296)
+        var lo = x - hi * 4294967296
+        var p = u64Make(hi, lo)
+        if (!neg) return p
+        var nhi = (~p.hi) >>> 0
+        var nlo = ((~p.lo) >>> 0) + 1
+        if (nlo > 4294967295) { nlo = nlo - 4294967296; nhi = (nhi + 1) >>> 0 }
+        return u64Make(nhi, nlo)
+    }
+    // An LLVM constant of the width a C type pins, from a plain JS integer.
+    function kct(ct, n) {
+        if (ct != undefined && ct.k == "int" && ct.w >= 8) return k64exact(u64FromNum(n))
+        return kint(n)
+    }
     var zero64 = k64(0)
     var one64 = k64(1)
     var kM52 = k64(4503599627370495)      // 2^52 - 1, the stored mantissa field
@@ -2299,14 +2438,22 @@ KwDefault   = "default" KwEnd ;
     }
     // int -> double and double -> int, at the i32 boundary the rest of the model uses.
     function emitI2D(b, ct, v) {
-        var w = (ct.k == "int" && ct.u == true) ? b.NewZExt(v, i64) : b.NewSExt(v, i64)
+        // A 64-bit operand is ALREADY an i64 register and must not be extended again.
+        var w = llIs64(v) ? v : ((ct.k == "int" && ct.u == true) ? b.NewZExt(v, i64) : b.NewSExt(v, i64))
         return b.NewCall(softFn("__mec_i2d", 1, buildI2D), [w])
     }
+    // The soft-float helper answers a full i64; the destination type narrows it
+    // (emitConv does), so a (long) cast of a double keeps all 64 bits.
     function emitD2I(b, v) {
-        return b.NewTrunc(b.NewCall(softFn("__mec_d2i", 1, buildD2I), [v]), i32)
+        return b.NewCall(softFn("__mec_d2i", 1, buildD2I), [v])
     }
 
-    truthy = function(b, v) { return b.NewICmp(llvm.enum.IPredNE, v, zero) }
+    // A condition is "not zero", against a zero of the value's own register width:
+    // an i64 long has to be compared against an i64 zero.
+    truthy = function(b, v) {
+        if (llvm.types.IsPointer(v.Type())) { return b.NewICmp(llvm.enum.IPredNE, v, llvm.constant.NewNull(i32p)) }
+        return b.NewICmp(llvm.enum.IPredNE, v, llIs64(v) ? zero64 : zero)
+    }
     function toInt(b, v) { return b.NewZExt(v, i32) }
 
     // ----- goto and labels -----
@@ -2367,22 +2514,46 @@ KwDefault   = "default" KwEnd ;
             // travels as cv, which is what lets a constant expression fold.
             return function(b) { return {b: b, v: zero, ct: ct, cv: cv} }
         }
-        var k = kint(cv)
+        var k = kct(ct, cv)
         return function(b) { return {b: b, v: k, ct: ct, cv: cv} }
     }
     function makeInt(n) { return makeNum(n, ctInt) }
-    // An integer constant carries the type its suffix names: u/U unsigned, l/L long.
-    function makeNumLit(n, text) { return makeNum(n, intCtOf(text)) }
-    function intCtOf(text) {
+    // An integer constant carries the type its suffix names and its VALUE selects
+    // (C11 6.4.4.1p5), and a 64-bit one is emitted from its exact two-half reading
+    // rather than from the double parseCInt answered.
+    function makeNumLit(n, text) {
+        var p = parseCInt64(text)
+        var ct = intCtOf(text, p)
+        if (ct.w < 8) return makeNum(n, ct)
+        var k = k64exact(p)
+        var cv = u64Num(p, ct.u == true)
+        return function(b) { return {b: b, v: k, ct: ct, cv: cv, big: true} }
+    }
+    // The suffix names the smallest rank and the signedness; the type is then the
+    // first one of that rank's list that holds the value. A decimal constant only ever
+    // picks a signed type, a hexadecimal / octal / binary one may pick the unsigned
+    // one of the same rank - which is what makes sizeof(0xFFFFFFFF) 4 while
+    // sizeof(5000000000) is 8.
+    function intCtOf(text, p) {
         var nl = 0
         var u = false
+        var isDec = true
+        if (text.length > 1 && text.charCodeAt(0) == 48) { isDec = false }
         for (var i = 0; i < text.length; i++) {
             var cc = text.charCodeAt(i)
             if (cc == 108 || cc == 76) nl = nl + 1
             else if (cc == 117 || cc == 85) u = true
             else if (!((cc >= 48 && cc <= 57) || (cc >= 97 && cc <= 102) || (cc >= 65 && cc <= 70) || cc == 120 || cc == 88)) break
         }
-        return ctI(nl > 0 ? 8 : 4, u)
+        if (nl > 0) return ctI(8, u)
+        var fitsU32 = (p.hi == 0)
+        var fitsI32 = (p.hi == 0 && (p.lo & 2147483648) == 0)
+        var fitsI64 = ((p.hi & 2147483648) == 0)
+        if (u) return fitsU32 ? ctI(4, true) : ctI(8, true)
+        if (fitsI32) return ctI(4, false)
+        if (!isDec && fitsU32) return ctI(4, true)
+        if (fitsI64) return ctI(8, false)
+        return ctI(8, true)
     }
     // A floating constant: f/F makes it a float, l/L a long double (modelled as a
     // double, like every long double here).
@@ -2567,14 +2738,15 @@ KwDefault   = "default" KwEnd ;
             var ct = r.ct != undefined ? r.ct : ctInt
             if (ct.k == "arr") return {b: r.b, v: r.b.NewGetElementPtr(ctLTy(ct), r.v, [zero, zero]), ct: {k: "ptr", p: ct.e}}
             if (ct.k == "struct") return {b: r.b, v: r.v, ct: ct}
-            return {b: r.b, v: r.b.NewLoad(ct.k == "ptr" ? i32p : i32, r.v), ct: ct}
+            return {b: r.b, v: r.b.NewLoad(ct.k == "ptr" ? i32p : ctLTy(ct), r.v), ct: ct}
         }
     }
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
             var ct = promote(r.ct != undefined ? r.ct : ctInt)
-            if (r.cv != undefined) {
+            // A 64-bit constant would fold through a double, so it is emitted.
+            if (r.cv != undefined && !(ct.k == "int" && ct.w >= 8)) {
                 var cv = convertNum(ct, 0 - r.cv)
                 return {b: r.b, v: kint(isFlt(ct) ? 0 : cv), ct: ct, cv: cv}
             }
@@ -2583,7 +2755,7 @@ KwDefault   = "default" KwEnd ;
                 var d = fltOperand(r.b, r, ct)
                 return {b: r.b, v: r.b.NewXor(d, r.b.NewShl(one64, k64(63))), ct: ct}
             }
-            return {b: r.b, v: emitConv(r.b, ct, r.b.NewSub(zero, r.v)), ct: ct}
+            return {b: r.b, v: emitConv(r.b, ct, r.b.NewSub(kct(ct, 0), emitConv(r.b, ct, r.v, r.ct)), ct), ct: ct}
         }
     }
     makeNot = function(t) {
@@ -2593,19 +2765,19 @@ KwDefault   = "default" KwEnd ;
                 var cv = (r.cv == 0) ? 1 : 0
                 return {b: r.b, v: kint(cv), ct: ctInt, cv: cv}
             }
-            return {b: r.b, v: toInt(r.b, r.b.NewICmp(llvm.enum.IPredEQ, r.v, zero)), ct: ctInt}
+            return {b: r.b, v: toInt(r.b, r.b.NewICmp(llvm.enum.IPredEQ, r.v,
+                        llvm.types.IsPointer(r.v.Type()) ? llvm.constant.NewNull(i32p) : (llIs64(r.v) ? zero64 : zero))), ct: ctInt}
         }
     }
     function makeBitNot(t) {
-        var minusOne = llvm.constant.NewInt(i32, -1)
         return function(b) {
             var r = t(b)
             var ct = promote(r.ct != undefined ? r.ct : ctInt)
-            if (r.cv != undefined) {
+            if (r.cv != undefined && !(ct.k == "int" && ct.w >= 8)) {
                 var cv = convertNum(ct, ~r.cv)
                 return {b: r.b, v: kint(cv), ct: ct, cv: cv}
             }
-            return {b: r.b, v: emitConv(r.b, ct, r.b.NewXor(r.v, minusOne)), ct: ct}
+            return {b: r.b, v: emitConv(r.b, ct, r.b.NewXor(emitConv(r.b, ct, r.v, r.ct), kct(ct, -1)), ct), ct: ct}
         }
     }
 
@@ -2645,7 +2817,10 @@ KwDefault   = "default" KwEnd ;
     function coerce(b, ct, r) {
         var rct = r.ct != undefined ? r.ct : ctInt
         if (ct != undefined && isFlt(ct)) return fltOperand(b, r, ct)
-        if (isFlt(rct)) return emitConv(b, ct != undefined ? ct : ctInt, emitD2I(b, dblOf(b, r)))
+        if (isFlt(rct)) return emitConv(b, ct != undefined ? ct : ctInt, emitD2I(b, dblOf(b, r)), ctI(8, false))
+        // An integer destination also fixes the REGISTER WIDTH: a long assigned into
+        // an int truncates, an int assigned into a long sign- or zero-extends.
+        if (ct != undefined && ct.k == "int" && rct.k == "int") return emitConv(b, ct, r.v, rct)
         return r.v
     }
     function isCmpOp(op) {
@@ -2675,7 +2850,8 @@ KwDefault   = "default" KwEnd ;
             // The index is widened to i64 first: the IR interpreter scales a gep
             // index as an UNSIGNED register, so a negative i32 index (p - 1) would
             // wrap into a wild address instead of stepping backwards.
-            var off = b.NewSExt((lp != undefined) ? r : l, llvm.types.I64)
+            var offSrc = (lp != undefined) ? r : l
+            var off = llIs64(offSrc) ? offSrc : b.NewSExt(offSrc, llvm.types.I64)
             if (op == "-") off = b.NewSub(llvm.constant.NewInt(llvm.types.I64, 0), off)
             var bct = (lp != undefined) ? lct : rct
             return {b: b, v: b.NewGetElementPtr(ctLTy(el), base, [off]),
@@ -2685,7 +2861,12 @@ KwDefault   = "default" KwEnd ;
         // A shift keeps the LEFT operand's promoted type (C11 6.5.7p3).
         if (op == "<<" || op == ">>") { ct = promote(lct) }
         var out = isCmpOp(op) ? ctInt : ct
-        if (lr.cv != undefined && rr.cv != undefined) {
+        // Constant folding runs on JS doubles, which stop being exact integers at
+        // 2^53, so it is switched OFF whenever the common type is 64 bits wide: the
+        // module then carries real i64 instructions on exact i64 constants, which is
+        // both correct and what the interpreter half computes.
+        var wide64 = (ct.k == "int" && ct.w >= 8)
+        if (lr.cv != undefined && rr.cv != undefined && !wide64) {
             var cv = constBin(op, ct, convertNum(ct, lr.cv), convertNum(op == "<<" || op == ">>" ? rct : ct, rr.cv))
             return {b: b, v: kint(out.k == "flt" ? 0 : cv), ct: out, cv: cv}
         }
@@ -2695,8 +2876,13 @@ KwDefault   = "default" KwEnd ;
             if (isCmpOp(op)) return {b: b, v: emitDCmp(b, op, xf, yf), ct: ctInt}
             return {b: b, v: emitDBin(b, op, xf, yf), ct: ct}
         }
-        var lv = emitConv(b, ct, l)
-        var rv = (op == "<<" || op == ">>") ? r : emitConv(b, ct, r)
+        var lv = emitConv(b, ct, l, lct)
+        // The shift COUNT keeps its own type in C, but LLVM wants both operands of a
+        // shl / lshr / ashr in the same register width, so it is widened (or narrowed)
+        // to the left operand's - never masked, which would change the value.
+        var rv = (op == "<<" || op == ">>")
+                 ? emitWiden(b, r, rct.k == "int" && rct.u == true, ct.k == "int" && ct.w >= 8)
+                 : emitConv(b, ct, r, rct)
         if (isCmpOp(op)) {
             // Pointer comparisons (p != 0, p == q): both operands become uniform i32*.
             if (llvm.types.IsPointer(lv.Type()) || llvm.types.IsPointer(rv.Type())) {
@@ -2724,7 +2910,7 @@ KwDefault   = "default" KwEnd ;
         else if (op == "&") v = b.NewAnd(lv, rv)
         else if (op == "<<") v = b.NewShl(lv, rv)
         else if (op == ">>") v = ct.u == true ? b.NewLShr(lv, rv) : b.NewAShr(lv, rv)
-        return {b: b, v: emitConv(b, ct, v), ct: ct}
+        return {b: b, v: emitConv(b, ct, v, ct), ct: ct}
     }
     // The shared foldBinary drops the C type, so the C grammar keeps its own.
     foldBinary = function(items) {
@@ -2803,7 +2989,7 @@ KwDefault   = "default" KwEnd ;
         } else if (ct != undefined && ct.k == "ptr") {
             v = b.NewIntToPtr(v, i32p)
         } else if (ct != undefined) {
-            v = emitConv(b, ct, v)
+            v = emitConv(b, ct, v, ct)
         }
         b.NewStore(v, addr)
         return v
@@ -2905,14 +3091,19 @@ KwDefault   = "default" KwEnd ;
             return {b: b, v: v, ct: vct}
         }
     }
-    function emitCallArgs(b, args, into) {
+    function emitCallArgs(b, args, into, pcts) {
         for (var i = 0; i < args.length; i++) {
             var r = args[i](b)
             b = r.b
             // Pointer arguments (&pt, &nodes[i]) become uniform i32* like the parameters;
             // a floating-point argument travels as its i64 bit pattern.
             if (r.ct != undefined && isFlt(r.ct)) { into.push(dblOf(b, r)); continue }
-            into.push(llvm.types.IsPointer(r.v.Type()) ? b.NewBitCast(r.v, i32p) : r.v)
+            if (llvm.types.IsPointer(r.v.Type())) { into.push(b.NewBitCast(r.v, i32p)); continue }
+            // A declared parameter type fixes the argument's register width, so a
+            // long parameter receives an i64 and an int parameter an i32.
+            var pct = (pcts != undefined && i < pcts.length) ? pcts[i] : undefined
+            if (pct != undefined && pct.k == "int") { into.push(coerce(b, pct, r)); continue }
+            into.push(emitWiden(b, r.v, r.ct != undefined && r.ct.k == "int" && r.ct.u == true, false))
         }
         return b
     }
@@ -2924,10 +3115,10 @@ KwDefault   = "default" KwEnd ;
             dest = b.NewAlloca(ctLTy(sct))
             argValues.push(b.NewBitCast(dest, i32p))
         }
-        b = emitCallArgs(b, args, argValues)
+        b = emitCallArgs(b, args, argValues, paramCtsOf(name))
         var cv = b.NewCall(getFuncByArity(name, args.length), argValues)
         if (sct != undefined) return {b: b, v: dest, ct: sct}
-        return {b: b, v: cv, ct: ctInt}
+        return {b: b, v: cv, ct: hasOwn(funcRetCt, name) ? funcRetCt[name] : ctInt}
     }
     function emitIndirectCall(b, idv, args) {
         var argValues = []
@@ -3049,8 +3240,9 @@ KwDefault   = "default" KwEnd ;
         var isPtr = ct.k == "ptr"
         staticSeq = staticSeq + 1
         var gname = name + ".static." + staticSeq
-        var g = m.NewGlobalDef(gname, isPtr ? llvm.constant.NewNull(i32p) : zero)
-        var entry = {val: g, arr: false, load: isPtr ? i32p : i32, ct: ct}
+        var slty = ctLTy(ct)
+        var g = m.NewGlobalDef(gname, isPtr ? llvm.constant.NewNull(i32p) : llvm.constant.NewZeroInitializer(slty))
+        var entry = {val: g, arr: false, ty: slty, load: isPtr ? i32p : slty, ct: ct}
         var flag = (opt != undefined) ? m.NewGlobalDef(gname + ".done", zero) : undefined
         return function(b) {
             declVar(name, entry)
@@ -3182,8 +3374,9 @@ KwDefault   = "default" KwEnd ;
                 return deadBlock()
             }
             var r = t(b)
-            // Every function of this model returns an int.
-            r.b.NewRet(coerce(r.b, ctInt, r))
+            // Every function of this model returns an int, unless it was declared to
+            // return a 64-bit type - then the value keeps its full width.
+            r.b.NewRet(coerce(r.b, curFnRetCt, r))
             return deadBlock()
         }
     }
@@ -3270,7 +3463,21 @@ KwDefault   = "default" KwEnd ;
         var bodyT = pop()
         var params = pop()
         var name = pop()
+        var star = pop()
+        var rt = (typeof star == "string") ? pop() : star
+        noteRetCt(name, (typeof star == "string") ? undefined : rt.ret)
         emitFunctionBody(name, params, bodyT, undefined)
+    }
+    // A prototype only records the shape: the name and the parameters are dropped, the
+    // return type is remembered so a call that PRECEDES the definition already emits
+    // the right return width.
+    function registerProto() {
+        var params = pop()
+        var name = pop()
+        var star = pop()
+        var rt = (typeof star == "string") ? pop() : star
+        noteRetCt(name, (typeof star == "string") ? undefined : rt.ret)
+        noteParamCts(name, params)
     }
     // The C type a 'struct S' / 'union U' / 'struct S *' return type names.
     function makeRetCt(items) { return ptrTo(starsOf(items[1]), ctStruct(items[0])) }
@@ -3287,11 +3494,16 @@ KwDefault   = "default" KwEnd ;
     // The current function's by-value struct destination, read by makeReturn.
     var curSret = undefined
     var curRetCt = undefined
+    // The C type the function currently being emitted returns (int unless it was
+    // declared to return a 64-bit type, in which case the LLVM return type is i64).
+    var curFnRetCt = ctInt
     function emitFunctionBody(name, params, bodyT, sretCt) {
         if (sretCt != undefined) { structRet[name] = sretCt }
         userFuncs[name] = params.length
+        noteParamCts(name, params)
         var f = getFunc(name, params)
         curF = f
+        curFnRetCt = hasOwn(funcRetCt, name) ? funcRetCt[name] : ctInt
         labelBlocks = {}   // Labels are function scoped.
         var b = f.NewBlock("entry")
         scopes.push({})
@@ -3308,16 +3520,18 @@ KwDefault   = "default" KwEnd ;
                 declVar(params[i].name, {val: a, arr: false, ct: pct})
                 continue
             }
-            var pty = params[i].ptr ? i32p : i32
+            var pty = params[i].ptr ? i32p
+                      : ((pct != undefined && pct.k == "int" && pct.w >= 8) ? llvm.types.I64 : i32)
             var ptr = b.NewAlloca(pty)
             b.NewStore(f.Params[i + off], ptr)
-            declVar(params[i].name, {val: ptr, arr: false, load: pty, ct: pct})
+            declVar(params[i].name, {val: ptr, arr: false, ty: pty, load: pty, ct: pct})
         }
         b = bodyT(b)
-        b.NewRet(zero)
+        b.NewRet(kct(curFnRetCt, 0))
         scopes.pop()
         curSret = undefined
         curRetCt = undefined
+        curFnRetCt = ctInt
     }
 
     // ----- typedef -----

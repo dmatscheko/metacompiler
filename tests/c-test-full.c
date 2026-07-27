@@ -27,8 +27,9 @@
 // VLAs (optional in C11), flexible array members, _Atomic and threads, setjmp,
 // wide-character semantics (wide literals appear via sizeof only), K&R-style
 // declarations, and anything undefined or implementation-defined - except the
-// two pins the feature-matrix file already relies on: the 32-bit-int /
-// 64-bit-pointer data model (sizeof checks) and the ASCII execution character
+// two pins the feature-matrix file already relies on: the LP64 data model -
+// 32-bit int, 64-bit long, long long and pointer (sizeof checks, and sections
+// 27-29) - and the ASCII execution character
 // set ('A' + 1 == 'B'). Binary 0b literals (a C23-ism) are included because
 // the reference toolchain accepts them warning-free under -std=c11.
 //
@@ -643,6 +644,205 @@ int s26(void) {
     return 0;
 }
 
+// ===== SECTION 27: 64-bit integers - literals, widths and conversions =====
+/* Every check in sections 27-29 is pinned against cc on this host: LP64, so long
+   and long long are both 64 bits while int is 32. Wrap-around is only exercised
+   on the UNSIGNED types, where C defines it. */
+
+long s27_gl = 5000000000L;              /* a global wider than 32 bits */
+unsigned long s27_gu = 18446744073709551615UL;
+
+int s27(void) {
+    long l = 5000000000L;
+    check(2701, l / 1000000 == 5000);
+    check(2702, l * 2 == 10000000000L);
+    check(2703, l - 5000000001L == -1);
+    long long ll = 9223372036854775807LL;
+    check(2704, ll == 9223372036854775807LL);
+    check(2705, ll - 1 == 9223372036854775806LL);
+    unsigned long ul = 18446744073709551615UL;
+    check(2706, ul + 1 == 0);
+    check(2707, ul / 3 == 6148914691236517205UL);
+    check(2708, ul > 0);
+    check(2709, (long)ul == -1);
+    check(2710, 1L << 40 == 1099511627776L);
+    check(2711, (1LL << 62) / 2 == 2305843009213693952LL);
+    check(2712, (-1L) >> 1 == -1L);
+    check(2713, (18446744073709551615UL) >> 60 == 15UL);
+    check(2714, -7 / 2 == -3);
+    check(2715, -7 % 2 == -1);
+    check(2716, 7 / -2 == -3);
+    check(2717, 7 % -2 == 1);
+    check(2718, -7L / 2L == -3L);
+    check(2719, -7L % 2L == -1L);
+    check(2720, sizeof(long) == 8 && sizeof(long long) == 8 && sizeof(int) == 4);
+    check(2721, s27_gl / 1000 == 5000000);
+    check(2722, s27_gu == 18446744073709551615UL);
+    check(2723, (int)l == 705032704);
+    check(2724, (long)(int)l == 705032704L);
+    check(2725, (unsigned)-1 == 4294967295U);
+    check(2726, (long)(unsigned)-1 == 4294967295L);
+    check(2727, (long)-1 == -1L);
+    check(2728, (unsigned long)-1 == 18446744073709551615UL);
+    check(2729, (char)300 == 44);
+    check(2730, (unsigned char)300 == 44);
+    check(2731, (short)70000 == 4464);
+    check(2732, (unsigned short)70000 == 4464);
+    check(2733, (signed char)-200 == 56);
+    return 0;
+}
+
+// ===== SECTION 28: 64-bit integers - promotion, wrap-around, exact arithmetic =====
+
+int s28(void) {
+    unsigned u = 4294967295U;
+    check(2801, u + 1 == 0);
+    check(2802, u * 2 == 4294967294U);
+    long l = 5000000000L;
+    int i = -1;
+    check(2803, l + i == 4999999999L);
+    check(2804, (l > i) == 1);
+    unsigned ux = 1;
+    check(2805, (i > ux) == 1);         /* -1 converts to unsigned: huge */
+    check(2806, ((long)i > ux) == 0);   /* long wins, so it stays -1 */
+    long long a = -9007199254740993LL;  /* -(2^53 + 1): past the exact double range */
+    check(2807, a % 2 == -1);
+    check(2808, a / 2 == -4503599627370496LL);
+    check(2809, a - 1 == -9007199254740994LL);
+    long long b = 3037000499LL;
+    check(2810, b * b == 9223372030926249001LL);
+    check(2811, 18446744073709551615UL % 1000000007UL == 582344007UL);
+    check(2812, (1UL << 63) == 9223372036854775808UL);
+    check(2813, (long long)(1UL << 63) == -9223372036854775807LL - 1);
+    check(2814, (0xF0F0F0F0F0F0F0F0UL & 0x00FF00FF00FF00FFUL) == 0x00F000F000F000F0UL);
+    check(2815, (0xF0F0F0F0F0F0F0F0UL | 0x0F0F0F0F0F0F0F0FUL) == 18446744073709551615UL);
+    check(2816, (0xF0F0F0F0F0F0F0F0UL ^ 0xFFFFFFFFFFFFFFFFUL) == 0x0F0F0F0F0F0F0F0FUL);
+    check(2817, ~0L == -1L);
+    check(2818, ~0UL == 18446744073709551615UL);
+    return 0;
+}
+
+// ===== SECTION 29: 64-bit integers - assignment, stepping, calls, truth =====
+
+long s29_id(long v) { return v; }       /* a 64-bit parameter and return value */
+int s29_narrow(long v) { return v; }    /* the declared int return TRUNCATES */
+
+int s29(void) {
+    long c = 1;
+    c <<= 40; check(2901, c == 1099511627776L);
+    c /= 1024; check(2902, c == 1073741824L);
+    c *= 4;    check(2903, c == 4294967296L);
+    c -= 1;    check(2904, c == 4294967295L);
+    c %= 1000000007L; check(2905, c == 294967267L);
+    long d = 4294967295L;
+    d++; check(2906, d == 4294967296L);
+    d--; check(2907, d == 4294967295L);
+    check(2908, sizeof(5000000000) == 8);
+    check(2909, sizeof(1) == 4);
+    check(2910, 5000000000 / 1000000 == 5000);
+    check(2911, sizeof(0xFFFFFFFF) == 4);
+    check(2912, 0xFFFFFFFF == 4294967295U);
+    check(2913, sizeof(0xFFFFFFFFF) == 8);
+    int arr[4];
+    long k = 2;
+    arr[k] = 9;
+    check(2914, arr[2] == 9);
+    check(2915, s29_id(5000000000L) == 5000000000L);
+    check(2916, s29_id(-5000000000L) / 1000000 == -5000);
+    check(2917, s29_narrow(5000000000L) == 705032704);
+    long x = 5000000000L;
+    check(2918, (x ? 1 : 0) == 1);
+    check(2919, (0L ? 1 : 0) == 0);
+    check(2920, (!5000000000L) == 0);
+    check(2921, (4294967296L && 1) == 1);
+    unsigned long z = 0UL;
+    check(2922, (z ? 1 : 0) == 0);
+    check(2923, (!z) == 1);
+    return 0;
+}
+
+// ===== SECTION 30: 64-bit integers in aggregates, pointers and loops =====
+
+struct S30 { int a; long b; unsigned long c; };
+long s30_tab[4] = { 1L, 5000000000L, -5000000000L, 0L };
+
+long s30_sum(long *p, int n) { long s = 0; int i; for (i = 0; i < n; i++) { s = s + p[i]; } return s; }
+
+int s30(void) {
+    struct S30 s;
+    s.a = 7; s.b = 5000000000L; s.c = 18446744073709551615UL;
+    check(3001, s.a == 7);
+    check(3002, s.b / 1000000 == 5000);
+    check(3003, s.c == 18446744073709551615UL);
+    check(3004, s30_tab[1] / 1000000 == 5000);
+    check(3005, s30_tab[2] / 1000000 == -5000);
+    check(3006, s30_sum(s30_tab, 4) == 1L);
+    long *q = s30_tab + 1;
+    check(3007, *q / 1000000 == 5000);
+    check(3008, (q - s30_tab) == 1);
+    check(3009, q[1] / 1000000 == -5000);
+    long acc = 0;
+    int i;
+    for (i = 0; i < 10; i++) { acc = acc * 10 + i; }
+    check(3010, acc == 123456789L);
+    long m[3];
+    m[0] = 1L; m[1] = 1L; m[2] = 0L;
+    for (i = 0; i < 60; i++) { m[2] = m[0] + m[1]; m[0] = m[1]; m[1] = m[2]; }
+    check(3011, m[2] == 4052739537881L);      /* fib(62), past 32 bits */
+    unsigned long h = 14695981039346656037UL; /* the FNV-1a 64 offset basis */
+    h = h ^ 65;
+    h = h * 1099511628211UL;                  /* wraps at 2^64 on every step */
+    check(3012, h == 12638222384927744748UL);
+    switch ((int)(s.b % 7)) { case 2: check(3013, 1); break; default: check(3013, 0); break; }
+    return 0;
+}
+
+// ===== SECTION 31: 64-bit integers - typedefs, literal bases, mixed widths =====
+
+typedef long s31_myl;
+
+int s31(void) {
+    s31_myl t = 5000000000L;            /* the width survives a typedef */
+    check(3101, t / 1000000 == 5000);
+    long n = 10000000000L;
+    int steps = 0;
+    while (n > 1L) { n = n / 3; steps++; }
+    check(3102, steps == 21);
+    long r = (1L, 5000000000L);         /* comma operator */
+    check(3103, r / 1000000 == 5000);
+    check(3104, (1 ? 5000000000L : 0L) / 1000000 == 5000);
+    long u = 5000000000L;
+    check(3105, -u / 1000000 == -5000);
+    char c1 = 100; char c2 = 100;       /* the narrow widths are unchanged */
+    check(3106, c1 + c2 == 200);
+    short sh = 30000;
+    check(3107, sh + sh == 60000);
+    check(3108, (short)(sh + sh) == -5536);
+    check(3109, (long)(char)(int)300L == 44);
+    check(3110, (5000000000L > c1) == 1);
+    check(3111, 0x7FFFFFFFFFFFFFFFLL == 9223372036854775807LL);
+    check(3112, 01000000000000000000000UL == 9223372036854775808UL);
+    check(3113, 0b1000000000000000000000000000000000000000L == 549755813888L);
+    return 0;
+}
+
+// ===== SECTION 32: 64-bit integers and floating point =====
+
+int s32(void) {
+    long l = 5000000000L;
+    double d = (double)l;                   /* a 64-bit integer widens exactly */
+    check(3201, d / 1000000.0 == 5000.0);
+    check(3202, (long)(d * 2.0) == 10000000000L);
+    double e = 1e18;
+    check(3203, (long)e == 1000000000000000000L);   /* past 2^31, so the i32 truncation showed */
+    float f = (float)l;
+    check(3204, (long)f > 4000000000L);
+    check(3205, (double)18446744073709551615UL > 1e19);
+    check(3206, (long)(-2.5e9) == -2500000000L);
+    check(3207, (long)3.7 == 3 && (long)(-3.7) == -3);  /* truncation towards zero */
+    return 0;
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -672,6 +872,12 @@ int main() {
     s24(); // SECTION-CALL 24
     s25(); // SECTION-CALL 25
     s26(); // SECTION-CALL 26
+    s27(); // SECTION-CALL 27
+    s28(); // SECTION-CALL 28
+    s29(); // SECTION-CALL 29
+    s30(); // SECTION-CALL 30
+    s31(); // SECTION-CALL 31
+    s32(); // SECTION-CALL 32
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

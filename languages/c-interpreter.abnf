@@ -32,6 +32,11 @@ unsigned divide, remainder, shift and comparison differ from the signed one, 0u 
 wraps to 4294967295 where 0 - 1 is -1, a cast really converts, sizeof answers the size
 of what it is applied to (including a whole array or struct), string literals are char
 arrays that can be indexed and measured, and _Generic selects on the type.
+long and long long are REAL 64-bit types (LP64, like cc on this host): their literals,
+arithmetic, wrap-around, shifts and unsigned comparisons all run through the
+language-neutral sized-integer layer of lib/interp-core.js, so 5000000000L keeps every
+bit and (unsigned long)-1 is 18446744073709551615. A declared return type converts the
+returned value, so a function declared int truncates a long.
 Not in the subset: aggregate initializers on globals, and variable-length arrays.
 
 The interpreter uses one flat, word addressed memory array: every variable lives at an
@@ -618,12 +623,12 @@ AnonBits    <~~ push({padBits: pop()}) ~~> = ":" Number ;
 
 // A function prototype (int putchar(int c);) is accepted and ignored: the callees
 // are resolved by name anyway. It keeps the test programs valid for a real C compiler.
-Proto       <~~ pop(); pop() /* Drop the collected name and parameters. */ ~~>
-            = TypeInt [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
+Proto       <~~ pop(); pop(); pop() /* Drop the return type, name and parameters. */ ~~>
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> [ PStars <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } ";" ;
 
 // The merged pushes: [name, [params...], bodyThunk]. A parameter is {name, ptr, sname?}.
 FuncDef     <~~ defineFunction() ~~>
-            = TypeInt [ PStars ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+            = TypeInt <~~ push({ret: baseCtOf(up.in)}) ~~> [ PStars <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 
 // A function whose RETURN type is a struct or union (by value, or a pointer to one).
 // A struct value is an address into the flat memory, and the memory of a call frame
@@ -1233,7 +1238,10 @@ KwDefault   = "default" KwEnd ;
         return -1
     }
     // A C integer constant: 0x/0X hex, 0b/0B binary, a leading 0 octal, or decimal,
-    // with any run of u/U/l/L suffix letters. Read as a 32-bit two's complement value.
+    // with any run of u/U/l/L suffix letters. Read EXACTLY at 64 bits: the digits are
+    // accumulated through szArith, so 18446744073709551615 keeps every bit instead of
+    // rounding to the nearest double. The result is a plain number while it fits a
+    // signed 64-bit double and the sized-integer box beyond that.
     function parseCInt(s) {
         var base = 10
         var i = 0
@@ -1243,13 +1251,14 @@ KwDefault   = "default" KwEnd ;
             else if (c1 == 98 || c1 == 66) { base = 2; i = 2 }
             else { base = 8; i = 1 }
         }
-        var v = 0
+        var v = anytype
+        v = 0
         for (; i < s.length; i++) {
             var d = digVal(s.charCodeAt(i))
             if (d < 0 || d >= base) break   // The u/U/l/L suffix run ends the digits.
-            v = v * base + d
+            v = szArith("+", szArith("*", v, base), d)
         }
-        return v | 0
+        return v
     }
     // The value of one character-constant body, including the C escape sequences:
     // backslash x with hex digits, backslash with up to three octal digits, and the
@@ -1492,7 +1501,7 @@ KwDefault   = "default" KwEnd ;
         var opt = items[1]
         return function() {
             var a = alloc(1)
-            if (opt != undefined) mem[a] = (opt().v != 0) ? 1 : 0
+            if (opt != undefined) mem[a] = nzv(opt().v) ? 1 : 0
             declVar(name, a, false, ctI(1, true))
         }
     }
@@ -1589,16 +1598,25 @@ KwDefault   = "default" KwEnd ;
     // Give a value the representation its C type pins: an integer wraps to its
     // declared width and signedness (C11 6.3.1.3), a float keeps its value.
     function convert(ct, x) {
-        if (ct.k == "flt") return x
+        if (ct.k == "flt") return szIs(x) ? szNum(x) : x
         if (ct.k == "int") {
-            var n = trunc0(x)
+            // A 64-bit type goes through the sized-integer box (szConv wraps to the
+            // width and answers a plain number whenever a signed 64-bit value fits a
+            // double exactly), so long / long long / unsigned long keep every bit.
+            if (ct.w >= 8) return szConv(szIs(x) ? x : trunc0(x), 64, ct.u == true)
+            // A narrower type truncates in the box domain first when the source is a
+            // box: masking a rounded double would take the wrong low bits.
+            var n = szIs(x) ? szNum(szConv(x, ct.w * 8, ct.u == true)) : trunc0(x)
+            if (szIs(x)) return n
             if (ct.w == 1) return ct.u ? (n & 255) : ((n << 24) >> 24)
             if (ct.w == 2) return ct.u ? (n & 65535) : ((n << 16) >> 16)
-            if (ct.w >= 8) return n     // 64 bit values ride on the JS double
             return ct.u ? (n >>> 0) : (n | 0)
         }
-        return trunc0(x)                // pointers and function pointers: addresses
+        return szIs(x) ? szNum(x) : trunc0(x)   // pointers: addresses
     }
+    // Nonzero, the C truth test, safe on a boxed 64-bit value (an unsigned 64-bit
+    // zero IS a box, so a bare '!= 0' would call it true).
+    function nzv(v) { return szIs(v) ? !szEq(v, 0) : (v != 0) }
     // The integer promotions: anything narrower than int is evaluated as an int.
     function promote(ct) { return (ct.k == "int" && ct.w < 4) ? ctInt : ct }
     // The usual arithmetic conversions (C11 6.3.1.8): the common type of a binary
@@ -1958,7 +1976,11 @@ KwDefault   = "default" KwEnd ;
         }
         var r = f.body()
         scopes = callerScopes
-        return (r != undefined && r.isRet) ? r.v : val(0, ctInt)
+        if (r == undefined || !r.isRet) return val(0, ctInt)
+        if (f.ret != undefined && f.ret.k == "int" && r.v.t != undefined && r.v.t.k == "int") {
+            return val(convert(f.ret, r.v.v), f.ret)
+        }
+        return r.v
     }
 
     // ----- goto and labels -----
@@ -2000,17 +2022,33 @@ KwDefault   = "default" KwEnd ;
     function makeNum(n, ct) { var v = convert(ct, n); return function() { return val(v, ct) } }
     function makeInt(n) { return makeNum(n, ctInt) }
     // An integer constant carries the type its suffix names: u/U unsigned, l/L long.
-    function makeNumLit(n, text) { return makeNum(n, intCtOf(text)) }
-    function intCtOf(text) {
+    function makeNumLit(n, text) { return makeNum(n, intCtOf(text, n)) }
+    // The type of an integer constant (C11 6.4.4.1p5): the suffix names the smallest
+    // rank and the signedness, and the type is then the FIRST one in the list for that
+    // rank/base that can hold the value. A decimal constant only ever picks a signed
+    // type; a hexadecimal, octal or binary one may pick the unsigned one of the same
+    // rank - which is what makes sizeof(0xFFFFFFFF) 4 and sizeof(5000000000) 8.
+    function intCtOf(text, n) {
         var nl = 0
         var u = false
+        var isDec = true
+        if (text.length > 1 && text.charCodeAt(0) == 48) { isDec = false }
         for (var i = 0; i < text.length; i++) {
             var cc = text.charCodeAt(i)
             if (cc == 108 || cc == 76) nl = nl + 1
             else if (cc == 117 || cc == 85) u = true
             else if (!((cc >= 48 && cc <= 57) || (cc >= 97 && cc <= 102) || (cc >= 65 && cc <= 70) || cc == 120 || cc == 88)) break
         }
-        return ctI(nl > 0 ? 8 : 4, u)
+        if (nl > 0) return ctI(8, u)
+        // Does the value still read back the same at 32 bits? szEq compares by value,
+        // so a constant that survives the round trip keeps the narrow type.
+        if (u) { if (szEq(szConv(n, 32, true), n)) return ctI(4, true); return ctI(8, true) }
+        if (szEq(szConv(n, 32, false), n)) return ctI(4, false)
+        if (!isDec && szEq(szConv(n, 32, true), n)) return ctI(4, true)
+        // parseCInt accumulates at 64 bits, so a value that has wrapped NEGATIVE is
+        // one that did not fit a signed 64-bit type: the unsigned one holds it.
+        if (szCmp(n, 0) < 0) return ctI(8, true)
+        return ctI(8, false)
     }
     // A floating constant: f/F makes it a float, l/L a long double (modelled as a
     // double, like every long double here).
@@ -2071,7 +2109,7 @@ KwDefault   = "default" KwEnd ;
             var s = path[i]
             bf = undefined
             if (s.idx != undefined) {
-                var idx = s.idx().v
+                var idx = szNum(s.idx().v)
                 if (ct.k == "arr") { ct = ct.e; addr = addr + idx * ctSize(ct) }
                 else if (ct.k == "ptr") { ct = ct.p; addr = load(addr) + idx * ctSize(ct) }
                 else fail("indexing needs an array or a pointer: " + name)
@@ -2185,11 +2223,12 @@ KwDefault   = "default" KwEnd ;
             return val(load(p.a), ct)
         }
     }
-    makeNot = function(t) { return function() { return val(t().v == 0 ? 1 : 0, ctInt) } }
+    makeNot = function(t) { return function() { return val(nzv(t().v) ? 0 : 1, ctInt) } }
     makeNeg = function(t) {
         return function() {
             var r = t()
             var ct = promote(r.t)
+            if (ct.k == "int") return val(convert(ct, szArith("-", 0, r.v)), ct)
             return val(convert(ct, 0 - r.v), ct)
         }
     }
@@ -2197,7 +2236,7 @@ KwDefault   = "default" KwEnd ;
         return function() {
             var r = t()
             var ct = promote(r.t)
-            return val(convert(ct, ~r.v), ct)
+            return val(convert(ct, szNot(r.v)), ct)
         }
     }
 
@@ -2213,48 +2252,56 @@ KwDefault   = "default" KwEnd ;
         var rp = pointeeOf(r.t)
         if (lp != undefined || rp != undefined) {
             if (op == "-" && lp != undefined && rp != undefined) {
-                return val(trunc0((l.v - r.v) / ctSize(lp)), ctInt)
+                return val(trunc0((szNum(l.v) - szNum(r.v)) / ctSize(lp)), ctInt)
             }
             if (op == "+" || op == "-") {
                 var base = (lp != undefined) ? l : r
-                var off = (lp != undefined) ? r.v : l.v
+                var off = szNum((lp != undefined) ? r.v : l.v)
                 var el = (lp != undefined) ? lp : rp
                 if (op == "-") off = 0 - off
-                return val(base.v + off * ctSize(el), base.t.k == "arr" ? {k: "ptr", p: el} : base.t)
+                return val(szNum(base.v) + off * ctSize(el), base.t.k == "arr" ? {k: "ptr", p: el} : base.t)
             }
         }
         var ct = arithCt(l.t, r.t)
         var a = convert(ct, l.v)
         var b = convert(ct, r.v)
-        if (op == "==") return val(a == b ? 1 : 0, ctInt)
-        if (op == "!=") return val(a != b ? 1 : 0, ctInt)
-        if (op == "<")  return val(a < b ? 1 : 0, ctInt)
-        if (op == ">")  return val(a > b ? 1 : 0, ctInt)
-        if (op == "<=") return val(a <= b ? 1 : 0, ctInt)
-        if (op == ">=") return val(a >= b ? 1 : 0, ctInt)
-        if (op == "+") return val(convert(ct, a + b), ct)
-        if (op == "-") return val(convert(ct, a - b), ct)
-        if (op == "*") return val(convert(ct, a * b), ct)
-        if (op == "/") return val(convert(ct, isFlt(ct) ? (a / b) : trunc0(a / b)), ct)
-        if (op == "%") return val(convert(ct, a % b), ct)
+        // An INTEGER common type runs the operator through the sized-integer layer,
+        // which is exact at 64 bits and wraps at the result type's width; convert
+        // then re-applies the width for the narrow types (szArith works at 64).
+        var isI = ct.k == "int"
+        if (op == "==") return val((isI ? szEq(a, b) : (a == b)) ? 1 : 0, ctInt)
+        if (op == "!=") return val((isI ? !szEq(a, b) : (a != b)) ? 1 : 0, ctInt)
+        if (op == "<")  return val((isI ? (szCmp(a, b) < 0)  : (a < b))  ? 1 : 0, ctInt)
+        if (op == ">")  return val((isI ? (szCmp(a, b) > 0)  : (a > b))  ? 1 : 0, ctInt)
+        if (op == "<=") return val((isI ? (szCmp(a, b) <= 0) : (a <= b)) ? 1 : 0, ctInt)
+        if (op == ">=") return val((isI ? (szCmp(a, b) >= 0) : (a >= b)) ? 1 : 0, ctInt)
+        if (op == "+") return val(convert(ct, isI ? szArith("+", a, b) : (a + b)), ct)
+        if (op == "-") return val(convert(ct, isI ? szArith("-", a, b) : (a - b)), ct)
+        if (op == "*") return val(convert(ct, isI ? szArith("*", a, b) : (a * b)), ct)
+        if (op == "/") return val(convert(ct, isI ? szArith("/", a, b) : (a / b)), ct)
+        if (op == "%") return val(convert(ct, isI ? szArith("%", a, b) : (a % b)), ct)
         // The bitwise operators take integers only; the shift count keeps the LEFT
         // operand's type (C11 6.5.7p3), so it is not part of the common type.
-        if (op == "|")  return val(convert(ct, a | b), ct)
-        if (op == "^")  return val(convert(ct, a ^ b), ct)
-        if (op == "&")  return val(convert(ct, a & b), ct)
+        if (op == "|")  return val(convert(ct, szArith("|", a, b)), ct)
+        if (op == "^")  return val(convert(ct, szArith("^", a, b)), ct)
+        if (op == "&")  return val(convert(ct, szArith("&", a, b)), ct)
         var sct = promote(l.t)
         var sv = convert(sct, l.v)
-        if (op == "<<") return val(convert(sct, sv * Math.pow(2, r.v & 31)), sct)
-        if (op == ">>") return val(convert(sct, sct.u ? (sv >>> (r.v & 31)) : (sv >> (r.v & 31))), sct)
+        var sn = szNum(r.v)
+        // A shift count at or above the width is undefined in C; the reference
+        // toolchain on this host masks it, and so does this model.
+        if (sct.w >= 8) { sn = sn & 63 } else { sn = sn & 31 }
+        if (op == "<<") return val(convert(sct, szArith("<<", sv, sn)), sct)
+        if (op == ">>") return val(convert(sct, szArith(">>", sv, sn)), sct)
     }
     // Real C short circuit: the right side only runs if it can still change the result.
     makeOrAnd = function(items, op) {
         if (items.length == 1) return items[0]
         return function() {
-            var v = items[0]().v != 0
+            var v = nzv(items[0]().v)
             for (var i = 1; i < items.length; i++) {
-                if (op == "||") { if (v) return val(1, ctInt); v = items[i]().v != 0 }
-                else            { if (!v) return val(0, ctInt); v = items[i]().v != 0 }
+                if (op == "||") { if (v) return val(1, ctInt); v = nzv(items[i]().v) }
+                else            { if (!v) return val(0, ctInt); v = nzv(items[i]().v) }
             }
             return val(v ? 1 : 0, ctInt)
         }
@@ -2264,7 +2311,7 @@ KwDefault   = "default" KwEnd ;
     function makeCond(items) {
         if (items.length == 1) return items[0]
         return function() {
-            var r = items[0]().v != 0 ? items[1]() : items[2]()
+            var r = nzv(items[0]().v) ? items[1]() : items[2]()
             return r
         }
     }
@@ -2459,7 +2506,7 @@ KwDefault   = "default" KwEnd ;
                     if (r === BRK) break
                     if (r !== CONT) return r
                 }
-            } while (condT().v != 0)
+            } while (nzv(condT().v))
         }
     }
     function makeFor(items) {
@@ -2474,7 +2521,7 @@ KwDefault   = "default" KwEnd ;
             scopes.push({})
             var res = undefined
             if (init != null) init()
-            while (cond == null || cond().v != 0) {
+            while (cond == null || nzv(cond().v)) {
                 var r = bodyT()
                 if (r != undefined) {
                     if (r === BRK) break
@@ -2563,7 +2610,13 @@ KwDefault   = "default" KwEnd ;
         var bodyT = pop()
         var params = pop()
         var name = pop()
-        funcs[name] = {params: params, body: bodyT}
+        var star = pop()
+        var rt = (typeof star == "string") ? pop() : star
+        // The declared RETURN type converts the returned value, exactly as C requires
+        // (6.8.6.4p3) - which is what makes a function declared int truncate a long.
+        // A pointer return ('*' present) keeps the address unconverted.
+        funcs[name] = {params: params, body: bodyT,
+                       ret: (typeof star == "string") ? undefined : rt.ret}
     }
     // The C type a 'struct S' / 'union U' / 'struct S *' return type names.
     function makeRetCt(items) { return ptrTo(starsOf(items[1]), ctStruct(items[0])) }
@@ -2649,7 +2702,7 @@ KwDefault   = "default" KwEnd ;
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "c"
-    core.test = function(v) { return v.v != 0 } // C conditions: any nonzero value.
+    core.test = function(v) { return nzv(v.v) } // C conditions: any nonzero value.
     // System headers the runtime already provides; #include of anything else is an
     // external library we cannot resolve (see resolveImport in lib/interp-core.js).
     core.stdlibImports = ["stdio.h", "stdlib.h", "string.h", "math.h", "ctype.h", "stdbool.h", "stdint.h", "stddef.h", "limits.h", "assert.h", "stdarg.h"]
