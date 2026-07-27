@@ -107,7 +107,38 @@ for f in tests/*-test-full.*; do
         bad=$((bad + 1)); rc=1; continue
     fi
     if clang -S -x ir "$ll" -o /dev/null 2>"$ll.err"; then
-        printf '%-12s %8s  ok\n' "$lang" "$lines"
+        # Parsing is not the whole story. `clang -S -x ir` proves the module is
+        # WELL-FORMED; it says nothing about whether the compiled program
+        # BEHAVES the way it does under our own llvm.Run. Those can differ - on
+        # 2026-07-27 the bash ratchet passed 289/289 under llvm.Run and failed 7
+        # assertions in the clang-built executable, all in the regex path, a
+        # defect that had been sitting behind a green matrix and a green
+        # clang-check.
+        #
+        # For the three languages that emit self-contained IR (bash, batch, c -
+        # plus the toys) we can go further and RUN it, because the ratchet file
+        # is self-checking: it exits non-zero and prints its own failure count.
+        # Do that. For a handle-IR language there is nothing to link, so the
+        # module check is all there is and the row says so.
+        if grep -q 'exePath' "languages/$lang-to-llvm-ir.abnf" 2>/dev/null; then
+            exe="$WORK/$lang.exe"
+            if ! "$BIN" "$g" "$f" -q -exe "$exe" >/dev/null 2>"$ll.exe.err"; then
+                printf '%-12s %8s  ok (module), BUT -exe FAILED TO BUILD\n' "$lang" "$lines"
+                sed -n '1,4p' "$ll.exe.err" | sed 's/^/                       /'
+                bad=$((bad + 1)); rc=1; continue
+            fi
+            out="$("$exe" 2>&1)"; erc=$?
+            if [ "$erc" -eq 0 ]; then
+                printf '%-12s %8s  ok, and the clang executable agrees\n' "$lang" "$lines"
+            else
+                printf '%-12s %8s  ok (module), BUT THE NATIVE RUN DISAGREES\n' "$lang" "$lines"
+                printf '%s\n' "$out" | grep -E '^(FAIL|full:)' | head -8 | sed 's/^/                       /'
+                printf '                       (llvm.Run passes this file; clang does not - the class -exe exists for)\n'
+                bad=$((bad + 1)); rc=1
+            fi
+            continue
+        fi
+        printf '%-12s %8s  ok (module only - handle IR, nothing to link)\n' "$lang" "$lines"
     else
         printf '%-12s %8s  CLANG REJECTS\n' "$lang" "$lines"
         sed -n '1,6p' "$ll.err" | sed 's/^/                       /'
@@ -119,8 +150,16 @@ printf -- '------------------------------------------------------------\n'
 if [ "$bad" -eq 0 ]; then
     printf '%d modules, all accepted by clang\n\n' "$n"
 else
-    printf '%d modules, %d REJECTED by clang\n\n' "$n" "$bad"
-    printf 'A rejected module still runs correctly under llvm.Run and still reports\n'
-    printf 'FULL, because llvm.Run resolves by handle, not by name. Fix the emitter.\n\n'
+    printf '%d modules, %d with a finding\n\n' "$n" "$bad"
+    printf 'Both findings above are invisible to ./test.sh, which compares each engine\n'
+    printf 'against ITSELF and is satisfied by any module llvm.Run can execute:\n'
+    printf '  - CLANG REJECTS      the module is not well-formed LLVM (a block label\n'
+    printf '                       colliding with a parameter name is the classic case).\n'
+    printf '                       llvm.Run resolves by handle, not by name, so it runs\n'
+    printf '                       anyway and the ratchet still reports FULL.\n'
+    printf '  - NATIVE RUN DISAGREES  the module is well-formed and clang builds it, but\n'
+    printf '                       the executable does not behave as it does under\n'
+    printf '                       llvm.Run. Only the three self-contained-IR languages\n'
+    printf '                       (bash, batch, c) can be checked this far at all.\n\n'
 fi
 exit "$rc"
