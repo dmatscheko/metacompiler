@@ -513,8 +513,16 @@ AltForeachBody = ":" AltBody KwEndforeach Semi ;
 // in an assignment, so both spellings bind identically.
 ForeachVars = DestructPat | ForeachKV ;
 ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
-ForeachV1   = [ FeRef ] DollarName <~~ push({v1: pop()}) ~~> ;
-ForeachV2   = [ FeRef ] DollarName <~~ push({v2: pop()}) ~~> ;
+// The bound slot is any assignable TARGET, not just a variable: PHP writes into
+// '$obj->prop', '$arr[0]' and '$this->var["key"]' exactly as it does into '$v'
+// (tests/foreach/bug34310, bug34467, bug34873, lang/foreachLoop.004, lang/040,
+// tests/enum/no-write-properties-through-foreach-reference). A '=>' pair may put a
+// DESTRUCTURING pattern in the value position (tests/lang/foreach_list_001).
+ForeachV1   <~~ push({v1: pop()}) ~~>
+            = [ FeRef ] Target ;
+ForeachV2   = DestructPat | ForeachV2T ;
+ForeachV2T  <~~ push({v2: pop()}) ~~>
+            = [ FeRef ] Target ;
 // 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array: the
 // loop binds the variable to the element's storage CELL instead of to a copy of its
 // value.
@@ -619,7 +627,144 @@ AssignOp    = "**=" | "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%=" |
             | "&=" | "|=" | "^=" | PlainEq ;
 PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { ArrowField | ArrowDyn | TIndex | TAppend } ;
+            = TargetHead { TStep }
+            | CallTgtAhead CallHead TStep { TStep } ;
+// The same target WITHOUT the lookahead, for the two places that already know they
+// are reading one: isset() and unset(). The guard exists only to stop a speculative
+// Target from re-parsing every ordinary call statement, and inside those brackets
+// there is nothing to speculate about.
+TgtOnly     <~~ push(makeTargetRef(takeAll())) ~~>
+            = TargetHead { TStep }
+            | CallHead TStep { TStep } ;
+TStep       = ArrowField | ArrowDyn | TIndex | TAppend ;
+// A CALL is an assignable head: 'foo()->bar[1] = "123"', 'foo($a)[0] = 2'. What is
+// written into is the value the call RETURNED, so it reaches the caller exactly when
+// that value is a shared one - an object, which is what php-src's own witnesses for
+// this form use (tests/bug37144, tests/bug70332, tests/closures/closure_write_prop).
+// A by-value ARRAY return is a temporary here, as it is in PHP without '&'.
+// At least one step is required: 'foo() = 1' is not a target in any reading.
+CallHead    <~~ push({headT: pop()}) ~~>
+            = Call ;
+// Is the text ahead a call-headed TARGET? Without this, 'Assignment = Target ...'
+// parses every ordinary call statement twice - once speculatively as a target, once
+// for real - which is 2^depth on nested calls (the documented Dart trap). The guard
+// answers in one capped forward scan: a name, a balanced argument list, at least one
+// '->' or '[' step, and then an assignment operator or '++'/'--' at bracket depth 0
+// before the statement ends. A false POSITIVE only costs the parse that would have
+// happened anyway; a false negative is a parse failure, so it errs toward yes.
+CallTgtAhead = :script(~~
+    (function() {
+        var CAP = 40000
+        var it = 0
+        function bad() { return abnf.newToken("\x01nocalltgt", 0) }
+        function isSp(ch) { return ch === 32 || ch === 9 || ch === 13 || ch === 10 }
+        function toEol(j) {
+            var g = 0
+            while (g < CAP) { g = g + 1; var ch = c.peek(j); if (ch < 0 || ch === 10) { break } j = j + 1 }
+            return j
+        }
+        function sk(j) {
+            var g = 0
+            while (g < CAP) {
+                g = g + 1
+                var ch = c.peek(j)
+                if (isSp(ch)) { j = j + 1; continue }
+                if (ch === 35) { j = toEol(j); continue }
+                if (ch === 47 && c.peek(j + 1) === 47) { j = toEol(j); continue }
+                if (ch === 47 && c.peek(j + 1) === 42) {
+                    j = j + 2
+                    var h = 0
+                    while (h < CAP) {
+                        h = h + 1
+                        var e = c.peek(j)
+                        if (e < 0) { break }
+                        if (e === 42 && c.peek(j + 1) === 47) { j = j + 2; break }
+                        j = j + 1
+                    }
+                    continue
+                }
+                break
+            }
+            return j
+        }
+        // Step over a quoted run, returning the position after the closing quote.
+        function skStr(j, q) {
+            j = j + 1
+            var g = 0
+            while (g < CAP) {
+                g = g + 1
+                var e = c.peek(j)
+                if (e < 0) { return j }
+                if (e === 92) { j = j + 2; continue }
+                j = j + 1
+                if (e === q) { return j }
+            }
+            return j
+        }
+        var i = sk(0)
+        var ch0 = c.peek(i)
+        if (!(ch0 === 92 || ch0 === 95 || (ch0 >= 65 && ch0 <= 90) || (ch0 >= 97 && ch0 <= 122))) { return bad() }
+        var st = i
+        while (it < CAP) {
+            it = it + 1
+            var cn = c.peek(i)
+            if (cn === 92 || cn === 95 || (cn >= 48 && cn <= 57) || (cn >= 65 && cn <= 90) || (cn >= 97 && cn <= 122)) { i = i + 1; continue }
+            break
+        }
+        if (i === st) { return bad() }
+        i = sk(i)
+        if (c.peek(i) !== 40) { return bad() }
+        var depth = 0
+        while (it < CAP) {
+            it = it + 1
+            var d = c.peek(i)
+            if (d < 0) { return bad() }
+            if (d === 39 || d === 34) { i = skStr(i, d); continue }
+            if (d === 40 || d === 91 || d === 123) { depth = depth + 1; i = i + 1; continue }
+            if (d === 41 || d === 93 || d === 125) {
+                depth = depth - 1
+                i = i + 1
+                if (depth === 0) { break }
+                continue
+            }
+            i = i + 1
+        }
+        if (depth !== 0) { return bad() }
+        i = sk(i)
+        var s0 = c.peek(i)
+        var step = (s0 === 91) || (s0 === 45 && c.peek(i + 1) === 62)
+        if (!step) { return bad() }
+        depth = 0
+        while (it < CAP) {
+            it = it + 1
+            var g2 = c.peek(i)
+            if (g2 < 0) { return bad() }
+            if (g2 === 39 || g2 === 34) { i = skStr(i, g2); continue }
+            if (g2 === 40 || g2 === 91 || g2 === 123) { depth = depth + 1; i = i + 1; continue }
+            if (g2 === 41 || g2 === 93 || g2 === 125) {
+                if (depth === 0) { return bad() }
+                depth = depth - 1
+                i = i + 1
+                continue
+            }
+            if (depth === 0) {
+                if (g2 === 59 || g2 === 44) { return bad() }
+                var n1 = c.peek(i + 1)
+                var n2 = c.peek(i + 2)
+                if (g2 === 43 && n1 === 43) { return undefined }
+                if (g2 === 45 && n1 === 45) { return undefined }
+                if (g2 === 61 && n1 !== 61 && n1 !== 62) { return undefined }
+                if (g2 === 63 && n1 === 63 && n2 === 61) { return undefined }
+                if ((g2 === 42 || g2 === 60 || g2 === 62) && n1 === g2 && n2 === 61) { return undefined }
+                if (n1 === 61 && (g2 === 43 || g2 === 45 || g2 === 42 || g2 === 47 || g2 === 37
+                                  || g2 === 46 || g2 === 38 || g2 === 124 || g2 === 94)) { return undefined }
+                if (g2 === 61) { i = i + 2; continue }
+            }
+            i = i + 1
+        }
+        return bad()
+    })()
+~~) ;
 // A static property (self::$made = ..., C::$made++) and a variable variable
 // ($$name = e, ${expr} = e) are assignable heads too. A static head carries its base
 // and property name, a variable-variable head the THUNK that computes the name, and
@@ -796,7 +941,30 @@ CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
 // PosArg also records its own source text: a call site can only pass a REFERENCE for
 // an argument that denotes one, and '$name' is exactly the spelling that does.
 ArgList     = Arg { "," Arg } [ "," ] ;
-Arg         = NamedArg | SpreadArg | FccArg | PosArg ;
+Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | PosArg ;
+// PHP 8.5 partial application: a '?' in an argument position is a PLACEHOLDER, so
+// the call yields a closure taking one parameter per '?' instead of calling. It is
+// spelled 'b: ?' when the placeholder names the parameter it stands for. ArgEnd is
+// what keeps it apart from a ternary - only a ',' or ')' may follow a placeholder,
+// and no expression here starts with '?'.
+PlaceArg    <~~ push({aplace: true}) ~~>
+            = "?" ArgEnd ;
+NamedPlaceArg <~~ push({aname: argLabel(up.in), aplace: true}) ~~>
+            = ArgLabel "?" ArgEnd ;
+ArgEnd      = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            break
+        }
+        if (cc === 44 || cc === 41) { return undefined }
+        return abnf.newToken("\x01notlval", 0)
+    })()
+~~) ;
 NamedArg    <~~ push({aname: argLabel(up.in), pos: pop()}) ~~>
             = ArgLabel Expression ;
 ArgLabel    = Id ":" !":" ;
@@ -855,11 +1023,11 @@ ConstRef    <~~ push(makeConstRef(lastSeg(stripWs(up.in)))) ~~>
 // missing variable or a missing array key answers false instead of aborting.
 // empty(e) is the negation of PHP truthiness, and unset() removes the binding.
 IssetExpr   <~~ push(makeIsset(takeAll())) ~~>
-            = KwIsset "(" Target { "," Target } [ "," ] ")" ;
+            = KwIsset "(" TgtOnly { "," TgtOnly } [ "," ] ")" ;
 EmptyExpr   <~~ push(makeEmpty(pop())) ~~>
             = KwEmpty "(" Expression ")" ;
 UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
-            = KwUnset "(" Target { "," Target } [ "," ] ")" Semi ;
+            = KwUnset "(" TgtOnly { "," TgtOnly } [ "," ] ")" Semi ;
 KwIsset     = "isset" KwEnd ;
 KwEmpty     = "empty" KwEnd ;
 KwUnset     = "unset" KwEnd ;
@@ -916,8 +1084,19 @@ StaticExpr  <~~ push(makeStaticExpr(takeAll())) ~~>
             = StaticBaseRef "::" StaticMember [ StaticArgs ] ;
 StaticBaseRef <~~ push({sbase: stripWs(up.in)}) ~~>
             = ( "static" KwEnd | QName ) ;
-StaticMember <~~ push({smem: up.in}) ~~>
+// A '::' member may be COMPUTED: 'Foo::{$name}()' names the method (or constant) at
+// run time, and 'Foo::$$v' / 'Foo::${expr}' the static PROPERTY (tests/bug55247,
+// tests/varSyntax/staticMember, tests/dynamic_call/dynamic_method_calls,
+// Zend/tests/int_static_prop_name). The computed forms push a THUNK where the
+// literal spelling pushes its text, and every access site asks for a name HANDLE -
+// a constant string for the literal form, js_phstr of the thunk's value otherwise.
+StaticMember = StaticMemLit | StaticDynProp | StaticDynName ;
+StaticMemLit <~~ push({smem: up.in}) ~~>
             = MethodName | DollarName ;
+StaticDynProp <~~ push({smemT: pop(), smemprop: true}) ~~>
+            = "$" ( VarRef | VarVarRef | "{" Expression "}" ) ;
+StaticDynName <~~ push({smemT: pop()}) ~~>
+            = "{" Expression "}" ;
 StaticArgs  <~~ push({sargs: takeAll()}) ~~>
             = "(" [ ArgList ] ")" ;
 
@@ -1359,7 +1538,7 @@ KwInstanceof = "instanceof" KwEnd ;
             var rn0 = refNameV(b, ref)
             return varCellV(rn0.b, rn0.v)
         }
-        var p = emitRefPath(b, ref)
+        var p = emitRefPathV(b, ref, true)
         b = p.b
         if (p.kind == "append") {
             callExt(b, "js_phpush", [p.obj, hNull])
@@ -1380,7 +1559,7 @@ KwInstanceof = "instanceof" KwEnd ;
             if (lhs.path.length == 0) {
                 callExt(b, "js_pyset_var", [curScopeV, emitStr(b, lhs.name), rc.v])
             } else {
-                var p = emitRefPath(b, lhs)
+                var p = emitRefPathV(b, lhs, true)
                 b = p.b
                 if (p.kind == "append") { callExt(b, "js_phpush", [p.obj, rc.v]) }
                 else if (p.kind == "index") { callExt(b, "js_phset", [p.obj, p.key, rc.v]) }
@@ -2094,20 +2273,38 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     // foreach over indexed arrays (key = index) and ordered maps (key/value),
     // uniformly via js_range_len / js_range_key / js_range_val.
+    // Bind one element of the iteration to the slot the header declared. A plain
+    // variable keeps the single js_pyset_var it always had; anything else is an
+    // ordinary assignment target and goes through the path walk.
+    function emitFeBind(b, ref, v) {
+        if (ref == null) { return b }
+        if (ref.path.length == 0 && ref.sbase == undefined && ref.headT == undefined && ref.nameT == null) {
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+            return b
+        }
+        var p = emitRefPathV(b, ref, true)
+        return writeRefSlot(p.b, p, v)
+    }
     function makeForeach(items) {
         var iterT = items[0]
         var keyName = null
         var valName = null
+        var slots = []
         var pat = null
         var body = null
         var byRef = false
         for (var i = 1; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].v1 != undefined) { valName = items[i].v1 }
-            else if (items[i].v2 != undefined) { keyName = items[i].v2 }
+            else if (items[i].v1 != undefined) { slots.push(items[i].v1) }
+            else if (items[i].v2 != undefined) { slots.push(items[i].v2) }
             else if (items[i].pat != undefined) { pat = items[i].pat }
             else if (items[i].feref != undefined) { byRef = true }
         }
+        // One slot is the VALUE; two make the first the key and the second the value.
+        // A '=>' whose value side is a pattern leaves exactly one slot AND a pattern.
+        if (slots.length == 1 && pat == null) { valName = slots[0] }
+        else if (slots.length == 1) { keyName = slots[0] }
+        else if (slots.length > 1) { keyName = slots[0]; valName = slots[1] }
         // Which loop shape to emit is decided at EMIT time, not here: usesYield is only
         // final once the whole program has been walked, and a foreach written BEFORE the
         // first generator function in the file would otherwise get the plain index loop.
@@ -2143,14 +2340,9 @@ KwInstanceof = "instanceof" KwEnd ;
                 bodyB = rel.b
                 elemV = callExt(bodyB, "js_phcopy", [rel.v])
             }
-            if (pat != null) {
-                bodyB = emitBindPattern(bodyB, pat, elemV)
-            } else if (keyName != null) {
-                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, valName), callExt(bodyB, "js_range_key", [itV, iB])])
-                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, keyName), elemV])
-            } else {
-                callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, valName), elemV])
-            }
+            if (keyName != null) { bodyB = emitFeBind(bodyB, keyName, callExt(bodyB, "js_range_key", [itV, iB])) }
+            if (pat != null) { bodyB = emitBindPattern(bodyB, pat, elemV) }
+            else { bodyB = emitFeBind(bodyB, valName, elemV) }
             loopStack.push({cont: postB, brk: exitB})
             body(bodyB).NewBr(postB)
             loopStack.pop()
@@ -2363,14 +2555,9 @@ KwInstanceof = "instanceof" KwEnd ;
             var keyV = bindB.NewPhi([llvm.ir.NewIncoming(gK, joinB), llvm.ir.NewIncoming(aK, aBody)])
             var valV = bindB.NewPhi([llvm.ir.NewIncoming(gV, joinB), llvm.ir.NewIncoming(aV, aBody)])
             var bb = bindB
-            if (pat != null) {
-                bb = emitBindPattern(bb, pat, valV)
-            } else if (keyName != null) {
-                callExt(bb, "js_pyset_var", [curScopeV, emitStr(bb, valName), keyV])
-                callExt(bb, "js_pyset_var", [curScopeV, emitStr(bb, keyName), valV])
-            } else {
-                callExt(bb, "js_pyset_var", [curScopeV, emitStr(bb, valName), valV])
-            }
+            if (keyName != null) { bb = emitFeBind(bb, keyName, keyV) }
+            if (pat != null) { bb = emitBindPattern(bb, pat, valV) }
+            else { bb = emitFeBind(bb, valName, valV) }
             loopStack.push({cont: postB, brk: exitB})
             body(bb).NewBr(postB)
             loopStack.pop()
@@ -2483,7 +2670,7 @@ KwInstanceof = "instanceof" KwEnd ;
                     var rn1 = refNameV(b, ref)
                     b = setVarV(rn1.b, rn1.v, callExt(rn1.b, "js_phcopy", [elem]))
                 } else {
-                    var p = emitRefPath(b, ref)
+                    var p = emitRefPathV(b, ref, true)
                     b = writeRefSlot(p.b, p, elem)
                 }
             }
@@ -2848,6 +3035,12 @@ KwInstanceof = "instanceof" KwEnd ;
                 } else if (s.kind == "mcall") {
                     // $o->m(...): a callable bound to this receiver.
                     if (hasFcc(s.args)) { cur = emitMethodFcc(b, cur, s.name); continue }
+                    if (hasPlace(s.args)) {
+                        var rpm = emitPartialFor(b, cur, s.name, "mcall", "\x00pfaself", s.args, methSigOf(s.name))
+                        b = rpm.b
+                        cur = rpm.v
+                        continue
+                    }
                     var ea = emitPhArgs(b, s.args, methSigOf(s.name))
                     b = ea.b
                     var rm = emitMethodCall(b, cur, emitStr(b, s.name), ea.v)
@@ -2858,6 +3051,14 @@ KwInstanceof = "instanceof" KwEnd ;
                     b = rg.b
                     cur = rg.v
                 } else if (s.kind == "call") {
+                    // $f(1, ?) : a partial over whatever the chain has produced.
+                    if (hasPlace(s.args)) {
+                        var rcv0 = callableV(b, cur)
+                        var rpv = emitPartialFor(rcv0.b, rcv0.v, "", "call", "\x00pfafn", s.args, null)
+                        b = rpv.b
+                        cur = rpv.v
+                        continue
+                    }
                     var ea2 = emitPhArgs(b, s.args, null)
                     b = ea2.b
                     var rc2 = callableV(ea2.b, cur)
@@ -3160,7 +3361,9 @@ KwInstanceof = "instanceof" KwEnd ;
             if (ref.sbase != undefined) {
                 var rb = ref.sbase(b)
                 b = rb.b
-                return {b: b, v: isSetHandle(b, callExt(b, "js_phsget", [rb.v, emitStr(b, ref.sname)]))}
+                var rs3 = sNameV(b, ref)
+                b = rs3.b
+                return {b: b, v: isSetHandle(b, callExt(b, "js_phsget", [rb.v, rs3.v]))}
             }
             var rn2 = refNameV(b, ref)
             var rd = phDeref(rn2.b, rawVarV(rn2.b, rn2.v))
@@ -3244,14 +3447,35 @@ KwInstanceof = "instanceof" KwEnd ;
         return callExt(b, "js_scope_get", [curScopeV, emitStr(b, frameClsName(which))])
     }
     // baseT :: member, with or without an argument list.
-    function emitStaticAccess(baseT, mem, args) {
+    // The member name as a runtime string: a constant for a literal spelling, the
+    // coerced value of the thunk for a computed one.
+    function memNameV(b, mem, memT) {
+        if (memT == null) { return {b: b, v: emitStr(b, mem)} }
+        var r = memT(b)
+        return {b: r.b, v: callExt(r.b, "js_phstr", [r.v])}
+    }
+    function emitStaticAccess(baseT, mem, args) { return emitStaticAccessV(baseT, mem, args, null, false) }
+    function emitStaticAccessV(baseT, mem, args, memT, memprop) {
         return function(b) {
             var rb = baseT(b)
             b = rb.b
+            if (memT != null) {
+                var rn8 = memNameV(b, mem, memT)
+                b = rn8.b
+                if (args != null) {
+                    var ea8 = emitPhArgs(b, args, null)
+                    b = ea8.b
+                    var th8 = callExt(b, "js_phthis", [curScopeV])
+                    return {b: b, v: callExt(b, "js_phscall", [rb.v, rn8.v, th8, ea8.v])}
+                }
+                if (memprop) { return {b: b, v: callExt(b, "js_phsget", [rb.v, rn8.v])} }
+                return {b: b, v: callExt(b, "js_phconst", [rb.v, rn8.v])}
+            }
             if (args != null) {
                 // C::m(...): the first-class callable form yields a closure that
                 // performs the static dispatch when it is finally called.
                 if (hasFcc(args)) { return {b: b, v: emitStaticFcc(b, rb.v, mem)} }
+                if (hasPlace(args)) { return emitPartialFor(b, rb.v, mem, "scall", "\x00pfacls", args, null) }
                 var ea = emitPhArgs(b, args, null)
                 b = ea.b
                 var thisV = callExt(b, "js_phthis", [curScopeV])
@@ -3266,10 +3490,14 @@ KwInstanceof = "instanceof" KwEnd ;
         }
     }
     function staticParts(items) {
-        var out = {base: null, mem: "", args: null}
+        var out = {base: null, mem: "", args: null, memT: null, memprop: false}
         for (var i = 0; i < items.length; i++) {
             if (items[i].sbase != undefined) { out.base = staticBaseThunk(items[i].sbase) }
             else if (items[i].smem != undefined) { out.mem = items[i].smem }
+            else if (items[i].smemT != undefined) {
+                out.memT = items[i].smemT
+                if (items[i].smemprop != undefined) { out.memprop = true }
+            }
             else if (items[i].sargs != undefined) { out.args = items[i].sargs }
         }
         return out
@@ -3324,18 +3552,28 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     function makeStaticExpr(items) {
         var p = staticParts(items)
-        return emitStaticAccess(p.base, p.mem, p.args)
+        return emitStaticAccessV(p.base, p.mem, p.args, p.memT, p.memprop)
     }
     // As a chain suffix the base is whatever the chain produced so far.
     function makeStaticSfx(items) {
         var p = staticParts(items)
         var mem = p.mem
         var args = p.args
-        return {kind: "static", run: function(b) { return {b: b, v: hNull} }, sfxMem: mem, sfxArgs: args}
+        return {kind: "static", run: function(b) { return {b: b, v: hNull} }, sfxMem: mem, sfxArgs: args,
+                sfxMemT: p.memT, sfxMemProp: p.memprop}
     }
     function makeStaticHead(items) {
         var p = staticParts(items)
-        return {var: "\x00staticprop", sbase: p.base, sname: p.mem.charAt(0) == "$" ? p.mem.substring(1) : p.mem}
+        return {var: "\x00staticprop", sbase: p.base, snameT: p.memT,
+                sname: p.mem.charAt(0) == "$" ? p.mem.substring(1) : p.mem}
+    }
+    // The static property NAME a target head denotes, literal or computed.
+    function sNameV(b, ref) {
+        if (ref.snameT != undefined && ref.snameT != null) {
+            var r = ref.snameT(b)
+            return {b: r.b, v: callExt(r.b, "js_phstr", [r.v])}
+        }
+        return {b: b, v: emitStr(b, ref.sname)}
     }
     function makeClone(t) {
         return function(b) {
@@ -3541,7 +3779,8 @@ KwInstanceof = "instanceof" KwEnd ;
     // An argument record (from ArgList) as opposed to a class-member record.
     function isArgRec(it) {
         if (it == undefined) { return false }
-        return it.pos != undefined || it.aname != undefined || it.aspread != undefined || it.fcc != undefined
+        return it.pos != undefined || it.aname != undefined || it.aspread != undefined
+            || it.fcc != undefined || it.aplace != undefined
     }
     var anonCount = 0
     function makeNewAnon(items) {
@@ -3630,26 +3869,61 @@ KwInstanceof = "instanceof" KwEnd ;
     // ----- assignment targets (locals via create-on-assign, ->field, [i], [] append) -----
     makeTargetRef = function(items) {
         var head = items[0]
+        // A CALL head ('foo()->bar[1] = "123"'): the path starts from the value the
+        // call returned, so there is no name and no scope slot - refRoot runs the
+        // thunk. A write reaches the caller exactly when that value is a shared one,
+        // which is what php-src's witnesses for this form use (tests/bug37144,
+        // tests/bug70332); a by-value array return is a temporary, as in PHP.
+        if (head.headT != undefined) {
+            return {name: null, nameT: null, path: items.slice(1), sbase: undefined, sname: undefined,
+                    snameT: null, headT: head.headT}
+        }
         return {name: head.var, nameT: head.varexpr == undefined ? null : head.varexpr,
-                path: items.slice(1), sbase: head.sbase, sname: head.sname}
+                path: items.slice(1), sbase: head.sbase, sname: head.sname,
+                snameT: head.snameT == undefined ? null : head.snameT, headT: undefined}
     }
     // The value a target's PATH starts from: a plain variable, or a static property
     // (self::$rows[0] = e reads the property, then indexes it).
     function refRoot(b, ref) {
+        if (ref.headT != undefined) { return ref.headT(b) }
         if (ref.sbase != undefined) {
             var rb = ref.sbase(b)
-            return {b: rb.b, v: callExt(rb.b, "js_phsget", [rb.v, emitStr(rb.b, ref.sname)])}
+            var rs4 = sNameV(rb.b, ref)
+            return {b: rs4.b, v: callExt(rs4.b, "js_phsget", [rb.v, rs4.v])}
         }
         var rn = refNameV(b, ref)
         return {b: rn.b, v: callExt(rn.b, "js_scope_get", [curScopeV, rn.v])}
     }
-    function emitRefPath(b, ref) {
+    // emitRefPath walks a target's path down to the container the LAST step writes
+    // into. `viv` says whether the walk may create what is missing: PHP auto-vivifies
+    // the intermediate levels of an assignment target ($a[0]["k"] = 1 makes $a[0] an
+    // array), and php-interpreter.abnf's resolveRefPhp has done that all along - but
+    // isset() and unset() walk the same path and must NOT create anything, which is
+    // why it is a parameter and not the default.
+    //
+    // The creating steps are exactly the interpreter's: an index or a '[]' step whose
+    // container is a PHP array. A '->name' step is left alone (the interpreter's guard
+    // is isArr(o), and an object is not one), and so is a static-property root.
+    function emitRefPath(b, ref) { return emitRefPathV(b, ref, false) }
+    function emitRefPathV(b, ref, viv) {
         var rr = refRoot(b, ref)
         b = rr.b
         var o = rr.v
+        // A multi-step target on a null variable makes that variable an array, and the
+        // answer is written back so a $x that is a REFERENCE gets it through its cell.
+        if (viv && ref.path.length > 1 && ref.sbase == undefined && ref.headT == undefined) {
+            var rd0 = phDeref(b, o)
+            b = rd0.b
+            o = callExt(b, "js_phvivroot", [rd0.v])
+            var rn9 = refNameV(b, ref)
+            b = setVarV(rn9.b, rn9.v, o)
+        }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) {
+            // '$c[]["p"] = 7' appends a fresh array and descends into it. '[]' is not
+            // legal in a READ position at all, so the non-creating walk answers null.
+            if (s.append === true) { o = viv ? callExt(b, "js_phvivpush", [o]) : hNull }
+            else if (s.key != undefined) {
                 var rs = emitPropGet(b, o, emitStr(b, s.key), s.key)
                 b = rs.b
                 o = rs.v
@@ -3665,7 +3939,11 @@ KwInstanceof = "instanceof" KwEnd ;
                 b = rs2.b
                 o = rs2.v
             }
-            else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_phget", [o, ri.v]) }
+            else {
+                var ri = s.idx(b)
+                b = ri.b
+                o = callExt(b, viv ? "js_phviv" : "js_phget", [o, ri.v])
+            }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.append === true) { return {b: b, obj: o, kind: "append"} }
@@ -3737,7 +4015,9 @@ KwInstanceof = "instanceof" KwEnd ;
             if (ref.sbase != undefined && ref.path.length == 0) {
                 var rb = ref.sbase(b)
                 b = rb.b
-                var snV = emitStr(b, ref.sname)
+                var rs5 = sNameV(b, ref)
+                b = rs5.b
+                var snV = rs5.v
                 if (op != "=") { v = emitBin(b, op, callExt(b, "js_phsget", [rb.v, snV]), v) }
                 callExt(b, "js_phsset", [rb.v, snV, v])
             } else if (ref.path.length == 0) {
@@ -3772,7 +4052,7 @@ KwInstanceof = "instanceof" KwEnd ;
                 arrB.NewBr(endB6)
                 b = endB6
             } else {
-                var p = emitRefPath(b, ref)
+                var p = emitRefPathV(b, ref, true)
                 b = p.b
                 if (op != "=") {
                     var rold2 = readRefSlot(b, p)
@@ -3793,7 +4073,9 @@ KwInstanceof = "instanceof" KwEnd ;
         if (ref.sbase != undefined && ref.path.length == 0) {
             var rb = ref.sbase(b)
             b = rb.b
-            var snV = emitStr(b, ref.sname)
+            var rs6 = sNameV(b, ref)
+            b = rs6.b
+            var snV = rs6.v
             var oldS = callExt(b, "js_phnum", [callExt(b, "js_phsget", [rb.v, snV])])
             var newS = callExt(b, ext, [oldS, emitNum(b, 1)])
             callExt(b, "js_phsset", [rb.v, snV, newS])
@@ -3808,7 +4090,7 @@ KwInstanceof = "instanceof" KwEnd ;
             b = setVarV(b, rn5.v, newV)
             return {b: b, v: isPre ? newV : oldV}
         }
-        var p = emitRefPath(b, ref)
+        var p = emitRefPathV(b, ref, true)
         b = p.b
         var rslot = readRefSlot(b, p)
         b = rslot.b
@@ -4004,10 +4286,22 @@ KwInstanceof = "instanceof" KwEnd ;
             return {b: b, v: av2}
         }
         // The general form: collect into a PHP array, then place by position / name.
+        var rt0 = emitArgTmp(b, args)
+        return emitPlaceInto(rt0.b, rt0.v, sig)
+    }
+    // Collect an argument run into one PHP array: positional arguments push, named
+    // ones store under their name, a spread MERGES. A '?' placeholder stores the PFA
+    // sentinel (js_phhole) in its slot, which js_phpfa later replaces with the value
+    // the partial closure is finally called with.
+    function emitArgTmp(b, args) {
         var tmp = callExt(b, "js_pharr", [])
         for (var q = 0; q < args.length; q++) {
             var a = args[q]
-            if (a.aspread != undefined) {
+            if (a.aplace != undefined) {
+                var hv = callExt(b, "js_phhole", [])
+                if (a.aname != undefined) { callExt(b, "js_phset", [tmp, emitStr(b, a.aname), hv]) }
+                else { callExt(b, "js_phpush", [tmp, hv]) }
+            } else if (a.aspread != undefined) {
                 var rs = a.aspread(b)
                 b = rs.b
                 callExt(b, "js_phmerge", [tmp, rs.v])
@@ -4021,6 +4315,14 @@ KwInstanceof = "instanceof" KwEnd ;
                 callExt(b, "js_phpush", [tmp, rp.v])
             }
         }
+        return {b: b, v: tmp}
+    }
+    // Read a collected PHP array back into the positional list the callee declared:
+    // by position, else by parameter name, with the variadic tail gathered into one
+    // PHP array. Used by an ordinary call AND, inside a partial closure, by the call
+    // it finally makes - which is why it is a function of the collected array rather
+    // than of the argument records.
+    function emitPlaceInto(b, tmp, sig) {
         var outV = callExt(b, "js_arr_new", [])
         if (sig == null) {
             // No declared signature: hand the collected values over in order.
@@ -4121,6 +4423,69 @@ KwInstanceof = "instanceof" KwEnd ;
     }
     function emitMethodFcc(b, recvV, name) { return emitBoundFcc(b, recvV, name, "mcall", "\x00fccself") }
     function emitStaticFcc(b, clsV, name) { return emitBoundFcc(b, clsV, name, "scall", "\x00fcccls") }
+
+    // ----- PHP 8.5 partial function application ---------------------------------
+    // 'foo(1, ?, 3)' does not call foo: it yields a closure whose parameters are the
+    // '?' placeholders, in source order, with everything else already bound. The
+    // trailing-'...' forms ('foo(1, ...)', 'foo(1, ?, 3, ...)') bind a prefix and
+    // forward whatever else the closure is called with.
+    //
+    // A BARE 'foo(...)' stays the PHP 8.1 first-class callable (hasFcc, above): it is
+    // the same function, so there is nothing to close over.
+    // A trailing '...' anywhere in the run: the form that FORWARDS the arguments a
+    // partial closure is given beyond the ones its placeholders consumed.
+    function hasFcc2(args) {
+        for (var i = 0; i < args.length; i++) {
+            if (args[i] != undefined && args[i].fcc != undefined) { return true }
+        }
+        return false
+    }
+    function hasPlace(args) {
+        for (var i = 0; i < args.length; i++) {
+            if (args[i] != undefined && args[i].aplace != undefined) { return true }
+        }
+        return args.length > 1 && args[args.length - 1] != undefined
+            && args[args.length - 1].fcc != undefined
+    }
+    // The closure itself. Its env carries the callee (a function value, a receiver or
+    // a class, depending on `ext`) and the BOUND argument array, holes and all; at
+    // call time js_phpfa fills the holes from the arguments this frame was given, in
+    // source order, and forwards whatever is left over.
+    function emitPartialFor(b, recvV, name, ext, holder, args, sig) {
+        var ra = emitArgTmp(b, args)
+        b = ra.b
+        var env = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [env, emitStr(b, holder), recvV])
+        callExt(b, "js_scope_decl", [env, emitStr(b, "\x00pfabound"), ra.v])
+        funcCount++
+        var idx = funcCount
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedTag = curFTag
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        curF = f
+        curFTag = idx
+        loopStack = []
+        var bb = f.NewBlock("entry")
+        curScopeV = callExt(bb, "js_scope_new", [f.Params[0]])
+        var selfV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, holder)])
+        var boundV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "\x00pfabound")])
+        var merged = callExt(bb, "js_phpfa", [boundV, phListOf(bb, f.Params[1]),
+                                              emitNum(bb, hasFcc2(args) ? 1 : 0)])
+        var pl = emitPlaceInto(bb, merged, sig)
+        bb = pl.b
+        var res = anytype
+        if (ext == "mcall") { res = callExt(bb, "js_mcall", [selfV, emitStr(bb, name), pl.v]) }
+        else if (ext == "scall") { res = callExt(bb, "js_phscall", [selfV, emitStr(bb, name), hUndef, phListOf(bb, pl.v)]) }
+        else { res = callExt(bb, "js_call", [selfV, hUndef, pl.v]) }
+        bb.NewRet(res)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return {b: b, v: callExt(b, "js_closure", [handle(idx), env])}
+    }
     // $name(...) where $name holds the STRING "s12area": PHP's variable function. A
     // string callee is resolved against the scope; anything else is already callable.
     // The probe is a round trip through the string cast, which is an identity only
@@ -4214,6 +4579,10 @@ KwInstanceof = "instanceof" KwEnd ;
             // expression IS the function, so there is nothing to call here.
             if (hasFcc(args)) {
                 return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])}
+            }
+            if (hasPlace(args)) {
+                var pfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
+                return emitPartialFor(b, pfV, name, "call", "\x00pfafn", args, sigOf(name))
             }
             if (hasBuiltin(name)) { return emitBuiltin(b, name, args) }
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])

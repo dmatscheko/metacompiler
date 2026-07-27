@@ -1595,6 +1595,24 @@ func (rt *jsrt) phpClone(v interface{}) interface{} {
 // share a name with one in jsrt.go REPLACE it, and the PHP-only externs are
 // created here rather than in the shared table.
 
+// phpHole is the PHP 8.5 partial-application placeholder: one shared sentinel,
+// because it never reaches user data - it only ever sits in the bound-argument
+// array a partial closure carries, and js_phpfa replaces every occurrence.
+var phpHole = func() *jsObject {
+	o := newJSObject()
+	o.set("__pfahole", true)
+	return o
+}()
+
+func phpIsHole(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	t, has := o.props["__pfahole"]
+	return has && t == true
+}
+
 // phpDumpIds hands out var_dump's object handles (#1, #2, ...) on first sight,
 // which is enough for a single run's transcript to be stable.
 var phpDumpIds = map[*jsrt]map[*jsObject]int{}
@@ -1839,6 +1857,103 @@ func init() {
 				return boolH(phpIsNum(v))
 			}
 			return jsHFalse
+		}
+		// PHP 8.5 PARTIAL FUNCTION APPLICATION. `foo(1, ?, 3)` binds what is
+		// there and leaves a hole per `?`; the compiler stores the bound run in
+		// one PHP array with the sentinel below in each hole, and js_phpfa fills
+		// the holes - in source order - from the arguments the partial closure is
+		// finally called with. Anything left over is appended, which is what the
+		// trailing-`...` form is for (superfluous_args_are_forwarded.phpt).
+		m["js_phhole"] = func(a []uint64) uint64 { return w(phpHole) }
+		m["js_phpfa"] = func(a []uint64) uint64 {
+			out := phpNewArr()
+			bk, bv, ok := phpArrParts(u(a[0]))
+			if !ok {
+				return w(out)
+			}
+			var sup []interface{}
+			var supKeys, supVals []interface{}
+			if sk, sv, ok2 := phpArrParts(u(a[1])); ok2 {
+				for i := range sk.elems {
+					if _, isNum := sk.elems[i].(float64); isNum {
+						sup = append(sup, phpDeref(sv.elems[i]))
+					} else {
+						supKeys = append(supKeys, sk.elems[i])
+						supVals = append(supVals, phpDeref(sv.elems[i]))
+					}
+				}
+			}
+			k := 0
+			for i := range bk.elems {
+				v := bv.elems[i]
+				if phpIsHole(v) {
+					v = interface{}(jsNull)
+					if k < len(sup) {
+						v = sup[k]
+					}
+					k++
+				}
+				if _, isNum := bk.elems[i].(float64); isNum {
+					rt.phpArrPush(out, v)
+				} else {
+					rt.phpArrSet(out, bk.elems[i], v)
+				}
+			}
+			// Only the trailing-`...` form forwards what is left over:
+			// superfluous_args_are_forwarded.phpt calls both `f(?, ...)` and
+			// `f(?)` with three arguments and expects three and one.
+			if rt.phpToLong(u(a[2])) != 0 {
+				for ; k < len(sup); k++ {
+					rt.phpArrPush(out, sup[k])
+				}
+			}
+			for i := range supKeys {
+				rt.phpArrSet(out, supKeys[i], supVals[i])
+			}
+			return w(out)
+		}
+		// AUTO-VIVIFICATION. `$a[0]["k"] = 1` creates the intermediate array in
+		// PHP, and php-interpreter.abnf's resolveRefPhp does the same; these three
+		// are the compiler half's version of that walk, one per step shape.
+		//
+		// They only ever run on an INTERMEDIATE step of an assignment target, and
+		// they only create when the container really is a PHP array - a property
+		// step on an object, a string, or anything else is left exactly as
+		// js_phget would have read it, which is what the interpreter does too
+		// (its guard is `isArr(o)`).
+		m["js_phviv"] = func(a []uint64) uint64 {
+			cont, key := u(a[0]), u(a[1])
+			cur := rt.phpArrGet(cont, key)
+			if isNullish(cur) {
+				if _, ok := phpAsArr(cont); ok {
+					na := phpNewArr()
+					rt.phpArrSet(cont, key, na)
+					return w(na)
+				}
+			}
+			return w(cur)
+		}
+		// The `[]` step: `$c[]["p"] = 7` appends a fresh array and descends into it.
+		m["js_phvivpush"] = func(a []uint64) uint64 {
+			cont := u(a[0])
+			if _, ok := phpAsArr(cont); ok {
+				na := phpNewArr()
+				rt.phpArrPush(cont, na)
+				return w(na)
+			}
+			return w(jsNull)
+		}
+		// The ROOT of the walk: `$e = null; $e["x"]["y"] = 5` makes $e an array.
+		// A pure function of the value - the caller writes the answer back with
+		// its own setVarV, so a $e that is a REFERENCE has the array installed
+		// through its cell. Only a target with more than one step gets this,
+		// exactly as in the interpreter (resolveRefPhp guards on path.length > 1),
+		// so `$a[0] = 1` on a null $a stays an error in both halves.
+		m["js_phvivroot"] = func(a []uint64) uint64 {
+			if cur := u(a[0]); !isNullish(cur) {
+				return a[0]
+			}
+			return w(phpNewArr())
 		}
 		m["js_phtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpTypeName(u(a[0]))) }
 		m["js_phdtype"] = func(a []uint64) uint64 { return rt.wrapStr(rt.phpDebugType(u(a[0]))) }

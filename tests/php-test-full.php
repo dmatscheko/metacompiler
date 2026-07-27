@@ -468,7 +468,30 @@ function s19() {
     $seen .= $it->current() . $it->key();
     $it->next();
     check("gen7", $seen === "1ay2b" && !$it->valid() && $it->getReturn() === 7);
+    // An INFINITE generator is PULLED, one value at a time, so a 'break' ends it.
+    // Pinned to php-src's own tests/generators/fibonacci.phpt, whose --EXPECT--
+    // block runs int(1) .. int(987) and stops at the first value over 1000.
+    $fib = "";
+    foreach (s19fib() as $n) { if ($n > 1000) { break; } $fib .= $n . ","; }
+    check("gen8", $fib === "1,2,3,5,8,13,21,34,55,89,144,233,377,610,987,");
+    // and the generator's side effects INTERLEAVE with the consumer's, which is the
+    // observable half of laziness. tests/generators/bug63066.phpt pins the order: its
+    // --EXPECTF-- prints the consumer's "foo" BEFORE the fatal error raised by the
+    // statement that follows the yield, so the consumer runs between the two.
+    $order = "";
+    $og = function () use (&$order) { $order .= "y1;"; yield 1; $order .= "y2;"; yield 2; };
+    foreach ($og() as $v) { $order .= "c" . $v . ";"; }
+    check("gen9", $order === "y1;c1;y2;c2;");
+    // 'yield from' delegates lazily too, so an infinite outer generator that
+    // delegates in a loop still streams: tests/generators/bug71297.phpt is exactly
+    // this shape (break at the fourth value) and its --EXPECT-- block is "012".
+    $del = "";
+    foreach (s19infdel() as $v) { if ($del === "012") { break; } $del .= $v; }
+    check("gen10", $del === "012");
 }
+function s19fib() { $a = 1; $b = 1; while (true) { yield $b; $t = $a + $b; $a = $b; $b = $t; } }
+function s19one($i) { yield $i; }
+function s19infdel() { $i = 0; while (true) { yield from s19one($i); $i++; } }
 function s19nums() { yield 1; yield 2; yield from [3, 4]; yield 5; }
 function s19keyed() { yield "a" => 1; yield "b" => 2; return 7; }
 function s19bounded($limit) { $i = 0; while ($i < $limit) { yield $i; $i++; } }
@@ -909,16 +932,35 @@ function s29dump() {
 //                                       so '??' binds LOOSER than '|>'
 // All four of those corpus files reproduce byte-for-byte against this grammar.
 //
-// Deliberately NOT asserted here, and why: multi-level array auto-vivification
-// ('$a[0]["k"] = 1'), which the compiler half does not do yet - it is a pre-existing
-// cross-half divergence, verified identical at HEAD, and it is chipped separately
-// rather than hidden by writing around it silently.
+// Multi-level array auto-vivification ('$a[0]["k"] = 1') was trimmed out of the '@'
+// assertion below while the compiler half could not do it. It can now (js_phviv /
+// js_phvivpush / js_phvivroot in abnf/jsrtphp.go answer the walk emitRefPathV makes),
+// so the assertion is back in its full form and the av1..av8 block beside it covers
+// the rest of the step shapes - including the two that must create NOTHING, isset()
+// and unset().
 class S30Box { public $a, $b; public $p = 1; }
 class S30Vis { public private(set) int $n = 4; }
 function s30dbl($x) { return $x * 2; }
 function s30inc($x) { return $x + 1; }
 function &s30ref() { static $v = 7; return $v; }
 function s30dnf(): (S30Box&S30Vis)|int { return 5; }
+function s30id($x) { return $x; }
+class S30Dyn {
+    const K = "kv";
+    public static $sp = 5;
+    public static function dyn() { return "D"; }
+}
+function s30four($a, $b, $c, $d) { return $a . "-" . $b . "-" . $c . "-" . $d; }
+function s30named($a = 1, $b = 2, $c = 3) { return $a . "/" . $b . "/" . $c; }
+function s30rest($a, ...$r) {
+    $s = "";
+    foreach ($r as $v) { $s = $s === "" ? ("" . $v) : ($s . "," . $v); }
+    return $a . "[" . $s . "]";
+}
+class S30PA {
+    public function m($x, $y) { return "m" . $x . $y; }
+    public static function s($x, $y) { return "s" . $x . $y; }
+}
 
 function s30() {
     // --- unbraced single-statement bodies ---
@@ -944,10 +986,42 @@ function s30() {
     check("u4", $d === "y");
 
     // --- '@' error suppression is a pass-through, and covers a whole assignment ---
+    // The target is deliberately a MULTI-LEVEL one: the compiler half did not
+    // auto-vivify intermediate levels, so this assertion used to be trimmed to a
+    // single step. It is pinned to lang/engine_assignExecutionOrder_002.phpt, whose
+    // '$ee["array entry created after f()"][f()] = "hello";' is exactly this shape and
+    // whose --EXPECTF-- print_r shows the intermediate array created.
     $ar = [];
-    @$ar[0] = "v";
-    check("s1", @$ar[0] === "v");
+    @$ar[0]["k"] = "v";
+    check("s1", @$ar[0]["k"] === "v" && $ar[0]["k"] === "v");
     check("s2", @s30dbl(4) === 8);
+    // --- the rest of auto-vivification, one assertion per step shape ---
+    $av = [];
+    $av[0]["k"] = 1; $av[0]["j"] = 2;          // an existing level is REUSED, not replaced
+    check("av1", $av[0]["k"] === 1 && $av[0]["j"] === 2);
+    $av2 = null;                                // the ROOT becomes an array too
+    $av2["x"]["y"]["z"] = 5;
+    check("av2", $av2["x"]["y"]["z"] === 5 && count($av2) === 1);
+    $av3 = [];
+    $av3[]["p"] = 7;                            // a '[]' step appends the new level
+    check("av3", $av3[0]["p"] === 7);
+    $av4 = [];
+    $av4["u"][] = 8;
+    check("av4", $av4["u"][0] === 8);
+    $av5 = [];
+    $av5["a"]["b"] += 3; $av5["a"]["c"]++;      // compound assignment and ++ vivify
+    check("av5", $av5["a"]["b"] === 3 && $av5["a"]["c"] === 1);
+    $av6 = [];
+    $av6r = &$av6["p"]["q"]; $av6r = 11;        // so does taking a reference
+    check("av6", $av6["p"]["q"] === 11);
+    $av7 = [];
+    [$av7["m"]["n"]] = [42];                    // and a destructuring slot
+    check("av7", $av7["m"]["n"] === 42);
+    // isset() and unset() walk the same path and must create NOTHING.
+    $av8 = [];
+    $av8seen = isset($av8["z"]["w"]);
+    unset($av8["z"]["w"]);
+    check("av8", $av8seen === false && count($av8) === 0);
 
     // --- the pipe operator (PHP 8.5), left associative ---
     check("p1", (5 |> s30dbl(...)) === 10);
@@ -955,6 +1029,110 @@ function s30() {
     check("p3", (5 |> "s30dbl") === 10);
     // '|>' binds tighter than '&&' and looser than '.', and single '|' still works
     check("p4", (5 | 2) === 7 && (5 & 3) === 1);
+
+    // --- PHP 8.5 partial function application ---
+    // Pinned to php-src's tests/partial_application/. rfc_examples_overview.phpt
+    // enumerates the five forms and asserts each is equivalent to the arrow function
+    // written beside it, which is exactly what pa1..pa5 check:
+    //   foo(1, ?, 3, 4)   ==  fn($b)         => foo(1, $b, 3, 4)
+    //   foo(1, ?, 3, ?)   ==  fn($b, $d)     => foo(1, $b, 3, $d)
+    //   foo(1, ...)       ==  fn($b, $c, $d) => foo(1, $b, $c, $d)
+    //   foo(1, 2, ...)    ==  fn($c, $d)     => foo(1, 2, $c, $d)
+    //   foo(1, ?, 3, ...) ==  fn($b, $d)     => foo(1, $b, 3, $d)
+    check("pa1", (s30four(1, ?, 3, 4))(2) === "1-2-3-4");
+    check("pa2", (s30four(1, ?, 3, ?))(2, 4) === "1-2-3-4");
+    check("pa3", (s30four(1, ...))(2, 3, 4) === "1-2-3-4");
+    check("pa4", (s30four(1, 2, ...))(3, 4) === "1-2-3-4");
+    check("pa5", (s30four(1, ?, 3, ...))(2, 4) === "1-2-3-4");
+    // A NAMED placeholder stands for the parameter of that name, and the parameters
+    // it does not mention keep their defaults (named_placeholders.phpt, Case 1:
+    // 'foo(b: ?)' called with one argument prints int(1) / that argument / int(3)).
+    check("pa6", (s30named(b: ?))(9) === "1/9/3");
+    // Superfluous arguments are forwarded IFF the trailing '...' asked for them -
+    // superfluous_args_are_forwarded.phpt calls 'f(?, ...)' and 'f(?)' with three
+    // arguments each and its --EXPECT-- shows three, then one.
+    check("pa7", (s30rest(?, ...))(1, 2, 3) === "1[2,3]");
+    check("pa8", (s30rest(?))(1, 2, 3) === "1[]");
+    // A method, a static method and a callable held in a variable all partial.
+    $pk = new S30PA();
+    check("pa9", ($pk->m(?, 2))(1) === "m12");
+    check("pa10", (S30PA::s(1, ?))(2) === "s12");
+    $pf = "s30four";
+    check("pa11", ($pf(1, ?, 3, 4))(2) === "1-2-3-4");
+    // The PHP 8.1 first-class callable is untouched: a BARE '(...)' is the function
+    // itself, and it still pipes.
+    check("pa12", (s30four(...))(1, 2, 3, 4) === "1-2-3-4" && (5 |> s30dbl(...)) === 10);
+
+    // --- a '::' member may be COMPUTED ---
+    // tests/bug55247.phpt writes "Test::{'method'}();" and its --EXPECT-- is the
+    // method's own output; Zend/tests/int_static_prop_name.phpt writes
+    // 'var_dump(Foo::${42});'; tests/varSyntax/staticMember.phpt writes
+    // 'var_dump(A::$$b_str);'; tests/dynamic_call/dynamic_method_calls.phpt writes
+    // 'foo::$$b();'. The constant form is Zend/tests/dynamic_class_const_fetch_*.
+    $dm = "dyn";
+    check("ds1", S30Dyn::{$dm}() === "D" && S30Dyn::{'dyn'}() === "D");
+    $dc = "K";
+    check("ds2", S30Dyn::{$dc} === "kv" && S30Dyn::{'K'} === "kv");
+    $dp = "sp";
+    check("ds3", S30Dyn::$$dp === 5 && S30Dyn::${'sp'} === 5);
+    S30Dyn::$$dp = 11;
+    check("ds4", S30Dyn::$sp === 11);
+    S30Dyn::${'sp'} += 1;
+    check("ds5", S30Dyn::$sp === 12 && isset(S30Dyn::$$dp));
+
+    // --- a foreach slot is any assignable TARGET, not just a variable ---
+    // tests/foreach/bug34467.phpt writes 'foreach (array (1,2,3) as $abc->k => $abc->v)'
+    // and its --EXPECT-- prints "0 1 / 1 2 / 2 3"; lang/040.phpt writes
+    // 'foreach($a as $b[0])'; tests/foreach/bug34873.phpt uses
+    // '$this->var["key"] => $this->var["value"]'; and tests/lang/foreach_list_001.phpt
+    // puts a nested list() on the value side of a '=>'.
+    $fo = new S30Box();
+    $ft = "";
+    foreach ([1, 2, 3] as $fo->a => $fo->b) { $ft = $ft . $fo->a . $fo->b . ";"; }
+    check("fe1", $ft === "01;12;23;");
+    $fa = [];
+    foreach ([5, 6] as $fa[0]) {}
+    check("fe2", $fa[0] === 6);
+    $fk = new S30Box();
+    $fk->a = [];
+    foreach (["p" => "q"] as $fk->a["key"] => $fk->a["value"]) {}
+    check("fe3", $fk->a["key"] === "p" && $fk->a["value"] === "q");
+    $fs = "";
+    foreach ([[[1, 2], [3, 4]]] as $fi => list(list($p1, $p2), list($p3, $p4))) {
+        $fs = $fs . $fi . $p1 . $p2 . $p3 . $p4;
+    }
+    check("fe4", $fs === "01234");
+    // the plain and by-reference forms are untouched
+    $fb = [1, 2];
+    foreach ($fb as &$fv) { $fv = $fv * 10; }
+    unset($fv);
+    check("fe5", $fb[0] === 10 && $fb[1] === 20);
+
+    // --- a CALL as the head of an assignment target ---
+    // tests/bug37144.phpt writes 'foo()->bar[1] = "123";', 'foo()->bar[0]++;' and
+    // 'unset(foo()->bar[0]);' and expects the file to run to its "ok";
+    // tests/bug70332.phpt writes 'test($arg)->name[1] = "xxxx";' and its --EXPECT--
+    // print_r shows the CALLER's object carrying the new element - which is what
+    // makes the returned object, not a copy, the thing written into.
+    $ch = new S30Box();
+    $ch->a = [7];
+    s30id($ch)->a[1] = "123";
+    check("ch1", $ch->a[0] === 7 && $ch->a[1] === "123");
+    s30id($ch)->a[0]++;
+    check("ch2", $ch->a[0] === 8);
+    check("ch3", isset(s30id($ch)->a[1]) && !isset(s30id($ch)->a[9]));
+    unset(s30id($ch)->a[0]);
+    check("ch4", !isset($ch->a[0]) && $ch->a[1] === "123");
+    s30id($ch)->a["k"] ??= 42;
+    check("ch5", $ch->a["k"] === 42);
+    s30id($ch)->b = "p";
+    check("ch6", $ch->b === "p");
+    // the guard that keeps this from re-parsing every call statement must not eat
+    // an ordinary one, nor a call used as an argument or a condition
+    $cnt = 0;
+    s30dbl(2);
+    if (s30id($ch)->a[1] === "123") { $cnt = $cnt + s30dbl(s30dbl(1)); }
+    check("ch7", $cnt === 4);
 
     // --- one declaration, several properties ---
     $bx = new S30Box();

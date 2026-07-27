@@ -44,11 +44,15 @@ Foo::class. Also covered: switch with fallthrough, do-while, the alternative
 colon/endXXX control syntax, break N / continue N, goto within a statement list,
 static local variables, global constants and the magic __FUNCTION__ / __CLASS__.
 
-Generators are covered with one deliberate deviation: there are no coroutines in this
-value model, so a generator's body runs to COMPLETION on the first iteration and the
-yielded key/value pairs are then walked. Creation stays lazy and every side effect
-happens exactly once, in order; what is lost is streaming, so an unbounded generator
-does not terminate.
+Generators are covered. There are no coroutines in this value model, so a generator
+cannot be SUSPENDED, and the body is read two ways instead. foreach (and yield from
+over a generator) PULLS: the body runs with the consumer attached as a sink, so each
+yielded pair is handed over as it is produced and a break aborts the generator - an
+unbounded generator is iterable. Everything that needs a length instead - the
+Generator methods, iterator_to_array - COLLECTS, running the body to completion; that
+one still cannot terminate on an unbounded generator, and neither can PHP. Creation
+stays lazy either way and every side effect happens exactly once, in order. Only
+send(), which has to resume a suspended body with a value, is out of reach.
 
 The program runs top to bottom; a self checking program ends with exit(failures).") ;
 
@@ -408,8 +412,10 @@ Declare     <~~ push(makeDeclare(takeAll())) ~~>
 DeclDirective <~~ takeAll() ~~> = Id "=" Expression ;
 // const NAME = expr; at file level: a global constant. Unlike a class constant it
 // takes no type, and its initializer is evaluated once, where the declaration stands.
+// A top-level 'const' may carry an attribute group, exactly as a class constant
+// may: '#[\Deprecated] const EXAMPLE = 5;' (tests/attributes/deprecated/constants/).
 ConstDecl   <~~ push(makeConstDecl(takeAll())) ~~>
-            = KwConst ConstItem { "," ConstItem } Semi ;
+            = [ AttrGrp ] KwConst ConstItem { "," ConstItem } Semi ;
 CatchType   = CatchName { "|" CatchName } ;
 CatchName   <~~ push({ctype: lastSeg(stripWs(up.in))}) ~~> = ExtName ;
 
@@ -429,7 +435,7 @@ Empty       <~~ push(makeConstStmt()) ~~>
 UnsetStmt   <~~ push(makeUnset(takeAll())) ~~>
             = KwUnset "(" IsTarget { "," IsTarget } [ "," ] ")" Semi ;
 IsTarget    <~~ push({istgt: pop()}) ~~>
-            = Target ;
+            = TgtOnly ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression Semi ;
@@ -484,8 +490,16 @@ ForEach     <~~ push(makeForeach(takeAll())) ~~>
 AltForeachBody = ":" AltBody KwEndforeach Semi ;
 ForeachVars = DestructPat | ForeachKV ;
 ForeachKV   = ForeachV1 [ "=>" ForeachV2 ] ;
-ForeachV1   = [ FeRef ] DollarName <~~ push({v1: pop()}) ~~> ;
-ForeachV2   = [ FeRef ] DollarName <~~ push({v2: pop()}) ~~> ;
+// The bound slot is any assignable TARGET, not just a variable: PHP writes into
+// '$obj->prop', '$arr[0]' and '$this->var["key"]' exactly as it does into '$v'
+// (tests/foreach/bug34310, bug34467, bug34873, lang/foreachLoop.004, lang/040,
+// tests/enum/no-write-properties-through-foreach-reference). A '=>' pair may put a
+// DESTRUCTURING pattern in the value position (tests/lang/foreach_list_001).
+ForeachV1   <~~ push({v1: pop()}) ~~>
+            = [ FeRef ] Target ;
+ForeachV2   = DestructPat | ForeachV2T ;
+ForeachV2T  <~~ push({v2: pop()}) ~~>
+            = [ FeRef ] Target ;
 // 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array.
 FeRef       <~~ push({byref: true}) ~~> = "&" ;
 
@@ -573,14 +587,151 @@ AssignOp    = "**=" | "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%=" |
             | "&=" | "|=" | "^=" | PlainEq ;
 PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = TargetHead { ArrowField | ArrowDyn | TIndex | TAppend } ;
+            = TargetHead { TStep }
+            | CallTgtAhead CallHead TStep { TStep } ;
+// The same target WITHOUT the lookahead, for the two places that already know they
+// are reading one: isset() and unset(). The guard exists only to stop a speculative
+// Target from re-parsing every ordinary call statement, and inside those brackets
+// there is nothing to speculate about.
+TgtOnly     <~~ push(makeTargetRef(takeAll())) ~~>
+            = TargetHead { TStep }
+            | CallHead TStep { TStep } ;
+TStep       = ArrowField | ArrowDyn | TIndex | TAppend ;
+// A CALL is an assignable head: 'foo()->bar[1] = "123"', 'foo($a)[0] = 2'. What is
+// written into is the value the call RETURNED, so it reaches the caller exactly when
+// that value is a shared one - an object, which is what php-src's own witnesses for
+// this form use (tests/bug37144, tests/bug70332, tests/closures/closure_write_prop).
+// A by-value ARRAY return is a temporary here, as it is in PHP without '&'.
+// At least one step is required: 'foo() = 1' is not a target in any reading.
+CallHead    <~~ push({headT: pop()}) ~~>
+            = Call ;
+// Is the text ahead a call-headed TARGET? Without this, 'Assignment = Target ...'
+// parses every ordinary call statement twice - once speculatively as a target, once
+// for real - which is 2^depth on nested calls (the documented Dart trap). The guard
+// answers in one capped forward scan: a name, a balanced argument list, at least one
+// '->' or '[' step, and then an assignment operator or '++'/'--' at bracket depth 0
+// before the statement ends. A false POSITIVE only costs the parse that would have
+// happened anyway; a false negative is a parse failure, so it errs toward yes.
+CallTgtAhead = :script(~~
+    (function() {
+        var CAP = 40000
+        var it = 0
+        function bad() { return abnf.newToken("\x01nocalltgt", 0) }
+        function isSp(ch) { return ch === 32 || ch === 9 || ch === 13 || ch === 10 }
+        function toEol(j) {
+            var g = 0
+            while (g < CAP) { g = g + 1; var ch = c.peek(j); if (ch < 0 || ch === 10) { break } j = j + 1 }
+            return j
+        }
+        function sk(j) {
+            var g = 0
+            while (g < CAP) {
+                g = g + 1
+                var ch = c.peek(j)
+                if (isSp(ch)) { j = j + 1; continue }
+                if (ch === 35) { j = toEol(j); continue }
+                if (ch === 47 && c.peek(j + 1) === 47) { j = toEol(j); continue }
+                if (ch === 47 && c.peek(j + 1) === 42) {
+                    j = j + 2
+                    var h = 0
+                    while (h < CAP) {
+                        h = h + 1
+                        var e = c.peek(j)
+                        if (e < 0) { break }
+                        if (e === 42 && c.peek(j + 1) === 47) { j = j + 2; break }
+                        j = j + 1
+                    }
+                    continue
+                }
+                break
+            }
+            return j
+        }
+        // Step over a quoted run, returning the position after the closing quote.
+        function skStr(j, q) {
+            j = j + 1
+            var g = 0
+            while (g < CAP) {
+                g = g + 1
+                var e = c.peek(j)
+                if (e < 0) { return j }
+                if (e === 92) { j = j + 2; continue }
+                j = j + 1
+                if (e === q) { return j }
+            }
+            return j
+        }
+        var i = sk(0)
+        var ch0 = c.peek(i)
+        if (!(ch0 === 92 || ch0 === 95 || (ch0 >= 65 && ch0 <= 90) || (ch0 >= 97 && ch0 <= 122))) { return bad() }
+        var st = i
+        while (it < CAP) {
+            it = it + 1
+            var cn = c.peek(i)
+            if (cn === 92 || cn === 95 || (cn >= 48 && cn <= 57) || (cn >= 65 && cn <= 90) || (cn >= 97 && cn <= 122)) { i = i + 1; continue }
+            break
+        }
+        if (i === st) { return bad() }
+        i = sk(i)
+        if (c.peek(i) !== 40) { return bad() }
+        var depth = 0
+        while (it < CAP) {
+            it = it + 1
+            var d = c.peek(i)
+            if (d < 0) { return bad() }
+            if (d === 39 || d === 34) { i = skStr(i, d); continue }
+            if (d === 40 || d === 91 || d === 123) { depth = depth + 1; i = i + 1; continue }
+            if (d === 41 || d === 93 || d === 125) {
+                depth = depth - 1
+                i = i + 1
+                if (depth === 0) { break }
+                continue
+            }
+            i = i + 1
+        }
+        if (depth !== 0) { return bad() }
+        i = sk(i)
+        var s0 = c.peek(i)
+        var step = (s0 === 91) || (s0 === 45 && c.peek(i + 1) === 62)
+        if (!step) { return bad() }
+        depth = 0
+        while (it < CAP) {
+            it = it + 1
+            var g2 = c.peek(i)
+            if (g2 < 0) { return bad() }
+            if (g2 === 39 || g2 === 34) { i = skStr(i, g2); continue }
+            if (g2 === 40 || g2 === 91 || g2 === 123) { depth = depth + 1; i = i + 1; continue }
+            if (g2 === 41 || g2 === 93 || g2 === 125) {
+                if (depth === 0) { return bad() }
+                depth = depth - 1
+                i = i + 1
+                continue
+            }
+            if (depth === 0) {
+                if (g2 === 59 || g2 === 44) { return bad() }
+                var n1 = c.peek(i + 1)
+                var n2 = c.peek(i + 2)
+                if (g2 === 43 && n1 === 43) { return undefined }
+                if (g2 === 45 && n1 === 45) { return undefined }
+                if (g2 === 61 && n1 !== 61 && n1 !== 62) { return undefined }
+                if (g2 === 63 && n1 === 63 && n2 === 61) { return undefined }
+                if ((g2 === 42 || g2 === 60 || g2 === 62) && n1 === g2 && n2 === 61) { return undefined }
+                if (n1 === 61 && (g2 === 43 || g2 === 45 || g2 === 42 || g2 === 47 || g2 === 37
+                                  || g2 === 46 || g2 === 38 || g2 === 124 || g2 === 94)) { return undefined }
+                if (g2 === 61) { i = i + 2; continue }
+            }
+            i = i + 1
+        }
+        return bad()
+    })()
+~~) ;
 // A static property is an assignable head too (self::$made = ..., C::$made++), so it
 // sits alongside a plain variable. It must be tried FIRST: PlainHead would otherwise
 // never see it, but VarVarHead / PlainHead both start at '$' and a bare class name
 // is not a target at all, so the ordering only matters against a later ConstRef.
 TargetHead  = StaticHead | PlainHead | VarVarHead ;
 StaticHead  <~~ push({staticvar: takeAll()}) ~~>
-            = StaticBase "::" StaticProp ;
+            = StaticBase "::" ( StaticProp | StaticDynProp ) ;
 PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
 // $$name = e / ${expr} = e : the variable NAME is computed.
 VarVarHead  <~~ push({varexpr: pop()}) ~~>
@@ -730,7 +881,16 @@ CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
 // An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
 // first-class callable placeholder (strlen(...)), with an optional trailing comma.
 ArgList     = Arg { "," Arg } [ "," ] ;
-Arg         = NamedArg | SpreadArg | FccArg | LvalArg | PosArg ;
+Arg         = NamedPlaceArg | NamedArg | SpreadArg | FccArg | PlaceArg | LvalArg | PosArg ;
+// PHP 8.5 partial application: a '?' in an argument position is a PLACEHOLDER, so
+// the call yields a closure taking one parameter per '?' instead of calling. It is
+// spelled 'b: ?' when the placeholder names the parameter it stands for. ArgEnd is
+// what keeps it apart from a ternary - only a ',' or ')' may follow a placeholder,
+// and no expression here starts with '?'.
+PlaceArg    <~~ push({place: true}) ~~>
+            = "?" ArgEnd ;
+NamedPlaceArg <~~ push({argname: popLabel(), place: true}) ~~>
+            = ArgLabel "?" ArgEnd ;
 // An argument that is exactly a variable / element / property is ALSO remembered as
 // an l-value, so a by-reference parameter (function f(&$n)) can bind the caller's
 // storage cell. ArgEnd is the guard that keeps '$a + 1' out of this alternative:
@@ -863,9 +1023,19 @@ StaticExpr  <~~ push(makeStaticExpr(takeAll(), up.pos)) ~~>
             = StaticBase "::" StaticMember [ StaticArgs ] ;
 StaticBase  <~~ push({sbase: lastSeg(stripWs(up.in))}) ~~>
             = ( "static" KwEnd | QName ) ;
-StaticMember = StaticProp | StaticName ;
+// A '::' member may be COMPUTED: 'Foo::{$name}()' names the method (or constant) at
+// run time, and 'Foo::$$v' / 'Foo::${expr}' the static PROPERTY (tests/bug55247,
+// tests/varSyntax/staticMember, tests/dynamic_call/dynamic_method_calls,
+// Zend/tests/int_static_prop_name). Each pushes a THUNK where the literal spelling
+// pushes a string; splitStatic keeps them apart and the access site resolves them
+// once per evaluation.
+StaticMember = StaticProp | StaticDynProp | StaticDynName | StaticName ;
 StaticName  <~~ push({sname: stripWs(up.in)}) ~~> = MemberName ;
 StaticProp  <~~ push({sprop: stripWs(up.in)}) ~~> = DollarName ;
+StaticDynProp <~~ push({spropT: pop()}) ~~>
+            = "$" ( VarRef | VarVar | "{" Expression "}" ) ;
+StaticDynName <~~ push({snameT: pop()}) ~~>
+            = "{" Expression "}" ;
 StaticArgs  <~~ push({sargs: takeAll()}) ~~>
             = "(" [ ArgList ] ")" ;
 
@@ -1201,7 +1371,52 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     //   {pos: [values], named: {"$name": value} | null, tgts: [cellMaker|null]}
     // which is what lets named arguments, spreads, variadics and by-reference
     // parameters all be bound in one place (bindParams).
-    function argsOf(list) { return {pos: list, named: null, tgts: [], fcc: false} }
+    function argsOf(list) { return {pos: list, named: null, nkeys: [], tgts: [], fcc: false, holes: []} }
+    // ----- PHP 8.5 partial function application ---------------------------------
+    // 'foo(1, ?, 3)' does not call foo: it yields a closure whose parameters are the
+    // '?' placeholders, in source order, with everything else already bound. The
+    // trailing-'...' forms ('foo(1, ...)', 'foo(1, ?, 3, ...)') bind a prefix and
+    // forward whatever else the closure is called with. isPartial decides which of
+    // the two readings a '...' argument list gets: a BARE 'foo(...)' is the PHP 8.1
+    // first-class callable and stays the plain function, anything with a bound
+    // argument or a placeholder becomes a partial.
+    function isPartial(argset) {
+        if (argset.holes.length > 0) { return true }
+        return argset.fcc === true && (argset.pos.length > 0 || argset.named != null)
+    }
+    // The bound named arguments, copied per call: the closure may be called more than
+    // once, and each call writes its own values into the named holes.
+    function copyNamed(argset) {
+        if (argset.named == null && argset.holes.length == 0) { return null }
+        var out = {}
+        for (var i = 0; i < argset.nkeys.length; i++) { scopePut(out, argset.nkeys[i], argset.named[argset.nkeys[i]]) }
+        return out
+    }
+    // callee(argset) performs the real call once the holes are filled.
+    function makePartial(callee, argset) {
+        return function(a2) {
+            var pos = argset.pos.slice()
+            var named = copyNamed(argset)
+            var hasNamed = argset.named != null
+            var k = 0
+            for (var i = 0; i < argset.holes.length; i++) {
+                var v = anytype
+                v = k < a2.pos.length ? a2.pos[k] : null
+                k = k + 1
+                if (argset.holes[i].nm != undefined) {
+                    scopePut(named, argset.holes[i].nm, v)
+                    hasNamed = true
+                } else { pos[argset.holes[i].ix] = v }
+            }
+            // Superfluous arguments are forwarded ONLY when the trailing '...' asked
+            // for them: superfluous_args_are_forwarded.phpt calls both 'f(?, ...)'
+            // and 'f(?)' with three arguments and expects three and one.
+            if (argset.fcc === true) {
+                for (var j = k; j < a2.pos.length; j++) { pos.push(a2.pos[j]) }
+            }
+            return callee({pos: pos, named: hasNamed ? named : null, nkeys: [], tgts: [], fcc: false, holes: []})
+        }
+    }
     // popLabel / popDyn: like popName, they lift ONE marker out of the pushed
     // values and put everything else back, so a following pop()/takeAll() is intact.
     function popLabel() {
@@ -1232,6 +1447,8 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     function evalArgs(args) {
         var pos = []
         var named = {}
+        var nkeys = []
+        var holes = []
         var hasNamed = false
         var fcc = false
         var tgts = []
@@ -1239,6 +1456,15 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         for (var i = 0; i < args.length; i++) {
             var a = args[i]
             if (a.fcc != undefined) { fcc = true; continue }
+            // A '?' placeholder reserves its slot instead of evaluating anything.
+            // A NAMED placeholder ('b: ?') reserves the parameter of that name.
+            if (a.place != undefined) {
+                if (a.argname != undefined) { holes.push({nm: "$" + a.argname}); continue }
+                pos.push(null)
+                tgts.push(null)
+                holes.push({ix: pos.length - 1})
+                continue
+            }
             if (a.argspread != undefined) {
                 var sv = anytype
                 sv = a.argspread()
@@ -1250,11 +1476,16 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 }
                 continue
             }
-            if (a.argname != undefined) { scopePut(named, "$" + a.argname, a.argval()); hasNamed = true; continue }
+            if (a.argname != undefined) {
+                scopePut(named, "$" + a.argname, a.argval())
+                nkeys.push("$" + a.argname)
+                hasNamed = true
+                continue
+            }
             pos.push(a.argval())
             tgts.push(a.argtgt == undefined ? null : mkCellMaker(a.argtgt, here))
         }
-        return {pos: pos, named: hasNamed ? named : null, tgts: tgts, fcc: fcc}
+        return {pos: pos, named: hasNamed ? named : null, nkeys: nkeys, tgts: tgts, fcc: fcc, holes: holes}
     }
     // A by-reference parameter needs the CALLER's cell, but binding happens after
     // the frame switch - so the maker restores the caller's chain for the lookup.
@@ -1808,33 +2039,69 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // foreach: items = [iterThunk, ({v1}, {v2}? | {pat}), {body}].
     // With 'as $k => $v' the first parsed name is the KEY and the second the value.
     // 'as &$v' binds the element's storage cell so a write reaches the array.
+    // Bind one element of the iteration to the slot the header declared. The slot is
+    // a TARGET, so a property or an element is written exactly as a variable is; the
+    // by-reference form still only aliases into a PLAIN VARIABLE, since that is the
+    // only slot this model can hold a storage cell in ('as &$obj->prop' therefore
+    // binds by value, the same degradation DTarget's '&' already documents).
+    function feBind(ref, v, byref, src, key) {
+        if (byref && ref.path.length == 0 && ref.name != null && ref.sref == null) {
+            scopePut(scopes[scopes.length - 1], refName(ref), arrCell(src, key))
+            return
+        }
+        writeTargetVal(ref, phpCopy(v))
+    }
     function makeForeach(items) {
         var iterT = items[0]
-        var keyName = null
-        var valName = null
+        var keyRef = null
+        var valRef = null
+        var keyRefs = []
         var pat = null
-        var byref = false
+        var byrefs = []
         var body = null
         for (var i = 1; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
             else if (items[i].pat != undefined) { pat = items[i].pat }
-            else if (items[i].byref != undefined) { byref = true }
-            else if (items[i].v1 != undefined) { valName = items[i].v1 }
-            else if (items[i].v2 != undefined) { keyName = items[i].v2 }
+            else if (items[i].byref != undefined) { byrefs.push(true) }
+            else if (items[i].v1 != undefined) { keyRefs.push(items[i].v1) }
+            else if (items[i].v2 != undefined) { keyRefs.push(items[i].v2) }
         }
+        // One slot is the VALUE; two make the first the key and the second the value.
+        // A '=>' whose value side is a pattern leaves exactly one slot AND a pattern.
+        if (keyRefs.length == 1 && pat == null) { valRef = keyRefs[0] }
+        else if (keyRefs.length == 1) { keyRef = keyRefs[0] }
+        else if (keyRefs.length > 1) { keyRef = keyRefs[0]; valRef = keyRefs[1] }
+        var byref = byrefs.length > 0
         return function() {
             var it = anytype
             it = iterT()
+            // A generator that has not been started yet is PULLED, one element at a
+            // time: the loop body becomes the sink genDrive calls from inside the
+            // generator's own body, so a `break` aborts the generator instead of
+            // waiting for it to finish. That is what lets an INFINITE generator be
+            // iterated at all (tests/generators/fibonacci.phpt).
+            if (isGen(it) && it.arr == null) {
+                var res = genDrive(it, function(gk, gv) {
+                    if (keyRef != null) { writeTargetVal(keyRef, gk) }
+                    if (pat != null) { bindPattern(pat, gv) }
+                    else { feBind(valRef, gv, false, it, gk) }
+                    var gs = runLoopBody(body)
+                    if (gs.sig != undefined) { return {sig: gs.sig} }
+                    if (gs.stop) { return {sig: null} }
+                    return null
+                })
+                if (res == null || res == undefined) { return null }
+                return res.sig
+            }
             var n = phpRangeLen(it)
             for (var i = 0; i < n; i++) {
                 var k = anytype
                 k = phpRangeKey(it, i)
                 var v = anytype
                 v = phpRangeVal(it, i)
+                if (keyRef != null) { writeTargetVal(keyRef, k) }
                 if (pat != null) { bindPattern(pat, v) }
-                else if (keyName != null) { phpSet(valName, k); phpSet(keyName, phpCopy(v)) }
-                else if (byref) { scopePut(scopes[scopes.length - 1], valName, arrCell(it, k)) }
-                else { phpSet(valName, phpCopy(v)) }
+                else { feBind(valRef, v, byref, it, k) }
                 var sg = runLoopBody(body)
                 if (sg.sig != undefined) { return sg.sig }
                 if (sg.stop) { return null }
@@ -1848,14 +2115,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // walk-time stack of "does the definition I am inside contain a yield", pushed by
     // the tag on each function header and popped by its builder.
     //
-    // DELIBERATE DEVIATION, and the honest cost of having no coroutines in this value
-    // model: the body runs to COMPLETION the first time the generator is iterated,
-    // collecting every yielded key/value pair into an array which the iteration then
-    // walks. Creation stays lazy (nothing runs until the first foreach) and every side
-    // effect happens exactly once, in order - what is lost is streaming: an unbounded
-    // generator does not terminate, where real PHP would let the consumer break out.
+    // There is no coroutine in this value model, so a generator cannot be SUSPENDED.
+    // Two readings of a generator's body exist here instead:
+    //
+    //   PULL (foreach, and 'yield from' over a generator) - genDrive runs the body
+    //   with a SINK attached to the collecting buffer, and every yield calls the sink
+    //   from inside the body. The consumer therefore sees each element as it is
+    //   produced, and when it stops (break / return / a signal) genEmit throws a
+    //   private stop marker that unwinds the generator's body. An INFINITE generator
+    //   is iterable this way, which is the whole point.
+    //
+    //   COLLECT (genList: Generator methods, iterator_to_array, anything that needs a
+    //   length) - the body runs to completion and every yielded pair is buffered.
+    //   That one still does not terminate on an unbounded generator, and cannot:
+    //   'count()' of an infinite stream has no answer.
+    //
+    // Creation stays lazy either way, and every side effect happens exactly once.
     var genFlags = []
     var genCollect = []
+    var genSeq = 0
     function genPush() { genFlags.push(false) }
     function genPop() { return genFlags.length > 0 ? genFlags.pop() : false }
     function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
@@ -1867,13 +2145,59 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // only need keys[i] / vals[i].
     function genList(g) {
         if (g.arr == null) {
-            var buf = {keys: [], vals: [], next: 0, ret: null}
+            genSeq = genSeq + 1
+            var buf = {keys: [], vals: [], next: 0, ret: null, sink: null, out: null, id: genSeq}
             genCollect.push(buf)
             buf.ret = g.run()
             genCollect.pop()
             g.arr = buf
         }
         return g.arr
+    }
+    // PULL a generator: run its body with `sink` attached, so each yielded pair is
+    // handed over as it is produced. The sink answers null to continue or a record to
+    // STOP, which genEmit turns into a throw that unwinds the body; genDrive answers
+    // that record (or null if the generator ran out on its own).
+    //
+    // The stop marker carries the buffer's ID rather than the buffer itself: with
+    // 'yield from' one drive nests inside another, and only the drive whose sink asked
+    // to stop may swallow the marker - every other one pops its buffer and rethrows.
+    function genDrive(g, sink) {
+        genSeq = genSeq + 1
+        var saved = scopes
+        var buf = {keys: [], vals: [], next: 0, ret: null, sink: sink, out: null, id: genSeq, cs: saved}
+        genCollect.push(buf)
+        try {
+            buf.ret = g.run()
+        } catch (e) {
+            genCollect.pop()
+            g.arr = buf
+            scopes = saved
+            if (e != undefined && e != null && e.__phGenStop === true && e.gid === buf.id) { return buf.out }
+            throw e
+        }
+        genCollect.pop()
+        g.arr = buf
+        return buf.out
+    }
+    // Call a sink with its own buffer OFF the collect stack: a 'yield' inside the
+    // consumer's loop body belongs to the ENCLOSING generator, not to the one being
+    // driven. The sink also runs in the CONSUMER's scope chain (buf.cs, captured
+    // before the body started) - it is the loop body of a foreach that lives outside
+    // the generator, and running it in the generator's frame made every variable it
+    // touches unknown. Both are restored on the exception path too, so a user
+    // exception thrown by the loop body leaves the stacks where genDrive expects them.
+    function genCallSink(buf, k, v) {
+        genCollect.pop()
+        var gsc = scopes
+        scopes = buf.cs
+        var r = anytype
+        r = null
+        try { r = buf.sink(k, v) }
+        catch (e2) { scopes = gsc; genCollect.push(buf); throw e2 }
+        scopes = gsc
+        genCollect.push(buf)
+        return r
     }
     // The Generator object's own methods. This engine COLLECTS a generator's stream
     // rather than suspending its body (it has no coroutine to park), so the cursor
@@ -1898,6 +2222,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         buf.keys.push(k)
         buf.vals.push(v)
         if (bump && typeof k == "number" && k >= buf.next) { buf.next = trunc(k) + 1 }
+        if (buf.sink != null) {
+            var r = anytype
+            r = genCallSink(buf, k, v)
+            if (r != null && r != undefined) {
+                buf.out = r
+                throw {__phGenStop: true, gid: buf.id}
+            }
+        }
     }
     // items = [{yval}?, {yval}?, {yfrom}?]. Two {yval}s mean 'yield $k => $v'.
     function makeYield(items) {
@@ -1919,6 +2251,12 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                 // of this generator, keeping the key the operand gave it.
                 var src = anytype
                 src = from()
+                // Delegating to an unstarted generator PULLS it too, so 'yield from'
+                // over an infinite inner generator streams instead of collecting.
+                if (isGen(src) && src.arr == null) {
+                    genDrive(src, function(ik, iv) { genEmit(buf, ik, iv, false); return null })
+                    return null
+                }
                 var n = phpRangeLen(src)
                 for (var j = 0; j < n; j++) { genEmit(buf, phpRangeKey(src, j), phpRangeVal(src, j), false) }
                 return null
@@ -2026,10 +2364,25 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
     function refExists(ref) {
-        var nm = refName(ref)
-        if (!varExists(nm)) { return false }
         var o = anytype
-        o = getVar(nm)
+        // A CALL head has no variable to probe: the call runs and the walk starts
+        // from what it returned.
+        if (ref.headT != null && ref.headT != undefined) { o = ref.headT() }
+        // A STATIC PROPERTY head: isset(C::$sp) asks whether the property exists and
+        // is not null. staticCell raises for one that was never declared, which is
+        // exactly the "false" answer here, so the probe catches it.
+        else if (ref.sref != null && ref.sref != undefined) {
+            var cell = anytype
+            cell = null
+            try { cell = ref.sref() } catch (e) { return false }
+            if (cell == null || cell == undefined) { return false }
+            o = deref(cell.v)
+        }
+        else {
+            var nm = refName(ref)
+            if (!varExists(nm)) { return false }
+            o = getVar(nm)
+        }
         for (var i = 0; i < ref.path.length; i++) {
             if (o === null || o === undefined) { return false }
             var st = stepOf(ref.path[i])
@@ -2067,7 +2420,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
                     }
                     continue
                 }
-                var p = resolveRefPhp(ref)
+                var p = resolveRefPhpV(ref, false)
                 if (p.last.key != undefined) { if (isObj(p.obj)) { arrDel(p.obj.p, p.last.key) } }
                 else if (p.last.append !== true && isArr(p.obj)) { arrDel(p.obj, p.last.idx()) }
             }
@@ -2654,6 +3007,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // ----- method dispatch and member chains -----
     function mcall(target, name, args) {
         if (target === null || target === undefined) { fail("method ->" + name + "() on null") }
+        if (isPartial(args)) {
+            var pt = target
+            var pn = name
+            return makePartial(function(a2) { return mcall(pt, pn, a2) }, args)
+        }
         if (isObj(target)) {
             if (args.fcc === true) {
                 var fm = classFind(target.__class, name)
@@ -2696,6 +3054,10 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // Calling a value: a closure, a function NAME held in a string (PHP's variable
     // functions), or an object with __invoke.
     function phpInvoke(cur, argset) {
+        if (isPartial(argset)) {
+            var pv = cur
+            return makePartial(function(a2) { return phpInvoke(pv, a2) }, argset)
+        }
         if (argset.fcc === true) { return asCallable(cur) }
         if (typeof cur == "function") { return cur(argset) }
         if (typeof cur == "string") { return callNamed(cur, argset) }
@@ -2880,6 +3242,13 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         self = (forwards && varExists("$this")) ? getVar("$this") : null
         var bind = forwards ? ctxStatic() : cls
         if (bind == null || bind == undefined) { bind = cls }
+        if (isPartial(argset)) {
+            if (m == null) { fail("unknown static method " + cls.__name + "::" + name) }
+            var pm = m
+            var pbind = bind
+            var pself = self
+            return makePartial(function(a2) { pendingStatic = pbind; return pm(pself, a2) }, argset)
+        }
         if (argset.fcc === true) {
             if (m == null) { fail("unknown static method " + cls.__name + "::" + name) }
             var mm = m
@@ -2902,12 +3271,14 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // parse one: a primary (Class::x), a member-chain suffix ($obj::x) and an
     // assignment head (self::$x = ...).
     function splitStatic(items) {
-        var r = {base: null, name: null, prop: null, args: null}
+        var r = {base: null, name: null, prop: null, args: null, nameT: null, propT: null}
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
             if (it.sbase != undefined) { r.base = it.sbase }
             else if (it.sname != undefined) { r.name = it.sname }
             else if (it.sprop != undefined) { r.prop = it.sprop.substring(1) }
+            else if (it.snameT != undefined) { r.nameT = it.snameT }
+            else if (it.spropT != undefined) { r.propT = it.spropT }
             else if (it.sargs != undefined) { r.args = it.sargs }
         }
         return r
@@ -2992,19 +3363,23 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         }
     }
 
+    // The member NAME of a '::' access, resolved now: the literal spelling if there
+    // was one, else the computed thunk's value as a string.
+    function stName(p) { return p.nameT == null ? p.name : phpStr(p.nameT()) }
+    function stProp(p) { return p.propT == null ? p.prop : phpStr(p.propT()) }
     function makeStaticExpr(items, pos) {
         var p = splitStatic(items)
-        return function() { return staticAccess(resolveClassName(p.base), p.name, p.prop, p.args, p.base) }
+        return function() { return staticAccess(resolveClassName(p.base), stName(p), stProp(p), p.args, p.base) }
     }
     function makeStaticSfx(items) {
         var p = splitStatic(items)
         return {kind: "static", run: function(cur) {
-            return staticAccess(classOfValue(cur), p.name, p.prop, p.args, "")
+            return staticAccess(classOfValue(cur), stName(p), stProp(p), p.args, "")
         }}
     }
     function makeStaticRef(items) {
         var p = splitStatic(items)
-        return function() { return staticCell(resolveClassName(p.base), p.prop) }
+        return function() { return staticCell(resolveClassName(p.base), stProp(p)) }
     }
 
     // include / require: a single-quoted literal path is resolved to a project file
@@ -3213,14 +3588,20 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     // ----- assignment (locals, ->field, [index], [] append) -----
     makeTargetRef = function(items) {
         var head = items[0]
+        // A CALL head: the path starts from the value the call returned, so there is
+        // no name and no cell - resolveRefPhp runs the thunk instead of reading a
+        // variable, and a write reaches the caller exactly when that value is shared.
+        if (head.headT != undefined) {
+            return {name: null, nameT: null, sref: null, headT: head.headT, path: items.slice(1)}
+        }
         // A static-property head (self::$made) denotes a CELL rather than a name, so
         // it carries a resolver instead of name/nameT; every reader below tests sref
         // first.
         if (head.staticvar != undefined) {
-            return {name: null, nameT: null, sref: makeStaticRef(head.staticvar), path: items.slice(1)}
+            return {name: null, nameT: null, sref: makeStaticRef(head.staticvar), headT: null, path: items.slice(1)}
         }
         return {name: head.var == undefined ? null : head.var, nameT: head.varexpr == undefined ? null : head.varexpr,
-                sref: null, path: items.slice(1)}
+                sref: null, headT: null, path: items.slice(1)}
     }
     // $$name resolves its name on every use, so it cannot be baked in at build time.
     function refName(ref) { return ref.nameT == null ? ref.name : "$" + phpStr(ref.nameT()) }
@@ -3245,11 +3626,26 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
     }
     // Walk the path to the container that the last step writes into, creating the
     // arrays along the way (PHP auto-vivifies: $a["x"]["y"] = 1 makes both levels).
-    function resolveRefPhp(ref) {
+    function resolveRefPhp(ref) { return resolveRefPhpV(ref, true) }
+    // ... except under unset(), which walks the same path and creates NOTHING:
+    // `unset($j["z"]["w"])` on an empty $j leaves it empty, it does not give it a
+    // "z" holding an empty array. (The compiler half never vivified at all, so this
+    // was the one case where its answer was the right one.)
+    function resolveRefPhpV(ref, viv) {
         var o = anytype
+        if (ref.headT != null && ref.headT != undefined) {
+            o = ref.headT()
+            for (var h = 0; h < ref.path.length - 1; h++) {
+                var hs = stepOf(ref.path[h])
+                if (hs.key != undefined) { o = phpGetProp(o, hs.key) }
+                else if (hs.append === true) { o = null }
+                else { o = phpIndex(o, hs.idx()) }
+            }
+            return {obj: o, last: stepOf(ref.path[ref.path.length - 1])}
+        }
         var sc = ref.sref == null ? null : ref.sref()
         o = sc == null ? getVar(refName(ref)) : deref(sc.v)
-        if (ref.path.length > 1 && (o === null || o === undefined)) {
+        if (viv && ref.path.length > 1 && (o === null || o === undefined)) {
             o = newArr()
             if (sc == null) { phpSet(refName(ref), o) } else { sc.v = o }
         }
@@ -3261,7 +3657,7 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
             if (s.key != undefined) { nxt = phpGetProp(o, s.key) }
             else if (s.append === true) { nxt = null }
             else { key = s.idx(); nxt = phpIndex(o, key) }
-            if ((nxt === null || nxt === undefined) && isArr(o)) {
+            if (viv && (nxt === null || nxt === undefined) && isArr(o)) {
                 nxt = newArr()
                 if (s.append === true) { arrPush(o, nxt) } else { arrSet(o, key, nxt) }
             }
@@ -3548,6 +3944,11 @@ AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x
         var args = items.slice(1)
         return function() {
             var argset = evalArgs(args)
+            // f(1, ?) / f(1, ...) is a PARTIAL: bind what is there, wait for the rest.
+            if (isPartial(argset)) {
+                var pname = name
+                return makePartial(function(a2) { return callNamed(pname, a2) }, argset)
+            }
             // f(...) is the first-class callable form: it yields the function itself.
             if (argset.fcc === true) {
                 if (hasOwn(phpBuiltins, name)) {
