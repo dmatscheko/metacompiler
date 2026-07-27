@@ -31,12 +31,13 @@ rem accompanies this file lists the areas that could not be settled.
 rem
 rem Deliberately out of scope (not syntax, or unrunnable in this harness):
 rem external programs of every kind (findstr, more, xcopy, ...), so no pipeline
-rem carries real data; anything that touches the filesystem, which rules out
-rem 'for /r', 'for /d', 'if exist' against real paths and the %~t / %~z / %~f
-rem modifiers that stat a file (the pure string modifiers %~d %~p %~n %~x %~nx
-rem ARE covered); interactive input, so 'set /p' is only exercised for the
-rem no-input case and 'pause' / 'choice' not at all; date/time/%RANDOM%;
-rem codepages and unicode; and the registry.
+rem carries real data; creating a file, so nothing is asserted about reading one
+rem back and 'if exist' is only asserted for paths every Windows installation
+rem has; enumerating a directory, which rules out 'for /r' and 'for /d'; the
+rem %~a / %~t / %~z modifiers, which stat a file (the pure string modifiers
+rem %~f %~d %~p %~n %~x %~nx ARE covered); interactive input, so 'set /p' is
+rem only exercised for the no-input case and 'pause' / 'choice' not at all;
+rem date/time/%RANDOM%; codepages and unicode; and the registry.
 rem
 rem Hand-written for the metacompiler project (Apache-2.0, no copied test-suite
 rem code), organized after the cmd.exe command reference.
@@ -911,6 +912,120 @@ exit /b %1
 :s20bare
 exit /b
 
+rem ===== SECTION 21: for-variable letters that are also modifier letters =====
+rem Every ~ modifier is a letter and so is every for-variable, so %%~ff and %%~pd are
+rem ambiguous to a greedy scan. This is the one area of the file whose expected values are
+rem not inferred from the help text but taken from a suite that was validated against
+rem Windows: tests/reference/batch/wine-cmd-tests has `for %%f in ("C D" E) do echo %%~ff`
+rem and `for %%d in ("I J" K) do echo %%~pd`, and its .exp file expects the drive/path of
+rem the LOOP VARIABLE. So the last letter of the run is the variable.
+:s21
+for %%f in ("C:\dir\sub\file.txt") do set r=%%~ff
+set cid=mod1
+set got=%r%
+set want=C:\dir\sub\file.txt
+call :check
+for %%d in ("C:\dir\sub\file.txt") do set r=%%~pd
+set cid=mod2
+set got=%r%
+set want=\dir\sub\
+call :check
+for %%n in ("C:\dir\sub\file.txt") do set r=%%~dn
+set cid=mod3
+set got=%r%
+set want=C:
+call :check
+rem A combination still ends at the variable.
+for %%x in ("C:\dir\sub\file.txt") do set r=%%~dpx
+set cid=mod4
+set got=%r%
+set want=C:\dir\sub\
+call :check
+exit /b 0
+
+rem ===== SECTION 22: parentheses as ordinary text =====
+rem Outside a block a ( or ) in a value is just a character; inside one, a ) closes the
+rem block, which is why a value that opens a paren has to close it again.
+:s22
+set p1=(a)
+set cid=par1
+set got=%p1%
+set want=(a)
+call :check
+set p2=Done (ok)
+set cid=par2
+set got=%p2%
+set want=Done (ok)
+call :check
+set p3=a(b)c(d)
+set cid=par3
+set got=%p3%
+set want=a(b)c(d)
+call :check
+rem A balanced pair inside a parenthesised block does not end the block.
+if 1 EQU 1 (
+    set p4=in(block)
+)
+set cid=par4
+set got=%p4%
+set want=in(block)
+call :check
+exit /b 0
+
+rem ===== SECTION 23: for /f command chains and absent file sets =====
+:s23
+rem The single-quoted set is a command line, so it can chain with &.
+for /f %%a in ('echo one& echo two') do set last=%%a
+set cid=ffc1
+set got=%last%
+set want=two
+call :check
+rem Each line drives one iteration.
+set /a rounds=0
+for /f %%a in ('echo alpha& echo beta& echo gamma') do set /a rounds=rounds+1
+set cid=ffc2
+set got=%rounds%
+set want=3
+call :check
+rem A bare word is a FILE set. This one does not exist, so the body never runs and the
+rem variable keeps its value. (cmd.exe also reports the missing file; that goes to the
+rem error stream, which this file does not capture.)
+set untouched=kept
+for /f %%a in (no-such-file-9k3.txt) do set untouched=%%a
+set cid=ffc3
+set got=%untouched%
+set want=kept
+call :check
+exit /b 0
+
+rem ===== SECTION 24: if exist =====
+rem Only paths that every Windows installation has are asserted here - there is no way to
+rem create a file from this harness, and a path that happens to exist on the machine that
+rem runs it would not be a property of the language.
+:s24
+set cid=exi1
+set got=no
+if exist nul set got=yes
+set want=yes
+call :check
+set cid=exi2
+set got=no
+if exist C:\Windows set got=yes
+set want=yes
+call :check
+rem A trailing separator names the same directory.
+set cid=exi3
+set got=no
+if exist C:\Windows\ set got=yes
+set want=yes
+call :check
+set cid=exi4
+set got=no
+if not exist C:\no-such-directory-9k3 set got=yes
+set want=yes
+call :check
+exit /b 0
+
 rem ===== END SECTIONS =====
 
 :main
@@ -934,5 +1049,9 @@ call :s17 SECTION-CALL 17
 call :s18 SECTION-CALL 18
 call :s19 SECTION-CALL 19
 call :s20 SECTION-CALL 20
+call :s21 SECTION-CALL 21
+call :s22 SECTION-CALL 22
+call :s23 SECTION-CALL 23
+call :s24 SECTION-CALL 24
 echo full: %checks% checks, %fails% failures
 exit /b %fails%

@@ -488,6 +488,138 @@ def s23
   check("r3e", br.cover?(3) == true && br.cover?(10) == false)
   check("r3f", s23_fwd(20, 21, 1) == 42)
 end
+# ===== SECTION 24: assignment targets and compound operators =====
+class S24Box
+  def initialize
+    @v = 0
+  end
+  def v
+    @v
+  end
+  def v=(n)
+    @v = n
+  end
+  def bump
+    self.v = self.v + 1
+    self.v
+  end
+end
+def s24
+  b = S24Box.new
+  b.v = 7
+  check("t1", b.v == 7)
+  check("t2", b.bump == 8)
+  n = 32
+  n |= 64
+  check("t3", n == 96)
+  n &= 12
+  check("t4", n == 0)
+  m = 5
+  m ^= 3
+  check("t5", m == 6)
+  p2 = 3
+  p2 **= 3
+  check("t6", p2 == 27)
+  sh = 1
+  sh <<= 4
+  check("t7", sh == 16)
+  a, = [1, 2, 3]
+  check("t8", a == 1)
+  x = nil
+  true && false && x = 1
+  check("t9", x == nil)
+  y = 1 || false && y = 2
+  check("t10", y == 1)
+end
+# ===== SECTION 25: statement sequences, rescue targets, nested declarations =====
+class S25Outer
+  class S25Inner
+    def who
+      "inner"
+    end
+  end
+  # A nested class DECLARES here (the section locks its syntax); resolving it by its
+  # short name from a method of the enclosing class is not implemented in either
+  # grammar, so the check below stays on the outer class.
+  def make
+    "outer"
+  end
+end
+S25_CONST = 11
+class S25Err
+  def initialize
+    @e = nil
+    @caught = nil
+  end
+  def caught
+    @caught
+  end
+  def run
+    begin
+      raise "boom"
+    rescue => @caught
+      1
+    end
+    @caught.message
+  end
+  def late
+    begin
+      raise "again"
+    rescue
+      S25_CONST
+    end
+  end
+end
+def s25_ensured
+  [1, 2].each do |i|
+    i
+  ensure
+    $s25_ensure = ($s25_ensure || 0) + 1
+  end
+  :done
+end
+def s25
+  check("p1", (1; 2; 3) == 3)
+  check("p2", () == nil)
+  check("p3", [0, (), 2].size == 3)
+  check("p4", S25Outer.new.make == "outer")
+  check("p5", S25Err.new.run == "boom")
+  check("p6", S25Err.new.late == 11)
+  check("p7", ::S25_CONST == 11)
+  $s25_ensure = 0
+  check("p8", s25_ensured == :done && $s25_ensure == 2)
+end
+# ===== SECTION 26: symbols, heredoc placement and command calls =====
+def s26_take(text, extra)
+  text + extra.to_s
+end
+def s26
+  check("y1", :foo?.to_s == "foo?")
+  check("y2", :foo=.to_s == "foo=")
+  check("y3", :+.to_s == "+")
+  check("y4", :[]=.to_s == "[]=")
+  check("y5", :@iv.to_s == "@iv")
+  check("y6", :@@cv.to_s == "@@cv")
+  check("y7", :'quoted'.to_s == "quoted")
+  check("y8", (+"copy") == "copy")
+  $0 == $0
+  glued = s26_take(<<~TXT, 5)
+    line one
+  TXT
+  check("y9", glued == "line one\n5")
+  tail = <<-RAW.size
+      abc
+      RAW
+  check("y10", tail == 10)
+  acc = []
+  acc.push 1
+  acc.push 2
+  check("y11", acc == [1, 2])
+  f = lambda { |a = 5, b = 4| a + b }
+  check("y12", f.call == 9)
+  r = [1].map { next 7, 8 }
+  check("y13", r == [[7, 8]])
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -512,5 +644,8 @@ s20() # SECTION-CALL 20
 s21() # SECTION-CALL 21
 s22() # SECTION-CALL 22
 s23() # SECTION-CALL 23
+s24() # SECTION-CALL 24
+s25() # SECTION-CALL 25
+s26() # SECTION-CALL 26
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

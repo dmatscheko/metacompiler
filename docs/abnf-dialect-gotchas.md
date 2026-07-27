@@ -192,6 +192,46 @@ C-family one here — must emit a property accessor as an ORDINARY method
 as the first argument. Kotlin gets away with `js_defprop` because it resolves
 `this` through `js_kget` instead.
 
+## An LLVM function's PARAMETER NAMES and its BLOCK LABELS share one namespace
+
+In LLVM's textual IR, `%name` is one flat per-function namespace: a parameter, an
+instruction result and a basic-block label all live in it. So
+
+    m.NewFunc("rt_subst", …, llvm.ir.NewParam("star", i32))
+    rtSubst.NewBlock("star")
+
+emits a module that our built-in IR interpreter **runs perfectly**, and that
+clang refuses:
+
+    error: '%star' is not a basic block
+      br i1 %3, label %star, label %plain
+
+Read that failure mode carefully, because it is the reason this entry exists.
+`./test.sh` runs every grammar twice and demands byte-identical stdout, and a
+name collision is byte-identical under both engines — the module text is
+deterministic, `llvm.Run` resolves the branch by handle rather than by name, and
+the program prints the right answer. **The project's central invariant cannot see
+this class of defect at all.** Only `-exe PATH`, which hands the printed module
+to clang, catches it.
+
+Every `-to-llvm-ir` grammar is exposed, and the exposure grows with the hand-written
+runtime: the more `m.NewFunc(…, NewParam("s"), NewParam("to"), NewParam("star"))`
+helpers a grammar emits, the likelier some block wants one of those words too.
+The collision is easy to make because the two names are written far apart — the
+parameter in the `NewFunc` line, the label thirty lines down — and because the
+obvious block names (`star`, `plain`, `name`, `rest`, `from`, `to`, `end`) are
+exactly the obvious parameter names.
+
+Two habits avoid it. Give blocks a prefix no parameter would use (`bstar`,
+`bplain`, or the `nb()` counter style), and **run `-exe` on the language's own
+test file after touching an emitter**, not only `./test.sh`:
+
+    mec languages/<lang>-to-llvm-ir.abnf tests/<lang>-test-full.<ext> -q -exe /tmp/x && /tmp/x
+
+(Found in `batch-to-llvm-ir.abnf`, where `rt_subst`'s `star` parameter collided
+with its `star` block. Both grammars were green, both engines agreed, and the
+ratchet reported FULL.)
+
 ## `:script` productions
 
 **A guard that scans FORWARD for a token on "this line" must skip the leading
@@ -275,6 +315,35 @@ double form outright. The same shape applies to `|` vs `||`, `<` vs `<<`, and
 This is a specific case of the ordered-choice rule at the top of this file, but
 it is worth its own entry because the usual symptom of a bad alternative — a
 parse failure — does not appear. You get a wrong parse tree instead.
+
+## A unary operator that is also an expansion's OPENING DELIMITER
+
+Batch has a logical-not `!` in `set /a`, and cmd.exe's delayed expansion writes a
+variable as `!VAR!`. The natural unary level
+
+    ArithUnary = ArithNot | ArithBNot | ArithNeg | ArithAtom ;
+    ArithNot   = "!" ArithUnary ;
+
+reads `set /a counter=!counter! + 1` as `!(counter)` — which *succeeds* — and
+then dies on the closing `!`. The reported position is that closing bang, so the
+error points at the END of a construct the parser never considered, and the
+obvious suspects (the `!VAR!` rule, the `+`, the assignment) are all innocent.
+
+The fix is the ordered-choice one, and it needs no lookahead: put the expansion
+alternative FIRST.
+
+    ArithUnary = ArithExp | ArithNot | ArithBNot | ArithNeg | ArithAtom ;
+
+That is safe precisely *because* the expansion form requires its closing
+delimiter. `!counter!` matches it; a genuine unary `!x` does not, so it falls
+through to `ArithNot` on its own. No `!"literal"` guard and no `:script` is
+involved — the delimiter does the disambiguating.
+
+The same shape appears wherever a language wraps names in a character that is
+also an operator: `!x!` vs `!x`, `%x%` vs `x % y` (batch again — the modulo
+operator and the expansion delimiter are the same byte), and `#{…}` vs `#` in a
+language that has both interpolation and a comment or length sigil. The rule of
+thumb: the DELIMITED form is the more specific one, so it goes first.
 
 ## `!"literal"` skips leading whitespace
 

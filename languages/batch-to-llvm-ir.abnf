@@ -21,8 +21,8 @@ dispatch block and so does not preserve dominance.
 Every value is a string, so the module carries a hand-emitted string runtime: rt_bump over a
 global arena, rt_strlen / rt_streq / rt_streqi / rt_strcat / rt_sub / rt_findch / rt_findstr,
 rt_int2str / rt_str2int for the 32-bit integers of set /a and if EQU/..., rt_substr / rt_subst /
-rt_stripq / rt_mods for the %VAR% operators and the ~ modifiers, and rt_tokb / rt_nlines /
-rt_lineat for for /f. Output goes through rt_println, which appends to a capture buffer when
+rt_stripq / rt_mods for the %VAR% operators and the ~ modifiers, rt_tokb / rt_nlines /
+rt_lineat for for /f, and rt_fskind for the path model that answers `if exist`. Output goes through rt_println, which appends to a capture buffer when
 one is open - that one mechanism backs both an output redirection (which discards) and
 for /f over the output of a command. Variables are gv_NAME i8* slots with a gd_NAME i32
 'defined' flag; setlocal and endlocal snapshot every slot into a stack in bat_setlocal /
@@ -37,7 +37,11 @@ modulo guard a zero divisor (result 0), matching the interpreter and cmd.exe.
 
 The generated module is printed (this is the compiler output) and is valid LLVM IR: clang can
 turn the compiled batch script into a native executable, either from the printed .ll or by
-passing -exe PATH to mec (mec languages/batch-to-llvm-ir.abnf script.bat -exe out && ./out).") ;
+passing -exe PATH to mec (mec languages/batch-to-llvm-ir.abnf script.bat -exe out && ./out).
+Run that after touching the emitter, and not only ./test.sh: an LLVM function's parameter names
+and its block labels share ONE namespace, and a collision between them produces a module the
+built-in IR interpreter runs perfectly and clang rejects - so the byte-identical invariant
+cannot see it. See docs/abnf-dialect-gotchas.md.") ;
 
 :startRule(Program) ;
 :whitespace(Hspace) ;
@@ -142,13 +146,19 @@ ForF        <~~ push(makeForF(takeAll())) ~~>
             = KwFor "/f" :whitespace(Hspace) [ ForOpts ] ForVar KwIn "(" :whitespace(Hspace)
               ForFSrc ")" :whitespace(Hspace) KwDo Body ;
 ForOpts     <~~ push({opts: up.in}) ~~> = '"' :whitespace() { NotDQ } '"' :whitespace(Hspace) ;
-ForFSrc     = ForFLit | ForFCmd ;
+ForFSrc     = ForFLit | ForFCmd | ForFFile ;
 ForFLit     <~~ push({lit: pop()}) ~~> = RawQuoted ;
 // The single-quoted form is a COMMAND whose output is parsed. External programs are out of
-// scope for this runtime, so the command has to be an `echo` - the one internal command that
-// produces capturable output.
-ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace() SqEcho "'" :whitespace(Hspace) ;
+// scope for this runtime, so the command is a chain of the internal commands that produce
+// capturable output - echo and ver.
+ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace(Hspace) SqChain "'" :whitespace(Hspace) ;
+SqChain     <~~ push(makeSeq(takeAll())) ~~> = SqCmd { "&" SqCmd } ;
+SqCmd       = SqEcho | SqVer ;
+SqVer       <~~ push(makeVer()) ~~> = KwVer ;
 SqEcho      <~~ push(makeEcho(pop())) ~~> = KwEcho SqText ;
+// A bare word is a FILE set. The path model behind this runtime answers existence, not
+// contents, so a file set always reads nothing and the loop runs zero times.
+ForFFile    <~~ push({file: pop()}) ~~> = Word ;
 SqText      <~~ push(makeWord(takeAll())) ~~> = [ SqPart ] :whitespace() { SqPart } ;
 SqPart      = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | SqChars ;
 SqChars     <~~ push(makeStr(up.in)) ~~> = SqChar :whitespace() { SqChar } ;
@@ -219,11 +229,42 @@ SubFChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\x3c" | "\x3e"..."\U0010ffff"
 SubTChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\U0010ffff" ;                    // not %
 
 // %%i for-variables, with the ~ modifiers (pure string operations on the value).
+// A for-variable is a LETTER, and so is every modifier, so `%%~ff` (the ~f modifier on the
+// variable f) and `%%~pd` (~p on d) are ambiguous to a greedy scan - it eats the variable
+// and then finds none. The wine cmd suite settles it: tests/reference/batch/wine-cmd-tests
+// has `for %%f in ("C D" E) do echo %%~ff` and `for %%d in ("I J" K) do echo %%~pd`, whose
+// .exp files expect the path of the loop variable. So the rule is: take the maximal run of
+// modifier letters, and if what follows it is NOT another letter, hand the run's LAST letter
+// back to be the variable. ModOkFor is that decision, as a pure lookahead.
 ForRef      <~~ push(mkForRef(takeAll())) ~~>
-            = "%%" :whitespace() [ TildeMod ] ForLetter :whitespace() ;
+            = "%%" :whitespace() [ TildeModF ] ForLetter :whitespace() ;
+TildeModF   <~~ push({mods: up.in}) ~~> = "~" :whitespace() { ModLetterF } :whitespace() ;
+ModLetterF  = ModOkFor ModLetter ;
+// A %1..%9 argument is a DIGIT, which no modifier ever is, so there the scan can stay greedy.
 TildeMod    <~~ push({mods: up.in}) ~~> = "~" :whitespace() { ModLetter } :whitespace() ;
 ModLetter   = "d" | "p" | "n" | "x" | "f" | "s" | "a" | "t" | "z"
             | "D" | "P" | "N" | "X" | "F" | "S" | "A" | "T" | "Z" ;
+ModOkFor    = :script(~~
+    (function() {
+        function isMod(cc) {
+            return cc === 100 || cc === 112 || cc === 110 || cc === 120 || cc === 102
+                || cc === 115 || cc === 97 || cc === 116 || cc === 122
+                || cc === 68 || cc === 80 || cc === 78 || cc === 88 || cc === 70
+                || cc === 83 || cc === 65 || cc === 84 || cc === 90
+        }
+        var n = 0
+        while (n < 16) {
+            var cc = c.peek(n)
+            if (cc < 0 || !isMod(cc)) { break }
+            n = n + 1
+        }
+        if (n === 0) { return abnf.newToken("\x01not-a-modifier", 0) }
+        var x = c.peek(n)
+        if (x >= 0 && ((x >= 65 && x <= 90) || (x >= 97 && x <= 122))) { return undefined }
+        if (n >= 2) { return undefined }
+        return abnf.newToken("\x01this-modifier-is-the-variable", 0)
+    })()
+~~) ;
 ForLetter   <~~ push({fv: up.in}) ~~>
             = ( "a"..."z" | "A"..."Z" ) :whitespace() ;
 // %1..%9 call arguments (%0 is the label), %* the whole tail, %~1 with the same modifiers.
@@ -266,7 +307,15 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
 LineText    <~~ push(makeWord(takeAll())) ~~>
             = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
-            | EscNL | EscCh | PctLit | BangLit | DqLit | LineChars ;
+            | EscNL | EscCh | PctLit | BangLit | DqLit | LineParen | LParenLit | LineChars ;
+// A ( ) pair is ordinary text - `echo Done (ok)` and `set x=(a)` are values, not blocks.
+// Requiring the run to be BALANCED is what keeps it from stealing the ) that closes an
+// enclosing block: inside `(set x=1)` the value has no ( , so the ) still terminates.
+LineParen   <~~ push(makeWord(takeAll())) ~~>
+            = LParen :whitespace() { LinePart } RParen :whitespace() ;
+LParen      <~~ push(makeStr("(")) ~~> = "(" ;
+RParen      <~~ push(makeStr(")")) ~~> = ")" ;
+LParenLit   <~~ push(makeStr("(")) ~~> = "(" :whitespace() ;
 DqLit       <~~ push(makeStr("\x22")) ~~> = '"' :whitespace() ;
 LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
 
@@ -353,14 +402,16 @@ LabelName   <~~ push(up.in) ~~>
 // else - % ! " ( ) & | < > ^ .
 BareChar    = "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x5d"
             | "\x5f"..."\x7b" | "\x7d"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
-// A line-text char: the same set plus space, tab, ( and , but still not % ! " ) & | < > ^ .
-LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27"..."\x28" | "\x2a"..."\x3b" | "\x3d"
+// A line-text char: the same set plus space, tab and , but not % ! " ( ) & | < > ^ .
+// ( and ) are excluded so a run stops at them and LineParen gets its chance; an unbalanced
+// ( then falls through to LParenLit.
+LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d"
             | "\x3f"..."\x5d" | "\x5f"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // A redirection target: printable except whitespace " & < > | .
 RTChar      = "\x21" | "\x23"..."\x25" | "\x27"..."\x3b" | "\x3d" | "\x3f"..."\x7b"
             | "\x7d"..."\U0010ffff" ;
-// Text inside a single-quoted for /f command: not ' % ! and not a newline.
-SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x26" | "\x28"..."\U0010ffff" ;
+// Text inside a single-quoted for /f command: not ' % ! & and not a newline.
+SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x28"..."\U0010ffff" ;
 NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotDQ       = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;                     // not " (0x22)
 NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " % newline
@@ -993,6 +1044,39 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         e.NewRet(out)
     })()
 
+    // There is NO filesystem behind a compiled run either, so `if exist` answers from the same
+    // small MODEL of the standard paths the interpreter uses - the shape bash-to-llvm-ir.abnf
+    // established for its -e/-f/-d predicates. 0 = absent, 1 = exists and is not a directory,
+    // 2 = directory. Both spellings of a directory (with and without the trailing separator)
+    // are in the table, which is cheaper than emitting the strip.
+    var FSMODEL = [
+        {p: "nul", k: 1}, {p: "con", k: 1}, {p: "prn", k: 1}, {p: "aux", k: 1},
+        {p: "com1", k: 1}, {p: "com2", k: 1}, {p: "com3", k: 1}, {p: "com4", k: 1}, {p: "com5", k: 1},
+        {p: "com6", k: 1}, {p: "com7", k: 1}, {p: "com8", k: 1}, {p: "com9", k: 1},
+        {p: "lpt1", k: 1}, {p: "lpt2", k: 1}, {p: "lpt3", k: 1}, {p: "lpt4", k: 1}, {p: "lpt5", k: 1},
+        {p: "lpt6", k: 1}, {p: "lpt7", k: 1}, {p: "lpt8", k: 1}, {p: "lpt9", k: 1},
+        {p: "c:", k: 2}, {p: "c:\x5c", k: 2},
+        {p: "c:\x5cwindows", k: 2}, {p: "c:\x5cwindows\x5c", k: 2},
+        {p: "c:\x5cwindows\x5csystem32", k: 2}, {p: "c:\x5cwindows\x5csystem32\x5c", k: 2},
+        {p: "c:\x5cusers", k: 2}, {p: "c:\x5cusers\x5c", k: 2},
+        {p: "c:\x5cprogram files", k: 2}, {p: "c:\x5cprogram files\x5c", k: 2},
+        {p: "c:\x5cprogramdata", k: 2}, {p: "c:\x5cprogramdata\x5c", k: 2}
+    ]
+    var rtFskind = m.NewFunc("rt_fskind", i32, llvm.ir.NewParam("s", i8ptr))
+    ;(function() {
+        var s = rtFskind.Params[0]
+        var e = rtFskind.NewBlock("entry")
+        var q = e.NewCall(rtStripq, s)
+        var cur = e, i
+        for (i = 0; i < FSMODEL.length; i++) {
+            var hitB = rtFskind.NewBlock(""), missB = rtFskind.NewBlock("")
+            cur.NewCondBr(cur.NewICmp(NE, cur.NewCall(rtStreqi, [q, gepStr(cur, FSMODEL[i].p)]), zero), hitB, missB)
+            hitB.NewRet(ci32(FSMODEL[i].k))
+            cur = missB
+        }
+        cur.NewRet(zero)
+    })()
+
     // ----- for /f: line and token boundaries -----
     var rtIsdelim = m.NewFunc("rt_isdelim", i32, [llvm.ir.NewParam("c", i32), llvm.ir.NewParam("d", i8ptr)])
     ;(function() {
@@ -1148,8 +1232,16 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         }
         return b.NewCall(rtSubst, [v, gepStr(b, mod.from), gepStr(b, mod.to), ci32(mod.star ? 1 : 0)])
     }
+    // The effective set of path components a ~ modifier run asks for: 1 = drive, 2 = path,
+    // 4 = name, 8 = extension; -1 = there was no ~ at all (the value is raw) and -2 = a bare
+    // ~ (strip the quotes and nothing else). ~s asks for the SHORT path, which on a volume
+    // with 8.3 names switched off is the long one, so it is a no-op flag on top of the others
+    // and means the whole path when it stands alone. ~a ~t ~z would have to stat the file,
+    // which the path model cannot do, so they ask for nothing - which is also what cmd.exe
+    // answers for a file that is not there.
     function maskOf(mods) {
         if (mods == null) { return -1 }
+        if (mods == "") { return -2 }
         var mask = 0, i
         for (i = 0; i < mods.length; i++) {
             var ch = lower(mods.charAt(i))
@@ -1159,12 +1251,13 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             if (ch == "n") { mask = mask | 4 }
             if (ch == "x") { mask = mask | 8 }
         }
+        if (mask == 0 && lower(mods).indexOf("s") >= 0) { mask = 15 }
         return mask
     }
-    // mask -1 = no ~ at all (the value is raw); 0 = a bare ~, which only strips the quotes.
     function applyTilde(b, v, mask) {
-        if (mask < 0) { return v }
-        if (mask == 0) { return b.NewCall(rtStripq, v) }
+        if (mask == -1) { return v }
+        if (mask == -2) { return b.NewCall(rtStripq, v) }
+        if (mask == 0) { return gepStr(b, "") }
         return b.NewCall(rtMods, [v, ci32(mask)])
     }
     function modsOf(items, upto) {
@@ -1311,19 +1404,11 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             return {b: bb, v: bb.NewICmp(SGE, bb.NewLoad(i32, gErrLvl), bb.NewCall(rtStr2int, r.v))}
         }
     }
-    // There is no filesystem here, so `if exist` only knows the reserved device names.
-    var DEVICES = ["nul", "con", "prn", "aux"]
     function mkExist(wT) {
         return function(b, ci) {
             var r = wT.fn(b)
             var bb = r.b
-            var q = bb.NewCall(rtStripq, r.v)
-            var acc = null, i
-            for (i = 0; i < DEVICES.length; i++) {
-                var hit = bb.NewICmp(NE, bb.NewCall(rtStreqi, [q, gepStr(bb, DEVICES[i])]), zero)
-                acc = (acc == null) ? hit : bb.NewOr(acc, hit)
-            }
-            return {b: bb, v: acc}
+            return {b: bb, v: bb.NewICmp(NE, bb.NewCall(rtFskind, r.v), zero)}
         }
     }
     function mkStrCmp(items) {
@@ -1694,6 +1779,9 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             if (src.lit != undefined) {
                 var r = src.lit.fn(b); b = r.b
                 txt = b.NewCall(rtStripq, r.v)
+            } else if (src.file != undefined) {
+                var rf = src.file.fn(b); b = rf.b
+                txt = emptyPtr(b)                      // no contents in the path model
             } else {
                 b.NewCall(rtCapStart)
                 b = src.cmd(b)

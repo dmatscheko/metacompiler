@@ -29,15 +29,28 @@ block is the value from before the block while !VAR! is the current one. The run
 the script's, so a self checking script that ends with `exit /b <failures>` is green exactly
 when it passes.
 
-NOT modelled, because the runtime has neither a filesystem nor real child processes: external
-programs and pipes carrying their data; for /r, for /d and file sets for for /f; if exist for
-anything but the reserved device names (nul, con, prn, aux, com1-9, lpt1-9), which always
-exist; the ~s ~a ~t ~z modifiers, which stat a file and so answer empty; a redirection target,
-so an output redirection discards; stdin, so set /p always reads nothing and leaves its
-variable unchanged; and date/time, %RANDOM%, codepages and the registry.
+Two rules are worth spelling out because a straightforward reading gets them wrong. A ~
+modifier run and a for-variable are both letters, so %%~ff and %%~pd are ambiguous; the rule
+is that the LAST letter of the run is the variable, which is what the wine cmd suite under
+tests/reference/batch expects. And parentheses are ordinary characters in a value, so
+`echo Done (ok)` and `set x=a(b)` work - a run of them has to be BALANCED, which is what
+keeps a value inside a ( ) block from swallowing the parenthesis that closes it.
 
-One divergence worth naming: a for /f command set has to be an echo, the one internal command
-in this runtime that produces capturable output.") ;
+There is NO filesystem behind a grammar run, so `if exist` answers from a small MODEL of the
+paths every Windows installation has - the reserved device names (nul, con, prn, aux, com1-9,
+lpt1-9) exist, C: and the standard Windows directories are directories, everything else is
+absent. This is the same shape bash-interpreter.abnf uses for its -e -f -d predicates. The
+model answers EXISTENCE, not contents and not a listing, and the rest follows from that: a
+for /f file set always reads nothing (the loop runs zero times), for /r and for /d are not
+offered at all because they enumerate a directory, the ~a ~t ~z modifiers answer empty
+because they stat a file (~s asks for the short path, which is the long one when 8.3 names
+are off, so it is a no-op flag and means the whole path when it stands alone), an output
+redirection discards instead of writing, and stdin is end of file at once so set /p always
+leaves its variable unchanged.
+
+Also NOT modelled: external programs and pipes carrying their data; date/time, %RANDOM%,
+codepages and the registry. A for /f command set is a chain of the internal commands that
+produce capturable output - echo and ver.") ;
 
 :startRule(Program) ;
 :whitespace(Hspace) ;
@@ -142,13 +155,19 @@ ForF        <~~ push(makeForF(takeAll())) ~~>
             = KwFor "/f" :whitespace(Hspace) [ ForOpts ] ForVar KwIn "(" :whitespace(Hspace)
               ForFSrc ")" :whitespace(Hspace) KwDo Body ;
 ForOpts     <~~ push({opts: up.in}) ~~> = '"' :whitespace() { NotDQ } '"' :whitespace(Hspace) ;
-ForFSrc     = ForFLit | ForFCmd ;
+ForFSrc     = ForFLit | ForFCmd | ForFFile ;
 ForFLit     <~~ push({lit: pop()}) ~~> = RawQuoted ;
 // The single-quoted form is a COMMAND whose output is parsed. External programs are out of
-// scope for this runtime, so the command has to be an `echo` - the one internal command that
-// produces capturable output.
-ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace() SqEcho "'" :whitespace(Hspace) ;
+// scope for this runtime, so the command is a chain of the internal commands that produce
+// capturable output - echo and ver.
+ForFCmd     <~~ push({cmd: pop()}) ~~> = "'" :whitespace(Hspace) SqChain "'" :whitespace(Hspace) ;
+SqChain     <~~ push(makeSeq(takeAll())) ~~> = SqCmd { "&" SqCmd } ;
+SqCmd       = SqEcho | SqVer ;
+SqVer       <~~ push(makeVer()) ~~> = KwVer ;
 SqEcho      <~~ push(makeEcho(pop())) ~~> = KwEcho SqText ;
+// A bare word is a FILE set. The path model behind this runtime answers existence, not
+// contents, so a file set always reads nothing and the loop runs zero times.
+ForFFile    <~~ push({file: pop()}) ~~> = Word ;
 SqText      <~~ push(makeWord(takeAll())) ~~> = [ SqPart ] :whitespace() { SqPart } ;
 SqPart      = ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar | PctLit | BangLit | SqChars ;
 SqChars     <~~ push(makeStr(up.in)) ~~> = SqChar :whitespace() { SqChar } ;
@@ -219,11 +238,42 @@ SubFChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\x3c" | "\x3e"..."\U0010ffff"
 SubTChar    = "\x09" | "\x20"..."\x24" | "\x26"..."\U0010ffff" ;                    // not %
 
 // %%i for-variables, with the ~ modifiers (pure string operations on the value).
+// A for-variable is a LETTER, and so is every modifier, so `%%~ff` (the ~f modifier on the
+// variable f) and `%%~pd` (~p on d) are ambiguous to a greedy scan - it eats the variable
+// and then finds none. The wine cmd suite settles it: tests/reference/batch/wine-cmd-tests
+// has `for %%f in ("C D" E) do echo %%~ff` and `for %%d in ("I J" K) do echo %%~pd`, whose
+// .exp files expect the path of the loop variable. So the rule is: take the maximal run of
+// modifier letters, and if what follows it is NOT another letter, hand the run's LAST letter
+// back to be the variable. ModOkFor is that decision, as a pure lookahead.
 ForRef      <~~ push(mkForRef(takeAll())) ~~>
-            = "%%" :whitespace() [ TildeMod ] ForLetter :whitespace() ;
+            = "%%" :whitespace() [ TildeModF ] ForLetter :whitespace() ;
+TildeModF   <~~ push({mods: up.in}) ~~> = "~" :whitespace() { ModLetterF } :whitespace() ;
+ModLetterF  = ModOkFor ModLetter ;
+// A %1..%9 argument is a DIGIT, which no modifier ever is, so there the scan can stay greedy.
 TildeMod    <~~ push({mods: up.in}) ~~> = "~" :whitespace() { ModLetter } :whitespace() ;
 ModLetter   = "d" | "p" | "n" | "x" | "f" | "s" | "a" | "t" | "z"
             | "D" | "P" | "N" | "X" | "F" | "S" | "A" | "T" | "Z" ;
+ModOkFor    = :script(~~
+    (function() {
+        function isMod(cc) {
+            return cc === 100 || cc === 112 || cc === 110 || cc === 120 || cc === 102
+                || cc === 115 || cc === 97 || cc === 116 || cc === 122
+                || cc === 68 || cc === 80 || cc === 78 || cc === 88 || cc === 70
+                || cc === 83 || cc === 65 || cc === 84 || cc === 90
+        }
+        var n = 0
+        while (n < 16) {
+            var cc = c.peek(n)
+            if (cc < 0 || !isMod(cc)) { break }
+            n = n + 1
+        }
+        if (n === 0) { return abnf.newToken("\x01not-a-modifier", 0) }
+        var x = c.peek(n)
+        if (x >= 0 && ((x >= 65 && x <= 90) || (x >= 97 && x <= 122))) { return undefined }
+        if (n >= 2) { return undefined }
+        return abnf.newToken("\x01this-modifier-is-the-variable", 0)
+    })()
+~~) ;
 ForLetter   <~~ push({fv: up.in}) ~~>
             = ( "a"..."z" | "A"..."Z" ) :whitespace() ;
 // %1..%9 call arguments (%0 is the label), %* the whole tail, %~1 with the same modifiers.
@@ -266,7 +316,15 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
 LineText    <~~ push(makeWord(takeAll())) ~~>
             = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = RawQuoted | ForRef | PctPct | VarPct | ParamStar | ParamRef | BangVar
-            | EscNL | EscCh | PctLit | BangLit | DqLit | LineChars ;
+            | EscNL | EscCh | PctLit | BangLit | DqLit | LineParen | LParenLit | LineChars ;
+// A ( ) pair is ordinary text - `echo Done (ok)` and `set x=(a)` are values, not blocks.
+// Requiring the run to be BALANCED is what keeps it from stealing the ) that closes an
+// enclosing block: inside `(set x=1)` the value has no ( , so the ) still terminates.
+LineParen   <~~ push(makeWord(takeAll())) ~~>
+            = LParen :whitespace() { LinePart } RParen :whitespace() ;
+LParen      <~~ push(makeStr("(")) ~~> = "(" ;
+RParen      <~~ push(makeStr(")")) ~~> = ")" ;
+LParenLit   <~~ push(makeStr("(")) ~~> = "(" :whitespace() ;
 DqLit       <~~ push(makeStr("\x22")) ~~> = '"' :whitespace() ;
 LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
 
@@ -353,14 +411,16 @@ LabelName   <~~ push(up.in) ~~>
 // else - % ! " ( ) & | < > ^ .
 BareChar    = "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d" | "\x3f"..."\x5d"
             | "\x5f"..."\x7b" | "\x7d"..."\x7e" | "\U000000a1"..."\U0010ffff" ;
-// A line-text char: the same set plus space, tab, ( and , but still not % ! " ) & | < > ^ .
-LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27"..."\x28" | "\x2a"..."\x3b" | "\x3d"
+// A line-text char: the same set plus space, tab and , but not % ! " ( ) & | < > ^ .
+// ( and ) are excluded so a run stops at them and LineParen gets its chance; an unbalanced
+// ( then falls through to LParenLit.
+LineChar    = "\x09" | "\x20" | "\x23"..."\x24" | "\x27" | "\x2a"..."\x3b" | "\x3d"
             | "\x3f"..."\x5d" | "\x5f"..."\x7b" | "\x7d"..."\U0010ffff" ;
 // A redirection target: printable except whitespace " & < > | .
 RTChar      = "\x21" | "\x23"..."\x25" | "\x27"..."\x3b" | "\x3d" | "\x3f"..."\x7b"
             | "\x7d"..."\U0010ffff" ;
-// Text inside a single-quoted for /f command: not ' % ! and not a newline.
-SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x26" | "\x28"..."\U0010ffff" ;
+// Text inside a single-quoted for /f command: not ' % ! & and not a newline.
+SqChar      = "\x09" | "\x20" | "\x22"..."\x24" | "\x28"..."\U0010ffff" ;
 NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 NotDQ       = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;                     // not " (0x22)
 NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not ! " % newline
@@ -572,8 +632,24 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         for (i = 0; i < mods.length; i++) { if (lower(mods.charAt(i)) == ch) { return true } }
         return false
     }
-    // Pure string path arithmetic. ~f ~d ~p ~n ~x ~nx are string operations; ~s ~a ~t ~z
-    // would have to stat the file, which this runtime cannot do, so they answer "".
+    // The effective set of path components a ~ modifier run asks for: 1 = drive, 2 = path,
+    // 4 = name, 8 = extension. ~f is all four. ~s asks for the SHORT path, and on a volume
+    // with 8.3 names switched off the short path is the long one, so it is a no-op flag on
+    // top of the others (%%~sdi is a drive) and means the whole path when it stands alone.
+    // ~a ~t ~z would have to stat the file, which the path model cannot do, so they ask for
+    // nothing and the result is empty - which is also what cmd.exe answers for a file that
+    // is not there.
+    function effMask(mods) {
+        var mask = 0
+        if (hasMod(mods, "f")) { mask = 15 }
+        if (hasMod(mods, "d")) { mask = mask | 1 }
+        if (hasMod(mods, "p")) { mask = mask | 2 }
+        if (hasMod(mods, "n")) { mask = mask | 4 }
+        if (hasMod(mods, "x")) { mask = mask | 8 }
+        if (mask == 0 && hasMod(mods, "s")) { mask = 15 }
+        return mask
+    }
+    // Pure string path arithmetic.
     function applyMods(mods, raw) {
         var s = stripQuotes(raw)
         if (mods == "") { return s }
@@ -590,12 +666,12 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         for (i = 0; i < base.length; i++) { if (base.charAt(i) == ".") { dot = i } }
         var nm = (dot > 0) ? base.substring(0, dot) : base
         var ext = (dot > 0) ? base.substring(dot) : ""
-        if (hasMod(mods, "f")) { return drive + path + nm + ext }
+        var mask = effMask(mods)
         var out = ""
-        if (hasMod(mods, "d")) { out = out + drive }
-        if (hasMod(mods, "p")) { out = out + path }
-        if (hasMod(mods, "n")) { out = out + nm }
-        if (hasMod(mods, "x")) { out = out + ext }
+        if ((mask & 1) != 0) { out = out + drive }
+        if ((mask & 2) != 0) { out = out + path }
+        if ((mask & 4) != 0) { out = out + nm }
+        if ((mask & 8) != 0) { out = out + ext }
         return out
     }
 
@@ -731,15 +807,25 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
 
     function mkDefined(name) { return function(ci) { return isDefined(name) } }
     function mkErrLevel(wT) { return function(ci) { return errlvl >= toInt(wT()) } }
-    function isDevice(s) {
-        if (s == "nul" || s == "con" || s == "prn" || s == "aux") { return true }
+    // There is NO filesystem behind a grammar run, so `if exist` answers from a small MODEL
+    // of the paths every Windows install has - exactly the shape bash-interpreter.abnf uses
+    // for its -e/-f/-d predicates. 0 = absent, 1 = exists and is not a directory,
+    // 2 = directory. The reserved device names are the ones that matter in practice.
+    var FSDIRS = ["c:", "c:\x5c", "c:\x5cwindows", "c:\x5cwindows\x5csystem32",
+                  "c:\x5cusers", "c:\x5cprogram files", "c:\x5cprogramdata"]
+    function fsKind(raw) {
+        var s = lower(stripQuotes(raw))
+        if (s == "nul" || s == "con" || s == "prn" || s == "aux") { return 1 }
         if (s.length == 4 && (s.substring(0, 3) == "com" || s.substring(0, 3) == "lpt")) {
             var cc = s.charCodeAt(3)
-            return cc >= 49 && cc <= 57
+            if (cc >= 49 && cc <= 57) { return 1 }
         }
-        return false
+        if (s.length > 3 && s.charAt(s.length - 1) == "\x5c") { s = s.substring(0, s.length - 1) }
+        var i = 0
+        for (i = 0; i < FSDIRS.length; i++) { if (s == FSDIRS[i]) { return 2 } }
+        return 0
     }
-    function mkExist(wT) { return function(ci) { return isDevice(lower(stripQuotes(wT()))) } }
+    function mkExist(wT) { return function(ci) { return fsKind(wT()) != 0 } }
     function mkStrCmp(items) {                     // [leftWord, "==", rightWord]
         var lT = items[0], rT = items[2]
         return function(ci) {
@@ -1061,6 +1147,7 @@ NotDQPct    = "\x09" | "\x20" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
             var spec = parseTokens(o.tokens)
             var text = ""
             if (src.lit != undefined) { text = stripQuotes(src.lit()) }
+            else if (src.file != undefined) { src.file(); text = "" }   // no contents in the model
             else { capStart(); src.cmd(); text = capEnd() }
             var lines = splitLines(text)
             var i = 0
