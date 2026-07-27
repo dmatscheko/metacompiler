@@ -267,3 +267,22 @@ double form outright. The same shape applies to `|` vs `||`, `<` vs `<<`, and
 This is a specific case of the ordered-choice rule at the top of this file, but
 it is worth its own entry because the usual symptom of a bad alternative — a
 parse failure — does not appear. You get a wrong parse tree instead.
+
+## `!"literal"` skips leading whitespace
+
+A negative lookahead is matched the same way a token is, which means the
+whitespace in front of it is skipped first. So `ForceSfx = NoSpace "!" !"="`
+silently rejected `maybe! == 7`: the lookahead stepped over the space and found
+the `=` of `==`. The neighbouring `maybe! != 7` and `maybe! + 1` both worked,
+which makes it present as an operator-precedence bug somewhere else entirely.
+
+When the lookahead has to be anchored to the very next byte, test it with a
+`:script` on `c.peek(0)` rather than with `!"…"`.
+
+## A greedy modifier list eats the declaration keyword
+
+Adding `class` to a `Modifier` production (to allow Swift's `class var`) broke
+`@objc class Cache {…}` at top level: `Modifiers` consumed the `class`, and
+`ClassDecl` then had nothing left to match. Keep a keyword that also *starts* a
+declaration out of the shared modifier list, and give members their own
+modifier production instead.

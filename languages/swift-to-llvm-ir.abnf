@@ -50,7 +50,7 @@ swift-interpreter.abnf.") ;
 Program     <~~ buildMain(takeAll()) ~~>
             = { FunTop | TypeTop | UnsupTop | TopStmt } ;
 FunTop      <~~ push(makeFunStmt(pop())) ~~> = [ Modifiers ] FunDecl ;
-TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | EnumDecl ) ;
+TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
 UnsupTop    = [ Modifiers ] UnsupDecl ;
 TopStmt     = Statement ;
 
@@ -61,7 +61,14 @@ Attribute   = "@" Id { "." Id } [ SkipParen ] ;
 Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
               | "final" | "static" | "mutating" | "nonmutating"
               | "override" | "lazy" | "weak" | "unowned" | "convenience"
-              | "required" | "dynamic" | "indirect" ) KwEnd ;
+              | "required" | "dynamic" | "indirect" | "package"
+              | "nonisolated" | "distributed" | "borrowing" | "consuming" ) KwEnd ;
+// `class` is a type-member modifier (class var / class func) as well as a
+// declaration keyword, so it is NOT in Modifier - a greedy Modifiers would eat the
+// `class` of `@objc class Cache { ... }` and leave nothing for ClassDecl. Member
+// tries the nested-type alternative first and only then this list.
+MemberModifiers = { Modifier | Attribute | ClassMod } ;
+ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
 FunDecl     <~~ push(makeFun(takeAll())) ~~>
@@ -100,21 +107,37 @@ StructDecl  <~~ push(makeClassStmt(takeAll())) ~~>
             = KwStruct Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+// An actor is a class with an isolation domain. There is no executor in this
+// runtime (async functions are defined, never awaited), so it lowers like a class.
+ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = KwActor Id <~~ push(up.in) ~~> [ SkipAngle ] [ ":" TypeList ] "{" { Member } "}" ;
+KwActor     = "actor" KwEnd ;
 TypeList    = Type { "," Type } ;
 
-Member      = [ Modifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+// A nested type is matched BEFORE the modifier-led members, so the `class` of
+// `class Inner {}` is read as the declaration keyword and the `class` of
+// `class var kind` as a modifier (ClassDecl fails on the `var` that follows).
+Member      = MemberType | [ MemberModifiers ] ( InitDecl | DeinitDecl | SubscriptDecl | MethodDecl | ComputedProp | PropDecl ) ;
+// The nested declaration's own statement is dropped: a nested type is accepted
+// structurally, not yet reachable as Outer.Inner.
+MemberType  <~~ pop(); push({}) ~~>
+            = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl | TypeAliasDecl ) ;
 InitDecl    <~~ push({method: makeInit(takeAll())}) ~~>
             = KwInit [ "?" | "!" ] [ SkipAngle ] ParamList [ FnEffects ] [ GenWhere ] FnBody ;
 // deinit and subscript are accepted structurally, not implemented; a class/struct
 // builder ignores the {} marker they push.
-DeinitDecl  <~~ notImpl("deinitializer", up.pos); push({}) ~~>
-            = KwDeinit SkipBlock ;
+// deinit is accepted and ignored - this runtime is garbage collected, so there is
+// no deterministic point at which to run it.
+DeinitDecl  <~~ push({}) ~~> = KwDeinit SkipBlock ;
 SubscriptDecl <~~ notImpl("subscript", up.pos); push({}) ~~>
             = KwSubscript [ SkipAngle ] SkipParen [ "->" Type ] SkipBlock ;
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
             = KwFunc Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList [ FnEffects ] [ "->" AnnType ] [ GenWhere ] FnBody ;
-PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] [ ";" ] ;
+// var w = 2, h = 3 declares two stored properties; each binding pushes its own
+// {prop} record, so the type builder sees them in declaration order.
+PropDecl    = ( "let" | "var" ) KwEnd PropBind { "," PropBind } [ ";" ] ;
+PropBind    <~~ push(makeProp(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] ;
 // Computed properties and stored properties with willSet/didSet observers.
 ComputedProp <~~ push(notImplStmt("computed property or property observer", up.pos)) ~~>
             = ( "let" | "var" ) KwEnd Id [ ":" Type ] [ "=" DiscardExpr ] SkipBlock ;
@@ -144,7 +167,8 @@ ProtocolDecl <~~ push(notImplStmt("protocol", up.pos)) ~~>
             = KwProtocol Id [ SkipAngle ] [ ":" TypeList ] SkipBlock ;
 ExtensionDecl <~~ push(notImplStmt("extension", up.pos)) ~~>
             = KwExtension Type [ ":" TypeList ] SkipBlock ;
-TypeAliasDecl <~~ push(notImplStmt("typealias", up.pos)) ~~>
+// typealias: types are parsed and ignored, so an alias needs nothing at run time.
+TypeAliasDecl <~~ push(function(b) { return b }) ~~>
             = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
 
 // Types are parsed and ignored: arrays [T], dictionaries [K: V], optionals T?,
@@ -152,7 +176,20 @@ TypeAliasDecl <~~ push(notImplStmt("typealias", up.pos)) ~~>
 // opaque/existential `some P` / `any P`, and compositions P & Q. The `&` of a
 // composition is spelled ( "&" !"&" ) so `x is T && y` is not read as `T & (&y)`.
 Type        = TypeMod TypeSuffixed { TypeAmp TypeMod TypeSuffixed } ;
-TypeSuffixed = TypeCore { "?" | "!" } ;
+// The optional / implicitly-unwrapped marker has to be ADJACENT to the type:
+// `x is T ? a : b` must keep its conditional, and `T?` never has a space in Swift.
+TypeSuffixed = TypeCore { NoSpace ( "?" | "!" ) } ;
+// A zero-width guard that fails when whitespace (or end of file) is ahead - the
+// dialect skips whitespace before each token, so "no space here" has to be asked
+// explicitly.
+NoSpace     = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc < 0)
+            ? abnf.newToken("\x01space-follows", 0)
+            : undefined
+    })()
+~~) ;
 TypeAmp     = "&" !"&" ;
 TypeMod     = { ( "some" | "any" | "inout" | "borrowing" | "consuming" | "each" ) KwEnd } ;
 TypeCore    = "[" Type [ ":" Type ] "]"
@@ -207,7 +244,7 @@ LocalFunc   <~~ push(makeLocalFunStmt(pop())) ~~>
             = [ Modifiers ] FunDecl ;
 // A nested type declaration inside a body - the same struct/class/enum productions
 // as at the top level, run as a statement of the enclosing body.
-LocalType   = StructDecl | ClassDecl | EnumDecl ;
+LocalType   = StructDecl | ClassDecl | ActorDecl | EnumDecl ;
 
 // do { STMTS } catch [pattern] { STMTS } [catch ...]: genuine try/catch (Swift has NO
 // finally). throw calls js_throw (a Go panic the runtime unwinds); each body compiles
@@ -357,8 +394,10 @@ OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
 AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
             = EqExpr { "&&" EqExpr } ;
+// === / !== compare object identity; the three-character forms are listed first
+// so `a === b` is not read as `a == (= b)`.
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = Cast { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Cast } ;
 // e as T / e as? T / e as! T / e is T: recognized, routed to notImplExpr. With no
@@ -387,7 +426,21 @@ Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
             = KwAwait UnaryExpr ;
 
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
+            = Primary { OptSfx | ForceSfx | MethodSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
+// x!: force-unwrap. Adjacent, and not the start of a != operator. The "not an =
+// next" test has to be a script and cannot be !"=" - a literal in this dialect
+// skips leading whitespace, so !"=" in `maybe! == 7` looks PAST the space, finds
+// the = of == and rejects a force-unwrap that is perfectly fine.
+ForceSfx    <~~ push({kind:"force"}) ~~> = NoSpace "!" NotChar61 ;
+// x?.y / x?[i]: optional chaining - a nil anywhere along the chain makes the WHOLE
+// chain nil instead of failing. Adjacent, and not the start of ?? or a ternary.
+OptSfx      <~~ push({kind:"opt"}) ~~> = NoSpace "?" NotChar63 ;
+NotChar61   = :script(~~
+    (function() { return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined })()
+~~) ;
+NotChar63   = :script(~~
+    (function() { return (c.peek(0) === 63) ? abnf.newToken("\x01q-follows", 0) : undefined })()
+~~) ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> MArgs ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
@@ -863,9 +916,21 @@ KwContinue  = "continue" KwEnd ;
             var r = primary(b)
             b = r.b
             var cur = r.v
+            // Optional chaining: every ?. adds a block that leaves the chain with nil.
+            var nilExits = []
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
-                if (s.kind == "mcall") {
+                if (s.kind == "opt") {
+                    var nB = curF.NewBlock("")
+                    var c1B = curF.NewBlock("")
+                    var contB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, callExt(b, "js_seq", [cur, hNull])), nB, c1B)
+                    c1B.NewCondBr(truthy(c1B, callExt(c1B, "js_seq", [cur, hUndef])), nB, contB)
+                    nilExits.push(nB)
+                    b = contB
+                } else if (s.kind == "force") {
+                    // Force unwrap: the value is already the unwrapped one here.
+                } else if (s.kind == "mcall") {
                     var ea = emitArgRecs(b, s.args)
                     b = ea.b
                     cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
@@ -884,7 +949,15 @@ KwContinue  = "continue" KwEnd ;
                     cur = callExt(b, core.indexExt, [cur, ir2.v])
                 }
             }
-            return {b: b, v: cur}
+            if (nilExits.length == 0) { return {b: b, v: cur} }
+            var mergeB = curF.NewBlock("")
+            var inc = [llvm.ir.NewIncoming(cur, b)]
+            b.NewBr(mergeB)
+            for (var k = 0; k < nilExits.length; k++) {
+                nilExits[k].NewBr(mergeB)
+                inc.push(llvm.ir.NewIncoming(hNull, nilExits[k]))
+            }
+            return {b: mergeB, v: mergeB.NewPhi(inc)}
         }
     }
 
@@ -1716,15 +1789,31 @@ KwContinue  = "continue" KwEnd ;
     function makeClassStmt(items) {
         var name = items[0]
         var props = []
+        var stored = []
         var methods = []
         var hasInit = false
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
-            if (it.prop != undefined && it.hasInit) { props.push(it) }
+            if (it.prop != undefined) {
+                stored.push(it)
+                if (it.hasInit) { props.push(it) }
+            }
             if (it.method != undefined) {
                 methods.push(it.method)
                 if (it.method.name == "init") { hasInit = true; regSig(name, it.method.params) }
             }
+        }
+        // The memberwise initializer a struct without an explicit init gets for free:
+        // one labelled parameter per stored property, in declaration order, defaulting
+        // to the property's own initial value where it has one.
+        var mparams = []
+        if (!hasInit) {
+            for (var s = 0; s < stored.length; s++) {
+                mparams.push({name: stored[s].prop, label: stored[s].prop, type: "",
+                              variadic: false, auto: false, inout: false,
+                              hasDefault: stored[s].hasInit, dflt: stored[s].init})
+            }
+            regSig(name, mparams)
         }
         classNames[name] = 1
         return function(b) {
@@ -1739,8 +1828,15 @@ KwContinue  = "continue" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
             if (!hasInit) {
-                var emptyBody = function(bb) { return bb }
-                var iidx = emitFunc([], emptyBody, true)
+                var mwBody = function(bb) {
+                    var thisV = callExt(bb, "js_kget", [curScopeV, emitStr(bb, "this")])
+                    for (var q = 0; q < mparams.length; q++) {
+                        callExt(bb, "js_set", [thisV, emitStr(bb, mparams[q].name),
+                                               callExt(bb, "js_kget", [curScopeV, emitStr(bb, mparams[q].name)])])
+                    }
+                    return bb
+                }
+                var iidx = emitFunc(mparams, mwBody, true)
                 callExt(b, "js_set", [clsV, emitStr(b, "init"), callExt(b, "js_closure", [handle(iidx), curScopeV])])
             }
             return b
@@ -1792,6 +1888,10 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // ----- Core library config (see lib/compile-core.js) -----
+    // === / !== compare identity; with reference objects that is strict equality.
+    binExt["==="] = "js_seq"
+    binExt["!=="] = "js_sne"
+
     core.scopeGetExt = "js_kget" // Scope read with fallback to the properties of self.
 
     c.compile(c.asg)
