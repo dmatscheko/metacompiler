@@ -1,4 +1,4 @@
-:title("C preprocessor (object-like macros)") ;
+:title("C preprocessor (macro expansion)") ;
 :description("A source-to-source C preprocessor: it reads C source, expands object-like
 #define macros and honors #undef, and prints the resulting source. It is meant to be
 piped into a C front end with the -pipe pipeline mode of the metacompiler, e.g.
@@ -10,17 +10,25 @@ so that the C grammar downstream sees the macros already expanded. This is the
 'output of one language is the input of another' generalization: the preprocessor is
 just another language whose output happens to be text.
 
-Scope: object-like macros only - '#define NAME body' where NAME is not immediately
-followed by '(' - expanded wherever NAME appears as a whole identifier token (not inside
-strings, character literals or comments), recursively and cycle-guarded, with '#undef'
-removing a definition and backslash-newline continuations joined. A body may be empty
-(a bare '#define FLAG'). Every OTHER directive - function-like '#define NAME(...)',
-'#include', the '#if/#ifdef/#ifndef/#else/#elif/#endif' family, '#pragma', '#error',
-'#line' - is passed through UNCHANGED for the downstream language to handle (which, for
-the C grammars, means #include resolves and the rest are skipped). Conditionals are NOT
-evaluated: a guarded block is always emitted. Macro uses inside pass-through directives
-are not expanded. The tokenizer reproduces every byte, so non-macro source is emitted
-verbatim; removed directive lines are replaced by their newlines so line numbers hold.") ;
+Scope: '#define' macros, both object-like ('#define NAME body') and function-like
+('#define NAME(a, b) body', the '(' following the name with no space), expanded wherever
+NAME appears as a whole identifier token (not inside strings, character literals or
+comments), recursively and guarded so a macro is not re-expanded inside its own
+expansion. Function-like macros support argument substitution (arguments are macro-
+expanded before substitution, except where they are an operand of '##'), '#'
+stringification, '##' token pasting with placemarkers for empty arguments, empty
+arguments and empty parameter lists, variadic '...'/'__VA_ARGS__', and calls that span
+lines (the newlines are re-emitted after the expansion so line numbers hold). A
+function-like macro name NOT followed by '(' is left alone. '#undef' removes a
+definition; backslash-newline continuations are joined. A body may be empty (a bare
+'#define FLAG'). Every OTHER directive - '#include', the '#if/#ifdef/#ifndef/#else/#elif/
+#endif' family, '#pragma', '#error', '#line' - is passed through UNCHANGED for the
+downstream language to handle (which, for the C grammars, means #include resolves and the
+rest are skipped). Conditionals are NOT evaluated: a guarded block is always emitted.
+Macro uses inside pass-through directives are not expanded. The tokenizer reproduces
+every byte, so non-macro source is emitted verbatim; removed directive lines are replaced
+by their newlines so line numbers hold. A space is inserted at the seam between an
+expansion and its neighbours only when the two would otherwise lex as one token.") ;
 
 :startRule(File) ;
 // Skip NOTHING: every byte is significant and reproduced verbatim. NoWs is a negative
@@ -37,7 +45,7 @@ File     <~~ preprocess(takeAll()) ~~> = { Item } ;
 // comments) are tried before the single-char Other fallback so their delimiters and
 // contents are never miscut. Ident groups whole words (so only whole identifiers can
 // be macro names); Other consumes any remaining single byte, so every byte is covered.
-Item     = Str | Char | LComment | BComment | Nl | Hws | Hash | Ident | Other ;
+Item     = Str | Char | LComment | BComment | Nl | Hws | Hash | Ident | Num | Other ;
 
 // A double-quoted string, kept verbatim (macros are never expanded inside it).
 Str      <~~ push({kind: "other", text: up.in}) ~~>
@@ -81,6 +89,17 @@ Ident    <~~ push({kind: "ident", text: up.in}) ~~>
 IdStart  = "A"..."Z" | "a"..."z" | "_" ;
 IdCont   = "A"..."Z" | "a"..."z" | "0"..."9" | "_" ;
 
+// A C preprocessing-number, kept whole: an optional '.', a digit, then any run of
+// identifier characters, dots and exponent signs ('10', '0x1fUL', '1.5e+3', '.5f').
+// The tokenizer would otherwise cut '10' into two single-byte Other tokens, and a '##'
+// pasting onto a number would then only reach its first digit. Tried after Ident, so a
+// name that merely contains digits ('x2') is still one identifier.
+Num      <~~ push({kind: "num", text: up.in}) ~~>
+         = [ "." ] Digit { NumTail } ;
+Digit    = "0"..."9" ;
+NumTail  = ExpSign | IdCont | "." ;
+ExpSign  = ("e" | "E" | "p" | "P") ("+" | "-") ;
+
 // Any other single byte (operators, punctuation, digits, ...), kept verbatim.
 Other    <~~ push({kind: "other", text: up.in}) ~~>
          = "\x00"..."\U0010ffff" ;
@@ -97,8 +116,11 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         return items
     }
 
-    // A macro maps its name to an array of body tokens; expandIdent splices them in,
-    // recursively, guarding against cycles with the `active` set. See the title for scope.
+    // A macro maps its name to a record {fn, params, variadic, body}: `body` is an array
+    // of body tokens, `params` the parameter names of a function-like macro (empty for an
+    // object-like one). expandList/tryExpandAt splice a macro's expansion in, recursively,
+    // guarding against runaway recursion with the `active` set (a macro is not re-expanded
+    // inside its own expansion). See the title for scope.
 
     // Own-property test for the user-keyed macro tables: a bare [name] read resolved
     // inherited Object.prototype members (toString, valueOf, ...) under a host JS
@@ -154,12 +176,78 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
         return s
     }
 
-    // Collect an object-like macro body from tokens[start .. end): leading and trailing
-    // horizontal whitespace and comments trimmed, interior comments and backslash-newline
+    // ---- small token helpers -------------------------------------------------
+    // Kinds seen here are the tokenizer's (ident, num, other, hws, nl, comment, hash) plus
+    // two that only exist inside an expansion: "paste" (a folded '##' operator) and "pm"
+    // (the standard's placemarker - what an empty argument leaves behind so that a '##'
+    // next to it pastes with nothing rather than with its neighbour's neighbour).
+    //
+    // `idx` is the token's position in the ORIGINAL token stream, or -1 for a token this
+    // script synthesised. Two tokens with consecutive idx were written next to each other
+    // in the source and must be emitted next to each other again (the tokenizer cuts '->'
+    // and '++' into single bytes, so any general "would these lex as one token?" test would
+    // otherwise pull them apart). Every other adjacency is a seam that needSpace judges.
+    function mkTok(kind, text) { return {kind: kind, text: text, idx: 0 - 1} }
+    function mkTokAt(kind, text, idx) { return {kind: kind, text: text, idx: idx} }
+    function srcAdjacent(a, b) { return a.idx >= 0 && b.idx == a.idx + 1 }
+
+    function isIdStart(ch) {
+        return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_"
+    }
+    function isIdCont(ch) { return isIdStart(ch) || (ch >= "0" && ch <= "9") }
+    // Does this text form a single identifier? Decides the kind of a pasted token, and so
+    // whether the result can itself name a macro.
+    function isIdentText(s) {
+        if (s.length == 0) { return false }
+        if (!isIdStart(s.charAt(0))) { return false }
+        var i = 1
+        while (i < s.length) { if (!isIdCont(s.charAt(i))) { return false } i = i + 1 }
+        return true
+    }
+    // string.indexOf ignores its from-index under -frozen; a plain scan is portable.
+    function hasChar(s, ch) {
+        var i = 0
+        while (i < s.length) { if (s.charAt(i) == ch) { return true } i = i + 1 }
+        return false
+    }
+    function pushAll(dst, src) {
+        var i = 0
+        while (i < src.length) { dst.push(src[i]); i = i + 1 }
+    }
+    function isOther(t, text) { return t.kind == "other" && t.text == text }
+    // Skip horizontal whitespace in any token list (skipHws above is the same walk; this
+    // one is kept separate so the two uses can diverge without disturbing directives).
+    function skipHwsL(list, p) {
+        while (p < list.length && list[p].kind == "hws") { p = p + 1 }
+        return p
+    }
+    // Skip whitespace, newlines and comments: the '(' of a macro call may be on a later line.
+    function skipSpaceNl(list, p) {
+        while (p < list.length &&
+               (list[p].kind == "hws" || list[p].kind == "nl" || list[p].kind == "comment")) { p = p + 1 }
+        return p
+    }
+    function isWsTok(t) { return t.kind == "hws" || t.kind == "nl" || t.kind == "comment" }
+
+    function newMacro(fn, params, variadic, body) {
+        return {fn: fn, params: params, variadic: variadic, body: body}
+    }
+    function noParams() { var p = []; return p }
+
+    function paramIndex(m, name) {
+        var ps = m.params
+        var i = 0
+        while (i < ps.length) { if (ps[i] == name) { return i } i = i + 1 }
+        return -1
+    }
+
+    // Collect a macro body from tokens[start .. end): leading and trailing horizontal
+    // whitespace and comments trimmed, interior comments and backslash-newline
     // continuations dropped (C removes comments and splices continuations before
-    // replacement). Interior horizontal whitespace is kept.
+    // replacement). Interior horizontal whitespace is kept. Adjacent '#' '#' tokens are
+    // folded into the single "paste" operator, so the substitution pass can see it.
     function collectBody(tokens, start, end) {
-        var body = []
+        var raw = []
         var s = start
         while (s < end && (tokens[s].kind == "hws" || tokens[s].kind == "comment")) { s = s + 1 }
         var e = end
@@ -172,30 +260,332 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
             } else if (t.kind == "nl" || t.kind == "comment") {
                 k = k + 1
             } else {
-                body.push(t)
+                raw.push(t)
                 k = k + 1
+            }
+        }
+        var body = []
+        var j = 0
+        while (j < raw.length) {
+            if (raw[j].kind == "hash" && j + 1 < raw.length && raw[j + 1].kind == "hash") {
+                body.push(mkTok("paste", "##"))
+                j = j + 2
+            } else {
+                body.push(raw[j])
+                j = j + 1
             }
         }
         return body
     }
 
-    // Expand an identifier through the macro table, recursively, cycle-guarded.
-    // The not-a-macro test is own-property only; an #undef leaves an own entry whose
-    // value is undefined, which counts as not defined too.
-    function expandIdent(name, macros, active) {
-        if (!hasOwn(macros, name) || macros[name] == undefined) { return name }
-        if (hasOwn(active, name) && active[name] == true) { return name }
-        var body = macros[name]
-        putOwn(active, name, true)
+    // Parse the parameter list of a function-like macro. `q` is the index of the '(' that
+    // immediately follows the macro name. Returns {ok, params, variadic, next}, `next`
+    // pointing just past the ')'. A trailing '...' (bare, or after the last named
+    // parameter) makes the macro variadic; a bare one is named __VA_ARGS__.
+    function parseParams(tokens, q, end) {
+        var params = []
+        var variadic = false
+        var p = skipHwsL(tokens, q + 1)
+        if (p < end && isOther(tokens[p], ")")) {
+            return {ok: true, params: params, variadic: false, next: p + 1}
+        }
+        while (p < end) {
+            if (isOther(tokens[p], ".") && p + 2 < end &&
+                isOther(tokens[p + 1], ".") && isOther(tokens[p + 2], ".")) {
+                params.push("__VA_ARGS__")
+                variadic = true
+                p = skipHwsL(tokens, p + 3)
+            } else if (tokens[p].kind == "ident") {
+                var nm = tokens[p].text
+                p = skipHwsL(tokens, p + 1)
+                if (p + 2 < end && isOther(tokens[p], ".") &&
+                    isOther(tokens[p + 1], ".") && isOther(tokens[p + 2], ".")) {
+                    variadic = true
+                    p = skipHwsL(tokens, p + 3)
+                }
+                params.push(nm)
+            } else {
+                return {ok: false, params: params, variadic: false, next: q}
+            }
+            if (p < end && isOther(tokens[p], ")")) {
+                return {ok: true, params: params, variadic: variadic, next: p + 1}
+            }
+            if (p < end && isOther(tokens[p], ",")) { p = skipHwsL(tokens, p + 1); continue }
+            return {ok: false, params: params, variadic: false, next: q}
+        }
+        return {ok: false, params: params, variadic: false, next: q}
+    }
+
+    // '#param': the argument's source text as a string literal - whitespace runs collapsed
+    // to one space, leading and trailing whitespace dropped, and '\' and '"' escaped inside
+    // string and character literals (the tokenizer keeps those whole, so a leading quote
+    // identifies them).
+    function stringize(arg) {
         var s = ""
+        var i = 0
+        var pendingWs = false
+        while (i < arg.length) {
+            var t = arg[i]
+            if (isWsTok(t)) { pendingWs = true; i = i + 1; continue }
+            if (s.length > 0 && pendingWs) { s = s + " " }
+            pendingWs = false
+            var txt = t.text
+            var c0 = ""
+            if (txt.length > 0) { c0 = txt.charAt(0) }
+            if (txt.length > 1 && (c0 == "\"" || c0 == "'")) {
+                var j = 0
+                while (j < txt.length) {
+                    var ch = txt.charAt(j)
+                    if (ch == "\"" || ch == "\\") { s = s + "\\" }
+                    s = s + ch
+                    j = j + 1
+                }
+            } else {
+                s = s + txt
+            }
+            i = i + 1
+        }
+        return "\"" + s + "\""
+    }
+
+    // Paste two tokens. A placemarker on either side yields the other side unchanged.
+    function pasteTok(l, r) {
+        if (l.kind == "pm" && r.kind == "pm") { return mkTok("pm", "") }
+        if (l.kind == "pm") { return r }
+        if (r.kind == "pm") { return l }
+        var s = l.text + r.text
+        if (isIdentText(s)) { return mkTok("ident", s) }
+        return mkTok("other", s)
+    }
+
+    // Run every '##' in a substituted body, left to right: the LAST token before it and the
+    // FIRST token after it are replaced by their concatenation. Placemarkers are dropped at
+    // the end, once they can no longer take part in a paste.
+    function pasteAll(list) {
+        var out = []
+        var k = 0
+        while (k < list.length) {
+            var t = list[k]
+            if (t.kind == "paste") {
+                while (out.length > 0 && out[out.length - 1].kind == "hws") { out.pop() }
+                var j = skipHwsL(list, k + 1)
+                var left = mkTok("pm", "")
+                if (out.length > 0) { left = out.pop() }
+                var right = mkTok("pm", "")
+                if (j < list.length) { right = list[j] }
+                out.push(pasteTok(left, right))
+                k = j + 1
+            } else {
+                out.push(t)
+                k = k + 1
+            }
+        }
+        var res = []
+        var q = 0
+        while (q < out.length) { if (out[q].kind != "pm") { res.push(out[q]) } q = q + 1 }
+        return res
+    }
+
+    // Is the body token at k an operand of a '##'? Then the standard substitutes its
+    // argument UNexpanded (this is what makes CAT(x,y)=x##y paste the names it was handed
+    // while XCAT(x,y)=CAT(x,y) pastes their expansions).
+    function nearPaste(body, k) {
+        var p = k - 1
+        while (p >= 0 && body[p].kind == "hws") { p = p - 1 }
+        if (p >= 0 && body[p].kind == "paste") { return true }
+        var n = skipHwsL(body, k + 1)
+        if (n < body.length && body[n].kind == "paste") { return true }
+        return false
+    }
+
+    // Replace the parameters in a macro body: `args` are the raw argument token lists,
+    // `eargs` the fully macro-expanded ones. Then run the '##' operators.
+    function substitute(m, args, eargs) {
+        var body = m.body
+        var out = []
         var k = 0
         while (k < body.length) {
-            var bt = body[k]
-            if (bt.kind == "ident") { s = s + expandIdent(bt.text, macros, active) }
-            else { s = s + bt.text }
+            var t = body[k]
+            if (m.fn && t.kind == "hash") {
+                var np = skipHwsL(body, k + 1)
+                if (np < body.length && body[np].kind == "ident") {
+                    var si = paramIndex(m, body[np].text)
+                    if (si >= 0) {
+                        out.push(mkTok("other", stringize(args[si])))
+                        k = np + 1
+                        continue
+                    }
+                }
+            }
+            if (m.fn && t.kind == "ident") {
+                var pi = paramIndex(m, t.text)
+                if (pi >= 0) {
+                    var src = eargs[pi]
+                    if (nearPaste(body, k)) { src = args[pi] }
+                    if (src.length == 0) { out.push(mkTok("pm", "")) } else { pushAll(out, src) }
+                    k = k + 1
+                    continue
+                }
+            }
+            out.push(t)
             k = k + 1
         }
+        return pasteAll(out)
+    }
+
+    function onlyWs(a) {
+        var i = 0
+        while (i < a.length) { if (!isWsTok(a[i])) { return false } i = i + 1 }
+        return true
+    }
+    // An argument with its outer whitespace removed, comments dropped and interior newlines
+    // flattened to spaces - the form both the raw and the expanded substitution want.
+    function trimArg(a) {
+        var s = 0
+        while (s < a.length && isWsTok(a[s])) { s = s + 1 }
+        var e = a.length
+        while (e > s && isWsTok(a[e - 1])) { e = e - 1 }
+        var r = []
+        var k = s
+        while (k < e) {
+            var t = a[k]
+            if (t.kind == "comment") { k = k + 1; continue }
+            if (t.kind == "nl") { r.push(mkTok("hws", " ")); k = k + 1; continue }
+            r.push(t)
+            k = k + 1
+        }
+        return r
+    }
+
+    // Collect the arguments of a function-like macro call. `op` is the index of the '('.
+    // Commas at paren depth 1 separate arguments (brackets and braces do NOT protect a
+    // comma, per the standard); strings and character literals are single tokens, so their
+    // commas are already safe. `nl` counts the newlines the call spanned, so the expansion
+    // can re-emit them and keep downstream line numbers aligned.
+    function collectArgs(tokens, op, m) {
+        var args = []
+        var cur = []
+        var depth = 1
+        var nl = 0
+        var i = op + 1
+        var lastIdx = m.params.length - 1
+        while (i < tokens.length) {
+            var t = tokens[i]
+            if (t.kind == "nl") { nl = nl + 1 }
+            if (isOther(t, "(")) { depth = depth + 1; cur.push(t); i = i + 1; continue }
+            if (isOther(t, ")")) {
+                depth = depth - 1
+                if (depth == 0) {
+                    args.push(cur)
+                    return {ok: true, args: args, next: i + 1, nl: nl}
+                }
+                cur.push(t)
+                i = i + 1
+                continue
+            }
+            if (isOther(t, ",") && depth == 1 && !(m.variadic && args.length >= lastIdx)) {
+                args.push(cur)
+                cur = []
+                i = i + 1
+                continue
+            }
+            cur.push(t)
+            i = i + 1
+        }
+        return {ok: false, args: args, next: op, nl: 0}
+    }
+
+    // Try to expand the macro named at list[i]. Returns {ok, out, next}; ok is false (and
+    // nothing is consumed) when the name is not a live macro, is already being expanded, or
+    // is function-like and not followed by a call. The not-a-macro test is own-property
+    // only; an #undef leaves an own entry whose value is undefined, which counts as not
+    // defined too.
+    function tryExpandAt(list, i, macros, active) {
+        var t = list[i]
+        if (t.kind != "ident") { return {ok: false, out: [], next: i} }
+        var name = t.text
+        if (!hasOwn(macros, name) || macros[name] == undefined) { return {ok: false, out: [], next: i} }
+        if (hasOwn(active, name) && active[name] == true) { return {ok: false, out: [], next: i} }
+        var m = macros[name]
+        var res = anytype
+
+        if (!m.fn) {
+            var sub = substitute(m, [], [])
+            putOwn(active, name, true)
+            res = expandList(sub, macros, active)
+            putOwn(active, name, undefined)
+            return {ok: true, out: res, next: i + 1}
+        }
+
+        var op = skipSpaceNl(list, i + 1)
+        if (op >= list.length || !isOther(list[op], "(")) { return {ok: false, out: [], next: i} }
+        var ca = collectArgs(list, op, m)
+        if (!ca.ok) { return {ok: false, out: [], next: i} }
+
+        var args = []
+        var q = 0
+        while (q < ca.args.length) { args.push(trimArg(ca.args[q])); q = q + 1 }
+        var np = m.params.length
+        if (np == 0 && args.length == 1 && args[0].length == 0) { args = [] }
+        if (m.variadic) {
+            if (args.length == np - 1) { args.push(noParams()) }
+            if (args.length != np) { return {ok: false, out: [], next: i} }
+        } else if (args.length != np) {
+            return {ok: false, out: [], next: i}
+        }
+
+        var eargs = []
+        q = 0
+        while (q < args.length) { eargs.push(expandList(args[q], macros, active)); q = q + 1 }
+
+        var sub2 = substitute(m, args, eargs)
+        putOwn(active, name, true)
+        res = expandList(sub2, macros, active)
         putOwn(active, name, undefined)
+        var n = 0
+        while (n < ca.nl) { res.push(mkTok("nl", "\n")); n = n + 1 }
+        return {ok: true, out: res, next: ca.next}
+    }
+
+    // Rescan a token list, expanding every macro in it.
+    function expandList(list, macros, active) {
+        var out = []
+        var i = 0
+        while (i < list.length) {
+            var r = tryExpandAt(list, i, macros, active)
+            if (r.ok) { pushAll(out, r.out); i = r.next }
+            else { out.push(list[i]); i = i + 1 }
+        }
+        return out
+    }
+
+    // Would `a` and `b` lex as one token if written back to back? Only asked at the seam
+    // between an expansion and the surrounding source, never between two source tokens
+    // (which must be reproduced byte for byte - 'a++b' has to stay 'a++b').
+    function needSpace(a, b) {
+        if (a.length == 0 || b.length == 0) { return false }
+        var x = a.charAt(a.length - 1)
+        var y = b.charAt(0)
+        if (isIdCont(x) && isIdCont(y)) { return true }
+        if (x == y && hasChar("+-<>&|=:.#", x)) { return true }
+        if (y == "=" && hasChar("+-*/%!<>&|^=", x)) { return true }
+        if (x == "/" && (y == "*" || y == "/")) { return true }
+        if (x == "*" && y == "/") { return true }
+        if (x == "-" && y == ">") { return true }
+        return false
+    }
+
+    // Write an expansion back out. Tokens that were neighbours in the source are re-joined
+    // untouched; at every other seam a space goes in only if the two would lex as one.
+    function emitToks(list) {
+        var s = ""
+        var i = 0
+        while (i < list.length) {
+            var txt = list[i].text
+            if (i > 0 && !srcAdjacent(list[i - 1], list[i]) && needSpace(s, txt)) { s = s + " " }
+            s = s + txt
+            i = i + 1
+        }
         return s
     }
 
@@ -222,11 +612,18 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
             }
             var name = tokens[p].text
             var q = p + 1
-            if (q < end && tokens[q].kind == "other" && tokens[q].text == "(") {
-                // Function-like macro: not supported, passed through verbatim.
-                return {text: rawText(tokens, i, afterLine), next: afterLine}
+            if (q < end && isOther(tokens[q], "(")) {
+                // Function-like macro: the '(' must follow the name with no space between.
+                var pp = parseParams(tokens, q, end)
+                if (!pp.ok) {
+                    // Not a parameter list we understand: pass the line through verbatim.
+                    return {text: rawText(tokens, i, afterLine), next: afterLine}
+                }
+                putOwn(macros, name,
+                       newMacro(true, pp.params, pp.variadic, collectBody(tokens, pp.next, end)))
+                return {text: newlinesText(tokens, i, end), next: afterLine}
             }
-            putOwn(macros, name, collectBody(tokens, q, end))
+            putOwn(macros, name, newMacro(false, noParams(), false, collectBody(tokens, q, end)))
             return {text: newlinesText(tokens, i, end), next: afterLine}
         }
         if (word == "undef") {
@@ -239,10 +636,18 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
     }
 
     // Walk the token stream in order, keeping a live macro table, and emit the result.
-    function preprocess(tokens) {
+    function preprocess(raw) {
+        // Copy the parse-stack records into plain script records carrying their stream
+        // position (a record that travelled through the tag stack hands back a fresh object
+        // on every property read, so owning our own copies is both cheaper and safer).
+        var tokens = []
+        var z = 0
+        while (z < raw.length) { tokens.push(mkTokAt(raw[z].kind, raw[z].text, z)); z = z + 1 }
+
         var macros = {}
         var out = ""
         var col0 = true          // only whitespace seen since the last newline
+        var afterExp = false     // the previous emission came out of a macro expansion
         var i = 0
         while (i < tokens.length) {
             var t = tokens[i]
@@ -251,16 +656,31 @@ Other    <~~ push({kind: "other", text: up.in}) ~~>
                 out = out + r.text
                 i = r.next
                 col0 = true
-            } else if (t.kind == "ident") {
-                out = out + expandIdent(t.text, macros, {})
-                col0 = false
-                i = i + 1
-            } else {
-                out = out + t.text
-                if (t.kind == "nl") { col0 = true }
-                else if (t.kind != "hws") { col0 = false }
-                i = i + 1
+                afterExp = false
+                continue
             }
+            if (t.kind == "ident") {
+                var e = tryExpandAt(tokens, i, macros, {})
+                if (e.ok) {
+                    var s = emitToks(e.out)
+                    if (s.length > 0) {
+                        if (needSpace(out, s)) { out = out + " " }
+                        out = out + s
+                        col0 = e.out[e.out.length - 1].kind == "nl"
+                        afterExp = true
+                    }
+                    i = e.next
+                    continue
+                }
+            }
+            // Ordinary source: reproduced byte for byte, except that a token landing right
+            // after an expansion may need a space so the two do not lex as one.
+            if (afterExp && needSpace(out, t.text)) { out = out + " " }
+            afterExp = false
+            out = out + t.text
+            if (t.kind == "nl") { col0 = true }
+            else if (t.kind != "hws") { col0 = false }
+            i = i + 1
         }
         print(out)
     }

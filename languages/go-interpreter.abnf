@@ -460,9 +460,19 @@ AssignOp    = "&^=" | "<<=" | ">>=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | 
 // A leading '*' is a pointer store: '*p = v' writes through p's cell, '**pp = v'
 // through two of them. On a value that is not a pointer cell it stays transparent,
 // which is what a struct pointer needs - those are already references.
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = { "*" <~~ push({star: true}) ~~> } Id <~~ push(up.in) ~~>
+Target      = TgtParen | TgtPlain ;
+TgtPlain    <~~ push(makeTargetRef(takeAll())) ~~>
+            = TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+// A parenthesised target: '(*pn).val = v', '(*h)[i] = v', '(q) = 1'. Go writes the
+// dereference this way when the field or index has to bind to the POINTER rather than to
+// the field, and the corpus uses it constantly. The pushes are the same ones TgtPlain
+// makes, so both build the identical ref - which is right here, because this model
+// already reads '*p.x' as '(*p).x' and Go itself auto-dereferences a pointer to a struct
+// or to an array for exactly these two suffixes.
+TgtParen    <~~ push(makeTargetRef(takeAll())) ~~>
+            = "(" TgtCore { "." Id <~~ push({key: up.in}) ~~> | TIndex } ")"
               { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+TgtCore     = { "*" <~~ push({star: true}) ~~> } Id <~~ push(up.in) ~~> ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -669,8 +679,16 @@ Deref       <~~ push(makeDeref(pop())) ~~>
 // .(T). The plain call suffix is what makes func literals, slice elements and
 // returned functions callable (func(){...}(), fs[0](), adder(3)(10)).
 PostfixExpr = CallMember ;
+// Go inserts a semicolon at a line break that follows ')', ']', '}', a name or a literal,
+// so a '(' or '[' suffix can never START a new line: after
+//     p := &pt29{7, 8}
+//     (*p).x = 9
+// the '(' opens a new STATEMENT, not a call of the composite literal. SameLine is that
+// rule. It does not restrict a call whose ARGUMENTS span lines, because the '(' itself is
+// still on the name's line.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | SliceSfx | TypeArgsSfx | IndexSfx | CallSfx | TypeAssertSfx } ;
+            = Primary { MethodSfx | FieldSfx | SameLine SliceSfx | SameLine TypeArgsSfx
+                      | SameLine IndexSfx | SameLine CallSfx | TypeAssertSfx } ;
 // f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
 // INSTANTIATION whose bracket list is not an index expression. Generics are erased, so
 // an instantiation is the identity on the value it indexes, and this suffix pushes
@@ -701,7 +719,7 @@ Spread      <~~ push({spread: true}) ~~> = "..." ;
 // Only the single-result form is supported (not the comma-ok v, ok := x.(T)).
 TypeAssertSfx = "." "(" Type ")" ;
 
-Primary     = ParenConv | "(" Expression ")" | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
+Primary     = ParenConv | ParenGroup | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
             | GoDecLit | True | False | Nil | FuncLit | MakeCall | NewCall | ConvExpr
             | CompositeLit | Call | Iota | VarRef ;
@@ -772,8 +790,29 @@ ConvExpr    <~~ push(makeConv(takeAll(), up.pos)) ~~>
 // this rule needs is a '{' there, and the alternative is retried.)
 ParenConv   <~~ push(makeConv(takeAll(), up.pos)) ~~>
             = "(" ParenConvT ")" "(" Expression [ "," ] ")" ;
+// A parenthesised expression. Go's composite-literal restriction is SYNTACTIC and applies
+// only to a BARE literal in an if/for/switch header: 'if (T{1}) == (T{2}) {' is legal Go
+// while 'if T{1} == T{2} {' is not, and likewise 'switch (T1{}) {'. So the group lifts the
+// gate for what is inside it and puts it back on the way out. A group that fails after its
+// '(' leaves its marker behind; CondOff pops down to its OWN marker so that such a leak
+// cannot outlive the header it happened in.
+ParenGroup  = "(" LitOn Expression LitOff ")" ;
+LitOn = :script(~~
+    push("$struct")
+    undefined
+~~) ;
+LitOff = :script(~~
+    pop()
+    undefined
+~~) ;
 ParenConvT  <~~ push({conv: firstType(up.in)}) ~~>
-            = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
+            = PtrTypeT | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
+            | StructTypeT ;
+// '(*[16]byte)(p)', '(*T)(unsafe.Pointer(&v))', '(*int)(nil)': a conversion to a POINTER
+// type. Go reads '(*X)(y)' as a conversion too, so this does not take anything away from
+// a call through a parenthesized expression; '(*p).f' still falls through, because the
+// '(' this rule needs after the type is a '.' there.
+PtrTypeT    = "*" Type ;
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
             = "[" "]" Type | ScalarType KwEnd ;
 ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
@@ -912,8 +951,13 @@ CondOn = :script(~~
     undefined
 ~~) ;
 CondOff = :script(~~
-    pop()
-    undefined
+    (function() {
+        // Pop down to THIS header's own marker, so a parenthesised group that failed
+        // half way (see ParenGroup) cannot leave the gate stack out of step.
+        var t = pop()
+        while (t != null && t != "$nostruct") { t = pop() }
+        return undefined
+    })()
 ~~) ;
 // InitAhead answers "does this if/switch header carry an init statement?" - i.e. is
 // there a ';' before the body's '{' at bracket depth 0. Without it the optional init

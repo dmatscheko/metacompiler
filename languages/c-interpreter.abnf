@@ -670,7 +670,7 @@ FnParams    = SkipParen ;
 ParamList   <~~ push(takeAll()) ~~>
             = "(" [ ( VoidOnly | ParamItem { "," ParamItem } [ "," "..." ] | "..." ) ] ")" ;
 VoidOnly    = "void" KwEnd !"*" ;
-ParamItem   = FnPtrParam | TdParam | ParenParam | Param | ParamAbs ;
+ParamItem   = FnPtrParam | TdParam | ParenParam | Param | ParamAbs | TdParamAbs ;
 // 'int (* const x)': a pointer parameter written with redundant parentheses.
 ParenParam  <~~ push(makeParam(takeAll())) ~~>
             = ParamType "(" Stars Id <~~ push(up.in) ~~> ")" ;
@@ -687,16 +687,31 @@ Param       <~~ push(makeParam(takeAll())) ~~>
             = ParamType [ Stars ] Id <~~ push(up.in) ~~> [ ArrDims ] ;
 // An abstract (unnamed) parameter: only its type matters, and nothing can read it.
 // An abstract parameter: only its type matters. 'int ()' is a function type, which
-// as a parameter is adjusted to a pointer to that function.
+// as a parameter is adjusted to a pointer to that function. A function type may carry
+// further parameter lists ('int (*[4])(int)' - an unnamed array of four pointers to
+// functions), which are balanced runs whose contents nothing here reads.
 ParamAbs    <~~ push(makeParam(takeAll())) ~~>
-            = ParamType [ Stars ] [ ArrDims | AbsFnTy ] ;
+            = ParamType [ Stars ] [ ArrDims | AbsFnTy { FnParams } ] ;
 AbsFnTy     <~~ push({fnabs: true}) ~~> = FnParams ;
+// An UNNAMED parameter whose type is a typedef name ('int f5(int (int()), fptr1);').
+// It is the last alternative of ParamItem, so a bare identifier here is only read as a
+// type after every other parameter shape has failed.
+TdParamAbs  <~~ push(makeTdParam(takeAll())) ~~>
+            = TdName [ Stars ] [ ArrDims ] ;
 ParamType   = BaseTy | KwStruct Id <~~ push({sname: up.in}) ~~>
             | KwUnion Id <~~ push({sname: uKey(up.in)}) ~~> ;
 
 // Globals are declared like locals but registered at build time.
 GlobalDecl  <~~ defineGlobals(takeAll()) ~~>
-            = BaseTy DeclItem { "," DeclItem } ";" ;
+            = BaseTy GDeclItem { "," GDeclItem } ";" ;
+// One declaration may mix prototypes and objects over a shared base type:
+// 'int f(int a), g(int a), a;' declares two functions and one int. A prototype needs no
+// lowering, so ProtoItem parses and drops it and only the objects reach defineGlobals.
+// Tried first, and it needs an Id followed by a parameter list, so a plain 'a' or an
+// initialised 'x = 1' falls straight through to DeclItem.
+GDeclItem   = ProtoItem | DeclItem ;
+ProtoItem   <~~ takeAll() /* A prototype needs no lowering. */ ~~>
+            = [ PStars ] Id ParamList { Attr } ;
 // The declaration BASE type, kept as a real C type so that a char is one byte wide
 // and an unsigned int divides and compares unsigned. Pushes {bty: ct}.
 BaseTy      <~~ push({bty: baseCtOf(up.in)}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] | TypeInt ;
@@ -885,8 +900,65 @@ InitDecl    <~~ push({dcl: makeDeclr(takeAll(), "plain")}) ~~>
 // the OUTERMOST may be left empty ('int a[] = { ... }', 'int m[][3][5] = ...'), where
 // -1 asks for the size to come from the initializer. A dimension may carry the
 // qualifiers a parameter is allowed to write there (int x[const 5]).
-ArrDims     <~~ push({dims: takeAll()}) ~~> = ( ArrDim | InferDim ) { ArrDim } ;
-ArrDim      = "[" { ArrQual } Number "]" ;
+ArrDims     <~~ push({dims: takeAll()}) ~~> = ( ArrDim | StarDim | InferDim ) { ArrDim | StarDim } ;
+// 'int x[const *]' - a VLA of UNSPECIFIED size, which C11 6.7.6.2 allows only in a
+// prototype, where nothing may read the bound anyway. Treated exactly like '[]'.
+StarDim     <~~ push(-1) ~~> = "[" { ArrQual } "*" "]" ;
+ArrDim      = "[" { ArrQual } ConstDim "]" ;
+// An array dimension is a constant EXPRESSION, not just a literal: 'char buf[5*32]' is
+// ordinary C, and so is 'int a[N]' once the preprocessor has turned N into '0x1E+1'. The
+// arithmetic is folded here, at parse time, because a dimension must already be a number
+// when the declarator is built - the interpreter has no frame yet and the compiler emits
+// no code for it.
+//
+// NoDimId is what keeps this honest: it refuses any identifier inside the brackets, so a
+// real variable-length array ('char test[argc]') is still REJECTED outright rather than
+// accepted and then failing at walk time. Accepting a VLA here would score a corpus win
+// while being strictly worse than the rejection it replaced.
+ConstDim    = NoDimId DimShift ;
+DimShift    <~~ push(foldDimBin(takeAll())) ~~> = DimAdd { DimShOp DimAdd } ;
+DimShOp     <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
+DimAdd      <~~ push(foldDimBin(takeAll())) ~~> = DimMul { DimAddOp DimMul } ;
+DimAddOp    <~~ push({op: up.in}) ~~> = "+" | "-" ;
+DimMul      <~~ push(foldDimBin(takeAll())) ~~> = DimUn { DimMulOp DimUn } ;
+DimMulOp    <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
+DimUn       = Number | DimParen | DimNeg | DimPos | DimNot ;
+DimParen    = "(" DimShift ")" ;
+DimNeg      <~~ push(0 - pop()) ~~> = "-" DimUn ;
+DimPos      = "+" DimUn ;
+DimNot      <~~ push(0 - pop() - 1) ~~> = "~" DimUn ;
+// Refuse a dimension that names anything. Scans the raw input to the closing ']':
+// a numeric literal swallows its own letters (0x1E, 5L, 1e3), so any letter or '_' left
+// over starts an identifier - a VLA, or a constant this pass cannot know.
+NoDimId = :script(~~
+    (function() {
+        var s = 0 // Neither whitespace NOR COMMENTS are skipped before a :script.
+        while (true) {
+            var ch = c.peek(s)
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { s++; continue }
+            break
+        }
+        while (true) {
+            var b = c.peek(s)
+            if (b < 0)   { return abnf.newToken("\x01dim-unterminated", 0) }
+            if (b === 93) { return undefined }                              // ']'
+            if (b === 91) { return abnf.newToken("\x01dim-bracket", 0) }    // '['
+            if (b >= 48 && b <= 57) {                                       // a number
+                s++
+                while (true) {
+                    var d = c.peek(s)
+                    if ((d >= 48 && d <= 57) || (d >= 65 && d <= 90) ||
+                        (d >= 97 && d <= 122) || d === 46) { s++ } else { break }
+                }
+                continue
+            }
+            if ((b >= 65 && b <= 90) || (b >= 97 && b <= 122) || b === 95) {
+                return abnf.newToken("\x01dim-not-constant", 0)
+            }
+            s++
+        }
+    })()
+~~) ;
 InferDim    <~~ push(-1) ~~> = "[" "]" ;
 ArrQual     = PtrQual | "static" KwEnd ;
 // A declaration initializer: a brace list, a string literal (which initializes a
@@ -1259,6 +1331,33 @@ KwDefault   = "default" KwEnd ;
     // accumulated through szArith, so 18446744073709551615 keeps every bit instead of
     // rounding to the nearest double. The result is a plain number while it fits a
     // signed 64-bit double and the sized-integer box beyond that.
+    // items = [v0, {op}, v1, {op}, v2, ...] - ONE precedence level of a constant array
+    // dimension, folded left to right at parse time. See the ArrDim rule for why a
+    // dimension is a number here rather than an expression tree.
+    function foldDimBin(items) {
+        var v = anytype
+        v = items[0]
+        var i = 1
+        while (i + 1 < items.length) {
+            var op = items[i].op
+            var r = items[i + 1]
+            if (op == "+") { v = v + r }
+            else if (op == "-") { v = v - r }
+            else if (op == "*") { v = v * r }
+            else if (op == "/") { v = r == 0 ? 0 : truncDiv(v, r) }
+            else if (op == "%") { v = r == 0 ? 0 : v - truncDiv(v, r) * r }
+            else if (op == "<<") { v = v * Math.pow(2, r) }
+            else if (op == ">>") { v = truncDiv(v, Math.pow(2, r)) }
+            i = i + 2
+        }
+        return v
+    }
+    // C integer division truncates toward zero, which Math.floor does not do for a
+    // negative quotient.
+    function truncDiv(a, b) {
+        var q = a / b
+        return q < 0 ? Math.ceil(q) : Math.floor(q)
+    }
     function parseCInt(s) {
         var base = 10
         var i = 0

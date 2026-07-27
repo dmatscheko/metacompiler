@@ -1031,7 +1031,7 @@ func s26() {
 // declares an ALIAS (one type with two names, unlike `type A B`); a function TYPE may
 // name its parameters and results; and a declaration may carry the pre-1.0 trailing
 // semicolon. Verified against go1 (`go run`) before being pinned here.
-type pt27 struct{ x, y int };
+type pt27 struct{ x, y int }
 type alias27 = pt27
 type ints27 = int
 type marker27 struct{}
@@ -1042,7 +1042,7 @@ func (*marker27) ptag() string { return "pointer" }
 type binop27 func(a, b int) int
 type seq27 = func(yield func(v int) bool)
 
-func triple27(n int) int { return 3 * n };
+func triple27(n int) int { return 3 * n }
 
 func s27() {
 	a := alias27{1, 2}
@@ -1126,6 +1126,70 @@ func s28() {
 	check("ret3", early28(2) == 109)
 }
 
+// ===== SECTION 29: parenthesized composite literals and assignment targets =====
+// Go's composite-literal restriction is SYNTACTIC and applies only to a BARE literal in an
+// if/for/switch header: `if T{1} == T{2} {` is a syntax error while `if (T{1}) == (T{2}) {`
+// is legal, and so is `switch (T{1}) {`. An assignment target may likewise be
+// parenthesized - `(*p).f = v`, `(*sp)[i] = v`, `(v) = e` - which is how Go binds a
+// dereference to the field or index rather than to the whole expression. Verified against
+// go1 (`go run`) before being pinned here.
+type pt29 struct {
+	x int
+	y int
+}
+
+func s29() {
+	// a parenthesized composite literal in a header, where a bare one is illegal
+	if (pt29{1, 2}) == (pt29{1, 2}) {
+		check("plit1", true)
+	} else {
+		check("plit1", false)
+	}
+	if (pt29{1, 2}) != (pt29{3, 4}) {
+		check("plit2", true)
+	} else {
+		check("plit2", false)
+	}
+	switch (pt29{5, 6}) {
+	case pt29{5, 6}:
+		check("plit3", true)
+	default:
+		check("plit3", false)
+	}
+	n := 0
+	for i := 0; i < 3; i++ {
+		if (pt29{i, i}) == (pt29{1, 1}) {
+			n++
+		}
+	}
+	check("plit4", n == 1)
+	if q := 2; (pt29{q, q}) == (pt29{2, 2}) {
+		check("plit5", true)
+	} else {
+		check("plit5", false)
+	}
+
+	// parenthesized assignment targets
+	p := &pt29{7, 8}
+	(*p).x = 9
+	check("ptgt1", p.x == 9)
+	(*p).y += 3
+	check("ptgt2", p.y == 11)
+	check("ptgt3", (*p).x+(*p).y == 20)
+	var v int
+	(v) = 41
+	(v)++
+	check("ptgt4", v == 42)
+	sl := []int{1, 2, 3}
+	sp := &sl
+	(*sp)[1] = 20
+	check("ptgt5", sl[1] == 20)
+	(*sp)[2] += 7
+	check("ptgt6", sl[2] == 10)
+	st := []pt29{{1, 2}}
+	(st)[0].x = 5
+	check("ptgt7", st[0].x == 5)
+}
 
 func main() {
 	s01() // SECTION-CALL 01
@@ -1156,6 +1220,7 @@ func main() {
 	s26() // SECTION-CALL 26
 	s27() // SECTION-CALL 27
 	s28() // SECTION-CALL 28
+	s29() // SECTION-CALL 29
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

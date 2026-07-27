@@ -896,6 +896,70 @@ int s33(void) {
     return 0;
 }
 
+// ===== SECTION 34: constant array dimensions and declarator lists =====
+/* An array dimension is a constant EXPRESSION, not just a literal ('char buf[5*32]'),
+   and it is folded at declaration time. A variable dimension is a VLA and stays out of
+   scope, so it is still refused. One declaration may also mix prototypes with objects
+   over a shared base type ('int f(int), g(int), a;'), and a prototype may take abstract
+   (unnamed) parameters, including a typedef name and an array of function pointers.
+   Verified against cc before being pinned here. */
+int s34_f(int a), s34_g(int a), s34_v;      /* two prototypes and an int, one declaration */
+typedef int (*s34_fp1)(int);
+int s34_h(s34_fp1), s34_w;                  /* an UNNAMED typedef-name parameter */
+int s34_k(int (*[4])(int), int);            /* an unnamed array of function pointers */
+int s34_l(int (), int);                     /* an unnamed function-type parameter */
+int s34_m(int ([4]), int);                  /* an unnamed array parameter */
+void s34_n(int [const *]);                  /* a VLA of unspecified size, prototype only */
+
+int s34_f(int a) { return a + 1; }
+int s34_g(int a) { return a + 2; }
+int s34_double(int v) { return v + v; }
+int s34_h(s34_fp1 fp) { return fp(10); }
+int s34_k(s34_fp1 *t, int i) { return t[0](i); }   /* the adjusted parameter type */
+int s34_l(int (*fp)(int), int i) { return fp(i); }
+int s34_m(int t[4], int i) { return t[i]; }
+void s34_n(int t[]) { t[0] = t[0] + 1; }
+
+char s34_buf[5 * 32];
+int s34_grid[2 + 1][4 / 2];
+int s34_shift[1 << 4];
+int s34_mixed[(3 + 1) * 2 - 3];
+int s34_paren[(8)];
+
+int s34(void) {
+    int i;
+    s34_fp1 tab[4];
+    int arr4[4];
+    s34_v = 5;
+    s34_w = 6;
+    check(3401, s34_f(1) == 2);
+    check(3402, s34_g(1) == 3);
+    check(3403, s34_v + s34_w == 11);
+    check(3404, s34_h(s34_double) == 20);
+    tab[0] = s34_double;
+    check(3405, s34_k(tab, 7) == 14);
+    check(3406, s34_l(s34_double, 8) == 16);
+    arr4[0] = 30; arr4[1] = 31; arr4[2] = 32; arr4[3] = 33;
+    check(3407, s34_m(arr4, 2) == 32);
+    s34_n(arr4);
+    check(3416, arr4[0] == 31);
+    /* the dimensions themselves */
+    for (i = 0; i < 160; i = i + 1) { s34_buf[i] = (char)(i & 15); }
+    check(3408, s34_buf[159] == 15);
+    check(3409, sizeof(s34_buf) == 160);
+    check(3410, sizeof(s34_grid) == 3 * 2 * sizeof(int));
+    check(3411, sizeof(s34_shift) == 16 * sizeof(int));
+    check(3412, sizeof(s34_mixed) == 5 * sizeof(int));
+    check(3413, sizeof(s34_paren) == 8 * sizeof(int));
+    {
+        char local[3 * 4];
+        local[11] = 9;
+        check(3414, sizeof(local) == 12);
+        check(3415, local[11] == 9);
+    }
+    return 0;
+}
+
 int main() {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -930,6 +994,7 @@ int main() {
     s31(); // SECTION-CALL 31
     s32(); // SECTION-CALL 32
     s33(); // SECTION-CALL 33
+    s34(); // SECTION-CALL 34
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);
