@@ -734,6 +734,34 @@ s22() {
   check dec14 "$opts" "-a-b"
 }
 
+# ===== SECTION 23: interpreter/compiler agreement ratchet =====
+# Character-counting parameter expansion. ${#s} and ${s:o:n} count CHARACTERS in
+# bash; this file's grammars used to disagree three ways on non-ASCII text - real
+# bash 5.3 said 3 for "a😀b", bash-interpreter.abnf said 4 (UTF-16 code units)
+# and bash-to-llvm-ir.abnf said 6 (bytes). ${a[i]:o:n} sliced the element LIST in
+# the compiler instead of the element. Every value below is what
+# /opt/homebrew/bin/bash 5.3 prints (in a UTF-8 locale).
+s23() {
+  local s="a😀b"
+  check uni1 "${#s}" 3
+  check uni2 "${s:1:1}" "😀"
+  check uni3 "${s:0:2}" "a😀"
+  check uni4 "${s:2}" "b"
+  check uni5 "${s: -1}" "b"
+  check uni6 "${s:1:-1}" "😀"
+  local u="ünïcödé"
+  check uni7 "${#u}" 7
+  check uni8 "${u:2:3}" "ïcö"
+  check uni9 "${u:0:1}" "ü"
+  local e=""
+  check uni10 "${#e}" 0
+  check uni11 "${s:9}" ""
+  check uni12 "${s:0:0}" ""
+  local arr=(one "thr😀e")
+  check uni13 "${#arr[1]}" 5
+  check uni14 "${arr[1]:1:2}" "hr"
+  check uni15 "${#arr[@]}" 2
+}
 # ===== END SECTIONS =====
 
 s01   # SECTION-CALL 01
@@ -758,5 +786,6 @@ s19   # SECTION-CALL 19
 s20   # SECTION-CALL 20
 s21   # SECTION-CALL 21
 s22   # SECTION-CALL 22
+s23   # SECTION-CALL 23
 echo "full: $checks checks, $fails failures"
 exit $fails

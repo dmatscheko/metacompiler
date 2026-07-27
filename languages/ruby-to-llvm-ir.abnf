@@ -2683,7 +2683,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     } else if (s.name == "length" || s.name == "size") {
                         snRes = callExt(callBk, "js_pylen", [cur])
                     } else if (s.name == "to_s") {
-                        snRes = callExt(callBk, "js_jadd", [emitStr(callBk, ""), cur])
+                        snRes = callExt(callBk, "js_rstr", [cur])
                     } else {
                         snRes = callExt(callBk, "js_rxmcall", [cur, emitStr(callBk, methodKey(s.name)), callExt(callBk, "js_arr_new", [])])
                     }
@@ -2695,9 +2695,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     if (s.name == "length" || s.name == "size") {
                         cur = callExt(b, "js_pylen", [cur])
                     } else if (s.name == "to_s") {
-                        cur = callExt(b, "js_jadd", [emitStr(b, ""), cur])
-                    } else if (s.name == "to_a") {
-                        cur = cur
+                        // js_rstr is Ruby's to_s (nil -> "", a class -> its name, a
+                        // Float keeps its point). js_jadd was JavaScript's, which
+                        // rendered nil as "null" - a live divergence from the
+                        // interpreter, whose rstr() has always answered "".
+                        cur = callExt(b, "js_rstr", [cur])
                     } else if (s.name == "new") {
                         // Foo.new without parens: a zero argument constructor call.
                         var rn2 = emitNew(b, cur, [])
@@ -2993,16 +2995,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var isPrint = items[0].cmd.indexOf("print") >= 0
         var args = items.slice(1)
         return function(b) {
-            var fnName = isPrint ? "print" : "println"
-            var fnV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, fnName)])
+            // js_rputs / js_rprint render with RUBY's to_s (nil -> "", a Float
+            // keeps its point, a class prints its name) and puts FLATTENS an
+            // array one element per line. The shared println host function does
+            // none of that - it printed Go's %v, so `puts nil' said "<nil>" and
+            // `puts [1, 2]' said "[1 2]" while the interpreter said "" and "1\n2".
+            var extName = isPrint ? "js_rprint" : "js_rputs"
             if (args.length == 0) {
-                if (!isPrint) { callExt(b, "js_call", [fnV, hUndef, argList(b, [emitStr(b, "")])]) }
+                if (!isPrint) { callExt(b, "js_rputs", [emitStr(b, "")]) }
                 return {b: b, v: hNull}
             }
             for (var i = 0; i < args.length; i++) {
                 var r = args[i](b)
                 b = r.b
-                callExt(b, "js_call", [fnV, hUndef, argList(b, [r.v])])
+                callExt(b, extName, [r.v])
             }
             return {b: b, v: hNull}
         }

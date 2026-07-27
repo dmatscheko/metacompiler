@@ -52,7 +52,17 @@ instead of an error. The same language is interpreted directly by lua-interprete
 // The whole file is one block; buildChunk runs it (interpreter) or wraps it into
 // jsmain (compiler). Block collects the statement thunks of exactly its own subtree.
 Chunk       <~~ buildChunk(takeAll()) ~~>
-            = Block ;
+            = [ ShebangLine ] Block ;
+// Lua drops a FIRST line that starts with '#', so a chunk can carry a '#!/usr/bin/lua'
+// line (lua-tests/all.lua) or a plain '# comment' one (lua-tests/main.lua). Anywhere else
+// '#' is the length operator, so AtFileStart pins this to offset 0: c.peek answers -1 out
+// of range, and only at offset 0 is there no byte before us.
+ShebangLine = AtFileStart "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+AtFileStart = :script(~~
+    (function() {
+        if (c.peek(-1) >= 0) { return abnf.newToken("\x01not-file-start", 0) }
+    })()
+~~) ;
 Block       <~~ push(makeSeq(takeAll())) ~~>
             = { NotEnders Statement } ;
 
@@ -141,7 +151,28 @@ Statement   <~~ push(stmtPos(pop())) ~~>
 // with a string-literal argument; anything else (require as a value, require(expr)) rolls
 // back to a normal call. A flat module model (the module's return value is not bound).
 Require     <~~ push(luaImport(takeAll(), up.pos)) ~~>
-            = "require" KwEnd ( "(" ReqPath ")" | ReqPath ) ;
+            = "require" KwEnd ( "(" ReqPath ")" | ReqPath ) NoReqSuffix ;
+// `require "mod"` is a statement, but `require"tracegc".start()` (lua-tests/all.lua) is an
+// ordinary call expression whose RESULT is indexed and called. Committing to the statement
+// form there left the `.start()` behind with nothing to attach it to. This guard declines
+// the statement form whenever a suffix follows on the same line, so the whole thing falls
+// through to CallStat and parses as the call chain it is. It scans only spaces and tabs -
+// stopping at a newline is what keeps the next statement's own `::label::` from looking
+// like a `:method` suffix of this one.
+NoReqSuffix = :script(~~
+    (function() {
+        var i = 0
+        while (i < 4096) {
+            var ch = c.peek(i)
+            if (ch === 32 || ch === 9) { i++; continue }
+            break
+        }
+        var nx = c.peek(i)
+        if (nx === 46 || nx === 91 || nx === 58 || nx === 40) {
+            return abnf.newToken("\x01require-has-suffix", 0)
+        }
+    })()
+~~) ;
 ReqPath     = ModDq | ModSq ;
 ModDq       = '"' :whitespace() { StrEsc | DqPlain } <~~ push(unescapeJs(up.in)) ~~> '"' :whitespace(Whitespace) ;
 ModSq       = "'" :whitespace() { StrEsc | SqPlain } <~~ push(unescapeJs(up.in)) ~~> "'" :whitespace(Whitespace) ;
@@ -204,8 +235,15 @@ ParamList   <~~ push({params: takeAll()}) ~~>
 VarargPar   <~~ push("...") ~~>
             = "..." ;
 
+// `return` takes an OPTIONAL expression list, and the guard in front of it is what makes
+// the option optional in practice: `end`, `else`, `elseif` and `until` are ordinary
+// identifiers to the Id rule, so a bare `return` followed by `end` used to parse as
+// `return end` - returning a variable named `end` - and the block then ate the NEXT `end`.
+// Nothing failed at the mistake; the parse slid one `end` out of step and died at EOF.
+// That single missing guard cost four files of the reference corpus (api, code, gengc,
+// coroutine). NotEnders consumes nothing and only fails on those four whole words.
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = KwReturn [ ExprList ] ;
+            = KwReturn [ NotEnders ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>
             = KwBreak ;
 
@@ -224,8 +262,15 @@ EmptyStat   <~~ push(makeEmpty()) ~~>
 // makeAssign tells them apart (a target is an object, a value thunk a function).
 AssignStat  <~~ push(makeAssign(takeAll())) ~~>
             = Target { "," Target } "=" ExprList ;
+// A target is Lua's `var`, and Lua's `var` is `prefixexp '.' Name | prefixexp '[' exp ']'`
+// - so everything a prefixexp may contain sits in front of the final field or index,
+// CALLS included: `getmetatable(t).__index = f`, `a[1], f(a)[2], b = ...` and `o:m().x = 1`
+// are all ordinary Lua. Restricting the chain to DotSfx / IndexSfx made those unparseable
+// and cost six files of the reference corpus. The chain is therefore the SAME one an
+// expression parses; emitTargetWrite walks all but the last step and writes into the slot
+// the last step names.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { DotSfx | IndexSfx } ;
+            = Id <~~ push(up.in) ~~> { CallSfx | MethodSfx | StrCallSfx | TblCallSfx | DotSfx | IndexSfx } ;
 
 CallStat    <~~ push(exprToStmt(pop())) ~~>
             = SuffixedExpr ;
@@ -395,10 +440,15 @@ AnyByte     = "\x00"..."\U0010ffff" ;
 // replaced here: a backslash may be followed by any character, a real line break
 // included (that form stands for a newline), and the z escape swallows the whole
 // whitespace run behind it. luaUnesc resolves them all.
-LuaDq       = '"' :whitespace() { LuaZSkip | LuaEsc | DqPlain } <~~ push(makeConst(luaUnesc(up.in))) ~~> '"' :whitespace(Whitespace) ;
-LuaSq       = "'" :whitespace() { LuaZSkip | LuaEsc | SqPlain } <~~ push(makeConst(luaUnesc(up.in))) ~~> "'" :whitespace(Whitespace) ;
+LuaDq       = '"' :whitespace() { LuaZSkip | LuaEsc | DqPlain | LuaRawByte } <~~ push(makeConst(luaUnesc(up.in))) ~~> '"' :whitespace(Whitespace) ;
+LuaSq       = "'" :whitespace() { LuaZSkip | LuaEsc | SqPlain | LuaRawByte } <~~ push(makeConst(luaUnesc(up.in))) ~~> "'" :whitespace(Whitespace) ;
 LuaZSkip    = "\\z" { @+" \t\r\n" } ;
 LuaEsc      = "\\" AnyByte ;
+// A Lua string is a BYTE string, and Lua's own test suite is written in Latin-1: files.lua,
+// pm.lua, sort.lua and strings.lua all embed a raw 0xe1 / 0xe3 that is not valid UTF-8, so
+// DqPlain's rune range - which has to decode - cannot match it. This BYTE range (..b) can.
+// It comes last, so well-formed UTF-8 still matches DqPlain as a rune and is unaffected.
+LuaRawByte  = "\x80"..b"\xff" ;
 
 FuncExpr    <~~ push(makeFuncExpr(pop(), pop())) ~~>
             = KwFunction ParamList Block KwEndKw ;
@@ -939,26 +989,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             s3B.NewRet(callExt(s3B, "js_pystr", [ps[0]]))
             smB.NewCondBr(rawTruthy(smB, callLua(smB, "lua_isint", [ps[0]])), siB, sfB)
             siB.NewRet(callExt(siB, "js_pystr", [ps[0]]))
+            // js_luaflt is Lua's float rendering: inf / -inf / nan for the
+            // non-finite values (js_pystr spelled them Infinity / NaN, which is
+            // JavaScript) and always a fraction otherwise.
             var sn2 = callLua(sfB, "lua_num", [ps[0]])
             sfB.NewCondBr(rawTruthy(sfB, callLua(sfB, "lua_isint", [sn2])), sdB, srB)
-            sdB.NewRet(callExt(sdB, "js_add", [callExt(sdB, "js_pystr", [sn2]), emitStr(sdB, ".0")]))
-            srB.NewRet(callExt(srB, "js_pystr", [sn2]))
+            sdB.NewRet(callExt(sdB, "js_luaflt", [sn2]))
+            srB.NewRet(callExt(srB, "js_luaflt", [sn2]))
             return
         }
         if (name == "lua_shift") {
-            // A shift by 64 or more clears the value in Lua, where the host's 32-bit
-            // shift externals would wrap the count instead. p0 is 1 for '<<', 0 for '>>'.
-            var zeroB = curF.NewBlock("")
-            var doB = curF.NewBlock("")
-            var kAbs = callExt(b, "js_lt", [ps[2], emitNum(b, 0)])
-            var kMag = b.NewSelect(truthy(b, kAbs), callExt(b, "js_neg", [ps[2]]), ps[2])
-            b.NewCondBr(truthy(b, callExt(b, "js_ge", [kMag, emitNum(b, 64)])), zeroB, doB)
-            zeroB.NewRet(emitNum(zeroB, 0))
-            var leftB = curF.NewBlock("")
-            var rightB = curF.NewBlock("")
-            doB.NewCondBr(doB.NewICmp(llvm.enum.IPredNE, ps[0], handle(0)), leftB, rightB)
-            leftB.NewRet(callExt(leftB, "js_shl", [ps[1], ps[2]]))
-            rightB.NewRet(callExt(rightB, "js_ushr", [ps[1], ps[2]]))
+            // Lua shifts a 64-BIT integer, logically, and a count of 64 or more clears
+            // the value; a negative count shifts the other way. js_shl / js_ushr are
+            // JavaScript's 32-bit shifts with a 5-bit count mask, so the compiler
+            // answered 1 for `1 << 32' and -16777216 for `255 << 24' while
+            // lua-interpreter.abnf (and real Lua) answered 4294967296 and 4278190080.
+            // js_luashift does the whole thing in Go. p0 is 1 for '<<', 0 for '>>'.
+            b.NewRet(callExt(b, "js_luashift", [ps[1], ps[2], ps[0]]))
             return
         }
         if (name == "lua_tail") {
@@ -1251,6 +1298,37 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return callLua(b, "lua_arith", [handle(arithCode[op]), l, r])
     }
 
+    // ONE suffix step of a prefixexp, emitted. `pre` says whether the value coming in is a
+    // possible multi-value (it is exactly after a call), in which case it is truncated
+    // first. Shared by the expression folder below and by emitTargetWrite, which is what
+    // makes `getmetatable(t).__index = f` emit exactly the chain `getmetatable(t).__index`
+    // reads. Answers {b, v, call} - `call` is the next step's `pre`.
+    function emitLuaStep(b, cur, s, pre) {
+        var v = cur
+        if (pre) { v = callLua(b, "lua_first", [v]) } // Only one value feeds a step.
+        if (s.kind == "call") {
+            var ea = emitListArr(b, s.args)
+            b = ea.b
+            return {b: b, v: callExt(b, "js_call", [v, hUndef, ea.v]), call: true}
+        }
+        if (s.kind == "method") {
+            // obj:m(args): look up m on the receiver, then call it with the
+            // receiver prepended as the first argument (self).
+            var fn = callExt(b, "js_get", [v, emitStr(b, s.name)])
+            var margs = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [margs, v])
+            var ma = emitListArr(b, s.args)
+            b = ma.b
+            b = emitArrExtend(b, margs, ma.v)
+            return {b: b, v: callExt(b, "js_call", [fn, hUndef, margs]), call: true}
+        }
+        if (s.kind == "field") {
+            return {b: b, v: callExt(b, "js_get", [v, emitStr(b, s.name)]), call: false}
+        }
+        var ir = s.idx(b)
+        b = ir.b
+        return {b: b, v: callExt(b, "js_get", [v, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])])]), call: false}
+    }
     // items = [primaryThunk, {kind:"call"|"field"|"index", ...}...].
     foldCallMember = function(items) {
         if (items.length == 1) { return items[0] }
@@ -1262,32 +1340,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var cur = r.v
             var afterCall = false
             for (var i = 0; i < suffixes.length; i++) {
-                var s = suffixes[i]
-                if (afterCall) { cur = callLua(b, "lua_first", [cur]) } // Only one value feeds a step.
-                afterCall = false
-                if (s.kind == "call") {
-                    var ea = emitListArr(b, s.args)
-                    b = ea.b
-                    cur = callExt(b, "js_call", [cur, hUndef, ea.v])
-                    afterCall = true
-                } else if (s.kind == "method") {
-                    // obj:m(args): look up m on the receiver, then call it with the
-                    // receiver prepended as the first argument (self).
-                    var fn = callExt(b, "js_get", [cur, emitStr(b, s.name)])
-                    var margs = callExt(b, "js_arr_new", [])
-                    callExt(b, "js_arr_push", [margs, cur])
-                    var ma = emitListArr(b, s.args)
-                    b = ma.b
-                    b = emitArrExtend(b, margs, ma.v)
-                    cur = callExt(b, "js_call", [fn, hUndef, margs])
-                    afterCall = true
-                } else if (s.kind == "field") {
-                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
-                } else {
-                    var ir = s.idx(b)
-                    b = ir.b
-                    cur = callExt(b, "js_get", [cur, callLua(b, "lua_cmpv", [callLua(b, "lua_first", [ir.v])])])
-                }
+                var st = emitLuaStep(b, cur, suffixes[i], afterCall)
+                b = st.b
+                cur = st.v
+                afterCall = st.call
             }
             return {b: b, v: cur}
         }
@@ -1341,11 +1397,16 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return b
         }
         var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        // emitLuaStep, not a bare js_get: the leading steps of a target may be calls
+        // (getmetatable(t).__index = f), which is ordinary Lua - see the Target production.
+        var afterCall = false
         for (var i = 0; i < ref.path.length - 1; i++) {
-            var pk = pathKeyV(b, ref.path[i])
-            b = pk.b
-            o = callExt(b, "js_get", [o, pk.v])
+            var st = emitLuaStep(b, o, ref.path[i], afterCall)
+            b = st.b
+            o = st.v
+            afterCall = st.call
         }
+        if (afterCall) { o = callLua(b, "lua_first", [o]) }
         var lk = pathKeyV(b, ref.path[ref.path.length - 1])
         b = lk.b
         callExt(b, "js_set", [o, lk.v, v])
@@ -1935,7 +1996,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var prIdx = funcCount
         var pf = m.NewFunc("jsf_" + prIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
         var pb = pf.NewBlock("entry")
-        pb.NewCall(getExtern("js_pyprint", 1), [callLua(pb, "lua_strall", [pf.Params[1]])])
+        // js_luaprint joins with a TAB, which is what Lua's print does (js_pyprint
+        // joined with a space - Python's rule - so every multi-argument print
+        // differed from lua-interpreter.abnf and from real Lua).
+        pb.NewCall(getExtern("js_luaprint", 1), [callLua(pb, "lua_strall", [pf.Params[1]])])
         pb.NewRet(hUndef)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"), callExt(b, "js_closure", [handle(prIdx), curScopeV])])
         b = emitLibs(b)

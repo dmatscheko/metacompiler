@@ -149,17 +149,51 @@ Program     <~~ buildMain(takeAll()) ~~>
 // Imports are module level (column 0) and yield no statement, so they are tried
 // at the TopStmt level (before Statement, outside the stmtPos wrapper) and push
 // nothing net - keeping the value stack balanced for buildMain(takeAll()).
-TopStmt     = SameLevel ( Import | FromImport | Statement ) ;
+TopStmt     = SameLevel ( ImportLine | Statement ) ;
+ImportLine  = ( Import | FromImport ) NL ;
 
 // Module level imports. resolveImport (lib/compile-core.js) checks each module
 // path against core.stdlibImports; an unresolvable one aborts (or, under
 // -warn-imports, warns and continues). An import produces no statement thunk:
 // DottedName pushes the bare path and the resolving tag pops it (net zero).
-Import      = KwImport ImportMod { "," ImportMod } NL ;
+Import      = KwImport ImportMod { "," ImportMod } ;
 ImportMod   <~~ resolveImport(pop(), up.pos) ~~>
             = DottedName [ KwAs Id ] ;
 FromImport  <~~ resolveImport(pop(), up.pos) ~~>
-            = KwFrom DottedName KwImport ( "*" | ImportName { "," ImportName } ) NL ;
+            = KwFrom RelName KwImport ( "*" | ImportParen | ImportName { "," ImportName } ) ;
+// from . import x / from ..pkg import y: the leading dots are the relative package
+// level, which this flat import model has nothing to resolve against, so they are
+// accepted and the name that follows (if any) decides.
+RelName     <~~ push(stripWs(up.in)) ~~>
+            = DotRun NotImportKw Id { "." Id } | DotRun ;
+DotRun      = { "." } ;
+// `from . import x` is the ordered-choice trap at the top of docs/abnf-dialect-gotchas.md:
+// the first alternative's Id happily matches the word `import` itself, RelName COMMITS to
+// the reading `from (.import)`, and the parse then dies on the name after it - PEG never
+// re-enters RelName to try the bare-dots alternative. A `!"import"` lookahead is wrong
+// here because it would also reject `from .importlib import x`, so the guard checks the
+// word boundary too and only fails on `import` as a whole word.
+NotImportKw = :script(~~
+    (function() {
+        var i = 0
+        while (i < 4096) {
+            var ws = c.peek(i)
+            if (ws === 32 || ws === 9) { i++; continue }
+            break
+        }
+        var kw = "import"
+        for (var k = 0; k < 6; k++) {
+            if (c.peek(i + k) !== kw.charCodeAt(k)) { return undefined }
+        }
+        var after = c.peek(i + 6)
+        if ((after >= 48 && after <= 57) || (after >= 65 && after <= 90) ||
+            after === 95 || (after >= 97 && after <= 122)) { return undefined }
+        return abnf.newToken("\x01import-kw", 0)
+    })()
+~~) ;
+// The parenthesized (and therefore multi-line) form of the name list, which is how
+// CPython's own suite writes any import of more than two names.
+ImportParen = "(" :whitespace(WhitespaceNL) ImportName { "," ImportName } [ "," ] ")" :whitespace(Whitespace) ;
 ImportName  = Id [ KwAs Id ] ;
 DottedName  <~~ push(stripWs(up.in)) ~~>
             = Id { "." Id } ;
@@ -181,7 +215,12 @@ DefLike     <~~ push(pop().dstmt) ~~>
 // them (a trailing ';' is allowed), so the line pushes ONE sequence thunk.
 SmallLine   <~~ push(makeSeq(takeAll())) ~~>
             = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
-SmallStmt   = Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del
+// An import may sit inside a function, a try or an if - CPython's own test suite is full
+// of them (`try: import _testcapi` opens eight of its files) - so it is a SMALL statement
+// too, not only a module level one. It pushes nothing net, so a line holding only an
+// import makes an empty (no-op) sequence, which is what an import is to a flat module.
+SmallStmt   = Import | FromImport
+            | Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del
             | TypeAlias | AugAssign | AnnAssign | Assign | ExprSmall ;
 
 // PEP 695 'type NAME[params] = TYPE': the alias is a real value, an object whose
@@ -271,8 +310,10 @@ While       <~~ push(makeWhile(takeAll())) ~~>
 // the same writer as an assignment.
 // A trailing 'else' on a loop runs when the loop ended WITHOUT a break, so it
 // hangs off the natural exit while break jumps past it.
+// The iterable is an expression LIST: `for v in 1, (2,), StopIteration(3):` loops over the
+// bare tuple, exactly as an unparenthesized right-hand side does everywhere else.
 For         <~~ push(makeFor(takeAll())) ~~>
-            = [ "async" KwEnd ] "for" KwEnd TargetList "in" KwEnd Expression Suite [ Else ] ;
+            = [ "async" KwEnd ] "for" KwEnd TargetList "in" KwEnd ExprList Suite [ Else ] ;
 
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
             = "def" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ "->" DiscardType ] Suite ;
@@ -284,8 +325,11 @@ TypeParam   = [ "**" | "*" ] Id [ ":" DiscardType ] [ "=" DiscardType ] ;
 // '*' and the '/' positional-only marker. Annotations parse and are ignored.
 // '/' has no runtime effect here (it only FORBIDS the keyword spelling, which no
 // correct program uses); everything after a '*' or '*args' is keyword-only.
+// Inside the parentheses a newline is not a statement end, so the list may be written
+// across lines - which any def with more than three parameters is. WhitespaceNL is what
+// every other bracketed construct here already uses.
 ParamList   <~~ push(makeParamList(takeAll())) ~~>
-            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+            = "(" :whitespace(WhitespaceNL) [ Param { "," Param } [ "," ] ] ")" :whitespace(Whitespace) ;
 Param       = DblStarParam | StarParam | SlashParam | NamedParam ;
 DblStarParam <~~ push(makeKwParam(takeAll())) ~~>
             = "**" [ Id <~~ push(up.in) ~~> [ ":" DiscardType ] ] ;
@@ -316,9 +360,16 @@ Decorator   <~~ push({deco: pop()}) ~~>
 // Keyword arguments (metaclass=...) parse and are ignored.
 Class       <~~ push(makeClass(takeAll(), up.pos)) ~~>
             = "class" KwEnd Id <~~ push({cname: up.in}) ~~> [ TypeParams ]
-              [ "(" [ ClassArg { "," ClassArg } [ "," ] ] ")" ] Suite ;
-ClassArg    = ClassKw | ClassBase ;
-ClassKw     <~~ pop() ~~>            = Id "=" Expression ;
+              [ ClassBases ] Suite ;
+// The base list may be written across lines (`class C(unittest.TestCase,` / `  Mixin):`)
+// and may carry keyword arguments and a `**kwargs` spread (`class C[T](B, a=1, **kw)`),
+// which the metaclass protocol passes on. They are parsed and dropped here.
+ClassBases  = "(" :whitespace(WhitespaceNL) [ ClassArg { "," ClassArg } [ "," ] ] ")" :whitespace(Whitespace) ;
+ClassArg    = ClassKwSpread | ClassStar | ClassKw | ClassBase ;
+ClassKwSpread <~~ pop() ~~>          = "**" Expression ;
+// class C(*bases, **kwargs): the base list itself may be spread from a sequence.
+ClassStar   <~~ pop() ~~>            = "*" Expression ;
+ClassKw     <~~ pop() ~~>            = Id "=" NotEqSign Expression ;
 ClassBase   <~~ push({cbase: pop()}) ~~> = Expression ;
 
 // async def: compiled as a plain def (the body runs synchronously). Only the
@@ -340,8 +391,12 @@ TryBody     <~~ push({trybody: pop()}) ~~>
 ExceptClause <~~ push(makeExcept(takeAll())) ~~>
             = SameLevel "except" KwEnd [ "*" <~~ push({estar: true}) ~~> ]
               [ ExcType [ KwAs Id <~~ push(up.in) ~~> ] ] Suite ;
+// PEP 758 (Python 3.14): the exception list may be written WITHOUT parentheses when
+// there is no `as` clause - `except EOFError, TypeError, ZeroDivisionError:`. Taking an
+// expression LIST here accepts both that and the parenthesized form; the tuple it builds
+// is the same one the parenthesized spelling produces, so makeExcept is unchanged.
 ExcType     <~~ push({etype: pop()}) ~~>
-            = Expression ;
+            = ExprList ;
 TryElse     <~~ push({elsebody: pop()}) ~~>
             = SameLevel "else" KwEnd Suite ;
 TryFinally  <~~ push({finalbody: pop()}) ~~>
@@ -361,9 +416,13 @@ RaiseFrom   <~~ push({rcause: pop()}) ~~>
 // value and just runs the body.
 With        <~~ push(makeWith(takeAll(), up.pos)) ~~>
             = [ "async" KwEnd ] "with" KwEnd
-              ( "(" WithItem { "," WithItem } [ "," ] ")" | WithItem { "," WithItem } ) WithBody ;
+              ( WithParen | WithItem { "," WithItem } ) WithBody ;
+// The parenthesized item list (Python 3.10+) exists so it can be written across LINES,
+// which is the only reason anyone uses it - so it needs WhitespaceNL inside the brackets.
+WithParen   = "(" :whitespace(WhitespaceNL) WithItem { "," WithItem } [ "," ] ")" :whitespace(Whitespace) ;
+// `as` takes a full target ITEM, so `with cm() as (a, b):` unpacks like an assignment.
 WithItem    <~~ push(makeWithItem(takeAll())) ~~>
-            = Expression [ KwAs Target ] ;
+            = Expression [ KwAs TargetItem ] ;
 WithBody    <~~ push({withbody: pop()}) ~~>
             = Suite ;
 
@@ -383,9 +442,11 @@ Nonlocal    <~~ push(makeNonlocal(takeAll(), up.pos)) ~~>
 // del NAME / del obj[k] / del obj.attr. A deleted local keeps its slot, holding
 // a sentinel, so a later read raises UnboundLocalError (a catchable exception)
 // instead of silently resolving to an enclosing binding of the same name.
+// `del y,` (trailing comma), `del (z)` and even `del ()` are all legal, and test_grammar
+// checks each of them.
 Del         <~~ push(makeDel(takeAll())) ~~>
-            = "del" KwEnd DelTarget { "," DelTarget } ;
-DelTarget   = "(" Target { "," Target } [ "," ] ")" | Target ;
+            = "del" KwEnd DelTarget { "," DelTarget } [ "," ] ;
+DelTarget   = "(" :whitespace(WhitespaceNL) [ Target { "," Target } [ "," ] ] ")" :whitespace(Whitespace) | Target ;
 
 
 // name: Type [= value]: the annotation is parsed and ignored; with a value it is a
@@ -400,17 +461,24 @@ AnnType     <~~ push({atype: stripWs(up.in)}) ~~>
 // A type annotation, parsed and ignored: dotted names, [..]-subscripts (commas
 // allowed), | unions, the '...' of tuple[int, ...] and the STRING form
 // (y: "str"), which Python allows for a forward reference.
-DiscardType = TypeAtom { "|" TypeAtom } ;
-TypeStr     <~~ pop() ~~> = StringLit ;
-TypeAtom    = TypeStr | "..." | Id { "." Id } [ TypeSub ] | TypeSub ;
-TypeSub     = "[" [ TypeItem { "," TypeItem } ] "]" ;
-TypeItem    = DiscardType ;
+// An annotation is an arbitrary EXPRESSION in Python, not a little type language of its
+// own: `def f(x: not (int is int), /)`, `no_name[does_not_exist]: 1/0 = 0` and
+// `type Alias[T] = lambda: T` are all real annotations, and CPython's own suite tests all
+// three. A hand-written type grammar can never catch up with that, so the annotation is
+// parsed as an ordinary expression and DROPPED - annotations here are erased at run time.
+// The tag pops the one thunk Expression pushes, so the production stays value-stack-
+// neutral, which is what a parameter list requires.
+DiscardType <~~ pop() ~~>
+            = Expression ;
 // An expression whose value is dropped (decorator calls, except types, defaults).
 DiscardExpr <~~ pop() ~~>
             = Expression ;
 
+// `return a, b` returns the bare TUPLE `(a, b)` - no parentheses needed - and it is how
+// most of CPython's suite returns a pair. Taking only one Expression here made the parse
+// die on the comma; six corpus files turned on this one word.
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = "return" KwEnd [ Expression ] ;
+            = "return" KwEnd [ ExprList ] ;
 Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd ;
 Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd ;
 Pass        <~~ push(function(b) { return b }) ~~>  = "pass" KwEnd ;
@@ -428,20 +496,52 @@ Assign      <~~ push(makeAssignStmt(takeAll())) ~~>
 AssignHead  <~~ push({tlist: pop()}) ~~>
             = TargetList "=" NotEqSign ;
 // A comma-separated target list unpacks; a single target with no comma stays itself.
+// The trailing comma is RECORDED, not just tolerated: `x, = t` and `for x, in [(1,)]`
+// are ONE-element tuple targets and must unpack, while `x = t` binds the whole value.
+// Without the marker a single-item list degraded to a plain target and the loop bound the
+// tuple itself - a wrong answer with no parse error anywhere.
 TargetList  <~~ push(makeTargetList(takeAll())) ~~>
-            = TargetItem { "," TargetItem } [ "," ] ;
+            = TargetItem { "," TargetItem } [ "," <~~ push({tcomma: true}) ~~> ] ;
 TargetItem  = StarTarget | TupleTarget | Target ;
 // *rest in a target list swallows the middle of the sequence.
 StarTarget  <~~ push({startgt: pop()}) ~~>
             = "*" TargetItem ;
 // A parenthesized or bracketed target list nests: (h, (i, j)) = (1, (2, 3)).
-TupleTarget <~~ push(makeTargetList(takeAll())) ~~>
-            = "(" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," ] ] ")" :whitespace(Whitespace)
-            | "[" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," ] ] "]" :whitespace(Whitespace) ;
+// A parenthesized or bracketed target list UNPACKS - but `(1).__class__` and `[list][0]`
+// open with the same bracket and are single targets with a suffix. TupleTarget is tried
+// first (it has to be, or `(a, b) = t` would parse as one grouped target and never
+// unpack), so it declines whenever a suffix is glued to its closing bracket and lets
+// Target read the whole thing as a seed plus a chain. The scan stops at a newline: the
+// NEXT statement may perfectly well open with `[` or `(`.
+TupleTarget = ParenTarget | BracketTarget ;
+ParenTarget <~~ push(makeTargetList(takeAll())) ~~>
+            = "(" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," <~~ push({tcomma: true}) ~~> ] ] ")" :whitespace(Whitespace) NoTgtSuffix ;
+// The two brackets are NOT the same target: `[g] = [4]` unpacks and binds g to 4, while
+// the parenthesized `(g) = [4]` is just `g = [4]`. So a bracketed target always makes a
+// tuple, however few elements it has and whether or not a comma is written.
+BracketTarget <~~ push(makeListTarget(takeAll())) ~~>
+            = "[" :whitespace(WhitespaceNL) [ TargetItem { "," TargetItem } [ "," <~~ push({tcomma: true}) ~~> ] ] "]" :whitespace(Whitespace) NoTgtSuffix ;
+NoTgtSuffix = :script(~~
+    (function() {
+        var i = 0
+        while (i < 4096) {
+            var ws = c.peek(i)
+            if (ws === 32 || ws === 9) { i++; continue }
+            break
+        }
+        var nx = c.peek(i)
+        if (nx === 46 || nx === 91 || nx === 40) {
+            return abnf.newToken("\x01target-has-suffix", 0)
+        }
+    })()
+~~) ;
 // A comma-separated value list is a tuple; a single value with no comma stays
 // itself, but a trailing comma ('one = 7,') still makes the one-element tuple.
+// An element may be STARRED: `a, *rest = xs` on the value side, `tuple[*Y]` in a
+// subscript, `return *a, *b`. ListItem is the same starred-or-plain element a list
+// display takes, and makeList already splices a {lspread} marker in.
 ExprList    <~~ push(makeExprList(takeAll())) ~~>
-            = Expression { "," Expression } [ "," <~~ push({tcomma: true}) ~~> ] ;
+            = ListItem { "," ListItem } [ "," <~~ push({tcomma: true}) ~~> ] ;
 // A zero-width guard that fails when the very next character is '=', so 'a == b'
 // is never read as an assignment head.
 NotEqSign   = :script(~~
@@ -449,22 +549,82 @@ NotEqSign   = :script(~~
         return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined
     })()
 ~~) ;
+// An assignment target is a SEED followed by a chain of suffixes whose last one is an
+// attribute, an index or a slice; the leading ones may be anything a reading chain may be,
+// calls and method calls included. `Exception().__traceback__ = 5`,
+// `del globals()["__class__"]`, `(1).__class__ = MyInt` and `[list][0]: type` are all
+// ordinary Python and all failed while the seed had to be a bare Id. This is the shape
+// docs/abnf-dialect-gotchas.md calls "object creation must SEED the member chain".
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { TSlice | TIndex | TAttr } ;
+            = TargetSeed { CallSfx | MethodSfx | TSlice | TIndex | TAttr } ;
+// A plain name stays a STRING - it is the only seed that can be a bare store into a scope,
+// and it is the overwhelmingly common one. Any other seed contributes a read thunk.
+// TargetExpr comes FIRST: a bytes/str prefix letter is a perfectly good Id, so
+// `b"a".__class__ = M` matched TargetName on the lone `b`, COMMITTED, and then died on the
+// quote - the ordered-choice trap at the top of docs/abnf-dialect-gotchas.md. Trying the
+// literal forms first is safe because each of them needs a quote, a digit or a bracket
+// that a bare name can never supply.
+TargetSeed  = TargetExpr | TargetName ;
+TargetName  <~~ push(up.in) ~~> = NotPyKw Id ;
+// A target NAME may not be one of Python's reserved words. Without this, `for x, in [...]`
+// (a one-element tuple target with a trailing comma) had its `{ "," TargetItem }`
+// repetition happily match the comma and then read `in` as a second target name - PEG
+// repetition is greedy and never gives a match back - and the parse died at the end of the
+// line. A `!"in"` lookahead would be wrong twice over: it skips whitespace, and it would
+// also reject a name that merely STARTS with a keyword (`information`), so the guard reads
+// the whole word and compares it. Soft keywords (`match`, `case`, `type`, `_`) are real
+// names in Python and are deliberately absent from the list.
+NotPyKw     = :script(~~
+    (function() {
+        var kws = ["False", "None", "True", "and", "as", "assert", "async", "await",
+                   "break", "class", "continue", "def", "del", "elif", "else", "except",
+                   "finally", "for", "from", "global", "if", "import", "in", "is",
+                   "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+                   "while", "with", "yield"]
+        var i = 0
+        while (i < 4096) {
+            var ws = c.peek(i)
+            if (ws === 32 || ws === 9) { i++; continue }
+            break
+        }
+        var len = 0
+        while (len < 16) {
+            var ch = c.peek(i + len)
+            if ((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || ch === 95 ||
+                (ch >= 97 && ch <= 122)) { len++; continue }
+            break
+        }
+        for (var k = 0; k < kws.length; k++) {
+            var kw = kws[k]
+            if (kw.length !== len) { continue }
+            var ok = true
+            for (var j = 0; j < len; j++) {
+                if (c.peek(i + j) !== kw.charCodeAt(j)) { ok = false }
+            }
+            if (ok) { return abnf.newToken("\x01python-keyword", 0) }
+        }
+    })()
+~~) ;
+TargetExpr  <~~ push({tb: pop()}) ~~> = EmptyTuple | Grouped | ListLit | StringLit | PyNum ;
+// The write side of a subscript takes the same expression LIST the reading IndexSfx does,
+// so `d[k1, k2] = v` writes the slot `d[(k1, k2)]` reads.
 TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
 // xs[lo:hi:step] as an assignment or del target. Tried before TIndex (the missing
 // ':' makes it fail fast there), like the reading SliceSfx.
 TSlice      <~~ push(makeTSlice(takeAll())) ~~>
-            = "[" [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" ;
+            = "[" :whitespace(WhitespaceNL) [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" :whitespace(Whitespace) ;
 // obj.attr = ... : an attribute target (self.x = ... in a method). The write goes
 // through js_pysetattr, which honours a __set__ descriptor on the class and the
 // __slots__ declaration.
 TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
             = "." Id <~~ push({taname: up.in}) ~~> ;
 
+// An expression statement may be a bare TUPLE - `1, 2, 3` on a line of its own is legal
+// Python (and test_grammar checks exactly that), so this takes an expression LIST. Assign
+// is tried before it, so `a = 1` is unaffected.
 ExprSmall   <~~ push(exprToStmt(pop())) ~~>
-            = Expression ;
+            = ExprList ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
 // A lambda binds loosest; then the a-if-c-else-b conditional expression; then
@@ -476,8 +636,9 @@ Expression  = Lambda | YieldExpr | Walrus | Ternary ;
 // compiled to a generator function (js_genfn); the body then runs on its own
 // goroutine and js_yield is the suspending handshake, so these are REAL
 // generators - the body is suspended and resumed, never replayed.
+// `yield a, b` yields the bare TUPLE, exactly like `return a, b`.
 YieldExpr   <~~ push(makeYield(takeAll())) ~~>
-            = "yield" KwEnd [ KwFrom <~~ push({yfrom: true}) ~~> ] [ Expression ] ;
+            = "yield" KwEnd [ KwFrom <~~ push({yfrom: true}) ~~> ] [ ExprList ] ;
 // The walrus operator, name := value: it assigns AND yields the value, so it can
 // introduce a binding inside a condition or a comprehension filter. Tried before
 // Ternary, whose OrExpr would otherwise consume the name and then choke on the ':='.
@@ -485,11 +646,15 @@ Walrus      <~~ var wv = pop(); push(makeWalrus(pop(), wv)) ~~>
             = Id <~~ push(up.in) ~~> ":=" Expression ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
+// `lambda a, /, b: ...` (positional-only marker) and `lambda a,: 0` (trailing comma) are
+// both legal and both appear in CPython's suite.
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
-            = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
+            = "lambda" KwEnd [ LamParam { "," LamParam } [ "," ] ] ":" Expression ;
 // Lambda parameters take no annotation (the ':' ends the header); defaults,
 // *args and **kwargs work exactly like in def.
-LamParam    = LamDblStar | LamStar | LamNamed ;
+LamParam    = LamDblStar | LamStar | LamSlash | LamNamed ;
+LamSlash    <~~ push({pslash: true}) ~~>
+            = "/" ;
 LamDblStar  <~~ push(makeKwParam(takeAll())) ~~>
             = "**" [ Id <~~ push(up.in) ~~> ] ;
 LamStar     <~~ push(makeRestParam(takeAll())) ~~>
@@ -534,9 +699,12 @@ Arith       <~~ push(foldBinary(takeAll())) ~~>
 Term        <~~ push(foldBinary(takeAll())) ~~>
             = Factor { ( "*" | "//" | "/" | "%" | "@" ) <~~ push(up.in) ~~> Factor } ;
 
-Factor      = Neg | Invert | Await | Power ;
+Factor      = Neg | Pos | Invert | Await | Power ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
+// Unary plus. It is the identity on every numeric type this model has, so the operand
+// thunk is simply passed through. `a = +4294967296` is real code in CPython's suite.
+Pos         = "+" Factor ;
 // ~x: the bitwise complement of the 32 bit integer value, and __invert__ on an
 // instance of a user class (js_pyunary decides, like unary minus).
 Invert      <~~ push(makeInvert(pop())) ~~>
@@ -573,8 +741,7 @@ CallArg     = CallKw | CallDblStar | CallStar | CallGenExp | CallPos ;
 // f(expr for x in it): a generator expression needs no parentheses of its own
 // when it is the only argument of a call.
 CallGenExp  <~~ push(makeListComp(takeAll())) ~~>
-            = Expression [ "async" KwEnd ] "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
-              "in" KwEnd Expression [ CompIf ] ;
+            = Expression CompFor { CompClause } ;
 CallKw      <~~ var kv = pop(); push({ckwname: pop().kwn, ckwval: kv}) ~~>
             = Id <~~ push({kwn: up.in}) ~~> "=" Expression ;
 CallDblStar <~~ push({ckwspread: pop()}) ~~> = "**" Expression ;
@@ -583,12 +750,15 @@ CallPos     = Expression ;
 // A slice s[lo:hi] with both ends optional; tried before plain indexing (the
 // missing ':' makes it fail fast there).
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
-            = "[" [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" ;
+            = "[" :whitespace(WhitespaceNL) [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" :whitespace(Whitespace) ;
 SliceLo     <~~ push({slo: pop()}) ~~> = Expression ;
 SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 SliceStep   <~~ push({sstep: pop()}) ~~> = Expression ;
+// A subscript takes an expression LIST, not one expression: `d[k1, k2]`, `dict[A, B]` and
+// `a[b:=0, c:=0]` all index with the bare tuple of what is between the brackets, and it may
+// be written across lines. A single index with no comma stays itself (makeExprList).
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
 
 // StringLit comes BEFORE the numbers and names: it is a run of adjacent pieces and
 // an f-string is one of them, so an f-string is never matched on its own here (that
@@ -658,8 +828,7 @@ EmptyTuple  <~~ push(makeList([])) ~~>
 // ( expr for x in it [if c] ): a generator expression. It is materialized
 // eagerly here - the sequence is the same, only the laziness is missing.
 GenExpParen <~~ push(makeListComp(takeAll())) ~~>
-            = "(" Expression [ "async" KwEnd ] "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
-              "in" KwEnd Expression [ CompIf ] ")" ;
+            = "(" :whitespace(WhitespaceNL) Expression CompFor { CompClause } ")" :whitespace(Whitespace) ;
 Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
             = "(" :whitespace(WhitespaceNL) ListItem { "," <~~ push({tcomma: true}) ~~> [ ListItem ] } ")" :whitespace(Whitespace) ;
 
@@ -668,8 +837,7 @@ Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
 // it with Python's ==. Tried after the dict forms so { k: v } and { k: v for ... }
 // still parse as dicts; { } alone stays the empty DICT, as in Python.
 SetComp     <~~ push(makeSetOf(makeListComp(takeAll()))) ~~>
-            = "{" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
-              "in" KwEnd Expression [ CompIf ] "}" ;
+            = "{" :whitespace(WhitespaceNL) Expression CompFor { CompClause } "}" :whitespace(Whitespace) ;
 SetLit      <~~ push(makeSetLit(takeAll())) ~~>
             = "{" SetItem { "," SetItem } [ "," ] "}" ;
 // A set element, or *iterable spreading its members into the set.
@@ -679,16 +847,24 @@ SetElem     <~~ push({selem: pop()}) ~~>   = Expression ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
-            = "[" Expression [ "async" KwEnd ] "for" KwEnd Id <~~ push({cvar: up.in}) ~~> "in" KwEnd Expression
-              [ CompIf ] "]" ;
+            = "[" :whitespace(WhitespaceNL) Expression CompFor { CompClause } "]" :whitespace(Whitespace) ;
+// A comprehension is a CHAIN of clauses: one or more `for` clauses, each of which may be
+// followed by any number of `if` clauses ([x for a in xs for x in a if x]), and the loop
+// target is a full target LIST, not a bare name - `for _, _, line in co.co_lines()` and
+// `for (kind, string, *_) in ...` are what CPython's own suite writes. Restricting this to
+// one `for` over one name cost seven files of the reference corpus.
+CompClause  = CompFor | CompIf ;
+CompFor     <~~ var it = pop(); push({cfor: pop(), citer: it}) ~~>
+            = [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression ;
+CompTarget  <~~ push(makeTargetList(takeAll())) ~~>
+            = TargetItem { "," TargetItem } [ "," ] ;
 CompIf      <~~ push({cif: pop()}) ~~>
             = "if" KwEnd Expression ;
 
 // {k: v for x in iterable if cond} builds a dict; tried before DictLit ('for' after
 // the first entry is what tells them apart) and the variable is comprehension local.
 DictComp    <~~ push(makeDictComp(takeAll())) ~~>
-            = "{" Expression ":" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
-              "in" KwEnd Expression [ CompIf ] "}" ;
+            = "{" :whitespace(WhitespaceNL) Expression ":" Expression CompFor { CompClause } "}" :whitespace(Whitespace) ;
 
 // {k: v, ...}: keys and values are expressions; entries keep their insertion order.
 // **mapping spreads another dict in, later entries overwriting earlier ones in
@@ -1360,117 +1536,145 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (s.step != null) { var rs = s.step(b); b = rs.b; stepV = rs.v }
         return {b: b, lo: loV, hi: hiV, step: stepV}
     }
-    // items = [exprT, {cvar}, iterT, {cif}?]. Compiles to an append loop over the
-    // normalized iterable (js_pyiter); the variable lives in an own scope (Python 3
-    // comprehension scoping: it does not leak).
+    // items = [exprT, clause, clause, ...] where a clause is {cfor, citer} or {cif}.
+    function compClauses(items, from) {
+        var cl = []
+        for (var i = from; i < items.length; i++) { cl.push(items[i]) }
+        return cl
+    }
+    // Declare the plain NAMES of a comprehension target in the comprehension's own scope,
+    // so the loop variable does not leak (Python 3 comprehension scoping). A target that
+    // is not a plain name (a subscript, an attribute) writes into an object that already
+    // exists and must NOT be declared here.
+    function declCompNames(b, t) {
+        if (t.tuple != undefined) {
+            var its = t.tuple
+            for (var i = 0; i < its.length; i++) { declCompNames(b, its[i]) }
+            return b
+        }
+        if (t.startgt != undefined) { return declCompNames(b, t.startgt) }
+        if (t.path != undefined && t.path.length == 0) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, t.name), hUndef])
+        }
+        return b
+    }
+    // Emit the clause chain of a comprehension RECURSIVELY, so nested `for`s and
+    // interleaved `if`s work in any order and to any depth. Each `for` is a counted loop
+    // over the normalized iterable (js_pyiter) whose target goes through the same
+    // writeTarget an assignment uses - which is what makes a tuple, a starred rest and a
+    // subscript target all work. elemT emits ONE element and pushes it into the
+    // accumulator named oName; the answer is the block to continue in after the chain.
+    function emitCompChain(b, cl, i, oName, elemT) {
+        if (i >= cl.length) {
+            var re = elemT(b)
+            var eb = re.b
+            var oV = callExt(eb, "js_scope_get", [curScopeV, emitStr(eb, oName)])
+            callExt(eb, "js_arr_push", [oV, re.v])
+            return eb
+        }
+        var cc = cl[i]
+        if (cc.cif != undefined) {
+            var rc = cc.cif(b)
+            var cb = rc.b
+            var keepB = curF.NewBlock("")
+            var skipB = curF.NewBlock("")
+            cb.NewCondBr(truthy(cb, rc.v), keepB, skipB)
+            emitCompChain(keepB, cl, i + 1, oName, elemT).NewBr(skipB)
+            return skipB
+        }
+        hidCount++
+        var iName = "$ci" + hidCount
+        var aName = "$ca" + hidCount
+        var r = cc.citer(b)
+        var ib = r.b
+        callExt(ib, "js_scope_decl", [curScopeV, emitStr(ib, aName), callExt(ib, "js_pyiter", [r.v])])
+        callExt(ib, "js_scope_decl", [curScopeV, emitStr(ib, iName), emitNum(ib, 0)])
+        declCompNames(ib, cc.cfor)
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var postB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        ib.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+        var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+        var bb = writeTarget(bodyB, cc.cfor, callExt(bodyB, "js_get", [aV2, iV2]))
+        emitCompChain(bb, cl, i + 1, oName, elemT).NewBr(postB)
+        var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
+        callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
+        postB.NewBr(headB)
+        return exitB
+    }
+    // [expr for ...] - the accumulator is a plain array, so a set comprehension is the
+    // same loop with js_pyset_new around it (makeSetOf) and a dict one differs only in
+    // what each element is (a [key, value] pair, folded by makeDictComp below).
     function makeListComp(items) {
         var exprT = items[0]
-        var name = items[1].cvar
-        var iterT = items[2]
-        var condT = items.length > 3 ? items[3].cif : null
+        var cl = compClauses(items, 1)
         return function(b) {
             hidCount++
-            var iName = "$ci" + hidCount
-            var aName = "$ca" + hidCount
             var oName = "$co" + hidCount
             var saved = curScopeV
             var savedWal = walrusScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
             walrusScopeV = (savedWal != null) ? savedWal : saved
-            var r = iterT(b)
-            b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [r.v])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_arr_new", [])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var postB = curF.NewBlock("")
-            var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-            var bb = bodyB
-            var iV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iName)])
-            var aV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, aName)])
-            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, name), callExt(bb, "js_get", [aV2, iV2])])
-            if (condT != null) {
-                var rc = condT(bb)
-                bb = rc.b
-                var keepB = curF.NewBlock("")
-                bb.NewCondBr(truthy(bb, rc.v), keepB, postB)
-                bb = keepB
-            }
-            var re = exprT(bb)
-            bb = re.b
-            var oV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, oName)])
-            callExt(bb, "js_arr_push", [oV, re.v])
-            bb.NewBr(postB)
-            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
-            postB.NewBr(headB)
-            var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])
+            var endB = emitCompChain(b, cl, 0, oName, exprT)
+            var outV = callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, oName)])
             curScopeV = saved
             walrusScopeV = savedWal
-            return {b: exitB, v: outV}
+            return {b: endB, v: outV}
         }
     }
-    // items = [kExprT, vExprT, {cvar}, iterT, {cif}?]. Like a list comprehension but
-    // builds a dict (js_dict_new + js_pyset); the variable lives in an own scope.
+    // {k: v for ...}: the shared clause walker collects [key, value] pairs, which a second
+    // counted loop folds into a real dict. Sharing emitCompChain is what gives a dict
+    // comprehension the same multiple-`for`, `if` and tuple-target surface a list one has.
     function makeDictComp(items) {
         var kExprT = items[0]
         var vExprT = items[1]
-        var name = items[2].cvar
-        var iterT = items[3]
-        var condT = items.length > 4 ? items[4].cif : null
+        var cl = compClauses(items, 2)
+        // One element thunk yielding the pair, so the clause walker applies unchanged.
+        var pairT = function(b) {
+            var rk = kExprT(b)
+            var rv = vExprT(rk.b)
+            var pb = rv.b
+            var pair = callExt(pb, "js_arr_new", [])
+            callExt(pb, "js_arr_push", [pair, rk.v])
+            callExt(pb, "js_arr_push", [pair, rv.v])
+            return {b: pb, v: pair}
+        }
         return function(b) {
             hidCount++
-            var iName = "$dci" + hidCount
-            var aName = "$dca" + hidCount
             var oName = "$dco" + hidCount
+            var jName = "$dcj" + hidCount
             var saved = curScopeV
+            var savedWal = walrusScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
-            var r = iterT(b)
-            b = r.b
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [r.v])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_dict_new", [])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
-            var headB = curF.NewBlock("")
-            var bodyB = curF.NewBlock("")
-            var postB = curF.NewBlock("")
-            var exitB = curF.NewBlock("")
-            b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
-            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
-            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
-            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
-            var bb = bodyB
-            var iV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, iName)])
-            var aV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, aName)])
-            callExt(bb, "js_scope_set", [curScopeV, emitStr(bb, name), callExt(bb, "js_get", [aV2, iV2])])
-            if (condT != null) {
-                var rc = condT(bb)
-                bb = rc.b
-                var keepB = curF.NewBlock("")
-                bb.NewCondBr(truthy(bb, rc.v), keepB, postB)
-                bb = keepB
-            }
-            var rk = kExprT(bb)
-            bb = rk.b
-            var rv = vExprT(bb)
-            bb = rv.b
-            var oV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, oName)])
-            callExt(bb, "js_pyset", [oV, rk.v, rv.v])
-            bb.NewBr(postB)
-            var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
-            postB.NewBr(headB)
-            var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])
+            walrusScopeV = (savedWal != null) ? savedWal : saved
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, oName), callExt(b, "js_arr_new", [])])
+            var endB = emitCompChain(b, cl, 0, oName, pairT)
+            var pairsV = callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, oName)])
+            var dV = callExt(endB, "js_dict_new", [])
+            callExt(endB, "js_scope_decl", [curScopeV, emitStr(endB, jName), emitNum(endB, 0)])
+            var fhead = curF.NewBlock("")
+            var fbody = curF.NewBlock("")
+            var fexit = curF.NewBlock("")
+            endB.NewBr(fhead)
+            var jV = callExt(fhead, "js_scope_get", [curScopeV, emitStr(fhead, jName)])
+            var nV = callExt(fhead, "js_get", [pairsV, emitStr(fhead, "length")])
+            fhead.NewCondBr(truthy(fhead, callExt(fhead, "js_lt", [jV, nV])), fbody, fexit)
+            var jV2 = callExt(fbody, "js_scope_get", [curScopeV, emitStr(fbody, jName)])
+            var pv = callExt(fbody, "js_get", [pairsV, jV2])
+            callExt(fbody, "js_pyset", [dV, callExt(fbody, "js_get", [pv, emitNum(fbody, 0)]),
+                                            callExt(fbody, "js_get", [pv, emitNum(fbody, 1)])])
+            callExt(fbody, "js_scope_set", [curScopeV, emitStr(fbody, jName), callExt(fbody, "js_add", [jV2, emitNum(fbody, 1)])])
+            fbody.NewBr(fhead)
             curScopeV = saved
-            return {b: exitB, v: outV}
+            walrusScopeV = savedWal
+            return {b: fexit, v: dV}
         }
     }
     // dict.items(): loop over js_keys(d) building a list of [key, value] 2 element lists
@@ -1534,12 +1738,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return {b: b, v: o}
     }
+    // Overridden by ASSIGNMENT: lib/compile-core.js DECLARES makeTargetRef, and a second
+    // declaration would leave goja and the frozen engine disagreeing about which is live
+    // (see docs/abnf-dialect-gotchas.md). A target either names a scope slot or reads its
+    // base from a thunk; both fields are always present and always the right type, because
+    // the frozen engine dislikes a record whose property is sometimes undefined.
+    makeTargetRef = function(items) {
+        var b = items[0]
+        var named = typeof b == "string"
+        return {name: named ? b : "", named: named, basef: named ? pyNoBase : b.tb, path: items.slice(1)}
+    }
+    function pyNoBase(b) { return {b: b, v: hUndef} }
     function emitRefWrite(b, ref, v) {
         if (ref.path.length == 0) {
             callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
             return b
         }
-        var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var o = hUndef
+        if (ref.named) { o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)]) }
+        else {
+            var rb = ref.basef(b)
+            b = rb.b
+            o = rb.v
+        }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var r = emitPathStep(b, o, ref.path[i])
             b = r.b
@@ -1622,9 +1843,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- Target lists and unpacking -----
     // A target LIST: one target with no star stays itself, several become a tuple
     // pattern that unpacks the assigned value. A {startgt} entry is the *rest target.
+    // A single target with no comma at all stays itself; one comma anywhere - including a
+    // trailing one, which arrives as a {tcomma} marker - makes it a tuple that unpacks.
+    function makeListTarget(items) {
+        var ls = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tcomma == undefined) { ls.push(items[i]) }
+        }
+        return {tuple: ls}
+    }
     function makeTargetList(items) {
-        if (items.length == 1 && items[0].startgt == undefined) { return items[0] }
-        return {tuple: items}
+        var ts = []
+        var comma = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tcomma != undefined) { comma = true }
+            else { ts.push(items[i]) }
+        }
+        if (ts.length > 1) { comma = true }
+        if (ts.length == 1 && !comma && ts[0].startgt == undefined) { return ts[0] }
+        return {tuple: ts}
     }
     // A comma-separated value list is a TUPLE (a list here - this subset has one
     // sequence type); a single value with no comma stays itself, but a trailing
@@ -2431,7 +2668,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, wName), r.v])
             var entV = callExt(b, "js_pyenter", [r.v])
-            if (mgr.target != null) { b = emitRefWrite(b, mgr.target, entV) }
+            // writeTarget, not emitRefWrite: `as` takes a full target item, so
+            // `with cm() as (a, b):` unpacks exactly like an assignment does.
+            if (mgr.target != null) { b = writeTarget(b, mgr.target, entV) }
             var bodyT = function(bb) {
                 bb = inner(bb)
                 var mv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, wName)])
@@ -2797,6 +3036,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = declBuiltin(b, "dict", "js_pydict", 1)
         b = declBuiltin(b, "max", "js_pymax", 0)
         b = declBuiltin(b, "min", "js_pymin", 0)
+        // The remaining conversions pyConvert of python-interpreter.abnf offers.
+        // Without them bool(0) / float(s) / repr(v) / set(it) / sum(it) / tuple(it)
+        // aborted with "variable not defined" under the COMPILER only.
+        b = declBuiltin(b, "bool", "js_pybool", 1)
+        b = declBuiltin(b, "float", "js_pyfloat", 1)
+        b = declBuiltin(b, "repr", "js_pyrepr", 1)
+        b = declBuiltin(b, "set", "js_pyset_new", 1)
+        b = declBuiltin(b, "sum", "js_pysum", 1)
+        b = declBuiltin(b, "tuple", "js_pylist", 1)
         // The builtin exception hierarchy, as REAL Python classes: Exception with
         // an __init__ that stores its arguments in .args, and the concrete types
         // deriving from it - so `class AppError(Exception)` and

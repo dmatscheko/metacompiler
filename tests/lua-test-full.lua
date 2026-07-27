@@ -404,6 +404,24 @@ function s18()
     check("clo5", outer()()(), 42)      -- upvalue through two nesting levels
 end
 
+-- ===== SECTION 19: interpreter/compiler agreement ratchet =====
+-- Shifts are 64-BIT and logical in Lua. lua-to-llvm-ir.abnf emitted JavaScript's
+-- 32-bit js_shl / js_ushr (with the count masked to 5 bits), so 1 << 32 was 1 and
+-- 255 << 24 was -16777216 while lua-interpreter.abnf and real Lua 5.4 answered
+-- 4294967296 and 4278190080. Values below are from /opt/homebrew/bin/lua.
+local function s19()
+  check("agr1", 1 << 32, 4294967296)
+  check("agr2", 1 << 33, 8589934592)
+  check("agr3", 255 << 24, 4278190080)
+  check("agr4", 0xFFFFFFFF << 4, 68719476720)
+  check("agr5", 1 >> 1, 0)
+  check("agr6", 1 << 64, 0)
+  check("agr7", 1 << -1, 0)
+  check("agr8", 4294967296 >> 32, 1)
+  check("agr9", 0xFF & 0x0F, 15)
+  check("agr10", 0xFF | 0x100, 511)
+  check("agr11", ~0, -1)
+end
 -- ===== END SECTIONS =====
 
 s01() -- SECTION-CALL 01
@@ -424,5 +442,6 @@ s15() -- SECTION-CALL 15
 s16() -- SECTION-CALL 16
 s17() -- SECTION-CALL 17
 s18() -- SECTION-CALL 18
+s19() -- SECTION-CALL 19
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

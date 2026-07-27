@@ -1920,6 +1920,25 @@ func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 		}
 		o.set(name, val)
 	case *jsArray:
+		// `arr.length = n` TRUNCATES (or pads with undefined) in JavaScript. It
+		// used to abort here with "invalid array index length", while the
+		// interpreter grammars, which run on a real JS array, truncated - so a
+		// program that clears an array this way diverged.
+		if s, isStr := key.(string); isStr && s == "length" {
+			n := rt.toNumber(val)
+			if n != math.Trunc(n) || n < 0 {
+				rt.fail("invalid array length %s", rt.toString(val))
+			}
+			ln := int(n)
+			o.dropIdx()
+			for len(o.elems) > ln {
+				o.elems = o.elems[:len(o.elems)-1]
+			}
+			for len(o.elems) < ln {
+				o.elems = append(o.elems, jsUndef)
+			}
+			return
+		}
 		if !maybeNumeric(key) {
 			rt.fail("invalid array index %s", rt.toString(key))
 		}
@@ -3480,6 +3499,19 @@ func (rt *jsrt) rubyNeg(v interface{}) interface{} {
 // rubyStr is Ruby's to_s: a Float keeps its decimal point, a Symbol is its bare
 // name, and an Array / Hash renders like #inspect (which is what interpolation of a
 // collection gives in Ruby). It mirrors rstr of ruby-interpreter.abnf.
+// rubyPuts is Kernel#puts for ONE argument, mirroring putsVal of
+// ruby-interpreter.abnf: an array is walked recursively (one element per line),
+// an EMPTY array prints nothing, everything else prints its to_s.
+func (rt *jsrt) rubyPuts(v interface{}) {
+	if arr, ok := v.(*jsArray); ok {
+		for _, e := range arr.elems {
+			rt.rubyPuts(e)
+		}
+		return
+	}
+	fmt.Fprintln(outWriter, wtf8Clean(rt.rubyStr(v)))
+}
+
 func (rt *jsrt) rubyStr(v interface{}) string {
 	switch t := v.(type) {
 	case jsNullT, jsUndefT:
@@ -3495,6 +3527,13 @@ func (rt *jsrt) rubyStr(v interface{}) string {
 	case *jsObject:
 		if _, _, isDict := dictParts(t); isDict {
 			return rt.rubyInspect(v)
+		}
+		// A CLASS object stringifies as its name (`Foo.to_s` / "#{Foo}" == "Foo"),
+		// not through the generic object path, which printed "[object Object]".
+		if _, isCls := t.props["__isclass"]; isCls {
+			if n, ok := t.props["__name"].(string); ok {
+				return n
+			}
 		}
 		if m, ok := rubyFindMethod(t, "to_s"); ok {
 			return rt.rubyStr(rt.call(m, jsUndef, []interface{}{t}))
@@ -3778,6 +3817,24 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return target
 		}
 	}
+	// NilClass's conversions. MRI answers "" / "nil" / [] / 0 / 0.0 for these, so
+	// they must not reach the "method .x on nil" abort at the bottom - and to_s in
+	// particular must not fall through to the JS stringification, which said
+	// "null" while ruby-interpreter.abnf said "".
+	if isUndefOrNull(target) {
+		switch name {
+		case "to_s":
+			return ""
+		case "inspect":
+			return "nil"
+		case "to_a":
+			return &jsArray{}
+		case "to_i":
+			return float64(0)
+		case "to_f":
+			return jsFlo{f: 0}
+		}
+	}
 	if rubyIsNum(target) {
 		if v, ok := rt.rubyNumMethod(target, name, args); ok {
 			return v
@@ -3845,6 +3902,13 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				return &jsArray{elems: append([]interface{}{}, keys.elems...)}
 			case "values":
 				return &jsArray{elems: append([]interface{}{}, vals.elems...)}
+			case "to_a", "entries":
+				// Hash#to_a is the list of [key, value] PAIRS, as in MRI.
+				out := &jsArray{}
+				for i := range keys.elems {
+					out.elems = append(out.elems, &jsArray{elems: []interface{}{keys.elems[i], vals.elems[i]}})
+				}
+				return out
 			case "include?", "has_key?", "key?":
 				return rt.dictFind(keys, argAt(args, 0)) >= 0
 			case "each":
@@ -3912,8 +3976,11 @@ func (rt *jsrt) rubyArrayMethod(t *jsArray, name string, args []interface{}) int
 	case "size", "length":
 		return float64(len(t.elems))
 	case "push", "append", "add":
+		// Ruby's Array#push is VARIADIC (`a.push(1, 2, 3)`); taking only args[0]
+		// dropped every further element silently. `a.push` with no argument is a
+		// no-op in Ruby, so an empty args list must append nothing.
 		t.dropIdx()
-		t.elems = append(t.elems, argAt(args, 0))
+		t.elems = append(t.elems, args...)
 		return t
 	case "pop":
 		if len(t.elems) == 0 {
@@ -5570,6 +5637,17 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_rclass": func(a []uint64) uint64 { return w(rt.rubyBuiltinClass(rt.toString(u(a[0])))) },
 		// Ruby's to_s, used for string interpolation and puts.
 		"js_rstr": func(a []uint64) uint64 { return rt.wrapStr(rt.rubyStr(u(a[0]))) },
+		// Kernel#puts and Kernel#print with RUBY rendering. The compiler used to
+		// hand the raw value to the shared println host function, which prints it
+		// with Go's %v - so `puts nil` said "<nil>", `puts [1, 2]` said "[1 2]" and
+		// `puts 1.class` printed a Go map, while ruby-interpreter.abnf printed
+		// "", "1\n2" and "Integer". puts also FLATTENS an array (one element per
+		// line) and prints nothing at all for an empty one, which is MRI.
+		"js_rputs": func(a []uint64) uint64 { rt.rubyPuts(u(a[0])); return 0 },
+		"js_rprint": func(a []uint64) uint64 {
+			fmt.Fprint(outWriter, wtf8Clean(rt.rubyStr(u(a[0]))))
+			return 0
+		},
 		// %W[..] / %I[..]: split an interpolated body on whitespace into an array of
 		// strings (or of symbols when the flag is set).
 		"js_rsplitw": func(a []uint64) uint64 {
@@ -7233,7 +7311,20 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 					}
 				}
 				return w(rt.jsAdd(l, r))
-			case "-", "*", "/":
+			case "*":
+				// Python's SEQUENCE REPETITION: "ab" * 3 and [0] * 3 (either way
+				// round). The compiler used to fall straight through to numeric
+				// arithmetic and answer NaN, while python-interpreter.abnf has
+				// always repeated - a live divergence on `[0] * n`, the ordinary
+				// way to build a fixed-size list.
+				if v, ok := pySeqRepeat(l, r); ok {
+					return w(v)
+				}
+				if v, ok := pySeqRepeat(r, l); ok {
+					return w(v)
+				}
+				return w(rt.pyArith(op[0], l, r))
+			case "-", "/":
 				return w(rt.pyArith(op[0], l, r))
 			case "//":
 				return rt.wrapNum(math.Floor(rt.toNumber(l) / rt.toNumber(r)))
@@ -7508,8 +7599,107 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(out)
 		},
 		// repr(v) / the !r conversion of an f-string field.
+		// Lua's print separates its arguments with a TAB (js_pyprint uses a space,
+		// which is Python's rule), and a Lua FLOAT renders as inf / -inf / nan and
+		// always carries a fraction. Both were JavaScript's spelling in the
+		// compiler ("1 2 3", "Infinity", "NaN") while lua-interpreter.abnf already
+		// answered Lua's. Only the Lua compiler emits these two.
+		"js_luaprint": func(a []uint64) uint64 {
+			args, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("js_luaprint needs an argument array")
+			}
+			out := ""
+			for i, e := range args.elems {
+				if i > 0 {
+					out += "\t"
+				}
+				out += rt.toString(e)
+			}
+			fmt.Fprintln(outWriter, wtf8Clean(out))
+			return 0
+		},
+		// Lua's 64-bit logical shift: value << k / value >> k over the two's
+		// complement 64-bit integer, k >= 64 clears, a negative k reverses the
+		// direction. (a[2] != 0 means "shift left".)
+		"js_luashift": func(a []uint64) uint64 {
+			v := uint64(int64(math.Trunc(rt.toNumber(u(a[0])))))
+			k := int64(math.Trunc(rt.toNumber(u(a[1]))))
+			left := a[2] != 0 // a RAW handle flag, not a wrapped value
+			if k < 0 {
+				k = -k
+				left = !left
+			}
+			if k >= 64 {
+				return rt.wrapNum(0)
+			}
+			if left {
+				v = v << uint(k)
+			} else {
+				v = v >> uint(k)
+			}
+			return rt.wrapNum(float64(int64(v)))
+		},
+		"js_luaflt": func(a []uint64) uint64 {
+			f := rt.toNumber(u(a[0]))
+			if math.IsNaN(f) {
+				return rt.wrapStr("nan")
+			}
+			if math.IsInf(f, 1) {
+				return rt.wrapStr("inf")
+			}
+			if math.IsInf(f, -1) {
+				return rt.wrapStr("-inf")
+			}
+			s := jsNumString(f)
+			if f == math.Trunc(f) && !strings.ContainsAny(s, ".eE") {
+				s += ".0"
+			}
+			return rt.wrapStr(s)
+		},
 		"js_pyrepr": func(a []uint64) uint64 {
 			return rt.wrapStr(rt.pyRepr(u(a[0])))
+		},
+		// bool(x) / float(x) / sum(it): the conversions pyConvert of
+		// python-interpreter.abnf has always had and the compiler had no extern
+		// for, so `bool(0)`, `float("1.5")` and `sum([1, 2])` aborted with
+		// "variable not defined" on the compiler side only.
+		"js_pybool": func(a []uint64) uint64 {
+			v := u(a[0])
+			if els, ok := pySetElems(v); ok {
+				return boolH(len(els.elems) > 0)
+			}
+			if arr, ok := v.(*jsArray); ok {
+				return boolH(len(arr.elems) > 0)
+			}
+			if keys, _, ok := dictParts(v); ok {
+				return boolH(len(keys.elems) > 0)
+			}
+			return boolH(rt.truthy(v))
+		},
+		"js_pyfloat": func(a []uint64) uint64 {
+			if s, isStr := u(a[0]).(string); isStr {
+				return rt.wrapNum(jsParseFloat(s))
+			}
+			return rt.wrapNum(rt.toNumber(u(a[0])))
+		},
+		"js_pysum": func(a []uint64) uint64 {
+			v := u(a[0])
+			if g, ok := v.(*jsGenerator); ok {
+				v = g.drain(rt)
+			}
+			if els, ok := pySetElems(v); ok {
+				v = els
+			}
+			total := float64(0)
+			if arr, ok := v.(*jsArray); ok {
+				for _, e := range arr.elems {
+					total += rt.toNumber(e)
+				}
+			} else {
+				rt.fail("sum() of a %s", rt.typeOf(u(a[0])))
+			}
+			return rt.wrapNum(total)
 		},
 		// format(v, spec, conv): the slice of Python's format mini-language an
 		// f-string replacement field writes - [[fill]align][sign][0][width]
@@ -9238,4 +9428,38 @@ func pyModuleScope(s *jsScope) *jsScope {
 		return mod
 	}
 	return root
+}
+
+// pySeqRepeat is Python's sequence repetition: seq * n for a string or a list
+// (a tuple is a list here). n is truncated to an integer and a non-positive n
+// yields an empty sequence, exactly as MRI... as CPython does. ok is false when
+// seq is not a sequence or n is not a number, so the caller falls back to
+// numeric multiplication.
+func pySeqRepeat(seq, n interface{}) (interface{}, bool) {
+	cnt, isNum := n.(float64)
+	if !isNum {
+		if b, isBool := n.(bool); isBool { // True * "ab" is "ab" in Python.
+			cnt = 0
+			if b {
+				cnt = 1
+			}
+		} else {
+			return nil, false
+		}
+	}
+	k := int(math.Trunc(cnt))
+	if k < 0 {
+		k = 0
+	}
+	switch s := seq.(type) {
+	case string:
+		return strings.Repeat(s, k), true
+	case *jsArray:
+		out := &jsArray{}
+		for i := 0; i < k; i++ {
+			out.elems = append(out.elems, s.elems...)
+		}
+		return out, true
+	}
+	return nil, false
 }

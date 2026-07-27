@@ -730,6 +730,19 @@ function s26declared(): int {
     return $r;
 }
 
+// ===== SECTION 27: interpreter/compiler agreement ratchet =====
+// strlen() measures PHP's string form of its argument. php-to-llvm-ir.abnf measured
+// the JAVASCRIPT form, so strlen(true) was 4 and strlen(false) 5 while
+// php-interpreter.abnf (and PHP 8) answer 1 and 0.
+function s27() {
+    check("agr1", strlen(true) === 1);
+    check("agr2", strlen(false) === 0);
+    check("agr3", strlen(null) === 0);
+    check("agr4", strlen("abc") === 3);
+    check("agr5", strlen(12) === 2);
+    $t = true; $f = false; $n = null;
+    check("agr6", strlen($t) === 1 && strlen($f) === 0 && strlen($n) === 0);
+}
 // ===== END SECTIONS =====
 
 function main() {
@@ -761,6 +774,7 @@ function main() {
     s24(); // SECTION-CALL 24
     s25(); // SECTION-CALL 25
     s26(); // SECTION-CALL 26
+    s27(); // SECTION-CALL 27
     echo "full: " . $checks . " checks, " . $failures . " failures\n";
     return $failures;
 }

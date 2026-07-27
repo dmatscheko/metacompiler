@@ -1572,7 +1572,18 @@ KwContinue  = "continue" KwEnd ;
     }
 
     // ----- Builtins available to the running program -----
-    hostGlobals["print"] = function(x) { println(swstr(x)) }
+    // Swift's print is VARIADIC and joins its arguments with a space. Taking only
+    // the first one silently swallowed output - print(1, 2, 3) printed "1" here and
+    // "1 2 3" in swift-to-llvm-ir.abnf, which is what real Swift prints.
+    hostGlobals["print"] = function() {
+        var args = arguments
+        var out = ""
+        for (var i = 0; i < args.length; i++) {
+            if (i > 0) { out += " " }
+            out += swstr(args[i])
+        }
+        println(out)
+    }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v | 0 : v | 0 }
     hostGlobals["max"] = function(a, b) { return a > b ? a : b }

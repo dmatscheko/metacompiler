@@ -2811,6 +2811,9 @@ NotFuncHead = :script(~~
         "println": println, "print": print, "printf": printf, "sprintf": sprintf,
         "parseInt": parseInt, "parseFloat": parseFloat, "Math": Math, "String": String,
         "Object": Object, "Array": Array,
+        // NaN and Infinity are global BINDINGS in JavaScript; the compiler half has
+        // always had them and this one raised "variable not defined".
+        "NaN": 0 / 0, "Infinity": 1 / 0, "undefined": undefined,
         "exit": exit
     }
 

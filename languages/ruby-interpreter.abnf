@@ -2675,6 +2675,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         // to_s may be inherited (Exception#to_s lives on the base class), so the whole
         // ancestor chain has to be searched - a direct property read on v.__class misses it.
         if (isUserObj(v) && typeof lookupMethod(v.__class, "to_s") == "function") { return rstr(mcall(v, "to_s", [], null)) }
+        // A CLASS object stringifies as its name, not as "[object Object]".
+        if (typeof v == "object" && v.__isclass === true) { return v.__name }
         return "" + v
     }
     function rinspect(v) {
@@ -3441,6 +3443,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (name == "size" || name == "length") { return target.keys.length }
             if (name == "keys") { return target.keys.slice(0) }
             if (name == "values") { return target.vals.slice(0) }
+            // Hash#to_a is the list of [key, value] PAIRS, as in MRI.
+            if (name == "to_a" || name == "entries") {
+                var dpairs = []
+                for (var dp = 0; dp < target.keys.length; dp++) { dpairs.push([target.keys[dp], target.vals[dp]]) }
+                return dpairs
+            }
             if (name == "include?" || name == "has_key?" || name == "key?") { return dictFind(target, args[0]) >= 0 }
             if (name == "each") {
                 for (var di = 0; di < target.keys.length; di++) { blockCall(blk, [target.keys[di], target.vals[di]]) }
@@ -3448,7 +3456,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
             fail("unknown Hash method: " + name)
         }
-        if (target === null || target === undefined) { fail("method ." + name + " on nil") }
+        if (target === null || target === undefined) {
+            // NilClass's conversions, as MRI answers them.
+            if (name == "to_s") { return "" }
+            if (name == "inspect") { return "nil" }
+            if (name == "to_a") { return [] }
+            if (name == "to_i") { return 0 }
+            if (name == "to_f") { return mkFlo(0) }
+            fail("method ." + name + " on nil")
+        }
         if (Array.isArray(target)) { return arrayMethod(target, name, args, blk) }
         if (target.__class != undefined) {
             if (name == "class") { return target.__class }
@@ -3525,7 +3541,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function arrayMethod(t, name, args, blk) {
         var i
         if (name == "size" || name == "length") { return t.length }
-        if (name == "push" || name == "append" || name == "add") { t.push(args[0]); return t }
+        // Array#push is VARIADIC: a.push(1, 2, 3) appends all three.
+        if (name == "push" || name == "append" || name == "add") {
+            for (i = 0; i < args.length; i++) { t.push(args[i]) }
+            return t
+        }
         if (name == "pop") { return t.length == 0 ? null : t.pop() }
         if (name == "first") { return t.length == 0 ? null : t[0] }
         if (name == "last") { return t.length == 0 ? null : t[t.length - 1] }
@@ -3827,7 +3847,8 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function putsVal(v) {
         if (Array.isArray(v)) {
-            if (v.length == 0) { println("") ; return }
+            // MRI prints NOTHING for `puts []' (an empty line only for `puts' with
+            // no argument at all, which makePuts handles above).
             for (var i = 0; i < v.length; i++) { putsVal(v[i]) }
             return
         }

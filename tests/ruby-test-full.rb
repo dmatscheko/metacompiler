@@ -844,6 +844,44 @@ def s31
   {a: 3} => a:
   check("m15", a == 3)
 end
+# ===== SECTION 32: interpreter/compiler agreement ratchet =====
+# Every check here is a divergence that WAS live between ruby-interpreter.abnf
+# and ruby-to-llvm-ir.abnf (or a silent data loss in the shared runtime), with
+# the expected value taken from MRI itself. The matrix cannot see this class of
+# bug - it compares each engine against itself under goja and -frozen - so the
+# assertions live here.
+class S32Klass
+end
+def s32
+  # Array#push is variadic; the compiler runtime kept only the first argument.
+  a = [1]
+  a.push(2, 3, 4)
+  check("n01", a.length == 4)
+  check("n02", a == [1, 2, 3, 4])
+  # nil's conversions. nil.to_s was "null" in the compiler and "" in the interpreter.
+  check("n03", nil.to_s == "")
+  check("n04", "[" + nil.to_s + "]" == "[]")
+  check("n05", "[#{nil}]" == "[]")
+  check("n06", nil.inspect == "nil")
+  check("n07", nil.to_i == 0)
+  check("n08", nil.to_a == [])
+  # A class object stringifies as its name, not as "[object Object]".
+  check("n09", S32Klass.to_s == "S32Klass")
+  check("n10", "#{S32Klass}" == "S32Klass")
+  check("n11", 1.class.to_s == "Integer")
+  # MatchData#to_a aborted in the compiler (the .to_a suffix was the identity).
+  m = "hello world".match(/(\w+) (\w+)/)
+  check("n12", m.to_a == ["hello world", "hello", "world"])
+  check("n13", m.captures == ["hello", "world"])
+  # Hash#to_a is the list of pairs; it used to return the hash itself.
+  h = {"a" => 1, "b" => 2}
+  check("n14", h.to_a == [["a", 1], ["b", 2]])
+  # Ruby to_s rendering of the container types.
+  check("n15", [1, 2].to_s == "[1, 2]")
+  check("n16", 1.0.to_s == "1.0")
+  check("n17", true.to_s == "true")
+  check("n18", :sym.to_s == "sym")
+end
 # ===== END SECTIONS =====
 s01() # SECTION-CALL 01
 s02() # SECTION-CALL 02
@@ -876,5 +914,6 @@ s28() # SECTION-CALL 28
 s29() # SECTION-CALL 29
 s30() # SECTION-CALL 30
 s31() # SECTION-CALL 31
+s32() # SECTION-CALL 32
 puts "full: #{FULLC[0]} checks, #{FULLC[1]} failures"
 exit(FULLC[1])

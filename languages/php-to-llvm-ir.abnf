@@ -3879,7 +3879,10 @@ KwInstanceof = "instanceof" KwEnd ;
         var vs = []
         for (var i = 0; i < args.length; i++) { var r = args[i].pos(b); b = r.b; vs.push(r.v) }
         // strlen counts BYTES (PHP strings are byte strings), count() counts elements.
-        if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [vs[0]])} }
+        // strlen() measures PHP's string form of the argument: true is "1", false
+        // and null are "". js_bytelen alone measured the JAVASCRIPT form, so
+        // strlen(true) was 4 and strlen(false) 5 - php-interpreter.abnf said 1 and 0.
+        if (name == "strlen") { return {b: b, v: callExt(b, "js_bytelen", [callExt(b, "js_phstr", [vs[0]])])} }
         if (name == "count") { return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }
         if (name == "in_array") { return {b: b, v: callExt(b, "js_phin", [vs[0], vs[1]])} }
         if (name == "array_push") { callExt(b, "js_phpush", [vs[0], vs[1]]); return {b: b, v: callExt(b, "js_phlen", [vs[0]])} }

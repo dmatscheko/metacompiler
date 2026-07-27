@@ -1014,20 +1014,37 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return out
     }
 
+    // bash counts CHARACTERS, not UTF-16 code units: ${#s} on "a<emoji>b" is 3.
+    // charLen / charIdx walk with chunkAt so a surrogate pair counts once and a
+    // slice can never cut one in half.
+    function charLen(s) {
+        var n = 0
+        var i = 0
+        while (i < s.length) { i = i + chunkAt(s, i).length; n = n + 1 }
+        return n
+    }
+    // The UTF-16 index at which character number k starts (s.length past the end).
+    function charIdx(s, k) {
+        var i = 0
+        var n = 0
+        while (i < s.length && n < k) { i = i + chunkAt(s, i).length; n = n + 1 }
+        return i
+    }
     function sliceStr(v, offT, lenT) {
+        var vlen = charLen(v)
         var off = offT()
-        if (off < 0) { off = v.length + off; if (off < 0) { off = 0 } }
-        if (off > v.length) { return "" }
-        if (lenT == null) { return v.slice(off) }
+        if (off < 0) { off = vlen + off; if (off < 0) { off = 0 } }
+        if (off > vlen) { return "" }
+        if (lenT == null) { return v.slice(charIdx(v, off)) }
         var ln = lenT()
         if (ln < 0) {
-            var end = v.length + ln
+            var end = vlen + ln
             if (end < off) { return "" }
-            return v.slice(off, end)
+            return v.slice(charIdx(v, off), charIdx(v, end))
         }
         var e2 = off + ln
-        if (e2 > v.length) { e2 = v.length }
-        return v.slice(off, e2)
+        if (e2 > vlen) { e2 = vlen }
+        return v.slice(charIdx(v, off), charIdx(v, e2))
     }
 
     // ${...} : items are [{pname}, {pe}?, {op}?, {anchor}?, wordThunk / arithThunk ...]
@@ -1066,7 +1083,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return function() {
                     var sub = readIdx()
                     if (sub == "@" || sub == "*") { return numToStr(arrKeyList(name).length) }
-                    return numToStr(arrGet(name, sub).length)
+                    return numToStr(charLen(arrGet(name, sub)))
                 }
             }
             if (pe == "ind") {
@@ -1103,7 +1120,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return arrGet(name, sub)
             }
         }
-        if (pe == "len") { return function() { return numToStr(getVarVal(name).length) } }
+        // ${#v} counts CHARACTERS in bash; .length counts UTF-16 code units.
+        if (pe == "len") { return function() { return numToStr(charLen(getVarVal(name))) } }
         if (pe == "ind") { return function() { return getVarVal(getVarVal(name)) } }
         if (pe == "substr") {
             var offT0 = args[0]

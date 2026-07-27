@@ -489,6 +489,25 @@ function s20() {
     check("re53", !/\Qa.b\E/.test("a.b") && /\Qa.b\E/.test("Qa.bE"))
 }
 
+// ===== SECTION 21: interpreter/compiler agreement ratchet =====
+// Assigning arr.length TRUNCATES (or pads) in JavaScript; the compiler runtime used
+// to abort with "invalid array index length". NaN and Infinity are global BINDINGS;
+// the interpreter half raised "variable not defined" for both. Values are node v24's.
+function s21() {
+    var a = [1, 2, 3]
+    a.length = 1
+    check("agr1", a.length === 1 && a[0] === 1)
+    var b = [1]
+    b.length = 3
+    check("agr2", b.length === 3 && b[2] === undefined)
+    var c = [1, 2]
+    c.length = 0
+    check("agr3", c.length === 0 && c.join(",") === "")
+    check("agr4", NaN !== NaN && ("" + NaN) === "NaN")
+    check("agr5", Infinity > 1e308 && ("" + Infinity) === "Infinity")
+    check("agr6", -Infinity < -1e308)
+    check("agr7", typeof undefined === "undefined")
+}
 // ===== END SECTIONS =====
 
 function main() {
@@ -512,6 +531,7 @@ function main() {
     s18() // SECTION-CALL 18
     s19() // SECTION-CALL 19
     s20() // SECTION-CALL 20
+    s21() // SECTION-CALL 21
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

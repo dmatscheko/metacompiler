@@ -753,3 +753,82 @@ A refusing guard that skips too little says yes, which is the unsafe direction. 
 presented as "the whole file fails, but the same two lines in a probe file work",
 because the probe had no comment. Give any guard that scans forward the full skip:
 spaces, tabs, CR, LF, form feed, `//` to end of line, and `/* */`.
+
+## The matrix compares each engine against ITSELF, never the two halves
+
+`./test.sh` runs every entry twice — goja and `-frozen` — and demands byte-identical
+stdout. That is a strong invariant and it is blind to one whole class of defect: the
+**interpreter grammar and the compiler grammar of the same language giving different
+answers.** Both halves are self-consistent across both script hosts, both report FULL,
+and the matrix is green while `nil.to_s` is `""` in one and `"null"` in the other.
+
+Nothing will ever flag that on its own. The only way to find it is to run the same
+probe through `languages/<lang>-interpreter.abnf` and `languages/<lang>-to-llvm-ir.abnf`
+and diff, with the real toolchain as the tie-breaker. A harness that strips the emitted
+IR is worth keeping around:
+
+    strip() { awk 'BEGIN{n=0} {l[n++]=$0}
+      END{last=-1; for(i=0;i<n;i++) if(l[i]=="}"||l[i]~/^declare /||l[i]~/^@/||l[i]~/^define /) last=i;
+          for(i=last+1;i<n;i++) print l[i]}'; }
+    mec languages/$L-interpreter.abnf p -q | strip
+    mec languages/$L-to-llvm-ir.abnf  p -q | strip
+
+Two notes on the flags: `-q` prints the module AND the program output for a
+`-to-llvm-ir` grammar (the module is its default output, not noise), and `-qq` is not a
+uniform substitute — for a grammar that runs through the JS runtime it still shows
+program output, for one that runs through `llvm.Run` it does not.
+
+### The recurring shapes
+
+Every divergence found in the 2026-07-27 sweep was one of five shapes. Check these
+first in a new grammar pair.
+
+**1. The compiler hands a RAW value to the shared `println` host function.** The
+interpreter half stringifies first (`rstr`, `jstr`, `swstr`, …), the compiler does not,
+so Go's `%v` reaches stdout: `<nil>` for null, `[1 2]` for a list, and a full
+`map[__class:map[__isclass:true …]]` dump for an object. Each language wants a different
+answer here (`null` in Java/Kotlin/Dart, `nil` in Swift, `""` in C# and Ruby, `<nil>` in
+Go), so the fix is a per-language print extern, the way `js_rputs` / `js_rprint` and
+`js_luaprint` are — not a change to `printArgs`.
+
+**2. A per-language operator falls through to the JavaScript one.** Python's `*` did
+numeric multiplication, so `[0] * 3` was `NaN` while the interpreter repeated the list.
+Lua's `<<` used `js_shl`, which is 32-bit with a 5-bit count mask, so `1 << 32` was `1`
+while the interpreter (and Lua) said `4294967296`. PHP's `strlen` measured the
+JavaScript string form, so `strlen(true)` was `4`.
+
+**3. A field-access FAST PATH in the compiler skips the dispatcher.** `ruby-to-llvm-ir`
+short-circuited `.to_s` to `js_jadd("", v)` (JavaScript's rule: `nil` became `"null"`)
+and `.to_a` to the identity (so `MatchData#to_a` aborted downstream). The fast path
+exists for speed and quietly implements different semantics from the `js_*mcall` it
+bypasses; whenever you add one, check it against the general path.
+
+**4. A variadic builtin implemented as unary.** `Array#push(a, b, c)` kept only `a` in
+the shared runtime, Swift's `print(1, 2, 3)` printed `1` in the interpreter. Neither
+raises. Grep for `argAt(args, 0)` / `function (x)` in anything whose language spelling
+is variadic.
+
+**5. The two halves carry DIFFERENT builtin tables.** `python-to-llvm-ir` had `max`/`min`
+and lacked `bool`/`float`/`repr`/`set`/`sum`/`tuple`; `python-interpreter` had exactly the
+complement. One half raises "variable not defined" for a program the other runs.
+
+### Counting characters is three different questions
+
+`${#s}` in bash disagreed three ways on `a<emoji>b`: real bash 5.3 counts CHARACTERS (3),
+`bash-interpreter.abnf` counted UTF-16 code units (4, because the script string type is
+UTF-16) and `bash-to-llvm-ir.abnf` counted bytes (6, because its runtime string is a
+NUL-terminated `i8*`). All three are defensible readings of "length" and only one is the
+language's.
+
+On the interpreter side the fix has to go through `chunkAt` — a char-by-char rebuild
+drops surrogate pairs, because the script string type re-encodes on every concatenation
+and a lone surrogate becomes U+FFFD (this is the same trap the existing `chunkAt` was
+written for). On the IR side, counting characters in UTF-8 is one byte test —
+`(b & 0xC0) != 0x80` starts a character — but a SLICE needs the byte offset of a
+character index, so it wants its own `rt_charoff` / `rt_csubstr` beside the byte-based
+`rt_substr` that every pattern helper drives. Do not convert `rt_substr` itself: the glob
+and `${v#pat}` machinery walks it in byte positions.
+
+Note also that the C locale changes the answer: `/opt/homebrew/bin/bash` counts bytes
+under `LANG=C` and characters under a UTF-8 locale. Settle such a question with the
+locale set explicitly.

@@ -729,6 +729,30 @@ def s22():
     check("re39", re.search(ten, "xyz123456777").group(0) == "xyz12345677")
     check("re40", re.search(ten, "xyz1234567 7") == None)
 
+# ===== SECTION 23: interpreter/compiler agreement ratchet =====
+# Every check here was a live divergence between python-interpreter.abnf and
+# python-to-llvm-ir.abnf. The matrix cannot see this class of bug - it compares
+# each engine against itself under goja and -frozen - so the assertions live here.
+# Expected values are CPython 3's.
+def s23():
+    # Sequence repetition. The compiler fell through to numeric arithmetic and
+    # answered NaN for every one of these; the interpreter always repeated.
+    check("agr1", "ab" * 3 == "ababab")
+    check("agr2", [0] * 3 == [0, 0, 0])
+    check("agr3", 3 * [0] == [0, 0, 0])
+    check("agr4", [1, 2] * 0 == [])
+    check("agr5", "x" * 0 == "")
+    # Conversions the interpreter had and the compiler did not.
+    check("agr6", bool(0) == False and bool([]) == False and bool("x") == True)
+    check("agr7", float("1.5") == 1.5 and float(2) == 2)
+    check("agr8", repr("x") == "'x'")
+    check("agr9", len(set([1, 2, 2])) == 2)
+    check("agr10", sum([1, 2, 3]) == 6 and sum([]) == 0)
+    check("agr11", len(tuple([1, 2])) == 2)
+    # max/min: the COMPILER had them and the interpreter did not.
+    check("agr12", max(1, 2) == 2 and min(1, 2) == 1)
+    check("agr13", max([3, 1, 2]) == 3 and min([3, 1, 2]) == 1)
+
 # ===== END SECTIONS =====
 
 def main():
@@ -754,5 +778,6 @@ def main():
     s20() # SECTION-CALL 20
     s21() # SECTION-CALL 21
     s22() # SECTION-CALL 22
+    s23() # SECTION-CALL 23
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

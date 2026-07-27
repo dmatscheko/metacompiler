@@ -1033,6 +1033,79 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         x.NewRet(x.NewLoad(i32, ip))
     })()
 
+    // i32 rt_charlen(i8* s): the number of CHARACTERS in s, which is what bash's
+    // ${#s} counts - not bytes (rt_strlen) and not UTF-16 units. A UTF-8
+    // continuation byte is 10xxxxxx, so every byte with (b & 0xC0) != 0x80 starts
+    // one character. `${#s}` on "a<emoji>b" is 3 in bash 5.3, was 6 here.
+    // The block labels carry a "cl" prefix: a parameter name and a block label
+    // share one per-function namespace in textual IR (see docs/abnf-dialect-gotchas.md).
+    var rtCharLen = m.NewFunc("rt_charlen", i32, llvm.ir.NewParam("s", i8ptr))
+    ;(function() {
+        var s = rtCharLen.Params[0]
+        var e = rtCharLen.NewBlock("entry")
+        var h = rtCharLen.NewBlock("clhead")
+        var bd = rtCharLen.NewBlock("clbody")
+        var cnt = rtCharLen.NewBlock("clcount")
+        var nx = rtCharLen.NewBlock("clnext")
+        var x = rtCharLen.NewBlock("clexit")
+        var ip = e.NewAlloca(i32)
+        var np = e.NewAlloca(i32)
+        e.NewStore(zero, ip)
+        e.NewStore(zero, np)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, ch, zero8), x, bd)
+        var c32 = bd.NewZExt(ch, i32)
+        var isCont = bd.NewICmp(llvm.enum.IPredEQ,
+                                bd.NewAnd(c32, llvm.constant.NewInt(i32, 192)),
+                                llvm.constant.NewInt(i32, 128))
+        bd.NewCondBr(isCont, nx, cnt)
+        cnt.NewStore(cnt.NewAdd(cnt.NewLoad(i32, np), one), np)
+        cnt.NewBr(nx)
+        nx.NewStore(nx.NewAdd(nx.NewLoad(i32, ip), one), ip)
+        nx.NewBr(h)
+        x.NewRet(x.NewLoad(i32, np))
+    })()
+
+    // i32 rt_charoff(i8* s, i32 k): the BYTE offset of character number k, clamped
+    // to the length of s. rt_csubstr converts a character range with it.
+    var rtCharOff = m.NewFunc("rt_charoff", i32,
+        [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("k", i32)])
+    ;(function() {
+        var s = rtCharOff.Params[0], k0 = rtCharOff.Params[1]
+        var e = rtCharOff.NewBlock("entry")
+        var h = rtCharOff.NewBlock("cohead")
+        var bd = rtCharOff.NewBlock("cobody")
+        var cnt = rtCharOff.NewBlock("cocount")
+        var bump = rtCharOff.NewBlock("cobump")
+        var nx = rtCharOff.NewBlock("conext")
+        var x = rtCharOff.NewBlock("coexit")
+        var ip = e.NewAlloca(i32)
+        var np = e.NewAlloca(i32)
+        e.NewStore(zero, ip)
+        e.NewStore(zero, np)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, ch, zero8), x, bd)
+        var c32 = bd.NewZExt(ch, i32)
+        var isCont = bd.NewICmp(llvm.enum.IPredEQ,
+                                bd.NewAnd(c32, llvm.constant.NewInt(i32, 192)),
+                                llvm.constant.NewInt(i32, 128))
+        bd.NewCondBr(isCont, nx, cnt)
+        // At a character START: this is character number n. Once n has reached k
+        // the walk is done and i IS the byte offset asked for; otherwise count it
+        // and step over its continuation bytes on the following iterations.
+        var n = cnt.NewLoad(i32, np)
+        cnt.NewCondBr(cnt.NewICmp(llvm.enum.IPredSGE, n, k0), x, bump)
+        bump.NewStore(bump.NewAdd(n, one), np)
+        bump.NewBr(nx)
+        nx.NewStore(nx.NewAdd(nx.NewLoad(i32, ip), one), ip)
+        nx.NewBr(h)
+        x.NewRet(x.NewLoad(i32, ip))
+    })()
+
     // i32 rt_streq(i8* a, i8* b) -> 1 if equal, else 0.
     var rtStreq = m.NewFunc("rt_streq", i32, [llvm.ir.NewParam("a", i8ptr), llvm.ir.NewParam("b", i8ptr)])
     ;(function() {
@@ -1414,6 +1487,25 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         bd.NewBr(h)
         x.NewStore(zero8, x.NewGetElementPtr(i8, dst, n))
         x.NewRet(dst)
+    })()
+
+    // i8* rt_csubstr(i8* s, i32 off, i32 n): rt_substr with off and n in CHARACTERS,
+    // which is what ${s:off:n} slices in bash. rt_substr itself stays byte-based -
+    // every pattern helper above drives it over byte positions.
+    var rtCSubstr = m.NewFunc("rt_csubstr", i8ptr,
+        [llvm.ir.NewParam("s", i8ptr), llvm.ir.NewParam("off", i32), llvm.ir.NewParam("n", i32)])
+    ;(function() {
+        var s0 = rtCSubstr.Params[0], off0 = rtCSubstr.Params[1], n0 = rtCSubstr.Params[2]
+        var e = rtCSubstr.NewBlock("entry")
+        var bo = e.NewCall(rtCharOff, [s0, e.NewSelect(e.NewICmp(llvm.enum.IPredSLT, off0, zero), zero, off0)])
+        // n < 0 means "to the end"; otherwise the end is off + n characters in.
+        var bend = e.NewCall(rtCharOff, [s0, e.NewAdd(off0, e.NewSelect(
+            e.NewICmp(llvm.enum.IPredSLT, n0, zero), zero, n0))])
+        var byteN = e.NewSelect(e.NewICmp(llvm.enum.IPredSLT, n0, zero),
+                                llvm.constant.NewInt(i32, -1), e.NewSub(bend, bo))
+        byteN = e.NewSelect(e.NewICmp(llvm.enum.IPredSLT, byteN, zero),
+                            llvm.constant.NewInt(i32, -1), byteN)
+        e.NewRet(e.NewCall(rtSubstr, [s0, bo, byteN]))
     })()
 
     // i32 rt_matchlen(i8* pat, i8* s, i32 i): end index of the LONGEST match of pat starting
@@ -2699,7 +2791,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     return {b: b, v: b.NewSelect(whole,
                         b.NewCall(rtInt2str, b.NewCall(rtArrCount, nmOf(b))),
-                        b.NewCall(rtInt2str, b.NewCall(rtStrlen, b.NewCall(rtArrGet, [nmOf(b), keyOf(b, rs.v)]))))}
+                        b.NewCall(rtInt2str, b.NewCall(rtCharLen, b.NewCall(rtArrGet, [nmOf(b), keyOf(b, rs.v)]))))}
                 }}
             }
             if (pe == "ind") {
@@ -2717,14 +2809,33 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return {f: true, c: undefined, fn: function(b) {
                     var rs = subOf(b); b = rs.b
                     var k = kindOf(b, rs.v)
+                    var whole = b.NewICmp(llvm.enum.IPredNE, k, zero)
                     var star = b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))
                     var all = b.NewCall(rtArrList, [nmOf(b), ifsFirstValue(b), zero, zero])
                     var ro = offT(b); b = ro.b
+                    var rlv = null
+                    if (lenT != null) { var rl = lenT(b); b = rl.b; rlv = rl.v }
                     var cnt = b.NewCall(rtNFields, all)
                     var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(cnt, ro.v), ro.v)
                     var n = b.NewSub(cnt, off)
-                    if (lenT != null) { var rl = lenT(b); b = rl.b; n = rl.v }
-                    return {b: b, v: b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), b.NewZExt(star, i32)])}
+                    if (rlv != null) { n = rlv }
+                    var lstV = b.NewCall(rtSliceFields, [all, off, n, ifsFirstValue(b), b.NewZExt(star, i32)])
+                    // ${a[i]:off:len} slices the ELEMENT, not the element list - the
+                    // list slice was emitted for a plain index too, so ${a[2]:1:2}
+                    // answered the whole joined array while the interpreter (and
+                    // bash) answered two characters of a[2].
+                    var ev = b.NewCall(rtArrGet, [nmOf(b), keyOf(b, rs.v)])
+                    var elen = b.NewCall(rtCharLen, ev)
+                    var eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(elen, ro.v), ro.v)
+                    eoff = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, eoff, zero), zero, eoff)
+                    var en = llvm.constant.NewInt(i32, -1)
+                    if (rlv != null) {
+                        en = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, rlv, zero),
+                                         b.NewSub(b.NewAdd(elen, rlv), eoff), rlv)
+                        en = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, en, zero), zero, en)
+                    }
+                    var elV = b.NewCall(rtCSubstr, [ev, eoff, en])
+                    return {b: b, v: b.NewSelect(whole, lstV, elV)}
                 }}
             }
             return {f: true, c: undefined, fn: function(b) {
@@ -2744,11 +2855,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var v = varString(b, name)
                 var ro = offT(b)
                 b = ro.b
-                var len = b.NewCall(rtStrlen, v)
+                // Offsets and lengths of ${v:off:len} are in CHARACTERS in bash,
+                // so the whole computation runs in character units and rt_csubstr
+                // converts to byte positions. rt_strlen/rt_substr here made
+                // ${s:1:2} on "h<e-acute>llo" answer one byte, not two characters.
+                var len = b.NewCall(rtCharLen, v)
                 // a negative offset counts from the end
                 var off = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, ro.v, zero), b.NewAdd(len, ro.v), ro.v)
                 if (lenT == null) {
-                    return {b: b, v: b.NewCall(rtSubstr, [v, off, llvm.constant.NewInt(i32, -1)])}
+                    return {b: b, v: b.NewCall(rtCSubstr, [v, off, llvm.constant.NewInt(i32, -1)])}
                 }
                 var rl = lenT(b)
                 b = rl.b
@@ -2756,7 +2871,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var n = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, rl.v, zero),
                                     b.NewSub(b.NewAdd(len, rl.v), off), rl.v)
                 n = b.NewSelect(b.NewICmp(llvm.enum.IPredSLT, n, zero), zero, n)
-                return {b: b, v: b.NewCall(rtSubstr, [v, off, n])}
+                return {b: b, v: b.NewCall(rtCSubstr, [v, off, n])}
             }}
         }
         if (pe == "#" || pe == "##" || pe == "%" || pe == "%%") {
@@ -2800,7 +2915,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (pe == "len") {
             return {c: undefined, fn: function(b) {
-                return {b: b, v: b.NewCall(rtInt2str, b.NewCall(rtStrlen, varString(b, name)))}
+                // ${#v} counts CHARACTERS in bash (rt_strlen counts bytes).
+                return {b: b, v: b.NewCall(rtInt2str, b.NewCall(rtCharLen, varString(b, name)))}
             }}
         }
         if (pe == "ind") {
