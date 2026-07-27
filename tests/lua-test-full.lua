@@ -20,7 +20,9 @@
 -- require/modules, load, _ENV, and the standard library beyond what
 -- lua-test-features.lua already uses (print, exit, string.len/sub/upper/
 -- lower/rep, ipairs, pairs, next, table.insert/remove, math.floor/ceil/abs/
--- max/min). That rules out setmetatable - so metatables, the operator
+-- max/min) plus the five names through which Lua 5.3+ makes the integer
+-- subtype visible at all - math.type/tointeger/fmod/maxinteger/mininteger,
+-- without which sections 21 and 22 could not be written. That rules out setmetatable - so metatables, the operator
 -- metamethods and the <close> attribute (needs __close) stay untested - and
 -- likewise error/pcall, tostring, select (varargs are counted by packing
 -- into {...}) and coroutine.* (library calls, not syntax). Lua has no
@@ -529,6 +531,80 @@ local function s20()
   check("corp21", y, 2)
 end
 
+-- ===== SECTION 21: the integer / float subtype =====
+function s21()
+    check("sub1", math.type(3), "integer")
+    check("sub2", math.type(3.0), "float")
+    check("sub3", math.type("3"), nil)   -- a string is not a number at all
+    check("sub4", math.type(true), nil)
+    check("sub5", "" .. 3 .. "|" .. 3.0, "3|3.0")
+    check("sub6", math.type(7 / 2), "float")
+    check("sub7", math.type(6 / 2), "float") -- '/' is ALWAYS a float
+    check("sub8", "" .. (6 / 2), "3.0")
+    check("sub9", math.type(7 // 2) .. math.type(7.0 // 2), "integerfloat")
+    check("sub10", math.type(7 % 3) .. math.type(7.5 % 2), "integerfloat")
+    check("sub11", math.type(2 ^ 31), "float") -- '^' is ALWAYS a float
+    check("sub12", "" .. 1e3 .. "|" .. math.type(1e3), "1000.0|float")
+    check("sub13", 1 == 1.0 and math.type(1) ~= math.type(1.0), true)
+    check("sub14", math.type(math.floor(3.7)) .. math.type(math.ceil(3.2)), "integerinteger")
+    check("sub15", math.type(#"abc"), "integer")
+    check("sub16", math.tointeger(3.0), 3)
+    check("sub17", math.tointeger(3.5), nil)
+    check("sub18", math.tointeger("8"), 8)
+    check("sub19", math.tointeger(true), nil)
+    check("sub20", math.type(math.abs(-1.0)), "float")
+    check("sub21", math.type(math.abs(-1)), "integer")
+    check("sub22", math.fmod(7, -2) .. "|" .. math.type(math.fmod(7, -2)), "1|integer")
+    check("sub23", math.type("10" + 5) .. math.type("10.0" + 5), "integerfloat")
+    check("sub24", math.type(math.max(1, 1.0)), "integer") -- max keeps its argument
+    check("sub25", "" .. (7 // -2) .. (-7 // -2) .. (7 % -2) .. (-7 % -2), "-43-1-1")
+end
+
+-- ===== SECTION 22: exact 64-bit integers =====
+function s22()
+    check("i64a", "" .. math.maxinteger, "9223372036854775807")
+    check("i64b", "" .. math.mininteger, "-9223372036854775808")
+    check("i64c", math.maxinteger + 1 == math.mininteger, true)
+    check("i64d", math.mininteger - 1 == math.maxinteger, true)
+    check("i64e", "" .. (math.maxinteger * 2), "-2")
+    check("i64f", "" .. 9223372036854775807, "9223372036854775807")
+    check("i64g", math.type(9223372036854775808), "float") -- too big: a float
+    check("i64h", 0xffffffffffffffff, -1)                  -- hex WRAPS
+    check("i64i", 0x7fffffffffffffff == math.maxinteger, true)
+    check("i64j", 0x10000000000000000, 0)
+    check("i64k", 1 << 62, 4611686018427387904)
+    check("i64l", "" .. (1 << 63), "-9223372036854775808")
+    check("i64m", (1 << 64) + (1 << -1), 0)
+    check("i64n", -1 >> 1 == math.maxinteger, true)         -- >> is LOGICAL
+    check("i64o", ~0, -1)
+    check("i64p", math.mininteger // -1 == math.mininteger, true)
+    check("i64q", math.mininteger % -1, 0)
+    check("i64r", -math.mininteger == math.mininteger, true)
+    check("i64s", math.abs(math.mininteger) == math.mininteger, true)
+    check("i64t", math.maxinteger // 1 == math.maxinteger, true)
+    check("i64u", math.type(math.maxinteger // 1), "integer")
+    check("i64v", math.tointeger(2 ^ 53), 9007199254740992)
+    check("i64w", math.tointeger(2 ^ 63), nil)              -- out of range
+    check("i64x", math.max(math.maxinteger, math.maxinteger - 1) == math.maxinteger, true)
+    check("i64y", math.floor(math.maxinteger) == math.maxinteger, true)
+    -- Table keys: a float with an exact integer value IS the integer key, and two
+    -- neighbouring 64-bit keys stay apart (their double readings would not).
+    local t = {}
+    t[1] = "a"
+    t[2.0] = "b"
+    t[math.maxinteger] = "M"
+    t[math.maxinteger - 1] = "N"
+    check("i64z1", t[1.0] .. t[2], "ab")
+    check("i64z2", t[math.maxinteger] .. t[math.maxinteger - 1], "MN")
+    -- A loop that runs up to the last integer stops on the exact value.
+    local n = 0
+    for i = math.maxinteger - 2, math.maxinteger do n = n + 1 end
+    check("i64z3", n, 3)
+    -- Comparison past 2^53 is exact.
+    check("i64z4", math.maxinteger > math.maxinteger - 1, true)
+    check("i64z5", math.maxinteger == math.maxinteger - 1, false)
+end
+
 -- ===== END SECTIONS =====
 
 s01() -- SECTION-CALL 01
@@ -551,5 +627,7 @@ s17() -- SECTION-CALL 17
 s18() -- SECTION-CALL 18
 s19() -- SECTION-CALL 19
 s20() -- SECTION-CALL 20
+s21() -- SECTION-CALL 21
+s22() -- SECTION-CALL 22
 print("full: " .. checks .. " checks, " .. failures .. " failures")
 exit(failures)

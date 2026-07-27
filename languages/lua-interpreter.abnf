@@ -602,18 +602,47 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ----- The number model: Lua's integer and float subtypes -----
     // Lua 5.3+ distinguishes integers from floats and the difference is observable: 1
     // renders as '1' but 1.0 as '1.0', 7 // 2 is 3 while 7.0 // 2 is 3.0, and a division
-    // is always a float. Every number here is a host double, so the subtype comes from
-    // the spelling: a non-integral double is a float already, and an integral one counts
-    // as an integer UNLESS it sits in a float box {__f, v}. Only integral floats need the
-    // box, so ordinary integer arithmetic - the common case - allocates nothing.
+    // is always a float. A Lua integer is moreover a REAL 64 bit integer - it wraps
+    // rather than losing precision, math.maxinteger + 1 is math.mininteger - and a host
+    // double holds only 53 bits exactly, so the value model needs three shapes:
+    //
+    //     a plain number     ==  an integer whose value is exact in a double
+    //                            (|v| <= 2^53, integral), OR a float whose value is
+    //                            NOT integral (1.5, inf, nan) - which is unambiguous
+    //     an {__sz} box      ==  an integer outside that range, up to the full signed
+    //                            64 bit span. This is the SHARED sized-integer layer of
+    //                            lib/interp-core.js (szArith / szCmp / szStr), the same
+    //                            one go-interpreter.abnf uses, at width 64 and signed.
+    //     an {__f} box       ==  a float whose value IS integral (1.0, 2.0, 1e100), the
+    //                            only case the plain reading could not tell from an
+    //                            integer.
+    //
+    // Both boxes are rare, so ordinary small-integer arithmetic - the common case -
+    // still allocates nothing and runs on plain doubles (szArith's own fast path).
     function isFlt(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f === true }
-    function numOf(v) { return isFlt(v) ? v.v : v }
-    function isNum(v) { return typeof v == "number" || isFlt(v) }
-    // A Lua integer: an unboxed double with an integral, finite value.
-    function isInt(v) { return typeof v == "number" && v - v === 0 && Math.floor(v) === v }
+    function numOf(v) { if (isFlt(v)) { return v.v } if (szIs(v)) { return szNum(v) } return v }
+    function isNum(v) { return typeof v == "number" || isFlt(v) || szIs(v) }
+    // A Lua integer: a sized-integer box, or an unboxed double with an integral, finite
+    // value.
+    function isInt(v) { if (szIs(v)) { return true } return typeof v == "number" && v - v === 0 && Math.floor(v) === v }
     // Box n as a float when it would otherwise read back as an integer. (n - n === 0
     // rejects the infinities and NaN, which are floats already and never need a box.)
     function mkFlt(n) { if (n - n === 0 && Math.floor(n) === n) { return {__f: true, v: n} } return n }
+    // A Lua TABLE. Both number boxes are host objects too, so every place that used to
+    // test `typeof v == "object"` has to exclude them.
+    function isTbl(v) { return v !== null && v !== undefined && typeof v == "object" && !isFlt(v) && !szIs(v) }
+    // The two ends of the signed 64 bit range, built from their bit pattern because
+    // neither survives a double: math.maxinteger reads back as 9223372036854775808.
+    function luaMaxInt() { return szNorm(i64Make(2147483647, 4294967295), 64, false) }
+    function luaMinInt() { return szNorm(i64Make(2147483648, 0), 64, false) }
+    // 2^63 exactly - the first magnitude that is NOT a Lua integer. Written as a literal
+    // because it is a power of two and therefore exact in a double.
+    var LUA_2P63 = 9223372036854775808
+    // An integral double into an integer value, when it fits the 64 bit range.
+    function luaI64(n) {
+        if (n >= LUA_2P63 || n < 0 - LUA_2P63) { return undefined }
+        return szNorm(i64FromNum(n), 64, false)
+    }
 
     function isSpaceCode(cc) { return cc === 32 || cc === 9 || cc === 10 || cc === 13 }
     function hexDigit(cc) {
@@ -645,15 +674,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (r === undefined) { return undefined }
         if (!neg) { return r }
         if (isFlt(r)) { return mkFlt(0 - r.v) }
+        if (isInt(r)) { return szNeg(r) }
         return 0 - r
     }
     // 0x...: an integer, unless the spelling carries a '.' or a binary 'p' exponent - then
     // it is a float whose value is the hex mantissa times two to the exponent.
+    //
+    // A hexadecimal INTEGER literal WRAPS to 64 bits rather than overflowing to a float
+    // (0xffffffffffffffff is -1 and 0x10000000000000000 is 0, both real Lua answers), so
+    // it is read from its digits on the exact 64 bit layer and never through the double
+    // `v` accumulated here - which only the float spellings still need.
     function luaHexNum(s, i, n) {
+        var hexStart = i
+        var hexEnd = i
         var v = 0
         var digits = 0
         var isFloat = false
         while (i < n && hexDigit(s.charCodeAt(i)) >= 0) { v = v * 16 + hexDigit(s.charCodeAt(i)); i = i + 1; digits = digits + 1 }
+        hexEnd = i
         if (i < n && s.charCodeAt(i) === 46) {
             isFloat = true
             i = i + 1
@@ -681,7 +719,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = v * Math.pow(2, esign * e)
         }
         if (i < n) { return undefined }
-        return isFloat ? mkFlt(v) : v
+        if (isFloat) { return mkFlt(v) }
+        return szNorm(i64FromRadix(s.slice(hexStart, hexEnd), 16), 64, false)
     }
     // A decimal literal: a float exactly when it has a fraction dot or an exponent.
     function luaDecNum(s, i, n) {
@@ -704,8 +743,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (edig === 0) { return undefined }
         }
         if (i < n) { return undefined }
-        var v = parseFloat(s.slice(start, i))
-        return isFloat ? mkFlt(v) : v
+        var body = s.slice(start, i)
+        if (isFloat) { return mkFlt(parseFloat(body)) }
+        // A DECIMAL integer literal is exact - 9223372036854775807 must not round to
+        // 9223372036854776000 - and one that does not fit a signed 64 bit integer is a
+        // FLOAT in Lua rather than a wrapped integer (9223372036854775808 is
+        // 9.2233720368548e+18). Reading the digits on the exact layer and spelling the
+        // result back is the fit test: only a value that survives the round trip fits.
+        var iv = szNorm(i64FromRadix(body, 10), 64, false)
+        var z = 0
+        while (z + 1 < body.length && body.charCodeAt(z) === 48) { z = z + 1 }
+        if (szStr(iv) !== body.slice(z)) { return mkFlt(parseFloat(body)) }
+        return iv
     }
 
     // ----- Lua strings are BYTE strings -----
@@ -936,7 +985,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaType(v) {
         if (v === undefined || v === null) { return "nil" }
         if (v === true || v === false) { return "boolean" }
-        if (typeof v == "number" || isFlt(v)) { return "number" }
+        if (isNum(v)) { return "number" }
         if (typeof v == "string") { return "string" }
         if (typeof v == "function") { return "function" }
         return "table"
@@ -948,10 +997,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return v !== undefined && v !== null && v !== false
     }
     // A table key: numbers and strings both address the map by their string form, and a
-    // float key with an integral value normalizes to that integer (t[2.0] is t[2]).
-    function luaKey(k) { if (isNum(k)) { return "" + numOf(k) } return "" + k }
+    // float key with an integral value normalizes to that integer (t[2.0] is t[2]) -
+    // which is Lua's own rule, not an accident of the string form. A 64 bit integer past
+    // 2^53 has to spell itself EXACTLY or two neighbouring keys would collide, so a box
+    // goes through szStr rather than through its double reading.
+    function luaKey(k) {
+        if (szIs(k)) { return szStr(k) }
+        if (isNum(k)) {
+            var n = numOf(k)
+            // An integral float that names an exact 64 bit integer addresses the INTEGER
+            // key: t[2.0^53 + 0.0] and the integer next to it must not both spell "1e+16".
+            if (isFlt(k) && n - n === 0 && Math.floor(n) === n) {
+                var iv = luaI64(n)
+                if (iv !== undefined) { return szStr(iv) }
+            }
+            return "" + n
+        }
+        return "" + k
+    }
     // How a number renders: an integer without a fraction, a float always with one.
     function luaNumStr(v) {
+        if (szIs(v)) { return szStr(v) }
         var n = numOf(v)
         if (n !== n) { return "nan" }   // real Lua prints "nan", not "-nan"
         if (n - n !== 0) { return n > 0 ? "inf" : "-inf" }
@@ -978,7 +1044,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var sk = "" + k
             return hasOwn(lib, sk) ? lib[sk] : undefined
         }
-        if (typeof o != "object" || isFlt(o)) { fail("attempt to index a " + luaType(o) + " value") }
+        if (!isTbl(o)) { fail("attempt to index a " + luaType(o) + " value") }
         var kk = luaKey(k)
         return hasOwn(o, kk) ? o[kk] : undefined
     }
@@ -992,13 +1058,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function luaSetIndex(o, k, v) {
         if (o === undefined || o === null) { fail("attempt to index a nil value") }
-        if (typeof o != "object" || isFlt(o)) { fail("attempt to index a " + luaType(o) + " value") }
+        if (!isTbl(o)) { fail("attempt to index a " + luaType(o) + " value") }
         luaRawSet(o, luaKey(k), v)
     }
     // #t: the sequence border - the largest n with t[1..n] all non nil (strings by length).
     function luaLen(v) {
         if (typeof v == "string") { return v.length }
-        if (typeof v == "object" && v !== null && !isFlt(v)) {
+        if (isTbl(v)) {
             var n = 0
             while (hasOwn(v, "" + (n + 1)) && v["" + (n + 1)] !== undefined) { n++ }
             return n
@@ -1009,81 +1075,81 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function luaMod(a, b) { return a - Math.floor(a / b) * b }
 
     // ----- 64-bit integer bit operations -----
-    // Lua's & | ~ << >> work on 64-bit two's complement integers, and a host double holds
-    // only 53 bits exactly - so every operand is split into two unsigned 32-bit halves,
-    // the operation runs on the halves, and the result is reassembled. The shifts are
-    // logical (they never sign-extend) and a count of 64 or more clears the value, both
-    // of which are Lua's rules rather than the host's.
-    function u32and(a, b) { var r = a & b; return r < 0 ? r + 4294967296 : r }
-    function u32or(a, b)  { var r = a | b; return r < 0 ? r + 4294967296 : r }
-    function u32xor(a, b) { var r = a ^ b; return r < 0 ? r + 4294967296 : r }
-    function u32not(a)    { var r = ~a;    return r < 0 ? r + 4294967296 : r }
-    // x is an unsigned 32-bit value and k is 0..31; the masking keeps every intermediate
-    // below 2^32, so no step loses precision.
-    function u32shl(x, k) { if (k <= 0) { return x } if (k >= 32) { return 0 } return (x % Math.pow(2, 32 - k)) * Math.pow(2, k) }
-    function u32shr(x, k) { if (k <= 0) { return x } if (k >= 32) { return 0 } return Math.floor(x / Math.pow(2, k)) }
-    // A Lua value as a 64-bit integer {hi, lo}: an integer, a float with an integral
-    // value, or a string that spells one.
-    function toI64(v) {
+    // Lua's & | ~ << >> are EXACT 64 bit two's complement operations and they are
+    // integer-only: a float operand is accepted exactly when its value is an integer the
+    // 64 bit range holds ("number has no integer representation" otherwise), and a
+    // non-number that does not coerce is a type error. All of it happens on the shared
+    // sized-integer layer of lib/interp-core.js, which is exact at 64 bits where a host
+    // double is not.
+    //
+    // The shifts are LOGICAL in both directions - Lua's >> never sign-extends - so they
+    // run at the UNSIGNED 64 bit width and the resulting bit pattern is read back as
+    // signed; a count of 64 or more clears the value and a negative count shifts the
+    // other way, both Lua's rules rather than the host's.
+    function toIntOp(v) {
         var a = anytype // The value after the string coercion.
         a = toNumV(v)
         if (a === undefined) { fail("attempt to perform bitwise operation on a " + luaType(v) + " value") }
+        if (szIs(a)) { return a }
         var n = numOf(a)
         if (n - n !== 0 || Math.floor(n) !== n) { fail("number has no integer representation") }
-        var hi = Math.floor(n / 4294967296)
-        var lo = n - hi * 4294967296
-        hi = hi % 4294967296
-        if (hi < 0) { hi = hi + 4294967296 }
-        return {hi: hi, lo: lo}
-    }
-    function fromI64(hi, lo) {
-        if (hi >= 2147483648) { return (hi - 4294967296) * 4294967296 + lo }
-        return hi * 4294967296 + lo
-    }
-    function shl64(hi, lo, k) {
-        if (k >= 64) { return {hi: 0, lo: 0} }
-        if (k >= 32) { return {hi: u32shl(lo, k - 32), lo: 0} }
-        if (k <= 0)  { return {hi: hi, lo: lo} }
-        return {hi: u32shl(hi, k) + u32shr(lo, 32 - k), lo: u32shl(lo, k)}
-    }
-    function shr64(hi, lo, k) {
-        if (k >= 64) { return {hi: 0, lo: 0} }
-        if (k >= 32) { return {hi: 0, lo: u32shr(hi, k - 32)} }
-        if (k <= 0)  { return {hi: hi, lo: lo} }
-        return {hi: u32shr(hi, k), lo: u32shr(lo, k) + u32shl(hi % Math.pow(2, k), 32 - k)}
+        var iv = luaI64(n)
+        if (iv === undefined) { fail("number has no integer representation") }
+        return iv
     }
     function luaBit(op, l, r) {
+        var a = toIntOp(l)
         if (op == "<<" || op == ">>") {
-            var p = toI64(l)
-            var kk = toI64(r)
-            var k = fromI64(kk.hi, kk.lo)
-            var left = (op == "<<")
+            var k = numOf(toIntOp(r))
+            var left = op == "<<"
             if (k < 0) { k = 0 - k; left = !left }
-            var q = left ? shl64(p.hi, p.lo, k) : shr64(p.hi, p.lo, k)
-            return fromI64(q.hi, q.lo)
+            if (k >= 64) { return 0 }
+            var u = szConv(a, 64, true)
+            return szConv(szArith(left ? "<<" : ">>", u, k), 64, false)
         }
-        var a = toI64(l)
-        var b = toI64(r)
-        if (op == "&") { return fromI64(u32and(a.hi, b.hi), u32and(a.lo, b.lo)) }
-        if (op == "|") { return fromI64(u32or(a.hi, b.hi), u32or(a.lo, b.lo)) }
-        return fromI64(u32xor(a.hi, b.hi), u32xor(a.lo, b.lo))
+        var b = toIntOp(r)
+        if (op == "&") { return szArith("&", a, b) }
+        if (op == "|") { return szArith("|", a, b) }
+        return szArith("^", a, b)   // Lua spells exclusive-or '~'
     }
-    function luaBitNot(v) {
-        var a = toI64(v)
-        return fromI64(u32not(a.hi), u32not(a.lo))
-    }
+    function luaBitNot(v) { return szNot(toIntOp(v)) }
 
     // ----- Overridden operator / expression builders -----
 
     // A value as a number, with Lua's automatic string coercion; undefined when it is
     // not convertible.
     function toNumV(v) {
-        if (typeof v == "number" || isFlt(v)) { return v }
+        if (isNum(v)) { return v }
         if (typeof v == "string") { return luaNumVal(v) }
         return undefined
     }
+    // Integer floor division and floor modulo. szArith's '/' and '%' TRUNCATE toward
+    // zero (that is Go's and C's rule); Lua rounds toward minus infinity, so a non-zero
+    // remainder whose sign differs from the divisor's moves the quotient one step down
+    // and the remainder one divisor up. Both stay exact and wrapping at 64 bits, which
+    // is what makes math.mininteger // -1 answer math.mininteger.
+    function luaIDiv(a, b) {
+        var q = szArith("/", a, b)
+        var m = szArith("-", a, szArith("*", q, b))
+        var mneg = szCmp(m, 0) < 0
+        var bneg = szCmp(b, 0) < 0
+        if (!szEq(m, 0) && mneg != bneg) { return szArith("-", q, 1) }
+        return q
+    }
+    function luaIMod(a, b) {
+        var m = szArith("%", a, b)
+        var mneg = szCmp(m, 0) < 0
+        var bneg = szCmp(b, 0) < 0
+        if (!szEq(m, 0) && mneg != bneg) { return szArith("+", m, b) }
+        return m
+    }
     // Arithmetic. The result is an integer only when both operands are integers; / and ^
     // always yield a float, and // and % keep the operands' subtype.
+    //
+    // The integer path is EXACT AND WRAPPING at 64 bits (szArith of lib/interp-core.js:
+    // two plain operands whose result stays inside 2^53 never leave its fast path, so
+    // ordinary arithmetic costs one magnitude test), and integer division by zero is an
+    // error rather than an infinity - a float division by zero still is not.
     function luaArith(op, l, r) {
         var a = anytype // The left operand as a number.
         var b = anytype // The right operand as a number.
@@ -1091,26 +1157,42 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         b = toNumV(r)
         if (a === undefined) { fail("attempt to perform arithmetic on a " + luaType(l) + " value") }
         if (b === undefined) { fail("attempt to perform arithmetic on a " + luaType(r) + " value") }
+        if (op == "/") { return mkFlt(numOf(a) / numOf(b)) }
+        if (op == "^") { return mkFlt(Math.pow(numOf(a), numOf(b))) }
+        if (isInt(a) && isInt(b)) {
+            if (op == "+" || op == "-" || op == "*") { return szArith(op, a, b) }
+            // The two messages are lua 5.5's own, verified against the installed one.
+            if (szEq(b, 0)) { fail(op == "//" ? "attempt to divide by zero" : "attempt to perform 'n%0'") }
+            if (op == "//") { return luaIDiv(a, b) }
+            return luaIMod(a, b)
+        }
         var x = numOf(a)
         var y = numOf(b)
-        if (op == "/") { return mkFlt(x / y) }
-        if (op == "^") { return mkFlt(Math.pow(x, y)) }
-        var flt = !(isInt(a) && isInt(b))
         var v = 0
         if (op == "+")       { v = x + y }
         else if (op == "-")  { v = x - y }
         else if (op == "*")  { v = x * y }
         else if (op == "//") { v = Math.floor(x / y) }
         else                 { v = luaMod(x, y) }
-        return flt ? mkFlt(v) : v
+        return mkFlt(v)
     }
     // Equality compares numbers across the two subtypes (1 == 1.0) and everything else
     // by identity; the ordering comparisons work on the numeric values or on strings.
+    // Two integers compare on the exact layer, because past 2^53 their double readings
+    // are equal for values that are not (math.maxinteger and math.maxinteger - 1).
     function luaEq(l, r) {
+        if (isInt(l) && isInt(r)) { return szEq(l, r) }
         if (isNum(l) && isNum(r)) { return numOf(l) === numOf(r) }
         return l === r
     }
     function luaCmp(op, l, r) {
+        if (isInt(l) && isInt(r)) {
+            var c = szCmp(l, r)
+            if (op == "<")  { return c < 0 }
+            if (op == ">")  { return c > 0 }
+            if (op == "<=") { return c <= 0 }
+            return c >= 0
+        }
         var a = anytype // The operands compare as numbers or as strings.
         var b = anytype
         a = isNum(l) ? numOf(l) : l
@@ -1138,6 +1220,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var a = toNumV(v)
             if (a === undefined) { fail("attempt to perform arithmetic on a " + luaType(v) + " value") }
             if (isFlt(a)) { return mkFlt(0 - a.v) }
+            // An integer negates at 64 bits and WRAPS: -math.mininteger is
+            // math.mininteger, the one value that is its own negation.
+            if (isInt(a)) { return szNeg(a) }
             return 0 - a
         }
     }
@@ -1450,18 +1535,28 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var limit = luaFirst(limitT())
             var step = anytype // The increment, 1 when the loop did not spell one out.
             step = stepT != null ? luaFirst(stepT()) : 1
-            var lim = numOf(limit)
             var stp = numOf(step)
             scopes.push({})
             var res = undefined
-            while (stp > 0 ? numOf(i) <= lim : numOf(i) >= lim) {
+            // luaCmp, not a comparison of the double readings: an integer loop that runs
+            // near math.maxinteger has to stop on the exact value, not on the rounded one.
+            while (stp > 0 ? luaCmp("<=", i, limit) : luaCmp(">=", i, limit)) {
                 scopes[scopes.length - 1][name] = i
                 var r = block()
                 if (r != undefined) {
                     if (r === BRK) { break }
                     if (r !== CONT) { res = r; break }
                 }
-                i = luaArith("+", i, step)
+                // The step WRAPS at 64 bits now that an integer really is one, so a loop
+                // whose limit is math.maxinteger would step from it to math.mininteger
+                // and run forever. Real Lua cannot: it precomputes the iteration count.
+                // The same stop, expressed on the values themselves - a step that does
+                // not move the control variable in the step's own direction has
+                // overflowed, and the loop is over.
+                var nxt = anytype // The next control value, before the overflow test.
+                nxt = luaArith("+", i, step)
+                if (stp > 0 ? luaCmp("<=", nxt, i) : luaCmp(">=", nxt, i)) { break }
+                i = nxt
             }
             scopes.pop()
             return res
@@ -1580,7 +1675,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // key AND its value, and nil once the table is exhausted - which is exactly what the
     // generic for expects, so pairs(t) is next plus the table.
     function luaNext(t, k) {
-        if (t === undefined || t === null || typeof t != "object" || isFlt(t)) {
+        if (!isTbl(t)) {
             fail("bad argument to 'next' (table expected, got " + luaType(t) + ")")
         }
         var keys = hasOwn(t, "__keys") ? t.__keys : []
@@ -1624,12 +1719,51 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // derived from floor so no host Math.ceil is required in frozen mode).
     // floor/ceil answer an integer (Lua does too); abs/max/min keep their argument's
     // number subtype, so math.abs(-1.0) stays a float.
+    // math.type / math.tointeger / math.maxinteger / math.mininteger are the four names
+    // through which Lua 5.3+ makes the integer subtype visible to a program, so they
+    // belong with it: math.type(3) is "integer", math.type(3.0) is "float" and
+    // math.type("3") is nil (a string is not a number at all).
     globalScope["math"] = {
-        floor: function(x) { return Math.floor(numOf(x)) },
-        ceil: function(x) { return 0 - Math.floor(0 - numOf(x)) },
+        // floor/ceil answer an INTEGER. An operand that already is one is handed back
+        // untouched - Math.floor of math.maxinteger would round it.
+        floor: function(x) { if (isInt(x)) { return x } return Math.floor(numOf(x)) },
+        ceil: function(x) { if (isInt(x)) { return x } return 0 - Math.floor(0 - numOf(x)) },
         abs: function(x) { return numOf(x) < 0 ? luaArith("-", 0, x) : x },
-        max: function(a, b) { return numOf(a) > numOf(b) ? a : b },
-        min: function(a, b) { return numOf(a) < numOf(b) ? a : b }
+        // max/min keep the WINNING argument, so the subtype survives - and the tie
+        // goes to the FIRST one, which is real Lua's rule (its loop replaces the
+        // running best only on a strict '<'), so math.max(1, 1.0) is the integer 1.
+        max: function(a, b) { return luaCmp("<", a, b) ? b : a },
+        min: function(a, b) { return luaCmp("<", b, a) ? b : a },
+        type: function(x) {
+            if (isInt(x)) { return "integer" }
+            if (isNum(x)) { return "float" }
+            return undefined
+        },
+        // math.tointeger(x): the integer x names, or nil when it names none - a
+        // non-integral float, a float outside the 64 bit range, and any value that is
+        // not a number at all. A STRING that spells a number does convert
+        // (math.tointeger("8") is 8, verified against lua 5.5), because it goes through
+        // the same coercion the arithmetic operators use.
+        tointeger: function(x) {
+            var a = anytype // The argument after Lua's string coercion.
+            a = toNumV(x)
+            if (a === undefined) { return undefined }
+            if (isInt(a)) { return a }
+            var n = numOf(a)
+            if (n - n !== 0 || Math.floor(n) !== n) { return undefined }
+            return luaI64(n)
+        },
+        // math.fmod keeps C's fmod: the remainder takes the sign of the DIVIDEND, which
+        // is where it differs from the '%' operator.
+        fmod: function(a, b) {
+            if (isInt(a) && isInt(b)) {
+                if (szEq(b, 0)) { fail("bad argument #2 to 'fmod' (zero)") }
+                return szArith("%", a, b)
+            }
+            return mkFlt(numOf(a) % numOf(b))
+        },
+        maxinteger: luaMaxInt(),
+        mininteger: luaMinInt()
     }
 
     // One end of a Lua string range, normalised to an inclusive 1-based index.

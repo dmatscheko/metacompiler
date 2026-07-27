@@ -605,11 +605,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Numeric literals -----
     // The same reader as the interpreter's: it decides from the spelling whether a
-    // literal is an integer or a float and marks a float by boxing it. The emitted
-    // runtime does not carry the integer/float subtype yet, so makeConst below unwraps
-    // the box again and both subtypes become one host double - the arithmetic and the
-    // rendering are identical, only '1.0' still prints as '1'.
+    // literal is an integer or a float and marks a float by boxing it.
+    //
+    // An INTEGER literal is exact to 64 bits, which a host double is not, so the reader
+    // does not compute its value at all - it hands makeConst the DIGIT TEXT in an
+    // {__ilit} descriptor and js_lulit (abnf/jsrtlua.go) reads it in the emitted
+    // program. Going through emitNum would already have rounded 9223372036854775807 to
+    // 9223372036854776000 on the way into the module, and would have lost the two rules
+    // that differ between the bases: a decimal literal too large for a 64 bit integer
+    // is a FLOAT, a hexadecimal one WRAPS.
     function isFlt(v) { return v !== null && v !== undefined && typeof v == "object" && v.__f === true }
+    function isILit(v) { return v !== null && v !== undefined && typeof v == "object" && v.__ilit === true }
+    function mkILit(d, r) { return {__ilit: true, d: d, r: r} }
     function mkFlt(n) { if (n - n === 0 && Math.floor(n) === n) { return {__f: true, v: n} } return n }
     function isSpaceCode(cc) { return cc === 32 || cc === 9 || cc === 10 || cc === 13 }
     function hexDigit(cc) {
@@ -638,13 +645,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (r === undefined) { return undefined }
         if (!neg) { return r }
         if (isFlt(r)) { return mkFlt(0 - r.v) }
+        if (isILit(r)) { return mkILit("-" + r.d, r.r) }
         return 0 - r
     }
     function luaHexNum(s, i, n) {
+        var hexStart = i
+        var hexEnd = i
         var v = 0
         var digits = 0
         var isFloat = false
         while (i < n && hexDigit(s.charCodeAt(i)) >= 0) { v = v * 16 + hexDigit(s.charCodeAt(i)); i = i + 1; digits = digits + 1 }
+        hexEnd = i
         if (i < n && s.charCodeAt(i) === 46) {
             isFloat = true
             i = i + 1
@@ -672,7 +683,8 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             v = v * Math.pow(2, esign * e)
         }
         if (i < n) { return undefined }
-        return isFloat ? mkFlt(v) : v
+        if (isFloat) { return mkFlt(v) }
+        return mkILit(s.slice(hexStart, hexEnd), 16)
     }
     function luaDecNum(s, i, n) {
         var start = i
@@ -694,13 +706,24 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (edig === 0) { return undefined }
         }
         if (i < n) { return undefined }
-        var v = parseFloat(s.slice(start, i))
-        return isFloat ? mkFlt(v) : v
+        if (isFloat) { return mkFlt(parseFloat(s.slice(start, i))) }
+        return mkILit(s.slice(start, i), 10)
     }
     // The literal emitter: a float literal becomes a float box at run time, so 1.0 keeps
-    // its subtype apart from 1 all the way to the concatenation that renders it.
+    // its subtype apart from 1 all the way to the concatenation that renders it, and an
+    // integer literal is read from its digits by js_lulit so that it is exact to 64 bits.
+    // A SMALL decimal integer skips the call and goes in as a plain number - which is
+    // every literal an ordinary program writes, so the emitted IR is unchanged there.
     var coreMakeConst = makeConst
     makeConst = function(v) {
+        if (isILit(v)) {
+            var d = v.d
+            var radix = v.r
+            if (radix == 10 && d.length <= 15) { return coreMakeConst(parseFloat(d)) }
+            return function(b) {
+                return {b: b, v: callExt(b, "js_lulit", [emitStr(b, d), emitNum(b, radix)])}
+            }
+        }
         if (!isFlt(v)) { return coreMakeConst(v) }
         var n = v.v
         return function(b) {
@@ -993,129 +1016,59 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return
         }
         if (name == "lua_num") {
-            // The raw number behind a Lua value: a float box gives up its number, a
-            // string coerces (Lua converts in arithmetic), everything else passes.
-            var objB = curF.NewBlock("")
-            var n1B = curF.NewBlock("")
-            var strB = curF.NewBlock("")
-            var elB = curF.NewBlock("")
-            var tv = callExt(b, "js_typeof", [ps[0]])
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [tv, emitStr(b, "object")])), objB, n1B)
-            objB.NewRet(callExt(objB, "js_get", [ps[0], emitStr(objB, "__f")]))
-            n1B.NewCondBr(rawTruthy(n1B, callExt(n1B, "js_seq", [tv, emitStr(n1B, "string")])), strB, elB)
-            // Lua also reads a hexadecimal string ('0x10' + 0 is 16), which the host's
-            // number conversion only accepts with a binary exponent - so a first attempt
-            // that came back NaN is retried with a 'p0' appended, which turns 0x10 into
-            // the hexadecimal float 0x10p0 and leaves every non-number string a NaN.
-            var hexB = curF.NewBlock("")
-            var okB = curF.NewBlock("")
-            var n0 = callExt(strB, "js_tonum", [ps[0]])
-            strB.NewCondBr(rawTruthy(strB, callExt(strB, "js_sne", [n0, n0])), hexB, okB)
-            hexB.NewRet(callExt(hexB, "js_tonum", [callExt(hexB, "js_add", [ps[0], emitStr(hexB, "p0")])]))
-            okB.NewRet(n0)
-            elB.NewRet(ps[0])
+            // The raw double behind a Lua value: a float box gives up its number and a
+            // string coerces (Lua converts in arithmetic, and it reads a hexadecimal
+            // string too - '0x10' + 0 is 16). js_lunum in abnf/jsrtlua.go does the whole
+            // reading, so a 64 bit integer box unwraps here as well.
+            b.NewRet(callExt(b, "js_lunum", [ps[0]]))
             return
         }
         if (name == "lua_isnum") {
-            var numB = curF.NewBlock("")
-            var o1B = curF.NewBlock("")
-            var oB = curF.NewBlock("")
-            var noB = curF.NewBlock("")
-            var tv2 = callExt(b, "js_typeof", [ps[0]])
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [tv2, emitStr(b, "number")])), numB, o1B)
-            numB.NewRet(hTrue)
-            o1B.NewCondBr(rawTruthy(o1B, callExt(o1B, "js_seq", [tv2, emitStr(o1B, "object")])), oB, noB)
-            oB.NewRet(callExt(oB, "js_sne", [callExt(oB, "js_get", [ps[0], emitStr(oB, "__f")]), hUndef]))
-            noB.NewRet(hFalse)
+            b.NewRet(callExt(b, "js_luisnum", [ps[0]]))
             return
         }
         if (name == "lua_isint") {
-            // A Lua INTEGER: an unboxed number with an integral, finite value. The modulo
-            // of an infinity or a NaN is a NaN, which compares unequal to 0, so those
-            // stay floats without a test of their own.
-            var iB = curF.NewBlock("")
-            var noB2 = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [ps[0]]), emitStr(b, "number")])), iB, noB2)
-            iB.NewRet(callExt(iB, "js_seq", [callExt(iB, "js_fmod", [ps[0], emitNum(iB, 1)]), emitNum(iB, 0)]))
-            noB2.NewRet(hFalse)
+            // A Lua INTEGER, either shape: a plain number with an integral finite value,
+            // or a 64 bit integer box.
+            b.NewRet(callExt(b, "js_luisint", [ps[0]]))
             return
         }
         if (name == "lua_mkflt") {
             // A float: boxed when its value would otherwise read back as an integer.
-            var boxB2 = curF.NewBlock("")
-            var plainB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isint", [ps[0]])), boxB2, plainB)
-            var fo = callExt(boxB2, "js_obj_new", [])
-            callExt(boxB2, "js_set", [fo, emitStr(boxB2, "__f"), ps[0]])
-            boxB2.NewRet(fo)
-            plainB.NewRet(ps[0])
+            b.NewRet(callExt(b, "js_lumkflo", [ps[0]]))
             return
         }
         if (name == "lua_res") {
-            // The subtype rule of + - * // and %: an integer only when BOTH operands are.
-            var t1B = curF.NewBlock("")
-            var intB = curF.NewBlock("")
-            var fltB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isint", [ps[0]])), t1B, fltB)
-            t1B.NewCondBr(rawTruthy(t1B, callLua(t1B, "lua_isint", [ps[1]])), intB, fltB)
-            intB.NewRet(ps[2])
-            fltB.NewRet(callLua(fltB, "lua_mkflt", [ps[2]]))
+            // Kept for the arity table only: js_luarith now applies the subtype rule of
+            // + - * // and % itself, together with the 64 bit wrapping it needs.
+            b.NewRet(callLua(b, "lua_mkflt", [ps[2]]))
             return
         }
         if (name == "lua_arith") {
-            // p0 is the operator: 0 +, 1 -, 2 *, 3 / (always a float), 4 //, 5 %.
-            var x = callLua(b, "lua_num", [ps[1]])
-            var y = callLua(b, "lua_num", [ps[2]])
-            var ops = ["js_add", "js_sub", "js_mul", "js_div", "js_fdiv", "js_fmod"]
-            var cur = b
-            for (var k = 0; k < ops.length; k++) {
-                var hitB = curF.NewBlock("")
-                var nextB = curF.NewBlock("")
-                cur.NewCondBr(cur.NewICmp(llvm.enum.IPredEQ, ps[0], handle(k)), hitB, nextB)
-                var rv = callExt(hitB, ops[k], [x, y])
-                if (k == 3) { hitB.NewRet(callLua(hitB, "lua_mkflt", [rv])) }
-                else { hitB.NewRet(callLua(hitB, "lua_res", [ps[1], ps[2], rv])) }
-                cur = nextB
-            }
-            cur.NewRet(hUndef)
+            // p0 is the operator: 0 +, 1 -, 2 *, 3 / (always a float), 4 // (floor
+            // division), 5 % (floor modulo). js_luarith is the exact twin of
+            // lua-interpreter.abnf's luaArith: the integer path is 64 bit and WRAPS,
+            // integer division by zero is an error rather than an infinity, and only
+            // two integer operands keep the integer subtype.
+            b.NewRet(callExt(b, "js_luarith", [ps[0], ps[1], ps[2]]))
             return
         }
         if (name == "lua_eq") {
-            // Numbers compare across the two subtypes (1 == 1.0); everything else by
-            // identity.
-            var e1B = curF.NewBlock("")
-            var enB = curF.NewBlock("")
-            var eoB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isnum", [ps[0]])), e1B, eoB)
-            e1B.NewCondBr(rawTruthy(e1B, callLua(e1B, "lua_isnum", [ps[1]])), enB, eoB)
-            enB.NewRet(callExt(enB, "js_seq", [callLua(enB, "lua_num", [ps[0]]), callLua(enB, "lua_num", [ps[1]])]))
-            eoB.NewRet(callExt(eoB, "js_seq", [ps[0], ps[1]]))
+            // Numbers compare across the two subtypes (1 == 1.0) and two integers on
+            // their exact 64 bit values; everything else by identity.
+            b.NewRet(callExt(b, "js_lueq", [ps[0], ps[1]]))
             return
         }
         if (name == "lua_cmpv") {
-            // A comparison operand: a number unboxes, a string stays a string. This is
-            // also what a table key goes through, so t[2.0] addresses t[2].
-            var cvB = curF.NewBlock("")
-            var cpB = curF.NewBlock("")
-            b.NewCondBr(rawTruthy(b, callLua(b, "lua_isnum", [ps[0]])), cvB, cpB)
-            cvB.NewRet(callLua(cvB, "lua_num", [ps[0]]))
-            cpB.NewRet(ps[0])
+            // A TABLE KEY. A number addresses the map by its value, so t[2.0] reaches
+            // t[2]; an integer past 2^53 becomes its exact decimal text, because its
+            // double reading would collide with its neighbour's.
+            b.NewRet(callExt(b, "js_lukey", [ps[0]]))
             return
         }
         if (name == "lua_cmp") {
             // p0 is the operator: 0 <, 1 >, 2 <=, 3 >=.
-            var cx = callLua(b, "lua_cmpv", [ps[1]])
-            var cy = callLua(b, "lua_cmpv", [ps[2]])
-            var cops = ["js_lt", "js_gt", "js_le", "js_ge"]
-            var ccur = b
-            for (var ci = 0; ci < cops.length; ci++) {
-                var chB = curF.NewBlock("")
-                var cnB = curF.NewBlock("")
-                ccur.NewCondBr(ccur.NewICmp(llvm.enum.IPredEQ, ps[0], handle(ci)), chB, cnB)
-                chB.NewRet(callExt(chB, cops[ci], [cx, cy]))
-                ccur = cnB
-            }
-            ccur.NewRet(hFalse)
+            b.NewRet(callExt(b, "js_lucmp", [ps[0], ps[1], ps[2]]))
             return
         }
         if (name == "lua_str") {
@@ -1151,25 +1104,23 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             soB.NewCondBr(rawTruthy(soB, callExt(soB, "js_seq", [stv, emitStr(soB, "object")])), spB, sxB)
             spB.NewRet(emitStr(spB, "table"))
             sxB.NewRet(callExt(sxB, "js_pystr", [ps[0]]))
+            // js_lustr is Lua's number rendering, both subtypes at once: an integer
+            // without a fraction and EXACTLY (js_pystr would have spelled
+            // math.maxinteger 9223372036854776000), a float always with a fraction, and
+            // inf / -inf / nan for the non-finite values rather than JavaScript's
+            // Infinity / NaN.
             smB.NewCondBr(rawTruthy(smB, callLua(smB, "lua_isint", [ps[0]])), siB, sfB)
-            siB.NewRet(callExt(siB, "js_pystr", [ps[0]]))
-            // js_luaflt is Lua's float rendering: inf / -inf / nan for the
-            // non-finite values (js_pystr spelled them Infinity / NaN, which is
-            // JavaScript) and always a fraction otherwise.
+            siB.NewRet(callExt(siB, "js_lustr", [ps[0]]))
             var sn2 = callLua(sfB, "lua_num", [ps[0]])
             sfB.NewCondBr(rawTruthy(sfB, callLua(sfB, "lua_isint", [sn2])), sdB, srB)
-            sdB.NewRet(callExt(sdB, "js_luaflt", [sn2]))
-            srB.NewRet(callExt(srB, "js_luaflt", [sn2]))
+            sdB.NewRet(callExt(sdB, "js_lustr", [ps[0]]))
+            srB.NewRet(callExt(srB, "js_lustr", [ps[0]]))
             return
         }
         if (name == "lua_shift") {
-            // Lua shifts a 64-BIT integer, logically, and a count of 64 or more clears
-            // the value; a negative count shifts the other way. js_shl / js_ushr are
-            // JavaScript's 32-bit shifts with a 5-bit count mask, so the compiler
-            // answered 1 for `1 << 32' and -16777216 for `255 << 24' while
-            // lua-interpreter.abnf (and real Lua) answered 4294967296 and 4278190080.
-            // js_luashift does the whole thing in Go. p0 is 1 for '<<', 0 for '>>'.
-            b.NewRet(callExt(b, "js_luashift", [ps[1], ps[2], ps[0]]))
+            // Kept for the arity table only: emitBin now sends every bitwise operator,
+            // the shifts included, straight to js_lubit. p0 is 1 for '<<', 0 for '>>'.
+            b.NewRet(callExt(b, "js_lubit", [b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, ps[0], handle(1)), handle(3), handle(4)), ps[1], ps[2]]))
             return
         }
         if (name == "lua_tail") {
@@ -1335,11 +1286,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             return {b: b, v: callLua(b, "lua_mkflt", [emitPow(b, callLua(b, "lua_num", [rl.v]), callLua(b, "lua_num", [rr.v]))])}
         }
     }
-    // Unary bitwise not: the complement is an exclusive or with all ones.
+    // Unary bitwise not: the exact 64 bit complement (js_bxor was JavaScript's 32 bit
+    // one, so ~0x100000000 lost its top half).
     function makeBNot(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_bxor", [r.v, emitNum(r.b, 0 - 1)])}
+            return {b: r.b, v: callExt(r.b, "js_lubnot", [r.v])}
         }
     }
 
@@ -1444,21 +1396,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Lua operators: no 32 bit wrapping, floor division //, floor modulo %, ~= not equal.
     // Every binary operator goes through the value model rather than straight to an
     // external: the arithmetic has to know the two number subtypes and to coerce a
-    // string operand, and the comparisons have to see through a float box. The bitwise
-    // and/or/xor still map to the runtime's 32-bit externals - Lua's are 64-bit, so a
-    // value beyond 32 bits does not match Lua yet (the shift COUNT does, see lua_shift).
-    binExt = {"&": "js_band", "|": "js_bor", "~": "js_bxor"}
+    // string operand, and the comparisons have to see through a float box.
+    //
+    // The bitwise operators used to map to the runtime's externals, which are
+    // JavaScript's 32-BIT ones: `1 << 62' answered 0 and `0xff00ff00ff & -1' lost the
+    // top half. They are 64 bit in Lua and integer-only, so all five now go to
+    // js_lubit (abnf/jsrtlua.go), which is exact and raises Lua's own two errors -
+    // and they must NOT go through lua_num, whose double reading is exactly the
+    // precision the operator is supposed to keep.
+    binExt = {}
     wraps = {}
     var arithCode = {"+": 0, "-": 1, "*": 2, "/": 3, "//": 4, "%": 5}
+    var bitCode = {"&": 0, "|": 1, "~": 2, "<<": 3, ">>": 4}
     var cmpCode = {"<": 0, ">": 1, "<=": 2, ">=": 3}
     emitBin = function(b, op, l, r) {
-        if (op == "<<" || op == ">>") {
-            return callLua(b, "lua_shift", [handle(op == "<<" ? 1 : 0),
-                callLua(b, "lua_num", [l]), callLua(b, "lua_num", [r])])
-        }
-        if (op == "&" || op == "|" || op == "~") {
-            return callExt(b, binExt[op], [callLua(b, "lua_num", [l]), callLua(b, "lua_num", [r])])
-        }
+        if (bitCode[op] != undefined) { return callExt(b, "js_lubit", [handle(bitCode[op]), l, r]) }
         if (op == "==") { return callLua(b, "lua_eq", [l, r]) }
         if (op == "~=") { return callExt(b, "js_not", [callLua(b, "lua_eq", [l, r])]) }
         if (cmpCode[op] != undefined) { return callLua(b, "lua_cmp", [handle(cmpCode[op]), l, r]) }
@@ -1804,12 +1756,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var limV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, limName)])
             var stpV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, stepName)])
             // The three control values keep their number subtype (a float start or step
-            // makes the loop variable a float), so the tests run on the raw numbers.
-            var iN = callLua(headB, "lua_num", [iV])
-            var limN = callLua(headB, "lua_num", [limV])
+            // makes the loop variable a float). The two bound tests go through lua_cmp
+            // rather than through the raw doubles: a loop that runs near math.maxinteger
+            // has to stop on the exact value, not on the rounded one.
             var stepPos = truthy(headB, callExt(headB, "js_gt", [callLua(headB, "lua_num", [stpV]), emitNum(headB, 0)]))
-            var leCond = callExt(headB, "js_le", [iN, limN])
-            var geCond = callExt(headB, "js_ge", [iN, limN])
+            var leCond = callLua(headB, "lua_cmp", [handle(2), iV, limV])
+            var geCond = callLua(headB, "lua_cmp", [handle(3), iV, limV])
             var condH = headB.NewSelect(stepPos, leCond, geCond)
             headB.NewCondBr(truthy(headB, condH), bodyB, exitB)
             callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])])
@@ -1818,8 +1770,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             loopStack.pop()
             var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             var stpV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, stepName)])
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callLua(postB, "lua_arith", [handle(0), iV2, stpV2])])
-            postB.NewBr(headB)
+            var nextV = callLua(postB, "lua_arith", [handle(0), iV2, stpV2])
+            // The step WRAPS at 64 bits now that an integer really is one, so a loop
+            // whose limit is math.maxinteger would step from it to math.mininteger and
+            // run forever. Real Lua cannot: it precomputes the iteration count. The same
+            // stop, expressed on the values themselves - a step that does not move the
+            // control variable in the step's own direction has overflowed, and the loop
+            // is over.
+            var stepPos2 = truthy(postB, callExt(postB, "js_gt", [callLua(postB, "lua_num", [stpV2]), emitNum(postB, 0)]))
+            var upWrap = callLua(postB, "lua_cmp", [handle(2), nextV, iV2])
+            var downWrap = callLua(postB, "lua_cmp", [handle(3), nextV, iV2])
+            var wrapH = postB.NewSelect(stepPos2, upWrap, downWrap)
+            var stepB = curF.NewBlock("")
+            postB.NewCondBr(truthy(postB, wrapH), exitB, stepB)
+            callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, iName), nextV])
+            stepB.NewBr(headB)
             curScopeV = saved
             return exitB
         }
@@ -1948,31 +1913,25 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return makeLen(function(bb) { return {b: bb, v: tv} })(b)
     }
 
-    // math.*: floor via floor-division by 1; ceil derived from floor; abs/max/min via a
-    // comparison and a select. All straight-line (Lua numbers are floats, no wrapping).
-    function libFloor(bb, argsH) {
-        var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
-        return {b: bb, v: callExt(bb, "js_fdiv", [x, emitNum(bb, 1)])}
-    }
-    function libCeil(bb, argsH) {
-        var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
-        var fl = callExt(bb, "js_fdiv", [callExt(bb, "js_neg", [x]), emitNum(bb, 1)])
-        return {b: bb, v: callExt(bb, "js_neg", [fl])}
-    }
-    function libAbs(bb, argsH) {
-        var x = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
-        var isNeg = truthy(bb, callExt(bb, "js_lt", [x, emitNum(bb, 0)]))
-        return {b: bb, v: bb.NewSelect(isNeg, callExt(bb, "js_neg", [x]), x)}
-    }
+    // math.*: one extern each (abnf/jsrtlua.go), because every one of them has to know
+    // the integer subtype - floor/ceil ANSWER an integer, abs/max/min KEEP their
+    // argument's subtype, and none of them may reduce a 64 bit integer to a double on
+    // the way through (math.floor(math.maxinteger) would round). math.type,
+    // math.tointeger, math.fmod, math.maxinteger and math.mininteger join them: those
+    // five are how Lua 5.3+ makes the subtype visible to a program at all.
+    function libFloor(bb, argsH) { return {b: bb, v: callExt(bb, "js_lufloor", [libArg(bb, argsH, 0)])} }
+    function libCeil(bb, argsH)  { return {b: bb, v: callExt(bb, "js_luceil",  [libArg(bb, argsH, 0)])} }
+    function libAbs(bb, argsH)   { return {b: bb, v: callExt(bb, "js_luabs",   [libArg(bb, argsH, 0)])} }
+    function libType(bb, argsH)  { return {b: bb, v: callExt(bb, "js_lutype",  [libArg(bb, argsH, 0)])} }
+    function libToInt(bb, argsH) { return {b: bb, v: callExt(bb, "js_lutoint", [libArg(bb, argsH, 0)])} }
     function libMax(bb, argsH) {
-        var a = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
-        var c = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
-        return {b: bb, v: bb.NewSelect(truthy(bb, callExt(bb, "js_gt", [a, c])), a, c)}
+        return {b: bb, v: callExt(bb, "js_lumax", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
     }
     function libMin(bb, argsH) {
-        var a = callLua(bb, "lua_num", [libArg(bb, argsH, 0)])
-        var c = callLua(bb, "lua_num", [libArg(bb, argsH, 1)])
-        return {b: bb, v: bb.NewSelect(truthy(bb, callExt(bb, "js_lt", [a, c])), a, c)}
+        return {b: bb, v: callExt(bb, "js_lumin", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
+    }
+    function libFmod(bb, argsH) {
+        return {b: bb, v: callExt(bb, "js_lufmod", [libArg(bb, argsH, 0), libArg(bb, argsH, 1)])}
     }
 
     // string.*: len via the host string's .length; upper/lower via the string methods;
@@ -2198,6 +2157,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = libSet(b, mt, "abs", emitLibFunc(libAbs))
             b = libSet(b, mt, "max", emitLibFunc(libMax))
             b = libSet(b, mt, "min", emitLibFunc(libMin))
+            b = libSet(b, mt, "fmod", emitLibFunc(libFmod))
+            b = libSet(b, mt, "type", emitLibFunc(libType))
+            b = libSet(b, mt, "tointeger", emitLibFunc(libToInt))
+            // The two ends of the integer range are VALUES, not functions, and neither
+            // survives a double - they are built from their bit pattern in Go.
+            callExt(b, "js_set", [mt, emitStr(b, "maxinteger"), callExt(b, "js_lumaxint", [])])
+            callExt(b, "js_set", [mt, emitStr(b, "mininteger"), callExt(b, "js_luminint", [])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "math"), mt])
         }
         if (libNeed.string) {
