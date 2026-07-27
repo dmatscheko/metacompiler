@@ -321,8 +321,30 @@ expectations_for() {
             # which the TS grammar itself refuses). Demanding that we parse them
             # was wrong - refusing them is the correct behaviour, so they carry
             # the hard 'reject' expectation and we are scored on refusing them.
-            awk '{ print ($0 ~ /\/(ErrorRecovery|SkippedTokens)\// || $0 ~ /\/decorators\/invalid\// \
-                          ? "reject|" : "parse|") $0 }' "$all"
+            #
+            # unicodeExtendedEscapes/ is not segregated by directory and needs two
+            # further rules, each on its own evidence:
+            #
+            #   - Three files carry the suite's own marker comment, "Shouldn't
+            #     work, negatives are not allowed" (the ...14 files, one each for
+            #     Strings, Templates and RegularExpressions). That comment IS the
+            #     expectation, so key on it rather than on the names.
+            #   - RegularExpressions17 and 19 are equally invalid but say nothing.
+            #     node v24 refuses /\u{r}\u{n}\u{t}/gu and /\u{}/gu outright with
+            #     "Invalid Unicode escape", so refusing them is correct and
+            #     demanding we parse them was wrong.
+            #
+            # Do not add to the second list without the same node check: it is
+            # the difference between a corpus bug and one of ours.
+            neg_ts="$TMP/neg.tsmark"
+            grep -il "shouldn't work\|should not work" $(cat "$all") 2>/dev/null | sort > "$neg_ts" || : > "$neg_ts"
+            awk -v marked="$neg_ts" '
+                BEGIN { while ((getline l < marked) > 0) mark[l] = 1 }
+                { bad = ($0 ~ /\/(ErrorRecovery|SkippedTokens)\//) \
+                     || ($0 ~ /\/decorators\/invalid\//) \
+                     || ($0 in mark) \
+                     || ($0 ~ /unicodeExtendedEscapesInRegularExpressions(17|19)\.ts$/)
+                  print (bad ? "reject|" : "parse|") $0 }' "$all"
             return ;;
         go)
             # The first line of every golang/go test/ file is its directive;

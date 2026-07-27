@@ -77,8 +77,9 @@ every shape JavaScript does NOT have is a syntax error rather than a stray chara
 and the methods length/charAt/charCodeAt/indexOf/replace/slice/substring/
 split/toUpperCase/toLowerCase/trim, template literals including tagged templates with
 'raw', booleans, null, undefined, arrays (push/pop/shift/unshift/slice/indexOf/join/concat)
-with spread, and regular expression literals as values (there is no regex engine, so they
-carry their source and flags but cannot match).
+with spread, regular expression literals matched by the shared engine in
+languages/lib/regex.js (RegExp#test/#exec with lastIndex, g / y / i / m / s / d, named
+groups, and String#match/#matchAll/#replace/#replaceAll/#search/#split),
 
 Operators: assignment (= += -= *= /= %= **= <<= >>= >>>= &= ^= |= and the short-circuiting
 &&= ||= ??=) as an expression whose target may reach through calls, destructuring
@@ -1450,13 +1451,11 @@ Digit       = "0"..."9" ;
 
 // A regular-expression literal in a primary position: /pattern/flags. A leading '/' at
 // an operand position is division (handled at MulExpr), so this is only ever reached
-// where a regex is genuinely valid. There is no regex ENGINE here (matching would need
-// a host extern), so the literal evaluates to a RegExp-shaped object carrying its own
-// source and flags: 'typeof re' is "object", re.source / re.flags read back, and the
-// value can be stored and passed around. Calling a matching method on it is what is
-// missing, and that fails as the unknown method it is.
+// where a regex is genuinely valid. The body is kept RAW - it is NOT unescaped, because
+// the regexp engine (languages/lib/regex.js) is the thing that reads the backslashes;
+// unescaping first would turn \d into a plain d.
 RegexLit    <~~ push(makeRegex(up.in)) ~~>
-            = "/" :whitespace() RegexFirst { RegexPart } "/" { RegexFlag } :whitespace(Whitespace) ;
+            = "/" :whitespace() ReStrictU RegexFirst { RegexPart } "/" { RegexFlag } :whitespace(Whitespace) ;
 RegexFirst  = RegexEsc | RegexClass | RegexFirstChar ;
 RegexPart   = RegexEsc | RegexClass | RegexBodyChar ;
 RegexClass  = "[" { RegexEsc | RegexClassChar } "]" ;
@@ -1465,6 +1464,233 @@ RegexFirstChar = "\x00"..."\x09" | "\x0b"..."\x29" | "\x2b"..."\x2e" | "\x30"...
 RegexBodyChar  = "\x00"..."\x09" | "\x0b"..."\x2e" | "\x30"..."\x5a" | "\x5d"..."\U0010ffff" ;
 RegexClassChar = "\x00"..."\x09" | "\x0b"..."\x5b" | "\x5e"..."\U0010ffff" ;
 RegexFlag   = IdPart ;
+
+// The 'u' flag switches JavaScript's regexp grammar from the sloppy Annex B one to the
+// STRICT one, and the difference is a SyntaxError at parse time, not a different match:
+// under 'u' a lone '{' or '}' is not a literal brace, a backreference must have a group,
+// an assertion may not be quantified, and the only identity escapes left are the syntax
+// characters and '/'. lib/regex.js cannot answer this - it deliberately implements one
+// permissive dialect for four languages, and it is not reachable from the parser VM
+// anyway - so the check is a zero-width guard right after the opening '/', re-derived
+// from the source on every call (guards must be pure functions of source and position,
+// see docs/abnf-dialect-gotchas.md). Verified against node v24 parsing with the Script
+// goal: /\1/u, /{*/u, /}?/u and /(?!.){0,}?/u are all SyntaxErrors while their unflagged
+// spellings are all legal.
+//
+// Only 'u' turns it on, not 'v': the 'v' flag's class-set syntax ([[a][b]], \q{...}) is
+// a THIRD grammar again, and refusing what it adds would be worse than accepting it.
+ReStrictU   = :script(~~
+    (function () {
+        var isHex = function (x) {
+            return (x >= 48 && x <= 57) || (x >= 97 && x <= 102) || (x >= 65 && x <= 70)
+        }
+        // The length of the escape starting at p (p points at the backslash), or -1 when
+        // 'u' mode does not allow it. A decimal backreference is NOT handled here - the
+        // caller has to count the groups first.
+        var escLen = function (p, inClass) {
+            var e = c.peek(p + 1)
+            if (e < 0) { return -1 }
+            // CharacterClassEscape and ControlEscape.
+            if (e == 100 || e == 68 || e == 115 || e == 83 || e == 119 || e == 87) { return 2 }
+            if (e == 102 || e == 110 || e == 114 || e == 116 || e == 118) { return 2 }
+            if (e == 98) { return 2 }                        // \b: assertion, or backspace in a class
+            if (e == 66) { if (inClass) { return -1 } return 2 }
+            if (e == 99) {                                   // \cX
+                var x = c.peek(p + 2)
+                if ((x >= 97 && x <= 122) || (x >= 65 && x <= 90)) { return 3 }
+                return -1
+            }
+            if (e == 120) {                                  // \xHH
+                if (isHex(c.peek(p + 2)) && isHex(c.peek(p + 3))) { return 4 }
+                return -1
+            }
+            if (e == 117) {                                  // \uHHHH and \u{H...}
+                if (c.peek(p + 2) == 123) {
+                    var q = p + 3
+                    var n = 0
+                    while (isHex(c.peek(q))) { q = q + 1; n = n + 1 }
+                    if (n > 0 && c.peek(q) == 125) { return q + 1 - p }
+                    return -1
+                }
+                if (isHex(c.peek(p + 2)) && isHex(c.peek(p + 3)) && isHex(c.peek(p + 4)) && isHex(c.peek(p + 5))) { return 6 }
+                return -1
+            }
+            if (e == 112 || e == 80) {                       // \p{...} / \P{...}
+                if (c.peek(p + 2) != 123) { return -1 }
+                var q2 = p + 3
+                while (q2 < p + 128 && c.peek(q2) != 125 && c.peek(q2) >= 0) { q2 = q2 + 1 }
+                if (c.peek(q2) != 125) { return -1 }
+                return q2 + 1 - p
+            }
+            if (e == 107) {                                  // \k<name>
+                if (inClass) { return -1 }
+                if (c.peek(p + 2) != 60) { return -1 }
+                var q3 = p + 3
+                while (q3 < p + 256 && c.peek(q3) != 62 && c.peek(q3) >= 0) { q3 = q3 + 1 }
+                if (c.peek(q3) != 62) { return -1 }
+                return q3 + 1 - p
+            }
+            if (e == 48) {                                   // \0, but not a legacy octal
+                var d0 = c.peek(p + 2)
+                if (d0 >= 48 && d0 <= 57) { return -1 }
+                return 2
+            }
+            if (e >= 49 && e <= 57) { return -1 }            // the caller handles \1..\9
+            // SyntaxCharacter and '/' are the only identity escapes 'u' keeps; a class
+            // adds '-'.
+            if (e == 94 || e == 36 || e == 92 || e == 46 || e == 42 || e == 43 || e == 63
+                || e == 40 || e == 41 || e == 91 || e == 93 || e == 123 || e == 125
+                || e == 124 || e == 47) { return 2 }
+            if (inClass && e == 45) { return 2 }
+            return -1
+        }
+
+        // ----- 1. where does the literal end, and does it carry 'u'? -----
+        var i = 0
+        var inCls = false
+        var end = -1
+        while (i < 65536) {
+            var ch = c.peek(i)
+            if (ch < 0 || ch == 10 || ch == 13) { return undefined }   // not a literal; the rules report it
+            if (ch == 92) { i = i + 2; continue }
+            if (inCls) { if (ch == 93) { inCls = false } }
+            else if (ch == 91) { inCls = true }
+            else if (ch == 47) { end = i; break }
+            i = i + 1
+        }
+        if (end < 0) { return undefined }
+        var strict = false
+        var k = end + 1
+        while (k < end + 32) {
+            var f = c.peek(k)
+            if (!((f >= 97 && f <= 122) || (f >= 65 && f <= 90) || (f >= 48 && f <= 57))) { break }
+            if (f == 117) { strict = true }
+            k = k + 1
+        }
+        if (!strict) { return undefined }
+
+        // ----- 2. how many capturing groups are there? -----
+        var ng = 0
+        var j = 0
+        inCls = false
+        while (j < end) {
+            var a = c.peek(j)
+            if (a == 92) { j = j + 2; continue }
+            if (inCls) { if (a == 93) { inCls = false } j = j + 1; continue }
+            if (a == 91) { inCls = true; j = j + 1; continue }
+            if (a == 40) {
+                if (c.peek(j + 1) != 63) { ng = ng + 1 }
+                else if (c.peek(j + 2) == 60 && c.peek(j + 3) != 61 && c.peek(j + 3) != 33) { ng = ng + 1 }
+            }
+            j = j + 1
+        }
+
+        // ----- 3. the strict walk -----
+        // prev classifies what a quantifier would attach to: 0 nothing, 1 a quantifiable
+        // atom, 2 an assertion (never quantifiable under 'u'), 3 an atom that already
+        // carries a quantifier (only a lazy '?' may follow), 4 a lazy quantifier.
+        var bad = false
+        var prev = 0
+        var gk = []
+        j = 0
+        inCls = false
+        while (j < end && !bad) {
+            var ch2 = c.peek(j)
+            if (inCls) {
+                if (ch2 == 93) { inCls = false; prev = 1; j = j + 1; continue }
+                if (ch2 == 92) {
+                    var L2 = escLen(j, true)
+                    if (L2 < 0) { bad = true; continue }
+                    j = j + L2
+                    continue
+                }
+                j = j + 1
+                continue
+            }
+            if (ch2 == 92) {
+                var e1 = c.peek(j + 1)
+                if (e1 >= 49 && e1 <= 57) {                  // \1..\9: a backreference
+                    var q6 = j + 1
+                    var val = 0
+                    while (c.peek(q6) >= 48 && c.peek(q6) <= 57) { val = val * 10 + (c.peek(q6) - 48); q6 = q6 + 1 }
+                    if (val > ng) { bad = true; continue }
+                    prev = 1
+                    j = q6
+                    continue
+                }
+                var L = escLen(j, false)
+                if (L < 0) { bad = true; continue }
+                prev = (e1 == 98 || e1 == 66) ? 2 : 1
+                j = j + L
+                continue
+            }
+            if (ch2 == 91) { inCls = true; j = j + 1; continue }
+            if (ch2 == 93) { bad = true; continue }          // a lone ']' is a literal only in Annex B
+            if (ch2 == 40) {
+                var n1 = c.peek(j + 1)
+                if (n1 != 63) { gk.push(1); prev = 0; j = j + 1; continue }
+                var n2 = c.peek(j + 2)
+                if (n2 == 58) { gk.push(1); prev = 0; j = j + 3; continue }            // (?:
+                if (n2 == 61 || n2 == 33) { gk.push(2); prev = 0; j = j + 3; continue } // (?= (?!
+                if (n2 == 60) {
+                    var n3 = c.peek(j + 3)
+                    if (n3 == 61 || n3 == 33) { gk.push(2); prev = 0; j = j + 4; continue } // (?<= (?<!
+                    var q7 = j + 3
+                    while (q7 < j + 256 && c.peek(q7) != 62 && c.peek(q7) >= 0) { q7 = q7 + 1 }
+                    if (c.peek(q7) != 62) { bad = true; continue }
+                    gk.push(1); prev = 0; j = q7 + 1; continue                          // (?<name>
+                }
+                bad = true                                    // (?X: not a group form JavaScript has
+                continue
+            }
+            if (ch2 == 41) {
+                if (gk.length == 0) { bad = true; continue }
+                prev = gk.pop()
+                j = j + 1
+                continue
+            }
+            if (ch2 == 42 || ch2 == 43) {                    // * +
+                if (prev != 1) { bad = true; continue }
+                prev = 3
+                j = j + 1
+                continue
+            }
+            if (ch2 == 63) {                                 // ? , or the lazy marker
+                if (prev == 3) { prev = 4; j = j + 1; continue }
+                if (prev != 1) { bad = true; continue }
+                prev = 3
+                j = j + 1
+                continue
+            }
+            if (ch2 == 123) {                                // {n} {n,} {n,m}
+                var q4 = j + 1
+                var nd = 0
+                while (c.peek(q4) >= 48 && c.peek(q4) <= 57) { q4 = q4 + 1; nd = nd + 1 }
+                var okq = false
+                if (nd > 0) {
+                    if (c.peek(q4) == 125) { okq = true }
+                    else if (c.peek(q4) == 44) {
+                        var q5 = q4 + 1
+                        while (c.peek(q5) >= 48 && c.peek(q5) <= 57) { q5 = q5 + 1 }
+                        if (c.peek(q5) == 125) { okq = true; q4 = q5 }
+                    }
+                }
+                if (!okq || q4 >= end) { bad = true; continue }
+                if (prev != 1) { bad = true; continue }
+                prev = 3
+                j = q4 + 1
+                continue
+            }
+            if (ch2 == 125) { bad = true; continue }         // a lone '}' is a literal only in Annex B
+            if (ch2 == 124) { prev = 0; j = j + 1; continue }
+            if (ch2 == 94 || ch2 == 36) { prev = 2; j = j + 1; continue }   // ^ $
+            prev = 1
+            j = j + 1
+        }
+        if (gk.length != 0 || inCls) { bad = true }
+        if (bad) { return abnf.newToken("\x01u-mode regexp", 0) }
+    })()
+~~) ;
 
 // ----- JavaScript's own whitespace, comments and identifiers -----
 
@@ -2025,6 +2251,12 @@ NotFuncHead = :script(~~
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
+    // The shared regular-expression engine (abnf/jsrtregex.go is its Go twin, used by
+    // typescript-to-llvm-ir.abnf). rxFail is a KNOB and is overridden by ASSIGNMENT, never
+    // by declaration - see the shared-helper entry in docs/abnf-dialect-gotchas.md.
+    include("lib/regex.js")
+    rxFail = function (msg) { fail(msg) }
+
     // takeAll empties the local stack of the current tag and returns its items in push
     // order as a plain JS array. It only uses pop(), so it works independently of how
     // the runtime wraps the Go slice behind up.stack.
@@ -2350,15 +2582,328 @@ NotFuncHead = :script(~~
     // typeof can answer "bigint". Arithmetic on it degrades to the numeric value.
     function isBigInt(v) { return v != undefined && v != null && typeof v == "object" && v.__bigint == true }
     function makeBigInt(n) { return function() { return {__bigint: true, v: n} } }
+    // ----- Regular expressions -----
+    // The MATCHER is the shared engine in lib/regex.js (abnf/jsrtregex.go is its Go twin,
+    // used by js-to-llvm-ir.abnf); everything below is JavaScript's SURFACE on top of it.
+    //
+    // Flag mapping. Three of JavaScript's letters are match modes and line up exactly with
+    // the engine's neutral set - i (fold case), s (dot matches newline) and m (^ and $ are
+    // line anchors). Unlike Ruby, 'm' must NOT be forced on: without it JavaScript's ^ and
+    // $ are string anchors. The rest are not match modes at all:
+    //   g  iteration state (lastIndex), handled by exec/test and the String methods
+    //   y  sticky: search from lastIndex and reject a match that does not BEGIN there
+    //   d  hasIndices: presentation only, the match record already carries the offsets
+    //   u  the strict parse-time grammar (ReStrictU above); no effect on the match here
+    //   v  as u, plus class-set syntax, which this engine does not implement
+    function jsReHas(flags, letter) {
+        for (var i = 0; i < flags.length; i++) { if (flags.charAt(i) == letter) { return true } }
+        return false
+    }
+    // RegExp#flags is the canonical order, not the order they were written in.
+    function jsReCanon(flags) {
+        var order = "dgimsuvy"
+        var out = ""
+        for (var i = 0; i < order.length; i++) {
+            if (jsReHas(flags, order.charAt(i))) { out = out + order.charAt(i) }
+        }
+        return out
+    }
+    function jsReNeutral(flags) {
+        var out = ""
+        if (jsReHas(flags, "i")) { out = out + "i" }
+        if (jsReHas(flags, "s")) { out = out + "s" }
+        if (jsReHas(flags, "m")) { out = out + "m" }
+        return out
+    }
+    // One compiled program per (neutral flags, source): a literal inside a loop builds a
+    // fresh RegExp object every time round (lastIndex is per-object state) but is compiled
+    // only once.
+    var rxProgCache = {}
+    function jsReProg(src, flags) {
+        var key = "$" + jsReNeutral(flags) + "\x00" + src
+        if (hasOwn(rxProgCache, key)) { return rxProgCache[key] }
+        var p = rxCompile(src, jsReNeutral(flags))
+        scopePut(rxProgCache, key, p)
+        return p
+    }
+    function mkRegex(src, flags) {
+        var v = {}
+        scopePut(v, "__regex", true)
+        scopePut(v, "source", src)
+        scopePut(v, "flags", flags)
+        scopePut(v, "prog", jsReProg(src, flags))
+        scopePut(v, "global", jsReHas(flags, "g"))
+        scopePut(v, "sticky", jsReHas(flags, "y"))
+        scopePut(v, "ignoreCase", jsReHas(flags, "i"))
+        scopePut(v, "multiline", jsReHas(flags, "m"))
+        scopePut(v, "dotAll", jsReHas(flags, "s"))
+        scopePut(v, "unicode", jsReHas(flags, "u"))
+        scopePut(v, "unicodeSets", jsReHas(flags, "v"))
+        scopePut(v, "hasIndices", jsReHas(flags, "d"))
+        scopePut(v, "lastIndex", 0)
+        scopePut(v, "__keys", [])   // Object.keys(/a/) is [] - every RegExp property is
+        return v                    // an accessor on the prototype or non-enumerable.
+    }
+    function isRegex(v) { return v != undefined && v != null && typeof v == "object" && v.__regex == true }
+    // A pattern lib/regex.js refuses is NOT a parse error: the engine is deliberately one
+    // permissive dialect shared by four languages, so it rejects a handful of patterns
+    // JavaScript accepts (lookbehind, [[:alpha:]], the Annex B identity escapes \x and
+    // \u{ ). Turning those into a SyntaxError would refuse valid JavaScript, so the
+    // failure is remembered at construction and raised only when the pattern is MATCHED.
+    // The parse-time half of the check is ReStrictU, which is exact for 'u' mode.
+    function reProgOf(rv) {
+        var p = rv.prog
+        if (!p.ok) { fail("invalid regular expression: /" + rv.source + "/: " + p.err) }
+        return p
+    }
     // /pattern/flags as a value. up.in is the whole literal, so the source is what sits
-    // between the delimiting slashes and the flags are the tail after the last one.
+    // between the delimiting slashes and the flags are the tail after the last one. Every
+    // EVALUATION yields a new RegExp object, which is what makes `while (m = re.exec(s))`
+    // over a literal inside a loop terminate.
     function makeRegex(text) {
         var end = text.length
         while (end > 0 && text.charAt(end - 1) != "/") { end = end - 1 }
         var src = text.substring(1, end - 1)
-        var flags = text.substring(end)
-        return function() { return {__regex: true, source: src, flags: flags, __keys: ["source", "flags"]} }
+        var flags = jsReCanon(text.substring(end))
+        jsReProg(src, flags)     // compile once, here, while the tags run
+        return function() { return mkRegex(src, flags) }
     }
+    // The result of a successful match. JavaScript models it as an Array carrying three
+    // extra properties; NEITHER engine here allows a non-index property on an array (the
+    // frozen one reports "invalid array index"), so it is an array-LIKE object instead:
+    // m[0], m[1], m.length, m.index, m.input and m.groups all read back exactly as in
+    // JavaScript, and only Array.isArray(m) tells the difference.
+    function reResult(rv, s, m) {
+        var prog = rv.prog
+        var o = {}
+        var keys = []
+        var n = rxGroupCount(prog)
+        var gv = anytype
+        for (var i = 0; i <= n; i++) {
+            gv = rxGroup(prog, s, m, i)
+            if (gv === null) { gv = undefined }
+            scopePut(o, "" + i, gv)
+            keys.push("" + i)
+        }
+        scopePut(o, "length", n + 1)
+        keys.push("index")
+        keys.push("input")
+        keys.push("groups")
+        scopePut(o, "index", m.begin)
+        scopePut(o, "input", s)
+        var named = anytype
+        named = undefined
+        var gobj = {}
+        var gkeys = []
+        for (var k = 1; k <= n; k++) {
+            var nm = rxNameAt(prog, k)
+            if (nm != "") {
+                gv = rxGroup(prog, s, m, k)
+                if (gv === null) { gv = undefined }
+                scopePut(gobj, nm, gv)
+                gkeys.push(nm)
+            }
+        }
+        if (gkeys.length > 0) { scopePut(gobj, "__keys", gkeys); named = gobj }
+        scopePut(o, "groups", named)
+        scopePut(o, "__keys", keys)
+        return o
+    }
+    // RegExp#exec. This is where g and y live: both read the search start out of
+    // lastIndex, both reset it to 0 on failure, and y additionally refuses a match that
+    // does not begin exactly there.
+    function reExec(rv, s) {
+        var prog = reProgOf(rv)
+        var useLast = rv.global || rv.sticky
+        var at = 0
+        if (useLast) {
+            at = rv.lastIndex
+            if (typeof at != "number") { at = 0 }
+        }
+        if (at < 0 || at > s.length) { if (useLast) { rv.lastIndex = 0 } return null }
+        var m = rxSearch(prog, s, at)
+        if (m != null && rv.sticky && m.begin != at) { m = null }
+        if (m == null) { if (useLast) { rv.lastIndex = 0 } return null }
+        if (useLast) { rv.lastIndex = m.end }
+        return reResult(rv, s, m)
+    }
+    function reTest(rv, s) {
+        if (rv.global || rv.sticky) { return reExec(rv, s) != null }
+        return rxSearch(reProgOf(rv), s, 0) != null
+    }
+    // String#match: with g the whole matches as a flat array, without it exactly exec's
+    // answer. String#matchAll always needs g and yields the full result of every match;
+    // JavaScript hands back an iterator, this hands back the array a spread would build,
+    // which is what for-of over it needs anyway.
+    function reMatchAll(rv, s, whole) {
+        var prog = reProgOf(rv)
+        var out = []
+        var at = 0
+        while (at <= s.length) {
+            var m = rxSearch(prog, s, at)
+            if (m == null) { break }
+            if (whole) { out.push(rxGroup(prog, s, m, 0)) } else { out.push(reResult(rv, s, m)) }
+            at = (m.end == m.begin) ? m.end + 1 : m.end
+        }
+        rv.lastIndex = 0
+        return out
+    }
+    // String#split with a pattern, following SplitMatcher: the match is ANCHORED at the
+    // scan position, an empty match at the current segment start does not split, and the
+    // capture groups of the separator are part of the output.
+    function reSplit(rv, s, limit) {
+        var prog = reProgOf(rv)
+        var out = []
+        var n = rxGroupCount(prog)
+        var gv = anytype
+        if (s.length == 0) {
+            var m0 = rxSearch(prog, s, 0)
+            if (m0 == null) { out.push("") }
+            return out
+        }
+        if (limit == 0) { return out }
+        var p = 0
+        var q = 0
+        while (q < s.length) {
+            var m = rxSearch(prog, s, q)
+            if (m == null || m.begin != q) { q = q + 1; continue }
+            if (m.end == p) { q = q + 1; continue }
+            out.push(s.substring(p, q))
+            if (limit >= 0 && out.length >= limit) { return out }
+            for (var i = 1; i <= n; i++) {
+                gv = rxGroup(prog, s, m, i)
+                if (gv === null) { gv = undefined }
+                out.push(gv)
+                if (limit >= 0 && out.length >= limit) { return out }
+            }
+            p = m.end
+            q = p
+        }
+        out.push(s.substring(p, s.length))
+        if (limit >= 0 && out.length > limit) { return out.slice(0, limit) }
+        return out
+    }
+    // rxExpand (lib/regex.js) expands the \1 / \k<name> spelling every other language in
+    // this tree uses. JavaScript spells the same thing $1 / $<name> / $& / $$, so the
+    // template is rewritten HERE, in the grammar, exactly as the library header asks.
+    // A literal backslash in the JavaScript template has to be doubled on the way in, or
+    // rxExpand would read it as the start of one of its own forms.
+    // Two forms are NOT covered, because the engine has nothing to rewrite them to: the
+    // prefix $` and the suffix $' - both stay the two characters they are written with.
+    // $10 and up read as $1 followed by a '0', since rxExpand takes one digit.
+    function jsReTemplate(t) {
+        var out = ""
+        var i = 0
+        while (i < t.length) {
+            var ch = t.charCodeAt(i)
+            if (ch == 92) { out = out + "\\\\"; i = i + 1; continue }
+            if (ch != 36) { out = out + t.charAt(i); i = i + 1; continue }
+            var d = t.charCodeAt(i + 1)
+            if (d == 36) { out = out + "$"; i = i + 2; continue }                          // $$
+            if (d == 38) { out = out + "\\0"; i = i + 2; continue }                        // $&
+            if (d >= 49 && d <= 57) { out = out + "\\" + t.charAt(i + 1); i = i + 2; continue } // $1..$9
+            if (d == 60) {                                                                 // $<name>
+                var j = i + 2
+                while (j < t.length && t.charCodeAt(j) != 62) { j = j + 1 }
+                out = out + "\\k<" + t.substring(i + 2, j) + ">"
+                i = j + 1
+                continue
+            }
+            out = out + "$"
+            i = i + 1
+        }
+        return out
+    }
+    // String#replace / #replaceAll. A STRING replacement goes through rxReplace after the
+    // template rewrite; a FUNCTION replacement is the interpreter's own job, because only
+    // this side can call a closure once per match.
+    function reReplace(rv, s, repl, forceAll) {
+        var prog = reProgOf(rv)
+        var all = forceAll || rv.global
+        if (typeof repl != "function") {
+            var res = rxReplace(prog, s, jsReTemplate("" + repl), all)
+            if (rv.global) { rv.lastIndex = 0 }
+            return res
+        }
+        var n = rxGroupCount(prog)
+        var out = ""
+        var at = 0
+        var last = 0
+        var gv = anytype
+        while (at <= s.length) {
+            var m = rxSearch(prog, s, at)
+            if (m == null) { break }
+            out = out + s.substring(last, m.begin)
+            var argv = []
+            for (var i = 0; i <= n; i++) {
+                gv = rxGroup(prog, s, m, i)
+                if (gv === null) { gv = undefined }
+                argv.push(gv)
+            }
+            argv.push(m.begin)
+            argv.push(s)
+            out = out + ("" + callWithThis(repl, undefined, argv))
+            last = m.end
+            at = m.end
+            if (m.end == m.begin) {
+                if (m.end < s.length) { out = out + s.charAt(m.end) }
+                last = m.end + 1
+                at = m.end + 1
+            }
+            if (!all) { break }
+        }
+        if (rv.global) { rv.lastIndex = 0 }
+        if (last > s.length) { return out }
+        return out + s.substring(last, s.length)
+    }
+    // A method call whose receiver is a RegExp, or whose receiver is a string and whose
+    // argument is a pattern. Answers null when the call is none of its business, which is
+    // every call in a program that uses no regular expression at all.
+    function rxDispatch(target, name, args) {
+        if (isRegex(target)) {
+            var s0 = (args.length > 0) ? "" + args[0] : "undefined"
+            if (name == "test") { return {v: reTest(target, s0)} }
+            if (name == "exec") { return {v: reExec(target, s0)} }
+            if (name == "toString") { return {v: "/" + target.source + "/" + target.flags} }
+            fail("unknown RegExp method: " + name)
+        }
+        if (typeof target != "string") { return null }
+        var pat = (args.length > 0) ? args[0] : undefined
+        if (name == "match" || name == "matchAll" || name == "search") {
+            var rv = isRegex(pat) ? pat : mkRegex((pat == undefined) ? "" : "" + pat, "")
+            if (name == "search") {
+                var m = rxSearch(reProgOf(rv), target, 0)
+                return {v: (m == null) ? -1 : m.begin}
+            }
+            if (name == "matchAll") { return {v: reMatchAll(rv, target, false)} }
+            if (rv.global) {
+                var all = reMatchAll(rv, target, true)
+                return {v: (all.length == 0) ? null : all}
+            }
+            return {v: reExec(rv, target)}
+        }
+        if (!isRegex(pat)) { return null }   // a plain-string argument keeps the host behaviour
+        if (name == "replace") { return {v: reReplace(pat, target, args[1], false)} }
+        if (name == "replaceAll") { return {v: reReplace(pat, target, args[1], true)} }
+        if (name == "split") {
+            var lim = -1
+            if (args.length > 1 && args[1] != undefined && args[1] != null) { lim = args[1] - 0 }
+            return {v: reSplit(pat, target, lim)}
+        }
+        return null
+    }
+    // new RegExp(src, flags) and RegExp(src, flags): the same construction with the flags
+    // arriving at run time instead of at parse time.
+    scopePut(hostGlobals, "RegExp", function() {
+        var a0 = (arguments.length > 0) ? arguments[0] : ""
+        var src = ""
+        var fl = ""
+        if (isRegex(a0)) { src = a0.source; fl = a0.flags }
+        else if (a0 == undefined) { src = "" }
+        else { src = "" + a0 }
+        if (arguments.length > 1 && arguments[1] != undefined && arguments[1] != null) { fl = "" + arguments[1] }
+        return mkRegex(src, jsReCanon(fl))
+    })
 
     // JavaScript's own string unescaping, on top of the shared unescapeJs: that one
     // predates \u{...} and the line continuation, and it is used by a dozen other
@@ -3568,7 +4113,16 @@ NotFuncHead = :script(~~
                     curThis = undefined
                 } else {
                     var argv = evalArgs(s.args)
-                    if (typeof cur == "function") {
+                    // The regular-expression surface first: a RegExp receiver has no
+                    // members of its own (getMember answered undefined), and a string
+                    // receiver whose argument is a pattern must not fall through to the
+                    // host's own string method, which knows nothing about these values.
+                    // Answers null for every call that is none of its business, which is
+                    // every call in a program that uses no regular expression.
+                    var rxHit = rxDispatch(curThis, lastKey, argv)
+                    if (rxHit != null) {
+                        cur = rxHit.v
+                    } else if (typeof cur == "function") {
                         cur = callWithThis(cur, curThis, argv)
                     } else {
                         cur = mcall(curThis, lastKey, argv)

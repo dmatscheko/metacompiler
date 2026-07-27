@@ -907,8 +907,17 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
             return sp
         } else if (op == RX_BREF) {
             var g = as[pc]
-            var from = caps[2 * g]
-            var to = caps[2 * g + 1]
+            // A reference to a group NUMBER the pattern never defined (\1 in a
+            // pattern with no groups) is out of range in caps. Treated exactly like
+            // a group that did not take part - it matches the empty string. Without
+            // the length test the JS read is undefined and sp silently goes NaN,
+            // and the Go twin panics with an index-out-of-range.
+            var from = -1
+            var to = -1
+            if (2 * g + 1 < caps.length) {
+                from = caps[2 * g]
+                to = caps[2 * g + 1]
+            }
             if (from < 0 || to < 0) {
                 // A group that did not take part matches the empty string.
                 pc = pc + 1

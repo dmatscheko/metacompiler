@@ -380,6 +380,91 @@ function s19() {
     check("exc3", reached === 1)
 }
 
+// ===== SECTION 20: regular expressions =====
+// Every expected value below was cross-checked against node v24.
+function s20() {
+    var re = /a(b+)c/
+    check("re01", re.source === "a(b+)c" && re.flags === "" && re.global === false)
+    check("re02", re.test("xxabbbc") && !re.test("ac"))
+    var m = re.exec("xxabbbc")
+    check("re03", m[0] === "abbbc" && m[1] === "bbb" && m.index === 2 && m.length === 2)
+    check("re04", m.input === "xxabbbc" && m.groups === undefined)
+    check("re05", re.exec("nope") === null)
+    // Flags: i folds case, s makes '.' match a newline, m makes ^ and $ line anchors -
+    // and WITHOUT m they are string anchors, which is the one place JavaScript differs
+    // from Ruby.
+    check("re06", /AB/i.test("xxab"))
+    check("re07", /a.b/s.test("a\nb") && !/a.b/.test("a\nb"))
+    check("re08", /^b$/m.test("a\nb\nc") && !/^b$/.test("a\nb\nc"))
+    // g is not a match mode, it is lastIndex iteration state.
+    var g = /a/g
+    var hits = ""
+    var one = g.exec("aXaXa")
+    while (one !== null) {
+        hits = hits + one.index
+        one = g.exec("aXaXa")
+    }
+    check("re09", hits === "024" && g.lastIndex === 0)
+    // y (sticky) anchors the search at lastIndex.
+    var st = /a/y
+    check("re10", !st.test("ba"))
+    st.lastIndex = 1
+    check("re11", st.test("ba") && st.lastIndex === 2)
+    // Named groups reach the match through .groups.
+    var nm = /(?<y>[0-9]{4})-(?<m>[0-9]{2})/.exec("on 2024-05-06")
+    check("re12", nm.groups.y === "2024" && nm.groups.m === "05" && nm.index === 3)
+    // String.prototype.match / matchAll / search.
+    check("re13", "a1b22".match(/\d+/)[0] === "1")
+    check("re14", "a1b22".match(/\d+/g).length === 2)
+    check("re15", "abc".match(/z/) === null)
+    check("re16", "abc".search(/c/) === 2 && "abc".search(/z/) === -1)
+    var all = [... "a1b2".matchAll(/(\w)(\d)/g)]
+    var joined = ""
+    for (var i = 0; i < all.length; i++) { joined = joined + all[i][1] + all[i][2] }
+    check("re17", joined === "a1b2")
+    // replace / replaceAll, with the $-template and with a function.
+    check("re18", "a1b22".replace(/\d+/, "#") === "a#b22")
+    check("re19", "a1b22".replace(/\d+/g, "#") === "a#b#")
+    check("re20", "one two".replace(/(\w+) (\w+)/, "$2 $1") === "two one")
+    check("re21", "abc".replace(/b/, "[$&]") === "a[b]c")
+    check("re22", "ab".replace(/a/, "$$") === "$b")
+    check("re23", "2024-05".replace(/(?<y>\d{4})-(?<m>\d{2})/, "$<m>/$<y>") === "05/2024")
+    check("re24", "aXbXc".replace(/X/g, function (w, off) { return "(" + off + ")" }) === "a(1)b(3)c")
+    check("re25", "aaa".replaceAll(/a/g, "b") === "bbb")
+    // split with a pattern keeps the separator's capture groups.
+    check("re26", "a,b,,c".split(/,/).length === 4)
+    check("re27", "a-b_c".split(/([-_])/).length === 5)
+    check("re28", "a1b".split(/\d/)[1] === "b")
+    // A string argument is not a pattern: these keep the plain string behaviour.
+    check("re29", "a.c".replace(".", "-") === "a-c" && "a.c".split(".").length === 2)
+    // new RegExp / RegExp with the flags arriving at run time.
+    var dyn = new RegExp("b+", "i")
+    check("re30", dyn.test("aBBc") && dyn.source === "b+" && dyn.flags === "i")
+    var dyn2 = RegExp("\\d")
+    check("re31", dyn2.test("x9") && !dyn2.test("xy"))
+    check("re32", typeof RegExp === "function" && typeof dyn === "object")
+    // Backreferences, alternation, lazy quantifiers and a group that did not take part.
+    check("re33", /(a)\1/.test("aa") && !/(a)\1/.test("ab"))
+    check("re34", /<(.+?)>/.exec("<a><b>")[1] === "a")
+    check("re35", /(a)(b)?/.exec("a")[2] === undefined)
+    check("re36", /^(cat|dog)s?$/.test("dogs"))
+    // Lookahead, and the escape forms the engine reads out of the RAW body.
+    check("re37", /foo(?!bar)/.test("foobaz") && !/foo(?!bar)/.test("foobar"))
+    check("re38", /a\/b/.test("a/b") && /\[\]/.test("[]"))
+    check("re39", /^\d{2,3}$/.test("123") && !/^\d{2,3}$/.test("1234"))
+    check("re40", /[a-z0-9_$]+/.exec("__x9!")[0] === "__x9")
+    // A '/' after a value is still division, which is what keeps the literal out of the
+    // way of ordinary arithmetic.
+    var division = 8 / 2 / 2
+    check("re41", division === 2)
+    check("re42", /x/.toString() === "/x/" && /x/gi.toString() === "/x/gi")
+    // Each evaluation of a literal yields a NEW object, so the lastIndex of a global
+    // pattern written inside a loop starts over every time round.
+    var counted = 0
+    for (var k = 0; k < 3; k++) { if (/z/g.test("z")) { counted = counted + 1 } }
+    check("re43", counted === 3)
+}
+
 // ===== END SECTIONS =====
 
 function main() {
@@ -402,6 +487,7 @@ function main() {
     s17() // SECTION-CALL 17
     s18() // SECTION-CALL 18
     s19() // SECTION-CALL 19
+    s20() // SECTION-CALL 20
     println("full: " + checks + " checks, " + failures + " failures")
     return failures
 }

@@ -977,7 +977,15 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			return sp
 		case rxOpBref:
 			g := re.as[pc]
-			from, to := caps[2*g], caps[2*g+1]
+			// A reference to a group NUMBER the pattern never defined (\1 in a
+			// pattern with no groups) is out of range in caps. Treated exactly like
+			// a group that did not take part - it matches the empty string. Without
+			// the length test this panics with an index-out-of-range, and the JS
+			// twin reads undefined and lets sp go NaN.
+			from, to := -1, -1
+			if 2*g+1 < len(caps) {
+				from, to = caps[2*g], caps[2*g+1]
+			}
 			if from < 0 || to < 0 {
 				// A group that did not take part matches the empty string.
 				pc++
@@ -1554,6 +1562,16 @@ func (rt *jsrt) rxMatchOp(l, r interface{}) interface{} {
 	return float64(m.begin)
 }
 
+// rxExtraExterns is the extension point for the PER-LANGUAGE method dispatchers.
+// The engine above is language-neutral, but a compiler grammar still needs a
+// receiver-and-name dispatch table in Go (the Ruby one is rxRegexMethod), and one
+// table per language would otherwise mean editing this file once per language.
+// Instead each sibling file (jsrtregexpy.go, jsrtregexkt.go, jsrtregexjs.go)
+// appends its own registrar in an init(), and addRegexExterns runs them all. Purely
+// additive: a registrar only ADDS names, and a language whose file is absent is
+// unaffected.
+var rxExtraExterns []func(rt *jsrt, m map[string]func(args []uint64) uint64)
+
 // addRegexExterns is the ONE hook into abnf/jsrt.go. It only ADDS js_rx* names;
 // the three wrappers capture the extern they extend and delegate to it unchanged,
 // so no existing name is rebound and no other language's compiler can notice this
@@ -1630,6 +1648,11 @@ func (rt *jsrt) addRegexExterns(m map[string]func(args []uint64) uint64) {
 	// The =~ / !~ operators.
 	m["js_rxmatch"] = func(a []uint64) uint64 { return w(rt.rxMatchOp(u(a[0]), u(a[1]))) }
 	m["js_rxnmatch"] = func(a []uint64) uint64 { return boolH(rt.rxMatchOp(u(a[0]), u(a[1])) == jsNull) }
+
+	// The per-language dispatchers (see rxExtraExterns above).
+	for _, add := range rxExtraExterns {
+		add(rt, m)
+	}
 }
 
 func init() {

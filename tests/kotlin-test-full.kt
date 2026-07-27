@@ -489,6 +489,85 @@ fun s22() {
     check("sus1", op != null)
 }
 
+// ===== SECTION 23: regular expressions =====
+// Regex and MatchResult over the shared engine (languages/lib/regex.js for the
+// interpreter, abnf/jsrtregex.go + abnf/jsrtregexkt.go for the compiler). Kotlin
+// has no regexp literal, so every pattern arrives as Regex("...") or
+// "...".toRegex(). Deviation from the JVM: Regex.escape answers explicitly
+// backslashed text rather than Pattern.quote's \Q...\E, so only its BEHAVIOUR is
+// asserted here; RegexOption.CANON_EQ and UNIX_LINES are reported as unsupported
+// instead of being silently ignored, and lookbehind, POSIX brackets and \p{...}
+// are not implemented by the engine.
+fun s23() {
+    val word23 = Regex("[a-c]+")
+    check("re01", word23.matches("abc") && !word23.matches("abcd"))
+    check("re02", word23.containsMatchIn("xxabyy") && !word23.containsMatchIn("zzz"))
+    check("re03", word23.pattern == "[a-c]+" && word23.toString() == "[a-c]+")
+    val hit23 = word23.find("xxabyy")
+    check("re04", hit23 != null && hit23.value == "ab")
+    check("re05", hit23 != null && hit23.range.first == 2 && hit23.range.last == 3)
+    check("re06", word23.find("zzz") == null)
+    check("re07", Regex("b").find("abcb", 2)!!.range.first == 3)
+
+    val pair23 = Regex("(\\w+)@(\\w+)")
+    val m23 = pair23.find("mail bob@host end")!!
+    check("re08", m23.value == "bob@host" && m23.groupValues[0] == "bob@host")
+    check("re09", m23.groupValues[1] == "bob" && m23.groupValues[2] == "host")
+    check("re10", m23.groups[1]!!.value == "bob" && m23.groups[2]!!.range.first == 9)
+    check("re11", m23.groups.size == 3 && Regex("(a)|(b)").find("b")!!.groups[1] == null)
+    val (user23, host23) = m23.destructured
+    check("re12", user23 == "bob" && host23 == "host")
+    val named23 = Regex("(?<who>[a-z]+)!").find("say hey! now")!!
+    check("re13", named23.groups["who"]!!.value == "hey")
+
+    // The replacement template is Kotlin's ($1 / ${name}, backslash escapes), not
+    // the engine's \1 - the grammar rewrites it on both sides of the pair.
+    check("re14", pair23.replace("a@b c@d", "\$2-\$1") == "b-a d-c")
+    check("re15", pair23.replaceFirst("a@b c@d", "\$2-\$1") == "b-a c@d")
+    check("re16", Regex("(?<d>[0-9])").replace("a1b2", "[\${d}]") == "a[1]b[2]")
+    check("re17", Regex("x").replace("x", Regex.escapeReplacement("\$1")) == "\$1")
+    check("re18", Regex("y").replace("y", "a\\\\b") == "a\\b")
+    check("re19", Regex("[a-z]").replace("abc") { "<" + it.value + ">" } == "<a><b><c>")
+
+    val parts23 = Regex("\\s+").split("a b  c")
+    check("re20", parts23.size == 3 && parts23[0] == "a" && parts23[2] == "c")
+    val lim23 = Regex(",").split("a,b,c", 2)
+    check("re21", lim23.size == 2 && lim23[0] == "a" && lim23[1] == "b,c")
+
+    check("re22", "a1b2".replace(Regex("[0-9]"), "#") == "a#b#")
+    check("re23", "a1b2".contains(Regex("[0-9]")) && !"abc".contains(Regex("[0-9]")))
+    check("re24", "a1b2".matches(Regex("[a-z0-9]+")) && !"a1b2".matches(Regex("[a-z]+")))
+    val sp23 = "x1y22z".split(Regex("[0-9]+"))
+    check("re25", sp23.size == 3 && sp23[1] == "y" && sp23[2] == "z")
+    check("re26", "[0-9]".toRegex().containsMatchIn("a7"))
+    check("re27", "he.lo".toRegex(RegexOption.LITERAL).matches("he.lo"))
+
+    // RegexOption maps onto the engine's neutral i / s / m / x. Kotlin (like Java,
+    // unlike Ruby) anchors ^ and $ to the whole input unless MULTILINE is given.
+    check("re28", Regex("A", RegexOption.IGNORE_CASE).containsMatchIn("xax"))
+    check("re29", Regex("a.b", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)).matches("A\nB"))
+    check("re30", Regex("^b\$", RegexOption.MULTILINE).containsMatchIn("a\nb\nc"))
+    check("re31", !Regex("^b\$").containsMatchIn("a\nb\nc"))
+    check("re32", Regex("a b # note", RegexOption.COMMENTS).matches("ab"))
+    val lit23 = Regex("a.b", RegexOption.LITERAL)
+    check("re33", lit23.matches("a.b") && !lit23.matches("axb"))
+    check("re34", Regex(Regex.escape("1+1")).matches("1+1"))
+
+    check("re35", Regex("b").findAll("abcb").count() == 2)
+    var next23 = Regex("b").find("abcb")
+    var seen23 = 0
+    while (next23 != null) { seen23 += 1; next23 = next23.next() }
+    check("re36", seen23 == 2)
+    val whole23 = Regex("[0-9]+").matchEntire("123")
+    check("re37", whole23 != null && whole23.value == "123" && whole23.range.last == 2)
+    check("re38", Regex("[0-9]+").matchEntire("12a") == null)
+
+    check("re39", Regex("(ab)\\1").containsMatchIn("xabab"))
+    check("re40", Regex("a+?b").find("aaab")!!.value == "aaab")
+    check("re41", Regex("colou?r").matches("color") && Regex("x{2,3}").find("xxxx")!!.value == "xxx")
+    check("re42", Regex("(?=a)[a-z]").find("za")!!.range.first == 1)
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -514,6 +593,7 @@ fun main() {
     s20() // SECTION-CALL 20
     s21() // SECTION-CALL 21
     s22() // SECTION-CALL 22
+    s23() // SECTION-CALL 23
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

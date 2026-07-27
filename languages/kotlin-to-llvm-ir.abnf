@@ -58,6 +58,25 @@ name declared by two classes shares one named-argument slot list. Not in the sub
 coroutines (suspend parses but nothing resumes), reflection, member-level extension
 functions, non-lazy property delegates.
 
+REGULAR EXPRESSIONS are genuine, over the shared engine (abnf/jsrtregex.go plus the
+Kotlin dispatcher abnf/jsrtregexkt.go, reached through the js_rxkt externals; the
+interpreter grammar runs the same engine as languages/lib/regex.js). Kotlin has no
+regexp literal, so a pattern arrives as Regex(p), Regex(p, options) or p.toRegex(options);
+the options are RegexOption entries, singly or in a setOf(...). IGNORE_CASE,
+DOT_MATCHES_ALL, MULTILINE and COMMENTS map onto the engine's neutral i / s / m / x,
+LITERAL quotes the pattern instead of being a mode, and CANON_EQ and UNIX_LINES are
+REPORTED as unsupported rather than silently ignored. Regex answers matches (whole
+input), containsMatchIn, find, findAll, matchEntire, replace (with a string template or
+a lambda), replaceFirst, split with an optional limit, pattern and toString;
+Regex.escape and Regex.escapeReplacement are the quoting helpers. A MatchResult carries
+value, range, groupValues, groups (by number and by name), destructured for
+val (a, b) = m.destructured, and next(). String.matches, .replace, .split and .contains
+take a Regex too, and only then - a String argument keeps the plain behavior. The
+replacement template is Kotlin's own dollar-one / dollar-brace-name spelling, rewritten
+before emission to what the engine expands. The engine has no lookbehind, no POSIX
+bracket expressions and no unicode property escapes, and Regex.escape answers explicitly
+backslashed text rather than the JVM's quote-region form.
+
 Functions, methods and lambdas become IR functions jsf_N(env, args) (methods get the
 instance prepended, lambdas close over their scope via js_closure), classes become
 descriptor objects linked by __super (the chain the runtime walks for method lookup,
@@ -2319,7 +2338,11 @@ KwContract  = "contract" KwEnd ;
                         return callExt(bb, "js_call", [invRecv, hUndef, invArgs])
                     })
                 }
-                return {b: ea.b, v: callExt(ea.b, "js_mcall", [cur, emitStr(ea.b, s.name), ea.v])}
+                // js_rxktmcall is js_mcall plus the Regex / MatchResult surface (and
+                // the String members that take a pattern); it hands every other
+                // receiver straight to js_mcall, so this is behaviour-preserving for
+                // a program that uses no regexps. See abnf/jsrtregexkt.go.
+                return {b: ea.b, v: callExt(ea.b, "js_rxktmcall", [cur, emitStr(ea.b, s.name), ea.v])}
             }
             if (s.kind == "field") {
                 // An extension property wins only when no builtin and no class property
@@ -2331,15 +2354,19 @@ KwContract  = "contract" KwEnd ;
                     return {b: b, v: callExt(b, "js_call", [gV, hUndef, gargsV])}
                 }
                 var fname = s.name == "size" ? "length" : s.name
-                return {b: b, v: callExt(b, "js_get", [cur, emitStr(b, fname)])}
+                // js_rxktget is js_get plus Regex.pattern and the MatchResult
+                // properties (value / range / groupValues / groups / destructured);
+                // every other receiver falls through to js_get.
+                return {b: b, v: callExt(b, "js_rxktget", [cur, emitStr(b, fname)])}
             }
             // a[i]: the `get` convention when some class declares it, else the plain
             // read. js_kindex, not js_get, so a STRING yields the Char at that index
             // (Kotlin's CharSequence.get) while a list still yields its element.
             var ir2 = s.idx(b)
             var keyV = ir2.v
+            // js_rxktindex is js_kindex plus m.groups[i] / m.groups["name"].
             return emitOpDispatch(ir2.b, cur, "get", [keyV], function(bb) {
-                return callExt(bb, "js_kindex", [cur, keyV])
+                return callExt(bb, "js_rxktindex", [cur, keyV])
             })
         }
         return function(b) {
@@ -2734,6 +2761,21 @@ KwContract  = "contract" KwEnd ;
             }
         }
         return function(b) {
+            // Regex(pattern) / Regex(pattern, options). Kotlin has no regexp literal,
+            // so this constructor call IS the literal syntax; the pattern is compiled
+            // (and reported on) by js_rxktnew - see abnf/jsrtregexkt.go. A program
+            // that declares its own Regex class or function keeps it.
+            if (name == "Regex" && classNames[name] == undefined && funNames["$" + name] != true) {
+                var rp = args[0].at(b)
+                b = rp.b
+                var roV = hUndef
+                if (args.length > 1) {
+                    var ro = args[1].at(b)
+                    b = ro.b
+                    roV = ro.v
+                }
+                return {b: b, v: callExt(b, "js_rxktnew", [rp.v, roV])}
+            }
             // A BARE call to a method of the enclosing class (own or inherited):
             // `secret()` inside a method is `this.secret()`. Decided at emission time,
             // when the whole file has been walked: we are inside a type body (so there IS
@@ -3493,6 +3535,12 @@ KwContract  = "contract" KwEnd ;
     // everywhere else `field` is an ordinary name (it is only a soft keyword in Kotlin).
     makeVarRef = function(name) {
         return function(b) {
+            // `RegexOption` (its entries are their own names) and `Regex` used as a
+            // value, which is only ever its companion - Regex.escape(s) and friends.
+            if ((name == "RegexOption" || name == "Regex") && classNames[name] == undefined
+                && funNames["$" + name] != true) {
+                return {b: b, v: callExt(b, "js_rxktglobal", [emitStr(b, name)])}
+            }
             if (emitOuterProps != null && emitOuterProps["$" + name] == true) {
                 var itV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
                 return {b: b, v: callExt(b, "js_get", [callExt(b, "js_get", [itV, emitStr(b, "__outer")]),

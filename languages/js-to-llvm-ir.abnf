@@ -31,8 +31,10 @@ the general `new` forms (a member-path or parenthesized callee, a nested new, no
 list), a class heritage that is not a plain name, for-in/of over a member path, export
 statements and `with`. Deliberate semantic simplifications, because the runtime has no
 model for them: `await` is the identity (there is no promise type and no job queue, so an
-async function is an ordinary function that returns its value), a regular expression
-literal evaluates to a RegExp-shaped object with source/flags but no matching engine, a
+async function is an ordinary function that returns its value), a regular expression is
+matched by the shared engine (abnf/jsrtregex.go plus abnf/jsrtregexjs.go), which is one
+permissive dialect shared by four languages and so has no lookbehind and no property
+escapes, a
 for-of over a generator materializes it first (the loop iterates by index), a BigInt that
 meets a double in an arithmetic operator converts instead of raising a TypeError, and the
 string parts of a tagged template are an object with index keys rather than an Array.
@@ -1186,7 +1188,7 @@ Digit       = "0"..."9" ;
 // `lastIndex` of a fresh regex, so the literal itself, its typeof and its inspection
 // work; matching (test/exec/String.prototype.match) is not implemented.
 RegexLit    <~~ push(makeRegex(up.in)) ~~>
-            = "/" :whitespace() RegexFirst { RegexPart } "/" { RegexFlag } :whitespace(Whitespace) ;
+            = "/" :whitespace() ReStrictU RegexFirst { RegexPart } "/" { RegexFlag } :whitespace(Whitespace) ;
 RegexFirst  = RegexEsc | RegexClass | RegexFirstChar ;
 RegexPart   = RegexEsc | RegexClass | RegexBodyChar ;
 RegexClass  = "[" { RegexEsc | RegexClassChar } "]" ;
@@ -1200,6 +1202,233 @@ RegexClassChar = "\x00"..."\x09" | "\x0b"..."\x5b" | "\x5e"..."\U0010ffff" ;
 // spells; without it the flags stop at the backslash and the rest of the line is a second
 // statement, which automatic semicolon insertion then refuses.)
 RegexFlag   = IdPart ;
+
+// The 'u' flag switches JavaScript's regexp grammar from the sloppy Annex B one to the
+// STRICT one, and the difference is a SyntaxError at parse time, not a different match:
+// under 'u' a lone '{' or '}' is not a literal brace, a backreference must have a group,
+// an assertion may not be quantified, and the only identity escapes left are the syntax
+// characters and '/'. lib/regex.js cannot answer this - it deliberately implements one
+// permissive dialect for four languages, and it is not reachable from the parser VM
+// anyway - so the check is a zero-width guard right after the opening '/', re-derived
+// from the source on every call (guards must be pure functions of source and position,
+// see docs/abnf-dialect-gotchas.md). Verified against node v24 parsing with the Script
+// goal: /\1/u, /{*/u, /}?/u and /(?!.){0,}?/u are all SyntaxErrors while their unflagged
+// spellings are all legal.
+//
+// Only 'u' turns it on, not 'v': the 'v' flag's class-set syntax ([[a][b]], \q{...}) is
+// a THIRD grammar again, and refusing what it adds would be worse than accepting it.
+ReStrictU   = :script(~~
+    (function () {
+        var isHex = function (x) {
+            return (x >= 48 && x <= 57) || (x >= 97 && x <= 102) || (x >= 65 && x <= 70)
+        }
+        // The length of the escape starting at p (p points at the backslash), or -1 when
+        // 'u' mode does not allow it. A decimal backreference is NOT handled here - the
+        // caller has to count the groups first.
+        var escLen = function (p, inClass) {
+            var e = c.peek(p + 1)
+            if (e < 0) { return -1 }
+            // CharacterClassEscape and ControlEscape.
+            if (e == 100 || e == 68 || e == 115 || e == 83 || e == 119 || e == 87) { return 2 }
+            if (e == 102 || e == 110 || e == 114 || e == 116 || e == 118) { return 2 }
+            if (e == 98) { return 2 }                        // \b: assertion, or backspace in a class
+            if (e == 66) { if (inClass) { return -1 } return 2 }
+            if (e == 99) {                                   // \cX
+                var x = c.peek(p + 2)
+                if ((x >= 97 && x <= 122) || (x >= 65 && x <= 90)) { return 3 }
+                return -1
+            }
+            if (e == 120) {                                  // \xHH
+                if (isHex(c.peek(p + 2)) && isHex(c.peek(p + 3))) { return 4 }
+                return -1
+            }
+            if (e == 117) {                                  // \uHHHH and \u{H...}
+                if (c.peek(p + 2) == 123) {
+                    var q = p + 3
+                    var n = 0
+                    while (isHex(c.peek(q))) { q = q + 1; n = n + 1 }
+                    if (n > 0 && c.peek(q) == 125) { return q + 1 - p }
+                    return -1
+                }
+                if (isHex(c.peek(p + 2)) && isHex(c.peek(p + 3)) && isHex(c.peek(p + 4)) && isHex(c.peek(p + 5))) { return 6 }
+                return -1
+            }
+            if (e == 112 || e == 80) {                       // \p{...} / \P{...}
+                if (c.peek(p + 2) != 123) { return -1 }
+                var q2 = p + 3
+                while (q2 < p + 128 && c.peek(q2) != 125 && c.peek(q2) >= 0) { q2 = q2 + 1 }
+                if (c.peek(q2) != 125) { return -1 }
+                return q2 + 1 - p
+            }
+            if (e == 107) {                                  // \k<name>
+                if (inClass) { return -1 }
+                if (c.peek(p + 2) != 60) { return -1 }
+                var q3 = p + 3
+                while (q3 < p + 256 && c.peek(q3) != 62 && c.peek(q3) >= 0) { q3 = q3 + 1 }
+                if (c.peek(q3) != 62) { return -1 }
+                return q3 + 1 - p
+            }
+            if (e == 48) {                                   // \0, but not a legacy octal
+                var d0 = c.peek(p + 2)
+                if (d0 >= 48 && d0 <= 57) { return -1 }
+                return 2
+            }
+            if (e >= 49 && e <= 57) { return -1 }            // the caller handles \1..\9
+            // SyntaxCharacter and '/' are the only identity escapes 'u' keeps; a class
+            // adds '-'.
+            if (e == 94 || e == 36 || e == 92 || e == 46 || e == 42 || e == 43 || e == 63
+                || e == 40 || e == 41 || e == 91 || e == 93 || e == 123 || e == 125
+                || e == 124 || e == 47) { return 2 }
+            if (inClass && e == 45) { return 2 }
+            return -1
+        }
+
+        // ----- 1. where does the literal end, and does it carry 'u'? -----
+        var i = 0
+        var inCls = false
+        var end = -1
+        while (i < 65536) {
+            var ch = c.peek(i)
+            if (ch < 0 || ch == 10 || ch == 13) { return undefined }   // not a literal; the rules report it
+            if (ch == 92) { i = i + 2; continue }
+            if (inCls) { if (ch == 93) { inCls = false } }
+            else if (ch == 91) { inCls = true }
+            else if (ch == 47) { end = i; break }
+            i = i + 1
+        }
+        if (end < 0) { return undefined }
+        var strict = false
+        var k = end + 1
+        while (k < end + 32) {
+            var f = c.peek(k)
+            if (!((f >= 97 && f <= 122) || (f >= 65 && f <= 90) || (f >= 48 && f <= 57))) { break }
+            if (f == 117) { strict = true }
+            k = k + 1
+        }
+        if (!strict) { return undefined }
+
+        // ----- 2. how many capturing groups are there? -----
+        var ng = 0
+        var j = 0
+        inCls = false
+        while (j < end) {
+            var a = c.peek(j)
+            if (a == 92) { j = j + 2; continue }
+            if (inCls) { if (a == 93) { inCls = false } j = j + 1; continue }
+            if (a == 91) { inCls = true; j = j + 1; continue }
+            if (a == 40) {
+                if (c.peek(j + 1) != 63) { ng = ng + 1 }
+                else if (c.peek(j + 2) == 60 && c.peek(j + 3) != 61 && c.peek(j + 3) != 33) { ng = ng + 1 }
+            }
+            j = j + 1
+        }
+
+        // ----- 3. the strict walk -----
+        // prev classifies what a quantifier would attach to: 0 nothing, 1 a quantifiable
+        // atom, 2 an assertion (never quantifiable under 'u'), 3 an atom that already
+        // carries a quantifier (only a lazy '?' may follow), 4 a lazy quantifier.
+        var bad = false
+        var prev = 0
+        var gk = []
+        j = 0
+        inCls = false
+        while (j < end && !bad) {
+            var ch2 = c.peek(j)
+            if (inCls) {
+                if (ch2 == 93) { inCls = false; prev = 1; j = j + 1; continue }
+                if (ch2 == 92) {
+                    var L2 = escLen(j, true)
+                    if (L2 < 0) { bad = true; continue }
+                    j = j + L2
+                    continue
+                }
+                j = j + 1
+                continue
+            }
+            if (ch2 == 92) {
+                var e1 = c.peek(j + 1)
+                if (e1 >= 49 && e1 <= 57) {                  // \1..\9: a backreference
+                    var q6 = j + 1
+                    var val = 0
+                    while (c.peek(q6) >= 48 && c.peek(q6) <= 57) { val = val * 10 + (c.peek(q6) - 48); q6 = q6 + 1 }
+                    if (val > ng) { bad = true; continue }
+                    prev = 1
+                    j = q6
+                    continue
+                }
+                var L = escLen(j, false)
+                if (L < 0) { bad = true; continue }
+                prev = (e1 == 98 || e1 == 66) ? 2 : 1
+                j = j + L
+                continue
+            }
+            if (ch2 == 91) { inCls = true; j = j + 1; continue }
+            if (ch2 == 93) { bad = true; continue }          // a lone ']' is a literal only in Annex B
+            if (ch2 == 40) {
+                var n1 = c.peek(j + 1)
+                if (n1 != 63) { gk.push(1); prev = 0; j = j + 1; continue }
+                var n2 = c.peek(j + 2)
+                if (n2 == 58) { gk.push(1); prev = 0; j = j + 3; continue }            // (?:
+                if (n2 == 61 || n2 == 33) { gk.push(2); prev = 0; j = j + 3; continue } // (?= (?!
+                if (n2 == 60) {
+                    var n3 = c.peek(j + 3)
+                    if (n3 == 61 || n3 == 33) { gk.push(2); prev = 0; j = j + 4; continue } // (?<= (?<!
+                    var q7 = j + 3
+                    while (q7 < j + 256 && c.peek(q7) != 62 && c.peek(q7) >= 0) { q7 = q7 + 1 }
+                    if (c.peek(q7) != 62) { bad = true; continue }
+                    gk.push(1); prev = 0; j = q7 + 1; continue                          // (?<name>
+                }
+                bad = true                                    // (?X: not a group form JavaScript has
+                continue
+            }
+            if (ch2 == 41) {
+                if (gk.length == 0) { bad = true; continue }
+                prev = gk.pop()
+                j = j + 1
+                continue
+            }
+            if (ch2 == 42 || ch2 == 43) {                    // * +
+                if (prev != 1) { bad = true; continue }
+                prev = 3
+                j = j + 1
+                continue
+            }
+            if (ch2 == 63) {                                 // ? , or the lazy marker
+                if (prev == 3) { prev = 4; j = j + 1; continue }
+                if (prev != 1) { bad = true; continue }
+                prev = 3
+                j = j + 1
+                continue
+            }
+            if (ch2 == 123) {                                // {n} {n,} {n,m}
+                var q4 = j + 1
+                var nd = 0
+                while (c.peek(q4) >= 48 && c.peek(q4) <= 57) { q4 = q4 + 1; nd = nd + 1 }
+                var okq = false
+                if (nd > 0) {
+                    if (c.peek(q4) == 125) { okq = true }
+                    else if (c.peek(q4) == 44) {
+                        var q5 = q4 + 1
+                        while (c.peek(q5) >= 48 && c.peek(q5) <= 57) { q5 = q5 + 1 }
+                        if (c.peek(q5) == 125) { okq = true; q4 = q5 }
+                    }
+                }
+                if (!okq || q4 >= end) { bad = true; continue }
+                if (prev != 1) { bad = true; continue }
+                prev = 3
+                j = q4 + 1
+                continue
+            }
+            if (ch2 == 125) { bad = true; continue }         // a lone '}' is a literal only in Annex B
+            if (ch2 == 124) { prev = 0; j = j + 1; continue }
+            if (ch2 == 94 || ch2 == 36) { prev = 2; j = j + 1; continue }   // ^ $
+            prev = 1
+            j = j + 1
+        }
+        if (gk.length != 0 || inCls) { bad = true }
+        if (bad) { return abnf.newToken("\x01u-mode regexp", 0) }
+    })()
+~~) ;
 
 // The keywords end with a negative lookahead, so that e.g. 'iffy' or 'variable' stay identifiers.
 KwVar       = ( "var" | "let" | "const" ) KwEnd ;
@@ -2967,10 +3196,22 @@ NotFuncHead = :script(~~
         return exitB
     }
 
-    // A regex literal /source/flags -> a RegExp-shaped object. The matched text still
-    // carries the trailing whitespace the production re-enabled, so it is trimmed first;
-    // the LAST '/' separates the source from the flags (an inner '/' is always escaped
-    // or inside a character class, both of which the RegexPart rules keep out of the way).
+    // A regex literal /source/flags -> a RegExp value built by js_jsxnew, which is the
+    // JavaScript surface of the shared engine (abnf/jsrtregexjs.go on top of
+    // abnf/jsrtregex.go; languages/lib/regex.js is the interpreter's copy). The matched
+    // text still carries the trailing whitespace the production re-enabled, so it is
+    // trimmed first; the LAST '/' separates the source from the flags (an inner '/' is
+    // always escaped or inside a character class, both of which the RegexPart rules keep
+    // out of the way). The body is handed over RAW - the engine is what reads the
+    // backslashes. Every EVALUATION builds a fresh object, because lastIndex is
+    // per-object state.
+    //
+    // A pattern the engine refuses is not reported here: it deliberately implements one
+    // permissive dialect for four languages and so rejects a handful of patterns
+    // JavaScript accepts (lookbehind, [[:alpha:]]). Turning those into a compile error
+    // would refuse valid JavaScript, so the failure is raised when the pattern is
+    // MATCHED. The parse-time half of the check is the ReStrictU guard above, which is
+    // exact for 'u' mode.
     function makeRegex(src) {
         var s = src
         while (s.length > 0) {
@@ -2983,11 +3224,7 @@ NotFuncHead = :script(~~
         var body = s.substring(1, cut - 1)
         var flags = s.substring(cut)
         return function(b) {
-            var o = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [o, emitStr(b, "source"), emitStr(b, body)])
-            callExt(b, "js_set", [o, emitStr(b, "flags"), emitStr(b, flags)])
-            callExt(b, "js_set", [o, emitStr(b, "lastIndex"), callExt(b, "js_num_i", [handle(0)])])
-            return {b: b, v: o}
+            return {b: b, v: callExt(b, "js_jsxnew", [emitStr(b, body), emitStr(b, flags)])}
         }
     }
 
@@ -3343,9 +3580,14 @@ NotFuncHead = :script(~~
                         var elseB = curF.NewBlock("")
                         var mergeB = curF.NewBlock("")
                         b.NewCondBr(isFn, thenB, elseB)
-                        var tv = callExt(thenB, "js_call", [fV, objV, argsV])
+                        // js_jsxcall / js_jsxmcall are js_call / js_mcall plus the regular
+                        // expression surface (abnf/jsrtregexjs.go). Both delegate to the
+                        // extern they wrap for every receiver that is not a RegExp and
+                        // every string call whose argument is not a pattern, so a program
+                        // that uses no regular expression behaves exactly as before.
+                        var tv = callExt(thenB, "js_jsxcall", [fV, objV, argsV])
                         thenB.NewBr(mergeB)
-                        var ev = callExt(elseB, "js_mcall", [objV, keyV, argsV])
+                        var ev = callExt(elseB, "js_jsxmcall", [objV, keyV, argsV])
                         elseB.NewBr(mergeB)
                         cur = mergeB.NewPhi([llvm.ir.NewIncoming(tv, thenB), llvm.ir.NewIncoming(ev, elseB)])
                         b = mergeB
@@ -4279,6 +4521,16 @@ NotFuncHead = :script(~~
     function makeNew(items) {
         var clsName = items[0].cls
         var argThunks = items.slice(1)
+        // new RegExp(src, flags) needs its own form: the function arm below hands back the
+        // FRESH object it made, not what the constructor returned, so a host constructor
+        // that answers a value of its own could not use it.
+        if (clsName == "RegExp") {
+            return function(b) {
+                var rargs = callExt(b, "js_arr_new", [])
+                b = pushArgs(b, rargs, argThunks)
+                return {b: b, v: callExt(b, "js_jsxregexp", [rargs])}
+            }
+        }
         return function(b) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
             var argsV = callExt(b, "js_arr_new", [])
@@ -4601,6 +4853,10 @@ NotFuncHead = :script(~~
         // runtime has no value for, so it is undefined - and declaring it here is what
         // keeps a top level 'this' from raising "variable not defined".
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), hUndef])
+        // The RegExp global, so a bare RegExp(src, flags) call (and 'typeof RegExp') work
+        // the way 'new RegExp' does. It is declared in the PROGRAM's own scope, not in the
+        // runtime's root, so no other language's compiler can see the name.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "RegExp"), callExt(b, "js_jsxctor", [])])
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

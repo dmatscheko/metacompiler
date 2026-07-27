@@ -1049,7 +1049,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 else if (it.bytes != undefined) {
                     var rb = makeBytes(it.bytes)(b)
                     b = rb.b
-                    v = callExt(b, "js_jadd", [v, callExt(b, "js_pystr", [rb.v])])
+                    v = callExt(b, "js_jadd", [v, callExt(b, "js_pyrxstr", [rb.v])])
                 } else {
                     var r = it(b)
                     b = r.b
@@ -1123,7 +1123,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             } else if (conv == "r" || (debug && conv == null)) {
                 body = callExt(b, "js_pyrepr", [r.v])
             } else {
-                body = callExt(b, "js_pystr", [r.v])
+                body = callExt(b, "js_pyrxstr", [r.v])
             }
             if (prefix != "") { body = callExt(b, "js_jadd", [emitStr(b, prefix), body]) }
             return {b: b, v: body}
@@ -1137,7 +1137,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (typeof spec[i] == "function") {
                 var r = spec[i](b)
                 b = r.b
-                v = callExt(b, "js_jadd", [v, callExt(b, "js_pystr", [r.v])])
+                v = callExt(b, "js_jadd", [v, callExt(b, "js_pyrxstr", [r.v])])
             } else {
                 v = callExt(b, "js_jadd", [v, emitStr(b, spec[i].chunk)])
             }
@@ -1242,7 +1242,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                     } else {
                         var ea2 = emitCallArgs(b, s.args)
                         b = ea2.b
-                        cur = callExt(b, "js_pymcall", [cur, emitStr(b, s.name), ea2.pos, ea2.kw])
+                        // js_pyrxmcall is js_pymcall plus the `re` module, a compiled
+                        // pattern and a match (abnf/jsrtregexpy.go); every other
+                        // receiver is handed straight on to js_pymcall, so this is
+                        // behaviour-preserving.
+                        cur = callExt(b, "js_pyrxmcall", [cur, emitStr(b, s.name), ea2.pos, ea2.kw])
                     }
                 } else if (s.kind == "attr") {
                     cur = callExt(b, "js_pygetattr", [cur, emitStr(b, s.name)])
@@ -2782,7 +2786,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
         // type(v), str(v), int(v) and isinstance(v, C).
         b = declBuiltin(b, "type", "js_pytype", 1)
-        b = declBuiltin(b, "str", "js_pystr", 1)
+        // The `re` module. `import re` binds no module object in this flat import
+        // model, so the module is an ordinary global holding the flag constants:
+        // js_pygetattr reads re.I / re.DOTALL straight out of it, and js_pyrxmcall
+        // dispatches re.search(...) on it (abnf/jsrtregexpy.go).
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "re"), callExt(b, "js_pyre_module", [])])
+        b = declBuiltin(b, "str", "js_pyrxstr", 1)
         b = declBuiltin(b, "int", "js_pyint", 1)
         b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
         b = declBuiltin(b, "dict", "js_pydict", 1)

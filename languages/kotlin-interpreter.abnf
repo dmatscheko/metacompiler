@@ -64,6 +64,23 @@ map/filter/sumOf/forEach/count/any/joinToString plus the usual size/get/add/cont
 Coroutines are syntax only (`suspend` is parsed, never resumed); so are reflection
 and the collections API beyond the calls above.
 
+REGULAR EXPRESSIONS are genuine, over the shared engine in languages/lib/regex.js.
+Kotlin has no regexp literal, so a pattern arrives as Regex(p), Regex(p, options) or
+p.toRegex(options); the options are RegexOption entries, singly or in a setOf(...).
+IGNORE_CASE, DOT_MATCHES_ALL, MULTILINE and COMMENTS map onto the engine's neutral
+i / s / m / x, LITERAL quotes the pattern instead of being a mode, and CANON_EQ and
+UNIX_LINES are REPORTED as unsupported rather than silently ignored. Regex answers
+matches (whole input), containsMatchIn, find, findAll, matchEntire, replace (with a
+string template or a lambda), replaceFirst, split with an optional limit, pattern and
+toString; Regex.escape and Regex.escapeReplacement are the quoting helpers. A
+MatchResult carries value, range, groupValues, groups (by number and by name),
+destructured for val (a, b) = m.destructured, and next(). String.matches, .replace,
+.split and .contains take a Regex too, and only then - a String argument keeps the
+plain behavior. The replacement template is Kotlin's own dollar-one / dollar-brace-name
+spelling, rewritten here to what the engine expands. The engine has no lookbehind, no
+POSIX bracket expressions and no unicode property escapes, and Regex.escape answers
+explicitly backslashed text rather than the JVM's quote-region form.
+
 Beyond the executable subset the grammar aims at RECOGNITION: backtick-quoted names,
 package and import declarations anywhere (and a package with a body), `private
 constructor`, context parameters, contracts, intersection types, collection literals,
@@ -1471,6 +1488,14 @@ NotMemberKw = :script(~~
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
+    // The shared regular-expression engine (rxCompile / rxSearch / rxGroup / ...). It
+    // is language neutral, so the RegexOption enum is translated to its own flag
+    // letters in krxFlags below. rxFail is a KNOB, overridden by ASSIGNMENT (not by
+    // declaration, see docs/abnf-dialect-gotchas.md) so a bad pattern reports like
+    // every other Kotlin runtime error.
+    include("lib/regex.js")
+    rxFail = function (msg) { fail(msg) }
+
     // ----- Imports (same policy as the compiler grammar) -----
     // Prefixes the runtime already provides as builtins; importing them is a no-op.
     core.stdlibImports = ["kotlin", "kotlin.math", "kotlin.collections", "kotlin.system", "kotlin.text", "kotlin.ranges", "kotlin.sequences"]
@@ -1838,6 +1863,315 @@ NotMemberKw = :script(~~
     hostGlobals["longArrayOf"] = hostGlobals["listOf"]
     hostGlobals["emptyList"] = hostGlobals["listOf"]
     hostGlobals["emptySet"] = hostGlobals["listOf"]
+    hostGlobals["Regex"] = function() {
+        return mkKRegex(arguments[0], arguments.length > 1 ? arguments[1] : null)
+    }
+
+    // ----- Regular expressions: Regex / MatchResult -----
+    // The matcher is the SHARED engine (languages/lib/regex.js, included above); its
+    // Go twin abnf/jsrtregex.go + abnf/jsrtregexkt.go serves the compiler grammar, so
+    // both halves of the pair answer the same thing. Kotlin has no regexp LITERAL -
+    // everything arrives through Regex("...") or "...".toRegex() - so there is no
+    // lexer ambiguity to solve here, only a value model and a method surface.
+    //
+    // The engine's neutral flag letters are i (fold case), s (dot matches newline),
+    // m (^/$ are LINE anchors) and x (extended). Kotlin's RegexOption maps onto them
+    // one for one; note that Kotlin, like Java and unlike Ruby, anchors ^/$ to the
+    // whole input UNLESS MULTILINE is given, so "m" is NOT forced on.
+    var krxCache = {}
+    // A RegexOption value is modelled as its own NAME, so it prints the way Kotlin
+    // prints an enum entry and needs no type of its own.
+    hostGlobals["RegexOption"] = {IGNORE_CASE: "IGNORE_CASE", MULTILINE: "MULTILINE",
+                                  DOT_MATCHES_ALL: "DOT_MATCHES_ALL", COMMENTS: "COMMENTS",
+                                  LITERAL: "LITERAL", CANON_EQ: "CANON_EQ", UNIX_LINES: "UNIX_LINES"}
+    // opts is absent, one RegexOption, or a collection of them (setOf(...) - which this
+    // subset models as a list). LITERAL is not a match mode: it quotes the pattern.
+    function krxFlags(opts) {
+        var list = []
+        if (opts != undefined && opts != null) {
+            if (Array.isArray(opts)) { for (var i = 0; i < opts.length; i++) { list.push(kstr2(opts[i])) } }
+            else { list.push(kstr2(opts)) }
+        }
+        var flags = ""
+        var literal = false
+        for (var k = 0; k < list.length; k++) {
+            var o = list[k]
+            if (o == "IGNORE_CASE") { flags += "i" }
+            else if (o == "DOT_MATCHES_ALL") { flags += "s" }
+            else if (o == "MULTILINE") { flags += "m" }
+            else if (o == "COMMENTS") { flags += "x" }
+            else if (o == "LITERAL") { literal = true }
+            else if (o == "CANON_EQ" || o == "UNIX_LINES") { fail("RegexOption." + o + " is not supported") }
+            else { fail("unknown RegexOption: " + o) }
+        }
+        return {flags: flags, literal: literal}
+    }
+    // Regex.escape / RegexOption.LITERAL. Kotlin answers Pattern.quote's \Q...\E here;
+    // the shared engine has no \Q, so every metacharacter is backslashed instead. The
+    // MATCH is the same, the returned TEXT is not - see the grammar description.
+    function krxQuote(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i)
+            var code = s.charCodeAt(i)
+            if (code == 10) { out += "\\n"; continue }
+            if (code == 13) { out += "\\r"; continue }
+            if (code == 9) { out += "\\t"; continue }
+            // A bare space and a # are ignored under the extended flag, so they are
+            // quoted too - LITERAL must beat COMMENTS.
+            if (code == 32 || c == "#" || c == "\\" || c == "." || c == "^" || c == "$" || c == "|"
+                || c == "?" || c == "*" || c == "+" || c == "(" || c == ")" || c == "["
+                || c == "]" || c == "{" || c == "}" || c == "-") { out += "\\" }
+            out += c
+        }
+        return out
+    }
+    // Under COMMENTS (the engine's x) a trailing '# ...' comment runs to the end of
+    // the LINE, so it would swallow the closing ')' of the anchoring wrapper below.
+    // A newline closes the comment and is itself ignored in extended mode.
+    function krxWrapSep(flags) {
+        for (var i = 0; i < flags.length; i++) { if (flags.charAt(i) == "x") { return "\n" } }
+        return ""
+    }
+    function mkKRegex(pat, opts) {
+        var fo = krxFlags(opts)
+        var src = fo.literal ? krxQuote(kstr2(pat)) : kstr2(pat)
+        var key = "$" + fo.flags + "\x00" + src
+        if (hasOwn(krxCache, key)) { return krxCache[key] }
+        var prog = rxCompile(src, fo.flags)
+        if (!prog.ok) { fail("invalid regex '" + src + "': " + prog.err) }
+        // matches()/matchEntire() anchor BOTH ends, which the engine spells \A ... \z.
+        // The wrapper group is non-capturing, so the group numbering is unchanged.
+        var wprog = rxCompile("\\A(?:" + src + krxWrapSep(fo.flags) + ")\\z", fo.flags)
+        if (!wprog.ok) { fail("invalid regex '" + src + "': " + wprog.err) }
+        var v = {__krx: true, src: src, flags: fo.flags, prog: prog, wprog: wprog}
+        krxCache[key] = v
+        return v
+    }
+    function isKRegex(v) { return v !== null && v !== undefined && typeof v == "object" && v.__krx === true }
+    function isKMatch(v) { return v !== null && v !== undefined && typeof v == "object" && v.__kmr === true }
+    function isKGroups(v) { return v !== null && v !== undefined && typeof v == "object" && v.__kmg === true }
+    function krxMk(rx, prog, s, m) { return {__kmr: true, rx: rx, prog: prog, text: s, m: m} }
+    // groupValues: index 0 is the whole match and a group that did not take part reads
+    // as "" (Kotlin), unlike groups[i], which is null there.
+    function krxGroupValues(md) {
+        var out = []
+        var i = 0
+        while (i <= md.prog.ngroups) {
+            var g = rxGroup(md.prog, md.text, md.m, i)
+            out.push(g == null ? "" : g)
+            i = i + 1
+        }
+        return out
+    }
+    function krxRange(from, to) { return {first: from, last: to} }
+    // A group that took no part reads as null; an index or a name that does not exist
+    // at all is an error, as it is on the JVM (IndexOutOfBounds / IllegalArgument).
+    function krxGroupAt(md, key) {
+        var i = 0
+        if (typeof key == "string") {
+            i = rxIndexOfName(md.prog, key)
+            if (i < 0) { fail("no group with name '" + key + "'") }
+        } else {
+            i = kNum(key)
+            if (i < 0 || i > md.prog.ngroups) { fail("group index " + i + " out of range") }
+        }
+        var g = rxGroup(md.prog, md.text, md.m, i)
+        if (g == null) { return null }
+        var caps = md.m.caps
+        return {value: g, range: krxRange(caps[2 * i], caps[2 * i + 1] - 1)}
+    }
+    function krxFindAll(rx, s) {
+        var out = []
+        var at = 0
+        while (at <= s.length) {
+            var m = rxSearch(rx.prog, s, at)
+            if (m == null) { break }
+            out.push(krxMk(rx, rx.prog, s, m))
+            at = m.end == m.begin ? m.end + 1 : m.end
+        }
+        return out
+    }
+    // Kotlin's replacement template is $1 / ${name}, with a backslash escaping the next
+    // character; the shared engine expands \1 / \k<name>. The rewrite happens HERE (the
+    // library header asks every grammar with another spelling to do exactly this), and
+    // the compiler grammar's twin does the same rewrite before it emits.
+    function krxTemplate(t) {
+        var out = ""
+        var i = 0
+        while (i < t.length) {
+            var c = t.charAt(i)
+            if (c == "\\") {
+                if (i + 1 >= t.length) { out += "\\\\"; i = i + 1; continue }
+                var e = t.charAt(i + 1)
+                out += e == "\\" ? "\\\\" : e
+                i = i + 2
+                continue
+            }
+            if (c == "$" && i + 1 < t.length) {
+                var d = t.charCodeAt(i + 1)
+                if (d >= 48 && d <= 57) { out += "\\" + t.charAt(i + 1); i = i + 2; continue }
+                if (d == 123) {
+                    var j = i + 2
+                    while (j < t.length && t.charAt(j) != "}") { j = j + 1 }
+                    var nm = t.substring(i + 2, j)
+                    if (nm.length > 0 && nm.charCodeAt(0) >= 48 && nm.charCodeAt(0) <= 57) { out += "\\" + nm.charAt(0) }
+                    else { out += "\\k<" + nm + ">" }
+                    i = j + 1
+                    continue
+                }
+            }
+            out += c
+            i = i + 1
+        }
+        return out
+    }
+    function krxEscapeRepl(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i)
+            if (c == "\\" || c == "$") { out += "\\" }
+            out += c
+        }
+        return out
+    }
+    // Regex#replace(input) { m -> ... }: the lambda produces each replacement.
+    function krxReplaceFn(rx, s, fn) {
+        var out = ""
+        var at = 0
+        var last = 0
+        while (at <= s.length) {
+            var m = rxSearch(rx.prog, s, at)
+            if (m == null) { break }
+            out += s.substring(last, m.begin) + kstr2(fn(krxMk(rx, rx.prog, s, m)))
+            last = m.end
+            if (m.end == m.begin) {
+                if (m.end < s.length) { out += s.charAt(m.end) }
+                last = m.end + 1
+                at = m.end + 1
+            } else { at = m.end }
+        }
+        return out + s.substring(last, s.length)
+    }
+    // Regex#split. limit 0 (Kotlin's default) means no limit; a positive limit stops
+    // after limit-1 cuts and keeps the rest of the input as the last part.
+    function krxSplit(prog, s, limit) {
+        var parts = []
+        var at = 0
+        var last = 0
+        while (at <= s.length) {
+            if (limit > 0 && parts.length >= limit - 1) { break }
+            var m = rxSearch(prog, s, at)
+            if (m == null) { break }
+            if (m.end == m.begin) {
+                if (m.begin >= s.length) { break }
+                parts.push(s.substring(last, m.begin + 1))
+                last = m.begin + 1
+                at = m.begin + 1
+            } else {
+                parts.push(s.substring(last, m.begin))
+                last = m.end
+                at = m.end
+            }
+        }
+        parts.push(s.substring(last, s.length))
+        return parts
+    }
+    function krxArgInt(args, i, dflt) {
+        if (args.length <= i || args[i] === undefined || args[i] === null) { return dflt }
+        return kNum(args[i])
+    }
+    // The method surface. Answers {v: result} when the call is one of ours and null
+    // when it is not, so mcall falls through to everything it already did.
+    // The Go twin is rxKtMethod in abnf/jsrtregexkt.go - keep the two in step.
+    function krxMethod(target, name, args) {
+        // Regex.escape(s) / Regex.escapeReplacement(s) / Regex.fromLiteral(s): the
+        // companion. `Regex` is a builtin FUNCTION here (Regex(pat) constructs), and
+        // Kotlin defines none of these names on a function value, so no ordinary call
+        // can reach this branch.
+        if (typeof target == "function") {
+            if (name == "escape") { return {v: krxQuote(kstr2(args[0]))} }
+            if (name == "escapeReplacement") { return {v: krxEscapeRepl(kstr2(args[0]))} }
+            if (name == "fromLiteral") { return {v: mkKRegex(kstr2(args[0]), "LITERAL")} }
+            return null
+        }
+        if (typeof target == "string") {
+            if (name == "toRegex") { return {v: mkKRegex(target, args.length > 0 ? args[0] : null)} }
+            // The String members that take a pattern. A non-Regex argument is left to
+            // the ordinary String behaviour, so plain replace/split/contains are
+            // untouched.
+            if (args.length > 0 && isKRegex(args[0])) {
+                var rx = args[0]
+                if (name == "matches") { return {v: rxSearch(rx.wprog, target, 0) != null} }
+                if (name == "contains") { return {v: rxTest(rx.prog, target)} }
+                if (name == "split") { return {v: krxSplit(rx.prog, target, krxArgInt(args, 1, 0))} }
+                if (name == "replace") {
+                    if (typeof args[1] == "function") { return {v: krxReplaceFn(rx, target, args[1])} }
+                    return {v: rxReplace(rx.prog, target, krxTemplate(kstr2(args[1])), true)}
+                }
+                if (name == "replaceFirst") { return {v: rxReplace(rx.prog, target, krxTemplate(kstr2(args[1])), false)} }
+            }
+            return null
+        }
+        if (isKRegex(target)) {
+            if (name == "matches") { return {v: rxSearch(target.wprog, kstr2(args[0]), 0) != null} }
+            if (name == "containsMatchIn") { return {v: rxTest(target.prog, kstr2(args[0]))} }
+            if (name == "find") {
+                var fs = kstr2(args[0])
+                var fm = rxSearch(target.prog, fs, krxArgInt(args, 1, 0))
+                return {v: fm == null ? null : krxMk(target, target.prog, fs, fm)}
+            }
+            if (name == "findAll") { return {v: krxFindAll(target, kstr2(args[0]))} }
+            if (name == "matchEntire") {
+                var es = kstr2(args[0])
+                var em = rxSearch(target.wprog, es, 0)
+                return {v: em == null ? null : krxMk(target, target.wprog, es, em)}
+            }
+            if (name == "replace") {
+                if (typeof args[1] == "function") { return {v: krxReplaceFn(target, kstr2(args[0]), args[1])} }
+                return {v: rxReplace(target.prog, kstr2(args[0]), krxTemplate(kstr2(args[1])), true)}
+            }
+            if (name == "replaceFirst") { return {v: rxReplace(target.prog, kstr2(args[0]), krxTemplate(kstr2(args[1])), false)} }
+            if (name == "split") { return {v: krxSplit(target.prog, kstr2(args[0]), krxArgInt(args, 1, 0))} }
+            if (name == "toString") { return {v: target.src} }
+            fail("unknown Regex method: " + name)
+        }
+        if (isKMatch(target)) {
+            if (name == "next") {
+                var at = target.m.end == target.m.begin ? target.m.end + 1 : target.m.end
+                if (at > target.text.length) { return {v: null} }
+                var nm = rxSearch(target.rx.prog, target.text, at)
+                return {v: nm == null ? null : krxMk(target.rx, target.rx.prog, target.text, nm)}
+            }
+            if (name == "toString") { return {v: rxGroup(target.prog, target.text, target.m, 0)} }
+            fail("unknown MatchResult method: " + name)
+        }
+        return null
+    }
+    // The property surface (Regex.pattern, MatchResult.value/range/groupValues/...).
+    function krxField(o, name) {
+        if (isKRegex(o)) {
+            if (name == "pattern") { return {v: o.src} }
+            if (name == "options") { return {v: []} }
+            return null
+        }
+        if (isKMatch(o)) {
+            if (name == "value") { return {v: rxGroup(o.prog, o.text, o.m, 0)} }
+            if (name == "range") { return {v: krxRange(o.m.begin, o.m.end - 1)} }
+            if (name == "groupValues") { return {v: krxGroupValues(o)} }
+            if (name == "groups") { return {v: {__kmg: true, md: o}} }
+            // Destructuring: `val (a, b) = m.destructured` reads componentN, and this
+            // subset takes componentN of a LIST positionally - so the holder IS the
+            // group list without the whole match, which both engines agree on.
+            if (name == "destructured") { return {v: krxGroupValues(o).slice(1)} }
+            return null
+        }
+        if (isKGroups(o)) {
+            if (name == "size") { return {v: o.md.prog.ngroups + 1} }
+            return null
+        }
+        return null
+    }
 
     function kstr(v) {
         if (v === undefined) return "kotlin.Unit"
@@ -1924,6 +2258,10 @@ NotMemberKw = :script(~~
             kSetNamed(sp.named)
             return extFuns["$" + name].apply(undefined, concat2impl([target], args))
         }
+        // Regex / MatchResult, and the String members that take a pattern. Answers null
+        // for everything that is not a regexp call, so the dispatch below is unchanged.
+        var krx = krxMethod(target, name, args)
+        if (krx != null) { return krx.v }
         if (typeof target == "string") {
             // The String methods of the `bmn` list above, with the semantics of the
             // js_mcall external the compiled twin calls: substring clamps and swaps
@@ -3806,6 +4144,8 @@ NotMemberKw = :script(~~
     // ----- Field / index access with accessors and operator conventions -----
     function kGetField(o, name) {
         if (o === undefined || o === null) { fail("property ." + name + " of null") }
+        var krxf = krxField(o, name)
+        if (krxf != null) { return krxf.v }
         if (typeof o == "string") {
             if (name == "length") { return o.length }
             if (name == "lastIndex") { return o.length - 1 }
@@ -3888,6 +4228,8 @@ NotMemberKw = :script(~~
     }
     function kIndex(o, i) {
         if (o === undefined || o === null) { fail("indexing of " + kstr(o)) }
+        // m.groups[1] / m.groups["name"]: a MatchGroup (value + range) or null.
+        if (isKGroups(o)) { return krxGroupAt(o.md, i) }
         if (typeof o == "string") { return kChar(o.charCodeAt(kNum(i))) }
         if (Array.isArray(o)) { return o[kNum(i)] }
         if (isRange(o)) { return rangeList(o)[kNum(i)] }

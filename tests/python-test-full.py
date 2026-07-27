@@ -17,13 +17,14 @@
 #   - main() returns the failure count (exit 0 == full support, verified)
 #
 # Deliberately out of scope (not syntax, or unrunnable in this harness):
-# import/from-import (hence no stdlib), metaclasses, eval/exec, __slots__-free
+# metaclasses, eval/exec, __slots__-free
 # introspection helpers, and builtins beyond the small set the feature test
 # already leans on plus type/str/int/isinstance and the Exception hierarchy
 # (ExceptionGroup appears once: except* cannot be exercised without it).
 # Parent methods are therefore called explicitly (Base.m(self)) instead of via
 # super(), and property/staticmethod/classmethod are replaced by a hand-rolled
-# descriptor and plain functions. Complex literals ARE included: they are core
+# descriptor and plain functions. The ONE stdlib module used is `re` (section 22),
+# which the shared regular-expression engine backs. Complex literals ARE included: they are core
 # literals needing no library. Async SYNTAX is covered; running it needs an
 # event loop, so async functions are only defined and inspected, never awaited.
 #
@@ -658,6 +659,66 @@ class Waiter:
     def ping(self):
         return "pong"
 
+# ===== SECTION 22: regular expressions (the re module) =====
+# Every assertion here was checked against CPython 3.14 first. `re` is the only
+# stdlib module this file uses; the matcher behind it is the shared engine in
+# languages/lib/regex.js (and its Go twin abnf/jsrtregex.go for the compiler).
+import re
+
+def s22():
+    m = re.search(r"(\d+)-(\d+)", "ab 12-34 cd")
+    check("re01", m.group(0) == "12-34" and m.group(1) == "12" and m.group(2) == "34")
+    check("re02", m.start() == 3 and m.end() == 8 and m.span() == [3, 8])
+    check("re03", m.span(1) == [3, 5] and len(m.groups()) == 2)
+    n = re.search(r"(?P<k>[a-z]+)=(?P<v>\d+)", "x: size=42")
+    check("re04", n.group("k") == "size" and n.group("v") == "42")
+    check("re05", n.groupdict()["k"] == "size" and n.groupdict()["v"] == "42")
+    # match anchors at the start, fullmatch at both ends - and fullmatch must
+    # BACKTRACK into an alternation, which a leftmost search plus a length check
+    # cannot do: re.fullmatch("a|ab", "ab") is "ab", not None.
+    check("re06", re.match(r"\d", "a1") == None and re.match(r"a", "a1").group(0) == "a")
+    check("re07", re.fullmatch(r"a|ab", "ab").group(0) == "ab" and re.fullmatch(r"a", "ab") == None)
+    check("re08", re.findall(r"\d+", "a1 b22 c333") == ["1", "22", "333"])
+    check("re09", re.findall(r"(\w)=(\d)", "a=1,b=2") == [["a", "1"], ["b", "2"]])
+    check("re10", re.sub(r"\s+", " ", "a   b \t c") == "a b c")
+    check("re11", re.sub(r"(\w)(\d)", r"\2\1", "a1 b2") == "1a 2b")
+    check("re12", re.sub(r"(\d)", r"[\g<1>]", "a1") == "a[1]")
+    check("re13", re.subn(r"o", "0", "foo boo") == ["f00 b00", 4])
+    check("re14", re.split(r"\s*,\s*", "a , b,c") == ["a", "b", "c"])
+    # A capture group in the separator is SPLICED into the result (Python's rule).
+    check("re15", re.split(r"(,)", "a,b") == ["a", ",", "b"])
+    check("re16", re.split(r"\d", "a1b2c", 1) == ["a", "b2c"])
+    # The flag bitmask, mapped onto the engine's neutral letters.
+    p = re.compile(r"^ab", re.I | re.M)
+    check("re17", p.pattern == "^ab" and len(p.findall("xx\nABc\nabz")) == 2)
+    check("re18", re.search(r"a.c", "a\nc", re.S).group(0) == "a\nc")
+    check("re19", re.search(r"a.c", "a\nc") == None)
+    check("re20", re.escape("a.b") == "a\\.b")
+    total = 0
+    for it in re.finditer(r"\d", "a1b2c3"):
+        total += int(it.group(0))
+    check("re21", total == 6)
+    # A callable replacement is the interpreter's own job, not the engine's.
+    check("re22", re.sub(r"\d", lambda z: "<" + z.group(0) + ">", "a1b2") == "a<1>b<2>")
+    # Backreferences, in the pattern and in Python's own (?P=name) spelling.
+    check("re23", re.search(r"(ab)\1", "xabab").group(0) == "abab")
+    check("re24", re.search(r"(?P<w>ab)(?P=w)", "abab").group(0) == "abab")
+    check("re25", re.search(r"x", "abc") == None)
+    # Lookahead, lazy and bounded quantifiers, classes and alternation.
+    check("re26", re.search(r"\d+(?=px)", "w 24px").group(0) == "24")
+    check("re27", re.search(r"<(.+?)>", "<a><b>").group(1) == "a")
+    check("re28", re.findall(r"[bc]{2,3}", "abccbcx") == ["bcc", "bc"])
+    check("re29", re.search(r"\bcat\b", "a cat.").group(0) == "cat")
+    check("re30", re.compile(r"[A-Z]+").search("xxYZz").group(0) == "YZ")
+    # re.X: unescaped whitespace and # comments in the PATTERN are ignored.
+    check("re31", re.search(r"\d+ [a-z]  # a number then a letter", "w 24px", re.X).group(0) == "24p")
+    check("re32", re.search(r"(\d)(\w)", "a1b").expand(r"<\2\1>") == "<b1>")
+    check("re33", re.compile(r"a", re.I).search("A").group(0) == "A")
+    # match/fullmatch anchor by WRAPPING the pattern, and under re.X a trailing
+    # comment would otherwise swallow the wrapper's own closing paren.
+    check("re34", re.fullmatch(r"\d+ # num", "24", re.X).group(0) == "24")
+    check("re35", re.match(r"\d+ # num", "24x", re.X).group(0) == "24")
+
 # ===== END SECTIONS =====
 
 def main():
@@ -682,5 +743,6 @@ def main():
     s19() # SECTION-CALL 19
     s20() # SECTION-CALL 20
     s21() # SECTION-CALL 21
+    s22() # SECTION-CALL 22
     println(f"full: {checks[0]} checks, {fails[0]} failures")
     return fails[0]

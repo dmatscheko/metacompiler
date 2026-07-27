@@ -802,6 +802,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // statement builders); language-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
+    // The shared regular-expression engine (rxCompile / rxSearch / rxGroup / ...),
+    // language-neutral: it takes a pattern string plus a flag string, and Python's
+    // re.I / re.S / re.M / re.X bitmask is mapped onto its four letters by
+    // pyReFlagStr below. rxFail is a KNOB, overridden by ASSIGNMENT (not by
+    // declaration - see docs/abnf-dialect-gotchas.md).
+    include("lib/regex.js")
+    rxFail = function (msg) { fail(msg) }
+
     // The host names a program can see.
     // The builtin exception types: callables producing an instance that carries
     // the constructor arguments as .args (enough for raise/except as/e.args[N]).
@@ -964,6 +972,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (v === true) return "True"
         if (v === false) return "False"
         if (pyBoxed(v)) { return isCplx(v) ? cplxStr(v) : bigStr(v) }
+        // A compiled pattern and a match render the way CPython's repr does.
+        if (isPyRe(v)) { return "re.compile(" + prepr(v.pattern) + ")" }
+        if (isPyMatch(v)) {
+            return "<re.Match object; span=(" + v.m.begin + ", " + v.m.end + "), match="
+                   + prepr(rxGroup(v.prog, v.string, v.m, 0)) + ">"
+        }
         if (Array.isArray(v)) {
             var out = "["
             for (var i = 0; i < v.length; i++) {
@@ -1074,7 +1088,381 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         fail("iteration over " + pstr(v))
     }
+    // ----- Regular expressions: the `re` module -----
+    //
+    // The matcher is languages/lib/regex.js, shared with Ruby, Kotlin, JavaScript and
+    // TypeScript and language-NEUTRAL: it takes a pattern string plus a flag string.
+    // Exactly two things here are Python's own, and both are translated in this
+    // grammar so the library stays neutral:
+    //   - the flag BITMASK (re.I | re.M) -> the engine's "i s m x" letters, and
+    //   - the (?P<name>...) / (?P=name) spellings -> (?<name>...) / a numbered
+    //     backreference, which is what the engine accepts.
+    //
+    // re.match / re.fullmatch are NOT a search plus a position check: `re.fullmatch(
+    // "a|ab", "ab")` has to backtrack INTO the alternation, and a leftmost search
+    // answers "a" and would then wrongly report no match. They anchor the pattern
+    // instead - \A(?:...) and \A(?:...)\z - which is both correct and cheap.
+
+    // CPython's re constants (sre_constants). re.A is the engine's only behaviour
+    // and re.U is the py3 default, so both are accepted and ignored; re.L has no
+    // locale to read and is ignored too.
+    var PY_RE_I = 2
+    var PY_RE_L = 4
+    var PY_RE_M = 8
+    var PY_RE_S = 16
+    var PY_RE_U = 32
+    var PY_RE_X = 64
+    var PY_RE_A = 256
+    function pyReFlagStr(fl) {
+        var n = 0
+        if (typeof fl == "number") { n = fl | 0 }
+        var s = ""
+        if ((n & PY_RE_I) != 0) { s += "i" }
+        if ((n & PY_RE_S) != 0) { s += "s" }
+        if ((n & PY_RE_M) != 0) { s += "m" }
+        if ((n & PY_RE_X) != 0) { s += "x" }
+        return s
+    }
+    function pyReFlagNum(fl) {
+        var n = 0
+        if (typeof fl == "number") { n = fl | 0 }
+        return n
+    }
+    // Translate the P-spellings and count capturing groups on the way, so a
+    // (?P=name) can become the numbered backreference the engine understands.
+    // Escapes and character classes are stepped over, so `[(?P<]` is left alone.
+    function pyRePat(src) {
+        var out = ""
+        var names = []
+        var idxs = []
+        var ngrp = 0
+        var i = 0
+        var incls = false
+        while (i < src.length) {
+            var ch = src.charAt(i)
+            if (ch == "\\") { out += src.substring(i, i + 2); i = i + 2; continue }
+            if (incls) {
+                if (ch == "]") { incls = false }
+                out += ch
+                i = i + 1
+                continue
+            }
+            if (ch == "[") { incls = true; out += ch; i = i + 1; continue }
+            if (ch != "(") { out += ch; i = i + 1; continue }
+            if (src.substring(i, i + 4) == "(?P<") {
+                var j = i + 4
+                while (j < src.length && src.charAt(j) != ">") { j = j + 1 }
+                if (j >= src.length) { return {ok: false, err: "unterminated group name"} }
+                ngrp = ngrp + 1
+                names.push(src.substring(i + 4, j))
+                idxs.push(ngrp)
+                out += "(?<" + src.substring(i + 4, j) + ">"
+                i = j + 1
+                continue
+            }
+            if (src.substring(i, i + 4) == "(?P=") {
+                var k = i + 4
+                while (k < src.length && src.charAt(k) != ")") { k = k + 1 }
+                if (k >= src.length) { return {ok: false, err: "unterminated group name"} }
+                var nm = src.substring(i + 4, k)
+                var gi = -1
+                for (var q = 0; q < names.length; q++) { if (names[q] == nm) { gi = idxs[q] } }
+                if (gi < 0) { return {ok: false, err: "unknown group name '" + nm + "'"} }
+                if (gi > 9) { return {ok: false, err: "named backreference to group " + gi + " is not supported"} }
+                // Wrapped, so a digit right after the reference cannot be read as
+                // part of the group number.
+                out += "(?:\\" + gi + ")"
+                i = k + 1
+                continue
+            }
+            if (src.substring(i, i + 3) == "(?<" && src.substring(i, i + 4) != "(?<="
+                && src.substring(i, i + 4) != "(?<!") {
+                ngrp = ngrp + 1
+                var j2 = i + 3
+                while (j2 < src.length && src.charAt(j2) != ">") { j2 = j2 + 1 }
+                names.push(src.substring(i + 3, j2))
+                idxs.push(ngrp)
+                out += src.substring(i, j2 + 1)
+                i = j2 + 1
+                continue
+            }
+            if (src.charAt(i + 1) != "?") { ngrp = ngrp + 1 }
+            out += ch
+            i = i + 1
+        }
+        return {ok: true, src: out}
+    }
+    // regexCache keys on flags+source, so a pattern inside a loop compiles once.
+    var pyReCache = {}
+    function pyReProg(src, neutral) {
+        var key = "$" + neutral + "\x00" + src
+        if (hasOwn(pyReCache, key)) { return pyReCache[key] }
+        var prog = rxCompile(src, neutral)
+        if (!prog.ok) { fail("re.error: " + prog.err) }
+        pyReCache[key] = prog
+        return prog
+    }
+    function pyReCompile(pat, fl) {
+        var neutral = pyReFlagStr(fl)
+        var tr = pyRePat(pat)
+        if (!tr.ok) { fail("re.error: " + tr.err) }
+        // Python's own .flags always reports re.UNICODE for a str pattern.
+        return {__pyre: true, pattern: pat, flags: pyReFlagNum(fl) | PY_RE_U,
+                __src: tr.src, __nf: neutral, prog: pyReProg(tr.src, neutral)}
+    }
+    function isPyRe(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyre === true }
+    function isPyMatch(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pymatch === true }
+    // The anchored programs behind .match() and .fullmatch().
+    function pyReAnchored(rv, whole) {
+        // Under the x flag a trailing `# comment` runs to END OF LINE, so it would
+        // swallow the wrapper's own closing paren. One newline in x-mode ends it.
+        var sep = rv.__nf.indexOf("x") >= 0 ? "\n" : ""
+        var src = "\\A(?:" + rv.__src + sep + ")"
+        if (whole) { src += "\\z" }
+        return pyReProg(src, rv.__nf)
+    }
+    function pyMkMatch(rv, prog, s, m) {
+        return {__pymatch: true, re: rv, string: s, prog: prog, m: m}
+    }
+    // Python's None is `undefined` in this value model (see the None production),
+    // and pyEq treats null and undefined as DIFFERENT - so every "no match" and
+    // every non-participating group has to answer undefined, not null.
+    function pyReNone(v) { return v === null ? undefined : v }
+    function pyReSearch(rv, s, from) {
+        var m = rxSearch(rv.prog, s, from)
+        if (m == null) { return undefined }
+        return pyMkMatch(rv, rv.prog, s, m)
+    }
+    // \A pins the match to position 0 of the searched text, so the anchored form
+    // has no way to express Python's `pos` argument; it is refused rather than
+    // silently answering the wrong thing.
+    function pyReAnchoredMatch(rv, s, from, whole) {
+        if (from != 0) { fail("re: the pos argument of match()/fullmatch() is not supported") }
+        var prog = pyReAnchored(rv, whole)
+        var m = rxSearch(prog, s, 0)
+        if (m == null) { return undefined }
+        return pyMkMatch(rv, prog, s, m)
+    }
+    function pyMGroupIdx(md, k) {
+        if (typeof k == "number") {
+            if (k < 0 || k > md.prog.ngroups) { pyRaise(pyMakeExc("IndexError", ["no such group"])) }
+            return k | 0
+        }
+        var gi = rxIndexOfName(md.prog, "" + k)
+        if (gi < 0) { pyRaise(pyMakeExc("IndexError", ["no such group"])) }
+        return gi
+    }
+    function pyMGroup(md, k) { return pyReNone(rxGroup(md.prog, md.string, md.m, pyMGroupIdx(md, k))) }
+    function pyMSpan(md, k, which) {
+        var slot = 2 * pyMGroupIdx(md, k) + which
+        var caps = md.m.caps
+        if (slot >= caps.length) { return -1 }
+        return caps[slot]
+    }
+    function pyMGroups(md) {
+        var out = []
+        for (var i = 1; i <= md.prog.ngroups; i++) { out.push(pyReNone(rxGroup(md.prog, md.string, md.m, i))) }
+        return out
+    }
+    function pyMGroupDict(md) {
+        var d = newDict()
+        for (var i = 1; i <= md.prog.ngroups; i++) {
+            var nm = rxNameAt(md.prog, i)
+            if (nm != "") { dictSet(d, nm, pyReNone(rxGroup(md.prog, md.string, md.m, i))) }
+        }
+        return d
+    }
+    // Python's replacement template is \1 / \g<1> / \g<name>; lib/regex.js expands
+    // \1 and \k<name>, so only the \g<...> form needs rewriting.
+    function pyReTemplate(repl) {
+        var out = ""
+        var i = 0
+        while (i < repl.length) {
+            if (repl.charAt(i) == "\\" && repl.substring(i, i + 3) == "\\g<") {
+                var j = i + 3
+                while (j < repl.length && repl.charAt(j) != ">") { j = j + 1 }
+                var nm = repl.substring(i + 3, j)
+                var alldig = nm.length > 0
+                for (var q = 0; q < nm.length; q++) {
+                    var cc = nm.charCodeAt(q)
+                    if (cc < 48 || cc > 57) { alldig = false }
+                }
+                if (alldig) { out += "\\" + nm } else { out += "\\k<" + nm + ">" }
+                i = j + 1
+                continue
+            }
+            if (repl.charAt(i) == "\\") { out += repl.substring(i, i + 2); i = i + 2; continue }
+            out += repl.charAt(i)
+            i = i + 1
+        }
+        return out
+    }
+    // re.sub / re.subn. `repl` may be a callable, which is the interpreter's job
+    // (the template form goes through the engine's own expander).
+    function pyReSub(rv, repl, s, count) {
+        var out = ""
+        var at = 0
+        var last = 0
+        var n = 0
+        var isFn = typeof repl == "function"
+        var tpl = isFn ? "" : pyReTemplate("" + repl)
+        while (at <= s.length) {
+            if (count > 0 && n >= count) { break }
+            var m = rxSearch(rv.prog, s, at)
+            if (m == null) { break }
+            var md = pyMkMatch(rv, rv.prog, s, m)
+            out += s.substring(last, m.begin)
+            out += isFn ? "" + repl(md) : rxExpand(rv.prog, s, m, tpl)
+            n = n + 1
+            last = m.end
+            at = m.end
+            if (m.end == m.begin) {
+                if (m.end < s.length) { out += s.charAt(m.end) }
+                last = m.end + 1
+                at = m.end + 1
+            }
+        }
+        if (last <= s.length) { out += s.substring(last, s.length) }
+        return {text: out, n: n}
+    }
+    // re.split. Unlike the engine's neutral rxSplit, Python SPLICES the capture
+    // groups of each separator into the result, so this walks the matches itself.
+    function pyReSplit(rv, s, maxsplit) {
+        var parts = []
+        var at = 0
+        var last = 0
+        var n = 0
+        while (at <= s.length) {
+            if (maxsplit > 0 && n >= maxsplit) { break }
+            var m = rxSearch(rv.prog, s, at)
+            if (m == null) { break }
+            if (m.end == m.begin) {
+                // A zero-width separator: Python 3.7+ splits there too, but never
+                // twice at the same place and never at the very end.
+                if (m.begin >= s.length) { break }
+                parts.push(s.substring(last, m.begin))
+                for (var g2 = 1; g2 <= rv.prog.ngroups; g2++) { parts.push(pyReNone(rxGroup(rv.prog, s, m, g2))) }
+                last = m.begin
+                at = m.begin + 1
+                n = n + 1
+                continue
+            }
+            parts.push(s.substring(last, m.begin))
+            for (var g = 1; g <= rv.prog.ngroups; g++) { parts.push(pyReNone(rxGroup(rv.prog, s, m, g))) }
+            last = m.end
+            at = m.end
+            n = n + 1
+        }
+        parts.push(s.substring(last, s.length))
+        return parts
+    }
+    // re.findall: no group -> the whole matches, one group -> that group, more ->
+    // the capture tuple of each match (a tuple is a list in this value model).
+    function pyReFindAll(rv, s, asMatch) {
+        var out = []
+        var at = 0
+        while (at <= s.length) {
+            var m = rxSearch(rv.prog, s, at)
+            if (m == null) { break }
+            if (asMatch) { out.push(pyMkMatch(rv, rv.prog, s, m)) }
+            else if (rv.prog.ngroups == 0) { out.push(rxGroup(rv.prog, s, m, 0)) }
+            else if (rv.prog.ngroups == 1) { out.push(pyReNone(rxGroup(rv.prog, s, m, 1))) }
+            else {
+                var t = []
+                for (var g = 1; g <= rv.prog.ngroups; g++) { t.push(pyReNone(rxGroup(rv.prog, s, m, g))) }
+                out.push(t)
+            }
+            at = m.end == m.begin ? m.end + 1 : m.end
+        }
+        return out
+    }
+    // re.escape, CPython 3.7+: exactly the characters in _special_chars_map.
+    function pyReEscape(s) {
+        var special = "()[]{}?*+-|^$\\.&~# \t\n\r\v\f"
+        var out = ""
+        for (var i = 0; i < s.length; i++) {
+            var ch = s.charAt(i)
+            if (special.indexOf(ch) >= 0) { out += "\\" }
+            out += ch
+        }
+        return out
+    }
+    function pyReArg(v, fl) {
+        if (isPyRe(v)) { return v }
+        return pyReCompile("" + v, fl)
+    }
+    // The module surface. Every re.f(pattern, ...) is the compiled pattern's own
+    // method with the pattern dropped, so the two entry points share one body; the
+    // only difference is where the optional flags argument sits.
+    function pyReModCall(name, args) {
+        if (name == "escape") { return pyReEscape("" + args[0]) }
+        if (name == "purge") { return undefined }
+        if (name == "compile") { return pyReArg(args[0], args.length > 1 ? args[1] : 0) }
+        var flpos = -1
+        if (name == "search" || name == "match" || name == "fullmatch"
+            || name == "findall" || name == "finditer") { flpos = 2 }
+        if (name == "sub" || name == "subn") { flpos = 4 }
+        if (name == "split") { flpos = 3 }
+        if (flpos < 0) { fail("unknown re function: " + name) }
+        var fl = args.length > flpos ? args[flpos] : 0
+        var rv = pyReArg(args[0], fl)
+        var rest = []
+        for (var i = 1; i < args.length && i < flpos; i++) { rest.push(args[i]) }
+        return pyReMethod(rv, name, rest)
+    }
+    function pyReMethod(rv, name, a) {
+        if (name == "search") {
+            return pyReSearch(rv, "" + a[0], a.length > 1 ? a[1] | 0 : 0)
+        }
+        if (name == "match" || name == "fullmatch") {
+            return pyReAnchoredMatch(rv, "" + a[0], a.length > 1 ? a[1] | 0 : 0, name == "fullmatch")
+        }
+        if (name == "findall") { return pyReFindAll(rv, "" + a[0], false) }
+        if (name == "finditer") { return pyReFindAll(rv, "" + a[0], true) }
+        if (name == "sub" || name == "subn") {
+            var r = pyReSub(rv, a[0], "" + a[1], a.length > 2 ? a[2] | 0 : 0)
+            return name == "sub" ? r.text : [r.text, r.n]
+        }
+        if (name == "split") { return pyReSplit(rv, "" + a[0], a.length > 1 ? a[1] | 0 : 0) }
+        fail("unknown Pattern method: " + name)
+    }
+    function pyMatchMethod(md, name, a) {
+        if (name == "group") {
+            if (a.length == 0) { return pyMGroup(md, 0) }
+            if (a.length == 1) { return pyMGroup(md, a[0]) }
+            var out = []
+            for (var i = 0; i < a.length; i++) { out.push(pyMGroup(md, a[i])) }
+            return out
+        }
+        if (name == "groups") { return pyMGroups(md) }
+        if (name == "groupdict") { return pyMGroupDict(md) }
+        if (name == "start") { return pyMSpan(md, a.length > 0 ? a[0] : 0, 0) }
+        if (name == "end") { return pyMSpan(md, a.length > 0 ? a[0] : 0, 1) }
+        if (name == "span") {
+            var k = a.length > 0 ? a[0] : 0
+            return [pyMSpan(md, k, 0), pyMSpan(md, k, 1)]
+        }
+        if (name == "expand") { return rxExpand(md.prog, md.string, md.m, pyReTemplate("" + a[0])) }
+        fail("unknown Match method: " + name)
+    }
+    // `import re` binds no module object in this flat import model, so the module
+    // is a host global: an ordinary record, which pyattr reads re.I / re.DOTALL out
+    // of and mcall dispatches re.search(...) on.
+    hostGlobals["re"] = {__pymod: "re", NOFLAG: 0,
+                         A: PY_RE_A, ASCII: PY_RE_A, I: PY_RE_I, IGNORECASE: PY_RE_I,
+                         L: PY_RE_L, LOCALE: PY_RE_L, M: PY_RE_M, MULTILINE: PY_RE_M,
+                         S: PY_RE_S, DOTALL: PY_RE_S, U: PY_RE_U, UNICODE: PY_RE_U,
+                         X: PY_RE_X, VERBOSE: PY_RE_X}
+
     function mcall(target, name, args) {
+        // The re module, a compiled Pattern and a Match all dispatch here. Arrays
+        // are excluded first: the frozen runtime refuses a non-index property read
+        // on one (docs/abnf-dialect-gotchas.md).
+        if (target !== null && target !== undefined && typeof target == "object" && !Array.isArray(target)) {
+            if (target.__pymod == "re") { return pyReModCall(name, args) }
+            if (target.__pyre === true) { return pyReMethod(target, name, args) }
+            if (target.__pymatch === true) { return pyMatchMethod(target, name, args) }
+        }
         if (isGen(target)) {
             if (name == "send") { return genSend(target, args.length > 0 ? args[0] : undefined) }
             if (name == "__next__") { return genSend(target, undefined) }
