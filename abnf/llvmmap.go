@@ -2252,6 +2252,12 @@ func (ma *machine) resolveExtern(f *ir.Func) func(args []uint64) uint64 {
 			return fn
 		}
 	}
+	// The POINTER-based natives (abnf/jsrtregexptr.go). They live here rather than in
+	// a runtime's extern table because a grammar with no handle runtime - bash, batch -
+	// runs with ma.externs == nil and never reaches one.
+	if fn := nativeExtern(ma, name); fn != nil {
+		return fn
+	}
 	switch name {
 	case "putchar":
 		return func(args []uint64) uint64 {
