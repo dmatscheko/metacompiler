@@ -501,6 +501,211 @@ void s22() {
   check("tv4", local == 11 && fin == 12 && shifty == "y");
 }
 
+// ===== SECTION 23: mixin application classes and call chains =====
+// `class C = S with M;` (a named mixin application), a call of whatever a chain
+// produced (`f(1)(2)`, `xs[0]()`), and the prefix ++ / --.
+mixin MaTag {
+  String tag() => "M";
+}
+class MaBase {
+  int base = 7;
+}
+class MaApp = MaBase with MaTag;
+base class MaApp2 = MaBase with MaTag;
+int Function(int) maAdder(int step) => (int m) => step + m;
+void s23() {
+  var a = MaApp();
+  check("ma1", a.base == 7 && a.tag() == "M");
+  check("ma2", MaApp2().tag() == "M");
+  check("ma3", maAdder(10)(7) == 17);
+  var fs = [(int x) => x * 2, (int x) => x + 1];
+  check("ma4", fs[0](5) == 10 && fs[1](5) == 6);
+  var n = 5;
+  check("ma5", ++n == 6 && n == 6);
+  check("ma6", --n == 5 && n == 5);
+  var box = MaBase();
+  check("ma7", ++box.base == 8 && box.base == 8);
+  var lst = [1, 2];
+  ++lst[0];
+  check("ma8", lst[0] == 2);
+  var f = maAdder(1);
+  check("ma9", f!(2) == 3);
+}
+
+// ===== SECTION 24: typed initialising formals, symbols and type literals =====
+// `A(int this.x)`, old-style function-typed formals, #symbol, and a type used as
+// a value (`List<int>`, `f<int>`). The disambiguation rule for the last one is the
+// one language/constructor/explicit_instantiation_syntax_test.dart states: a
+// `<...>` run is type arguments only before a stop or continuation token.
+class TiPair {
+  final int fst;
+  final int snd;
+  const TiPair(int this.fst, int this.snd);
+  TiPair.named({int this.fst = 1, int this.snd = 2});
+  TiPair.opt([int this.fst = 3, int this.snd = 4]);
+}
+int tiApply(int v, int f(int x)) => f(v);
+int tiApply2(int v, {int g(int x)?}) => g == null ? v : g(v);
+T tiId<T>(T v) => v;
+typedef TiHandler(bool e);
+void s24() {
+  const p = TiPair(1, 2);
+  check("ti1", p.fst == 1 && p.snd == 2);
+  check("ti2", TiPair.named(snd: 9).snd == 9 && TiPair.named().fst == 1);
+  check("ti3", TiPair.opt(7).fst == 7 && TiPair.opt().snd == 4);
+  check("ti4", tiApply(4, (int x) => x * 3) == 12);
+  check("ti5", tiApply2(4) == 4 && tiApply2(4, g: (int x) => x + 1) == 5);
+  var sym = #tiApply;
+  check("ti6", sym == #tiApply && sym != #other);
+  check("ti7", #a.b == #a.b);
+  var lit = List<int>;
+  // `&&` is neither a stop nor a continuation token, so the parenthesizing is
+  // REQUIRED - `x == List<int> && y` is a syntax error in Dart too.
+  check("ti8", (lit == List<int>) && (lit != Map<int, int>));
+  var inst = tiId<int>;
+  check("ti9", inst != null);
+  // Only the LITERAL is asserted here: `0.5 + 0.25` is a known wrong answer in
+  // both halves (integer-truncating addition), which is not this file's subject.
+  check("ti10", .5 == 0.5 && .25 < .5 && .125 > 0);
+}
+
+// ===== SECTION 25: null-aware targets, elements and cascade refinements =====
+// `e?.f ??= v`, `?e` collection elements, `{?k: v}` map entries, a cascade with a
+// compound assignment and with type arguments on the called method.
+class NtBox {
+  int? v;
+  List<int> log = [];
+  NtBox add(int x) { log.add(x); return this; }
+  T echo<T>(T x) => x;
+}
+void s25() {
+  NtBox? nb = NtBox();
+  nb?.v ??= 4;
+  check("nt1", nb?.v == 4);
+  NtBox? none = null;
+  none?.v ??= 9;
+  check("nt2", none == null);
+  int? missing = null;
+  var xs = [1, ?missing, 2, ?3];
+  check("nt3", xs.length == 3 && xs[1] == 2 && xs[2] == 3);
+  String? nullKey = null;
+  var mp = {?nullKey: 1, "b": 2, "c": ?missing, "d": ?4};
+  check("nt4", mp.length == 2 && mp["b"] == 2 && mp["d"] == 4);
+  var acc = NtBox()
+    ..v = 1
+    ..v = 5
+    ..add(3)
+    ..echo<int>(1);
+  check("nt5", acc.v == 5 && acc.log[0] == 3);
+  var mid = NtBox();
+  mid.v = 2;
+  mid..v = 10;
+  check("nt6", mid.v == 10);
+}
+
+// ===== SECTION 26: anonymous methods =====
+// `receiver.{ body }` and `receiver.=> e` run IMMEDIATELY with `this` bound to the
+// receiver; a declared parameter receives the receiver too. The corpus's own
+// language/anonymous_methods/ tests are what pin the "invoked at once" reading.
+int amTop = 42;
+void s26() {
+  var buf = "abcd";
+  final v1 = buf.{
+    return amTop;
+  };
+  final v2 = buf.=> this.length;
+  final v3 = buf.(p) => p.length + 1;
+  final v4 = buf.(p) {
+    return p.length + 2;
+  };
+  check("am1", v1 == 42 && v2 == 4 && v3 == 5 && v4 == 6);
+  String? maybe = null;
+  final v5 = maybe?.=> this.length;
+  check("am2", v5 == null);
+  var casc = buf..{
+    return 1;
+  };
+  check("am3", casc == "abcd");
+  final v6 = (buf.=> this.length).=> this + 1;
+  check("am4", v6 == 5);
+}
+
+// ===== SECTION 27: primary constructors and header classes =====
+// The Dart 3.10 declaring header constructor: `class Point(var int x, var int y);`
+// declares the fields and the constructor at once, and the body may be a bare ";".
+class PcPoint(var int x, var int y);
+class PcFinal(final int a, final int b);
+class const PcConst(final int k);
+class PcBase(final int seed);
+class PcBody(final int n) {
+  int twice() => n * 2;
+}
+class PcNamedP({final int w = 1, required var int h});
+class PcOptP([final int p = 5, var int q = 6]);
+class PcPlain {}
+class PcEmpty extends PcPlain;
+void s27() {
+  var pt = PcPoint(1, 2);
+  check("pc1", pt.x == 1 && pt.y == 2);
+  pt.x = 3;
+  check("pc2", pt.x == 3);
+  check("pc3", PcFinal(4, 5).b == 5);
+  check("pc4", const PcConst(6).k == 6);
+  check("pc5", PcBody(7).twice() == 14 && PcBody(7).n == 7);
+  check("pc6", PcNamedP(h: 8).h == 8 && PcNamedP(h: 8).w == 1);
+  check("pc7", PcOptP(9).p == 9 && PcOptP().q == 6);
+  check("pc8", PcEmpty() != null);
+}
+
+// ===== SECTION 28: unnamed extensions, external members and case labels =====
+// `extension on T { ... }` (and its generic form), an `external` declaration with
+// no body, a labelled `case`, and a switch case whose pattern is a const creation.
+extension on int {
+  int get exDoubled => this * 2;
+}
+extension<T> on List<T> {
+  T? get exSecond => length > 1 ? this[1] : null;
+}
+external void exMissing(int x);
+class ExVal {
+  final int n;
+  const ExVal(this.n);
+}
+String exPick(int v) {
+  switch (v) {
+    lbl:
+    case 1:
+      return "one";
+    case 2:
+      return "two";
+    default:
+      return "other";
+  }
+}
+String exConstPat(Object o) {
+  switch (o) {
+    // The const-creation pattern must PARSE and must not match a non-instance. What it
+    // does against `const ExVal(3)` itself is not asserted here: the compiler half does
+    // not canonicalize const instances yet (identical(const E(3), const E(3)) is false
+    // there and true in the interpreter), which is a semantic gap, not a syntax one.
+    case const ExVal(3):
+      return "three";
+    case 3:
+      return "int-three";
+    default:
+      return "no";
+  }
+}
+void s28() {
+  check("ex1", 4.exDoubled == 8);
+  check("ex2", [1, 2, 3].exSecond == 2 && <int>[1].exSecond == null);
+  check("ex3", exPick(1) == "one" && exPick(2) == "two" && exPick(5) == "other");
+  check("ex4", exConstPat(3) == "int-three" && exConstPat("x") == "no");
+  var dollar$name = 1;
+  var $lead = 2;
+  check("ex5", dollar$name + $lead == 3);
+}
+
 // ===== END SECTIONS =====
 
 int main() {
@@ -526,6 +731,12 @@ int main() {
   s20(); // SECTION-CALL 20
   s21(); // SECTION-CALL 21
   s22(); // SECTION-CALL 22
+  s23(); // SECTION-CALL 23
+  s24(); // SECTION-CALL 24
+  s25(); // SECTION-CALL 25
+  s26(); // SECTION-CALL 26
+  s27(); // SECTION-CALL 27
+  s28(); // SECTION-CALL 28
   print("full: $checks checks, $fails failures");
   return fails;
 }

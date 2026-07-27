@@ -921,3 +921,125 @@ whose whole purpose is to be dropped needs its own untagged chunk rule — this 
 "tagging a sub-rule changes how many items its PARENT pops" trap met from the other
 side, where the sub-rule was tagged all along and the new parent is the one that
 cannot afford it.
+
+## A GROUP of alternatives is committed exactly like an ordered choice
+
+The ordered-choice rule at the top of this file is usually met between the
+alternatives of a named production. It applies just as hard to an INLINE group,
+and there the mistake is much easier to make because the group looks like a
+convenience rather than a decision. Dart spelled a late declaration
+
+    VarLate = KwLate ( KwFinal Type | KwFinal | KwVar | Type ) DeclTail ;
+
+and `late final y = 1;` did not parse. The group matched `KwFinal Type` with
+`Type` = the identifier `y`, `DeclTail` then found the `=` where it wanted a
+name, and the sequence failed — without the group ever being asked to try its
+second alternative. The neighbouring `late final int y = 1;` works, which
+presents as "the type is somehow required".
+
+Give each shape its own full alternative, exactly as the `FieldMember` line
+above it already did:
+
+    VarLate           = VarLateFinalTyped | VarLateFinal | VarLateVar | VarLateTyped ;
+    VarLateFinalTyped = KwLate KwFinal Type DeclTail ;
+    VarLateFinal      = KwLate KwFinal      DeclTail ;
+
+The same shape hides in a greedy OPTIONAL, which is the one-alternative case of
+it. `ExtensionOn = KwExtension [ EXName ] [ SkipAngle ] KwOn …` cannot parse
+Dart's anonymous `extension on Object { … }`: `EXName` is an `Id`, `on` is a
+perfectly good identifier, so the optional consumes the keyword and `KwOn` then
+fails on the type. Two alternatives (`KwExtension EXName … KwOn …` and
+`KwExtension … KwOn …`) is again the fix. Roughly twenty Dart corpus files sat
+behind that single pair of brackets.
+
+## An "empty" alternative added to a shared body rule swallows ordinary statements
+
+Dart's `external void f(Object? o);` has no body, so the obvious move is to add
+the no-body form to the rule every function body goes through:
+
+    FnBodyKind = FBlock | FArrow | FSemi ;
+    FSemi <~~ push({ebody: makeConst(null)}) ~~> = ";" ;
+
+That is wrong in a way no parse error reports. `FuncPlain = FName ParamList
+FnBody`, so the ordinary statement
+
+    c1();
+
+now parses as a body-less DECLARATION of a function named `c1` — and since
+`FuncDecl` is tried before `ExprStmt`, every call statement of a nil-ary
+function silently stopped calling anything. The symptom was a closure test
+reporting the wrong counter value, which sends you into the closure machinery.
+
+Confine the permissive form to the context that needs it. Here that is a
+production reached only under the `external` / `abstract` modifier:
+
+    TopModDecl = TopMod ( ExternDecl | StatementBody ) ;
+
+The general rule: an alternative whose right-hand side is a strict PREFIX of
+what some other statement form already matches must not live in a rule that
+form goes through.
+
+## A speculative Target is 2^depth when its seeds are expensive
+
+`Assignment = Target AssignOp Expression` and `IncDec = Target ("++"|"--")` both
+parse a whole `Target` before they can tell whether the operator they need is
+even there. That is harmless while `Target`'s seed is an identifier. The moment
+object creation and a parenthesized expression become seeds — which is what
+makes `new A().field = 42`, `(mock as dynamic).mood = 'x'` and `(variable)[0] = 0`
+assignable, worth about a dozen corpus files — every nested creation is parsed
+TWICE: once by the speculative `Target`, once by the `CallMember` that follows
+it when the speculation fails. On `language/async_nested/*`, a corpus of
+deliberately deep literals, that is 2^depth: one 59-line file went from 0.13s to
+9.4s and started hitting the sweep's timeout.
+
+The documented fix applies — a cheap zero-width lookahead in front of both
+productions, answering "is there an assignment operator or a `++`/`--` ahead, at
+bracket depth 0, before this expression ends". Three details cost measurements:
+
+- **Two caps, not one.** A single counter that charges COMMENTS to the same
+  budget as code is a 44-file regression: a statement preceded by nine lines of
+  commentary spends the whole budget before reaching its own `=`, the guard says
+  "no assignment", and a perfectly good statement stops parsing. Bound the
+  scanned CODE with one counter and the raw iterations with another.
+- **Stopping at a depth-0 `,` is what makes it cheap** — without it the two
+  20 000-element `big_set_literal` tests took 25s each — but the comma of a TYPE
+  ARGUMENT list is not the end of the expression. `Indexable<String, Object?>('')[0]
+  ??= e` is one target; stopping at its comma lost eight files. Track an angle
+  depth (`<` up, `>` down, floored at zero) and only honour the comma outside it.
+- String literals must be skipped, or their contents are read as brackets and
+  operators.
+
+A false POSITIVE only costs the parse that would have happened anyway, so when
+in doubt the guard should say yes. A false negative is a parse failure.
+
+## The corpus is the specification when there is no toolchain
+
+Two Dart questions that look unanswerable without `dart` are answered outright
+by the vendored test suite, in prose, inside the files themselves.
+
+`language/constructor/explicit_instantiation_syntax_test.dart` states the
+disambiguation rule for `id<T, T>` — is it a type literal or two comparisons? —
+and then enumerates every token:
+
+    <continuationToken> ::= `(' | `.' | `==' | `!='
+    <stopToken> ::= `)' | `]' | `}' | `;' | `:' | `,'
+
+so `Map<int, bool>` is a value before a `,` and `x == List<int> && y` is a
+syntax error in real Dart too. Implementing exactly that rule as an `InstEnd`
+guard is worth about thirty files and cannot over-accept.
+
+`language/anonymous_methods/` settles what `receiver.{ … }` means with an
+assertion rather than a comment: `final v1 = buffer.{ return foo; };` followed by
+`v1.expectStaticType<Exactly<int>>` says the construct is invoked IMMEDIATELY
+with `this` bound to the receiver, not that it builds a closure.
+
+Read the corpus before filing a semantics question as unanswerable.
+
+## `var x = 0` types the slot under -frozen, not just a parameter
+
+The entry above records that a reassigned function PARAMETER keeps the type it
+was first called with. A plain local has the same rule: `var oneV = 0` followed
+by `oneV = callExt(…)` fails with `variable 'oneV' has type number and cannot
+hold a object` — under `-frozen` only, behind a green goja run and a green
+`--full` ratchet for the interpreter half. Start any slot that will hold a
+handle as `anytype`.

@@ -29,7 +29,7 @@ subset is compiled to LLVM IR by dart-to-llvm-ir.abnf.") ;
 
 // Shared token productions (languages/lib).
 :include("lib/cstyle-comments.abnf") ;
-:include("lib/ident.abnf") ;
+:include("lib/ident-dollar.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
 
@@ -39,7 +39,10 @@ subset is compiled to LLVM IR by dart-to-llvm-ir.abnf.") ;
 // The merged pushes of all top level declarations become one program thunk on the global stack.
 // Leading directives (import / export / part / library) are accepted and not implemented.
 Program     <~~ pushg(makeSeq(takeAll())) ~~>
-            = { Directive } { Statement } ;
+            = [ Shebang ] { Directive } { Statement } ;
+// A leading `#!` line is a comment (tools/hello_script_test.dart ships one).
+Shebang     = "#" :whitespace() "!" { ShebangCh } :whitespace(Whitespace) ;
+ShebangCh   = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // Library directives: accepted, not implemented (there is no module system). Each pushes
 // nothing, so only the statement thunks reach makeSeq.
@@ -49,11 +52,12 @@ Directive   = ImportD | ExportD | PartD | LibraryD ;
 // URI with its surrounding quotes stripped and hands it to resolveImport; the show/hide
 // combinators and a conditional-import URI are parsed and ignored.
 ImportD     <~~ resolveImport(pop(), up.pos) ~~>
-            = KwImport ImportUri [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
+            = KwImport ImportUri { KwIf SkipParen UriStr } [ KwDeferred ] [ KwAs Id ]
+              { Combinator } { KwIf SkipParen UriStr } ";" ;
 ImportUri   <~~ push(uriPath(up.in)) ~~>
             = UriStr ;
 ExportD     <~~ notImpl("export directive", up.pos) ~~>
-            = KwExport UriStr { Combinator } ";" ;
+            = KwExport UriStr { Combinator } { KwIf SkipParen UriStr } ";" ;
 PartD       <~~ notImpl("part directive", up.pos) ~~>
             = KwPart [ KwOf ] ( UriStr | QualName ) ";" ;
 LibraryD    <~~ notImpl("library directive", up.pos) ~~>
@@ -66,15 +70,38 @@ QualName    = Id { "." Id } ;
 // The keyword-led statements come first: otherwise 'return x;' would parse as a variable
 // declaration of a variable x with the (identifier-shaped) type 'return'.
 Statement   = [ Annotations ] StatementBody ;
-StatementBody = Block | ClassDecl | EnumDecl | MixinDecl | ExtensionDecl | TypedefDecl
+StatementBody = TopModDecl | Block | ClassAlias | ClassDecl | EnumDecl | MixinDecl | ExtensionDecl | TypedefDecl
             | IfCase | If | Switch | While | DoWhile | For | TryStmt | Return
             | Break | Continue | Rethrow | ThrowStmt | Yield | Assert | TopGetter | TopSetter
             | FuncDecl | VarDecl | LabeledStmt
             | Empty | PatAssign | ExprStmt ;
 
+// A top-level `external` / `abstract` declaration: the modifier is erased and the
+// declaration itself is an ordinary one. It pushes the inner statement's own thunk, so
+// the item count the enclosing rule sees is unchanged.
+TopModDecl  = TopMod ( ExternDecl | StatementBody ) ;
+TopMod      = ( "external" | "abstract" ) KwEnd ;
+// An `external` declaration has no body at all. The no-body form is confined to this
+// production on purpose: offering it as an alternative of FnBodyKind made the ordinary
+// statement `c1();` parse as a body-less declaration of a function named c1, which
+// parses, runs and quietly returns null.
+ExternDecl  = ExternFnTyped | ExternGetter | ExternSetter | ExternFnPlain ;
+ExternFnTyped <~~ push(makeFuncDecl(takeAll())) ~~>
+            = Type FName [ SkipAngle ] ParamList ExternBody ;
+ExternFnPlain <~~ push(makeFuncDecl(takeAll())) ~~>
+            = FName [ SkipAngle ] ParamList ExternBody ;
+ExternGetter <~~ push(makeTopAccessor(true, takeAll())) ~~>
+            = KwGet FName ExternBody | Type KwGet FName ExternBody ;
+ExternSetter <~~ push(makeTopAccessor(false, takeAll())) ~~>
+            = KwSet FName ParamList ExternBody | Type KwSet FName ParamList ExternBody ;
+ExternBody  <~~ push({ebody: makeConst(null)}) ~~> = ";" ;
+
 // Metadata annotations (@Foo, @Foo.bar, @Foo(args)) are parsed and erased, like in Java.
 Annotations = Annotation { Annotation } ;
-Annotation  = "@" Id { "." Id } [ SkipParen ] ;
+// `@A<int>(0)`, `@GenericClass<int, String>.new()`, `@prefix.C.named(1)`. The type
+// arguments and the `.new` tear-off are part of the metadata grammar; all of it is erased.
+Annotation  = "@" Id [ SkipAngle ] { "." AnnPart } [ SkipParen ] ;
+AnnPart     = KwNew | Id ;
 
 // Top-level declarations accepted structurally and reported as not implemented; their
 // bodies are matched with SkipBlock so a full file parses.
@@ -82,7 +109,7 @@ Annotation  = "@" Id { "." Id } [ SkipParen ] ;
 // then (after a ";") the ordinary members of an enhanced enum. Every value gets .index,
 // and the enum itself a static .values list.
 EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
-            = KwEnum CName [ SkipAngle ] [ WithClause ] [ ImplementsClause ]
+            = KwEnum [ KwConst ] CName [ SkipAngle ] [ PrimaryCtor ] [ WithClause ] [ ImplementsClause ]
               "{" EnumValue { "," EnumValue } [ "," ] [ ";" { Member } ] "}" ;
 EnumValue   <~~ push(makeEnumValue(takeAll())) ~~>
             = EVName [ SkipAngle ] [ EnumArgs ] ;
@@ -93,28 +120,38 @@ EnumArgs    <~~ push({eargs: takeAll()}) ~~> = "(" [ Arg { "," Arg } [ "," ] ] "
 // interface it may call through with super; the linearisation puts it between the using
 // class and that superclass.
 MixinDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ MixinMods ] KwMixin [ KwClass ] CName [ SkipAngle ] [ KwOn OnType { "," OnType } ]
-              [ ImplementsClause ] "{" { Member } "}" ;
+            = [ MixinMods ] KwMixin [ KwClass ] CName [ SkipAngle ] [ PrimaryCtor ]
+              [ KwOn OnType { "," OnType } ] [ ImplementsClause ] ClassBody ;
 OnType      <~~ push({con: up.in}) ~~> = TypeNamed ;
 
 // extension Name on T { ... } adds members to an existing type; extension type N(T v)
 // declares a wrapper type. The extension-type form comes first (it starts with the same
 // two keywords).
 ExtensionDecl = ExtensionType | ExtensionOn ;
-ExtensionOn <~~ push(makeExtensionStmt(takeAll())) ~~>
-            = KwExtension [ EXName ] [ SkipAngle ] KwOn ExtOnType "{" { Member } "}" ;
+// An extension may be ANONYMOUS: `extension on Object { ... }`. Writing the name as
+// `[ EXName ]` does not work - the optional is greedy and never given back, so EXName
+// matched the `on` keyword itself and KwOn then failed. Two full alternatives instead.
+ExtensionOn = ExtensionNamed | ExtensionAnon ;
+ExtensionNamed <~~ push(makeExtensionStmt(takeAll())) ~~>
+            = KwExtension EXName [ SkipAngle ] KwOn ExtOnType "{" { Member } "}" ;
+ExtensionAnon <~~ push(makeExtensionStmt(takeAll())) ~~>
+            = KwExtension [ SkipAngle ] KwOn ExtOnType "{" { Member } "}" ;
 EXName      <~~ push({exname: up.in}) ~~> = Id ;
 ExtOnType   <~~ push({exton: up.in}) ~~> = Type ;
 ExtensionType <~~ push(makeExtTypeStmt(takeAll())) ~~>
-            = KwExtension KwType [ KwConst ] CName [ SkipAngle ] "(" ExtTypeField ")"
-              [ ImplementsClause ] "{" { Member } "}" ;
-ExtTypeField <~~ push({etfield: popName()}) ~~> = Type Id <~~ push({mname: up.in}) ~~> ;
+            = KwExtension KwType [ KwConst ] CName [ SkipAngle ] [ "." ETCtorName ] "(" ExtTypeField ")"
+              [ ImplementsClause ] ClassBody ;
+ETCtorName  = Id ;
+ExtTypeField <~~ push({etfield: popName()}) ~~>
+            = [ ParamMods ] Type Id <~~ push({mname: up.in}) ~~> ;
 
 // A typedef only names a type, and all types are erased here, so it compiles to nothing.
 TypedefDecl <~~ push(function() {}) ~~>
-            = KwTypedef ( TypedefNew | TypedefOld ) ;
+            = KwTypedef ( TypedefNew | TypedefOld | TypedefBare ) ;
 TypedefNew  = Id [ SkipAngle ] "=" Type ";" ;
 TypedefOld  = Type Id [ SkipAngle ] SkipParen ";" ;
+// The legacy form with no return type: typedef Handler(bool e);
+TypedefBare = Id [ SkipAngle ] SkipParen ";" ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -122,9 +159,24 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 // class Name { fields; constructors; methods }. Class modifiers (abstract, base, final,
 // interface, sealed, mixin) are parsed and erased so the class still compiles.
 // Inheritance/mixins are not implemented.
+// A mixin application class: `class C = S with M1, M2;` declares a class whose body is
+// exactly S plus the mixins, with S's constructors forwarded. It has to be tried BEFORE
+// ClassDecl (both open with the same modifiers and name) and is told apart by the "=".
+ClassAlias  <~~ push(makeClassStmt(takeAll())) ~~>
+            = [ ClassMods ] KwClass CName [ SkipAngle ] "=" AliasSuper [ WithClause ]
+              [ ImplementsClause ] ";" ;
+AliasSuper  <~~ push({csuper: up.in}) ~~> = TypeNamed ;
+// A PRIMARY (declaring header) constructor, Dart 3.10: `class Point(var int x, var int y);`
+// declares two fields and the constructor that fills them, and the body may be just a ";".
+// `class const C(...)` marks that constructor const.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ ClassMods ] KwClass CName [ SkipAngle ]
-              [ ExtendsClause ] [ WithClause ] [ ImplementsClause ] "{" { Member } "}" ;
+            = [ ClassMods ] KwClass [ KwConst ] CName [ SkipAngle ] [ PrimaryCtor ]
+              [ ExtendsClause ] [ WithClause ] [ ImplementsClause ] ClassBody ;
+// A class body is a brace block or, for a header-constructor class, a bare ";".
+ClassBody   = ClassBraceBody | ClassSemiBody ;
+ClassBraceBody = "{" { Member } "}" ;
+ClassSemiBody = ";" ;
+PrimaryCtor <~~ push(makePrimaryCtor(pop())) ~~> = ParamList ;
 CName       <~~ push({cname: up.in}); curClassName = up.in ~~> = Id ;
 ClassMods   = { ClassMod } ;
 ClassMod    = ( "abstract" | "base" | "final" | "interface" | "sealed" | "mixin" ) KwEnd ;
@@ -150,8 +202,18 @@ IfaceType   <~~ push({ciface: up.in}) ~~> = TypeNamed ;
 // descriptor per declared member rather than a single one.
 Member      <~~ pushMembers(takeAll()) ~~>
             = [ Annotations ] [ MemberMods ] MemberCore ;
-MemberCore  = GetterMember | SetterMember | OperatorMember | FactoryMember
+MemberCore  = PrimaryBodyMember | ShortNewCtor | ShortFactoryCtor
+            | GetterMember | SetterMember | OperatorMember | FactoryMember
             | NamedCtorMember | PlainFnMember | TypedFnMember | FieldMember ;
+// The body part of a primary constructor: `this { ... }` / `this : x = 1 { ... }`.
+PrimaryBodyMember <~~ push(makePrimaryBody(takeAll())) ~~>
+            = "this" KwEnd [ CtorInit ] MemberBody ;
+// The short forms a header-constructor class uses for its OTHER constructors:
+// `new named() : x = 1;` is `C.named()`, `const factory() = C._;` is `const factory C()`.
+ShortNewCtor <~~ push(makeCtorMember(false, takeAll())) ~~>
+            = KwNew [ "." ] MName [ SkipAngle ] ParamList [ CtorInit ] MemberBody ;
+ShortFactoryCtor <~~ push(makeCtorMember(true, takeAll())) ~~>
+            = [ KwConst ] KwFactory ParamList ( MemberBody | FactoryRedirect ) ;
 MemberMods  = MemberMod { MemberMod } ;
 MemberMod   <~~ push({mmod: up.in}) ~~>
             = ( "static" | "covariant" | "external" | "abstract" ) KwEnd ;
@@ -212,7 +274,12 @@ FieldFinalTyped = KwFinal Type FieldList ";" ;
 FieldFinal      = KwFinal      FieldList ";" ;
 FieldConstTyped = KwConst Type FieldList ";" ;
 FieldConst      = KwConst      FieldList ";" ;
-FieldLate       = KwLate ( KwFinal Type | KwFinal | KwVar | Type ) FieldList ";" ;
+// Same PEG-group trap as VarLate: `late final y = 1;` needs its own alternative.
+FieldLate       = FieldLateFinalTyped | FieldLateFinal | FieldLateVar | FieldLateTyped ;
+FieldLateFinalTyped = KwLate KwFinal Type FieldList ";" ;
+FieldLateFinal      = KwLate KwFinal      FieldList ";" ;
+FieldLateVar        = KwLate KwVar        FieldList ";" ;
+FieldLateTyped      = KwLate Type         FieldList ";" ;
 FieldTyped      = Type         FieldList ";" ;
 FieldList   = FieldDecl { "," FieldDecl } ;
 FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
@@ -237,38 +304,57 @@ ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ ParamItems ] ")" ;
 ParamItems  = TailGroup | Param { "," Param } [ "," TailGroup ] [ "," ] ;
 TailGroup   = NamedGroup | OptGroup ;
-Param       = [ ParamMods ] ParamCore ;
-ParamCore   = ThisParam | SuperParam | TypedParam | PlainParam ;
+Param       = [ Annotations ] [ ParamMods ] ParamCore ;
+ParamCore   = TypedThisParam | ThisParam | SuperParam | TypedParam | FnPlainParam | PlainParam ;
 ParamMods   = ParamMod { ParamMod } ;
-ParamMod    = ( "covariant" | "required" | "final" ) KwEnd ;
+ParamMod    = ( "covariant" | "required" | "final" | "var" ) KwEnd ;
 ThisParam   <~~ push({thisf: popName()}) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+// A field-initialising formal may be written with its type: `const Pair(A this.fst)`.
+TypedThisParam <~~ push({thisf: popName()}) ~~>
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
 // A super parameter (2.17): IhKid(super.v) forwards v to the superclass constructor.
 SuperParam  <~~ push(makeSuperParam(false, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+// A parameter may itself be function-typed, in the old positional style:
+// `void forEach(callback(E element))`, `bool test(Object error)?`.
 TypedParam  <~~ push({pname: popName()}) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+            = Type Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] [ SkipParen ] [ "?" ] ;
+FnPlainParam <~~ push({pname: popName()}) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] SkipParen [ "?" ] ;
 PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
 
 // Named (curly) parameters: foo({int a = 1, required int b, this.x = 0}). Optional, each
 // with a default; unsupplied ones fall back to the default, else null. Marked named:true.
 NamedGroup  = "{" NamedParam { "," NamedParam } [ "," ] "}" ;
-NamedParam  = [ ParamMods ] NamedParamCore ;
-NamedParamCore = NamedThisParam | NamedSuperParam | NamedTypedParam | NamedPlainParam ;
+NamedParam  = [ Annotations ] [ ParamMods ] NamedParamCore ;
+NamedParamCore = NamedTypedThisParam | NamedThisParam | NamedSuperParam | NamedTypedParam
+            | NamedFnPlainParam | NamedPlainParam ;
 NamedThisParam  <~~ push(makeNamedParam(true, takeAll())) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+NamedTypedThisParam <~~ push(makeNamedParam(true, takeAll())) ~~>
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 NamedSuperParam <~~ push(makeSuperParam(true, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 NamedTypedParam <~~ push(makeNamedParam(false, takeAll())) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] [ "?" ] [ "=" AssignExpr ] ;
+// `{onTimeout()?}` - function-typed with no return type, the old positional style.
+NamedFnPlainParam <~~ push(makeNamedParam(false, takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] SkipParen [ "?" ] [ "=" AssignExpr ] ;
 NamedPlainParam <~~ push(makeNamedParam(false, takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
 // Optional POSITIONAL parameters: foo(int a, [int b = 2, int? c]). Positional like the
 // plain ones, but a missing argument falls back to the default (else null).
 OptGroup    = "[" OptParam { "," OptParam } [ "," ] "]" ;
-OptParam    = [ ParamMods ] OptParamCore ;
-OptParamCore = OptThisParam | OptSuperParam | OptTypedParam | OptPlainParam ;
+OptParam    = [ Annotations ] [ ParamMods ] OptParamCore ;
+OptParamCore = OptTypedThisParam | OptThisParam | OptSuperParam | OptTypedParam
+            | OptFnPlainParam | OptPlainParam ;
+// `[int? this.j]`, `[A<U> this.a = const A()]` - a typed field-initialising formal.
+OptTypedThisParam <~~ push(makeOptParam(true, takeAll())) ~~>
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+OptFnPlainParam <~~ push(makeOptParam(false, takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] SkipParen [ "?" ] [ "=" AssignExpr ] ;
 OptThisParam  <~~ push(makeOptParam(true, takeAll())) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 OptSuperParam <~~ push(makeSuperParam(false, takeAll())) ~~>
@@ -311,7 +397,10 @@ PatNullAssert <~~ push({post: "!"}) ~~> = "!" !"=" ;
 PatCast     = KwAs PatCastType ;
 PatCastType <~~ push({post: "as", ty: up.in}) ~~> = Type ;
 
-PatPrimary  = PatList | PatMap | PatRecP | PatVarTyped | PatObject | PatBareId | PatConst ;
+PatPrimary  = PatList | PatMap | PatRecP | PatConstE | PatVarTyped | PatObject | PatBareId | PatConst ;
+// `case const C(0.0):` - a const creation used as a constant pattern. It must come before
+// PatVarTyped, which would otherwise read `const` as the TYPE and `C` as the bound name.
+PatConstE   <~~ push({p: "const", t: pop()}) ~~> = ConstMember ;
 PatList     <~~ push(makeListPat(takeAll())) ~~>
             = "[" [ PatListElem { "," PatListElem } [ "," ] ] "]" ;
 PatListElem = PatRest | PatElemP ;
@@ -361,7 +450,11 @@ PatObjShort <~~ push(makeShortField(pop())) ~~> = ":" Pattern ;
 // A bare name. The !"." / !"(" lookaheads keep a qualified constant (EnDir.north) and an
 // object pattern out of this alternative.
 PatBareId   <~~ push({p: "idref", name: up.in}) ~~> = PatBareName ;
-PatBareName = Id !"." !"(" ;
+// The `!"<"` keeps `case C<int>:` and `case List<int>:` out of here: a bare identifier
+// pattern binds or names a constant and is never followed by type arguments, so without
+// it PatBareId matched just the `C`, succeeded, and the case then died on the "<" with
+// no way back (PEG: a committed alternative is never retried).
+PatBareName = Id !"." !"(" !"<" ;
 PatConst    <~~ push({p: "const", t: pop()}) ~~> = RelExpr ;
 
 // Local variable declarations. Separate complete alternatives avoid the optional-type trap.
@@ -372,7 +465,14 @@ PatVarDecl  <~~ push(makePatDecl(takeAll())) ~~>
 PatDeclHead = PatList | PatMap | PatRecP ;
 // `late` only delays the initialisation check, which this front end does not make, so a
 // late declaration is an ordinary one (uninitialised means null).
-VarLate     = KwLate ( KwFinal Type | KwFinal | KwVar | Type ) DeclTail ;
+// A GROUP of alternatives is committed once it matches: `late final y = 1;` took the
+// `KwFinal Type` branch (Type = the identifier `y`), DeclTail then found the `=` and
+// failed, and a PEG never retries the group. Each shape needs its own alternative.
+VarLate     = VarLateFinalTyped | VarLateFinal | VarLateVar | VarLateTyped ;
+VarLateFinalTyped = KwLate KwFinal Type DeclTail ;
+VarLateFinal      = KwLate KwFinal      DeclTail ;
+VarLateVar        = KwLate KwVar        DeclTail ;
+VarLateTyped      = KwLate Type         DeclTail ;
 VarKwDecl     = KwVar         DeclTail ;
 VarFinalTyped = KwFinal Type  DeclTail ;
 VarFinal      = KwFinal       DeclTail ;
@@ -433,7 +533,12 @@ Empty       <~~ push(function() {}) ~~>  = ";" ;
 // the first non-empty body at or after the matching case). break is allowed and swallowed.
 Switch      <~~ push(makeSwitch(takeAll())) ~~>
             = KwSwitch "(" Expression ")" "{" { SwitchMember } "}" ;
-SwitchMember = SwitchCase | SwitchDefault ;
+// A case may carry labels (`a: case 5:`), which `continue a;` jumps to. The labels are
+// parsed and erased; the jump itself is not implemented.
+SwitchMember = CaseLabels SwitchMemberCore | SwitchMemberCore ;
+SwitchMemberCore = SwitchCase | SwitchDefault ;
+CaseLabels  = CaseLabel { CaseLabel } ;
+CaseLabel   = Id ":" ;
 SwitchCase  <~~ push(makeSwCase(takeAll())) ~~>
             = KwCase Pattern [ SwGuard ] ":" SwBody ;
 SwitchDefault <~~ push(makeSwDefault(takeAll())) ~~>
@@ -539,7 +644,7 @@ AssignExpr  = ThrowExpr | Assignment | Cascade ;
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow AssignExpr ;
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
-            = Target ( "+=" | "-=" | "*=" | "~/=" | "/=" | "%=" | "??=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+            = TargetOpAhead Target ( "+=" | "-=" | "*=" | "~/=" | "/=" | "%=" | "??=" | "&=" | "|=" | "^=" | "<<=" | ">>>=" | ">>=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
 // Cascade: target..m(args)..field = v . Every section acts on the one target and the
 // whole expression evaluates to that target. With no sections it is just the CondExpr,
@@ -551,18 +656,146 @@ Cascade     <~~ push(makeCascade(takeAll())) ~~>
 // at the conditional level, not the cascade level, so `..a = 1..[1] = 9` reads the second
 // `..` as the next section of the OUTER cascade rather than a cascade on the value 1.
 CascadeSection <~~ push(makeCascadeSec(takeAll())) ~~>
-            = CascadeOp CascadeHead { MethodSfx | FieldSfx | IndexSfx } [ CascadeAssign ] ;
+            = CascadeOp CascadeHead
+              { MethodSfx | GenFieldSfx | FieldSfx | CallSfx | IndexSfx
+              | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } [ CascadeAssign ] ;
 CascadeOp   <~~ push({casc: up.in}) ~~> = "?.." | ".." ;
-CascadeHead = CascadeMcall | CascadeField | IndexSfx ;
+CascadeHead = CascadeAnon | CascadeMcall | CascadeGenField | CascadeField | IndexSfx ;
+// `[]..expectStaticType<Exactly<List<num>>>;` - a generic tear-off with no call, the
+// cascade twin of GenFieldSfx. Before CascadeField, which would stop at the name.
+CascadeGenField = Id <~~ push({kind: "field", name: up.in}) ~~> TypeArgs ;
+// `buffer..{ ... }` / `buffer?..=> e`: an anonymous method as a cascade section. The
+// section's value is discarded, like every other cascade section.
+CascadeAnon <~~ push(makeAnonSfx(false, takeAll())) ~~> = AnonBody ;
 CascadeMcall <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = Id <~~ push({mname: up.in}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 CascadeField = Id <~~ push({kind: "field", name: up.in}) ~~> ;
-CascadeAssign <~~ push({cassign: pop()}) ~~> = "=" CascadeValue ;
-CascadeValue = ThrowExpr | CondExpr ;
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
+CascadeAssign <~~ var cv = pop(); push({cassign: cv, cop: pop()}) ~~>
+            = CascadeAssignOp <~~ push(up.in) ~~> CascadeValue ;
+// A named production, not an inline group: a group of single-token alternatives directly
+// after a :command() is read as a Times repetition (the Times trap).
+CascadeAssignOp = "+=" | "-=" | "*=" | "~/=" | "/=" | "%=" | "??=" | "&=" | "|=" | "^="
+            | "<<=" | ">>>=" | ">>=" | "=" ;
+CascadeValue = ThrowExpr | Assignment | CondExpr ;
+// A zero-width fast-fail in front of the two productions that begin with Target.
+// Both `Assignment` and `IncDec` parse a whole Target before they learn whether the
+// operator they need is there, and Target's seeds now include `new C(...)` and a
+// parenthesized expression - so every nested creation was parsed TWICE (once by the
+// speculative Target, once by the CallMember that follows it), which is 2^depth on
+// language/async_nested/*, a corpus of deliberately deep literals. This guard answers
+// "is there an assignment operator or a ++/-- ahead, at bracket depth 0, before this
+// expression ends" and declines outright when there is not. It turned 9.4s into 0.13s
+// on async_nested20_test.dart.
+// Two caps, and they must be separate: `budget` bounds the CODE scanned (a target longer
+// than that is treated as "no operator", which surfaces as a parse failure, not as a
+// wrong parse), while `spin` bounds the raw iterations. Charging comments to `budget`
+// was a 44-file regression - a statement preceded by nine lines of commentary spent the
+// whole budget before reaching its own `=`.
+TargetOpAhead = :script(~~
+    (function() {
+        var i = 0
+        var depth = 0
+        var angle = 0
+        var budget = 512
+        var spin = 0
+        var q = 0
+        var ch = 0
+        while (spin < 200000 && budget > 0) {
+            spin = spin + 1
+            ch = c.peek(i)
+            if (ch < 0) { break }
+            if (ch === 32 || ch === 9 || ch === 10 || ch === 13 || ch === 12) { i = i + 1; continue }
+            // comments - not charged to the budget
+            if (ch === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                while (c.peek(i) >= 0 && c.peek(i) !== 10) { i = i + 1 }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i = i + 1 }
+                i = i + 2
+                continue
+            }
+            budget = budget - 1
+            // string literals: their contents must not be read as operators or brackets
+            if (ch === 39 || ch === 34) {
+                q = ch
+                if (c.peek(i + 1) === q && c.peek(i + 2) === q) {
+                    i = i + 3
+                    while (c.peek(i) >= 0
+                           && !(c.peek(i) === q && c.peek(i + 1) === q && c.peek(i + 2) === q)) {
+                        if (c.peek(i) === 92) { i = i + 1 }
+                        i = i + 1
+                    }
+                    i = i + 3
+                    continue
+                }
+                i = i + 1
+                while (c.peek(i) >= 0 && c.peek(i) !== q && c.peek(i) !== 10) {
+                    if (c.peek(i) === 92) { i = i + 1 }
+                    i = i + 1
+                }
+                i = i + 1
+                continue
+            }
+            if (ch === 40 || ch === 91 || ch === 123) { depth = depth + 1; i = i + 1; continue }
+            if (ch === 41 || ch === 93 || ch === 125) {
+                depth = depth - 1
+                if (depth < 0) { break }
+                i = i + 1
+                continue
+            }
+            if (ch === 60) { angle = angle + 1 }
+            if (ch === 62 && angle > 0) { angle = angle - 1 }
+            if (depth === 0) {
+                // A ';' or a ',' at depth 0 ends this expression: any operator that
+                // belongs to it stands before them. Stopping at the comma is what keeps
+                // the guard cheap inside a 20 000-element literal - without it the two
+                // big_set_literal tests took 25s each and hit the sweep's timeout.
+                // The comma of a TYPE ARGUMENT list is not such an end, though, so it
+                // only counts outside an open '<': `Indexable<String, Object?>('')[0]
+                // ??= e` is one target, and stopping at its comma lost eight files.
+                if (ch === 59) { break }
+                if (ch === 44 && angle === 0) { break }
+                // ++ / -- (a postfix or prefix step)
+                if ((ch === 43 && c.peek(i + 1) === 43) || (ch === 45 && c.peek(i + 1) === 45)) { return }
+                // an assignment operator is the one that ENDS in a single '=' that is
+                // neither part of '==', '=>', '!=', '<=' nor '>='.
+                if (ch === 61 && c.peek(i + 1) !== 61 && c.peek(i + 1) !== 62) {
+                    var p1 = i > 0 ? c.peek(i - 1) : 0
+                    var p2 = i > 1 ? c.peek(i - 2) : 0
+                    if (p1 === 61 || p1 === 33) { i = i + 1; continue }        // == , !=
+                    if (p1 === 60 && p2 !== 60) { i = i + 1; continue }        // <= (not <<=)
+                    if (p1 === 62 && p2 !== 62) { i = i + 1; continue }        // >= (not >>=)
+                    return
+                }
+            }
+            i = i + 1
+        }
+        return abnf.newToken("\x01noassign", 0)
+    })()
+~~) ;
+
+// An assignment target: a name, or a CALL, followed by any run of .field / [index]
+// steps. The call seed is what makes `E0(c0).m1 = 0` and `f(x)[0] = 1` assignable; the
+// call form is tried first because it is the more specific of the two.
+Target      <~~ push(makeDartTarget(takeAll())) ~~>
+            = TargetSeed { DotTarget | IndexTarget | NullDotTarget | NullIndexTarget } ;
+TargetSeed  = TargetCall | TargetNew | TargetParen | TargetName ;
+TargetCall  <~~ push({seed: pop()}) ~~> = Call ;
+// `new A().field = 42`, `(mock as dynamic).mood = 'x'`, `(variable)[0] = 0`: an object
+// creation and a parenthesized expression are assignable seeds too.
+TargetNew   <~~ push({seed: pop()}) ~~> = NewExpr ;
+TargetParen <~~ push({seed: pop()}) ~~> = "(" Expression ")" ;
+TargetName  <~~ push(up.in) ~~> = Id ;
 DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
 IndexTarget <~~ push({idx: pop()}) ~~> = "[" Expression "]" ;
+// Null-aware assignment targets: `e?.f = v`, `e?[i] ??= v`. A null receiver makes the
+// whole assignment a no-op evaluating to null, exactly as in Dart. "?[" is one fused
+// token for the same reason NullIndexSfx fuses it.
+NullDotTarget = "?." Id <~~ push({key: up.in, nulla: true}) ~~> ;
+NullIndexTarget <~~ push({idx: pop(), nulla: true}) ~~> = "?[" Expression "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = IfNullExpr [ "?" AssignExpr ":" AssignExpr ] ;
@@ -602,7 +835,11 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "~/" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Await | Neg | Not | BitNot | PostfixExpr ;
+// The prefix ++ / -- come BEFORE Neg: "--i" would otherwise read as the double negation
+// -(-i), which parses and quietly means something else.
+UnaryExpr   = Await | PreIncDec | Neg | Not | BitNot | PostfixExpr ;
+PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 // await has no event loop here: a Future is already its value, so await is the identity
 // (the child pushes the operand thunk unchanged).
 Await       = KwAwait UnaryExpr ;
@@ -615,12 +852,34 @@ PostfixExpr = IncDec | ConstMember | CallMember ;
 // const creations with equal arguments are identical().
 ConstMember <~~ push(constify(pop())) ~~> = KwConst CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = TargetOpAhead Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // A primary followed by any mix of method calls, field reads, index reads and the (not
 // implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
+            = Primary { MethodSfx | GenFieldSfx | AnonMethodSfx | FieldSfx | CallSfx | IndexSfx
+                      | NullAnonSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
+// An ANONYMOUS METHOD (Dart 3.11 experiment): `receiver.{ return this.length; }` and its
+// expression form `receiver.=> this.length`. It is invoked IMMEDIATELY - the corpus's own
+// `final v1 = buffer.{ return foo; }; v1.expectStaticType<Exactly<int>>` says the value is
+// the body's result, not a closure - with `this` bound to the receiver. It has to be tried
+// before FieldSfx / NullFieldSfx, which also open with "." / "?.".
+AnonMethodSfx <~~ push(makeAnonSfx(false, takeAll())) ~~> = "." AnonBody ;
+NullAnonSfx   <~~ push(makeAnonSfx(true, takeAll())) ~~> = "?." AnonBody ;
+// The body may declare a PARAMETER, which receives the receiver as well:
+// `buffer.(p) => p.length` is `buffer.length`. ParamList fails on the first byte when
+// there is none, so the optional is safe here.
+AnonBody    = [ ParamList ] AnonTail ;
+AnonTail    = AnonBlock | AnonArrow ;
+AnonBlock   <~~ push({ablock: pop()}) ~~> = Block ;
+AnonArrow   <~~ push({aexpr: pop()}) ~~>  = "=>" AssignExpr ;
+// A call of whatever the chain has produced so far: foo(10)(20), f!(b), map['k']!(4, 2).
+// Without it a curried or stored function can only be called through a variable.
+CallSfx     <~~ push({kind: "callv", args: takeAll()}) ~~>
+            = [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+// A generic tear-off: `o.method<int>` with no argument list (the parenthesized form is
+// MethodSfx, which is tried first). The type arguments are erased.
+GenFieldSfx = "." Id <~~ push({kind:"field", name: up.in}) ~~> TypeArgs ;
 BangSfx     <~~ push({kind:"bang"}) ~~> = "!" !"=" ;
 // Null-aware access (?., ?.(), ?[]): a null receiver short-circuits the whole remaining
 // suffix chain to null, exactly like Dart.
@@ -640,9 +899,65 @@ RecPosName  = "$" :whitespace() "0"..."9" { "0"..."9" } :whitespace(Whitespace) 
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = ArrowFn | SuperExpr | SwitchExpr | RecordLit | "(" Expression ")" | TypedColl | ListLit | MapLit
+Primary     = ArrowFn | SuperExpr | SwitchExpr | SymbolLit | RecordLit | "(" Expression ")" | TypedColl | ListLit | MapLit
             | SetLit | StrLit | NumLit | True | False | Null | NewExpr | QualCall | QualRef
-            | Call | VarRef ;
+            | Call | TypeLit | DotShorthand | VarRef ;
+
+// A TYPE LITERAL / explicit instantiation used as a value: `Map<int, bool>`,
+// `f1<int>`, `A<B<int>>`. Types are erased here, so it evaluates to the type's text.
+// `a < b, c > d` is also a perfectly good pair of comparisons, and Dart resolves the
+// ambiguity purely lexically: `id<T, T>` is one term only when what FOLLOWS it is a
+// stop or continuation token. language/constructor/explicit_instantiation_syntax_test.dart
+// states the rule outright and enumerates every case:
+//     <continuationToken> ::= '(' | '.' | '==' | '!='
+//     <stopToken>         ::= ')' | ']' | '}' | ';' | ':' | ','
+// TypeLit sits AFTER Call, so the '(' case is still a call; it is here for the rest.
+TypeLit     <~~ push(makeConst(stripWs(up.in))) ~~>
+            = Id TypeArgs InstEnd ;
+// Whitespace is NOT skipped before a :script guard, and a refusing guard that skips too
+// little says yes - the unsafe direction - so this steps over spaces AND both comment
+// forms by hand, like every other forward-scanning guard in this tree.
+InstEnd = :script(~~
+    (function() {
+        var i = 0
+        var spin = 0
+        while (spin < 200000) {
+            spin = spin + 1
+            var t = c.peek(i)
+            if (t === 32 || t === 9 || t === 10 || t === 13 || t === 12) { i = i + 1; continue }
+            if (t === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                var u = c.peek(i)
+                while (u >= 0 && u !== 10) { i = i + 1; u = c.peek(i) }
+                continue
+            }
+            if (t === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                var v = c.peek(i)
+                while (v >= 0 && !(v === 42 && c.peek(i + 1) === 47)) { i = i + 1; v = c.peek(i) }
+                if (v >= 0) { i = i + 2 }
+                continue
+            }
+            break
+        }
+        var ch = c.peek(i)
+        if (ch < 0) { return }                                   // end of file: a stop
+        if (ch === 41 || ch === 93 || ch === 125) { return }      // ) ] }
+        if (ch === 59 || ch === 58 || ch === 44) { return }       // ; : ,
+        if (ch === 40 || ch === 46) { return }                    // ( .
+        if (ch === 61 && c.peek(i + 1) === 61) { return }         // ==
+        if (ch === 33 && c.peek(i + 1) === 61) { return }         // !=
+        return abnf.newToken("\x01notinst", 0)
+    })()
+~~) ;
+
+// A dot shorthand (Dart 3.10): `.blue`, `.new(1)`, `.member()` name a static member or
+// constructor of the CONTEXT type. This front end does no type inference, so there is no
+// context type to resolve the name against: the form is parsed and reported at run time.
+DotShorthand <~~ push(makeDotShorthand(takeAll(), up.pos)) ~~>
+            = "." DSName [ DSArgs ] ;
+DSName      <~~ push({dsname: up.in}) ~~> = KwNew | Id ;
+DSArgs      <~~ push({dsargs: takeAll()}) ~~> = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A generic type used as a receiver: List<int>.filled(10, null), Future<Object?>.value().
 // Without these two the type arguments are read as a comparison and the parse dies on the
@@ -669,6 +984,16 @@ SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
 SwExprCase  <~~ push(makeSwExprCase(takeAll())) ~~>
             = Pattern [ SwGuard ] "=>" AssignExpr ;
 
+// A symbol literal: #foo, #a.b . It names a member without calling it; with no mirrors
+// here it evaluates to the plain string of that name. The whitespace scoping is the
+// RecPosName idiom - no space may sit between the # and the name.
+SymbolLit   <~~ push(makeConst(stripWs(up.in).substring(1))) ~~>
+            = "#" :whitespace() SymName :whitespace(Whitespace) ;
+// A symbol names a member, and an operator is a member: #>>>, #+, #[]= . The overloadable
+// operator spellings come first because `#[]` is a prefix of `#[]=` (PEG ordered choice).
+SymName     = OverloadableOp | SymDotted ;
+SymDotted   = Id { "." Id } ;
+
 // A record literal (Dart 3). It is told apart from a parenthesized expression by needing
 // either two fields, a trailing comma after a single one, or a named field - which is why
 // the three shapes are separate alternatives and RecordLit comes before "(" Expression ")".
@@ -687,7 +1012,10 @@ PosRecField <~~ push({rname: "", t: pop()}) ~~> = AssignExpr ;
 // Dart number literals: hex (0x..), then the fractional/exponent form, then the plain
 // integer. All three accept '_' digit separators (Dart 3.6). The longest/prefixed forms
 // come first because this is a PEG.
-NumLit      = NumHex | NumDec | NumInt ;
+// A double may start with the point: `.5`. It comes first so the plain forms never see it.
+NumLit      = NumLeadDot | NumHex | NumDec | NumInt ;
+NumLeadDot  <~~ push(makeConst(parseFloat("0" + stripWs(up.in)))) ~~>
+            = "." :whitespace() "0"..."9" { "0"..."9" | "_" } :whitespace(Whitespace) ;
 
 // A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
 // argument is erased and the list/map/set is built as usual.
@@ -704,8 +1032,11 @@ SetLit      <~~ push(makeSet(takeAll())) ~~>
             = "{" CollElem { "," CollElem } [ "," ] "}" ;
 
 // A closure: (params) => expr or (params) { statements }.
+// A closure may be GENERIC: `<X>(X x) => x`, `<E>() sync* { ... }`. The type parameter
+// list is erased. It is safe at the head of Primary because it demands a "<" first and
+// then a parameter list, which no comparison expression offers.
 ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
-            = ParamList [ AsyncMod ] ArrowTail ;
+            = [ SkipAngle ] ParamList [ AsyncMod ] ArrowTail ;
 ArrowTail   = ArrowExpr | ArrowBlock ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = "=>" AssignExpr ;
 ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
@@ -730,12 +1061,17 @@ ListLit     <~~ push(makeList(takeAll())) ~~>
 // A collection element is a plain expression, a spread (...e splicing e's elements, ...?e
 // contributing nothing when e is null), a collection-if or a collection-for. The same
 // three control forms exist for map entries, one level down (MapElem).
-CollElem    = SpreadElem | IfElem | ForElem | ExprElem ;
+CollElem    = SpreadElem | IfElem | ForElem | NullAwareElem | ExprElem ;
+// A null-aware element (Dart 3.8): `?e` contributes nothing when e is null. "?" is not
+// glued to the expression (`? .cn` is legal), so an ordinary token match is right here.
+NullAwareElem <~~ push(makeNullAwareElem(pop())) ~~> = "?" AssignExpr ;
 SpreadElem  <~~ push(makeSpread(takeAll())) ~~> = "..." [ "?" <~~ push({nullaware: true}) ~~> ] AssignExpr ;
 IfElem      <~~ push(makeIfElem(takeAll())) ~~>
             = KwIf "(" Expression ")" CollElem [ KwElse CollElem ] ;
+// `[await for (var i in stream) i]` - an await-for stream loop as a collection element.
+// The await is in front of the `for`, not inside the head.
 ForElem     <~~ push(makeForElem(takeAll())) ~~>
-            = KwFor "(" ForElemHead ")" CollElem ;
+            = [ KwAwait ] KwFor "(" ForElemHead ")" CollElem ;
 ExprElem    <~~ push({ekind: "val", t: pop()}) ~~> = AssignExpr ;
 // The head of a collection-for is either `x in e` or the C-style triple; both reuse the
 // statement-level pieces, so the markers arrive in the same shape.
@@ -746,11 +1082,16 @@ ForElemC    = [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ;
 
 MapLit      <~~ push(makeMap(takeAll())) ~~>
             = "{" [ MapElem { "," MapElem } [ "," ] ] "}" ;
-MapElem     = SpreadElem | IfMapElem | ForMapElem | MapEntry ;
+MapElem     = SpreadElem | IfMapElem | ForMapElem | MapNullKeyEntry | MapEntry ;
+// `{?k: v}` / `{k: ?v}`: a null key or value drops the whole entry.
+MapNullKeyEntry <~~ push(makeNullMapEntry(takeAll())) ~~>
+            = MapKeyQ AssignExpr ":" MapValQ AssignExpr ;
+MapKeyQ     <~~ push({nk: up.in}) ~~> = [ "?" ] ;
+MapValQ     <~~ push({nv: up.in}) ~~> = [ "?" ] ;
 IfMapElem   <~~ push(makeIfElem(takeAll())) ~~>
             = KwIf "(" Expression ")" MapElem [ KwElse MapElem ] ;
 ForMapElem  <~~ push(makeForElem(takeAll())) ~~>
-            = KwFor "(" ForElemHead ")" MapElem ;
+            = [ KwAwait ] KwFor "(" ForElemHead ")" MapElem ;
 MapEntry    <~~ var v = pop(); push({ekind: "entry", mk: pop(), mv: v}) ~~>
             = AssignExpr ":" AssignExpr ;
 
@@ -877,6 +1218,7 @@ KwWhen      = "when" KwEnd ;
 KwYield     = "yield" KwEnd ;
 KwAwait     = "await" KwEnd ;
 KwSuper     = "super" KwEnd ;
+KwDeferred  = "deferred" KwEnd ;
 
 // ---
 
@@ -1461,6 +1803,12 @@ KwSuper     = "super" KwEnd ;
         if (items.length > 1) { na = true }
         return {ekind: "spread", t: t, nullaware: na}
     }
+    // `?e` as a collection element, `{?k: v}` / `{k: ?v}` as a map entry.
+    function makeNullAwareElem(t) { return {ekind: "nval", t: t} }
+    function makeNullMapEntry(items) {
+        return {ekind: "nentry", nullk: stripWs(items[0].nk) == "?", mk: items[1],
+                nullv: stripWs(items[2].nv) == "?", mv: items[3]}
+    }
     function makeIfElem(items) {
         return {ekind: "if", cond: items[0], then: items[1], els: items.length > 2 ? items[2] : null}
     }
@@ -1483,6 +1831,25 @@ KwSuper     = "super" KwEnd ;
     function emitElem(e, sink) {
         if (e.ekind == "val") { sink(e.t(), null, false); return }
         if (e.ekind == "entry") { sink(e.mk(), e.mv(), true); return }
+        // A null-aware element / entry (Dart 3.8) contributes NOTHING when the marked
+        // operand is null; an entry drops whole when either marked half is null.
+        if (e.ekind == "nval") {
+            var nv = anytype
+            nv = e.t()
+            if (nv === null || nv === undefined) { return }
+            sink(nv, null, false)
+            return
+        }
+        if (e.ekind == "nentry") {
+            var nk = anytype
+            nk = e.mk()
+            if (e.nullk && (nk === null || nk === undefined)) { return }
+            var nvv = anytype
+            nvv = e.mv()
+            if (e.nullv && (nvv === null || nvv === undefined)) { return }
+            sink(nk, nvv, true)
+            return
+        }
         if (e.ekind == "spread") {
             var s = anytype
             s = e.t()
@@ -1698,6 +2065,15 @@ KwSuper     = "super" KwEnd ;
                     else { cur = mcall(cur, s.name, argv) }
                 } else if (s.kind == "field") {
                     cur = readField(cur, s.name)
+                } else if (s.kind == "anon") {
+                    if (s.nulla && (cur === null || cur === undefined)) { return null }
+                    cur = runAnon(s, cur)
+                } else if (s.kind == "callv") {
+                    // Calling whatever the chain produced: foo(10)(20), f!(b), m['k']!(1).
+                    var cv = anytype
+                    cv = cur
+                    if (typeof cv != "function") { fail("call of a non-function value") }
+                    cur = cv.apply(undefined, evalArgs(s.args))
                 } else if (s.kind == "bang") {
                     // The postfix null assertion: a null operand is a runtime error.
                     if (cur === null || cur === undefined) { fail("null check operator used on a null value") }
@@ -1707,6 +2083,30 @@ KwSuper     = "super" KwEnd ;
             }
             return cur
         }
+    }
+
+    // An anonymous method: run the body with `this` bound to the receiver, in the
+    // CURRENT lexical scope chain (the body reads enclosing locals), and yield what it
+    // returned. A block body's return signal is consumed here so it cannot escape.
+    function makeAnonSfx(nulla, items) {
+        var it = items[items.length - 1]
+        var ps = (items.length > 1 && items[0].params != undefined) ? items[0].params : []
+        return {kind: "anon", nulla: nulla, params: ps, ablock: it.ablock, aexpr: it.aexpr}
+    }
+    function runAnon(s, recv) {
+        scopes.push({})
+        declVar("this", recv)
+        // A declared parameter receives the receiver too: `b.(p) => p.length`.
+        if (s.params.length > 0) { bindPlainParams(scopes[scopes.length - 1], s.params, [recv], 0) }
+        var out = anytype
+        out = undefined
+        if (s.aexpr != undefined) { out = s.aexpr() }
+        else {
+            var r = s.ablock()
+            if (r != undefined && r.isRet) { out = r.v }
+        }
+        scopes.pop()
+        return out
     }
 
     // ----- method dispatch (agrees with the compiler's js_mcall / memberCall) -----
@@ -1774,10 +2174,10 @@ KwSuper     = "super" KwEnd ;
     // ----- cascade: t..m()..f = v evaluates the target once and returns it -----
     // items = [{casc}, selector suffixes..., {cassign}?]
     function makeCascadeSec(items) {
-        var sec = {nullaware: items[0].casc == "?..", path: [], assign: null}
+        var sec = {nullaware: items[0].casc == "?..", path: [], assign: null, aop: "="}
         var path = []
         for (var i = 1; i < items.length; i++) {
-            if (items[i].cassign != undefined) { sec.assign = items[i].cassign }
+            if (items[i].cassign != undefined) { sec.assign = items[i].cassign; sec.aop = stripWs(items[i].cop) }
             else { path.push(items[i]) }
         }
         sec.path = path
@@ -1801,10 +2201,19 @@ KwSuper     = "super" KwEnd ;
                     for (var j = 0; j <= last; j++) { cur = applySfx(cur, path[j]) }
                 } else {
                     for (var k = 0; k < last; k++) { cur = applySfx(cur, path[k]) }
+                    var isIdx = path[last].kind == "index"
+                    var key = anytype
+                    key = isIdx ? path[last].idx() : path[last].name
+                    // A compound cascade assignment (`..v -= x`, `..v ??= x`) reads the
+                    // old value first; the key is evaluated once and reused for both.
+                    var old = anytype
+                    old = null
+                    if (s.aop != "=") { old = isIdx ? dget(cur, key) : readMember(cur, key) }
+                    if (s.aop == "??=" && old !== null && old !== undefined) { continue }
                     var v = anytype
                     v = s.assign()
-                    if (path[last].kind == "index") { dsetIndexD(cur, path[last].idx(), v) }
-                    else { setFieldD(cur, path[last].name, v) }
+                    if (s.aop != "=" && s.aop != "??=") { v = applyOp(s.aop, old, v) }
+                    if (isIdx) { dsetIndexD(cur, key, v) } else { setFieldD(cur, key, v) }
                 }
             }
             return t
@@ -1812,6 +2221,12 @@ KwSuper     = "super" KwEnd ;
     }
     // One selector step of a cascade section (a read).
     function applySfx(cur, s) {
+        if (s.kind == "anon") { return runAnon(s, cur) }
+        if (s.kind == "callv") { return cur.apply(undefined, evalArgs(s.args)) }
+        if (s.kind == "bang") { return cur }
+        if (s.kind == "nmcall") { return mcall(cur, s.name, evalArgs(s.args)) }
+        if (s.kind == "nfield") { return readMember(cur, s.name) }
+        if (s.kind == "nindex") { return dget(cur, s.idx()) }
         if (s.kind == "mcall") { return mcall(cur, s.name, evalArgs(s.args)) }
         if (s.kind == "field") { return readMember(cur, s.name) }
         return dget(cur, s.idx())
@@ -2028,6 +2443,11 @@ KwSuper     = "super" KwEnd ;
         var name = items[1].qname
         return function() { return readField(getVar(base), name) }
     }
+    // A dot shorthand names a member of the CONTEXT type, which only static type
+    // inference can supply. There is none here, so the expression parses and reports.
+    function makeDotShorthand(items, pos) {
+        return notImplExpr("dot shorthand '." + items[0].dsname + "' (no context type)", pos)
+    }
     function makeCall(items) {
         var name = items[0]
         var args = items.slice(1)
@@ -2197,9 +2617,45 @@ KwSuper     = "super" KwEnd ;
     var extensionTypes = {}
 
     // items = [{cname}, {csuper}?, {cmixin}*, {ciface}*, {con}*, member descriptors...]
+    // ----- primary (declaring header) constructors -----
+    // `class Point(var int x, var int y);` declares a FIELD per declaring parameter and
+    // the unnamed constructor that fills them. Each such parameter is rewritten into the
+    // field-initialising formal `this.x`, so the existing constructor machinery does the
+    // storing; `this.x` / `super.x` parameters are already in that shape and pass through.
+    function makePrimaryCtor(rec) {
+        var ps = rec.params
+        var flds = []
+        var cps = []
+        for (var i = 0; i < ps.length; i++) {
+            var p = ps[i]
+            if (p.thisf != undefined || p.superf != undefined) { cps.push(p); continue }
+            flds.push({field: p.pname, init: null})
+            // The other flags have to travel with it: the optional-positional binder
+            // keys its default on `opt`, so dropping it made `class C([var int q = 6])`
+            // bind null instead of 6 - in the compiler only.
+            cps.push({thisf: p.pname, pname: p.pname, named: p.named, opt: p.opt, def: p.def})
+        }
+        return {primary: true, pfields: flds, pparams: cps}
+    }
+    // `this { ... }` / `this : x = 1 { ... }` - the BODY part of a primary constructor,
+    // written as a member because the header carries only the parameters.
+    function makePrimaryBody(items) {
+        var inits = []
+        var body = {none: true}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (it.amod != undefined) { continue }
+            if (it.body != undefined || it.ebody != undefined || it.none != undefined) { body = it }
+            else { inits.push(it) }
+        }
+        return {pbody: true, pinits: inits, pbodyd: body}
+    }
     function makeClassStmt(items) {
         var name = items[0].cname
         var superName = ""
+        var primary = null
+        var pbody = null
         var mixinNames = []
         var fields = []
         var statics = []
@@ -2215,6 +2671,14 @@ KwSuper     = "super" KwEnd ;
             else if (hasOwn(it, "field")) { if (it.isStatic === true) { statics.push(it) } else { fields.push(it) } }
             else if (hasOwn(it, "method")) { if (it.isStatic === true) { statics.push(it) } else { methods.push(it.method) } }
             else if (hasOwn(it, "ctor")) { ctors.push(it.ctor) }
+            else if (hasOwn(it, "primary")) { primary = it }
+            else if (hasOwn(it, "pbody")) { pbody = it }
+        }
+        if (primary != null) {
+            for (var pf = 0; pf < primary.pfields.length; pf++) { fields.push(primary.pfields[pf]) }
+            ctors.push({name: "", params: primary.pparams, factory: false, isconst: false,
+                        body: (pbody != null) ? pbody.pbodyd : {none: true},
+                        inits: (pbody != null) ? pbody.pinits : []})
         }
         return function() {
             declVar(name, buildClass(name, superName, mixinNames, fields, statics, methods, ctors, []))
@@ -2614,16 +3078,31 @@ KwSuper     = "super" KwEnd ;
         var init = items.length > 1 ? items[1] : makeConst(null)
         return function() { declVar(name, init()) }
     }
+    // An assignment target is either a plain name or a CALL used as the seed of the
+    // .field / [index] path (`E0(c0).m1 = 0`, `f(x)[0] = 1`). A seeded target has no
+    // name, so every reader has to branch on `ref.seed` before touching `ref.name`.
+    function makeDartTarget(items) {
+        if (items[0] != undefined && items[0].seed != undefined) {
+            return {name: "", seed: items[0].seed, path: items.slice(1)}
+        }
+        return {name: items[0], seed: null, path: items.slice(1)}
+    }
     function resolveRefDart(ref) {
         var o = anytype
-        o = getVar(ref.name)
+        if (ref.seed != null) { o = ref.seed() } else { o = getVar(ref.name) }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
+            if (s.nulla === true && (o === null || o === undefined)) {
+                return {obj: null, key: "", field: true, skip: true}
+            }
             if (s.key != undefined) { o = readMember(o, s.key) } else { o = dget(o, s.idx()) }
         }
         var last = ref.path[ref.path.length - 1]
-        if (last.key != undefined) { return {obj: o, key: last.key, field: true} }
-        return {obj: o, key: last.idx(), field: false}
+        if (last.nulla === true && (o === null || o === undefined)) {
+            return {obj: null, key: "", field: true, skip: true}
+        }
+        if (last.key != undefined) { return {obj: o, key: last.key, field: true, skip: false} }
+        return {obj: o, key: last.idx(), field: false, skip: false}
     }
     function makeAssign(items, pos) {
         var ref = items[0]
@@ -2631,6 +3110,11 @@ KwSuper     = "super" KwEnd ;
         var valT = items[2]
         return function() {
             var v = anytype
+            if (ref.path.length == 0 && ref.seed != null) {
+                // `f(x) = v` has no assignable location; evaluate both and yield the value.
+                ref.seed()
+                return valT()
+            }
             if (ref.path.length == 0) {
                 if (op == "??=") {
                     var cur0 = getVar(ref.name)
@@ -2643,6 +3127,8 @@ KwSuper     = "super" KwEnd ;
                 setVar(ref.name, v)
             } else {
                 var p = resolveRefDart(ref)
+                // A null-aware step on a null receiver short-circuits the whole assignment.
+                if (p.skip === true) { return null }
                 if (p.field) {
                     var cur = readMember(p.obj, p.key)
                     if (op == "??=") {
@@ -2668,14 +3154,42 @@ KwSuper     = "super" KwEnd ;
             return v
         }
     }
+    // x++ / x.f++ / x[i]++ : read the old value, store old+delta, yield the OLD value.
+    // The prefix form is the same update yielding the NEW value.
+    function stepRef(ref, delta) {
+        if (ref.path.length == 0 && ref.seed == null) {
+            var n = getVar(ref.name) - 0
+            setVar(ref.name, incNum(n, delta))
+            return n
+        }
+        var p = resolveRefDart(ref)
+        if (p.skip === true) { return null }
+        if (p.field) {
+            var f = readMember(p.obj, p.key) - 0
+            setFieldD(p.obj, p.key, incNum(f, delta))
+            return f
+        }
+        var d = dget(p.obj, p.key) - 0
+        dsetIndexD(p.obj, p.key, incNum(d, delta))
+        return d
+    }
+    // Dart's ++ is +1 on the value's own type: an int stays an int, a double stays a
+    // double. Truncating with |0 would turn 1.5++ into 2, so only an integral value
+    // is wrapped back into the 32-bit range.
+    function incNum(n, delta) {
+        var r = n + delta
+        if (r === Math.floor(r)) { return r | 0 }
+        return r
+    }
     function makeIncDec(items) {
         var ref = items[0]
         var delta = (items[1] == "++") ? 1 : -1
-        return function() {
-            var n = getVar(ref.name) - 0
-            setVar(ref.name, (n + delta) | 0)
-            return n
-        }
+        return function() { return stepRef(ref, delta) }
+    }
+    function makePreIncDec(items) {
+        var delta = (items[0] == "++") ? 1 : -1
+        var ref = items[1]
+        return function() { return incNum(stepRef(ref, delta), delta) }
     }
 
     // ----- labels, loops and their control signals -----
