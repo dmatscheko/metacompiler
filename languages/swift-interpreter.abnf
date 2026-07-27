@@ -58,15 +58,35 @@ A declaration made under #if stays visible after the #endif. #available and
 #unavailable answer true and false; #sourceLocation / #error / #warning /
 #assert are accepted and ignored, and a leading hashbang line is skipped.
 
+Every numeric literal form (hexadecimal, octal, binary, digit group separators,
+decimal and hexadecimal floats with exponents) and every string literal form
+(unicode escapes, multi-line strings with the closing delimiter's indentation
+stripped, raw strings with one or two pound levels and their pound-interpolation).
+A string is a sequence of extended grapheme clusters: .count counts CLUSTERS and
+== compares by CANONICAL EQUIVALENCE, so a precomposed letter equals its
+decomposed spelling. lazy properties (built at the first read), property wrappers
+(@Wrapper var x, with x reading wrappedValue and $x projectedValue), operator and
+precedencegroup declarations with user-defined infix and prefix operators folded
+by their declared precedence and associativity, operator overloading through
+`static func + / == / prefix -` on a type, the bitwise and overflow operators,
+and ranges as values (1...5 ~= 3, for-in over a range value).
+
+The value model: Int arithmetic is 32 bit and truncating, Double arithmetic is
+not, and the two are told apart by the OPERANDS - an operation whose operands are
+both whole numbers answers like Int. A Double that happens to hold a whole number
+is therefore treated as an Int; that is the one place this single-number-type
+model shows. A user-defined infix operator sits at one level of the expression
+grammar, binding tighter than * and /, and the precedence groups order the custom
+operators among THEMSELVES. A compound assignment is lowered to a = a <op> b, so
+an overloaded + is what runs for +=, and a declared `static func +=` is accepted
+but unused. Canonical equivalence covers the Latin-1 precomposed letters.
+
 Not in the subset (accepted structurally and reported as not implemented under
--warn-unsupported, or simply not parsed): floating point (the runtime is 32-bit
-integer only), the numeric literal forms beyond plain decimals (hexadecimal,
-octal, binary, digit group separators, exponents), the string literal forms
-beyond a double-quoted one with interpolation (unicode escapes, multi-line and
-raw strings), generics (parsed and ignored), lazy properties, property wrappers
-and their projected values, operator and precedencegroup declarations, operator
-overloading, the bitwise and overflow operators, and async/await (async and actor
-declarations are accepted and their bodies never awaited).
+-warn-unsupported, or simply not parsed): generics (parsed and ignored),
+async/await (async and actor declarations are accepted and their bodies never
+awaited), macros, result builders, raw multi-line strings and pound levels beyond
+two, suppressed conformances (~Copyable is parsed and contributes nothing), and
+parameter packs.
 
 Top level self checking programs count failures and end with exit(failures).") ;
 
@@ -91,7 +111,11 @@ Top level self checking programs count failures and end with exit(failures).") ;
 Program     = [ Hashbang ] { TopExec } ;
 TopExec     <~~ var xs = takeAll(); for (var i = 0; i < xs.length; i++) { if (xs[i] != null) { xs[i]() } } ~~>
             = TopItem ;
-TopItem     = PoundIfTop | FunTop | TypeTop | UnsupTop | TopStmt ;
+TopItem     = PoundIfTop | OpDeclTop | FunTop | TypeTop | UnsupTop | TopStmt ;
+// An operator / precedencegroup declaration is matched BEFORE the modifier-led
+// items: `prefix` is in the modifier list (it precedes `func`), so a greedy
+// Modifiers would eat the `prefix` of `prefix operator ~~~` and leave nothing.
+OpDeclTop   = PrecGroupDecl | OperatorDecl ;
 FunTop      <~~ push(makeRegFun(pop())) ~~> = [ Modifiers ] FunDecl ;
 TypeTop     = [ Modifiers ] ( StructDecl | ClassDecl | ActorDecl | EnumDecl ) ;
 UnsupTop    = [ Modifiers ] UnsupDecl ;
@@ -157,6 +181,7 @@ Hashbang    = "#!" :whitespace() { PoundCondChar } :whitespace(Whitespace) ;
 Modifiers   = { Modifier | Attribute } ;
 Attribute   = "@" Id { "." Id } [ SkipParen ] ;
 Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
+              | "prefix" | "postfix" | "infix"
               | "final" | "static" | "mutating" | "nonmutating"
               | "override" | "lazy" | "weak" | "unowned" | "convenience"
               | "required" | "dynamic" | "indirect" | "package"
@@ -169,8 +194,12 @@ Modifier    = ( "public" | "private" | "fileprivate" | "internal" | "open"
 // class puts the member on the type descriptor instead of on instances); the rest
 // are parsed and dropped. A marker arrives ahead of the member's own record, in
 // source order, so splitMembers attaches it to the member that follows.
-MemberModifiers = { MemStatic | Modifier | Attribute | ClassMod } ;
+MemberModifiers = { MemStatic | MemLazy | MemAttr | Modifier | ClassMod } ;
 MemStatic   <~~ push({mstatic: 1}) ~~> = ( "static" | "class" ) KwEnd ;
+MemLazy     <~~ push({mlazy: 1}) ~~> = "lazy" KwEnd ;
+// A member attribute keeps its NAME: @Wrapper on a stored property is a property
+// wrapper, and everything else (@objc, @escaping, ...) is parsed and dropped.
+MemAttr     = "@" Id <~~ push({mattr: up.in}) ~~> { "." Id } [ SkipParen ] ;
 ClassMod    = "class" KwEnd ;
 
 // func name(label param: Type, ...) -> Ret { ... }
@@ -215,7 +244,9 @@ ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
 // every entry may be a protocol whose default implementations are mixed in. Each
 // name is kept as text and resolved when the type is created.
 InheritList = InheritName { "," InheritName } ;
-InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = Type ;
+// A leading ~ is a SUPPRESSED conformance (~Copyable, ~Escapable): it is recorded
+// under its written name, which resolves to nothing, so it contributes nothing.
+InheritName <~~ push({inherit: stripWs(up.in)}) ~~> = [ "~" ] Type ;
 // An actor is a class with an isolation domain. There is no executor in this
 // runtime (async functions are defined, never awaited), so it lowers like a class.
 ActorDecl   <~~ push(makeClassStmt(takeAll())) ~~>
@@ -502,8 +533,8 @@ PatRangeDn  <~~ push(makePatRange(takeAll())) ~~> = RangeOp PatOperand ;
 // full expression grammar: a `{ ... }` would be read as a closure and swallow the
 // body of `catch { ... }`, whose pattern is optional.
 PatExpr     <~~ push({pexpr: pop()}) ~~> = PatOperand ;
-PatOperand  = PatNegLit | Template | FloatLit | IntLit | True | False | Nil ;
-PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" ( FloatLit | IntLit ) ;
+PatOperand  = PatNegLit | Template | NumberLit | True | False | Nil ;
+PatNegLit   <~~ push(makeNeg(pop())) ~~> = "-" NumberLit ;
 PatLet      <~~ push({plet: pop()}) ~~> = ( "let" | "var" ) KwEnd Pattern ;
 PatTuple    <~~ push({ptup: takeAll()}) ~~> = "(" Pattern { "," Pattern } ")" ;
 PatWild     <~~ push({pwild: 1}) ~~> = Wildcard ;
@@ -519,8 +550,12 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { PoundIfStmt | Statement } "}" ;
 
 Decl        = DeclTuple | DeclPlain ;
-DeclPlain   <~~ push(makeDecl(takeAll())) ~~>
-            = ( "let" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] [ ";" ] ;
+// One let/var may declare SEVERAL bindings: `let a = 1, b = 2`. Each binding builds
+// its own declaration thunk and the statement runs them in order.
+DeclPlain   <~~ push(makeSeq(takeAll())) ~~>
+            = ( "let" | "var" ) KwEnd DeclBind { "," DeclBind } [ ";" ] ;
+DeclBind    <~~ push(makeDecl(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ ":" AnnType ] [ "=" Expression ] ;
 // let (a, _, c) = someTuple - a tuple-pattern declaration; _ discards its element.
 DeclTuple   <~~ push(makeDeclTuple(takeAll())) ~~>
             = ( "let" | "var" ) KwEnd TupNames [ ":" Type ] "=" Expression [ ";" ] ;
@@ -548,8 +583,10 @@ Repeat      <~~ push(makeRepeat(takeAll())) ~~>
 For         = ForCase | ForRange | ForList ;
 ForCase     <~~ push(makeForCase(takeAll())) ~~>
             = [ LoopLabel ] KwFor KwCase Pattern KwIn Expression [ ForWhere ] Block ;
+// The bounds are read at Coalesce level, BELOW RangeExpr, so the loop keeps its own
+// range operator instead of receiving one range value.
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = [ LoopLabel ] KwFor ForPat KwIn Expression RangeOp Expression [ ForWhere ] Block ;
+            = [ LoopLabel ] KwFor ForPat KwIn Coalesce RangeOp Coalesce [ ForWhere ] Block ;
 RangeOp     = "..." <~~ push({rop: "..."}) ~~>
             | "..<" <~~ push({rop: "..<"}) ~~> ;
 ForList     <~~ push(makeForList(takeAll())) ~~>
@@ -631,28 +668,88 @@ AndExpr     <~~ push(makeOrAnd(takeAll(), false)) ~~>
 // === / !== compare object identity; the three-character forms are listed first
 // so `a === b` is not read as `a == (= b)`.
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
-            = RelExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> RelExpr } ;
+            = RelExpr { ( "===" | "!==" | "==" | "!=" | "~=" ) <~~ push(stripWs(up.in)) ~~> RelExpr } ;
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = Cast { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> Cast } ;
 // e as T / e as? T / e as! T / e is T: recognized, routed to notImplExpr. With no
 // cast operator it is a pure pass-through (a single item), so behavior is
 // unchanged for programs that do not cast.
 Cast        <~~ push(makeCast(takeAll(), up.pos)) ~~>
-            = Coalesce { CastOp CastType } ;
+            = RangeExpr { CastOp CastType } ;
+// a...b / a..<b as a VALUE (Swift's RangeFormationPrecedence sits here): the
+// pattern-match operator ~= tests it, and a for-in can walk it.
+RangeExpr   <~~ push(makeRange(takeAll())) ~~>
+            = Coalesce [ RangeOp Coalesce ] ;
 CastOp      <~~ push({cast: stripWs(up.in)}) ~~>
             = ( "as" KwEnd [ "?" | "!" ] | "is" KwEnd ) ;
 CastType    <~~ push({ctype: stripWs(up.in)}) ~~> = Type ;
 // a ?? b yields a unless it is nil (short circuit; the nil-coalescing operator).
 Coalesce    <~~ push(makeCoalesce(takeAll())) ~~>
             = AddExpr { "??" AddExpr } ;
+// The overflow operators (&+ &- &*) are listed before the plain ones, and | and &
+// are spelled with a guard so they cannot start on the first character of || / &&
+// or of an overflow operator. | and ^ carry Swift's AdditionPrecedence, & its
+// MultiplicationPrecedence and the shifts their own, higher, level.
 AddExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
+            = MulExpr { ( "&+" | "&-" | "+" | "-" | BitOr | "^" ) <~~ push(stripWs(up.in)) ~~> MulExpr } ;
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = ShiftExpr { ( "&*" | "*" | "/" | "%" | BitAnd ) <~~ push(stripWs(up.in)) ~~> ShiftExpr } ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = CustomBin { ( "<<" | ">>" ) <~~ push(stripWs(up.in)) ~~> CustomBin } ;
+BitOr       = "|" NotChar124 ;
+BitAnd      = "&" NotAmpOp ;
+NotChar124  = :script(~~
+    (function() { return (c.peek(0) === 124) ? abnf.newToken("\x01or-follows", 0) : undefined })()
+~~) ;
+// Rejects the first character of && and of the overflow operators &+ &- &*.
+NotAmpOp    = :script(~~
+    (function() {
+        var ch = c.peek(0)
+        return (ch === 38 || ch === 43 || ch === 45 || ch === 42)
+            ? abnf.newToken("\x01amp-op-follows", 0) : undefined
+    })()
+~~) ;
+// A chain of USER-DEFINED infix operators, folded by their declared precedence
+// groups and associativity. Everything at this level binds tighter than * and /,
+// which is where a custom operator declared higherThan: MultiplicationPrecedence
+// belongs; operators of other groups keep their order among THEMSELVES.
+CustomBin   <~~ push(foldCustomOps(takeAll())) ~~>
+            = UnaryExpr { CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr } ;
 
-UnaryExpr   = Neg | Not | TryExpr | Await | CallMember ;
+UnaryExpr   = Neg | Not | CustomPrefix | BitNot | TryExpr | Await | CallMember ;
 Neg         <~~ push(makeNeg(pop())) ~~>   = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>   = "!" UnaryExpr ;
+// A user-defined prefix operator, tried before ~ so that ~~~x is one operator and
+// not a ~ applied to ~~x.
+CustomPrefix <~~ push(makeCustomPrefix(takeAll())) ~~>
+            = CustomOp <~~ push({op: stripWs(up.in)}) ~~> UnaryExpr ;
+BitNot      <~~ push(makeBitNot(pop())) ~~> = "~" NotChar61b UnaryExpr ;
+NotChar61b  = :script(~~
+    (function() { return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined })()
+~~) ;
+// A maximal run of operator characters that is NOT one of the built-in operators -
+// Swift lexes operators by maximal munch, so *** is one token and * another. The
+// scan is a pure function of (source, position): it skips the whitespace itself and
+// returns a token covering only the run.
+CustomOp    = :script(~~
+    (function() {
+        var i = 0
+        var ch = c.peek(i)
+        while (ch === 32 || ch === 9 || ch === 10 || ch === 13) { i++; ch = c.peek(i) }
+        var s = ""
+        while (ch === 47 || ch === 61 || ch === 45 || ch === 43 || ch === 33 || ch === 42
+               || ch === 37 || ch === 60 || ch === 62 || ch === 38 || ch === 124
+               || ch === 94 || ch === 126 || ch === 63) {
+            s = s + String.fromCharCode(ch)
+            i++
+            ch = c.peek(i)
+        }
+        if (s.length === 0) { return abnf.newToken("\x01no-operator", 0) }
+        var builtin = "|=|==|!=|===|!==|<|>|<=|>=|+|-|*|/|%|&&|null||||??|?|!|&|^|~|<<|>>|&+|&-|&*|~=|->|&=|+=|-=|*=|/=|%=|"
+        if (builtin.indexOf("|" + s + "|") >= 0) { return abnf.newToken("\x01builtin-operator", 0) }
+        return abnf.newToken(s, 0)
+    })()
+~~) ;
 // try / try! : the prefix is parsed and ignored and the inner expression is evaluated
 // normally (a throw inside the call unwinds via excThrow regardless). try? SWALLOWS a
 // thrown error and yields nil instead, so it is a form of its own.
@@ -665,7 +762,11 @@ Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
 
 // obj.m(args), obj.field, arr[i] - and a trailing closure becomes the last arg.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { OptSfx | ForceSfx | MethodSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
+            = Primary { OptSfx | ForceSfx | MethodSfx | ProjSfx | FieldSfx | TupleSfx | IndexSfx | CallSfx } ;
+// p.$score: the PROJECTED value of a property wrapper. The $ is adjacent to the
+// name, so whitespace is off between them; the member is read under the name "$x",
+// which is where the wrapper's generated accessor lives.
+ProjSfx     = "." "$" :whitespace() Id <~~ push({kind:"field", name: "$" + up.in}) ~~> :whitespace(Whitespace) ;
 // x!: force-unwrap. Adjacent, and not the start of a != operator. The "not an =
 // next" test has to be a script and cannot be !"=" - a literal in this dialect
 // skips leading whitespace, so !"=" in `maybe! == 7` looks PAST the space, finds
@@ -777,9 +878,25 @@ ArgLabel    = Id <~~ push({alabel: up.in}) ~~> ":" ;
 // character of a && operator.
 InoutArg    = "&" !"&" Id <~~ push({aref: up.in}) ~~> ;
 
-Primary     = Paren | Template | FloatLit | IntLit | True | False | Nil
+Primary     = Paren | MultiStr | RawStr2 | RawStr1 | Template | NumberLit
+            | True | False | Nil
             | PoundExpr | SuperRef | DotMember | Closure | DictLit | ArrayLit
             | Shorthand | MultiTrail | Call | VarRef ;
+
+// The numeric literal forms, longest/most specific first (PEG first-match): a hex
+// FLOAT before the hex integer that is its prefix, the based forms before the
+// decimal ones (0 would otherwise match and leave xFF behind), and the fractional
+// form before the plain integer. NumHex / NumBin / NumOct / NumDec / NumInt are the
+// shared, opt-in productions of lib/numbers.abnf and carry the `_` digit-group
+// separators with them; only the hex float is Swift/Go specific.
+NumberLit   = HexFloatLit | NumHex | NumBin | NumOct | NumDec | NumInt ;
+// 0xFp2 / 0xC.8p0: the mantissa is hexadecimal, the p exponent is DECIMAL and scales
+// by a power of two, and it is mandatory - without it the same text is a hex integer.
+HexFloatLit <~~ push(makeConst(parseHexFloat(up.in))) ~~>
+            = "0" ( "x" | "X" ) :whitespace() HexFDig { HexFDig | "_" }
+              [ "." HexFDig { HexFDig | "_" } ]
+              ( "p" | "P" ) [ "+" | "-" ] "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
+HexFDig     = "0"..."9" | "a"..."f" | "A"..."F" ;
 
 // `super.m(...)` / `super.p` / `super.init(...)`: a marker value whose member lookup
 // starts at the SUPERCLASS of the type the running method was declared in, with the
@@ -818,11 +935,6 @@ Paren       <~~ push(makeParen(takeAll(), up.pos)) ~~>
 TupleElem   <~~ push(makeTupleElem(takeAll())) ~~>
             = [ TupleLabel ] Expression ;
 TupleLabel  = Id <~~ push({tlabel: up.in}) ~~> ":" ;
-// Floating-point literals (3.14): recognized, routed to notImplExpr (the runtime
-// is 32-bit integer only). Tried before IntLit; a plain integer or a range (1...5)
-// still parses as IntLit because a fractional digit is required.
-FloatLit    <~~ push(notImplExpr("floating-point literal", up.pos)) ~~>
-            = ( "0" | "1"..."9" ) :whitespace() { "0"..."9" } "." "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 // Closure shorthand arguments ($0, $1, ...): recognized, routed to notImplExpr.
 // Closure shorthand arguments ($0, $1, ...): a closure without a signature binds
 // its arguments under exactly these names, so the shorthand is an ordinary read.
@@ -874,11 +986,42 @@ Template    <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplExpr | TplChunk } '"' :whitespace(Whitespace) ;
 TplExpr     <~~ push({e: pop()}) ~~>
             = "\\(" :whitespace(Whitespace) Expression ")" ;
-TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
+TplChunk    <~~ push({s: swUnescape(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
-TplEsc      = "\\" ( "n" | "t" | "r" | "0" | "\\" | @'"' | "'" ) ;
+TplEsc      = "\\" ( "n" | "t" | "r" | "0" | "\\" | @'"' | "'" | UniEsc ) ;
+// \u{48} / \u{1F600}: a Unicode scalar escape, one to eight hexadecimal digits.
+UniEsc      = "u" "{" HexFDig { HexFDig } "}" ;
 TplPlain    = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+
+// A multi-line string literal. Everything between the delimiter lines is content;
+// the indentation of the CLOSING delimiter is stripped from every line, and the
+// newline after the opening delimiter and the one before the closing one are not
+// part of the value. Escapes and \( ... ) interpolation work as in a normal string.
+MultiStr    <~~ push(makeMultiStr(takeAll())) ~~>
+            = '"""' :whitespace() { MlExpr | MlChunk } '"""' :whitespace(Whitespace) ;
+MlExpr      <~~ push({e: pop()}) ~~>
+            = "\\(" :whitespace(Whitespace) Expression ")" ;
+MlChunk     <~~ push({s: up.in}) ~~> = MlChar { MlChar } ;
+MlChar      = TplEsc | MlPlain ;
+// Any character that does not start the closing delimiter; the backslash (0x5c) is
+// excluded so an escape and an interpolation are reached first.
+MlPlain     = !'"""' ( "\x00"..."\x5b" | "\x5d"..."\U0010ffff" ) ;
+
+// Raw string literals: #"..."# and ##"..."##. Nothing inside is an escape - a
+// backslash is a backslash - and the only interpolation is \#( ... ) / \##( ... ),
+// whose pound count matches the delimiter's. Two pound levels are supported, which
+// is what real code uses; more would just be more of the same rules.
+RawStr2     <~~ push(makeRawStr(takeAll())) ~~>
+            = '##"' :whitespace() { Raw2Expr | Raw2Chunk } '"##' :whitespace(Whitespace) ;
+Raw2Expr    <~~ push({e: pop()}) ~~> = "\\##(" :whitespace(Whitespace) Expression ")" ;
+Raw2Chunk   <~~ push({s: up.in}) ~~> = Raw2Char { Raw2Char } ;
+Raw2Char    = !'"##' !"\\##(" "\x00"..."\U0010ffff" ;
+RawStr1     <~~ push(makeRawStr(takeAll())) ~~>
+            = '#"' :whitespace() { Raw1Expr | Raw1Chunk } '"#' :whitespace(Whitespace) ;
+Raw1Expr    <~~ push({e: pop()}) ~~> = "\\#(" :whitespace(Whitespace) Expression ")" ;
+Raw1Chunk   <~~ push({s: up.in}) ~~> = Raw1Char { Raw1Char } ;
+Raw1Char    = !'"#' !"\\#(" "\x00"..."\U0010ffff" ;
 
 Nil         <~~ push(makeConst(null)) ~~>  = "nil" KwEnd ;
 VarRef      <~~ push(makeVarRef(up.in)) ~~> = Id ;
@@ -905,7 +1048,31 @@ DiscardExpr <~~ pop() ~~> = Expression ;
 
 KwFunc      = "func" KwEnd ;
 // A function name is an identifier or, for an operator declaration, the operator.
-FuncName    = Id <~~ push(up.in) ~~> ;
+FuncName    = Id <~~ push(up.in) ~~> | OpName <~~ push(stripWs(up.in)) ~~> ;
+// A run of Swift operator characters. Whitespace is switched off after the first
+// one so the run is contiguous - with the ambient rule in force, `a + b` would
+// lex as the single operator `+b`.
+OpName      = OpChar :whitespace() { OpChar } :whitespace(Whitespace) ;
+OpChar      = "/" | "=" | "-" | "+" | "!" | "*" | "%" | "<" | ">" | "&" | "|" | "^" | "~" | "?" ;
+
+// precedencegroup G { higherThan: H  associativity: right }: the relations are
+// recorded and used to fold the custom-operator chain; the group's own name is what
+// an `infix operator` declaration refers to.
+PrecGroupDecl <~~ push(makePrecGroup(takeAll())) ~~>
+            = "precedencegroup" KwEnd Id <~~ push(up.in) ~~> "{" { PrecAttr } "}" ;
+PrecAttr    = PrecHigher | PrecLower | PrecAssoc | PrecFlag ;
+PrecHigher  <~~ push({phigher: takeAll()}) ~~> = "higherThan" ":" PrecRef { "," PrecRef } ;
+PrecLower   <~~ push({plower: takeAll()}) ~~> = "lowerThan" ":" PrecRef { "," PrecRef } ;
+PrecRef     <~~ push(up.in) ~~> = Id ;
+PrecAssoc   = "associativity" ":" PrecAssocVal ;
+PrecAssocVal <~~ push({passoc: up.in}) ~~> = ( "left" | "right" | "none" ) KwEnd ;
+PrecFlag    = "assignment" ":" ( "true" | "false" ) KwEnd ;
+// infix operator ***: G / prefix operator ~~~ : declares the operator and, for an
+// infix one, the precedence group whose relations order it against the others.
+OperatorDecl <~~ push(makeOperatorDecl(takeAll())) ~~>
+            = OpFixity "operator" KwEnd OpName <~~ push({oname: stripWs(up.in)}) ~~>
+              [ ":" Id <~~ push({ogroup: up.in}) ~~> ] [ ";" ] ;
+OpFixity    <~~ push({ofix: stripWs(up.in)}) ~~> = ( "prefix" | "postfix" | "infix" ) KwEnd ;
 KwImport    = "import" KwEnd ;
 KwWhere     = "where" KwEnd ;
 KwDeinit    = "deinit" KwEnd ;
@@ -948,6 +1115,360 @@ KwContinue  = "continue" KwEnd ;
     // statement builders); Swift-specific behavior is configured on `core` below.
     include("lib/interp-core.js")
 
+    // ----- Operators -----
+    // precedencegroup / operator declarations. Only the RELATIVE order of the custom
+    // operators matters: they all sit at one level of the expression grammar (tighter
+    // than * and /), and the fold below orders them among themselves.
+    var groupInfo = {}
+    var opInfo = {}
+    var builtinLevel = {AssignmentPrecedence: 1, TernaryPrecedence: 2, DefaultPrecedence: 3,
+                        LogicalDisjunctionPrecedence: 4, LogicalConjunctionPrecedence: 5,
+                        ComparisonPrecedence: 6, NilCoalescingPrecedence: 7,
+                        CastingPrecedence: 8, RangeFormationPrecedence: 9,
+                        AdditionPrecedence: 10, MultiplicationPrecedence: 11,
+                        BitwiseShiftPrecedence: 12}
+    function makePrecGroup(items) {
+        var name = items[0]
+        var higher = []
+        var assoc = "left"
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.phigher != undefined) { higher = it.phigher }
+            else if (it.passoc != undefined) { assoc = stripWs(it.passoc) }
+        }
+        scopePut(groupInfo, "$" + name, {higher: higher, assoc: assoc})
+        return function() {}
+    }
+    function groupLevel(name) {
+        if (hasOwn(builtinLevel, name)) { return builtinLevel[name] }
+        if (!hasOwn(groupInfo, "$" + name)) { return 3 }
+        var g = groupInfo["$" + name]
+        var lvl = 3
+        for (var i = 0; i < g.higher.length; i++) {
+            var h = groupLevel(g.higher[i]) + 1
+            if (h > lvl) { lvl = h }
+        }
+        return lvl
+    }
+    function groupAssoc(name) {
+        if (!hasOwn(groupInfo, "$" + name)) { return "left" }
+        return groupInfo["$" + name].assoc
+    }
+    function makeOperatorDecl(items) {
+        var oname = ""
+        var group = "DefaultPrecedence"
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.oname != undefined) { oname = it.oname }
+            else if (it.ogroup != undefined) { group = it.ogroup }
+        }
+        scopePut(opInfo, "$" + oname, {group: group})
+        return function() {}
+    }
+    function opLevelOf(op) {
+        if (!hasOwn(opInfo, "$" + op)) { return 3 }
+        return groupLevel(opInfo["$" + op].group)
+    }
+    function opAssocOf(op) {
+        if (!hasOwn(opInfo, "$" + op)) { return "left" }
+        return groupAssoc(opInfo["$" + op].group)
+    }
+    // items = [thunk, {op}, thunk, {op}, thunk, ...] -> a tree built by precedence
+    // climbing. Built on the FIRST evaluation, because the operator declarations are
+    // read by the same walk that builds this thunk.
+    function foldCustomOps(items) {
+        if (items.length == 1) { return items[0] }
+        var built = null
+        return function() {
+            if (built == null) { built = climbOps(items, {i: 0}, 0) }
+            return built()
+        }
+    }
+    function climbOps(items, pos, minLevel) {
+        var lhs = items[pos.i]
+        pos.i++
+        while (pos.i + 1 < items.length) {
+            var op = items[pos.i].op
+            var lvl = opLevelOf(op)
+            if (lvl < minLevel) { break }
+            pos.i++
+            var rhs = climbOps(items, pos, opAssocOf(op) == "right" ? lvl : lvl + 1)
+            lhs = makeOpCall(op, lhs, rhs)
+        }
+        return lhs
+    }
+    function makeOpCall(op, lt, rt) {
+        return function() { return callOperator(op, [lt(), rt()]) }
+    }
+    function makeCustomPrefix(items) {
+        var op = items[0].op
+        var t = items[1]
+        return function() { return callOperator(op, [t()]) }
+    }
+    // A user operator is an ordinary function of that name, or - for an operator
+    // declared inside a type - a static member of one of its operands.
+    function callOperator(op, argv) {
+        var h = lookupOrNull(op)
+        if (h != null && typeof h.v == "function") { return h.v.apply(undefined, argv) }
+        var f = findOpFn(op, argv[0])
+        if (f == null && argv.length > 1) { f = findOpFn(op, argv[1]) }
+        if (f == null) { fail("unknown operator '" + op + "'") }
+        return f.apply(undefined, concat2impl([undefined], argv))
+    }
+    // The `static func <op>` an operand's type declares, or null.
+    function findOpFn(op, v) {
+        if (v === null || v === undefined || typeof v != "object") { return null }
+        var t = accTable(v)
+        if (t == null) { return null }
+        var f = classFind(t, "__static_" + op)
+        return typeof f == "function" ? f : null
+    }
+    // Installs an operator that first offers itself to an operand's type.
+    function swOverloadable(op, fallback) {
+        binOps[op] = function(l, r) {
+            var f = findOpFn(op, l)
+            if (f == null) { f = findOpFn(op, r) }
+            if (f != null) { return f(undefined, l, r) }
+            return fallback(l, r)
+        }
+    }
+
+    // ----- Ranges -----
+    // a...b / a..<b as a value: what ~= tests and what a for-in over a range walks.
+    function makeRange(items) {
+        if (items.length == 1) { return items[0] }
+        var lo = items[0]
+        var closed = items[1].rop == "..."
+        var hi = items[2]
+        return function() { return {__range: true, lo: lo(), hi: hi(), closed: closed} }
+    }
+    function isRange(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__range === true
+    }
+    function rangeLen(r) {
+        var n = (r.closed ? r.hi - r.lo + 1 : r.hi - r.lo) | 0
+        return n < 0 ? 0 : n
+    }
+    function rangeArray(r) {
+        var out = []
+        var n = rangeLen(r)
+        for (var i = 0; i < n; i++) { out.push((r.lo + i) | 0) }
+        return out
+    }
+    function rangeHas(r, v) {
+        if (v < r.lo) { return false }
+        return r.closed ? v <= r.hi : v < r.hi
+    }
+
+    // ----- Literals -----
+    // 0xC.8p0: a hexadecimal mantissa scaled by a DECIMAL power-of-two exponent.
+    // Written out rather than handed to parseFloat, which does not accept the form.
+    function parseHexFloat(s) {
+        var v = 0
+        var scale = 1
+        var seenDot = false
+        var i = 2
+        while (i < s.length) {
+            var cc = s.charCodeAt(i)
+            i++
+            if (cc == 95) { continue }
+            if (cc == 46) { seenDot = true; continue }
+            if (cc == 112 || cc == 80) { break }
+            var d = 0
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            if (seenDot) { scale = scale / 16; v = v + d * scale } else { v = v * 16 + d }
+        }
+        var esign = 1
+        if (i < s.length && s.charCodeAt(i) == 43) { i++ }
+        else if (i < s.length && s.charCodeAt(i) == 45) { esign = 0 - 1; i++ }
+        var exp = 0
+        while (i < s.length) {
+            var c2 = s.charCodeAt(i)
+            i++
+            if (c2 < 48 || c2 > 57) { continue }
+            exp = exp * 10 + (c2 - 48)
+        }
+        exp = exp * esign
+        var mul = 1
+        var k = 0
+        if (exp >= 0) { for (k = 0; k < exp; k++) { mul = mul * 2 } }
+        else { for (k = 0; k < 0 - exp; k++) { mul = mul / 2 } }
+        return v * mul
+    }
+    // Swift string escapes. Like interp-core's unescapeJs plus \u{...}, whose payload
+    // is a Unicode SCALAR: above U+FFFF it becomes a surrogate pair.
+    function swUnescape(str) {
+        var out = ""
+        var i = 0
+        while (i < str.length) {
+            var c1 = str.charCodeAt(i)
+            if (c1 != 92) { out += str.charAt(i); i++; continue }
+            var e = str.charCodeAt(i + 1)
+            if (e == 110) { out += "\n"; i += 2; continue }
+            if (e == 116) { out += "\t"; i += 2; continue }
+            if (e == 114) { out += "\r"; i += 2; continue }
+            if (e == 48) { out += String.fromCharCode(0); i += 2; continue }
+            if (e == 117 && str.charCodeAt(i + 2) == 123) {
+                var j = i + 3
+                var cp = 0
+                while (j < str.length && str.charCodeAt(j) != 125) {
+                    var h = str.charCodeAt(j)
+                    var d = 0
+                    if (h >= 48 && h <= 57) { d = h - 48 }
+                    else if (h >= 97 && h <= 102) { d = h - 87 }
+                    else if (h >= 65 && h <= 70) { d = h - 55 }
+                    cp = cp * 16 + d
+                    j++
+                }
+                out += codePointStr(cp)
+                i = j + 1
+                continue
+            }
+            out += String.fromCharCode(e)
+            i += 2
+        }
+        return out
+    }
+    function codePointStr(cp) {
+        if (cp < 0x10000) { return String.fromCharCode(cp) }
+        var v = cp - 0x10000
+        return String.fromCharCode(0xD800 + ((v / 1024) | 0)) + String.fromCharCode(0xDC00 + (v % 1024))
+    }
+    // A multi-line literal: the indentation of the CLOSING delimiter is removed from
+    // every line, and the newline that follows the opening delimiter and the one that
+    // precedes the closing one are not part of the value.
+    function makeMultiStr(items) {
+        var parts = []
+        for (var i = 0; i < items.length; i++) { parts.push(items[i]) }
+        var indent = ""
+        for (var k = parts.length - 1; k >= 0; k--) {
+            if (parts[k].s == undefined) { break }
+            var t = parts[k].s
+            var cut = -1
+            for (var j = 0; j < t.length; j++) { if (t.charAt(j) == "\n") { cut = j } }
+            if (cut < 0) { continue }
+            var tail = t.substring(cut + 1)
+            var ok = true
+            for (var q = 0; q < tail.length; q++) {
+                var ch = tail.charAt(q)
+                if (ch != " " && ch != "\t") { ok = false }
+            }
+            if (ok) { indent = tail }
+            break
+        }
+        var out = []
+        for (var n = 0; n < parts.length; n++) {
+            if (parts[n].s == undefined) { out.push(parts[n]); continue }
+            var txt = parts[n].s
+            if (n == 0) { txt = dropFirstLine(txt) }
+            if (n == parts.length - 1) { txt = dropLastLine(txt) }
+            out.push({s: swUnescape(stripIndent(txt, indent))})
+        }
+        return makeTemplate(out)
+    }
+    function dropFirstLine(t) {
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) == "\n") { return t.substring(i + 1) } }
+        return t
+    }
+    function dropLastLine(t) {
+        var cut = -1
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) == "\n") { cut = i } }
+        if (cut < 0) { return t }
+        return t.substring(0, cut)
+    }
+    function stripIndent(t, indent) {
+        if (indent == "") { return t }
+        var out = ""
+        var i = 0
+        var atLineStart = true
+        while (i < t.length) {
+            if (atLineStart && t.substring(i, i + indent.length) == indent) { i += indent.length }
+            atLineStart = t.charAt(i) == "\n"
+            out += t.charAt(i)
+            i++
+        }
+        return out
+    }
+    // A raw literal keeps its characters verbatim; only \#( ... ) interpolates.
+    function makeRawStr(items) { return makeTemplate(items) }
+
+    // ----- Strings are sequences of extended grapheme clusters -----
+    // .count counts CLUSTERS, so an astral emoji is one and a base letter plus its
+    // combining mark is one; and == compares by CANONICAL EQUIVALENCE, so the
+    // precomposed and the decomposed spelling of a letter are the same string. The
+    // decomposition table covers the Latin-1 precomposed letters, which is the range
+    // real programs mix; anything outside it compares by code units.
+    var nfdBase = "AAAAAA\x00CEEEEIIII\x00NOOOOO\x00\x00UUUUY\x00\x00aaaaaa\x00ceeeeiiii\x00nooooo\x00\x00uuuuy\x00y"
+    var nfdMark = [0x300, 0x301, 0x302, 0x303, 0x308, 0x30A, 0, 0x327,
+                   0x300, 0x301, 0x302, 0x308, 0x300, 0x301, 0x302, 0x308,
+                   0, 0x303, 0x300, 0x301, 0x302, 0x303, 0x308, 0,
+                   0, 0x300, 0x301, 0x302, 0x308, 0x301, 0, 0,
+                   0x300, 0x301, 0x302, 0x303, 0x308, 0x30A, 0, 0x327,
+                   0x300, 0x301, 0x302, 0x308, 0x300, 0x301, 0x302, 0x308,
+                   0, 0x303, 0x300, 0x301, 0x302, 0x303, 0x308, 0,
+                   0, 0x300, 0x301, 0x302, 0x308, 0x301, 0, 0x308]
+    function swNFD(str) {
+        var out = ""
+        for (var i = 0; i < str.length; i++) {
+            var cc = str.charCodeAt(i)
+            if (cc >= 0xC0 && cc <= 0xFF) {
+                var b = nfdBase.charCodeAt(cc - 0xC0)
+                if (b != 0) {
+                    out += String.fromCharCode(b) + String.fromCharCode(nfdMark[cc - 0xC0])
+                    continue
+                }
+            }
+            out += str.charAt(i)
+        }
+        return out
+    }
+    function hasNonAscii(str) {
+        for (var i = 0; i < str.length; i++) { if (str.charCodeAt(i) > 127) { return true } }
+        return false
+    }
+    function swStrEq(a, b) {
+        if (a === b) { return true }
+        if (!hasNonAscii(a) || !hasNonAscii(b)) { return false }
+        return swNFD(a) === swNFD(b)
+    }
+    // A code point that attaches to the cluster before it rather than starting one.
+    function isCombiningCp(cp) {
+        if (cp >= 0x0300 && cp <= 0x036F) { return true }
+        if (cp >= 0x0483 && cp <= 0x0489) { return true }
+        if (cp >= 0x0591 && cp <= 0x05BD) { return true }
+        if (cp >= 0x0610 && cp <= 0x061A) { return true }
+        if (cp >= 0x064B && cp <= 0x065F) { return true }
+        if (cp >= 0x1AB0 && cp <= 0x1AFF) { return true }
+        if (cp >= 0x1DC0 && cp <= 0x1DFF) { return true }
+        if (cp >= 0x20D0 && cp <= 0x20F0) { return true }
+        if (cp >= 0xFE00 && cp <= 0xFE0F) { return true }
+        if (cp >= 0xFE20 && cp <= 0xFE2F) { return true }
+        return false
+    }
+    function swGraphemeCount(str) {
+        var n = 0
+        var i = 0
+        var joining = false
+        while (i < str.length) {
+            var cp = str.charCodeAt(i)
+            var w = 1
+            if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < str.length) {
+                cp = 0x10000 + ((cp - 0xD800) * 1024) + (str.charCodeAt(i + 1) - 0xDC00)
+                w = 2
+            }
+            i += w
+            if (cp == 0x200D) { joining = true; continue }
+            if (joining) { joining = false; continue }
+            if (isCombiningCp(cp)) { continue }
+            n++
+        }
+        return n
+    }
+
     // ----- Values: dictionaries, strings, indexing (js_pyget/js_pyset semantics) -----
     // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
     function swstr(v) {
@@ -958,13 +1479,22 @@ KwContinue  = "continue" KwEnd ;
         if (typeof v == "string") { return v }
         return "" + v
     }
+    // Int arithmetic is 32 bit and truncating; Double arithmetic is not. The value
+    // model has ONE number type, so the two are told apart by the operands: an
+    // operation whose operands are both integral answers like Int, and one with a
+    // fractional operand answers like Double. (A Double that happens to hold a whole
+    // number is therefore treated as an Int - the one place this model shows.)
+    function swWhole(v) { return typeof v == "number" && v === Math.floor(v) }
+    function swIntish(l, r) { return swWhole(l) && swWhole(r) }
     function swadd(l, r) {
         if (typeof l == "string" || typeof r == "string") { return swstr(l) + swstr(r) }
-        return (l + r) | 0
+        return swIntish(l, r) ? (l + r) | 0 : l + r
     }
     function swlen(v) {
         if (isDict(v)) { return v.keys.length }
         if (v === null || v === undefined) { fail("count of nil") }
+        if (typeof v == "string") { return swGraphemeCount(v) }
+        if (v.__range === true) { return rangeLen(v) }
         return v.length
     }
     function swGetField(o, name) {
@@ -1059,7 +1589,7 @@ KwContinue  = "continue" KwEnd ;
             if (typeof bm == "function") { return bm.apply(undefined, concat2impl([target], args)) }
         }
         if (typeof target == "string") {
-            if (name == "count") { return target.length }
+            if (name == "count") { return swGraphemeCount(target) }
             if (name == "uppercased") { return target.toUpperCase() }
             if (name == "lowercased") { return target.toLowerCase() }
             if (name == "hasPrefix") { return target.slice(0, args[0].length) === args[0] }
@@ -2056,6 +2586,7 @@ KwContinue  = "continue" KwEnd ;
         var wantPair = pat.tnames != undefined
         return function() {
             var arr = listT()
+            if (isRange(arr)) { arr = rangeArray(arr) }
             var res = undefined
             var isD = isDict(arr)
             var n = swlen(arr)
@@ -2491,6 +3022,26 @@ KwContinue  = "continue" KwEnd ;
         if (cls != undefined && cls !== null) { return cls }
         return builtinTableFor(o)
     }
+    // `lazy var x = e`: e runs at the FIRST read and its value is kept under the
+    // hidden name __lz_x, so a lazy property that is never read never runs.
+    function installLazy(lz, cls) {
+        var store = "__lz_" + lz.name
+        var build = makeMethodClosure({name: "__lzinit_" + lz.name, params: [],
+                                       body: makeExprBody(lz.init)}, cls)
+        tput(cls, "__get_" + lz.name, function(self) {
+            if (!hasOwn(self, store)) { scopePut(self, store, build(self)) }
+            return self[store]
+        })
+        tput(cls, "__set_" + lz.name, function(self, v) { scopePut(self, store, v) })
+    }
+    // `@Wrapper var x`: x is the wrapper's wrappedValue and $x its projectedValue.
+    function installWrapped(wp, cls) {
+        var store = "_" + wp.name
+        tput(cls, "__get_" + wp.name, function(self) { return swGetField(self[store], "wrappedValue") })
+        tput(cls, "__set_" + wp.name, function(self, v) { setElem(self[store], "wrappedValue", v) })
+        tput(cls, "__get_$" + wp.name, function(self) { return swGetField(self[store], "projectedValue") })
+    }
+
     // Reads an accessor (a function) off a value's member table, walking the
     // superclass chain, or null.
     function findAccessor(o, key) {
@@ -2507,19 +3058,32 @@ KwContinue  = "continue" KwEnd ;
     function splitMembers(items, from) {
         var mem = {raw: "", inherits: [], cases: [], nested: [], fields: [], initProps: [],
                    methods: [], comps: [], statProps: [], statMethods: [], statComps: [],
-                   hasInit: false}
+                   lazies: [], wrapped: [], hasInit: false}
         var isStatic = false
+        var isLazy = false
+        var attr = null
         for (var i = from; i < items.length; i++) {
             var it = items[i]
             if (it == undefined) { continue }
             if (it.mstatic != undefined) { isStatic = true; continue }
+            if (it.mlazy != undefined) { isLazy = true; continue }
+            if (it.mattr != undefined) { attr = it.mattr; continue }
             if (it.nested != undefined) { mem.nested.push(it.nested); continue }
             if (it.inherit != undefined) { mem.inherits.push(it.inherit); continue }
             if (it.eraw != undefined) { mem.raw = it.eraw; continue }
             if (it.ecase != undefined) { mem.cases.push(it.ecase); continue }
             if (it.prop != undefined) {
                 var f = {name: it.prop, store: it.prop, hasInit: it.hasInit, init: it.init}
-                if (isStatic) { mem.statProps.push(f) } else {
+                if (isStatic) { mem.statProps.push(f) }
+                else if (isLazy) { mem.lazies.push({name: it.prop, init: it.init}) }
+                else if (attr != null && isWrapperName(attr)) {
+                    // @Wrapper var x = e: the storage is the WRAPPER instance, and x
+                    // reads and writes its wrappedValue while $x reads projectedValue.
+                    mem.wrapped.push({name: it.prop, wrapper: attr})
+                    mem.fields.push({name: it.prop, store: "_" + it.prop, hasInit: true,
+                                     init: makeWrapperInit(attr, it.init)})
+                    mem.initProps.push(mem.fields[mem.fields.length - 1])
+                } else {
                     mem.fields.push(f)
                     if (it.hasInit) { mem.initProps.push(f) }
                 }
@@ -2540,8 +3104,29 @@ KwContinue  = "continue" KwEnd ;
                 }
             }
             isStatic = false
+            isLazy = false
+            attr = null
         }
         return mem
+    }
+    // A type declared with @propertyWrapper. Recorded during the walk, which reaches
+    // the wrapper's own declaration before any use of it.
+    var wrapperNames = {}
+    function isWrapperName(n) { return hasOwn(wrapperNames, "$" + n) }
+    function declaresWrappedValue(mem) {
+        for (var i = 0; i < mem.comps.length; i++) { if (mem.comps[i].name == "wrappedValue") { return true } }
+        for (var j = 0; j < mem.fields.length; j++) { if (mem.fields[j].name == "wrappedValue") { return true } }
+        return false
+    }
+    function makeWrapperInit(wname, dflt) {
+        return function() {
+            var w = getVar(wname)
+            var argv = dflt == null ? [] : [dflt()]
+            pendingLabels = dflt == null ? [] : ["wrappedValue"]
+            var v = constructInstance(w, argv, pendingLabels)
+            pendingLabels = null
+            return v
+        }
     }
     // The memberwise initializer a struct without an explicit init gets for free:
     // one labelled parameter per stored property, in declaration order, defaulting
@@ -2572,6 +3157,8 @@ KwContinue  = "continue" KwEnd ;
             addMethod(cls, mem.methods[m].name, makeMethodClosure(mem.methods[m], cls), mem.methods[m].params)
         }
         for (var c2 = 0; c2 < mem.comps.length; c2++) { installComputed(mem.comps[c2], cls) }
+        for (var lz = 0; lz < mem.lazies.length; lz++) { installLazy(mem.lazies[lz], cls) }
+        for (var wp = 0; wp < mem.wrapped.length; wp++) { installWrapped(mem.wrapped[wp], cls) }
         for (var sm = 0; sm < mem.statMethods.length; sm++) {
             tput(cls, "__static_" + mem.statMethods[sm].name, makeMethodClosure(mem.statMethods[sm], cls))
         }
@@ -2601,6 +3188,10 @@ KwContinue  = "continue" KwEnd ;
     function makeTypeStmt(items, isStruct) {
         var name = items[0]
         var mem = splitMembers(items, 1)
+        // A property WRAPPER is recognised by what it declares - a wrappedValue
+        // member - rather than by its @propertyWrapper attribute, so the attribute
+        // stays parse-and-drop like every other one.
+        if (declaresWrappedValue(mem)) { scopePut(wrapperNames, "$" + name, 1) }
         for (var i = 0; i < mem.methods.length; i++) {
             if (mem.methods[i].name == "init") { regSig(name, mem.methods[i].params) }
         }
@@ -2636,6 +3227,9 @@ KwContinue  = "continue" KwEnd ;
                 scopes = [globalScope, {}]
                 declVar("this", self)
                 declVar("self", self)
+                for (var f0 = 0; f0 < mem.fields.length; f0++) {
+                    if (!hasOwn(self, mem.fields[f0].store)) { scopePut(self, mem.fields[f0].store, null) }
+                }
                 for (var p = 0; p < mem.initProps.length; p++) {
                     scopePut(self, mem.initProps[p].store, mem.initProps[p].init())
                 }
@@ -2900,6 +3494,7 @@ KwContinue  = "continue" KwEnd ;
         return null
     }
     function swEq(l, r) {
+        if (typeof l == "string" && typeof r == "string") { return swStrEq(l, r) }
         if (isCaseVal(l) && isCaseVal(r)) {
             if (l.__ename !== r.__ename) { return false }
             var a = l.__vals
@@ -2934,8 +3529,52 @@ KwContinue  = "continue" KwEnd ;
     binOps["!=="] = function(l, r) { return l !== r }
     // == / != understand enum case values (name plus associated values); everything
     // else keeps the identity/value comparison it had.
-    binOps["=="] = function(l, r) { return swEq(l, r) }
-    binOps["!="] = function(l, r) { return !swEq(l, r) }
+    swOverloadable("==", function(l, r) { return swEq(l, r) })
+    swOverloadable("!=", function(l, r) { return !swEq(l, r) })
+    // The bitwise and overflow operators. Int is 32 bit, so an overflow operator is
+    // the ordinary operation with the truncation Swift's &+ / &- / &* promise.
+    binOps["&"] = function(l, r) { return (l & r) | 0 }
+    binOps["|"] = function(l, r) { return (l | r) | 0 }
+    binOps["^"] = function(l, r) { return (l ^ r) | 0 }
+    binOps["<<"] = function(l, r) { return (l << r) | 0 }
+    binOps[">>"] = function(l, r) { return (l >> r) | 0 }
+    binOps["&+"] = function(l, r) { return (l + r) | 0 }
+    binOps["&-"] = function(l, r) { return (l - r) | 0 }
+    binOps["&*"] = function(l, r) { return (l * r) | 0 }
+    // ~= is the pattern-match operator: over a range it is containment, elsewhere ==.
+    binOps["~="] = function(l, r) { return isRange(l) ? rangeHas(l, r) : swEq(l, r) }
+    function makeBitNot(t) { return function() { return (~t()) | 0 } }
+
+    // The arithmetic operators, Double-aware (see swIntish above). == and != are
+    // installed further down, over enum cases and canonical string equality.
+    swOverloadable("+", function(l, r) { return swadd(l, r) })
+    swOverloadable("-", function(l, r) { return swIntish(l, r) ? (l - r) | 0 : l - r })
+    swOverloadable("*", function(l, r) { return swIntish(l, r) ? (l * r) | 0 : l * r })
+    swOverloadable("/", function(l, r) { return swIntish(l, r) ? (l / r) | 0 : l / r })
+    swOverloadable("%", function(l, r) { return swIntish(l, r) ? (l % r) | 0 : l % r })
+    swOverloadable("<", function(l, r) { return l < r })
+    swOverloadable(">", function(l, r) { return l > r })
+    swOverloadable("<=", function(l, r) { return l <= r })
+    swOverloadable(">=", function(l, r) { return l >= r })
+    // A compound assignment is lowered to `a = a <op> b`, which is what makes an
+    // overloaded operator work through it. A type may still DECLARE `static func +=`
+    // - it is accepted - but the + overload is the one that runs.
+    applyOps["+="] = function(a, b) { return binOp("+", a, b) }
+    applyOps["-="] = function(a, b) { return binOp("-", a, b) }
+    applyOps["*="] = function(a, b) { return binOp("*", a, b) }
+    applyOps["/="] = function(a, b) { return binOp("/", a, b) }
+    applyOps["%="] = function(a, b) { return binOp("%", a, b) }
+    // -x: a `static prefix func -` on the operand's type wins over the negation.
+    makeNeg = function(t) {
+        return function() {
+            var v = t()
+            var f = findOpFn("-", v)
+            if (f != null) { return f(undefined, v) }
+            return swWhole(v) ? (0 - v) | 0 : 0 - v
+        }
+    }
+    // Int.max / Int.min: the bounds of the 32-bit integer this runtime uses.
+    hostGlobals["Int"] = {max: 2147483647, min: 0 - 2147483648}
 
     core.lang = "swift"
     // `_` is the discard name: `_ = expr` evaluates and throws the value away.
