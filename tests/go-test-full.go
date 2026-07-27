@@ -34,6 +34,7 @@ package main
 
 import (
 	"fmt"
+	f27 "fmt"
 	"os"
 )
 
@@ -1025,6 +1026,107 @@ func s26() {
 	check("slt25", fmt.Sprintf("%d %v %d", xs[0], ys, m["a"]) == "0 [0 0] -128")
 }
 
+// ===== SECTION 27: unnamed receivers, type aliases, named func types =====
+// A method may leave its receiver unnamed when the body does not use it; `type A = B`
+// declares an ALIAS (one type with two names, unlike `type A B`); a function TYPE may
+// name its parameters and results; and a declaration may carry the pre-1.0 trailing
+// semicolon. Verified against go1 (`go run`) before being pinned here.
+type pt27 struct{ x, y int };
+type alias27 = pt27
+type ints27 = int
+type marker27 struct{}
+
+func (marker27) tag() string   { return "value" }
+func (*marker27) ptag() string { return "pointer" }
+
+type binop27 func(a, b int) int
+type seq27 = func(yield func(v int) bool)
+
+func triple27(n int) int { return 3 * n };
+
+func s27() {
+	a := alias27{1, 2}
+	check("ali1", a.x+a.y == 3)
+	var b pt27 = a // an alias is the SAME type, so no conversion is involved
+	check("ali2", b.y == 2)
+	var n ints27 = 7
+	check("ali3", n == 7)
+	check("ali4", f27.Sprint(n) == "7") // aliased import binds the package object
+	check("ali5", triple27(4) == 12)
+	m := marker27{}
+	check("rcv1", m.tag() == "value")
+	check("rcv2", m.ptag() == "pointer") // &m taken automatically
+	var op binop27 = func(a, b int) int { return a * b }
+	check("fnt1", op(6, 7) == 42)
+	total := 0
+	var it seq27 = func(yield func(v int) bool) {
+		for i := 1; i <= 3; i++ {
+			if !yield(i) {
+				return
+			}
+		}
+	}
+	it(func(v int) bool { total += v; return true })
+	check("fnt2", total == 6)
+}
+
+// ===== SECTION 28: trailing commas, generic instantiation, parenthesized conversions =====
+// A call's argument list may end with a comma when it is spread over lines; a generic
+// instantiation may carry several type arguments or one that is not an expression
+// (struct{}, [62]byte, map[string][]int); a conversion's target type may be
+// parenthesized; and `return` before a `case` label ends at the line break. Verified
+// against go1 (`go run`) before being pinned here.
+type pair28[A any, B any] struct {
+	a A
+	b B
+}
+
+func make28[A any, B any](x A, y B) pair28[A, B] { return pair28[A, B]{x, y} }
+
+func size28[T any](n int) int { return n }
+
+func sum28(a, b, c int) int { return a + b + c }
+
+// A bare `return` directly in front of a `case` label: Go's semicolon insertion ends
+// the statement at the line break, so the `case` is NOT the returned expression.
+func early28(i int) (n int) {
+	switch i {
+	case 0:
+		n = 1
+	case 1:
+		return
+	default:
+		n = 9
+	}
+	n += 100
+	return
+}
+
+func s28() {
+	check("trl1", sum28(
+		1,
+		2,
+		3,
+	) == 6)
+	p := make28[int, string](7, "z")
+	check("gen1", p.a == 7 && p.b == "z")
+	check("gen2", size28[struct{}](4) == 4)
+	check("gen3", size28[[62]byte](5) == 5)
+	check("gen4", size28[map[string][]int](6) == 6)
+	var ch chan int = (chan int)(nil)
+	check("cnv1", ch == nil)
+	var fn func() = (func())(nil)
+	check("cnv2", fn == nil)
+	var mp map[string]int = (map[string]int)(nil)
+	check("cnv3", mp == nil)
+	check("cnv4", string(([]byte)("hi")) == "hi")
+	check("cnv5", ([]int{5, 6})[1] == 6)
+	check("ret1", early28(0) == 101)
+	check("ret2", early28(1) == 0)
+	check("ret3", early28(2) == 109)
+}
+
+
 func main() {
 	s01() // SECTION-CALL 01
 	s02() // SECTION-CALL 02
@@ -1052,6 +1154,8 @@ func main() {
 	s24() // SECTION-CALL 24
 	s25() // SECTION-CALL 25
 	s26() // SECTION-CALL 26
+	s27() // SECTION-CALL 27
+	s28() // SECTION-CALL 28
 	fmt.Println("full:", checks, "checks,", fails, "failures")
 	os.Exit(fails)
 }

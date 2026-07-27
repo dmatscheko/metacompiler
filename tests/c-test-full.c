@@ -845,6 +845,57 @@ int s32(void) {
 
 // ===== END SECTIONS =====
 
+// ===== SECTION 33: unary plus, block-scope typedefs, enum return types, attributes =====
+/* Unary '+' (C11 6.5.3.3p2) is the identity on its promoted operand; a typedef may be
+   declared inside a block; a function may RETURN an enum type, and be declared that way
+   ahead of the enum's own definition (GCC's forward enum, which the corpus relies on);
+   and a tag definition may carry __attribute__ before its name or after its body.
+   Verified against cc before being pinned here. */
+enum s33_fwd;                           /* forward enum declaration */
+extern enum s33_fwd s33_pick(int n);    /* an enum RETURN type, declared early */
+
+enum s33_fwd { S33_A, S33_B, S33_C = 7, S33_D };
+
+enum s33_fwd s33_pick(int n) {
+    if (n == 0) return S33_A;
+    if (n == 1) return S33_B;
+    return S33_D;
+}
+
+typedef struct __attribute__((packed)) s33_pre { int u; } s33_pre_t;
+typedef struct s33_post { int u; int v; } __attribute__((packed)) s33_post_t;
+
+int s33(void) {
+    check(3301, +1 == 1);
+    check(3302, +0 == 0);
+    check(3303, -+2 == -2);
+    check(3304, +-2 == -2);
+    check(3305, 3 - +1 == 2);
+    check(3306, 3 + +1 == 4);
+    check(3307, (int)s33_pick(0) == 0);
+    check(3308, (int)s33_pick(1) == 1);
+    check(3309, (int)s33_pick(2) == 8);
+    check(3310, (int)S33_C == 7);
+    {
+        typedef int s33_local;          /* a typedef in block scope */
+        s33_local v = 41;
+        v = v + 1;
+        check(3311, v == 42);
+    }
+    typedef unsigned char s33_byte;
+    s33_byte b = 250;
+    b = b + 10;
+    check(3312, b == 4);
+    s33_pre_t p;
+    p.u = 5;
+    check(3313, p.u == 5);
+    s33_post_t q;
+    q.u = 6;
+    q.v = 7;
+    check(3314, q.u + q.v == 13);
+    return 0;
+}
+
 int main() {
     s01(); // SECTION-CALL 01
     s02(); // SECTION-CALL 02
@@ -878,6 +929,7 @@ int main() {
     s30(); // SECTION-CALL 30
     s31(); // SECTION-CALL 31
     s32(); // SECTION-CALL 32
+    s33(); // SECTION-CALL 33
     /* summary: "full: <checks> checks, <failures> failures" */
     putchar('f'); putchar('u'); putchar('l'); putchar('l'); putchar(':'); putchar(' ');
     print_num(nchecks);

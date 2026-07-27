@@ -65,7 +65,7 @@ Program     = { TopItem } ;
 TopItem     = Include | PPCond | PPLine | StaticAssert | EnumDef | UnionDef | UnionGDecl | TagSkip
               | TypedefDecl
               | StructDef | GStructDefDecl | GUnionDefDecl | TagFwd | StructGDecl
-              | FnPtrFuncDef | TdProto | TdFuncDef | TdGlobalDecl | SProto | SFuncDef | FuncDef | Proto | GlobalDecl ;
+              | FnPtrFuncDef | TdProto | TdFuncDef | TdGlobalDecl | SProto | SFuncDef | EFuncDef | EProto | FuncDef | Proto | GlobalDecl ;
 
 // Preprocessor directives other than #include are accepted and skipped (object-like
 // #define, the #if/#ifdef/#ifndef/#else/#elif/#endif family, #undef, #pragma, #error,
@@ -92,7 +92,7 @@ EnumInit    <~~ push({val: makeEnumVal(takeAll())}) ~~>
 // maximum over the members. Tags live in the same table as the struct tags but under
 // a 'u:' prefixed key, so 'struct X' and 'union X' stay distinct C tag namespaces.
 UnionDef    <~~ defineUnion(takeAll()) ~~>
-            = KwUnion Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" ";" ;
+            = KwUnion { Attr } Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" { Attr } ";" ;
 // Global union variables, pointers and arrays, with the same declarator syntax as
 // everything else - the tag only supplies the base type.
 UnionGDecl  <~~ defineGlobals(takeAll()) ~~>
@@ -123,9 +123,9 @@ TdBase      = TdStructDef | TdUnionDef | TdEnumDef
             | TdRef ;
 TdRef       <~~ push({tref: up.in}) ~~> = NotCKw Id ;
 TdStructDef <~~ push({tb: tdTagDef(takeAll(), false)}) ~~>
-            = KwStruct [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" ;
+            = KwStruct { Attr } [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" { Attr } ;
 TdUnionDef  <~~ push({tb: tdTagDef(takeAll(), true)}) ~~>
-            = KwUnion [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" ;
+            = KwUnion { Attr } [ Id <~~ push({tag: up.in}) ~~> ] "{" { FieldLine } "}" { Attr } ;
 TdEnumDef   <~~ defineEnum(takeAll()); push({tb: ctInt}) ~~>
             = KwEnum [ Id <~~ push({tag: up.in}) ~~> ]
               "{" [ Enumerator { "," Enumerator } [ "," ] ] "}" ;
@@ -580,7 +580,7 @@ HdrChar     = "\x20"..."\x21" | "\x23"..."\x3b" | "\x3d" | "\x3f"..."\x7e" ;
 // structs, nested struct values and struct pointers (also of the struct itself:
 // that is how linked lists work).
 StructDef   <~~ defineStruct(takeAll()) ~~>
-            = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
+            = KwStruct { Attr } Id <~~ push(up.in) ~~> "{" { FieldLine } "}" { Attr } ";" ;
 // A member line is either an ANONYMOUS struct/union member (C11 6.7.2.1p13: its
 // members are addressed as members of the enclosing tag) or an ordinary declarator
 // list, whose declarators may carry a ':width' bit-field size.
@@ -638,6 +638,14 @@ SFuncDef    <~~ defineSFunction(takeAll()) ~~>
             = SRetType Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
 SProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
             = SRetType Id ParamList { Attr } ";" ;
+
+// A function whose RETURN type is an enum ('extern enum efoo it_real_fn(void);'). An
+// enum is an int here, so the only new thing is the declarator's base-type spelling.
+ERetType    <~~ push({ret: ctInt}) ~~> = [ TypeInt ] EnumRef [ TypeInt ] ;
+EFuncDef    <~~ defineFunction() ~~>
+            = ERetType [ PStars <~~ push("*") ~~> ] Id <~~ push(up.in) ~~> ParamList { Attr } Block ;
+EProto      <~~ takeAll() /* A prototype needs no lowering. */ ~~>
+            = ERetType [ PStars ] Id ParamList { Attr } ";" ;
 SRetType    <~~ push({ret: makeRetCt(takeAll())}) ~~>
             = ( KwStruct Id <~~ push(up.in) ~~> | KwUnion Id <~~ push(uKey(up.in)) ~~> ) [ Stars ] ;
 
@@ -715,19 +723,25 @@ PtrQual     = "const" KwEnd | "volatile" KwEnd | "restrict" KwEnd | "_Atomic" Kw
 // which BaseTy does not read.
 Statement   = Block | If | While | Do | For | Switch | Return | Break | Continue
             | AssertStmt | BoolDecl | LProto | LTagFwd | LStructDef | LUnionDef | StructDefDecl | UnionDefDecl
-            | StaticDecl | StructDecl | UnionDecl | Decl
+            | LTypedef | StaticDecl | StructDecl | UnionDecl | Decl
             | Goto | PPCondStmt | PPStmt | Label | TdDecl | Empty | ExprStmt ;
+
+// A typedef inside a function body. C scopes it to the block; this model has one
+// typedef table, which is wider than C but never narrower, so every use still
+// resolves. The declaration itself lowers to nothing, exactly like LStructDef.
+LTypedef    <~~ defineTypedef(takeAll()); push(function() {}) ~~>
+            = KwTypedef TdBase TdDeclr { "," TdDeclr } ";" ;
 
 // A struct definition inside a function body. The layout is registered exactly like a
 // top-level one (the tag runs at build time), and the statement itself does nothing.
 LStructDef  <~~ defineStruct(takeAll()); push(function() {}) ~~>
-            = KwStruct Id <~~ push(up.in) ~~> "{" { FieldLine } "}" ";" ;
+            = KwStruct { Attr } Id <~~ push(up.in) ~~> "{" { FieldLine } "}" { Attr } ";" ;
 // A tag definition that also declares locals, and its union twin.
 StructDefDecl <~~ push(makeDeclSeq(tagDefDecl(takeAll(), false), false)) ~~> = StructDefBody ;
 UnionDefDecl  <~~ push(makeDeclSeq(tagDefDecl(takeAll(), true), false)) ~~>  = UnionDefBody ;
 // The same for a union definition inside a function body.
 LUnionDef   <~~ defineUnion(takeAll()); push(function() {}) ~~>
-            = KwUnion Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" ";" ;
+            = KwUnion { Attr } Id <~~ push(uKey(up.in)) ~~> "{" { FieldLine } "}" { Attr } ";" ;
 
 // A static local: the storage is allocated ONCE and survives across calls, unlike an
 // ordinary local. At the top level 'static' is just a linkage word on a global and is
@@ -1021,7 +1035,7 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 // * dereferences (as an expression it loads the pointed to value).
 // AlignOf comes before PostfixExpr: '_Alignof(int)' looks exactly like a call of a
 // function named _Alignof, and the general call seed would claim it first.
-UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Not | BitNot | Sizeof | AlignOf | Generic | Cast | PostfixExpr ;
+UnaryExpr   = PreIncDec | AddrOf | DerefLoad | Neg | Pos | Not | BitNot | Sizeof | AlignOf | Generic | Cast | PostfixExpr ;
 
 // A cast '(Type)expr' converts the value to the named type: an integer wraps to that
 // type's width and signedness, a float truncates towards zero on the way to an
@@ -1080,6 +1094,9 @@ DerefLoad   <~~ push(makeLoad(makeDerefPlace(pop()))) ~~>
             = "*" UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
+// Unary '+' is the identity on its promoted operand (C11 6.5.3.3p2), so this production
+// carries no tag at all: the operand's own thunk is already the answer.
+Pos         = "+" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>

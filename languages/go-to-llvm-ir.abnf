@@ -107,16 +107,34 @@ The same language with the same semantics is interpreted directly by go-interpre
 Program     <~~ buildMain(takeAll()) ~~>
             = PackageClause { Import } { TypeDecl | TypeGroup | ConstGroup | ConstSingle | FuncDecl | TopVar } ;
 
-PackageClause = "package" KwEnd Id ;
-Import      = "import" KwEnd ( ImportStr | "(" { ImportStr } ")" ) ;
-ImportStr   <~~ resolveImport(up.in.slice(1, up.in.length - 1), up.pos) ~~>
+PackageClause = "package" KwEnd Id [ ";" ] ;
+// An import spec may carry a local name: an alias (import f "fmt"), the blank
+// identifier (import _ "x", imported for its side effects only) or a dot
+// (import . "fmt", which drops the package's exported names into file scope).
+// The alias really binds - it is declared in the module scope as a second name
+// for the package object - so f.Println works; the dot form is parsed and
+// reported not implemented, because file-scope injection has no model here.
+Import      <~~ push(makeSeq(takeAll())) ~~>
+            = "import" KwEnd ( ImportSpec | "(" { ImportSpec } ")" ) [ ";" ] ;
+ImportSpec  = ImportDot | ImportNamed | ImportPlain ;
+ImportPlain <~~ push(makeImport(pop(), up.pos)) ~~> = ImportPath [ ";" ] ;
+ImportNamed <~~ push(makeImportAs(takeAll(), up.pos)) ~~>
+            = Id <~~ push(up.in) ~~> ImportPath [ ";" ] ;
+ImportDot   <~~ push(makeImport(pop(), up.pos)); notImpl("dot import", up.pos) ~~>
+            = "." ImportPath [ ";" ] ;
+ImportPath  <~~ push(up.in.slice(1, up.in.length - 1)) ~~>
             = '"' :whitespace() { "\x20"..."\x21" | "\x23"..."\x7e" } '"' :whitespace(Whitespace) ;
 
 // type Point struct { x int; y int } and type Shape interface { Area() int }.
 // The name is pushed first; the body decides between a struct (lowered) and an
 // interface (accepted, then reported not implemented - no interface semantics).
+// `type A = B` is an ALIAS: A and B name the same type rather than two distinct ones,
+// so the alias is declared as a second name for whatever B is bound to (a struct
+// descriptor stays a struct descriptor, which a conversion wrapper would have
+// destroyed). The trailing ';' is the pre-1.0 spelling the corpus is full of.
 TypeDecl    <~~ push(makeTypeDecl(takeAll(), up.pos)) ~~>
-            = "type" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ( StructBody | IfaceBody | DefinedType ) ;
+            = "type" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] [ AliasEq ] ( StructBody | IfaceBody | DefinedType ) [ ";" ] ;
+AliasEq     <~~ push({alias: true}) ~~> = "=" ;
 // type myInt int / type Celsius float64: a defined type over an existing one. The value
 // model has no distinct type for it, so the name becomes the CONVERSION to its
 // underlying type - which is exactly how a defined type is used in an expression.
@@ -155,8 +173,23 @@ ConstSingle <~~ push(makeVarDecl(takeAll())) ~~>
             = "const" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
 
 // func name(params) rets { } and func (r Type) name(params) rets { }
-FuncDecl    <~~ push(makeFuncStmt(takeAll())) ~~>
-            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ RetTypes ] Block ;
+// The result list is optional, so like FuncTypeT's it has to be pinned to the line the
+// parameters ended on: Go inserts a semicolon there, and `func (t T) m()` followed by
+// `func main() {` otherwise reads the next declaration's `func` as this one's result
+// type (NamedType's Id happily matches the keyword).
+// A function may be declared WITHOUT a body: its implementation comes from assembly
+// (or from another file the linker supplies), which this project can never provide.
+// The syntax is accepted so the rest of the file parses; the missing body is reported
+// as not implemented, so nobody mistakes the acceptance for support. The bodied form
+// is tried first, so `func f() {` never reaches here.
+FuncDecl    = FuncBodied | FuncNoBody ;
+FuncBodied  <~~ push(makeFuncStmt(takeAll())) ~~>
+            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] Block [ ";" ] ;
+FuncNoBody  <~~ push(makeFuncStmt(takeAll())) ~~>
+            = "func" KwEnd [ Receiver ] Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ SameLine RetTypes ] NoBody [ ";" ] ;
+// An always-empty match: Go source holds no NUL byte, so the optional never consumes
+// anything and the production stands purely for its tag.
+NoBody      <~~ push(notImplStmt("function without a body", up.pos)) ~~> = [ "\x00" ] ;
 // Generics are ERASED: a type parameter list is parsed and ignored, the constraint with
 // it, and an instantiation (f[int], T[K, V]) is the identity on the value it indexes.
 // The value model is dynamically typed, so an erased generic behaves exactly like the
@@ -168,8 +201,50 @@ Constraint  = ConstrTerm { "|" ConstrTerm } ;
 ConstrTerm  = [ "~" ] Type ;
 // A POINTER receiver is marked: its method sees the caller's struct, while a value
 // receiver is handed a copy (js_gomcall / js_gofield read the __ptr$name marker).
-Receiver    <~~ push({recv: takeAll()}) ~~>
-            = "(" Id <~~ push(up.in) ~~> [ "*" <~~ push({byptr: true}) ~~> ] Id <~~ push(up.in) ~~> [ TypeArgs ] ")" ;
+// A method may also leave the receiver UNNAMED (func (T) M(), func (*T) M()) when the
+// body does not use it - very common in interface-satisfaction tests. Which shape it is
+// is decided by a lookahead rather than by letting the named form try and fail, because
+// `(T)` matches the named form's first Id and only dies at the second one. RecvAnon
+// pushes an {anon} marker LAST (a tag runs after its children), and normRecv turns that
+// into the canonical [name, {byptr}?, type] the method lowering expects, with an empty
+// name.
+Receiver    <~~ push({recv: normRecv(takeAll())}) ~~>
+            = "(" ( RecvNamed | RecvAnon ) ")" ;
+RecvNamed   = RecvNamedAhead Id <~~ push(up.in) ~~> [ "*" <~~ push({byptr: true}) ~~> ] Id <~~ push(up.in) ~~> [ TypeArgs ] ;
+RecvAnon    <~~ push({anon: true}) ~~>
+            = [ "*" <~~ push({byptr: true}) ~~> ] Id <~~ push(up.in) ~~> [ TypeArgs ] ;
+// The receiver is NAMED exactly when an identifier is followed by another identifier
+// or by '*' - `(p *T)` and `(p T)` are named, `(T)`, `(*T)` and `(T[P])` are not.
+// A :script SUCCEEDS by returning undefined and FAILS by returning an impossible
+// token, so the named case is the `undefined` one.
+RecvNamedAhead = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        while (i < 256) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            break
+        }
+        if (cc < 0) { return abnf.newToken("\x01anon-receiver", 0) }
+        var isWord = (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95 || cc >= 128
+        if (!isWord) { return abnf.newToken("\x01anon-receiver", 0) }
+        while (i < 512) {
+            cc = c.peek(i)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95 || cc >= 128) { i++; continue }
+            break
+        }
+        while (i < 768) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            break
+        }
+        if (cc < 0) { return abnf.newToken("\x01anon-receiver", 0) }
+        if (cc === 42) { return undefined }
+        if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95 || cc >= 128) { return undefined }
+        return abnf.newToken("\x01anon-receiver", 0)
+    })()
+~~) ;
 // Parameters: several names may share a type (a, b int), a name may be omitted
 // entirely (func(int), only in type positions), and the last one may be variadic.
 // A named group is tried first; on an unnamed list it fails and the bare-type form
@@ -246,7 +321,22 @@ TypeArgs    = "[" Type { "," Type } "]" ;
 // array declares like a slice. The size expression is parsed and ignored.
 ArrayTypeT  = "[" ( "..." | Expression <~~ pop() ~~> ) "]" Type ;
 MapTypeT    = "map" KwEnd "[" Type "]" Type ;
-FuncTypeT   = "func" KwEnd "(" [ Type { "," Type } ] ")" [ Type | "(" Type { "," Type } ")" ] ;
+// A func TYPE may name its parameters and its results exactly like a declaration does
+// (type Seq[V any] func(yield func(V) bool)); the names are parsed and dropped, since a
+// type carries no bindings. The shape mirrors ParamList/RetTypes, untagged - a Type has
+// to stay item-neutral, so none of these productions may push.
+// The result is optional, so it must not be allowed to run over the line end: Go
+// inserts a semicolon after the ')' that ends the parameters when the line stops
+// there, and without SameLine the optional result happily reads the NEXT top-level
+// `func` declaration as this type's return type.
+FuncTypeT   = "func" KwEnd FTParams [ SameLine FTRets ] ;
+FTParams    = "(" [ FTItem { "," FTItem } [ "," ] ] ")" ;
+FTItem      = FTNamed | FTAnon ;
+FTNamed     = Id { "," Id } [ "..." ] Type ;
+FTAnon      = [ "..." ] Type ;
+FTRets      = FTRetNamed | Type | "(" [ Type { "," Type } ] ")" ;
+FTRetNamed  = NamedAhead "(" FTRetGrp { "," FTRetGrp } ")" ;
+FTRetGrp    = Id { "," Id } Type ;
 // Channel and (anonymous) interface types are parsed so declarations mentioning
 // them type-check syntactically; their values are only produced/consumed through
 // constructs that are themselves reported as not implemented.
@@ -317,7 +407,7 @@ NotSelLabel = :script(~~
 // defer f(args) / defer pkg.fn(args): the function value and the arguments are
 // evaluated now, the call runs when the surrounding function returns (LIFO).
 Defer       <~~ push(makeDefer(takeAll())) ~~>
-            = "defer" KwEnd DeferTarget "(" [ Expression { "," Expression } [ Spread ] ] ")" [ ";" ] ;
+            = "defer" KwEnd DeferTarget "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" [ ";" ] ;
 // Whatever the call is made ON: a name, a package member, a method value or a
 // function literal. It is evaluated at defer time, together with the arguments.
 // It must NOT swallow the call itself, so the chain carries only the non-call
@@ -462,14 +552,18 @@ CaseLabel   <~~ push(makeCaseLabel(takeAll())) ~~>
               | "default" KwEnd ) ":" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
-            = "return" KwEnd [ Expression { "," Expression } ] [ ";" ] ;
+            = "return" KwEnd [ SameLine RetVals ] [ ";" ] ;
+// Go's semicolon insertion makes `return` a RESTRICTED production: a line break right
+// after it ends the statement. Without SameLine a bare `return` followed by `case <-c:`
+// reads `case` as the start of its result expression and the whole switch falls apart.
+RetVals     = Expression { "," Expression } ;
 
 // break / continue carry an optional label: they leave (resp. re-enter) the loop that
 // carries that label rather than the innermost one.
 Break       <~~ push(makeBreakG(takeAll())) ~~>
-            = "break" KwEnd [ Id <~~ push(up.in) ~~> ] [ ";" ] ;
+            = "break" KwEnd [ SameLine Id <~~ push(up.in) ~~> ] [ ";" ] ;
 Continue    <~~ push(makeContinueG(takeAll())) ~~>
-            = "continue" KwEnd [ Id <~~ push(up.in) ~~> ] [ ";" ] ;
+            = "continue" KwEnd [ SameLine Id <~~ push(up.in) ~~> ] [ ";" ] ;
 // goto name: a branch to a label of an ENCLOSING labelled statement (the backward
 // jump Go programs actually use). A forward goto is reported at compile time.
 Goto        <~~ push(makeGoto(takeAll(), up.pos)) ~~>
@@ -593,7 +687,20 @@ Deref       <~~ push(makeDeref(pop())) ~~>
 // (a chain's IndexSfx would fail at the ':' and fall through to the slice form).
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | SliceSfx | IndexSfx | CallSfx | TypeAssertSfx } ;
+            = Primary { MethodSfx | FieldSfx | SliceSfx | TypeArgsSfx | IndexSfx | CallSfx | TypeAssertSfx } ;
+// f[int16, float32, string], NewMap[int, struct{}], shift[[62]byte]: a generic
+// INSTANTIATION whose bracket list is not an index expression. Generics are erased, so
+// an instantiation is the identity on the value it indexes, and this suffix pushes
+// nothing at all. It has to be tried BEFORE IndexSfx - `struct{}` would otherwise be
+// read as a composite literal of a type called "struct" - so both shapes are written to
+// be impossible as an index: two or more arguments (Go has no comma index), or a single
+// argument that is a type no expression can start with. An ARRAY type is in that set
+// and `m[[2]int{1, 2}]` is a legal index, but there the '{' makes this rule fail and
+// IndexSfx is retried, which is exactly the PEG behaviour wanted.
+TypeArgsSfx  = TypeArgsMany | TypeArgsKw ;
+TypeArgsMany = "[" Type "," Type { "," Type } "]" ;
+TypeArgsKw   = "[" NonExprT "]" ;
+NonExprT     = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
 // s[lo:hi] / s[lo:hi:max]. Tried before IndexSfx so the ':' inside the brackets is
 // reached (an index would fail there and the whole chain with it). Each bound is
 // tagged, so an omitted one is told apart from a following one.
@@ -604,9 +711,9 @@ SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
 // Call covers only the 'Id(args)' form, so without this suffix a call on any other
 // expression does not parse at all.
 CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
-            = "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
+            = "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
+            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -616,7 +723,7 @@ IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
 // Only the single-result form is supported (not the comma-ok v, ok := x.(T)).
 TypeAssertSfx = "." "(" Type ")" ;
 
-Primary     = "(" Expression ")" | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
+Primary     = ParenConv | "(" Expression ")" | ImagLit | DotFloatLit | HexFloatLit | FloatLit | HexLit | OctLit
             | BinLit | LegOctLit | DecULit | DqString | RawString | RuneLit
             | GoDecLit | True | False | Nil | FuncLit | SliceLit
             | MapLit | MakeMap | MakeSlice | MakeChan | NewCall | AnonStructLit | StructLit
@@ -631,6 +738,18 @@ Primary     = "(" Expression ")" | ImagLit | DotFloatLit | HexFloatLit | FloatLi
 // PEG, so "uint" matching the front of "uint16" would never be retried.
 ConvExpr    <~~ push(makeConv(takeAll(), up.pos)) ~~>
             = ConvType "(" Expression [ "," ] ")" ;
+// (chan int)(nil), (func())(nil), (map[string]int)(nil), ([]byte)(s): a conversion whose
+// target type is PARENTHESIZED. ParenConvT deliberately leaves out the bare-name and
+// pointer types, which are the two shapes that are also EXPRESSIONS: `(f)(3)` has to
+// stay a call of a parenthesized function value and `(*fp)(3)` a call through a
+// dereferenced one. What is left - chan/map/func/struct/interface/slice/array - can
+// never start an expression, so trying this first costs nothing and is unambiguous.
+// (A parenthesized composite literal, `([]int{1, 2})`, still falls through: the ')'
+// this rule needs is a '{' there, and the alternative is retried.)
+ParenConv   <~~ push(makeConv(takeAll(), up.pos)) ~~>
+            = "(" ParenConvT ")" "(" Expression [ "," ] ")" ;
+ParenConvT  <~~ push({conv: firstType(up.in)}) ~~>
+            = "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT | StructTypeT ;
 ConvType    <~~ push({conv: firstType(up.in)}) ~~>
             = "[" "]" Type | ScalarType KwEnd ;
 ScalarType  = "uintptr" | "float32" | "float64" | "uint16" | "uint32" | "uint64"
@@ -808,7 +927,7 @@ ZType       <~~ push({mzero: up.in}) ~~>
 // Point{3, 4} positional, Point{y: 4, x: 3} keyed, Point{} empty. A keyed element is
 // tried first: its 'name:' would otherwise parse as a bare expression.
 StructLit   <~~ push(makeStructLit(takeAll())) ~~>
-            = StructGate Id <~~ push(up.in) ~~> [ TypeArgs ]
+            = StructGate NotTypeKw Id <~~ push(up.in) ~~> [ TypeArgs ]
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
 // struct{ a, b int }{10, 20}: an anonymous struct type carries its own field list, so
 // the descriptor is built at the literal site instead of being looked up by name. No
@@ -823,7 +942,7 @@ KeyedElem   = Id <~~ push({fkey: up.in}) ~~> ":" Expression ;
 // f(a, b): a function or a builtin. A trailing '...' (spread of a slice into a
 // variadic parameter) is accepted and ignored (the last argument passes through).
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] ] ")" ;
+            = Id <~~ push(up.in) ~~> "(" [ Expression { "," Expression } [ Spread ] [ "," ] ] ")" ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -952,6 +1071,48 @@ SameLine = :script(~~
                 continue
             }
             break
+        }
+        return undefined
+    })()
+~~) ;
+
+// A composite literal's TYPE NAME must not be a type keyword. `Id` in this dialect
+// happily matches `struct`, so `size[struct{}]()` (a generic instantiation whose type
+// argument is an anonymous struct) parsed as a literal of a type CALLED "struct" and
+// only blew up later, in the emitter. The keyword forms have their own productions
+// (the anonymous-struct literal, the interface type), so rejecting them here loses
+// nothing. Comments are skipped as well as whitespace, since either may sit in front.
+NotTypeKw = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        while (i < 4096) {
+            cc = c.peek(i)
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 4096 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i += 2
+                while (i < 4096 && c.peek(i) >= 0 && !(c.peek(i) === 42 && c.peek(i + 1) === 47)) { i++ }
+                i += 2
+                continue
+            }
+            break
+        }
+        var w = ""
+        while (i < 4096 && w.length < 12) {
+            cc = c.peek(i)
+            if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc === 95) {
+                w = w + String.fromCharCode(cc)
+                i++
+                continue
+            }
+            break
+        }
+        if (w === "struct" || w === "interface" || w === "func" || w === "map" || w === "chan") {
+            return abnf.newToken("\x01type-keyword", 0)
         }
         return undefined
     })()
@@ -3418,8 +3579,36 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     }
     // type Name struct {...} lowers to a descriptor; type Name interface {...} is
     // accepted (marked with {iface}) and reported not implemented.
+    // Every type NAME the program declares, so `type A = B` can tell a user type (which
+    // the alias re-binds to) from a builtin like int (which it converts to).
+    var declaredTypes = {}
     function makeTypeDecl(items, pos) {
         var last = items[items.length - 1]
+        // `type A = B`: AliasEq pushed its marker straight after the name. When B is a
+        // type this file already declared, A becomes a SECOND NAME for the same binding
+        // (struct descriptor included); otherwise (type Int = int) it falls through to
+        // the defined-type conversion below.
+        if (items.length > 2 && typeof items[1] == "object" && items[1] != null && items[1].alias == true) {
+            var aName = items[0]
+            var aTgt = (typeof last == "object" && last != null && last.under != undefined) ? last.under : ""
+            declaredTypes[aName] = true
+            if (aTgt != "" && declaredTypes[aTgt] == true) {
+                if (structFields[aTgt] != undefined) {
+                    structFields[aName] = structFields[aTgt]
+                    structFTypes[aName] = structFTypes[aTgt]
+                }
+                return function(b) {
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName),
+                                                 callExt(b, "js_scope_get", [curScopeV, emitStr(b, aTgt)])])
+                    return b
+                }
+            }
+            var alias = [items[0]]
+            for (var ai = 2; ai < items.length; ai++) { alias.push(items[ai]) }
+            items = alias
+            last = items[items.length - 1]
+        }
+        declaredTypes[items[0]] = true
         // An interface declaration binds no runtime value: the value model is dynamic,
         // so satisfaction is implicit and a method call on an interface value is the
         // ordinary method call on whatever struct is in it. A constraint interface
@@ -3541,6 +3730,40 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             emitNameList(b, clsV, "__fields", fields)
             emitNameList(b, clsV, "__ftypes", ftypes)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            return b
+        }
+    }
+    // An unnamed receiver (func (T) M()) arrives as [{byptr}?, type, {anon:true}] because
+    // a tag runs after its children; give it the empty name the named form would have put
+    // first, so recv stays [name, {byptr}?, type] everywhere downstream.
+    function normRecv(items) {
+        var last = items[items.length - 1]
+        if (typeof last == "object" && last != null && last.anon == true) {
+            var out = [""]
+            for (var i = 0; i < items.length - 1; i++) { out.push(items[i]) }
+            return out
+        }
+        return items
+    }
+    // import "path" is a pure compile-time act (resolveImport pulls a project file in, or
+    // recognises a stdlib package the prologue already declared), so it lowers to nothing.
+    function makeImport(path, pos) {
+        resolveImport(path, pos)
+        return function(b) { return b }
+    }
+    // import alias "path" / import _ "path": resolve exactly as above, then declare the
+    // alias as a second name for the package object. This thunk runs from buildMain's
+    // makeSeq, i.e. after buildPackages and the fmt/os prologue, so the base name is bound.
+    // items = [alias, path].
+    function makeImportAs(items, pos) {
+        var alias = items[0]
+        var path = items[1]
+        resolveImport(path, pos)
+        var base = pkgBaseName(stripWs(path))
+        if (alias == "_" || alias == base) { return function(b) { return b } }
+        return function(b) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, alias),
+                                         callExt(b, "js_scope_get", [curScopeV, emitStr(b, base)])])
             return b
         }
     }
