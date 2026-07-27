@@ -365,6 +365,57 @@ expectations_for() {
             awk '{ bad = ($0 ~ /\/(test_listcomps|test_patma)\.py$/)
                    print (bad ? "reject|" : "parse|") $0 }' "$all"
             return ;;
+        bash)
+            # The oils corpus has no negative-test marker to read, and the
+            # default here was a blanket "must parse". That was wrong for 73 of
+            # the 2562 swept files, and it cost us in both directions.
+            #
+            # bash itself is the exact oracle: `bash -n` is a parse-only pass, so
+            # a file it refuses is one WE must refuse too. Measured 2026-07-27
+            # with GNU bash 5.3.15 (aarch64-apple-darwin25), the version this
+            # corpus targets:
+            #
+            #   73 files are rejected by `bash -n`. Of those we already refuse
+            #   64 - and every one was being counted as a PARSE-FAIL, i.e. as our
+            #   bug, when it was correct behaviour.
+            #
+            #   The other 9 we WRONGLY ACCEPT, and the old expectation could not
+            #   see them at all. They are self-describing:
+            #     parse-errors/011-is-its-own-word-needs-a-space.sh
+            #     parse-errors/020-misplaced.sh
+            #     regex/013-malformed-regex.sh
+            #     regex/035-parse-error-with-2-words.sh
+            #     var-sub-quote/032-syntax-error-for-single-quote-in-double-quote.sh
+            #     dbracket/040-is-syntax-error.sh, 041-is-syntax-error.sh
+            #     command-sub-ksh/002, 003 (ksh-only $(...) forms)
+            #   Now that they carry 'reject' we are scored on refusing them.
+            #
+            # After the split: parse 2260/2489 = 90.8%, reject 64/73 = 87.7%.
+            # The single blended 88.6% this replaces was neither number.
+            #
+            # Note the sweep reads oils-spec/extracted/ only. The 264 raw sources
+            # under oils-spec/spec/ are never swept - which is correct, they are
+            # the INPUT extract-oils.py turned into extracted/ and they mix YSH
+            # and OSH syntax with '## stdout:' metadata, so they are not bash
+            # programs at all. (`bash -n` refuses 138 of them, for that reason.)
+            #
+            # CAUTION, learned the hard way on two other corpora the same day: a
+            # toolchain is only an oracle at the RIGHT VERSION. `luac` 5.5 and
+            # `/usr/bin/ruby` 2.6.10 were tried here too and produced 12 bogus
+            # findings between them - 2.6 predates every Ruby 3 form the corpus
+            # uses ('{a:}', '(..1)', 'def foo(...)', '**nil'), and luac reports a
+            # <const> violation, which is semantic, not syntactic. Re-verify the
+            # version before extending this approach to another language.
+            if command -v bash >/dev/null 2>&1; then
+                while IFS= read -r f; do
+                    if bash -n "$f" 2>/dev/null; then printf 'parse|%s\n' "$f"
+                    else                              printf 'reject|%s\n' "$f"; fi
+                done < "$all"
+            else
+                echo "  [warn] bash: no bash on PATH, falling back to must-parse" >&2
+                sed 's/^/parse|/' "$all"
+            fi
+            return ;;
         go)
             # The first line of every golang/go test/ file is its directive;
             # "// errorcheck" means the compiler must reject the file.

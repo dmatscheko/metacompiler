@@ -172,10 +172,17 @@ full_probe() {
                     break
                 fi
                 if [ "$gaps" -eq 0 ]; then
+                    # Record how many assertions actually ran. "FULL" only says the
+                    # file got to the end; it cannot see a section whose checks
+                    # stopped executing (an early return, a swallowed exception, a
+                    # loop that runs zero times), which silently lowers the count
+                    # while staying green. The two halves of a language must agree
+                    # on it - see the CHECK-COUNT report at the end of this group.
+                    printf '%s\n' "$out" | sed -n 's/^full: \([0-9]*\) checks.*/\1/p' | head -1 > "$R.checks"
                     RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>/dev/null
                     RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>/dev/null
                     if cmp -s "$work.g" "$work.f"; then
-                        printf '    FULL - every section parses and passes, goja and -frozen byte-identical\n'
+                        printf '    FULL - %s assertions, goja and -frozen byte-identical\n' "$(cat "$R.checks")"
                     else
                         printf '    FULL under goja, BUT -frozen fails or differs - inspect before celebrating\n'
                     fi
@@ -255,6 +262,7 @@ if [ "$FULL" -eq 1 ]; then
             n=$((n + 1))
             r="$RESDIR/full.$(printf '%03d' "$n")"
             REPORTS="$REPORTS $r"
+            printf '%s\n' "$lang" > "$r.lang"
             if [ ! -f "$G" ]; then
                 printf '%s:\n    (grammar not found, skipped)\n' "$(basename "$G" .abnf)" > "$r"
                 continue
@@ -269,6 +277,35 @@ if [ "$FULL" -eq 1 ]; then
     echo " still needs; the default matrix is unaffected by these files)"
     if [ -z "$REPORTS" ]; then echo; echo "nothing matched the filter"; exit 0; fi
     for r in $REPORTS; do echo; cat "$r"; done
+
+    # CHECK-COUNT agreement. A grammar half that reaches the end of the ratchet
+    # file reports FULL, and that is the headline - but it is possible to be FULL
+    # while running FEWER assertions than the other half of the same language,
+    # which means one half is quietly skipping work the other does. The ratchet
+    # file is one file, so the two halves must produce the SAME count; anything
+    # else is a defect in whichever half runs fewer. This is cheap and
+    # self-maintaining: it needs no expected number checked into the repo.
+    echo
+    echo "assertion counts (both halves of a language run the same file, so they must agree)"
+    mism=0
+    for r in $REPORTS; do
+        [ -f "$r.lang" ] || continue
+        printf '%s\t%s\n' "$(cat "$r.lang")" "$(cat "$r.checks" 2>/dev/null || echo -)"
+    done | sort | awk -F'\t' '
+        { if ($1 != last) { if (last != "") emit(); last = $1; n = 0 }
+          v[n++] = $2 }
+        function emit(   i, bad) {
+            bad = 0
+            for (i = 1; i < n; i++) if (v[i] != v[0]) bad = 1
+            if (n < 2)      printf "  %-12s %s (only one half ran - filtered?)\n", last, v[0]
+            else if (bad)   { printf "  %-12s MISMATCH:", last
+                              for (i = 0; i < n; i++) printf " %s", v[i]
+                              printf "\n"; mismatch++ }
+            else            printf "  %-12s %s\n", last, v[0]
+            total += (v[0] ~ /^[0-9]+$/ ? v[0] : 0)
+        }
+        END { if (last != "") emit()
+              printf "\n  %d assertions in total; %d languages with halves that disagree\n", total, mismatch }'
     exit 0
 fi
 
