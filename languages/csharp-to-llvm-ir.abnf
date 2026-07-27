@@ -893,11 +893,15 @@ VerbPlain   <~~ push(makeConst(csVerb(up.in))) ~~>
 VbDQuote    = '"' '"' ;
 VbChar      = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
 
-// C# numeric literals beyond the plain decimal integer that IntLit already handles: hex
-// (0x), binary (0b), reals (a '.' fraction, an exponent or an f/d/m suffix), and decimals
-// with '_' digit groups or an integer u/l suffix. The value is computed by csNum.
+// C# numeric literals. The value is computed by csNum, which is also where the
+// literal's TYPE is decided (ECMA-334 6.4.5.3). CsDecP - the plain decimal
+// integer - is listed LAST but is no longer left to the shared IntLit, because
+// IntLit reads it with parseInt, i.e. through a double: 18446744073709551615
+// came back as 18446744073709552000, and the two script engines even rounded it
+// differently. CsNum precedes IntLit in the literal choice, so IntLit is now
+// unreachable for this grammar.
 CsNum       <~~ push(makeNumConst(csNum(up.in))) ~~>
-            = CsHex | CsBin | CsDot | CsReal | CsDecU | CsDecS ;
+            = CsHex | CsBin | CsDot | CsReal | CsDecU | CsDecS | CsDecP ;
 CsHex       = ( "0x" | "0X" ) :whitespace() CsHexD { CsHexD | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 CsBin       = ( "0b" | "0B" ) :whitespace() CsBit { CsBit | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 // A leading-dot real ('.5'): only a digit may follow the dot, so a member access
@@ -906,6 +910,7 @@ CsDot       = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ CsExp ] [ CsRSfx
 CsReal      = "0"..."9" :whitespace() { "0"..."9" | "_" } CsRealT :whitespace(Whitespace) ;
 CsDecU      = "0"..."9" :whitespace() { "0"..."9" } "_" { "0"..."9" | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 CsDecS      = "0"..."9" :whitespace() { "0"..."9" } CsISfx :whitespace(Whitespace) ;
+CsDecP      = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 CsRealT     = "." "0"..."9" { "0"..."9" | "_" } [ CsExp ] [ CsRSfx ] | CsExp [ CsRSfx ] | CsRSfx ;
 CsExp       = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 CsHexD      = "0"..."9" | "a"..."f" | "A"..."F" ;
@@ -1133,17 +1138,18 @@ KwLet       = "let" KwEnd ;
     // The bitwise / shift operators reuse the runtime externals (they already truncate to
     // 32 bit through wrapNum(toInt32(...)), so they need no extra intWrap). Added to the
     // shared binExt table so foldBinary and the compound assignments emit them directly.
-    binExt["|"]  = "js_bor";  binExt["^"]  = "js_bxor"; binExt["&"]  = "js_band"
-    binExt["<<"] = "js_shl";  binExt[">>"] = "js_shr"
-    binExt["|="] = "js_bor";  binExt["^="] = "js_bxor"; binExt["&="] = "js_band"
-    binExt["<<="] = "js_shl"; binExt[">>="] = "js_shr"
+    // NOT the runtime's 32 bit externs any more: js_bor/js_band/js_shl are
+    // JavaScript's THIRTY-TWO bit operators, so 1L << 40 answered 256 and
+    // uint.MaxValue >> 1 answered -1 >> 1. The emitBin override below routes
+    // every one of them through js_csarith / js_csshift, which apply the
+    // ECMA-334 12.4.7.3 promotion and mask the shift count.
 
     // == / != go through the char-aware equality (js_jchareq is js_seq unless a char meets
     // the one-character string it renders as).
     // C#'s '+': "x" + null is "x", not "xnull" - the js_csadd external, which is
     // js_jadd with C#'s null rendering (and the same double awareness).
-    binExt["+"] = "js_csadd"
-    binExt["+="] = "js_csadd"
+    binExt["+"] = "js_csadd2"
+    binExt["+="] = "js_csadd2"
     var coreEmitBin = emitBin
     emitBin = function(b, op, l, r) {
         if (op == "==" || op == "!=") {
@@ -1159,6 +1165,10 @@ KwLet       = "let" KwEnd ;
             } else {
                 eqv = callExt(b, "js_jchareq", [l, r])
             }
+            // Two INTEGRAL operands compare BY VALUE at their promoted type:
+            // without this a `long x = 5` box and the plain int 5 are two
+            // different runtime values and `x == 5` is false.
+            eqv = callExt(b, "js_cseq", [l, r, eqv])
             if (op == "!=") { return callExt(b, "js_not", [eqv]) }
             return eqv
         }
@@ -1177,12 +1187,29 @@ KwLet       = "let" KwEnd ;
         // override - and passes every other value through UNCHANGED, so two ints
         // still add as ints and a boxed double still adds as a double.
         if (op == "+" || op == "+=") {
-            return callExt(b, "js_csadd", [callExt(b, "js_csstr", [l]), callExt(b, "js_csstr", [r])])
+            return callExt(b, "js_csadd2", [callExt(b, "js_csstr", [l]), callExt(b, "js_csstr", [r])])
         }
-        if (op == "-" || op == "-=") return callExt(b, "js_jfsub", [l, r])
-        if (op == "*" || op == "*=") return callExt(b, "js_jfmul", [l, r])
-        if (op == "/" || op == "/=") return callExt(b, "js_jfdiv", [l, r])
-        if (op == "%" || op == "%=") return callExt(b, "js_jfmod", [l, r])
+        // Every INTEGRAL operator routes through js_csarith / js_csshift /
+        // js_cscmp, which apply the ECMA-334 12.4.7.3 promotion (ulong / long /
+        // uint / int) and wrap at the promoted type - so the whole width story
+        // lives in one place, exactly as csArith does in csharp-interpreter.abnf.
+        if (op == "-" || op == "-=") return callExt(b, "js_csarith", [emitStr(b, "-"), l, r])
+        if (op == "*" || op == "*=") return callExt(b, "js_csarith", [emitStr(b, "*"), l, r])
+        if (op == "/" || op == "/=") return callExt(b, "js_csarith", [emitStr(b, "/"), l, r])
+        if (op == "%" || op == "%=") return callExt(b, "js_csarith", [emitStr(b, "%"), l, r])
+        if (op == "&" || op == "&=") return callExt(b, "js_csarith", [emitStr(b, "&"), l, r])
+        if (op == "|" || op == "|=") return callExt(b, "js_csarith", [emitStr(b, "|"), l, r])
+        if (op == "^" || op == "^=") return callExt(b, "js_csarith", [emitStr(b, "^"), l, r])
+        // The shift COUNT is masked - & 31 for an int/uint, & 63 for a long/ulong
+        // - and the result type is the LEFT operand's alone (ECMA-334 12.11), so
+        // `1 << 32` is 1; `>>` on an unsigned type is the LOGICAL shift.
+        if (op == "<<" || op == "<<=") return callExt(b, "js_csshift", [emitStr(b, "<<"), l, r])
+        if (op == ">>" || op == ">>=") return callExt(b, "js_csshift", [emitStr(b, ">>"), l, r])
+        if (op == ">>>" || op == ">>>=") return callExt(b, "js_csshift", [emitStr(b, ">>>"), l, r])
+        if (op == "<") return callExt(b, "js_cscmp", [emitStr(b, "<"), l, r])
+        if (op == ">") return callExt(b, "js_cscmp", [emitStr(b, ">"), l, r])
+        if (op == "<=") return callExt(b, "js_cscmp", [emitStr(b, "<="), l, r])
+        if (op == ">=") return callExt(b, "js_cscmp", [emitStr(b, ">="), l, r])
         return coreEmitBin(b, op, l, r)
     }
 
@@ -1207,7 +1234,7 @@ KwLet       = "let" KwEnd ;
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return emitUnDyn(r.b, "-", r.v, function(bb) { return callExt(bb, "js_jfneg", [r.v]) })
+            return emitUnDyn(r.b, "-", r.v, function(bb) { return callExt(bb, "js_csneg", [r.v]) })
         }
     }
     makeNot = function(t) {
@@ -1217,12 +1244,14 @@ KwLet       = "let" KwEnd ;
         }
     }
 
-    // ~v is v ^ -1 on the ToInt32 value, so it reuses the xor external.
+    // ~v is the complement at the UNARY PROMOTED type (ECMA-334 12.4.7.2): int
+    // for a byte/sbyte/short/ushort/char/int, and the operand's own type for
+    // uint/long/ulong. `v ^ -1` through js_bxor was always the 32 bit signed one.
     function makeBitNot(t) {
         return function(b) {
             var r = t(b)
             b = r.b
-            return {b: b, v: callExt(b, "js_bxor", [r.v, emitNum(b, -1)])}
+            return {b: b, v: callExt(b, "js_csnot", [r.v])}
         }
     }
     // 'a ?? b': the first operand that is not null wins; the right side runs only when the
@@ -1582,19 +1611,48 @@ KwLet       = "let" KwEnd ;
         s = stripWs(s)
         var t = ""
         for (var i = 0; i < s.length; i++) { if (s.charAt(i) != "_") { t = t + s.charAt(i) } }
-        if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) { return parseInt(t.substring(2), 16) }
-        if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "b" || t.charAt(1) == "B")) { return parseInt(t.substring(2), 2) }
+        var hex = t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")
+        var bin = t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "b" || t.charAt(1) == "B")
         // A real literal is a DOUBLE: a '.' fraction, an exponent, or one of the
-        // f/F/d/D/m/M suffixes (ECMA-334 6.4.5.3). It emits the js_csflo box.
+        // f/F/d/D/m/M suffixes (ECMA-334 6.4.5.3). It emits the js_csflo box. A
+        // hex/binary literal is never real, so its e/d/f DIGITS must not be
+        // mistaken for one.
         var lastc = t.charAt(t.length - 1)
-        var isReal = t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0
-                     || lastc == "f" || lastc == "F" || lastc == "d" || lastc == "D"
-                     || lastc == "m" || lastc == "M"
-        if (isReal) { return {__flo: parseFloat(t)} }
-        return parseInt(t, 10)
+        if (!hex && !bin) {
+            var isReal = t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0
+                         || lastc == "f" || lastc == "F" || lastc == "d" || lastc == "D"
+                         || lastc == "m" || lastc == "M"
+            if (isReal) { return {__flo: parseFloat(t)} }
+        }
+        // An INTEGER literal travels as its DIGITS, because emitNum would already
+        // have rounded 9223372036854775807 to 9223372036854776000 on the way into
+        // the module - and the two script engines even rounded it differently. Its
+        // TYPE follows its suffix and its value (ECMA-334 6.4.5.3); js_cslit picks.
+        var hasU = false
+        var hasL = false
+        var body = t
+        while (body.length > 0) {
+            var c = body.charAt(body.length - 1)
+            if (c == "u" || c == "U") { hasU = true; body = body.substring(0, body.length - 1) }
+            else if (c == "l" || c == "L") { hasL = true; body = body.substring(0, body.length - 1) }
+            else { break }
+        }
+        if (hex) { return {__int: body.substring(2), __radix: 16, __u: hasU, __l: hasL} }
+        if (bin) { return {__int: body.substring(2), __radix: 2, __u: hasU, __l: hasL} }
+        return {__int: body, __radix: 10, __u: hasU, __l: hasL}
     }
     function makeNumConst(v) {
         if (v !== null && typeof v == "object") {
+            if (v.__int != undefined) {
+                var txt = v.__int
+                var rdx = v.__radix
+                var vu = v.__u
+                var vl = v.__l
+                return function(b) {
+                    return {b: b, v: callExt(b, "js_cslit", [emitStr(b, txt), emitNum(b, rdx),
+                                                             vu ? hTrue : hFalse, vl ? hTrue : hFalse])}
+                }
+            }
             var f = v.__flo
             return function(b) { return {b: b, v: callExt(b, "js_csflo", [emitNum(b, f)])} }
         }
@@ -2115,8 +2173,14 @@ KwLet       = "let" KwEnd ;
     // A compound assignment. '+=' / '-=' on a delegate combine / remove instead of adding;
     // the decision is a run-time one (the right operand being a closure), and the whole
     // branch only exists in a program that declares a delegate type.
+    // A compound assignment carries an IMPLICIT CAST back to the LEFT operand's
+    // type (ECMA-334 12.21.4: `x op= y` is `x = (T)(x op y)`), so `byte b = 250;
+    // b += 10` is (byte)260 == 4 and `int i = 5; i += 1.5` is (int)6.5 == 6.
+    // js_csnarrowlike reads the type off the old value and applies it; a string or
+    // a delegate left operand passes through untouched.
+    function emitNarrowLike(b, oldV, v) { return callExt(b, "js_csnarrowlike", [oldV, v]) }
     function emitCompound(b, op, oldV, v) {
-        if (!csHasDeleg || (op != "+=" && op != "-=")) { return {b: b, v: emitBin(b, op, oldV, v)} }
+        if (!csHasDeleg || (op != "+=" && op != "-=")) { return {b: b, v: emitNarrowLike(b, oldV, emitBin(b, op, oldV, v))} }
         var dB = curF.NewBlock("")
         var stdB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
@@ -2136,7 +2200,10 @@ KwLet       = "let" KwEnd ;
         dr.b.NewBr(mergeB)
         var sv = emitBin(stdB, op, oldV, v)
         stdB.NewBr(mergeB)
-        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(dr.v, dr.b), llvm.ir.NewIncoming(sv, stdB)])}
+        var mv = mergeB.NewPhi([llvm.ir.NewIncoming(dr.v, dr.b), llvm.ir.NewIncoming(sv, stdB)])
+        // The delegate result is not numeric, so js_csnarrowlike hands it back
+        // unchanged; only the arithmetic branch is converted.
+        return {b: mergeB, v: emitNarrowLike(mergeB, oldV, mv)}
     }
     // Calling a delegate value: a multicast one is an array, so every entry runs and the
     // last result wins. Without a delegate type in the program this is one js_call.
@@ -2517,7 +2584,10 @@ KwLet       = "let" KwEnd ;
                     b = emitEvtCall(b, p.obj, p.keyName, op, v)
                 } else if (p.isField && csPropAcc[p.keyName] != undefined) {
                     // A property with a set accessor body ('b.W = 5').
-                    if (op != "=") { v = emitBin(b, op, emitPropGet(b, p.obj, p.keyName), v) }
+                    if (op != "=") {
+                        var oldp = emitPropGet(b, p.obj, p.keyName)
+                        v = emitNarrowLike(b, oldp, emitBin(b, op, oldp, v))
+                    }
                     b = emitPropSet(b, p.obj, p.keyName, v)
                 } else if (p.isField) {
                     if (op != "=") {
@@ -2531,13 +2601,13 @@ KwLet       = "let" KwEnd ;
                     if (op != "=") {
                         var oldx = emitIndexGet(b, p.obj, p.key)
                         b = oldx.b
-                        v = emitBin(b, op, oldx.v, v)
+                        v = emitNarrowLike(b, oldx.v, emitBin(b, op, oldx.v, v))
                     }
                     b = emitIndexSet(b, p.obj, p.key, v)
                 } else {
                     if (op != "=") {
                         var oldm = callExt(b, "js_pyget", [p.obj, p.key])
-                        v = emitBin(b, op, oldm, v)
+                        v = emitNarrowLike(b, oldm, emitBin(b, op, oldm, v))
                     }
                     callExt(b, "js_pyset", [p.obj, p.key, v])
                 }
@@ -2558,7 +2628,7 @@ KwLet       = "let" KwEnd ;
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
-                var newV = callExt(b, "js_jfstep", [oldV, oneV])
+                var newV = callExt(b, "js_csstep", [oldV, oneV])
                 callExt(b, "js_scope_set", [curScopeV, nameV, newV])
                 return {b: b, v: pre ? newV : oldV}
             }
@@ -2566,12 +2636,12 @@ KwLet       = "let" KwEnd ;
             b = p.b
             if (p.isField) {
                 var oldM = callExt(b, "js_get", [p.obj, p.key])
-                var newM = callExt(b, "js_jfstep", [oldM, oneV])
+                var newM = callExt(b, "js_csstep", [oldM, oneV])
                 callExt(b, "js_set", [p.obj, p.key, newM])
                 return {b: b, v: pre ? newM : oldM}
             }
             var oldI = callExt(b, "js_pyget", [p.obj, p.key])
-            var newI = callExt(b, "js_jfstep", [oldI, oneV])
+            var newI = callExt(b, "js_csstep", [oldI, oneV])
             callExt(b, "js_pyset", [p.obj, p.key, newI])
             return {b: b, v: pre ? newI : oldI}
         }
@@ -2784,27 +2854,39 @@ KwLet       = "let" KwEnd ;
     // A cast to a reference type lowers as identity. A cast to a primitive type converts:
     // the integral targets truncate to 32 bit (js_char_code unboxes a char first),
     // '(char)' boxes a code back into a char, the floating targets only unbox.
+    // The widths and signedness of C#'s integral type names; the twin of csTypeW
+    // in csharp-interpreter.abnf. C#'s `byte` is UNSIGNED (0..255) and `sbyte` is
+    // the signed one - the opposite of Java. The keys are "$"-prefixed because
+    // compile-core has no hasOwn and a bare lookup would find Object.prototype's.
+    var csTypeW = {"$sbyte": 8, "$byte": 8, "$short": 16, "$ushort": 16,
+                   "$int": 32, "$uint": 32, "$long": 64, "$ulong": 64,
+                   "$nint": 64, "$nuint": 64}
+    var csTypeU = {"$sbyte": false, "$byte": true, "$short": false, "$ushort": true,
+                   "$int": false, "$uint": true, "$long": false, "$ulong": true,
+                   "$nint": false, "$nuint": true}
     function makeCast(inner, ty) {
         if (ty == undefined || ty == null || ty.castty == undefined) { return inner }
         var t = ty.castty
         // An explicit user conversion declared on the operand's own class wins; without one
         // emitConvTo emits exactly the built-in conversion below.
+        // (char) narrows to 16 UNSIGNED bits; each integral cast narrows to its
+        // OWN width and signedness, so (byte)300 is 44, (sbyte)200 is -56 and
+        // (uint)-1 is 4294967295 - where a shared intWrap made every one of them
+        // a signed 32 bit truncation and (byte)/(sbyte) an unconditional & 255.
         if (t == "char") {
             return function(b) {
                 var r = inner(b)
-                return emitConvTo(r.b, t, r.v, function(bb, v) { return callExt(bb, "js_char", [callExt(bb, "js_char_code", [v])]) })
+                return emitConvTo(r.b, t, r.v, function(bb, v) { return callExt(bb, "js_cschar", [v]) })
             }
         }
-        if (t == "byte" || t == "sbyte") {
+        if (csTypeW["$" + t] != undefined) {
+            var cw = csTypeW["$" + t]
+            var cu = csTypeU["$" + t]
             return function(b) {
                 var r = inner(b)
-                return emitConvTo(r.b, t, r.v, function(bb, v) { return callExt(bb, "js_band", [callExt(bb, "js_char_code", [v]), emitNum(bb, 255)]) })
-            }
-        }
-        if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short" || t == "ushort") {
-            return function(b) {
-                var r = inner(b)
-                return emitConvTo(r.b, t, r.v, function(bb, v) { return intWrap(bb, callExt(bb, "js_char_code", [v])) })
+                return emitConvTo(r.b, t, r.v, function(bb, v) {
+                    return callExt(bb, "js_csconv", [v, emitNum(bb, cw), cu ? hTrue : hFalse])
+                })
             }
         }
         // (double)/(float)/(decimal) BOX: the result is a double whatever the operand
@@ -3305,11 +3387,21 @@ KwLet       = "let" KwEnd ;
         // A double/float/decimal declaration CONVERTS its initializer (ECMA-334 10.2.3,
         // implicit numeric conversion): `double d = 1;` holds 1.0.
         var isDbl = (ty == "double" || ty == "float" || ty == "decimal")
+        // An INTEGRAL declared type puts its WIDTH AND SIGNEDNESS on the value the
+        // same way, which is what makes `long t = 1; t = t * 1000000 * 1000000`
+        // stay 64 bit, `byte b = 250; b += 10` wrap to 4 and `uint u = 5` behave
+        // as a uint rather than a signed int. js_csadopt converts only an integral
+        // value, so `object o = "s"` and a lambda pass through untouched.
+        var declW = csTypeW["$" + ty]
+        var declU = csTypeU["$" + ty]
         return function(b) {
             var r = init(b)
             b = r.b
             var v = r.v
             if (isDbl) { v = callExt(b, "js_csflo", [v]) }
+            if (declW != undefined) {
+                v = callExt(b, "js_csadopt", [v, emitNum(b, declW), declU ? hTrue : hFalse])
+            }
             // 'S12Vec d = 5;': the declared type declares 'implicit operator S12Vec(int)',
             // so the value is converted before anything else looks at it.
             if (csOpDecls["__conv_" + ty] != undefined) {
@@ -4460,6 +4552,17 @@ KwLet       = "let" KwEnd ;
         // See abnf/jsrtcsharp.go.
         var consoleV = callExt(b, "js_csconsole", [])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Console"), consoleV])
+        // The integral type NAMES as expression primaries, so `int.MaxValue` and
+        // `ulong.MaxValue` resolve. ulong.MaxValue is 18446744073709551615, which
+        // no double holds, so they arrive as runtime objects (js_cstype in
+        // abnf/jsrtcsharp.go) rather than as emitted literals.
+        var csTypeIdents = ["sbyte", "SByte", "byte", "Byte", "short", "Int16",
+                            "ushort", "UInt16", "int", "Int32", "uint", "UInt32",
+                            "long", "Int64", "ulong", "UInt64", "char", "Char"]
+        for (var cti = 0; cti < csTypeIdents.length; cti++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, csTypeIdents[cti]),
+                                         callExt(b, "js_cstype", [emitStr(b, csTypeIdents[cti])])])
+        }
         b = emitValEqDecl(b)
         b = emitImported(b)
         b = makeSeq(items)(b)

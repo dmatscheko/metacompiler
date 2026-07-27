@@ -83,12 +83,570 @@ package abnf
 
 import (
 	"fmt"
+	"math"
+	"strings"
 )
+
+// ----------------------------------------------------------------------------
+// SIZED INTEGERS
+//
+// C#'s integral types have fixed widths AND a signedness, and both have to
+// survive into the next operation: `byte b = 255; b++` is 0, uint.MaxValue is
+// 4294967295 rather than -1, and ulong.MaxValue / 3 is 6148914691236517205 - an
+// answer no double holds. The box that carries it is jsGInt from jsrtint.go, the
+// same one Go, Swift and Java use; only the RULES are C#'s and they live here, so
+// no shared file has to learn a second dialect.
+//
+// The invariant is C#'s and it is deliberately NOT Go's. There a plain number is
+// a 64 bit int; here
+//
+//	a plain number  ==  an `int`, i.e. a SIGNED 32 BIT value
+//	a jsGInt        ==  every other integral type: long, ulong, uint, short,
+//	                    ushort, byte (UNSIGNED in C#) and sbyte
+//	a jsJFlo        ==  a double / float / decimal              (jsrtjvm.go)
+//	a jsChar        ==  a char (16 bit unsigned, rendered as a glyph)
+//
+// ARITHMETIC IS UNCHECKED, C#'s default (ECMA-334 12.8.20): every operator wraps.
+// A `checked` block is parsed but NOT modelled - it does not throw - and that is
+// a documented gap. Division by zero DOES throw (12.9.3), because it throws in
+// both contexts.
+//
+// There is no dotnet on this machine, so every rule below is CITED rather than
+// executed; the section header of each function names the clause.
+//
+// languages/csharp-interpreter.abnf implements exactly these rules on top of the
+// sz* layer in lib/interp-core.js, and ./test.sh --cross diffs the two halves.
+
+func csSzW(v interface{}) uint8 {
+	if b, ok := v.(jsGInt); ok {
+		return b.w
+	}
+	return 32
+}
+
+func csSzU(v interface{}) bool {
+	if b, ok := v.(jsGInt); ok {
+		return b.u
+	}
+	return false
+}
+
+// csIsIntegral says whether a value is an operand of INTEGER arithmetic - which a
+// char is, C#'s char being an integral type, and a double is not.
+func csIsIntegral(v interface{}) bool {
+	switch v.(type) {
+	case jsGInt, float64, jsChar:
+		return true
+	}
+	return false
+}
+
+// csNorm applies the invariant: a signed 32 bit result is a PLAIN NUMBER,
+// everything else is a box. giNorm cannot be used - it unboxes at 64 bits, where
+// a plain number means `int` here.
+func csNorm(v int64, w uint8, u bool) interface{} {
+	v = giTrunc(v, w, u)
+	if w == 32 && !u {
+		return float64(int32(v))
+	}
+	return jsGInt{v: v, w: w, u: u}
+}
+
+// csBox reads a value at a given width and signedness.
+func csBox(rt *jsrt, v interface{}, w uint8, u bool) jsGInt {
+	return jsGInt{v: giTrunc(giVal(rt, v), w, u), w: w, u: u}
+}
+
+// csPromote is the BINARY NUMERIC PROMOTION of ECMA-334 12.4.7.3 for two integral
+// operands. The surprising rule is the uint one: `uint + int` is a LONG, because
+// int does not fit in uint and uint does not fit in int. That is the only place
+// C# differs from Java's much simpler "long if either is long, else int".
+//
+//	ulong, if either operand is ulong
+//	long,  if either operand is long
+//	long,  if one is uint and the other is sbyte / short / int
+//	uint,  if either operand is uint
+//	int,   otherwise (so byte + byte and short * short are int)
+func csPromote(l, r interface{}) (uint8, bool) {
+	lw, lu := csSzW(l), csSzU(l)
+	rw, ru := csSzW(r), csSzU(r)
+	if (lw == 64 && lu) || (rw == 64 && ru) {
+		return 64, true
+	}
+	if lw == 64 || rw == 64 {
+		return 64, false
+	}
+	if (lw == 32 && lu) || (rw == 32 && ru) {
+		other := l
+		if lw == 32 && lu {
+			other = r
+		}
+		// A char, a byte and a ushort convert to uint and stay there; a plain
+		// number is an `int` and forces the pair up to long.
+		if _, isChar := other.(jsChar); isChar {
+			return 32, true
+		}
+		if b, isBox := other.(jsGInt); isBox {
+			if b.u || b.w > 32 {
+				return 32, true
+			}
+			return 64, false
+		}
+		return 64, false
+	}
+	return 32, false
+}
+
+// csThrow raises one of the BCL exception types, which in both halves are plain
+// objects carrying __excname and Message - the shape `new
+// DivideByZeroException(msg)` builds and a catch clause reads.
+func (rt *jsrt) csThrow(name, msg string) {
+	o := newJSObject()
+	o.set("__excname", name)
+	o.set("Message", msg)
+	panic(&jsThrown{value: o})
+}
+
+// csArith is one binary arithmetic or bitwise operator on two INTEGRAL operands,
+// at the promoted type and wrapping to it (unchecked).
+func (rt *jsrt) csArith(op string, l, r interface{}) interface{} {
+	w, un := csPromote(l, r)
+	if w != 32 || un {
+		a, b := csBox(rt, l, w, un), csBox(rt, r, w, un)
+		if (op == "/" || op == "%") && b.v == 0 {
+			rt.csThrow("DivideByZeroException", "Attempted to divide by zero.")
+		}
+		return csNorm(giVal(rt, rt.giArith(op, a, b)), w, un)
+	}
+	a, b := int32(giVal(rt, l)), int32(giVal(rt, r))
+	var x int32
+	switch op {
+	case "+":
+		x = a + b
+	case "-":
+		x = a - b
+	case "*":
+		x = a * b
+	case "/":
+		if b == 0 {
+			rt.csThrow("DivideByZeroException", "Attempted to divide by zero.")
+		}
+		// int.MinValue / -1 overflows. ECMA-334 12.9.3 leaves the UNCHECKED
+		// outcome implementation-defined between a System.OverflowException and
+		// "the resulting value being that of the left operand"; the second is what
+		// both halves answer, and it is what Java specifies outright.
+		if a == math.MinInt32 && b == -1 {
+			x = a
+		} else {
+			x = a / b
+		}
+	case "%":
+		if b == 0 {
+			rt.csThrow("DivideByZeroException", "Attempted to divide by zero.")
+		}
+		if a == math.MinInt32 && b == -1 {
+			x = 0
+		} else {
+			x = a % b
+		}
+	case "&":
+		x = a & b
+	case "|":
+		x = a | b
+	case "^":
+		x = a ^ b
+	default:
+		rt.fail("js_csarith: unknown operator %q", op)
+	}
+	return float64(x)
+}
+
+// csShift is << >> >>>. The result type is the LEFT operand's alone after unary
+// promotion (ECMA-334 12.11: sbyte/byte/short/ushort/char all become int), and
+// the COUNT is MASKED - & 31 for an int/uint, & 63 for a long/ulong, so
+// `1 << 32` is 1. `>>` on an UNSIGNED type is the LOGICAL shift, which is how C#
+// spells what Java writes as `>>>`; C# 11's own `>>>` is that same operation on a
+// signed type.
+func (rt *jsrt) csShift(op string, l, r interface{}) interface{} {
+	n := giVal(rt, r)
+	w := uint8(32)
+	if csSzW(l) == 64 {
+		w = 64
+	}
+	un := false
+	if csSzW(l) >= 32 {
+		un = csSzU(l)
+	}
+	s := uint(n & 31)
+	if w == 64 {
+		s = uint(n & 63)
+	}
+	a := giTrunc(giVal(rt, l), w, un)
+	var x int64
+	switch op {
+	case "<<":
+		x = a << s
+	case ">>>":
+		x = int64(giU(a, w) >> s)
+	default:
+		if un {
+			x = int64(giU(a, w) >> s)
+		} else {
+			x = a >> s
+		}
+	}
+	return csNorm(x, w, un)
+}
+
+// csCmp is the ordered comparison at the PROMOTED type. giCmp on its own is not
+// usable: it compares at the widest operand's width, so `byte b = 5; b < 1000`
+// would truncate 1000 to a byte and answer false.
+func (rt *jsrt) csCmp(op string, l, r interface{}) bool {
+	w, un := csPromote(l, r)
+	c := rt.giCmp(csBox(rt, l, w, un), csBox(rt, r, w, un))
+	switch op {
+	case "<":
+		return c < 0
+	case ">":
+		return c > 0
+	case "<=":
+		return c <= 0
+	case ">=":
+		return c >= 0
+	case "==":
+		return c == 0
+	}
+	return c != 0
+}
+
+// csConvTo is an explicit conversion to an integral type. An INTEGRAL source is a
+// pure bit truncation (unchecked); a FLOATING POINT one whose value does not fit
+// is "undefined behaviour" in ECMA-334 12.3.2, so this SATURATES - deterministic,
+// and identical in both halves.
+func csConvTo(rt *jsrt, v interface{}, w uint8, u bool) interface{} {
+	if f, isFlo := v.(jsJFlo); isFlo {
+		n := f.f
+		if math.IsNaN(n) {
+			n = 0
+		}
+		var p int64
+		switch {
+		case n >= 18446744073709551616:
+			p = -1 // ulong.MaxValue's bit pattern
+		case n >= 9223372036854775808:
+			if u {
+				p = int64(uint64(n))
+			} else {
+				p = math.MaxInt64
+			}
+		case n < -9223372036854775808:
+			p = math.MinInt64
+		default:
+			p = int64(math.Trunc(n))
+		}
+		return csNorm(p, w, u)
+	}
+	return csNorm(giVal(rt, v), w, u)
+}
+
+// The widths and signedness of C#'s integral type names. C#'s `byte` is UNSIGNED
+// (0..255) and `sbyte` is the signed one - the opposite of Java, and the single
+// most common way to get this wrong.
+var csTypeW = map[string]uint8{"sbyte": 8, "byte": 8, "short": 16, "ushort": 16,
+	"int": 32, "uint": 32, "long": 64, "ulong": 64, "nint": 64, "nuint": 64}
+var csTypeU = map[string]bool{"sbyte": false, "byte": true, "short": false, "ushort": true,
+	"int": false, "uint": true, "long": false, "ulong": true, "nint": false, "nuint": true}
+
+// csParseInt is int.Parse / long.Parse / uint.Parse: a decimal digit run with an
+// optional sign, and a System.FormatException on anything else.
+func (rt *jsrt) csParseInt(s string, w uint8, u bool) interface{} {
+	t := strings.TrimSpace(s)
+	neg := false
+	if strings.HasPrefix(t, "+") || strings.HasPrefix(t, "-") {
+		neg = t[0] == '-'
+		t = t[1:]
+	}
+	if t == "" {
+		rt.csThrow("FormatException", "The input string was not in a correct format.")
+	}
+	var acc uint64
+	for i := 0; i < len(t); i++ {
+		if t[i] < '0' || t[i] > '9' {
+			rt.csThrow("FormatException", "The input string was not in a correct format.")
+		}
+		acc = acc*10 + uint64(t[i]-'0')
+	}
+	v := int64(acc)
+	if neg {
+		v = -v
+	}
+	return csNorm(v, w, u)
+}
+
+// csTypeObject is one of the integral type names as an expression primary, so
+// that `int.MaxValue` and `ulong.MaxValue` resolve.
+func (rt *jsrt) csTypeObject(name string) *jsObject {
+	o := newJSObject()
+	if name == "char" || name == "Char" {
+		o.set("MinValue", jsChar{code: 0})
+		o.set("MaxValue", jsChar{code: 65535})
+		return o
+	}
+	alias := map[string]string{"SByte": "sbyte", "Byte": "byte", "Int16": "short",
+		"UInt16": "ushort", "Int32": "int", "UInt32": "uint", "Int64": "long", "UInt64": "ulong"}
+	if a, ok := alias[name]; ok {
+		name = a
+	}
+	w, ok := csTypeW[name]
+	if !ok {
+		return o
+	}
+	un := csTypeU[name]
+	var lo, hi int64
+	if un {
+		lo, hi = 0, int64(-1)
+		if w < 64 {
+			hi = int64(1)<<uint(w) - 1
+		}
+	} else {
+		hi = int64(1)<<uint(w-1) - 1
+		lo = -hi - 1
+	}
+	o.set("MinValue", csNorm(lo, w, un))
+	o.set("MaxValue", csNorm(hi, w, un))
+	o.set("Parse", jsHostFunc("Parse", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+		return rt.csParseInt(rt.toString(argAt(args, 0)), w, un)
+	}))
+	return o
+}
 
 func init() {
 	rxExtraExterns = append(rxExtraExterns, func(rt *jsrt, m map[string]func(args []uint64) uint64) {
 		u := rt.unwrap
+		w := rt.wrap
+		boolH := func(b bool) uint64 {
+			if b {
+				return jsHTrue
+			}
+			return jsHFalse
+		}
+		opOf := func(h uint64) string { return rt.toString(u(h)) }
 
+		// One binary integral operator: (op, left, right). A double operand keeps
+		// the FLOAT path of jsrtjvm.go, which is where the two boxes meet; two
+		// bools take C#'s non-short-circuit & | ^.
+		m["js_csarith"] = func(a []uint64) uint64 {
+			op, l, r := opOf(a[0]), u(a[1]), u(a[2])
+			if jvmIsFlo(l) || jvmIsFlo(r) {
+				return w(rt.jvmArith(op[0], l, r))
+			}
+			lb, lok := l.(bool)
+			rb, rok := r.(bool)
+			if lok && rok {
+				switch op {
+				case "&":
+					return boolH(lb && rb)
+				case "|":
+					return boolH(lb || rb)
+				case "^":
+					return boolH(lb != rb)
+				}
+			}
+			if !csIsIntegral(l) || !csIsIntegral(r) {
+				return w(rt.jvmArith(op[0], l, r))
+			}
+			return w(rt.csArith(op, l, r))
+		}
+		m["js_csshift"] = func(a []uint64) uint64 {
+			return w(rt.csShift(opOf(a[0]), u(a[1]), u(a[2])))
+		}
+		m["js_cscmp"] = func(a []uint64) uint64 {
+			op, l, r := opOf(a[0]), u(a[1]), u(a[2])
+			if csIsIntegral(l) && csIsIntegral(r) && !jvmIsFlo(l) && !jvmIsFlo(r) {
+				return boolH(rt.csCmp(op, l, r))
+			}
+			c := rt.jsCompare(l, r)
+			switch op {
+			case "<":
+				return boolH(c < 0)
+			case ">":
+				return boolH(c > 0)
+			case "<=":
+				return boolH(c <= 0)
+			}
+			return boolH(c >= 0)
+		}
+		// A cast or a declared integral type: (value, bits, unsigned).
+		m["js_csconv"] = func(a []uint64) uint64 {
+			return w(csConvTo(rt, u(a[0]), uint8(jsToInt(rt.toNumber(u(a[1])))), rt.truthy(u(a[2]))))
+		}
+		// A declared type applied to an initializer: only an INTEGRAL value
+		// converts, so `object o = "s"` and a lambda pass through untouched.
+		m["js_csadopt"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if !csIsIntegral(v) {
+				return a[0]
+			}
+			return w(csConvTo(rt, v, uint8(jsToInt(rt.toNumber(u(a[1])))), rt.truthy(u(a[2]))))
+		}
+		// An integer literal, passed as DIGITS because emitNum would already have
+		// rounded 9223372036854775807 to 9223372036854776000 on the way into the
+		// module. Its TYPE follows its suffix and its value (ECMA-334 6.4.5.3):
+		// with no suffix it is the first of int, uint, long, ulong that holds it;
+		// U makes it uint or ulong; L long or ulong; UL ulong.
+		m["js_cslit"] = func(a []uint64) uint64 {
+			s := rt.toString(u(a[0]))
+			radix := uint64(jsToInt(rt.toNumber(u(a[1]))))
+			hasU, hasL := rt.truthy(u(a[2])), rt.truthy(u(a[3]))
+			var acc uint64
+			for i := 0; i < len(s); i++ {
+				var d uint64
+				switch c := s[i]; {
+				case c >= '0' && c <= '9':
+					d = uint64(c - '0')
+				case c >= 'a' && c <= 'f':
+					d = uint64(c-'a') + 10
+				case c >= 'A' && c <= 'F':
+					d = uint64(c-'A') + 10
+				default:
+					continue
+				}
+				if d >= radix {
+					continue
+				}
+				acc = acc*radix + d
+			}
+			p := int64(acc)
+			fitsUInt := acc <= 0xffffffff
+			fitsInt := acc <= 0x7fffffff
+			fitsLong := acc <= 0x7fffffffffffffff
+			switch {
+			case hasU && hasL:
+				return w(jsGInt{v: p, w: 64, u: true})
+			case hasU:
+				if fitsUInt {
+					return w(jsGInt{v: p, w: 32, u: true})
+				}
+				return w(jsGInt{v: p, w: 64, u: true})
+			case hasL:
+				if fitsLong {
+					return w(jsGInt{v: p, w: 64})
+				}
+				return w(jsGInt{v: p, w: 64, u: true})
+			case fitsInt:
+				return rt.wrapNum(float64(int32(p)))
+			case fitsUInt:
+				return w(jsGInt{v: p, w: 32, u: true})
+			case fitsLong:
+				return w(jsGInt{v: p, w: 64})
+			}
+			return w(jsGInt{v: p, w: 64, u: true})
+		}
+		// -x and ~x, at the UNARY promoted type (ECMA-334 12.4.7.2): a long keeps
+		// its type, a uint becomes a LONG under '-' (because -uint.MaxValue does
+		// not fit in a uint) and keeps uint under '~', and everything narrower
+		// becomes an int.
+		m["js_csneg"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if f, ok := v.(jsJFlo); ok {
+				return w(jsJFlo{f: -f.f, sty: f.sty})
+			}
+			if csSzW(v) == 64 {
+				return w(csNorm(-giVal(rt, v), 64, csSzU(v)))
+			}
+			if csSzW(v) == 32 && csSzU(v) {
+				return w(csNorm(-giVal(rt, v), 64, false))
+			}
+			return rt.wrapNum(float64(-int32(giVal(rt, v))))
+		}
+		m["js_csnot"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if csSzW(v) == 64 || (csSzW(v) == 32 && csSzU(v)) {
+				return w(csNorm(^giVal(rt, v), csSzW(v), csSzU(v)))
+			}
+			return rt.wrapNum(float64(^int32(giVal(rt, v))))
+		}
+		// ++ / -- step at the operand's OWN type and wrap there (ECMA-334 12.8.15:
+		// `x++` is `x = (T)(x + 1)`), so `byte b = 255; b++` is 0.
+		m["js_csstep"] = func(a []uint64) uint64 {
+			v, d := u(a[0]), giVal(rt, u(a[1]))
+			switch t := v.(type) {
+			case jsChar:
+				return w(jsChar{code: int32((int64(t.code) + d) & 65535)})
+			case jsJFlo:
+				return w(jsJFlo{f: t.f + float64(d), sty: t.sty})
+			case jsGInt:
+				return w(csConvTo(rt, rt.csArith("+", t, float64(d)), t.w, t.u))
+			}
+			return rt.wrapNum(float64(int32(giVal(rt, v)) + int32(d)))
+		}
+		// The result of a COMPOUND assignment: the operation, then the implicit
+		// cast back to the LEFT operand's type (ECMA-334 12.21.4: `x op= y` is
+		// `x = (T)(x op y)`), so `byte b = 250; b += 10` is (byte)260 == 4.
+		m["js_csnarrowlike"] = func(a []uint64) uint64 {
+			l, v := u(a[0]), u(a[1])
+			switch t := l.(type) {
+			case jsJFlo:
+				if f, ok := v.(jsJFlo); ok {
+					return w(f)
+				}
+				return w(jsJFlo{f: rt.toNumber(v), sty: t.sty})
+			case jsChar:
+				return w(jsChar{code: int32(giVal(rt, v) & 65535)})
+			case jsGInt:
+				return w(csConvTo(rt, v, t.w, t.u))
+			case float64:
+				if csIsIntegral(v) || jvmIsFlo(v) {
+					return w(csConvTo(rt, v, 32, false))
+				}
+			}
+			return a[1]
+		}
+		// A (char) cast: narrow to 16 UNSIGNED bits and re-box.
+		m["js_cschar"] = func(a []uint64) uint64 {
+			v := u(a[0])
+			if f, isFlo := v.(jsJFlo); isFlo {
+				return w(jsChar{code: int32(giVal(rt, csConvTo(rt, f, 16, true)) & 65535)})
+			}
+			return w(jsChar{code: int32(giVal(rt, v) & 65535)})
+		}
+		// C#'s '+'. Identical to the shared js_csadd - string concat with C#'s
+		// null rule, float add when a double is involved - except that two
+		// INTEGRAL operands add at their promoted type and wrap to it, instead of
+		// through a double that rounds above 2^53. js_csadd itself is a shared
+		// extern in jsrt.go and is left exactly as it was.
+		m["js_csadd2"] = func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			_, ls := l.(string)
+			_, rs := r.(string)
+			if ls || rs {
+				return rt.wrapStr(strConcat(rt.csString(l), rt.csString(r)))
+			}
+			if jvmIsFlo(l) || jvmIsFlo(r) {
+				return w(jsJFlo{f: rt.toNumber(l) + rt.toNumber(r), sty: jvmStyleOf(l, r)})
+			}
+			if csIsIntegral(l) && csIsIntegral(r) {
+				return w(rt.csArith("+", l, r))
+			}
+			return rt.wrapNum(rt.toNumber(l) + rt.toNumber(r))
+		}
+		// == / != with a sized integer on either side: two integers compare BY
+		// VALUE at their promoted type, so a uint and a long holding the same
+		// number are equal and two boxes holding 5 are not two distinct objects.
+		m["js_cseq"] = func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			if csIsIntegral(l) && csIsIntegral(r) && !jvmIsFlo(l) && !jvmIsFlo(r) {
+				if _, lb := l.(jsGInt); lb {
+					return boolH(rt.csCmp("==", l, r))
+				}
+				if _, rb := r.(jsGInt); rb {
+					return boolH(rt.csCmp("==", l, r))
+				}
+			}
+			return a[2] // the js_jchareq / $valeq result the caller computed
+		}
+		// One of the integral type NAMES as an expression primary.
+		m["js_cstype"] = func(a []uint64) uint64 { return w(rt.csTypeObject(rt.toString(u(a[0])))) }
 		// The whole Console object, built here rather than in the grammar so that
 		// WriteLine / Write render through cspStr instead of through the shared
 		// println host function (which is what leaked Go's %v).
@@ -221,7 +779,25 @@ func cspArrayName(a *jsArray) string {
 }
 
 func cspElemName(e interface{}) string {
-	switch e.(type) {
+	switch t := e.(type) {
+	case jsGInt:
+		// A sized integer carries its own type, so long[] / uint[] / byte[] are
+		// the one array kind whose element type is not a guess.
+		switch {
+		case t.w == 64 && t.u:
+			return "System.UInt64"
+		case t.w == 64:
+			return "System.Int64"
+		case t.w == 32 && t.u:
+			return "System.UInt32"
+		case t.w == 16 && t.u:
+			return "System.UInt16"
+		case t.w == 16:
+			return "System.Int16"
+		case t.u:
+			return "System.Byte"
+		}
+		return "System.SByte"
 	case jsJFlo:
 		return "System.Double"
 	case string:

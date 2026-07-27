@@ -67,6 +67,7 @@ class Main {
         S22.run(); // SECTION-CALL 22
         S23.run(); // SECTION-CALL 23
         S24.run(); // SECTION-CALL 24
+        S25.run(); // SECTION-CALL 25
         System.out.println("full: " + Main.checks + " checks, " + Main.failures + " failures");
         System.exit(Main.failures);
     }
@@ -802,6 +803,156 @@ class S24 {
         Main.check("ren12", S24.s(Col.RED).equals("RED") && Col.BLUE.toString().equals("BLUE"));
         // Everything that already rendered correctly still does.
         Main.check("ren13", S24.s(true).equals("true") && ("" + 'x').equals("x") && S24.s(1.5).equals("1.5"));
+    }
+}
+
+// ===== SECTION 25: sized integers (int / long / byte / short / char) =====
+// Java's integral types have FIXED WIDTHS and wrap silently, and the width has
+// to survive into the next operation. Every answer below was run as a real
+// .java file under `java` (JDK 24) BEFORE it was written down, and the whole
+// ratchet file is itself a valid Java program - so `java tests/java-test-full.java`
+// prints the same summary line both grammar halves print.
+//
+// The area used to be simply absent: Integer.MAX_VALUE was an undefined
+// variable, `long` was a 32 bit int (1L << 40 answered 256), Long.MAX_VALUE
+// could not even be spelled because a double rounds 9223372036854775807 to
+// 9223372036854776000 - and the two script engines rounded it DIFFERENTLY, so
+// the goja and -frozen runs of the same program disagreed.
+class S25 {
+    static int overflow(int x) { return x + 1; }
+    static long lid(long x) { return x; }
+    static void run() {
+        // ----- the type constants -----
+        Main.check("int1", Integer.MAX_VALUE == 2147483647 && Integer.MIN_VALUE == -2147483648);
+        Main.check("int2", Long.MAX_VALUE == 9223372036854775807L && Long.MIN_VALUE == -9223372036854775808L);
+        Main.check("int3", Byte.MAX_VALUE == 127 && Byte.MIN_VALUE == -128);
+        Main.check("int4", Short.MAX_VALUE == 32767 && Short.MIN_VALUE == -32768);
+        Main.check("int5", Character.MAX_VALUE == 65535 && Character.MIN_VALUE == 0);
+        // A long's DIGITS survive: the value is exact, not the nearest double.
+        Main.check("int6", ("" + Long.MAX_VALUE).equals("9223372036854775807"));
+        Main.check("int7", ("" + Long.MIN_VALUE).equals("-9223372036854775808"));
+
+        // ----- int wraps at 32 bits, long at 64 -----
+        Main.check("int8", Integer.MAX_VALUE + 1 == Integer.MIN_VALUE);
+        Main.check("int9", Integer.MIN_VALUE - 1 == Integer.MAX_VALUE);
+        Main.check("int10", S25.overflow(2147483647) == -2147483648);
+        Main.check("int11", Long.MAX_VALUE + 1 == Long.MIN_VALUE);
+        // 3000000000 does not fit in an int, so the multiplication must be 64 bit.
+        Main.check("int12", 3000000000L * 3 == 9000000000L);
+        // ... and the same operands as ints wrap instead.
+        int big = 1000000;
+        Main.check("int13", big * big == -727379968);
+        Main.check("int14", 1000000L * 1000000L == 1000000000000L);
+        // A declared `long` keeps its width across an assignment and a call.
+        long acc = 1;
+        acc = acc * 1000000;
+        acc = acc * 1000000;
+        Main.check("int15", acc == 1000000000000L && S25.lid(acc) == 1000000000000L);
+
+        // ----- the shift count is MASKED: & 31 for an int, & 63 for a long -----
+        // This is the classic: `1 << 32` is 1, not 0. (Go shifts everything out.)
+        Main.check("int16", 1 << 32 == 1 && 1 << 33 == 2);
+        Main.check("int17", 1L << 64 == 1L && 1L << 65 == 2L);
+        Main.check("int18", 1L << 40 == 1099511627776L && 1L << 62 == 4611686018427387904L);
+        Main.check("int19", 1 << 31 == Integer.MIN_VALUE && 1L << 63 == Long.MIN_VALUE);
+        // >> keeps the sign, >>> does not - and >>> is a 32 bit operation on an
+        // int and a 64 bit one on a long, which is what a `| 0` could never model.
+        Main.check("int20", -8 >> 1 == -4 && -8 >>> 1 == 2147483644);
+        Main.check("int21", -8L >> 1 == -4L && -8L >>> 1 == 9223372036854775804L);
+        Main.check("int22", -1 >>> 28 == 15 && -1L >>> 60 == 15L);
+
+        // ----- division truncates toward zero; % takes the DIVIDEND's sign -----
+        Main.check("int23", -7 / 2 == -3 && 7 / -2 == -3 && -7 % 2 == -1 && 7 % -2 == 1);
+        Main.check("int24", Long.MAX_VALUE / 3 == 3074457345618258602L);
+        // The one signed-division overflow: MIN_VALUE / -1 wraps back to itself.
+        Main.check("int25", Integer.MIN_VALUE / -1 == Integer.MIN_VALUE);
+        Main.check("int26", Long.MIN_VALUE / -1 == Long.MIN_VALUE && Integer.MIN_VALUE % -1 == 0);
+        // Integer division by zero THROWS (JLS 15.17.2), it does not give Infinity.
+        boolean threw = false;
+        String msg = "";
+        try { int z = 0; int q = 1 / z; Main.check("int27", q == 99); }
+        catch (ArithmeticException e) { threw = true; msg = e.getMessage(); }
+        Main.check("int27", threw && msg.equals("/ by zero"));
+        boolean lthrew = false;
+        try { long lz = 0; long lq = 1L % lz; Main.check("int28", lq == 99); }
+        catch (ArithmeticException e) { lthrew = true; }
+        Main.check("int28", lthrew);
+
+        // ----- byte / short: their own widths, and PROMOTION to int -----
+        byte b = (byte) 200;
+        short sh = (short) 70000;
+        Main.check("int29", b == -56 && sh == 4464);
+        // byte + byte is an INT (JLS 5.6.2), so it does not wrap at 8 bits.
+        byte b1 = 100;
+        byte b2 = 100;
+        Main.check("int30", b1 + b2 == 200);
+        // ++ and a compound assignment DO narrow back (JLS 15.14.2 / 15.26.2).
+        byte bm = 127;
+        bm++;
+        Main.check("int31", bm == -128);
+        byte bc = 10;
+        bc += 300;
+        Main.check("int32", bc == 54);
+        short sm = 32767;
+        sm++;
+        Main.check("int33", sm == -32768);
+        // A byte compares against an int at INT width - 5 < 1000 is not 5 < -24.
+        byte bs = 5;
+        Main.check("int34", bs < 1000 && bs > -1000);
+
+        // ----- casts narrow to the target width -----
+        Main.check("int35", (int) 3000000000L == -1294967296 && (long) (int) 3000000000L == -1294967296L);
+        Main.check("int36", (byte) 300 == 44 && (short) -70000 == -4464);
+        Main.check("int37", (char) 70000 == 4464 && (char) -1 == 65535);
+        // A double narrows to an integral type by TRUNCATING toward zero, and an
+        // out-of-range value SATURATES (JLS 5.1.3) - it does not wrap.
+        Main.check("int38", (int) 2.9 == 2 && (int) -2.9 == -2 && (long) -2.9 == -2L);
+        Main.check("int39", (long) 1e20 == Long.MAX_VALUE && (int) 1e20 == Integer.MAX_VALUE);
+
+        // ----- literals -----
+        // Hex/binary/octal without a suffix are INTs, so the digits are read at 32
+        // bits and 0xFFFFFFFF is -1; with L they are read at 64.
+        Main.check("int40", 0xFFFFFFFF == -1 && 0xFFFFFFFFL == 4294967295L);
+        Main.check("int41", 0xFFFFFFFFFFFFFFFFL == -1L && 0x7FFFFFFFFFFFFFFFL == Long.MAX_VALUE);
+        Main.check("int42", 0b1010 == 10 && 017 == 15 && 1_000_000 == 1000000);
+        Main.check("int43", 1_000_000_000_000L == 1000000000000L);
+
+        // ----- unary -, ~ and char arithmetic -----
+        Main.check("int44", -Integer.MIN_VALUE == Integer.MIN_VALUE && -Long.MIN_VALUE == Long.MIN_VALUE);
+        Main.check("int45", ~0 == -1 && ~0L == -1L && ~(1L << 40) == -1099511627777L);
+        char c = 'a';
+        Main.check("int46", c + 1 == 98 && (char) (c + 1) == 'b');
+
+        // ----- the bitwise operators are 64 bit on a long -----
+        long mask = 0xF0F0F0F0F0F0F0F0L;
+        Main.check("int47", (mask & 0xFFL) == 0xF0L && (mask | 1L) == 0xF0F0F0F0F0F0F0F1L);
+        Main.check("int48", (mask ^ mask) == 0L && (mask >>> 4) == 0x0F0F0F0F0F0F0F0FL);
+
+        // ----- it composes with the FLOAT box rather than fighting it -----
+        // Mixed int/double arithmetic still promotes to double (JLS 5.6.2), and a
+        // long promotes the same way.
+        Main.check("int49", 1 / 3 == 0 && 1.0 / 3.0 == 0.3333333333333333 && 1 / 3.0 == 0.3333333333333333);
+        Main.check("int50", Long.MAX_VALUE + 0.0 == 9.223372036854776E18 && (double) 1L / 2 == 0.5);
+        Main.check("int51", ("" + (2.5 * 2)).equals("5.0") && ("" + (5 * 2)).equals("10"));
+        double d = 1;
+        d += 1L;
+        Main.check("int52", d == 2.0 && ("" + d).equals("2.0"));
+        // A compound assignment to an INT narrows a double result back to an int.
+        int ni = 5;
+        ni += 1.5;
+        Main.check("int53", ni == 6);
+
+        // ----- Integer.parseInt / Long.parseLong / compare -----
+        Main.check("int54", Integer.parseInt("-42") == -42 && Long.parseLong("9223372036854775807") == Long.MAX_VALUE);
+        Main.check("int55", Integer.compare(1, 2) == -1 && Long.compare(Long.MAX_VALUE, 0L) == 1);
+        Main.check("int56", Integer.max(3, 7) == 7 && Long.min(Long.MIN_VALUE, 0L) == Long.MIN_VALUE);
+
+        // ----- a long survives an array, a field and String.valueOf -----
+        long[] ls = new long[2];
+        ls[0] = Long.MAX_VALUE;
+        ls[1] = ls[0] - 1;
+        Main.check("int57", ls[1] == 9223372036854775806L && ("" + ls[0]).equals("9223372036854775807"));
+        Main.check("int58", ("" + (Long.MAX_VALUE - 1)).equals("9223372036854775806"));
     }
 }
 

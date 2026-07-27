@@ -812,6 +812,56 @@ KwSync      = "synchronized" KwEnd ;
         max: function(a, b) { return jMinMax(a, b, jNumD(a) > jNumD(b)) },
         min: function(a, b) { return jMinMax(a, b, jNumD(a) < jNumD(b)) }
     }
+    // The boxed-primitive types' constants and the handful of static methods a
+    // program reaches for. MIN_VALUE / MAX_VALUE are the whole reason a sized
+    // integer had to exist: Long.MAX_VALUE cannot be written as a plain number at
+    // all, and Integer.MAX_VALUE + 1 has to wrap to Integer.MIN_VALUE rather than
+    // grow. Byte / Short / Integer keep the plain-number or narrow-box shape their
+    // own width implies; Long's two are 64 bit boxes.
+    // Integer.parseInt / Long.parseLong throw NumberFormatException on junk, which
+    // is the one behaviour of theirs programs actually depend on.
+    function jParseInt(s, w) {
+        var t = stripWs("" + s)
+        var neg = false
+        if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; t = t.substring(1) }
+        if (t.length == 0) { jThrowExc("NumberFormatException", "For input string: \"" + s + "\"") }
+        for (var i = 0; i < t.length; i++) {
+            var c = t.charCodeAt(i)
+            if (c < 48 || c > 57) { jThrowExc("NumberFormatException", "For input string: \"" + s + "\"") }
+        }
+        var p = i64FromStr(t)
+        if (neg) { p = i64Neg(p) }
+        return jNarrow(szMake(p, 64, jNoU), w)
+    }
+    hostGlobals["Integer"] = {
+        MAX_VALUE: 2147483647, MIN_VALUE: 0 - 2147483648, SIZE: 32, BYTES: 4,
+        parseInt: function(s) { return jParseInt(s, 32) },
+        valueOf: function(v) { return jNarrow(v, 32) },
+        toString: function(v) { return jstr(v) },
+        compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
+        max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 32) : jNarrow(b, 32) },
+        min: function(a, b) { return jCmp("<", a, b) ? jNarrow(a, 32) : jNarrow(b, 32) }
+    }
+    hostGlobals["Long"] = {
+        MAX_VALUE: szMake(i64Make(0x7fffffff, 0xffffffff), 64, false),
+        MIN_VALUE: szMake(i64Make(0x80000000, 0), 64, false),
+        SIZE: 64, BYTES: 8,
+        parseLong: function(s) { return jParseInt(s, 64) },
+        valueOf: function(v) { return jNarrow(v, 64) },
+        toString: function(v) { return jstr(v) },
+        compare: function(a, b) { return jCmp("<", a, b) ? 0 - 1 : (jCmp(">", a, b) ? 1 : 0) },
+        max: function(a, b) { return jCmp(">", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) },
+        min: function(a, b) { return jCmp("<", a, b) ? jNarrow(a, 64) : jNarrow(b, 64) }
+    }
+    // Built with szMake / i64Make rather than through the helpers below, because
+    // this runs at SCRIPT BODY time and only the included lib is textually in
+    // scope by now; the pairs are the sign-extended 64 bit readings of each width's
+    // extremes, which is the invariant i64Trunc would have produced.
+    hostGlobals["Byte"] = {MAX_VALUE: szMake(i64Make(0, 127), 8, false),
+                           MIN_VALUE: szMake(i64Make(0xffffffff, 0xffffff80), 8, false), SIZE: 8, BYTES: 1}
+    hostGlobals["Short"] = {MAX_VALUE: szMake(i64Make(0, 32767), 16, false),
+                            MIN_VALUE: szMake(i64Make(0xffffffff, 0xffff8000), 16, false), SIZE: 16, BYTES: 2}
+    hostGlobals["Character"] = {MAX_VALUE: {__char: 65535}, MIN_VALUE: {__char: 0}, SIZE: 16, BYTES: 2}
 
     // ----- char: a boxed {__char: code} value -----
     // Java's char is an integral type that renders as a glyph, so it can be neither a
@@ -820,7 +870,10 @@ KwSync      = "synchronized" KwEnd ;
     // jstr renders the character, and only a (char) cast or String.charAt boxes again.
     function jChar(code) { return {__char: code} }
     function jIsChar(v) { return v !== null && v !== undefined && typeof v == "object" && v.__char !== undefined }
-    function jNum(v) { return jIsChar(v) ? v.__char : (jIsFlo(v) ? v.__flo : v) }
+    // The PLAIN NUMBER reading of any numeric operand - what an array index, a
+    // string offset, an array length and a `new int[n]` bound all want. A sized
+    // box unwraps through szNum (exact below 2^53, the nearest double above it).
+    function jNum(v) { return jIsChar(v) ? v.__char : (jIsFlo(v) ? v.__flo : szNum(v)) }
 
     // ----- double / float: a boxed {__flo: value} -----
     // Java's `double` is a DIFFERENT type from `int`, and the value model here is
@@ -843,16 +896,191 @@ KwSync      = "synchronized" KwEnd ;
         return v
     }
     function jIsFlo(v) { return v !== null && v !== undefined && typeof v == "object" && v.__flo !== undefined }
-    // The numeric value of any numeric operand (a plain number, a char or a double).
+    // The numeric value of any numeric operand: a plain number, a char, a double
+    // or a sized integer (which reads as the nearest double above 2^53, the way a
+    // long -> double promotion does).
     function jNumD(v) {
         if (v === null || v === undefined) return v
         if (typeof v == "object") {
             if (v.__flo !== undefined) return v.__flo
             if (v.__char !== undefined) return v.__char
+            if (v.__sz === true) return szNum(v)
         }
         return v
     }
     function jNegF(f) { return f * jNegOne }
+
+    // ----- int / long / short / byte: the SIZED INTEGER box -----
+    // Java's integral types have fixed widths and WRAP silently on overflow, and
+    // the width has to survive into the next operation - `byte b = 127; b++` is
+    // -128, and nothing about the value 127 says so. That is the same problem the
+    // {__flo} box solves for floating point and it gets the same answer: the type
+    // goes ON the value. The machinery is the language-neutral sz* layer in
+    // lib/interp-core.js (szArith / szConv / szCmp / szStr on exact 64 bit pairs);
+    // abnf/jsrtjava.go implements the identical rules for the compiled half and
+    // ./test.sh --cross diffs the two, so the two MUST stay in step.
+    //
+    // The INVARIANT here is Java's, and it is deliberately NOT the one Go and
+    // Swift use. There a plain number is a 64 bit int; here
+    //
+    //     a plain number   ==  an `int`, i.e. a SIGNED 32 BIT value
+    //     an {__sz} box    ==  a long (w 64), a short (w 16) or a byte (w 8)
+    //     an {__flo} box   ==  a double / float
+    //     a {__char} box   ==  a char (16 bit unsigned, rendered as a glyph)
+    //
+    // int is the type of every unsuffixed integer literal and of every arithmetic
+    // result that has no long operand, so keeping IT unboxed is what makes the
+    // change affordable - an ordinary program allocates no box at all and runs the
+    // 32 bit path it ran before. The cost is that a 64 bit value must stay boxed
+    // even when it would fit in a double, because a plain number means `int`
+    // here: szNorm unboxes such a result, so jL boxes it straight back.
+    var jNoU = false
+    function jIsSz(v) { return szIs(v) }
+    function jIsLong(v) { return szIs(v) && v.w == 64 }
+    // jL is "read this as a long": always a box, never a plain number.
+    function jL(v) {
+        if (jIsLong(v)) { return v }
+        if (szIs(v)) { return szMake(i64Trunc(v.p, 64, jNoU), 64, jNoU) }
+        return szMake(i64FromNum(jNumD(v)), 64, jNoU)
+    }
+    // jW is JLS 5.6.2 binary numeric promotion for two INTEGRAL operands: long
+    // when either side is long, int otherwise - so `byte + byte` is an int and
+    // `short * short` is an int, which is the rule people are surprised by.
+    function jW(l, r) {
+        if (jIsLong(l) || jIsLong(r)) { return 64 }
+        return 32
+    }
+    // jI is the int reading of any integral operand: a box's value, a char's code,
+    // a plain number. Only ever called where the result type is int, so the 32 bit
+    // wrap is the promotion itself.
+    function jI(v) { return szNum(jNumD(v)) | 0 }
+    // ArithmeticException, thrown rather than failed, so a program can catch it.
+    // interp-core's exception protocol is {__exc: true, v: <thrown value>}.
+    function jThrowExc(clsName, msg) {
+        throw {__exc: true, v: {__class: globalScope[clsName], message: msg}}
+    }
+    // (a * b) mod 2^32. `(a * b) | 0` is WRONG: the exact product needs up to 62
+    // bits and a double keeps only 53, so the low bits - the only ones that
+    // survive - are already gone by the time |0 runs. Splitting into 16 bit halves
+    // keeps every partial product exact.
+    function jMul32(a, b) {
+        var ah = (a >>> 16) & 65535
+        var al = a & 65535
+        var bh = (b >>> 16) & 65535
+        var bl = b & 65535
+        return (((ah * bl + al * bh) << 16) + al * bl) | 0
+    }
+    // jArith is one binary arithmetic or bitwise operator on two INTEGRAL
+    // operands. The int case is ordinary 32 bit JavaScript arithmetic; only a long
+    // operand pays for the exact 64 bit pair path.
+    function jArith(op, l, r) {
+        if (jW(l, r) == 64) {
+            var la = jL(l)
+            var lb = jL(r)
+            if ((op == "/" || op == "%") && i64IsZero(lb.p)) { jThrowExc("ArithmeticException", "/ by zero") }
+            return jL(szArith(op, la, lb))
+        }
+        var a = jI(l)
+        var b = jI(r)
+        if (op == "+") return (a + b) | 0
+        if (op == "-") return (a - b) | 0
+        if (op == "*") return jMul32(a, b)
+        if (op == "/") {
+            if (b == 0) { jThrowExc("ArithmeticException", "/ by zero") }
+            // |0 truncates toward zero inside the int range and wraps outside it,
+            // which is exactly what Integer.MIN_VALUE / -1 needs: the mathematical
+            // 2147483648 wraps back to Integer.MIN_VALUE (JLS 15.17.2).
+            return (a / b) | 0
+        }
+        if (op == "%") {
+            if (b == 0) { jThrowExc("ArithmeticException", "/ by zero") }
+            return (a % b) | 0
+        }
+        if (op == "&") return a & b
+        if (op == "|") return a | b
+        if (op == "^") return a ^ b
+        return coreBinOp(op, a, b)
+    }
+    // A shift's result type is the LEFT operand's alone (JLS 15.19, unary
+    // promotion of each operand separately), and the COUNT is masked: & 31 for an
+    // int, & 63 for a long. That is why `1 << 32` is 1 and not 0.
+    function jShift(op, l, r) {
+        var n = jI(r)
+        if (jIsLong(l)) {
+            var m = n & 63
+            if (op == "<<") return jL(szArith("<<", jL(l), m))
+            if (op == ">>") return jL(szArith(">>", jL(l), m))
+            // >>> is the LOGICAL shift: read the operand as unsigned at the width,
+            // shift, read the result back as signed. C# spells this ">>" on an
+            // unsigned type instead, which is the same operation.
+            return jL(szConv(szArith(">>", szConv(jL(l), 64, true), m), 64, jNoU))
+        }
+        var a = jI(l)
+        // JavaScript's shift operators already mask the count by 31 and operate on
+        // 32 bits, which IS Java's int rule; >>> yields an unsigned value there, so
+        // it is wrapped back into the int range.
+        if (op == "<<") return a << n
+        if (op == ">>") return a >> n
+        return (a >>> n) | 0
+    }
+    // The ordered comparison of two integral operands, at the promoted width.
+    // szCmp on its own is NOT usable here: it compares at the widest operand's
+    // width, so `byte b = 5; b < 1000` would truncate 1000 to a byte and answer
+    // false where Java promotes both to int and answers true.
+    function jCmp(op, l, r) {
+        if (jW(l, r) == 64) {
+            var c = szCmp(jL(l), jL(r))
+            if (op == "<") return c < 0
+            if (op == ">") return c > 0
+            if (op == "<=") return c <= 0
+            if (op == ">=") return c >= 0
+            return op == "==" ? c == 0 : c != 0
+        }
+        var a = jI(l)
+        var b = jI(r)
+        if (op == "<") return a < b
+        if (op == ">") return a > b
+        if (op == "<=") return a <= b
+        if (op == ">=") return a >= b
+        return op == "==" ? a == b : a != b
+    }
+    // ----- conversions -----
+    var jLongMaxP = i64Make(0x7fffffff, 0xffffffff)
+    var jLongMinP = i64Make(0x80000000, 0)
+    // Truncation toward zero, without Math.trunc (which the frozen engine has not).
+    function jTruncF(n) { return n < 0 ? 0 - Math.floor(0 - n) : Math.floor(n) }
+    // (byte) / (short) / (int) / (long) / (char), and a declared integral type.
+    //
+    // A FLOATING POINT source does not just take the low bits: JLS 5.1.3 SATURATES
+    // it at the target's range - and for a target NARROWER than int it saturates
+    // at the INT range first and only then truncates the bits, so (int) 1e20 is
+    // Integer.MAX_VALUE and (byte) 1e20 is (byte) Integer.MAX_VALUE == -1. That is
+    // not the modular wrap Go uses for the same conversion. An INTEGRAL source is
+    // a pure bit truncation with no saturation anywhere.
+    var jDeclWidth = {"long": 64, "int": 32, "short": 16, "byte": 8}
+    function jNarrow(v, w) {
+        if (jIsFlo(v)) {
+            var n = v.__flo
+            if (n !== n) { n = 0 }
+            if (w == 64) {
+                if (n >= 9223372036854775808) { return szMake(jLongMaxP, 64, jNoU) }
+                if (n < 0 - 9223372036854775808) { return szMake(jLongMinP, 64, jNoU) }
+                return szMake(i64FromNum(jTruncF(n)), 64, jNoU)
+            }
+            var i = 0
+            if (n >= 2147483648) { i = 2147483647 }
+            else if (n < 0 - 2147483648) { i = 0 - 2147483648 }
+            else { i = jTruncF(n) }
+            if (w == 32) { return i }
+            return szNorm(i64FromNum(i), w, jNoU)
+        }
+        var p = szIs(v) ? v.p : i64FromNum(jNumD(v))
+        if (w == 64) { return szMake(i64Trunc(p, 64, jNoU), 64, jNoU) }
+        if (w == 32) { return szNum(szNorm(p, 32, jNoU)) | 0 }
+        if (w == 16) { return szNorm(p, 16, jNoU) }
+        return szNorm(p, 8, jNoU)
+    }
+
     // One binary operator with at least one double operand: the whole operation is
     // floating point (JLS 5.6.2, binary numeric promotion) and its result is a double.
     function jFloOp(op, l, r) {
@@ -1066,6 +1294,9 @@ KwSync      = "synchronized" KwEnd ;
         if (t == "object") {
             if (e.__flo !== undefined) return "[D"
             if (e.__char !== undefined) return "[C"
+            // A sized integer carries its own width, so long[] / short[] / byte[]
+            // are the one array kind whose element type is NOT a guess.
+            if (e.__sz === true) { return e.w == 64 ? "[J" : (e.w == 16 ? "[S" : "[B") }
         }
         return ""
     }
@@ -1092,6 +1323,9 @@ KwSync      = "synchronized" KwEnd ;
         if (Array.isArray(v)) { return jArrayTag(v) + "@" + jIdHash(v) }
         if (typeof v == "object") {
             if (v.__flo !== undefined) return jFloStr(v.__flo)
+            // A sized integer prints its exact digits; "" + v would print
+            // [object Object] and szNum would round above 2^53.
+            if (v.__sz === true) return szStr(v)
             if (v.__char !== undefined) return String.fromCharCode(v.__char)
             if (v.__isclass) return "class " + v.__name
             if (v.__class != undefined) {
@@ -1173,12 +1407,9 @@ KwSync      = "synchronized" KwEnd ;
     function jadd(l, r) {
         if (typeof l == "string" || typeof r == "string") return jstr2(l) + jstr2(r)
         if (jIsFlo(l) || jIsFlo(r)) { return jFlo(jNumD(l) + jNumD(r)) }
-        var a = anytype
-        var b = anytype
-        a = jNum(l)
-        b = jNum(r)
-        if ((a | 0) == a && (b | 0) == b) { return (a + b) | 0 }
-        return a + b
+        // Two integral operands: int + int wraps at 32 bits, anything with a long
+        // in it at 64 (JLS 15.18.2 on top of the 5.6.2 promotion).
+        return jArith("+", l, r)
     }
     function jstr2(v) {
         if (typeof v == "string") return v
@@ -1209,11 +1440,14 @@ KwSync      = "synchronized" KwEnd ;
             return v
         }
     }
-    // ++ / -- keep the type of what they step: on a char the result is a char
-    // again (Java's c++ on a char yields a char), on anything else an int32.
+    // ++ / -- keep the type of what they step (JLS 15.14.2 - the increment carries
+    // the same implicit narrowing cast a compound assignment does): a char steps to
+    // a char, a byte to a byte (so 127++ is -128), a long to a long, an int to an
+    // int32.
     function jStep(v, d) {
         if (jIsChar(v)) { return jChar((v.__char + d) & 65535) }
         if (jIsFlo(v)) { return jFlo(v.__flo + d) }
+        if (jIsSz(v)) { return jNarrow(jArith("+", v, d), v.w) }
         return (v + d) | 0
     }
     function makeIncDec(items) {
@@ -1270,13 +1504,20 @@ KwSync      = "synchronized" KwEnd ;
             }
         }
         if (isFlt) { return jFlo(parseFloat(s)) }
+        // An L suffix makes the literal a LONG, and a long literal is exact to 64
+        // bits - which parseInt is not: 9223372036854775807 comes back as
+        // 9223372036854775808 there, and the two script engines even round it
+        // differently. i64FromStr / i64FromRadix accumulate the digits exactly.
+        // Without the suffix the literal is an INT: the digits are read at 32 bits,
+        // so 0xFFFFFFFF is -1 the way javac's constant conversion makes it.
+        var isLong = last == "L" || last == "l"
         if (base == 16) {
             var pAt = -1
             for (var i = 2; i < s.length; i++) {
                 var c = s.charAt(i)
                 if (c == "p" || c == "P") { pAt = i }
             }
-            if (pAt < 0) { return parseInt(s.substring(2), 16) }
+            if (pAt < 0) { return jLit(i64FromRadix(s.substring(2), 16), isLong) }
             // 0x1p4 is a hexadecimal DOUBLE literal (JLS 3.10.2).
             var mant = parseInt(s.substring(2, pAt), 16)
             var et = s.substring(pAt + 1)
@@ -1287,30 +1528,55 @@ KwSync      = "synchronized" KwEnd ;
             while (k > 0) { scale = scale * 2; k = k - 1 }
             return jFlo(exp < 0 ? mant / scale : mant * scale)
         }
-        if (base == 2) { return parseInt(s.substring(2), 2) }
-        if (base == 8) { return parseInt(s.substring(1), 8) }
-        return parseInt(s, 10)
+        if (base == 2) { return jLit(i64FromRadix(s.substring(2), 2), isLong) }
+        if (base == 8) { return jLit(i64FromRadix(s.substring(1), 8), isLong) }
+        return jLit(i64FromStr(s), isLong)
+    }
+    // One integral literal: a long stays boxed at 64 bits, an int is the low 32.
+    function jLit(p, isLong) {
+        if (isLong) { return szMake(p, 64, jNoU) }
+        return szNum(szNorm(p, 32, jNoU)) | 0
     }
 
     // Unary + is identity; ~x is the int32 complement.
     function makeUPlus(inner) { return inner }
     // -x keeps the operand's type: a double negates as a double (so -0.0 and
-    // -1.0/0.0 are real), a char and an int negate as int32.
+    // -1.0/0.0 are real), a long negates as a long (so -Long.MIN_VALUE is
+    // Long.MIN_VALUE again), and a char, a byte, a short and an int all promote to
+    // int first (JLS 5.6.1) and negate there.
     makeNeg = function(t) {
         return function() {
             var v = anytype
             v = t()
             if (jIsFlo(v)) { return jFlo(jNegF(v.__flo)) }
-            return (0 - jNum(v)) | 0
+            return jArith("-", jIsLong(v) ? jL(0) : 0, v)
         }
     }
+    // ~x is the complement at the PROMOTED width: int for a byte/short/char/int,
+    // long for a long. ~ on a plain number is already the int32 complement.
     function makeBitNot(inner, pos) {
-        return function() { return ~inner() }
+        return function() {
+            var v = inner()
+            if (jIsLong(v)) { return jL(szNot(jL(v))) }
+            return ~jI(v)
+        }
     }
     // Java's bitwise / shift operators on top of the core set: & | ^ on two
-    // booleans are the non-short-circuit boolean operators, otherwise the int32
-    // ops; >>> keeps Java's int semantics via |0 (JS >>> yields unsigned).
+    // booleans are the non-short-circuit boolean operators, otherwise the sized
+    // integer ops. Every INTEGRAL operator routes through jArith / jShift / jCmp,
+    // which apply JLS 5.6.2 promotion (long if either side is long, else int) and
+    // wrap at the promoted width - so the whole 32/64 bit story lives in one place.
     var coreBinOp = binOp
+    // The operators that are integer arithmetic rather than something else.
+    var jArithOps = {"+": true, "-": true, "*": true, "/": true, "%": true}
+    var jCmpOps = {"<": true, ">": true, "<=": true, ">=": true}
+    // Is this an operand of INTEGER arithmetic (as opposed to a string, a boolean,
+    // a reference)? A char counts - Java's char is an integral type.
+    function jIsIntegral(v) {
+        if (typeof v == "number") { return true }
+        if (v === null || v === undefined || typeof v != "object") { return false }
+        return v.__sz === true || v.__char !== undefined
+    }
     binOp = function(op, l, r) {
         // A char unboxes for every operator - Java's char IS an integral type - so
         // 'b' - 'a' == 1, c == 65 and c < 'z' all hold. Gated on one typeof test that
@@ -1319,13 +1585,16 @@ KwSync      = "synchronized" KwEnd ;
             // A double operand pulls the WHOLE operation into floating point, so it
             // is tested before the char unboxing ('a' + 0.5 is a double, not an int).
             if (jIsFlo(l) || jIsFlo(r)) { return jFloOp(op, l, r) }
-            // A char unboxes for arithmetic and comparison, but NOT for the string
-            // concatenation form of '+': "x" + 'a' is "xa", not "x97" (JLS 15.18.1
-            // picks the string conversion, which renders a char as its glyph).
-            if (jIsChar(l) || jIsChar(r)) {
-                if (op == "+" && (typeof l == "string" || typeof r == "string")) { return jstr2(l) + jstr2(r) }
-                return binOp(op, jNum(l), jNum(r))
-            }
+            // A char is NOT unboxed for the string concatenation form of '+':
+            // "x" + 'a' is "xa", not "x97" (JLS 15.18.1 picks the string
+            // conversion, which renders a char as its glyph).
+            if (op == "+" && (typeof l == "string" || typeof r == "string")) { return jstr2(l) + jstr2(r) }
+        }
+        if (jIsIntegral(l) && jIsIntegral(r)) {
+            if (hasOwn(jArithOps, op)) { return jArith(op, l, r) }
+            if (op == "&" || op == "|" || op == "^") { return jArith(op, l, r) }
+            if (op == "<<" || op == ">>" || op == ">>>") { return jShift(op, l, r) }
+            if (hasOwn(jCmpOps, op) || op == "==" || op == "!=") { return jCmp(op, l, r) }
         }
         if (op == "&") { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
         if (op == "|") { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }
@@ -1333,22 +1602,36 @@ KwSync      = "synchronized" KwEnd ;
         if (op == "<<") return l << r
         if (op == ">>") return l >> r
         if (op == ">>>") return (l >>> r) | 0
+        // == / != between a sized integer and a non-integer (a boxed Long against
+        // null, say) is reference equality; the shared path already answers that.
         return coreBinOp(op, l, r)
     }
     var coreApplyOp = applyOp
-    var jCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
+    var jCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
+                     "&=": "&", "|=": "|", "^=": "^",
+                     "<<=": "<<", ">>=": ">>", ">>>=": ">>>"}
+    // A compound assignment carries an IMPLICIT NARROWING CAST back to the LEFT
+    // operand's type (JLS 15.26.2): `byte b = 10; b += 300` is (byte)(310), which
+    // is 54, and `int i = 5; i += 1.5` is (int)(6.5), which is 6. The declared
+    // width is on the value, so it is there to narrow back to.
+    function jNarrowLike(a, v) {
+        if (jIsFlo(a)) { return jIsFlo(v) ? v : jFlo(jNumD(v)) }
+        if (jIsChar(a)) { return jChar(jNum(v) & 65535) }
+        if (jIsSz(a)) { return jNarrow(v, a.w) }
+        if (typeof a == "number") { return jNarrow(v, 32) }
+        return v
+    }
     applyOp = function(op, a, b) {
-        // A double on either side makes the compound operator floating point too.
-        if (jIsFlo(a) || jIsFlo(b)) {
-            var bop = hasOwn(jCompound, op) ? jCompound[op] : ""
-            if (bop != "") { return binOp(bop, a, b) }
+        var bop = hasOwn(jCompound, op) ? jCompound[op] : ""
+        if (bop != "") {
+            var v = binOp(bop, a, b)
+            // Only a NUMERIC left operand narrows; `s += 1` on a String is the
+            // string concatenation and keeps its result.
+            if (typeof v == "number" || (v !== null && v !== undefined && typeof v == "object" && (v.__sz === true || v.__flo !== undefined || v.__char !== undefined))) {
+                return jNarrowLike(a, v)
+            }
+            return v
         }
-        if (op == "&=") return binOp("&", a, b)
-        if (op == "|=") return binOp("|", a, b)
-        if (op == "^=") return binOp("^", a, b)
-        if (op == "<<=") return binOp("<<", a, b)
-        if (op == ">>=") return binOp(">>", a, b)
-        if (op == ">>>=") return binOp(">>>", a, b)
         return coreApplyOp(op, a, b)
     }
     // x instanceof Type [binding]: rtIsType decides; a pattern variable binds
@@ -1557,10 +1840,11 @@ KwSync      = "synchronized" KwEnd ;
     // makes (char)(c + 1) == 'c' work); the integral casts truncate to int32 the way
     // Java does; every other cast, reference casts included, is the identity.
     function makeCast(inner, ty) {
-        if (ty == "char") { return function() { return jChar(jNum(inner()) & 65535) } }
-        if (ty == "int" || ty == "long" || ty == "short" || ty == "byte") {
-            return function() { return jNumD(inner()) | 0 }
-        }
+        if (ty == "char") { return function() { return jChar(szNum(jNarrow(inner(), 16)) & 65535) } }
+        if (ty == "int") { return function() { return jNarrow(inner(), 32) } }
+        if (ty == "long") { return function() { return jNarrow(inner(), 64) } }
+        if (ty == "short") { return function() { return jNarrow(inner(), 16) } }
+        if (ty == "byte") { return function() { return jNarrow(inner(), 8) } }
         if (ty == "double" || ty == "float") { return function() { return jFlo(jNumD(inner())) } }
         return inner
     }
@@ -1855,7 +2139,15 @@ KwSync      = "synchronized" KwEnd ;
         // A declared primitive type CONVERTS its initializer (JLS 5.2, assignment
         // conversion): `double d = 1;` holds 1.0, `int i = 'a';` holds 97.
         if (ty == "double" || ty == "float") {
-            if (typeof v == "number" || jIsChar(v)) { return jFlo(jNumD(v)) }
+            if (typeof v == "number" || jIsChar(v) || jIsSz(v)) { return jFlo(jNumD(v)) }
+            return v
+        }
+        // An INTEGRAL declared type puts its width on the value, which is what
+        // makes `long t = 1; t = t * 1000000 * 1000000` stay 64 bit and
+        // `byte b = 100; b += 100` wrap to -56. The widening itself is JLS 5.1.2
+        // (int -> long) and the narrowing JLS 5.2 (a constant in range).
+        if (hasOwn(jDeclWidth, ty)) {
+            if (jIsIntegral(v)) { return jNarrow(v, jDeclWidth[ty]) }
             return v
         }
         if (typeof v != "function") { return v }

@@ -748,6 +748,199 @@ b";                                                   // verbatim keeps the newl
             Program.Check("str18", 'x'.ToString() == "x" && "s".ToString() == "s");
         }
 
+        // ===== SECTION 25: sized integers (int/uint/long/ulong/byte/sbyte/...) =====
+        // C#'s integral types have fixed WIDTHS and a SIGNEDNESS, and both have to
+        // survive into the next operation. The area used to be simply absent:
+        // int.MaxValue was an undefined name, `long` was a 32 bit int (1L << 40
+        // answered 256), and ulong.MaxValue could not even be spelled, because a
+        // double rounds 18446744073709551615 - and the two script engines rounded
+        // it DIFFERENTLY, so the goja and -frozen runs of one program disagreed.
+        //
+        // THERE IS NO dotnet ON THIS MACHINE, so unlike the Java twin of this
+        // section NONE of these answers was executed. Every one is cited to the
+        // C# standard (ECMA-334, 6th edition) by clause, and the three places
+        // where the standard leaves a choice are called out as choices:
+        //
+        //   6.4.5.3   an integer literal's type follows its suffix AND its value
+        //   12.4.7.3  binary numeric promotion (the uint/int -> long rule)
+        //   12.8.20   arithmetic is UNCHECKED by default, so it WRAPS. A `checked`
+        //             block is parsed here but NOT modelled - it does not throw -
+        //             and that is a documented gap, not an oversight.
+        //   12.9.3    division by zero throws System.DivideByZeroException in
+        //             BOTH contexts; int.MinValue / -1 is implementation-defined
+        //             in an unchecked one between an OverflowException and "the
+        //             resulting value being that of the left operand". This
+        //             implementation CHOOSES the second, which is also what Java
+        //             specifies outright.
+        //   12.11     the shift count is masked (& 31 / & 63) and `>>` on an
+        //             unsigned type is the LOGICAL shift.
+        //   12.3.2    a floating point value that does not fit its integral
+        //             conversion target is undefined behaviour; this
+        //             implementation CHOOSES to saturate, so that both halves
+        //             agree rather than each inventing an answer.
+        static long S25Id(long x) { return x; }
+
+        static void S25()
+        {
+            // ----- the type constants (6.4.5.3 gives the ranges) -----
+            Program.Check("num01", int.MaxValue == 2147483647 && int.MinValue == -2147483648);
+            Program.Check("num02", long.MaxValue == 9223372036854775807L && long.MinValue == -9223372036854775808L);
+            Program.Check("num03", uint.MaxValue == 4294967295 && uint.MinValue == 0);
+            Program.Check("num04", ulong.MaxValue == 18446744073709551615 && ulong.MinValue == 0);
+            // C#'s `byte` is UNSIGNED (0..255) and `sbyte` is the signed one -
+            // the opposite of Java, and the easiest thing here to get wrong.
+            Program.Check("num05", byte.MaxValue == 255 && byte.MinValue == 0);
+            Program.Check("num06", sbyte.MaxValue == 127 && sbyte.MinValue == -128);
+            Program.Check("num07", short.MaxValue == 32767 && ushort.MaxValue == 65535);
+            // The System aliases name the same types.
+            Program.Check("num08", Int32.MaxValue == int.MaxValue && UInt64.MaxValue == ulong.MaxValue);
+            // The DIGITS survive: the values are exact, not the nearest double.
+            Program.Check("num09", ("" + long.MaxValue) == "9223372036854775807");
+            Program.Check("num10", ("" + ulong.MaxValue) == "18446744073709551615");
+
+            // ----- unchecked arithmetic WRAPS (12.8.20) -----
+            Program.Check("num11", int.MaxValue + 1 == int.MinValue);
+            Program.Check("num12", int.MinValue - 1 == int.MaxValue);
+            Program.Check("num13", long.MaxValue + 1 == long.MinValue);
+            Program.Check("num14", 3000000000L * 3 == 9000000000L);
+            int big = 1000000;
+            Program.Check("num15", big * big == -727379968);
+            // A declared `long` keeps its width across an assignment and a call.
+            long acc = 1;
+            acc = acc * 1000000;
+            acc = acc * 1000000;
+            Program.Check("num16", acc == 1000000000000L && Program.S25Id(acc) == 1000000000000L);
+            // ulong arithmetic stays above 2^63, where a signed reading would go
+            // negative and a double would round.
+            Program.Check("num17", ulong.MaxValue / 3 == 6148914691236517205);
+            Program.Check("num18", ulong.MaxValue > 0 && ulong.MaxValue - 1 == 18446744073709551614);
+
+            // ----- binary numeric promotion (12.4.7.3) -----
+            // The rule people are surprised by: uint + int is a LONG, because int
+            // does not fit in uint and uint does not fit in int.
+            uint u1 = 5;
+            int i1 = -7;
+            Program.Check("num19", u1 + i1 == -2L && (u1 + i1) < 0);
+            // uint + uint stays a uint and WRAPS at 32 bits. Both operands are
+            // spelled as uints on purpose: `u2 + 1` would be uint + uint in real
+            // C# through the IMPLICIT CONSTANT EXPRESSION CONVERSION of 10.2.11
+            // (an int CONSTANT in range converts to uint), and that rule is a
+            // compile-time one this untyped value model cannot see - here the
+            // plain 1 is an ordinary int and 12.4.7.3 promotes the pair to long.
+            // A KNOWN DIVERGENCE, recorded rather than asserted away.
+            uint u2 = 4294967295;
+            uint one = 1;
+            Program.Check("num20", u2 + one == 0 && u2 * 2u == 4294967294);
+            // byte + byte and short * short are INT, so they do not wrap at 8/16.
+            byte b1 = 200;
+            byte b2 = 200;
+            Program.Check("num21", b1 + b2 == 400);
+            short s1 = 300;
+            Program.Check("num22", s1 * s1 == 90000);
+            // long meets uint as long; ulong meets a positive literal as ulong.
+            long l1 = 5;
+            Program.Check("num23", l1 + u1 == 10L);
+
+            // ----- the shift count is MASKED (12.11) -----
+            Program.Check("num24", 1 << 32 == 1 && 1 << 33 == 2);
+            Program.Check("num25", 1L << 64 == 1L && 1L << 40 == 1099511627776L);
+            Program.Check("num26", 1L << 62 == 4611686018427387904L && 1 << 31 == int.MinValue);
+            // '>>' on a SIGNED type keeps the sign; on an UNSIGNED one it is the
+            // LOGICAL shift - which is how C# spells what Java writes as '>>>'.
+            Program.Check("num27", -8 >> 1 == -4 && -8L >> 1 == -4L);
+            uint u3 = 4294967288;
+            Program.Check("num28", u3 >> 1 == 2147483644);
+            ulong u4 = 18446744073709551608;
+            Program.Check("num29", u4 >> 1 == 9223372036854775804);
+            // The left operand's type alone decides the width, so a byte shifts as
+            // an int (12.11: unary promotion of each operand separately).
+            byte b3 = 255;
+            Program.Check("num30", b3 << 8 == 65280);
+
+            // ----- division (12.9.3 / 12.9.4) -----
+            Program.Check("num31", -7 / 2 == -3 && 7 / -2 == -3 && -7 % 2 == -1 && 7 % -2 == 1);
+            Program.Check("num32", long.MaxValue / 3 == 3074457345618258602L);
+            // The implementation-defined unchecked overflow: the left operand.
+            Program.Check("num33", int.MinValue / -1 == int.MinValue && int.MinValue % -1 == 0);
+            // Division by zero THROWS in both contexts (12.9.3).
+            bool threw = false;
+            string msg = "";
+            try { int z = 0; int q = 1 / z; Program.Check("num34", q == 99); }
+            catch (DivideByZeroException e) { threw = true; msg = e.Message; }
+            Program.Check("num34", threw && msg == "Attempted to divide by zero.");
+            bool lthrew = false;
+            try { long lz = 0; long lq = 1L % lz; Program.Check("num35", lq == 99); }
+            catch (DivideByZeroException) { lthrew = true; }
+            Program.Check("num35", lthrew);
+
+            // ----- ++ and a compound assignment convert BACK (12.8.15 / 12.21.4) -----
+            byte b4 = 255;
+            b4++;
+            Program.Check("num36", b4 == 0);
+            byte b5 = 250;
+            b5 += 10;
+            Program.Check("num37", b5 == 4);
+            sbyte sb1 = 127;
+            sb1++;
+            Program.Check("num38", sb1 == -128);
+            ushort us1 = 65535;
+            us1++;
+            Program.Check("num39", us1 == 0);
+            // `int i = 5; i += 1.5` is (int)6.5 == 6, the same implicit cast.
+            int ni = 5;
+            ni += 1.5;
+            Program.Check("num40", ni == 6);
+            // A byte compares against an int at INT width - 5 < 1000 is not 5 < -24.
+            byte b6 = 5;
+            Program.Check("num41", b6 < 1000 && b6 > -1000);
+
+            // ----- explicit conversions narrow to their own type (12.3.2) -----
+            Program.Check("num42", (byte) 300 == 44 && (sbyte) 200 == -56);
+            Program.Check("num43", (int) 3000000000L == -1294967296 && (uint) -1 == 4294967295);
+            Program.Check("num44", (short) 70000 == 4464 && (ushort) -1 == 65535);
+            Program.Check("num45", (char) 70000 == 4464 && (char) -1 == 65535);
+            Program.Check("num46", (int) 2.9 == 2 && (int) -2.9 == -2 && (long) -2.9 == -2L);
+
+            // ----- literals (6.4.5.3) -----
+            // No suffix: the first of int, uint, long, ulong that HOLDS the value.
+            // So 0xFFFFFFFF is a uint here, where in Java it is the int -1.
+            Program.Check("num47", 0xFFFFFFFF == 4294967295 && 0x7FFFFFFF == 2147483647);
+            Program.Check("num48", 0xFFFFFFFFFFFFFFFF == ulong.MaxValue);
+            Program.Check("num49", 4294967296 == 4294967296L && 0b1010 == 10);
+            Program.Check("num50", 1_000_000_000_000L == 1000000000000L && 5U == 5 && 5UL == 5);
+
+            // ----- unary - and ~ at the promoted type (12.4.7.2) -----
+            Program.Check("num51", -int.MinValue == int.MinValue && -long.MinValue == long.MinValue);
+            // -uint is a LONG, because -uint.MaxValue does not fit in a uint.
+            Program.Check("num52", -u2 == -4294967295L);
+            Program.Check("num53", ~0 == -1 && ~0L == -1L && ~(1L << 40) == -1099511627777L);
+            // ~ on a uint stays a uint.
+            uint u5 = 0;
+            Program.Check("num54", ~u5 == 4294967295);
+
+            // ----- the bitwise operators are 64 bit on a long -----
+            // Spelled in decimal, not as unchecked((long) 0xF0F0F0F0F0F0F0F0):
+            // `unchecked` is not implemented here at all (neither operator nor
+            // block), which is the documented gap this section's header records.
+            long mask = -1085102592571150096L;
+            Program.Check("num55", (mask & 0xFFL) == 0xF0L && (mask ^ mask) == 0L);
+            Program.Check("num56", (0x0F0F0F0F0F0F0F0FL | 0xF0F0F0F0F0F0F0L) == 0x0FFFFFFFFFFFFFFFL);
+
+            // ----- it composes with the FLOAT box rather than fighting it -----
+            Program.Check("num57", 1 / 3 == 0 && 1.0 / 3.0 == 0.3333333333333333 && 1 / 3.0 == 0.3333333333333333);
+            Program.Check("num58", (double) 1L / 2 == 0.5 && ("" + (2.5 * 2)) == "5" && ("" + (5 * 2)) == "10");
+            double d = 1;
+            d += 1L;
+            Program.Check("num59", d == 2.0 && ("" + d) == "2");
+
+            // ----- Parse, and a long through an array -----
+            Program.Check("num60", int.Parse("-42") == -42 && long.Parse("9223372036854775807") == long.MaxValue);
+            long[] ls = new long[2];
+            ls[0] = long.MaxValue;
+            ls[1] = ls[0] - 1;
+            Program.Check("num61", ls[1] == 9223372036854775806L && ("" + ls[0]) == "9223372036854775807");
+        }
+
         // ===== END SECTIONS =====
 
         static int Main()
@@ -776,6 +969,7 @@ b";                                                   // verbatim keeps the newl
             Program.S22(); // SECTION-CALL 22
             Program.S23(); // SECTION-CALL 23
             Program.S24(); // SECTION-CALL 24
+            Program.S25(); // SECTION-CALL 25
             Console.WriteLine("full: " + Program.Checks + " checks, " + Program.Fails + " failures");
             return Program.Fails;
         }

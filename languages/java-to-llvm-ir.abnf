@@ -920,11 +920,16 @@ KwYield     = "yield" KwEnd ;
             var r = valT(b)
             b = r.b
             var v = r.v
+            // A compound assignment carries an IMPLICIT NARROWING CAST back to the
+            // LEFT operand's type (JLS 15.26.2), so `byte b = 10; b += 300` is
+            // (byte)310 == 54 and `int i = 5; i += 1.5` is (int)6.5 == 6.
+            // js_jvnarrowlike reads the width off the old value and applies it; a
+            // String left operand keeps its concatenation untouched.
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
                     var old = callExt(b, "js_scope_get", [curScopeV, nameV])
-                    v = emitBin(b, op, old, v)
+                    v = callExt(b, "js_jvnarrowlike", [old, emitBin(b, op, old, v)])
                 }
                 callExt(b, "js_scope_set", [curScopeV, nameV, v])
             } else {
@@ -932,7 +937,7 @@ KwYield     = "yield" KwEnd ;
                 b = p.b
                 if (op != "=") {
                     var oldM = callExt(b, "js_get", [p.obj, p.key])
-                    v = emitBin(b, op, oldM, v)
+                    v = callExt(b, "js_jvnarrowlike", [oldM, emitBin(b, op, oldM, v)])
                 }
                 callExt(b, "js_set", [p.obj, p.key, v])
             }
@@ -951,13 +956,13 @@ KwYield     = "yield" KwEnd ;
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
-                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, "js_jfstep", [oldV, oneV])])
+                callExt(b, "js_scope_set", [curScopeV, nameV, callExt(b, "js_jvstep", [oldV, oneV])])
                 return {b: b, v: oldV}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_get", [p.obj, p.key])
-            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_jfstep", [oldM, oneV])])
+            callExt(b, "js_set", [p.obj, p.key, callExt(b, "js_jvstep", [oldM, oneV])])
             return {b: b, v: oldM}
         }
     }
@@ -969,14 +974,14 @@ KwYield     = "yield" KwEnd ;
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 var oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
-                var nv = callExt(b, "js_jfstep", [oldV, oneV])
+                var nv = callExt(b, "js_jvstep", [oldV, oneV])
                 callExt(b, "js_scope_set", [curScopeV, nameV, nv])
                 return {b: b, v: nv}
             }
             var p = emitRefPath(b, ref)
             b = p.b
             var oldM = callExt(b, "js_get", [p.obj, p.key])
-            var nv2 = callExt(b, "js_jfstep", [oldM, oneV])
+            var nv2 = callExt(b, "js_jvstep", [oldM, oneV])
             callExt(b, "js_set", [p.obj, p.key, nv2])
             return {b: b, v: nv2}
         }
@@ -1006,13 +1011,21 @@ KwYield     = "yield" KwEnd ;
             }
         }
         if (isFlt) { return {__flo: parseFloat(s)} }
+        // An L suffix makes the literal a LONG, and a long literal is exact to 64
+        // bits - which neither parseInt nor emitNum is, both of them going through
+        // a double that rounds 9223372036854775807 to 9223372036854776000 on the
+        // way into the module. So the DIGITS travel instead and js_jvlit
+        // accumulates them exactly (see abnf/jsrtjava.go). Without the suffix the
+        // literal is an INT and is read at 32 bits, which makes 0xFFFFFFFF -1 the
+        // way javac's constant conversion does.
+        var isLong = last == "L" || last == "l"
         if (base == 16) {
             var pAt = -1
             for (var i = 2; i < s.length; i++) {
                 var c = s.charAt(i)
                 if (c == "p" || c == "P") { pAt = i }
             }
-            if (pAt < 0) { return parseInt(s.substring(2), 16) }
+            if (pAt < 0) { return {__int: s.substring(2), __radix: 16, __long: isLong} }
             // 0x1p4 is a hexadecimal DOUBLE literal (JLS 3.10.2).
             var mant = parseInt(s.substring(2, pAt), 16)
             var et = s.substring(pAt + 1)
@@ -1023,14 +1036,23 @@ KwYield     = "yield" KwEnd ;
             while (k > 0) { scale = scale * 2; k = k - 1 }
             return {__flo: exp < 0 ? mant / scale : mant * scale}
         }
-        if (base == 2) { return parseInt(s.substring(2), 2) }
-        if (base == 8) { return parseInt(s.substring(1), 8) }
-        return parseInt(s, 10)
+        if (base == 2) { return {__int: s.substring(2), __radix: 2, __long: isLong} }
+        if (base == 8) { return {__int: s.substring(1), __radix: 8, __long: isLong} }
+        return {__int: s, __radix: 10, __long: isLong}
     }
     // A numeric literal's constant thunk: a double emits the js_jflo box, an
-    // integral value the plain number the shared makeConst emits.
+    // integral value goes through js_jvlit with its DIGITS so that a long literal
+    // is exact.
     function makeNumConst(v) {
         if (v !== null && typeof v == "object") {
+            if (v.__int != undefined) {
+                var txt = v.__int
+                var rdx = v.__radix
+                var lng = v.__long
+                return function(b) {
+                    return {b: b, v: callExt(b, "js_jvlit", [emitStr(b, txt), emitNum(b, rdx), lng ? hTrue : hFalse])}
+                }
+            }
             var f = v.__flo
             return function(b) { return {b: b, v: callExt(b, "js_jflo", [emitNum(b, f)])} }
         }
@@ -1163,13 +1185,16 @@ KwYield     = "yield" KwEnd ;
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_jfneg", [r.v])}
+            return {b: r.b, v: callExt(r.b, "js_jvneg", [r.v])}
         }
     }
+    // ~x is the complement at the PROMOTED width (JLS 5.6.1): int for a
+    // byte/short/char/int, long for a long. js_bxor with -1 was JavaScript's
+    // 32 bit complement, so ~0L answered -1 by luck and ~(1L<<40) did not.
     function makeBitNot(inner, pos) {
         return function(b) {
             var r = inner(b)
-            return {b: r.b, v: callExt(r.b, "js_bxor", [r.v, emitNum(r.b, -1)])}
+            return {b: r.b, v: callExt(r.b, "js_jvnot", [r.v])}
         }
     }
     // Java's bitwise / shift operators on top of the core set: & | ^ go through
@@ -1184,21 +1209,31 @@ KwYield     = "yield" KwEnd ;
         // and "" + obj was "[object Object]" where java writes [I@... / Main$Box@...
         // (see abnf/jsrtjava.go). Arithmetic is unchanged.
         if (op == "+" || op == "+=") return callExt(b, "js_jvadd", [l, r])
-        if (op == "&" || op == "&=") return callExt(b, "js_jband", [l, r])
-        if (op == "|" || op == "|=") return callExt(b, "js_jbor", [l, r])
-        if (op == "^" || op == "^=") return callExt(b, "js_jbxor", [l, r])
-        if (op == "<<" || op == "<<=") return callExt(b, "js_shl", [l, r])
-        if (op == ">>" || op == ">>=") return callExt(b, "js_shr", [l, r])
-        if (op == ">>>" || op == ">>>=") return intWrap(b, callExt(b, "js_ushr", [l, r]))
+        if (op == "&" || op == "&=") return callExt(b, "js_jvarith", [emitStr(b, "&"), l, r])
+        if (op == "|" || op == "|=") return callExt(b, "js_jvarith", [emitStr(b, "|"), l, r])
+        if (op == "^" || op == "^=") return callExt(b, "js_jvarith", [emitStr(b, "^"), l, r])
+        // The shift COUNT is masked - & 31 for an int, & 63 for a long - and the
+        // result type is the LEFT operand's alone (JLS 15.19), which is why
+        // `1 << 32` is 1 here and not 0. js_shl/js_shr/js_ushr were JavaScript's
+        // THIRTY-TWO bit operators, so 1L << 40 answered 256.
+        if (op == "<<" || op == "<<=") return callExt(b, "js_jvshift", [emitStr(b, "<<"), l, r])
+        if (op == ">>" || op == ">>=") return callExt(b, "js_jvshift", [emitStr(b, ">>"), l, r])
+        if (op == ">>>" || op == ">>>=") return callExt(b, "js_jvshift", [emitStr(b, ">>>"), l, r])
+        // The ordered comparisons: two integers compare at the PROMOTED width, so
+        // a long above 2^53 compares exactly rather than through a rounded double.
+        if (op == "<") return callExt(b, "js_jvcmp", [emitStr(b, "<"), l, r])
+        if (op == ">") return callExt(b, "js_jvcmp", [emitStr(b, ">"), l, r])
+        if (op == "<=") return callExt(b, "js_jvcmp", [emitStr(b, "<="), l, r])
+        if (op == ">=") return callExt(b, "js_jvcmp", [emitStr(b, ">="), l, r])
         // The arithmetic operators are DOUBLE-aware: js_jfsub/js_jfmul/js_jfdiv/
         // js_jfmod answer a boxed double when either operand is one (JLS 5.6.2) and
         // wrap to int32 when both are integral - so the shared intWrap, which turned
         // every one of them into integer arithmetic, is gone. '+' already went
         // through js_jadd, which now has the same rule.
-        if (op == "-" || op == "-=") return callExt(b, "js_jfsub", [l, r])
-        if (op == "*" || op == "*=") return callExt(b, "js_jfmul", [l, r])
-        if (op == "/" || op == "/=") return callExt(b, "js_jfdiv", [l, r])
-        if (op == "%" || op == "%=") return callExt(b, "js_jfmod", [l, r])
+        if (op == "-" || op == "-=") return callExt(b, "js_jvarith", [emitStr(b, "-"), l, r])
+        if (op == "*" || op == "*=") return callExt(b, "js_jvarith", [emitStr(b, "*"), l, r])
+        if (op == "/" || op == "/=") return callExt(b, "js_jvarith", [emitStr(b, "/"), l, r])
+        if (op == "%" || op == "%=") return callExt(b, "js_jvarith", [emitStr(b, "%"), l, r])
         // == / != go through the char-aware equality (js_jchareq is js_seq unless a
         // char meets the one-character String that charAt answers).
         if (op == "==") return callExt(b, "js_jchareq", [l, r])
@@ -1424,26 +1459,37 @@ KwYield     = "yield" KwEnd ;
     // A cast is identity: (Type) expr lowers to expr.
     function makeCast(inner) { return inner }
     // A PRIMITIVE cast converts: (double)/(float) box their operand into a double
-    // (that is what makes (double)7 / 2 == 3.5), the integral casts truncate
-    // towards zero and wrap to int32, and (char) re-boxes as a char. A reference
-    // cast stays the identity.
+    // (that is what makes (double)7 / 2 == 3.5), the integral casts narrow to
+    // their own WIDTH - (byte)200 is -56 and (int)3000000000L is -1294967296,
+    // where the old js_jfint wrapped everything to int32 - and (char) re-boxes as
+    // a char. A reference cast stays the identity.
     function makePrimCast(inner, ty) {
-        var ext = ""
-        if (ty == "double" || ty == "float") { ext = "js_jflo" }
-        if (ty == "int" || ty == "long" || ty == "short" || ty == "byte") { ext = "js_jfint" }
-        if (ty == "char") { ext = "js_char" }
-        if (ext == "") { return inner }
-        if (ext == "js_char") {
+        if (ty == "double" || ty == "float") {
             return function(b) {
-                var rc = inner(b)
-                return {b: rc.b, v: callExt(rc.b, "js_char", [callExt(rc.b, "js_char_code", [rc.v])])}
+                var rf = inner(b)
+                return {b: rf.b, v: callExt(rf.b, "js_jflo", [rf.v])}
             }
         }
+        if (ty == "char") {
+            return function(b) {
+                var rc = inner(b)
+                // js_jvchar narrows to 16 bits and re-boxes, so (char)70000 is 4464
+                // and (char)-1 is 65535 - the char is UNSIGNED, which is the one
+                // place a width alone is not the whole answer.
+                return {b: rc.b, v: callExt(rc.b, "js_jvchar", [rc.v])}
+            }
+        }
+        var wd = jDeclWidth["$" + ty]
+        if (wd == undefined) { return inner }
         return function(b) {
             var r = inner(b)
-            return {b: r.b, v: callExt(r.b, ext, [r.v])}
+            return {b: r.b, v: callExt(r.b, "js_jvconv", [r.v, emitNum(r.b, wd)])}
         }
     }
+    // The widths of Java's integral types; the twin of jDeclWidth in
+    // java-interpreter.abnf. The keys are "$"-prefixed because compile-core has
+    // no hasOwn and a bare lookup would find Object.prototype's members.
+    var jDeclWidth = {"$long": 64, "$int": 32, "$short": 16, "$byte": 8}
     // A lambda is a real closure: its body becomes an own IR function jsf_N(env,
     // args) and the site yields js_closure(N, currentScope), so it captures the
     // defining scope. An expression body returns its value; a block body returns
@@ -1777,11 +1823,18 @@ KwYield     = "yield" KwEnd ;
         // decides, not the base name: `double[] xs = {...}` declares an ARRAY and
         // must not box the array itself.
         var isDbl = (rawTy == "double" || rawTy == "float")
+        // An INTEGRAL declared type puts its WIDTH on the value the same way, which
+        // is what makes `long t = 1; t = t * 1000000 * 1000000` stay 64 bit and
+        // `byte b = 100; b += 100` wrap to -56. js_jvadopt narrows only an integral
+        // value, so `Object o = "s"` and a lambda pass through untouched.
+        var declW = jDeclWidth["$" + rawTy]
+        if (declW == undefined) { declW = 0 }
         return function(b) {
             var r = init(b)
             b = r.b
             var v = r.v
             if (isDbl) { v = callExt(b, "js_jflo", [v]) }
+            if (declW > 0) { v = callExt(b, "js_jvadopt", [v, emitNum(b, declW)]) }
             if (sam != null) {
                 var sr = emitSam(b, v, tyName, sam)
                 b = sr.b
@@ -2610,7 +2663,12 @@ KwYield     = "yield" KwEnd ;
                             "$UnsupportedOperationException": "IllegalArgumentException",
                             "$NumberFormatException": "IllegalArgumentException",
                             "$InterruptedException": "Exception", "$IOException": "Exception"}
-    var neededExc = {}
+    // ArithmeticException is needed whether or not the program names it: an
+    // integer divide by zero throws one (JLS 15.17.2), and js_jvarith raises it
+    // through the descriptor js_jvexc registers. So it, and its ancestors, are
+    // always emitted.
+    var neededExc = {"$ArithmeticException": true, "$RuntimeException": true,
+                     "$Exception": true, "$Throwable": true}
     var userDeclared = {}
     for (var bx = 0; bx < builtinExcOrder.length; bx++) { classNames["$" + builtinExcOrder[bx]] = true }
     // Records that `name` is used as a type, so its builtin descriptor (and every
@@ -2658,6 +2716,11 @@ KwYield     = "yield" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, "__ctor"),
                                   callExt(b, "js_closure", [handle(emitCtorDispatch(name, [0, 1])), curScopeV])])
             callExt(b, "js_set", [clsV, emitStr(b, "getMessage"), callExt(b, "js_closure", [handle(getMsg), curScopeV])])
+            // Hand ArithmeticException to the runtime once, so that a divide by
+            // zero can THROW a catchable exception from inside js_jvarith - which
+            // has no access to the program's scope. The interpreter half throws
+            // the same shape from jThrowExc.
+            if (name == "ArithmeticException") { callExt(b, "js_jvexc", [clsV]) }
         }
         return b
     }
@@ -3022,6 +3085,15 @@ KwYield     = "yield" KwEnd ;
         // Math.abs(-2.0) is 2.0 here, exactly like in java-interpreter.abnf.
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Math"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__jmath")])])
+        // java.lang's boxed primitive types, for their MIN_VALUE / MAX_VALUE and
+        // the few static methods a program reaches for. Long.MAX_VALUE cannot be
+        // written as a plain number at all, which is why they arrive as runtime
+        // objects (js_jvboxtype in abnf/jsrtjava.go) rather than emitted literals.
+        var jvBoxTypes = ["Integer", "Long", "Byte", "Short", "Character"]
+        for (var jb = 0; jb < jvBoxTypes.length; jb++) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, jvBoxTypes[jb]),
+                                         callExt(b, "js_jvboxtype", [emitStr(b, jvBoxTypes[jb])])])
+        }
         b = emitBuiltinExc(b)
         b = emitImported(b)
         b = makeSeq(items)(b)

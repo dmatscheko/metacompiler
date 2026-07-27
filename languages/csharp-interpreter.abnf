@@ -884,11 +884,15 @@ VerbPlain   <~~ push(makeConst(csVerb(up.in))) ~~>
 VbDQuote    = '"' '"' ;
 VbChar      = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
 
-// C# numeric literals beyond the plain decimal integer that IntLit already handles: hex
-// (0x), binary (0b), reals (a '.' fraction, an exponent or an f/d/m suffix), and decimals
-// with '_' digit groups or an integer u/l suffix. The value is computed by csNum.
+// C# numeric literals. The value is computed by csNum, which is also where the
+// literal's TYPE is decided (ECMA-334 6.4.5.3). CsDecP - the plain decimal
+// integer - is listed LAST but is no longer left to the shared IntLit, because
+// IntLit reads it with parseInt, i.e. through a double: 18446744073709551615
+// came back as 18446744073709552000, and the two script engines even rounded it
+// differently. CsNum precedes IntLit in the literal choice, so IntLit is now
+// unreachable for this grammar.
 CsNum       <~~ push(makeConst(csNum(up.in))) ~~>
-            = CsHex | CsBin | CsDot | CsReal | CsDecU | CsDecS ;
+            = CsHex | CsBin | CsDot | CsReal | CsDecU | CsDecS | CsDecP ;
 CsHex       = ( "0x" | "0X" ) :whitespace() CsHexD { CsHexD | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 CsBin       = ( "0b" | "0B" ) :whitespace() CsBit { CsBit | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 // A leading-dot real ('.5'): only a digit may follow the dot, so a member access
@@ -897,6 +901,7 @@ CsDot       = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ CsExp ] [ CsRSfx
 CsReal      = "0"..."9" :whitespace() { "0"..."9" | "_" } CsRealT :whitespace(Whitespace) ;
 CsDecU      = "0"..."9" :whitespace() { "0"..."9" } "_" { "0"..."9" | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 CsDecS      = "0"..."9" :whitespace() { "0"..."9" } CsISfx :whitespace(Whitespace) ;
+CsDecP      = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
 CsRealT     = "." "0"..."9" { "0"..."9" | "_" } [ CsExp ] [ CsRSfx ] | CsExp [ CsRSfx ] | CsRSfx ;
 CsExp       = ( "e" | "E" ) [ "+" | "-" ] "0"..."9" { "0"..."9" | "_" } ;
 CsHexD      = "0"..."9" | "a"..."f" | "A"..."F" ;
@@ -1086,6 +1091,42 @@ KwLet       = "let" KwEnd ;
         Write: function(x) { print(x === undefined ? "" : csStr(x)) }
     }
 
+    // The integral type NAMES as expression primaries, so `int.MaxValue` and
+    // `ulong.MaxValue` resolve. Each keyword and its System alias name the same
+    // object. MinValue / MaxValue are the whole reason a sized integer had to
+    // exist: ulong.MaxValue is 18446744073709551615, which no double holds, and
+    // int.MaxValue + 1 has to wrap to int.MinValue rather than grow.
+    //
+    // Built with szMake / i64Make rather than through the helpers further down,
+    // because this runs at SCRIPT BODY time and the frozen engine does not hoist
+    // declarations - only the included lib is in scope by now.
+    function csTypeObj(minV, maxV, parse) { return {MinValue: minV, MaxValue: maxV, Parse: parse} }
+    var csP0 = i64Make(0, 0)
+    function csIntParse(w, u) {
+        return function(s) { return csParseInt(s, w, u) }
+    }
+    var csTypeNames = ["sbyte", "SByte", "byte", "Byte", "short", "Int16", "ushort", "UInt16",
+                       "int", "Int32", "uint", "UInt32", "long", "Int64", "ulong", "UInt64"]
+    var csTypeMin = [szMake(i64Make(0xffffffff, 0xffffff80), 8, false), szMake(csP0, 8, true),
+                     szMake(i64Make(0xffffffff, 0xffff8000), 16, false), szMake(csP0, 16, true),
+                     0 - 2147483648, szMake(csP0, 32, true),
+                     szMake(i64Make(0x80000000, 0), 64, false), szMake(csP0, 64, true)]
+    var csTypeMax = [szMake(i64Make(0, 127), 8, false), szMake(i64Make(0, 255), 8, true),
+                     szMake(i64Make(0, 32767), 16, false), szMake(i64Make(0, 65535), 16, true),
+                     2147483647, szMake(i64Make(0, 0xffffffff), 32, true),
+                     szMake(i64Make(0x7fffffff, 0xffffffff), 64, false),
+                     szMake(i64Make(0xffffffff, 0xffffffff), 64, true)]
+    var csTypeBits = [8, 8, 16, 16, 32, 32, 64, 64]
+    var csTypeUns = [false, true, false, true, false, true, false, true]
+    for (var cti = 0; cti < csTypeNames.length; cti = cti + 2) {
+        var ctk = cti / 2
+        var cto = csTypeObj(csTypeMin[ctk], csTypeMax[ctk], csIntParse(csTypeBits[ctk], csTypeUns[ctk]))
+        hostGlobals[csTypeNames[cti]] = cto
+        hostGlobals[csTypeNames[cti + 1]] = cto
+    }
+    hostGlobals["char"] = {MinValue: {__char: 0}, MaxValue: {__char: 65535}}
+    hostGlobals["Char"] = hostGlobals["char"]
+
     // The class whose body is currently being built (for base calls), and the stack that
     // restores the outer name when a nested class ends.
     var curClassName = ""
@@ -1121,10 +1162,242 @@ KwLet       = "let" KwEnd ;
         if (typeof v == "object") {
             if (v.__flo !== undefined) return v.__flo
             if (v.__char !== undefined) return v.__char
+            // A sized integer reads as the nearest double, which is what an
+            // implicit long/ulong -> double conversion does (ECMA-334 10.2.3).
+            if (v.__sz === true) return szNum(v)
         }
         return v
     }
     function csNegF(f) { return f * csNegOne }
+
+    // ----- the SIZED INTEGER box: int/uint/long/ulong/short/ushort/byte/sbyte -----
+    // C#'s integral types have fixed widths and a SIGNEDNESS, and both have to
+    // survive into the next operation: `byte b = 255; b++` is 0, `uint.MaxValue`
+    // is 4294967295 and not -1, and ulong.MaxValue / 3 is 6148914691236517205 -
+    // an answer a double cannot even hold. That is the same problem the {__flo}
+    // box solves for floating point and it gets the same answer: the type goes ON
+    // the value. The machinery is the language-neutral sz* layer in
+    // lib/interp-core.js; abnf/jsrtcsharp.go implements the identical rules for
+    // the compiled half and ./test.sh --cross diffs the two, so they MUST stay in
+    // step.
+    //
+    // The INVARIANT is C#'s, and it is deliberately NOT the one Go and Swift use.
+    // There a plain number is a 64 bit int; here
+    //
+    //     a plain number   ==  an `int`, i.e. a SIGNED 32 BIT value
+    //     an {__sz} box    ==  every other integral type: long, ulong, uint,
+    //                          short, ushort, byte (UNSIGNED in C#) and sbyte
+    //     an {__flo} box   ==  a double / float / decimal
+    //     a {__char} box   ==  a char (16 bit UNSIGNED, rendered as a glyph)
+    //
+    // int is the type of every unsuffixed literal that fits and of every
+    // arithmetic result whose operands are int or narrower, so keeping IT unboxed
+    // is what makes the change affordable. The cost is that a 64 bit value stays
+    // boxed even when it would fit in a double, because a plain number means
+    // `int` here: szNorm unboxes such a result, so csL boxes it straight back.
+    //
+    // ARITHMETIC IS UNCHECKED, which is C#'s default (ECMA-334 12.8.20): every
+    // operator wraps. A `checked` block is parsed but NOT modelled - it does not
+    // throw - and that is a documented gap rather than an accident. Division by
+    // zero DOES throw (12.9.3), because it throws in both contexts.
+    function csIsSz(v) { return szIs(v) }
+    function csSzW(v) { return szIs(v) ? v.w : 32 }
+    function csSzU(v) { return szIs(v) ? v.u : false }
+    // csL is "read this at width w with signedness u": always a box for 64 bits.
+    function csBox(v, w, u) {
+        var p = szIs(v) ? v.p : i64FromNum(csNumD(v))
+        return szMake(i64Trunc(p, w, u), w, u)
+    }
+    // The BINARY NUMERIC PROMOTION of ECMA-334 12.4.7.3, for two integral
+    // operands. The surprising rule is the uint one: `uint + int` is a LONG,
+    // because int does not fit in uint and uint does not fit in int, and the two
+    // unsigned-and-signed cases below are the only place C# differs from Java's
+    // much simpler "long if either is long, else int".
+    //     ulong, if either operand is ulong
+    //     long,  if either operand is long
+    //     long,  if one is uint and the other is sbyte / short / int
+    //     uint,  if either operand is uint
+    //     int,   otherwise (so byte + byte and short * short are int)
+    function csProW(l, r) {
+        var lw = csSzW(l)
+        var rw = csSzW(r)
+        if ((lw == 64 && csSzU(l)) || (rw == 64 && csSzU(r))) { return 64 }
+        if (lw == 64 || rw == 64) { return 64 }
+        if ((lw == 32 && csSzU(l)) || (rw == 32 && csSzU(r))) {
+            return csProUintMeets(l, r) ? 64 : 32
+        }
+        return 32
+    }
+    function csProU(l, r) {
+        var lw = csSzW(l)
+        var rw = csSzW(r)
+        if ((lw == 64 && csSzU(l)) || (rw == 64 && csSzU(r))) { return true }
+        if (lw == 64 || rw == 64) { return false }
+        if ((lw == 32 && csSzU(l)) || (rw == 32 && csSzU(r))) {
+            return !csProUintMeets(l, r)
+        }
+        return false
+    }
+    // Does a uint meet a SIGNED type of int width or narrower? Then both go to
+    // long. A char, a byte and a ushort convert to uint instead and stay there.
+    function csProUintMeets(l, r) {
+        var other = (csSzW(l) == 32 && csSzU(l)) ? r : l
+        if (csIsChar(other)) { return false }
+        if (!szIs(other)) { return true }      // a plain number is an `int`
+        if (other.u) { return false }
+        return other.w <= 32
+    }
+    // csI is the int reading of any integral operand.
+    function csI(v) { return szNum(csNumD(v)) | 0 }
+    // System.DivideByZeroException / the rest of the System hierarchy, thrown
+    // rather than failed, so a program can catch it. interp-core's exception
+    // protocol is {__exc: true, v: <thrown value>}.
+    // The BCL exception types are plain objects carrying __excname and Message
+    // (see csBclExcNames further down), which is the shape `new
+    // DivideByZeroException(msg)` builds and the shape a catch clause reads.
+    function csThrowExc(clsName, msg) {
+        throw {__exc: true, v: {__excname: clsName, Message: msg}}
+    }
+    // (a * b) mod 2^32. `(a * b) | 0` is WRONG: the exact product needs up to 62
+    // bits and a double keeps only 53, so the low bits - the only ones that
+    // survive - are already gone by the time |0 runs.
+    function csMul32(a, b) {
+        var ah = (a >>> 16) & 65535
+        var al = a & 65535
+        var bh = (b >>> 16) & 65535
+        var bl = b & 65535
+        return (((ah * bl + al * bh) << 16) + al * bl) | 0
+    }
+    // One binary arithmetic or bitwise operator on two INTEGRAL operands, at the
+    // promoted type and wrapping to it (unchecked).
+    function csArith(op, l, r) {
+        var w = csProW(l, r)
+        var u = csProU(l, r)
+        if (w != 32 || u) {
+            var a = csBox(l, w, u)
+            var b = csBox(r, w, u)
+            if ((op == "/" || op == "%") && i64IsZero(b.p)) {
+                csThrowExc("DivideByZeroException", "Attempted to divide by zero.")
+            }
+            var res = szArith(op, a, b)
+            return szIs(res) ? res : szMake(i64FromNum(res), w, u)
+        }
+        var x = csI(l)
+        var y = csI(r)
+        if (op == "+") return (x + y) | 0
+        if (op == "-") return (x - y) | 0
+        if (op == "*") return csMul32(x, y)
+        if (op == "/") {
+            if (y == 0) { csThrowExc("DivideByZeroException", "Attempted to divide by zero.") }
+            // int.MinValue / -1 overflows. ECMA-334 12.9.3 leaves the UNCHECKED
+            // outcome implementation-defined between an OverflowException and
+            // "the resulting value being that of the left operand"; the second is
+            // what |0 gives, and it is what the Java half does too.
+            return (x / y) | 0
+        }
+        if (op == "%") {
+            if (y == 0) { csThrowExc("DivideByZeroException", "Attempted to divide by zero.") }
+            return (x % y) | 0
+        }
+        if (op == "&") return x & y
+        if (op == "|") return x | y
+        if (op == "^") return x ^ y
+        return undefined
+    }
+    // A shift's result type is the LEFT operand's alone after unary promotion
+    // (ECMA-334 12.11: sbyte/byte/short/ushort/char all become int), and the COUNT
+    // is MASKED - & 31 for an int/uint, & 63 for a long/ulong. So `1 << 32` is 1.
+    // `>>` on an UNSIGNED type is the logical shift, which is how C# spells what
+    // Java writes as `>>>`; C# 11's own `>>>` is the same operation on a signed
+    // one.
+    function csShift(op, l, r) {
+        var n = csI(r)
+        var w = csSzW(l) == 64 ? 64 : 32
+        var u = csSzW(l) >= 32 ? csSzU(l) : false
+        var a = csBox(l, w, u)
+        var m = w == 64 ? (n & 63) : (n & 31)
+        if (op == ">>>") {
+            var res0 = szArith(">>", szConv(a, w, true), m)
+            var back = szConv(res0, w, u)
+            return (w == 32 && !u) ? szNum(back) | 0 : (szIs(back) ? back : szMake(i64FromNum(back), w, u))
+        }
+        var res = szArith(op == "<<" ? "<<" : ">>", a, m)
+        if (w == 32 && !u) { return szNum(res) | 0 }
+        return szIs(res) ? res : szMake(i64FromNum(res), w, u)
+    }
+    // The ordered comparison, at the PROMOTED type. szCmp on its own is not
+    // usable: it compares at the widest operand's width, so `byte b = 5;
+    // b < 1000` would truncate 1000 to a byte and answer false.
+    function csCmp(op, l, r) {
+        var w = csProW(l, r)
+        var u = csProU(l, r)
+        var c = 0
+        if (w != 32 || u) {
+            c = szCmp(csBox(l, w, u), csBox(r, w, u))
+        } else {
+            var a = csI(l)
+            var b = csI(r)
+            c = a < b ? 0 - 1 : (a > b ? 1 : 0)
+        }
+        if (op == "<") return c < 0
+        if (op == ">") return c > 0
+        if (op == "<=") return c <= 0
+        return c >= 0
+    }
+    // ----- conversions -----
+    // The width and signedness of every C# integral type name. C#'s `byte` is
+    // UNSIGNED (0..255) and `sbyte` is the signed one - the opposite of Java,
+    // and the single most common way to get this wrong.
+    var csTypeW = {"sbyte": 8, "byte": 8, "short": 16, "ushort": 16,
+                   "int": 32, "uint": 32, "long": 64, "ulong": 64,
+                   "nint": 64, "nuint": 64}
+    var csTypeU = {"sbyte": false, "byte": true, "short": false, "ushort": true,
+                   "int": false, "uint": true, "long": false, "ulong": true,
+                   "nint": false, "nuint": true}
+    var csULongMaxP = i64Make(0xffffffff, 0xffffffff)
+    var csLongMaxP = i64Make(0x7fffffff, 0xffffffff)
+    var csLongMinP = i64Make(0x80000000, 0)
+    function csTruncF(n) { return n < 0 ? 0 - Math.floor(0 - n) : Math.floor(n) }
+    // An explicit conversion to an integral type. An INTEGRAL source is a pure bit
+    // truncation (unchecked); a FLOATING POINT source is "undefined behaviour" in
+    // ECMA-334 12.3.2 when the value does not fit, and the CLR's conv.i8 leaves an
+    // unspecified value there - so this saturates, which is at least deterministic
+    // and is what both halves do.
+    function csConvTo(v, w, u) {
+        if (csIsFlo(v)) {
+            var n = v.__flo
+            if (n !== n) { n = 0 }
+            var p = csLongMinP
+            if (n >= 18446744073709551616) { p = csULongMaxP }
+            else if (n >= 9223372036854775808) { p = u ? i64FromNum(csTruncF(n)) : csLongMaxP }
+            else if (n < 0 - 9223372036854775808) { p = csLongMinP }
+            else { p = i64FromNum(csTruncF(n)) }
+            return csNorm(p, w, u)
+        }
+        var q = szIs(v) ? v.p : i64FromNum(csNumD(v))
+        return csNorm(q, w, u)
+    }
+    // csNorm applies the invariant: a signed 32 bit result is a PLAIN NUMBER,
+    // everything else is a box (unlike szNorm, which unboxes at 64 bits).
+    function csNorm(p, w, u) {
+        if (w == 32 && !u) { return szNum(szNorm(p, 32, false)) | 0 }
+        return szMake(i64Trunc(p, w, u), w, u)
+    }
+    // int.Parse / long.Parse / uint.Parse ...: a decimal digit run with an
+    // optional sign, and a System.FormatException on anything else.
+    function csParseInt(s, w, u) {
+        var t = stripWs("" + s)
+        var neg = false
+        if (t.charAt(0) == "+" || t.charAt(0) == "-") { neg = t.charAt(0) == "-"; t = t.substring(1) }
+        if (t.length == 0) { csThrowExc("FormatException", "The input string was not in a correct format.") }
+        for (var i = 0; i < t.length; i++) {
+            var c = t.charCodeAt(i)
+            if (c < 48 || c > 57) { csThrowExc("FormatException", "The input string was not in a correct format.") }
+        }
+        var p = i64FromStr(t)
+        if (neg) { p = i64Neg(p) }
+        return csNorm(p, w, u)
+    }
     // double.ToString() under the invariant culture (ECMA-335 / .NET "G"): the
     // shortest round-tripping digits, NO trailing ".0" for an integral value, and the
     // NumberFormatInfo.InvariantInfo symbols "Infinity" / "-Infinity" / "NaN".
@@ -1203,6 +1476,10 @@ KwLet       = "let" KwEnd ;
         if (csIsChar(r) && typeof l == "string") { return l.length == 1 && l.charCodeAt(0) === r.__char }
         if (csIsChar(l) && csIsChar(r)) { return l.__char === r.__char }
         if (csIsFlo(l) || csIsFlo(r)) { return csNumD(l) === csNumD(r) }
+        // Two integral operands compare by VALUE at their promoted type, so a
+        // uint and a long that hold the same number are equal and two different
+        // boxes holding 5 are not two different objects.
+        if (csIsIntegral(l) && csIsIntegral(r)) { return csCmp("<=", l, r) && csCmp(">=", l, r) }
         if (l === r) { return true }
         // Records and tuples compare by VALUE in C#, not by identity.
         if (csIsRecObj(l) && csIsRecObj(r)) { return csRecEq(l, r) }
@@ -1271,6 +1548,14 @@ KwLet       = "let" KwEnd ;
         if (typeof e == "string") return "System.String"
         if (csIsChar(e)) return "System.Char"
         if (csIsFlo(e)) return "System.Double"
+        // A sized integer carries its own type, so long[] / uint[] / byte[] are
+        // the one array kind whose element type is not a guess.
+        if (csIsSz(e)) {
+            if (e.w == 64) { return e.u ? "System.UInt64" : "System.Int64" }
+            if (e.w == 32) { return "System.UInt32" }
+            if (e.w == 16) { return e.u ? "System.UInt16" : "System.Int16" }
+            return e.u ? "System.Byte" : "System.SByte"
+        }
         if (typeof e == "number") return "System.Int32"
         return ""
     }
@@ -1302,6 +1587,9 @@ KwLet       = "let" KwEnd ;
         if (typeof v == "string") return v
         if (csIsChar(v)) return String.fromCharCode(v.__char)
         if (csIsFlo(v)) return csFloStr(v.__flo)
+        // A sized integer prints its exact digits, unsigned where its type is;
+        // "" + v would print [object Object] and szNum would round above 2^53.
+        if (typeof v == "object" && v.__sz === true) return szStr(v)
         if (Array.isArray(v)) return csArrayName(v)
         if (typeof v == "object") {
             var m = csFindToStr(v)
@@ -1322,12 +1610,21 @@ KwLet       = "let" KwEnd ;
         // 'f += g' on delegates combines their invocation lists.
         if (csHasDeleg && csIsDelegVal(r)) { return csDelegAdd(l, r) }
         if (csIsFlo(l) || csIsFlo(r)) { return csFlo(csNumD(l) + csNumD(r)) }
+        // Two integral operands add at their PROMOTED type and wrap to it.
+        if (csIsIntegral(l) && csIsIntegral(r)) { return csArith("+", l, r) }
         var a = anytype
         var b = anytype
         a = csNumV(l)
         b = csNumV(r)
         if ((a | 0) == a && (b | 0) == b) { return (a + b) | 0 }
         return a + b
+    }
+    // Is this an operand of INTEGER arithmetic (rather than a string, a bool, a
+    // reference)? A char counts - C#'s char is an integral type.
+    function csIsIntegral(v) {
+        if (typeof v == "number") { return true }
+        if (v === null || v === undefined || typeof v != "object") { return false }
+        return v.__sz === true || v.__char !== undefined
     }
 
     // Dictionaries (isDict/dictFind/dictSet) mirror the compiled runtime's js_dict
@@ -1765,6 +2062,9 @@ KwLet       = "let" KwEnd ;
     function csStep(v, d) {
         if (csIsFlo(v)) { return csFlo(v.__flo + d) }
         if (csIsChar(v)) { return csChar((v.__char + d) & 65535) }
+        // A sized operand steps at ITS OWN type and wraps there (ECMA-334 12.8.15:
+        // `x++` is `x = (T)(x + 1)`), so `byte b = 255; b++` is 0.
+        if (csIsSz(v)) { return csConvTo(csArith("+", v, d), v.w, v.u) }
         return (v + d) | 0
     }
     function makeIncDec(items, pre) {
@@ -1964,17 +2264,27 @@ KwLet       = "let" KwEnd ;
                 var f = csConvOf(v, t)
                 if (f != undefined) { v = f(v) }
             }
-            if (t == "char") { return csChar(csNumD(v) | 0) }
-            if (t == "byte" || t == "sbyte") { return csNumD(v) & 255 }
-            if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short" || t == "ushort") {
-                return csNumD(v) | 0
-            }
+            // (char) narrows to 16 UNSIGNED bits; the integral casts narrow to
+            // their own width and signedness, so (byte)300 is 44, (sbyte)200 is
+            // -56 and (uint)-1 is 4294967295.
+            if (t == "char") { return csChar(szNum(csConvTo(v, 16, true)) & 65535) }
+            if (hasOwn(csTypeW, t)) { return csConvTo(v, csTypeW[t], csTypeU[t]) }
             if (t == "double" || t == "float" || t == "decimal") { return csFlo(csNumD(v)) }
             return v
         }
     }
-    // ~v flips the 32-bit representation (JS ~).
-    function makeBitNot(t) { return function() { return ~t() } }
+    // ~v is the complement at the PROMOTED type (ECMA-334 12.4.7.2): int for a
+    // byte/sbyte/short/ushort/char/int, and the operand's own type for
+    // uint/long/ulong. A plain JS ~ was always the 32 bit signed one.
+    function makeBitNot(t) {
+        return function() {
+            var v = t()
+            var w = csSzW(v)
+            var u = csSzU(v)
+            if (w == 64 || (w == 32 && u)) { return szMake(i64Trunc(i64Not(csBox(v, w, u).p), w, u), w, u) }
+            return ~csI(v)
+        }
+    }
     // 'a ?? b ?? c': the first operand that is not null wins; the rest never runs.
     function makeNullCoal(items, pos) {
         if (items.length == 1) { return items[0] }
@@ -2193,16 +2503,55 @@ KwLet       = "let" KwEnd ;
         s = stripWs(s)
         var t = ""
         for (var i = 0; i < s.length; i++) { if (s.charAt(i) != "_") { t = t + s.charAt(i) } }
-        if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) { return parseInt(t.substring(2), 16) }
-        if (t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "b" || t.charAt(1) == "B")) { return parseInt(t.substring(2), 2) }
+        var hex = t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")
+        var bin = t.length >= 2 && t.charAt(0) == "0" && (t.charAt(1) == "b" || t.charAt(1) == "B")
         // A real literal is a DOUBLE: a '.' fraction, an exponent, or one of the
-        // f/F/d/D/m/M suffixes (ECMA-334 6.4.5.3).
+        // f/F/d/D/m/M suffixes (ECMA-334 6.4.5.3). A hex/binary literal is never
+        // real, so its 'e'/'d'/'f' digits must not be mistaken for one.
         var lastc = t.charAt(t.length - 1)
-        var isReal = t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0
-                     || lastc == "f" || lastc == "F" || lastc == "d" || lastc == "D"
-                     || lastc == "m" || lastc == "M"
-        if (isReal) { return csFlo(parseFloat(t)) }
-        return parseInt(t, 10)
+        if (!hex && !bin) {
+            var isReal = t.indexOf(".") >= 0 || t.indexOf("e") >= 0 || t.indexOf("E") >= 0
+                         || lastc == "f" || lastc == "F" || lastc == "d" || lastc == "D"
+                         || lastc == "m" || lastc == "M"
+            if (isReal) { return csFlo(parseFloat(t)) }
+        }
+        // An INTEGER literal's type follows its SUFFIX and its value (ECMA-334
+        // 6.4.5.3): with no suffix it is the first of int, uint, long, ulong that
+        // the value fits; U makes it uint or ulong; L makes it long or ulong; UL
+        // makes it ulong. The digits are accumulated EXACTLY - parseInt goes
+        // through a double, which rounds 9223372036854775807 to
+        // 9223372036854775808 and does it DIFFERENTLY in the two script engines,
+        // so the goja and -frozen runs of one program disagreed.
+        var hasU = false
+        var hasL = false
+        var body = t
+        while (body.length > 0) {
+            var c = body.charAt(body.length - 1)
+            if (c == "u" || c == "U") { hasU = true; body = body.substring(0, body.length - 1) }
+            else if (c == "l" || c == "L") { hasL = true; body = body.substring(0, body.length - 1) }
+            else { break }
+        }
+        var p = i64Make(0, 0)
+        if (hex) { p = i64FromRadix(body.substring(2), 16) }
+        else if (bin) { p = i64FromRadix(body.substring(2), 2) }
+        else { p = i64FromStr(body) }
+        return csLitType(p, hasU, hasL)
+    }
+    // The smallest of the four types the literal's suffix allows that HOLDS it.
+    // The digit run is UNSIGNED, so the range tests have to be unsigned too: an
+    // all-ones pair is 18446744073709551615 here and not -1, and a signed
+    // round-trip test would have called it an int.
+    function csLitType(p, hasU, hasL) {
+        var fitsInt = i64CmpU(p, i64Make(0, 0x7fffffff)) <= 0
+        var fitsUInt = i64CmpU(p, i64Make(0, 0xffffffff)) <= 0
+        var fitsLong = i64CmpU(p, i64Make(0x7fffffff, 0xffffffff)) <= 0
+        if (hasU && hasL) { return szMake(p, 64, true) }
+        if (hasU) { return fitsUInt ? szMake(p, 32, true) : szMake(p, 64, true) }
+        if (hasL) { return fitsLong ? szMake(p, 64, false) : szMake(p, 64, true) }
+        if (fitsInt) { return szNum(szNorm(p, 32, false)) | 0 }
+        if (fitsUInt) { return szMake(p, 32, true) }
+        if (fitsLong) { return szMake(p, 64, false) }
+        return szMake(p, 64, true)
     }
 
     // 'lock (e) s': run the guard (keeping its calls), then the guarded statement.
@@ -3529,6 +3878,19 @@ KwLet       = "let" KwEnd ;
             var fr = csFloOp(op, l0, r0)
             if (fr !== undefined) { return fr }
         }
+        // == / != compare a char against the one-character string it renders as too, so a
+        // char that has come out of a string (s[i], .ToString()) still compares equal.
+        if (op == "==") return csEq(l0, r0)
+        if (op == "!=") return !csEq(l0, r0)
+        // Every INTEGRAL operator routes through csArith / csShift / csCmp, which
+        // apply the ECMA-334 12.4.7.3 promotion (ulong / long / uint / int) and
+        // wrap at the promoted type - so the whole width story lives in one place.
+        if (csIsIntegral(l0) && csIsIntegral(r0)) {
+            if (op == "<<" || op == ">>" || op == ">>>") { return csShift(op, l0, r0) }
+            if (op == "<" || op == ">" || op == "<=" || op == ">=") { return csCmp(op, l0, r0) }
+            var ar = csArith(op, l0, r0)
+            if (ar !== undefined) { return ar }
+        }
         var l = anytype
         var r = anytype
         l = csNumV(l0)
@@ -3537,36 +3899,44 @@ KwLet       = "let" KwEnd ;
         if (op == "*") return (l * r) | 0
         if (op == "/") return (l / r) | 0
         if (op == "%") return (l % r) | 0
-        // == / != compare a char against the one-character string it renders as too, so a
-        // char that has come out of a string (s[i], .ToString()) still compares equal.
-        if (op == "==") return csEq(l0, r0)
-        if (op == "!=") return !csEq(l0, r0)
         if (op == "<")  return l < r
         if (op == ">")  return l > r
         if (op == "<=") return l <= r
         if (op == ">=") return l >= r
-        if (op == "|")  return l | r
-        if (op == "^")  return l ^ r
-        if (op == "&")  return l & r
+        // & | ^ on two bools are C#'s non-short-circuit boolean operators.
+        if (op == "|")  { if (typeof l == "boolean" && typeof r == "boolean") { return l || r } return l | r }
+        if (op == "^")  { if (typeof l == "boolean" && typeof r == "boolean") { return l != r } return l ^ r }
+        if (op == "&")  { if (typeof l == "boolean" && typeof r == "boolean") { return l && r } return l & r }
         if (op == "<<") return l << r
         if (op == ">>") return l >> r
     }
-    var csCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%"}
+    var csCompound = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
+                      "&=": "&", "|=": "|", "^=": "^", "<<=": "<<", ">>=": ">>", ">>>=": ">>>"}
+    // A compound assignment carries an IMPLICIT CAST back to the LEFT operand's
+    // type (ECMA-334 12.21.4: `x op= y` is `x = (T)(x op y)`), so `byte b = 250;
+    // b += 10` is (byte)260 == 4 and `int i = 5; i += 1.5` is (int)6.5 == 6. The
+    // declared width is on the value, so it is there to convert back to.
+    function csNarrowLike(a, v) {
+        if (csIsFlo(a)) { return csIsFlo(v) ? v : csFlo(csNumD(v)) }
+        if (csIsChar(a)) { return csChar(csI(v) & 65535) }
+        if (csIsSz(a)) { return csConvTo(v, a.w, a.u) }
+        if (typeof a == "number") { return csConvTo(v, 32, false) }
+        return v
+    }
     applyOp = function(op, a, b) {
-        // A double on either side makes the compound operator floating point too.
-        if ((csIsFlo(a) || csIsFlo(b)) && hasOwn(csCompound, op)) { return binOp(csCompound[op], a, b) }
-        if (op == "+=") return core.add(a, b)
         // 'f -= g' on delegates removes g from the invocation list.
         if (op == "-=" && csHasDeleg && csIsDelegVal(b)) { return csDelegSub(a, b) }
-        if (op == "-=") return (a - b) | 0
-        if (op == "*=") return (a * b) | 0
-        if (op == "/=") return (a / b) | 0
-        if (op == "%=") return (a % b) | 0
-        if (op == "&=") return a & b
-        if (op == "|=") return a | b
-        if (op == "^=") return a ^ b
-        if (op == "<<=") return a << b
-        if (op == ">>=") return a >> b
+        var bop = hasOwn(csCompound, op) ? csCompound[op] : ""
+        if (bop != "") {
+            var v = (bop == "+") ? core.add(a, b) : binOp(bop, a, b)
+            // Only a NUMERIC left operand converts back; `s += 1` on a string is
+            // the concatenation and keeps its result, and so does a delegate.
+            if (typeof v == "number" || (v !== null && v !== undefined && typeof v == "object" && (v.__sz === true || v.__flo !== undefined || v.__char !== undefined))) {
+                return csNarrowLike(a, v)
+            }
+            return v
+        }
+        return undefined
     }
 
     // Unary '-' and '!' may be overloaded too.
@@ -3578,10 +3948,14 @@ KwLet       = "let" KwEnd ;
                 var f = csFindAcc(v, "__op1_-")
                 if (f != undefined) { return f(v) }
             }
-            // -x keeps the operand's type: a double negates as a double (so -0.0
-            // and -1.0/0.0 are real), everything else as an int32.
+            // -x keeps the operand's type after UNARY promotion (ECMA-334 12.4.7.2):
+            // a double negates as a double (so -0.0 and -1.0/0.0 are real), a long
+            // as a long, a uint as a LONG (because -uint.MaxValue does not fit in a
+            // uint), and everything narrower as an int.
             if (csIsFlo(v)) { return csFlo(csNegF(v.__flo)) }
-            return (0 - csNumV(v)) | 0
+            if (csSzW(v) == 64) { return csArith("-", csBox(0, 64, csSzU(v)), v) }
+            if (csSzW(v) == 32 && csSzU(v)) { return csArith("-", csBox(0, 64, false), csBox(v, 64, false)) }
+            return (0 - csI(v)) | 0
         }
     }
     makeNot = function(t) {
@@ -3600,7 +3974,13 @@ KwLet       = "let" KwEnd ;
     function csImplicitConv(ty, v) {
         // A double/float/decimal declaration CONVERTS its initializer (ECMA-334
         // 10.2.3, implicit numeric conversion): `double d = 1;` holds 1.0.
-        if ((ty == "double" || ty == "float" || ty == "decimal") && typeof v == "number") { return csFlo(v) }
+        if ((ty == "double" || ty == "float" || ty == "decimal") && (typeof v == "number" || csIsSz(v))) { return csFlo(csNumD(v)) }
+        // An INTEGRAL declared type puts its width AND signedness on the value,
+        // which is what makes `long t = 1; t = t * 1000000 * 1000000` stay 64 bit
+        // and `byte b = 250; b += 10` wrap to 4. `uint u = 4294967295` needs it
+        // too: without the declared type the literal is already a uint, but
+        // `uint u = 5` would otherwise stay a signed int.
+        if (hasOwn(csTypeW, ty) && csIsIntegral(v)) { return csConvTo(v, csTypeW[ty], csTypeU[ty]) }
         if (!csHasOps) { return v }
         if (v !== null && v !== undefined && typeof v == "object" && v.__class != undefined) { return v }
         var cls = hasOwn(globalScope, ty) ? globalScope[ty] : undefined
