@@ -1,11 +1,15 @@
-/* Kotlin widened syntax that is PARSED but not fully lowered. Modifiers and
- * annotations (no args) are parsed and ignored; `as` casts, `is` type tests and
- * raw strings are genuine now; an `enum class` is recognised but not implemented.
- * Without flags the compile stops at the first unimplemented construct with a
- * clean file:line message (this file SHOULD fail by default). With
- * -warn-unsupported the enum is warned and skipped, so the program runs and
- * self-checks: main() ends with exitProcess(fails). (try/catch/finally and throw
- * are implemented - see kotlin-test-try.kt.) **/
+/* Kotlin widened syntax. Modifiers and annotations (no args) are parsed and
+ * ignored; `as` casts, `is` type tests, raw strings and `enum class` are all
+ * genuine now, in the interpreter and the compiler alike, so the file runs and
+ * self-checks with or without -warn-unsupported: main() ends with
+ * exitProcess(fails). (try/catch/finally and throw are implemented - see
+ * kotlin-test-try.kt.)
+ *
+ * History: this file used to be a by-design SHOULD-FAIL guard, because the
+ * `enum class` below was recognised but not lowered and aborted a flagless run.
+ * The full-syntax work implemented it, which removed the guard's premise, so the
+ * matrix entry became an ordinary one. The still-red guards are widen2 (which
+ * keeps a genuinely unimplemented declaration) and the recognition tests. **/
 
 @Deprecated
 public fun twice(x: Int): Int = x * 2

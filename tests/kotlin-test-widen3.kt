@@ -1,9 +1,12 @@
 /* Compact self-check for the Kotlin parse-surface widenings, in a small geometry theme
- * deliberately unlike any real application. The GENUINE constructs are asserted; the
- * recognised-but-not-lowered one - the abstract (bodiless) member function - is only
- * present so it parses. Run with -warn-unsupported: it warns and main() runs to
- * exitProcess(fails), which is 0 when every check passes. SHOULD FAIL by default: it
- * aborts at that not-implemented construct.
+ * deliberately unlike any real application. Every construct here is genuine now and is
+ * asserted, including the abstract (bodiless) member function, which the full-syntax
+ * work implemented. main() runs to exitProcess(fails), which is 0 when every check
+ * passes, with or without -warn-unsupported.
+ *
+ * History: the abstract member used to be recognised-but-not-lowered, which made a
+ * flagless run abort, so this file was a by-design SHOULD-FAIL guard. Implementing it
+ * removed that premise and the matrix entry became an ordinary one.
  *
  * Covers: labelled receiver this@Box; calls with a trailing lambda, the no-paren form,
  * and explicit type arguments (top-level and method); `when` with a val-binding subject

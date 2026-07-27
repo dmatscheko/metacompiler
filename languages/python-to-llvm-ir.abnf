@@ -1,54 +1,77 @@
 :title("Python (subset) to LLVM IR compiler") ;
-:description("Compiles a Python subset - with significant indentation - to an LLVM IR
-module and runs it with the built-in IR interpreter and the MetaJS handle runtime
-(llvm.RunJS).
+:description("Compiles a large Python subset - with significant indentation - to an
+LLVM IR module and runs it with the built-in IR interpreter and the MetaJS handle
+runtime (llvm.RunJS).
 
 The blocks are recognized with real INDENT/DEDENT handling: :script() rules keep an
 indentation stack on the persistent parser stack, a suite is ':' NEWLINE INDENT
 statements DEDENT, and every statement checks that it starts at the level of its block.
-Comments (#) and blank lines are skipped by the newline rule. Indentation must use
+The one-line form (if c: x = 1) and semicolon separated small statements are accepted
+too. Comments (#) and blank lines are skipped by the newline rule. Indentation must use
 spaces (no tabs).
 
-The language: def functions (top level, with positional parameters), if/elif/else,
-while, for x in <list, dict (its keys), string (its chars) or range(a[,b])>,
-break/continue/pass/return, assignment and
-+= -= *= /= (assignment creates a variable in the current function if none exists in
-scope - there is no 'global' keyword; use a mutable list like fails = [0] for counters),
-lists with negative indexing, element assignment, .append()/.pop(), dicts with
-insertion order ({'a': 1}, d[k] get/set, in tests keys, len(), .keys()/.values()/
-.get(k[, default]), the counts[w] = counts.get(w, 0) + 1 idiom), the list() builtin (a fresh list from any iterable), slicing of lists
-and strings (s[1:3], s[:2], s[-3:]; no step), list comprehensions
-([x * x for x in xs if x % 2 == 0]; the variable does not leak), len(), in / not in
-membership tests on lists, strings and dicts, f-strings (f'x={a + 1}' renders like
-str()), print() with
-Python style rendering (True/None/[1, 2]/{'a': 1}), True/False/None, and/or/not with
-Python
-truthiness (empty lists and dicts are falsy) and operand values, comparisons (no
-chaining),
-+ - * % with float semantics, / as true division (7/2 == 3.5), // as floor division
-(-7//2 == -4), % as floor modulo (-7%2 == 1), unary -, int and float literals, and
-single or double quoted strings with escapes.
+Statements: def (nested, closures, decorators, PEP 695 type parameters), async def
+(compiled as a plain function - there is no event loop, so await is the identity on its
+operand), class, if/elif/else, while and for (both with the trailing else that runs when
+the loop was not broken), break/continue/pass/return, try/except/else/finally, raise,
+with, assert, global/nonlocal, del, import, plain / parallel / augmented / annotated
+assignment, and the walrus operator.
 
-Lambdas, nested defs and lexical closures are supported (js_closure captures the
-defining scope as the emitted function's env).
+Functions: positional parameters, default values (evaluated once, where the def runs),
+*args, **kwargs, keyword-only parameters after a '*' and the '/' positional-only marker.
+Calls take positional, keyword and *seq / **map arguments; the def registers its
+parameter shape (js_pysig) and the call site's keyword dict is bound to it at run time
+(pyBindCall).
 
-Not in the subset: classes, tuples,
-comparison chaining, slice assignment and slice steps, dict comprehensions,
-for-else, imports, and
-list/dict equality by value (== compares them by identity).
+Classes: single AND multiple inheritance, with the MRO C3-linearized once when the class
+object is built, so attribute reads and method calls stay a flat walk. The class body is
+a suite that runs in a scope of its own, and everything it binds becomes a class member
+(methods, class attributes, __slots__). Instance and class attribute reads follow
+Python's order and run a __get__ / __set__ descriptor found on the class; __slots__
+rejects an undeclared attribute. isinstance(), type() and the operator dunders (__add__,
+__eq__, __lt__, __getitem__, __setitem__, __contains__, __len__, __call__, __neg__,
+__matmul__ and the reflected forms) are all dispatched. The builtin exception types are
+ordinary classes, so 'class MyError(Exception)' is nothing special.
+
+Generators are REAL: a def whose body contains a yield becomes a generator function
+(js_genfn), its body runs on its own goroutine and yield is a suspending handshake -
+never a replay. yield from, send() and StopIteration carrying the return value all work.
+Generator expressions parse (parenthesized and as the sole argument of a call) but are
+materialized eagerly.
+
+Values and expressions: int and float literals, single, double and triple quoted strings
+with escapes, f-strings (f'x={a + 1}' renders like str()), True/False/None, the Ellipsis
+'...', lists with negative indexing and slices (s[1:3], s[:2], s[-3:]; no step), tuples
+(this subset has ONE sequence type - a tuple is a list that is not written to), dicts
+with insertion order, list and dict comprehensions (the variable does not leak),
+comparison chaining evaluating each operand once, and/or/not with Python truthiness
+(empty containers are falsy) and operand values, in / not in, is / is not, + - * / // %
+with Python semantics (7/2 == 3.5, -7//2 == -4, -7%2 == 1), unary -, and the @ matrix
+operator (which only ever reaches __matmul__).
+
+Still missing: sets, the match statement, hexadecimal / octal / binary / underscored /
+imaginary number literals, bytes and raw string literals, f-string format specifiers,
+starred assignment targets (a, *b = ...), slice steps and slice assignment, the ** power
+and the bitwise / shift operators, PEP 695 type aliases, except* and ExceptionGroup, and
+bare 'raise' re-raise / 'raise X from e' cause chaining. An except clause matches
+everything: the exception TYPE is parsed and dropped, and only the first handler of a
+try statement is kept.
 
 Functions become IR functions jsf_N(env, args); Python scoping (assignment creates a
 function local unless the name exists) goes through the js_pyset_var external, negative
 indexing and dict entries through js_pyget/js_pyset, dicts through js_dict_new (two
 parallel key/value arrays keep the insertion order), slices through js_pyslice,
 iteration through js_pyiter, len through js_pylen, floor division and modulo through
-js_fdiv/js_fmod,
-truthiness (empty lists and dicts are falsy) through js_pytruthy, and print/f-strings
-through js_pyprint/js_pystr.
-The whole file becomes jsmain(env, args) and simply runs top to bottom. Self checking
-programs end with exit(fails[0]).
-The same language with the same semantics is interpreted directly by
-python-interpreter.abnf.") ;
+js_fdiv/js_fmod, truthiness through js_pytruthy, every user visible operator through the
+js_pybin dispatcher (which gives a user class the chance to answer it with a dunder),
+classes through js_pyclass_new/js_pyclass_fill/js_pygetattr/js_pysetattr/js_pymcall/
+js_pycall, exceptions through js_throw/js_try, and print/f-strings through
+js_pyprint/js_pystr.
+The whole file becomes jsmain(env, args) and simply runs top to bottom; a top-level
+main() is then entered and its return value becomes the exit status.
+The same language is interpreted directly by python-interpreter.abnf, which does not
+reach quite as far - it has no goroutine to suspend, so its generators cannot be the
+real thing.") ;
 
 
 // --- main rules
@@ -87,15 +110,28 @@ KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
 Statement   <~~ push(stmtPos(pop())) ~~>
-            = If | While | For | TryStmt | With | Class | Decorated | AsyncDef | Def | SmallLine ;
+            = If | While | For | TryStmt | With | Decorated | DefLike | SmallLine ;
 
-SmallLine   = ( Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
-              | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ) NL ;
+// class / def / async def push {dname, dstmt}: the NAME is what a decorator
+// chain has to rebind, so the definition carries it. Used undecorated, only the
+// statement thunk survives.
+DefLike     <~~ push(pop().dstmt) ~~>
+            = Class | AsyncDef | Def ;
+
+// One logical line of small statements: 'a = 1; b = 2' is one line with two of
+// them (a trailing ';' is allowed), so the line pushes ONE sequence thunk.
+SmallLine   <~~ push(makeSeq(takeAll())) ~~>
+            = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
+SmallStmt   = Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del
+            | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ;
 
 // A suite: ':' NEWLINE INDENT statements DEDENT. Every further statement of the
 // suite starts at the same level; the first one defined the level via Indent.
+// Python also allows the inline form 'if c: x = 1' - a ':' followed by a single
+// line of small statements; it is tried second (a real block has a NEWLINE right
+// after the ':', so the indented alternative fails fast on the inline form).
 Suite       <~~ push(makeSeq(takeAll())) ~~>
-            = ":" NL Indent Statement { SameLevel Statement } Dedent ;
+            = ":" ( NL Indent Statement { SameLevel Statement } Dedent | SmallLine ) ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = "if" KwEnd Expression Suite { Elif } [ Else ] ;
@@ -104,54 +140,73 @@ Elif        <~~ push(makeElif(pop(), pop())) ~~>
 Else        <~~ push(makeElse(pop())) ~~>
             = SameLevel "else" KwEnd Suite ;
 
-While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = "while" KwEnd Expression Suite ;
+While       <~~ push(makeWhile(takeAll())) ~~>
+            = "while" KwEnd Expression Suite [ Else ] ;
 
 // for x in ITER: a single name (genuinely compiled). A tuple target
 // (for a, b in ...  /  for (a, b) in ...) is accepted and reported as not
 // implemented (the subset has no tuple unpacking in the loop head).
+// A trailing 'else' on a loop runs when the loop ended WITHOUT a break, so it
+// hangs off the natural exit while break jumps past it.
 For         = ForOne | ForTup ;
-ForOne      <~~ push(makeFor(pop(), pop(), pop())) ~~>
-            = "for" KwEnd Id <~~ push(up.in) ~~> "in" KwEnd Expression Suite ;
+ForOne      <~~ push(makeFor(takeAll())) ~~>
+            = [ "async" KwEnd ] "for" KwEnd Id <~~ push({fvar: up.in}) ~~> "in" KwEnd Expression Suite [ Else ] ;
 ForTup      <~~ takeAll(); push(notImplStmt("for-loop tuple unpacking", up.pos)) ~~>
-            = "for" KwEnd ForTargets "in" KwEnd Expression Suite ;
+            = [ "async" KwEnd ] "for" KwEnd ForTargets "in" KwEnd Expression Suite [ Else ] ;
 ForTargets  = "(" Id { "," Id } [ "," ] ")" | Id "," Id { "," Id } [ "," ] ;
 
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
-            = "def" KwEnd Id <~~ push(up.in) ~~> ParamList [ "->" DiscardType ] Suite ;
+            = "def" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ParamList [ "->" DiscardType ] Suite ;
+// PEP 695 type parameters - def f[T](...) / class C[A, B] - parsed and ignored.
+TypeParams  = "[" TypeParam { "," TypeParam } [ "," ] "]" ;
+TypeParam   = [ "**" | "*" ] Id [ ":" DiscardType ] [ "=" DiscardType ] ;
 // Parameter lists: plain names, default values (evaluated once, when the def
-// statement runs - like real Python) and a *args rest parameter all work;
-// **kwargs, the bare '*' and '/' markers and keyword-only parameters after
-// *args are reported as not implemented. Annotations parse and are ignored.
+// statement runs - like real Python), a *args rest parameter, **kwargs, the bare
+// '*' and the '/' positional-only marker. Annotations parse and are ignored.
+// '/' has no runtime effect here (it only FORBIDS the keyword spelling, which no
+// correct program uses); everything after a '*' or '*args' is keyword-only.
 ParamList   <~~ push(makeParamList(takeAll())) ~~>
             = "(" [ Param { "," Param } [ "," ] ] ")" ;
 Param       = DblStarParam | StarParam | SlashParam | NamedParam ;
-DblStarParam <~~ push({pcomplex: true}) ~~>
-            = "**" [ Id [ ":" DiscardType ] ] ;
+DblStarParam <~~ push(makeKwParam(takeAll())) ~~>
+            = "**" [ Id <~~ push(up.in) ~~> [ ":" DiscardType ] ] ;
 StarParam   <~~ push(makeRestParam(takeAll())) ~~>
             = "*" [ Id <~~ push(up.in) ~~> [ ":" DiscardType ] ] ;
-SlashParam  <~~ push({pcomplex: true}) ~~>
+SlashParam  <~~ push({pslash: true}) ~~>
             = "/" ;
 NamedParam  <~~ push(makeNamedParam(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" DiscardType ] [ ParamDefault ] ;
 ParamDefault <~~ push({pdefault: pop()}) ~~>
             = "=" Expression ;
 
-// A decorated def / async-def / class: the decorators parse (their call
-// expressions are dropped) and the function/class is defined unwrapped.
-Decorated   = Decorator { SameLevel Decorator } SameLevel ( Def | AsyncDef | Class ) ;
-Decorator   = "@" DiscardExpr NL ;
+// A decorated def / async-def / class: every decorator expression is evaluated
+// where the definition runs and applied to the defined value bottom-up, then the
+// result is re-bound to the definition's name - real PEP 318 / PEP 614
+// semantics, so '@times(5)' and '@registry["t"]' work like any other call.
+Decorated   <~~ push(makeDecorated(takeAll())) ~~>
+            = Decorator { SameLevel Decorator } SameLevel ( Class | AsyncDef | Def ) ;
+Decorator   <~~ push({deco: pop()}) ~~>
+            = "@" Expression NL ;
 
-// class Name[(bases, metaclass=..., ...)]: SUITE - accepted structurally and
-// reported as not implemented (the subset has no user-defined classes). The base
-// list reuses the call-argument surface (positional bases, keyword and *unpacked
-// arguments); the whole body is parsed and dropped.
-Class       <~~ takeAll(); push(notImplStmt("class definition", up.pos)) ~~>
-            = "class" KwEnd Id [ "(" [ CallArg { "," CallArg } [ "," ] ] ")" ] Suite ;
+// class Name[(bases, metaclass=..., ...)]: SUITE. The body is a suite that runs
+// in a scope of its own; every name it binds becomes a class member (methods,
+// class attributes, __slots__ - a class body really is a statement sequence, so
+// 'for _step in range(3): limit += 20' inside one works). The bases are ordinary
+// expressions; the MRO is C3-linearized once, when the class object is built
+// (js_pyclass_new), so multiple inheritance costs nothing at lookup time.
+// Keyword arguments (metaclass=...) parse and are ignored.
+Class       <~~ push(makeClass(takeAll(), up.pos)) ~~>
+            = "class" KwEnd Id <~~ push({cname: up.in}) ~~> [ TypeParams ]
+              [ "(" [ ClassArg { "," ClassArg } [ "," ] ] ")" ] Suite ;
+ClassArg    = ClassKw | ClassBase ;
+ClassKw     <~~ pop() ~~>            = Id "=" Expression ;
+ClassBase   <~~ push({cbase: pop()}) ~~> = Expression ;
 
-// async def / await: accepted structurally, reported as not implemented.
-AsyncDef    <~~ takeAll(); push(notImplStmt("async def", up.pos)) ~~>
-            = "async" KwEnd "def" KwEnd Id ParamList [ "->" DiscardType ] Suite ;
+// async def: compiled as a plain def (the body runs synchronously). Only the
+// SYNTAX is in scope here - there is no event loop, so nothing awaits.
+AsyncDef    <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
+            = "async" KwEnd "def" KwEnd Id <~~ push(up.in) ~~> [ TypeParams ] ParamList
+              [ "->" DiscardType ] Suite ;
 
 // try/except/else/finally: accepted; under -warn-unsupported the try body (and a
 // finally body) run, so calls inside them stay visible. There is no exception
@@ -167,15 +222,18 @@ TryElse     <~~ push({elsebody: pop()}) ~~>
 TryFinally  <~~ push({finalbody: pop()}) ~~>
             = SameLevel "finally" KwEnd Suite ;
 
-// raise: accepted, reported as not implemented; the raised expression still runs.
+// raise EXPR: genuinely implemented (js_throw, recovered by the enclosing
+// js_try). A bare re-raise and the 'from CAUSE' chaining parse but are dropped.
 Raise       <~~ push(makeRaise(takeAll(), up.pos)) ~~>
             = "raise" KwEnd [ Expression [ KwFrom Expression ] ] ;
 
-// with EXPR [as TARGET]: a simple form - the context expression runs, the target
-// is bound to its value and the body runs (no __enter__/__exit__ protocol), so it
-// is reported as not implemented but stays visible under -warn-unsupported.
+// with EXPR [as TARGET]: the real context-manager protocol - __enter__ before the
+// body, __exit__ after it (and on the exception path, where a truthy answer
+// swallows the exception). A context expression that defines neither binds its own
+// value and just runs the body.
 With        <~~ push(makeWith(takeAll(), up.pos)) ~~>
-            = "with" KwEnd WithItem { "," WithItem } WithBody ;
+            = [ "async" KwEnd ] "with" KwEnd
+              ( "(" WithItem { "," WithItem } [ "," ] ")" | WithItem { "," WithItem } ) WithBody ;
 WithItem    <~~ push(makeWithItem(takeAll())) ~~>
             = Expression [ KwAs Target ] ;
 WithBody    <~~ push({withbody: pop()}) ~~>
@@ -194,12 +252,13 @@ Global      <~~ push(makeGlobal(takeAll(), up.pos)) ~~>
             = "global" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
 Nonlocal    <~~ push(makeNonlocal(takeAll(), up.pos)) ~~>
             = "nonlocal" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
-Del         <~~ takeAll(); push(notImplStmt("del statement", up.pos)) ~~>
-            = "del" KwEnd Expression { "," Expression } ;
+// del NAME / del obj[k] / del obj.attr. A deleted local keeps its slot, holding
+// a sentinel, so a later read raises UnboundLocalError (a catchable exception)
+// instead of silently resolving to an enclosing binding of the same name.
+Del         <~~ push(makeDel(takeAll())) ~~>
+            = "del" KwEnd DelTarget { "," DelTarget } ;
+DelTarget   = "(" Target { "," Target } [ "," ] ")" | Target ;
 
-// yield: accepted as a statement, reported as not implemented (no generators).
-YieldStmt   <~~ takeAll(); push(notImplStmt("yield", up.pos)) ~~>
-            = "yield" KwEnd [ KwFrom ] [ Expression ] ;
 
 // a, b = x, y (and a, b = b, a): all right-hand values are evaluated before any
 // target is written; a single right-hand iterable is unpacked positionally.
@@ -212,9 +271,11 @@ AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
             = Target ":" DiscardType [ "=" Expression ] ;
 
 // A type annotation, parsed and ignored: dotted names, [..]-subscripts (commas
-// allowed) and | unions.
+// allowed), | unions, the '...' of tuple[int, ...] and the STRING form
+// (y: "str"), which Python allows for a forward reference.
 DiscardType = TypeAtom { "|" TypeAtom } ;
-TypeAtom    = Id { "." Id } [ TypeSub ] | TypeSub ;
+TypeStr     <~~ pop() ~~> = StringLit ;
+TypeAtom    = TypeStr | "..." | Id { "." Id } [ TypeSub ] | TypeSub ;
 TypeSub     = "[" [ TypeItem { "," TypeItem } ] "]" ;
 TypeItem    = DiscardType ;
 // An expression whose value is dropped (decorator calls, except types, defaults).
@@ -228,16 +289,16 @@ Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd ;
 Pass        <~~ push(function(b) { return b }) ~~>  = "pass" KwEnd ;
 
 AugAssign   <~~ push(makeAugAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" ) <~~ push({op: up.in}) ~~> Expression ;
+            = Target ( "+=" | "-=" | "*=" | "//=" | "/=" | "%=" | "@=" ) <~~ push({op: up.in}) ~~> Expression ;
 Assign      <~~ push(makeAssign(pop(), pop())) ~~>
             = Target "=" Expression ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { TIndex | TAttr } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
-// obj.attr = ... : an attribute target (common in class methods: self.x = ...).
-// Accepted so the surrounding code parses; the write is reported as not
-// implemented (the subset has no user objects to store an attribute on).
+// obj.attr = ... : an attribute target (self.x = ... in a method). The write goes
+// through js_pysetattr, which honours a __set__ descriptor on the class and the
+// __slots__ declaration.
 TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
             = "." Id <~~ push({taname: up.in}) ~~> ;
 
@@ -247,16 +308,29 @@ ExprSmall   <~~ push(exprToStmt(pop())) ~~>
 // Every expression production pushes exactly one thunk: function() -> value.
 // A lambda binds loosest; then the a-if-c-else-b conditional expression; then
 // the boolean/arith layers.
-Expression  = Lambda | Ternary ;
+Expression  = Lambda | YieldExpr | Walrus | Ternary ;
+// yield / yield from: an EXPRESSION in Python ('got = yield 1' hands the value
+// of the next send() to got), so it lives here and 'yield 1' on a line of its
+// own is that expression used as a statement. A def whose body contains one is
+// compiled to a generator function (js_genfn); the body then runs on its own
+// goroutine and js_yield is the suspending handshake, so these are REAL
+// generators - the body is suspended and resumed, never replayed.
+YieldExpr   <~~ push(makeYield(takeAll())) ~~>
+            = "yield" KwEnd [ KwFrom <~~ push({yfrom: true}) ~~> ] [ Expression ] ;
+// The walrus operator, name := value: it assigns AND yields the value, so it can
+// introduce a binding inside a condition or a comprehension filter. Tried before
+// Ternary, whose OrExpr would otherwise consume the name and then choke on the ':='.
+Walrus      <~~ var wv = pop(); push(makeWalrus(pop(), wv)) ~~>
+            = Id <~~ push(up.in) ~~> ":=" Expression ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
             = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
-// Lambda parameters take no annotation (the ':' ends the header); defaults
-// and *args work like in def, **kwargs is reported as not implemented.
+// Lambda parameters take no annotation (the ':' ends the header); defaults,
+// *args and **kwargs work exactly like in def.
 LamParam    = LamDblStar | LamStar | LamNamed ;
-LamDblStar  <~~ push({pcomplex: true}) ~~>
-            = "**" [ Id ] ;
+LamDblStar  <~~ push(makeKwParam(takeAll())) ~~>
+            = "**" [ Id <~~ push(up.in) ~~> ] ;
 LamStar     <~~ push(makeRestParam(takeAll())) ~~>
             = "*" [ Id <~~ push(up.in) ~~> ] ;
 LamNamed    <~~ push(makeNamedParam(takeAll())) ~~>
@@ -272,12 +346,18 @@ Not         <~~ push(makeNot(pop())) ~~>
 
 // 'is' / 'is not' are identity comparisons; in this subset (== already compares
 // lists and dicts by identity) they lower to the same == / != externs.
-Comparison  <~~ push(foldBinary(takeAll())) ~~>
-            = BitExpr [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr
+// Python CHAINS comparisons: 'a < b < c' means 'a < b and b < c', with b evaluated
+// ONCE and the chain short-circuiting as soon as a link is false. That is a repetition,
+// not an option, and it cannot go through foldBinary (which would compare the BOOLEAN
+// result of the first link with c). makeCompare lowers the chain properly.
+// 'is' / 'is not' are identity comparisons; in this subset (== already compares lists
+// and dicts by identity) they lower to the same == / != externs.
+Comparison  <~~ push(makeCompare(takeAll())) ~~>
+            = BitExpr { ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr
                     | ( "not" KwEnd "in" KwEnd ) <~~ push("not in") ~~> BitExpr
-                    | ( "is" KwEnd "not" KwEnd ) <~~ push("!=") ~~> BitExpr
-                    | ( "is" KwEnd ) <~~ push("==") ~~> BitExpr
-                    | ( "in" KwEnd ) <~~ push("in") ~~> BitExpr ] ;
+                    | ( "is" KwEnd "not" KwEnd ) <~~ push("is not") ~~> BitExpr
+                    | ( "is" KwEnd ) <~~ push("is") ~~> BitExpr
+                    | ( "in" KwEnd ) <~~ push("in") ~~> BitExpr } ;
 
 // Bitwise / shift operators ( | ^ & << >> ) sit just above comparison; they are
 // accepted and reported as not implemented (no integer-bit externs in the subset).
@@ -288,9 +368,10 @@ BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
 Arith       <~~ push(foldBinary(takeAll())) ~~>
             = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
 
-// The floor division // must be tried before /.
+// The floor division // must be tried before /. @ is the matrix-multiply
+// operator, which has no builtin meaning: it only ever reaches __matmul__.
 Term        <~~ push(foldBinary(takeAll())) ~~>
-            = Factor { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> Factor } ;
+            = Factor { ( "*" | "//" | "/" | "%" | "@" ) <~~ push(up.in) ~~> Factor } ;
 
 Factor      = Neg | Invert | Await | Power ;
 Neg         <~~ push(makeNeg(pop())) ~~>
@@ -298,16 +379,17 @@ Neg         <~~ push(makeNeg(pop())) ~~>
 // ~x bitwise-not: accepted, reported as not implemented.
 Invert      <~~ takeAll(); push(notImplExpr("~ operator", up.pos)) ~~>
             = "~" Factor ;
-// await EXPR: accepted, reported as not implemented (no coroutines).
-Await       <~~ takeAll(); push(notImplExpr("await", up.pos)) ~~>
-            = "await" KwEnd Factor ;
+// await EXPR: there is no event loop here and an async def is compiled as an
+// ordinary function, so awaiting is the identity on its operand - the syntax is
+// recognized and the expression it suspends on is simply evaluated.
+Await       = "await" KwEnd Factor ;
 
 // a ** b exponentiation: accepted, reported as not implemented (no pow extern).
 // With no '**' the layer is transparent (returns the single operand).
 Power       <~~ push(makePower(takeAll(), up.pos)) ~~>
             = PostfixExpr [ "**" Factor ] ;
 
-// f(a), s[i], lst.append(x), obj.attr (attribute access is not implemented).
+// f(a), s[i], lst.append(x), obj.attr - all genuinely lowered.
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx | AttrSfx } ;
@@ -315,16 +397,25 @@ CallSfx     <~~ push(makeCallSfx(takeAll(), up.pos)) ~~>
             = "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
 MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.pos)) ~~>
             = "." Id <~~ push({mname: up.in}) ~~> "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
-// obj.attr with no call: accepted, reported as not implemented (no user objects).
+// obj.attr with no call: js_pygetattr - own attributes first, then the MRO of the
+// class (running a __get__ descriptor found there).
 AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
             = "." Id <~~ push({aname: up.in}) ~~> ;
-// A call argument: keyword (name=value) and *seq / **map unpacking are accepted
-// as markers (the call becomes not implemented); a plain positional is compiled.
-CallArg     = CallKw | CallStar | CallPos ;
-CallKw      <~~ pop(); push({ckw: true}) ~~>
-            = Id "=" Expression ;
-CallStar    <~~ pop(); push({ckw: true}) ~~>
-            = ( "**" | "*" ) Expression ;
+// A call argument: a plain positional expression, a keyword (name=value), or
+// *seq / **map unpacking. The keyword ones are collected into a dict the callee
+// side binds to its parameters (js_pysig / pyBindCall). CallKw must be tried
+// before CallPos - 'a' alone is a valid expression, so the '=' is what tells
+// them apart, and the PEG has to see it first.
+CallArg     = CallKw | CallDblStar | CallStar | CallGenExp | CallPos ;
+// f(expr for x in it): a generator expression needs no parentheses of its own
+// when it is the only argument of a call.
+CallGenExp  <~~ push(makeListComp(takeAll())) ~~>
+            = Expression [ "async" KwEnd ] "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
+              "in" KwEnd Expression [ CompIf ] ;
+CallKw      <~~ var kv = pop(); push({ckwname: pop().kwn, ckwval: kv}) ~~>
+            = Id <~~ push({kwn: up.in}) ~~> "=" Expression ;
+CallDblStar <~~ push({ckwspread: pop()}) ~~> = "**" Expression ;
+CallStar    <~~ push({cspread: pop()}) ~~>   = "*" Expression ;
 CallPos     = Expression ;
 // A slice s[lo:hi] with both ends optional; tried before plain indexing (the
 // missing ':' makes it fail fast there).
@@ -335,13 +426,19 @@ SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = EmptyTuple | Grouped | FString | StringLit | DecLit | True | False | None
+Primary     = EmptyTuple | GenExpParen | Grouped | FString | StringLit | DecLit | EllipsisLit | True | False | None
             | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
 
-// ( ) empty tuple and ( a, b, ... ) / ( a, ) tuples are accepted and reported as
-// not implemented; a single parenthesized expression ( a ) is plain grouping.
-EmptyTuple  <~~ push(notImplExpr("tuple", up.pos)) ~~>
+// ( ) empty tuple and ( a, b, ... ) / ( a, ) tuples build a list value: this
+// subset has one sequence type, so a tuple is an immutable list that is simply
+// not written to. A single parenthesized expression ( a ) is plain grouping.
+EmptyTuple  <~~ push(makeList([])) ~~>
             = "(" ")" ;
+// ( expr for x in it [if c] ): a generator expression. It is materialized
+// eagerly here - the sequence is the same, only the laziness is missing.
+GenExpParen <~~ push(makeListComp(takeAll())) ~~>
+            = "(" Expression [ "async" KwEnd ] "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
+              "in" KwEnd Expression [ CompIf ] ")" ;
 Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
             = "(" Expression { "," <~~ push({tcomma: true}) ~~> [ Expression ] } ")" ;
 
@@ -355,7 +452,7 @@ SetLit      <~~ takeAll(); push(notImplExpr("set literal", up.pos)) ~~>
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
-            = "[" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~> "in" KwEnd Expression
+            = "[" Expression [ "async" KwEnd ] "for" KwEnd Id <~~ push({cvar: up.in}) ~~> "in" KwEnd Expression
               [ CompIf ] "]" ;
 CompIf      <~~ push({cif: pop()}) ~~>
             = "if" KwEnd Expression ;
@@ -400,6 +497,8 @@ TdqQ2       = '""' ( TStrEsc | TdqChar ) ;
 TsqChar     = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 TsqQ1       = "'" ( TStrEsc | TsqChar ) ;
 TsqQ2       = "''" ( TStrEsc | TsqChar ) ;
+// The Ellipsis singleton: '...' is a value, and 'x is ...' has to hold.
+EllipsisLit <~~ push(makeEllipsis()) ~~>       = "..." ;
 True        <~~ push(makeConst(true)) ~~>      = "True" KwEnd ;
 False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
 None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
@@ -478,13 +577,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function fail(msg) { println("python compiler error: " + msg); exit(1) }
 
     var hidCount = 0
+    // sawYield is set while the CURRENT function body is being emitted, by every
+    // yield in it; emitClosure hands the answer to makeDef through genClosure, so
+    // a def with a yield anywhere in it becomes a generator function.
+    var sawYield = false
+    var genClosure = false
     // Python truthiness for branches.
     // ----- Expression thunks: function(block) -> {b, v} -----
 
     makeNeg = function(t) {
         return function(b) {
             var r = t(b)
-            return {b: r.b, v: callExt(r.b, "js_neg", [r.v])}
+            return {b: r.b, v: callExt(r.b, "js_pyunary", [emitStr(r.b, "-"), r.v])}
         }
     }
     // not: True exactly when the Python truthiness is 0.
@@ -516,9 +620,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // Python's == compares lists and dicts BY VALUE (js_pyeq), while 'is' is identity
+    // (js_seq) - two different questions that JavaScript answers with the same operator,
+    // which is why they get separate entries here.
     binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div",
                   "//": "js_fdiv", "%": "js_fmod",
-                  "==": "js_seq", "!=": "js_sne",
+                  "==": "js_pyeq", "!=": "js_pyne",
+                  "is": "js_seq", "is not": "js_sne",
                   "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge",
                   "in": "js_pyin",
                   "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div"}
@@ -531,44 +639,64 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 1; i < items.length; i += 2) {
                 var rr = items[i + 1](b)
                 b = rr.b
-                if (items[i] == "not in") {
-                    v = callExt(b, "js_not", [callExt(b, "js_pyin", [v, rr.v])])
-                } else {
-                    v = callExt(b, binExt[items[i]], [v, rr.v])
-                }
+                v = emitPyBin(b, items[i], v, rr.v)
             }
             return {b: b, v: v}
         }
     }
-    // Detect the still-unsupported suffixes (keyword / *starred call arguments)
-    // at build time: the whole postfix chain becomes not implemented and yields
-    // undefined, matching the other notImpl expr.
-    function complexSuffix(suffixes) {
-        for (var i = 0; i < suffixes.length; i++) {
-            if (suffixes[i].complex == true) { return {what: "keyword/starred call arguments", pos: suffixes[i].pos} }
-        }
-        return null
+    // One binary step with Python's operator set. 'not in' has no extern of its own -
+    // it is the negation of js_pyin - so every emitter has to go through here rather
+    // than reach into binExt directly, or that one operator silently emits a call to
+    // the undefined extern binExt has no entry for.
+    // Every user visible operator goes through the js_pybin dispatcher, which
+    // gives an instance of a user class the chance to answer it with a dunder
+    // (__add__, __lt__, __eq__, __contains__, ...) and otherwise takes exactly
+    // the path the plain js_* extern would. binExt above stays the record of
+    // which extern that is.
+    function emitPyBin(b, op, l, r) {
+        return callExt(b, "js_pybin", [emitStr(b, op), l, r])
     }
-    // A call suffix: complex (keyword/starred) args mark it not implemented.
-    function makeCallSfx(items, pos) {
+    function makeCallSfx(items, pos) { return {kind: "call", args: items} }
+    function makeMethodSfx(name, items, pos) { return {kind: "mcall", name: name, args: items} }
+    // The argument list of one call: the positional values go into an array, the
+    // keyword ones into a dict (created only when there is one, so the ordinary
+    // call still emits exactly the two instructions it always did). *seq appends
+    // to the array and **map merges into the dict, both at run time.
+    function emitCallArgs(b, items) {
+        var anyKw = false
         for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].ckw == true) { return {kind: "call", complex: true, pos: pos} }
+            if (items[i].ckwname != undefined || items[i].ckwspread != undefined) { anyKw = true }
         }
-        return {kind: "call", args: items}
-    }
-    function makeMethodSfx(name, items, pos) {
-        for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].ckw == true) { return {kind: "mcall", name: name, complex: true, pos: pos} }
+        var pos = callExt(b, "js_arr_new", [])
+        var kw = hUndef
+        if (anyKw) { kw = callExt(b, "js_dict_new", []) }
+        for (var j = 0; j < items.length; j++) {
+            var it = items[j]
+            if (typeof it == "function") {
+                var r = it(b)
+                b = r.b
+                callExt(b, "js_arr_push", [pos, r.v])
+            } else if (it.cspread != undefined) {
+                var rs = it.cspread(b)
+                b = rs.b
+                callExt(b, "js_pyspread", [pos, rs.v])
+            } else if (it.ckwspread != undefined) {
+                var rk = it.ckwspread(b)
+                b = rk.b
+                callExt(b, "js_pykwspread", [kw, rk.v])
+            } else {
+                var rv = it.ckwval(b)
+                b = rv.b
+                callExt(b, "js_pyset", [kw, emitStr(b, it.ckwname), rv.v])
+            }
         }
-        return {kind: "mcall", name: name, args: items}
+        return {b: b, pos: pos, kw: kw}
     }
     // and/or keep the deciding operand, with Python truthiness.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        var bad = complexSuffix(suffixes)
-        if (bad != null) { return notImplExpr(bad.what, bad.pos) }
         return function(b) {
             var r = primary(b)
             b = r.b
@@ -576,9 +704,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "call") {
-                    var ea = emitArgs(b, s.args)
+                    var ea = emitCallArgs(b, s.args)
                     b = ea.b
-                    cur = callExt(b, "js_call", [cur, hUndef, ea.v])
+                    cur = callExt(b, "js_pycall", [cur, ea.pos, ea.kw])
                 } else if (s.kind == "mcall") {
                     // .items(): the runtime's js_mcall has no dict "items", so lower it
                     // here to a loop over js_keys building [key, value] pairs.
@@ -587,12 +715,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         b = ri.b
                         cur = ri.v
                     } else {
-                        var ea2 = emitArgs(b, s.args)
+                        var ea2 = emitCallArgs(b, s.args)
                         b = ea2.b
-                        cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea2.v])
+                        cur = callExt(b, "js_pymcall", [cur, emitStr(b, s.name), ea2.pos, ea2.kw])
                     }
                 } else if (s.kind == "attr") {
-                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                    cur = callExt(b, "js_pygetattr", [cur, emitStr(b, s.name)])
                 } else if (s.kind == "slice") {
                     var loV = hUndef
                     var hiV = hUndef
@@ -658,7 +786,9 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var aName = "$ca" + hidCount
             var oName = "$co" + hidCount
             var saved = curScopeV
+            var savedWal = walrusScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            walrusScopeV = (savedWal != null) ? savedWal : saved
             var r = iterT(b)
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [r.v])])
@@ -695,6 +825,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             postB.NewBr(headB)
             var outV = callExt(exitB, "js_scope_get", [curScopeV, emitStr(exitB, oName)])
             curScopeV = saved
+            walrusScopeV = savedWal
             return {b: exitB, v: outV}
         }
     }
@@ -798,7 +929,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // One step along a target path: an index ([i], js_pyget) or an attribute
     // (.name, js_get - matching the pyattr read of the interpreter).
     function emitPathStep(b, o, step) {
-        if (step.tattr == true) { return {b: b, v: callExt(b, "js_get", [o, emitStr(b, step.name)])} }
+        if (step.tattr == true) { return {b: b, v: callExt(b, "js_pygetattr", [o, emitStr(b, step.name)])} }
         var r = step.idx(b)
         return {b: r.b, v: callExt(r.b, "js_pyget", [o, r.v])}
     }
@@ -824,7 +955,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
-            callExt(b, "js_set", [o, emitStr(b, last.name), v])
+            callExt(b, "js_pysetattr", [o, emitStr(b, last.name), v])
             return b
         }
         var kr = last.idx(b)
@@ -832,6 +963,64 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         callExt(b, "js_pyset", [o, kr.v, v])
         return b
     }
+    // name := value. It writes the binding with the same js_pyset_var an ordinary
+    // assignment uses (so the scoping rule is identical) and leaves the value behind,
+    // which is what makes it an expression.
+    function makeWalrus(name, valT) {
+        return function(b) {
+            var r = valT(b)
+            b = r.b
+            // A comprehension runs in a scope of its own so its loop variable does not
+            // leak - but a walrus inside one binds in the ENCLOSING scope, which is the
+            // whole point of allowing it there. walrusScopeV carries that scope while a
+            // comprehension is being emitted (see makeListComp) and is null elsewhere.
+            var target = (walrusScopeV != null) ? walrusScopeV : curScopeV
+            callExt(b, "js_pyset_var", [target, emitStr(b, name), r.v])
+            return {b: b, v: r.v}
+        }
+    }
+    // The scope a walrus binds in while a comprehension is being emitted; null outside
+    // one. It is the comprehension's own ENCLOSING scope, and it stays the outermost
+    // such scope when comprehensions nest.
+    var walrusScopeV = null
+
+    // A comparison CHAIN: items = [operand, op, operand, op, operand, ...].
+    // 'a < b < c' is 'a < b and b < c' with b evaluated once, so each operand is
+    // emitted exactly once and its value reused as the left side of the next link.
+    // The chain short-circuits: as soon as a link is false the result is that false
+    // value and the remaining operands are never evaluated - which is why every link
+    // after the first needs its own block and the whole thing ends in a phi.
+    function makeCompare(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var left = r.v
+            var mergeB = curF.NewBlock("")
+            var inc = []
+            var cur = anytype // The running result: a comparison value.
+            cur = undefined
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = items[i + 1](b)
+                b = rr.b
+                var res = emitPyBin(b, items[i], left, rr.v)
+                left = rr.v // The right operand becomes the next link's left one.
+                if (i + 2 < items.length) {
+                    // Not the last link: false ends the chain with this value.
+                    var nextB = curF.NewBlock("")
+                    inc.push(llvm.ir.NewIncoming(res, b))
+                    b.NewCondBr(truthy(b, res), nextB, mergeB)
+                    b = nextB
+                } else {
+                    cur = res
+                }
+            }
+            inc.push(llvm.ir.NewIncoming(cur, b))
+            b.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi(inc)}
+        }
+    }
+
     // Pops reversed: value, target.
     function makeAssign(valT, ref) {
         return function(b) {
@@ -849,7 +1038,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = rr.b
             var rv = valT(b)
             b = rv.b
-            return emitRefWrite(b, ref, callExt(b, binExt[op], [rr.v, rv.v]))
+            return emitRefWrite(b, ref, emitPyBin(b, op.substring(0, op.length - 1), rr.v, rv.v))
         }
     }
 
@@ -891,8 +1080,14 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // for x in <list>: a hidden index drives the loop; x is a normal Python variable
-    // (function scoped, survives the loop).
-    function makeFor(bodyT, listT, name) {
+    // (function scoped, survives the loop). A trailing 'else' suite runs when the
+    // loop ran out on its own - break jumps past it, which is the whole point.
+    function makeFor(items) {
+        var name = items[0].fvar
+        var listT = items[1]
+        var bodyT = items[2]
+        var elseT = null
+        if (items.length > 3) { elseT = items[3].elseSuite }
         return function(b) {
             hidCount++
             var iName = "$i" + hidCount
@@ -914,13 +1109,118 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
             callExt(bodyB, "js_pyset_var", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
-            loopStack.push({cont: postB, brk: exitB})
+            var afterB = exitB
+            if (elseT != null) { afterB = curF.NewBlock("") }
+            loopStack.push({cont: postB, brk: afterB})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var iV3 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, iName)])
             callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, iName), callExt(postB, "js_add", [iV3, emitNum(postB, 1)])])
             postB.NewBr(headB)
+            if (elseT != null) {
+                elseT(exitB).NewBr(afterB)
+                return afterB
+            }
             return exitB
+        }
+    }
+    // while COND: SUITE [else: SUITE] - the shared makeWhile has no loop-else, so
+    // Python brings its own (same shape, plus the not-broken arm).
+    makeWhile = function(items) {
+        var condT = items[0]
+        var bodyT = items[1]
+        var elseT = null
+        if (items.length > 2) { elseT = items[2].elseSuite }
+        return function(b) {
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            var afterB = exitB
+            if (elseT != null) { afterB = curF.NewBlock("") }
+            b.NewBr(headB)
+            var r = condT(headB)
+            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            loopStack.push({cont: headB, brk: afterB})
+            bodyT(bodyB).NewBr(headB)
+            loopStack.pop()
+            if (elseT != null) {
+                elseT(exitB).NewBr(afterB)
+                return afterB
+            }
+            return exitB
+        }
+    }
+    // yield [from] EXPR. Plain yield suspends the body and answers what the next
+    // send() passes in. 'yield from ITER' yields every element of ITER in turn;
+    // its own value (a sub-generator's return) is not propagated.
+    function makeYield(items) {
+        var isFrom = false
+        var valT = null
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { valT = items[i] }
+            else if (items[i].yfrom == true) { isFrom = true }
+        }
+        return function(b) {
+            sawYield = true
+            var v = hUndef
+            if (valT != null) {
+                var r = valT(b)
+                b = r.b
+                v = r.v
+            }
+            if (!isFrom) { return {b: b, v: callExt(b, "js_yield", [v])} }
+            // yield from: a plain index loop over the normalized iterable.
+            hidCount++
+            var iName = "$yi" + hidCount
+            var aName = "$ya" + hidCount
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), callExt(b, "js_pyiter", [v])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
+            var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+            callExt(bodyB, "js_yield", [callExt(bodyB, "js_get", [aV2, iV2])])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                            callExt(bodyB, "js_add", [iV2, emitNum(bodyB, 1)])])
+            bodyB.NewBr(headB)
+            return {b: exitB, v: hUndef}
+        }
+    }
+    // '...' - one Ellipsis object per run, so 'x is ...' holds.
+    function makeEllipsis() {
+        return function(b) { return {b: b, v: callExt(b, "js_pyellipsis", [])} }
+    }
+    // del a, b[i], c.x
+    function makeDel(refs) {
+        return function(b) {
+            for (var i = 0; i < refs.length; i++) {
+                var ref = refs[i]
+                if (ref.path.length == 0) {
+                    callExt(b, "js_pydel_var", [curScopeV, emitStr(b, ref.name)])
+                    continue
+                }
+                var o = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+                for (var j = 0; j < ref.path.length - 1; j++) {
+                    var r = emitPathStep(b, o, ref.path[j])
+                    b = r.b
+                    o = r.v
+                }
+                var last = ref.path[ref.path.length - 1]
+                if (last.tattr == true) {
+                    callExt(b, "js_pydel_attr", [o, emitStr(b, last.name)])
+                } else {
+                    var kr = last.idx(b)
+                    b = kr.b
+                    callExt(b, "js_pydel_item", [o, kr.v])
+                }
+            }
+            return b
         }
     }
     function makeReturn(items) {
@@ -953,7 +1253,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // implemented (a comma pushed a {tcomma} marker, so items has more than one).
     function makeParen(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("tuple", pos)
+        var elems = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { elems.push(items[i]) }
+        }
+        return makeList(elems)
     }
     // a if c else b: genuinely lowered; the two arms meet in a phi (only the taken
     // arm's side effects run).
@@ -1096,52 +1400,119 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var target = items.length > 1 ? items[1] : null
         return {ctxitem: items[0], target: target}
     }
+    // with EXPR [as T]: the real context-manager protocol. __enter__ runs before
+    // the body and its value is what `as` binds; __exit__ runs after it, and on
+    // the exception path it is handed the exception and may SWALLOW it by
+    // returning true. That is exactly a try/except, so it is lowered as one
+    // (js_try + ctl closures) with the normal-completion __exit__ call appended
+    // to the try body. Several items nest, innermost last, so they unwind in
+    // reverse order. Deviation: a return leaving the body skips __exit__.
     function makeWith(items, pos) {
-        notImpl("with statement", pos)
         var body = null
         var mgrs = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].withbody != undefined) { body = items[i].withbody }
             else if (items[i].ctxitem != undefined) { mgrs.push(items[i]) }
         }
+        if (body == null) { body = function(b) { return b } }
+        return withLevel(mgrs, 0, body)
+    }
+    function emitExit(b, mgrV, excV) {
+        return callExt(b, "js_pyexit", [mgrV, excV])
+    }
+    function withLevel(mgrs, i, body) {
+        if (i >= mgrs.length) { return body }
+        var inner = withLevel(mgrs, i + 1, body)
+        var mgr = mgrs[i]
         return function(b) {
-            for (var j = 0; j < mgrs.length; j++) {
-                var r = mgrs[j].ctxitem(b)
-                b = r.b
-                if (mgrs[j].target != null) { b = emitRefWrite(b, mgrs[j].target, r.v) }
+            hidCount++
+            var wName = "$wm" + hidCount
+            var eName = "$we" + hidCount
+            var r = mgr.ctxitem(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, wName), r.v])
+            var entV = callExt(b, "js_pyenter", [r.v])
+            if (mgr.target != null) { b = emitRefWrite(b, mgr.target, entV) }
+            var bodyT = function(bb) {
+                bb = inner(bb)
+                var mv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, wName)])
+                emitExit(bb, mv, hUndef)
+                return bb
             }
-            if (body != null) { b = body(b) }
-            return b
+            var catchT = function(bb) {
+                var ev = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, eName)])
+                var mv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, wName)])
+                var handled = emitExit(bb, mv, ev)
+                var swB = curF.NewBlock("")
+                var reB = curF.NewBlock("")
+                bb.NewCondBr(truthy(bb, handled), swB, reB)
+                callExt(reB, "js_throw", [ev])
+                reB.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+                return swB
+            }
+            var tryClo = callExt(b, "js_closure", [handle(emitClosure([], bodyT, true)), curScopeV])
+            var catchClo = callExt(b, "js_closure", [handle(emitClosure([eName], catchT, true)), curScopeV])
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            return excDispatch(b, ctl)
         }
     }
-    // A parameter list: collect the plain positional names; flag *args/**kwargs,
-    // annotations-with-defaults and the '*'/'/' markers as unsupported.
+    // A parameter list. names/dflts keep the declared order (the keyword-only ones
+    // last, which is where Python puts them anyway); nkwonly says how many of the
+    // trailing names came after the '*' or '*args' and can therefore only be given
+    // by keyword. ext marks the extended prologue layout (see pySig in jsrt.go):
+    // a def with keyword-only or **kwargs parameters cannot recover them from a
+    // flat positional array, so its *args list and **kwargs dict are handed over
+    // as two extra argument slots instead.
     function makeParamList(items) {
         var names = []
         var dflts = []
         var rest = null
-        var complex = false
+        var kwargs = null
+        var nkwonly = 0
+        var afterStar = false
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.pcomplex == true) { complex = true }
-            else if (it.prest == true) {
-                if (rest != null) { complex = true }
-                rest = it.pname
-            } else if (it.pname != undefined) {
-                if (rest != null) { complex = true }
+            if (it.pslash == true) { continue }        // '/' only forbids a spelling.
+            if (it.pstar == true) { afterStar = true }
+            else if (it.pkw == true) { kwargs = it.pname }
+            else if (it.prest == true) { rest = it.pname; afterStar = true }
+            else if (it.pname != undefined) {
                 names.push(it.pname)
                 dflts.push(it.pdflt != undefined ? it.pdflt : null)
+                if (afterStar) { nkwonly = nkwonly + 1 }
             }
         }
-        return {params: names, dflts: dflts, rest: rest, complex: complex}
+        var ext = false
+        if (nkwonly > 0) { ext = true }
+        if (kwargs != null) { ext = true }
+        return {params: names, dflts: dflts, rest: rest, kwargs: kwargs,
+                nkwonly: nkwonly, ext: ext, complex: false}
     }
     function makeNamedParam(items) {
         if (items.length > 1) { return {pname: items[0], pdflt: items[1].pdefault} }
         return {pname: items[0]}
     }
+    // '*' alone: no rest list, but everything after it is keyword-only.
     function makeRestParam(items) {
-        if (items.length == 0) { return {pcomplex: true} }
+        if (items.length == 0) { return {pstar: true} }
         return {pname: items[0], prest: true}
+    }
+    // '**kws' (or a bare '**', which names nothing and only ends the list).
+    function makeKwParam(items) {
+        if (items.length == 0) { return {pslash: true} }
+        return {pname: items[0], pkw: true}
+    }
+    // Register a def's parameter shape on its closure, so a keyword call can be
+    // bound to it (js_pysig; the runtime side is pyBindCall).
+    function emitSig(b, clo, plist) {
+        var namesV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < plist.params.length; i++) {
+            callExt(b, "js_arr_push", [namesV, emitStr(b, plist.params[i])])
+        }
+        var nk = plist.nkwonly != undefined ? plist.nkwonly : 0
+        var ex = hFalse
+        if (plist.ext == true) { ex = hTrue }
+        return callExt(b, "js_pysig", [clo, namesV, emitNum(b, nk), ex])
     }
 
     // def: an own IR function; the body shares one function scope (no block scopes).
@@ -1177,12 +1548,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, params[i]), argV])
         }
-        if (rest != null) {
+        var kwargs = plist.kwargs != undefined ? plist.kwargs : null
+        if (plist.ext == true) {
+            // The extended layout: [params..., *args list, **kwargs dict].
+            if (rest != null) {
+                callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, rest),
+                                              callExt(fb, "js_arg", [f.Params[1], handle(params.length)])])
+            }
+            if (kwargs != null) {
+                callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, kwargs),
+                                              callExt(fb, "js_arg", [f.Params[1], handle(params.length + 1)])])
+            }
+        } else if (rest != null) {
             callExt(fb, "js_scope_decl", [curScopeV, emitStr(fb, rest),
                                           callExt(fb, "js_pyrest", [f.Params[1], handle(params.length)])])
         }
+        var savedYield = sawYield
+        sawYield = false
         var endB = bodyT(fb)
         endB.NewRet(hUndef)
+        genClosure = sawYield
+        sawYield = savedYield
         if (isCtl) { ctlLeave() }
         curF = savedF
         curScopeV = savedScope
@@ -1209,14 +1595,74 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return {b: b, env: env}
     }
+    // A def pushes {dname, dstmt}: the name is what a decorator chain rebinds.
+    // js_pyfnname remembers it on the closure so f.__name__ can answer.
     function makeDef(bodyT, plist, name, pos) {
-        if (plist.complex) { notImpl("**kwargs/keyword-only parameters", pos) }
-        return function(b) {
+        return {dname: name, dstmt: function(b) {
             var idx = emitClosure(plist, bodyT, false)
             var er = emitDefaultsEnv(b, plist)
             b = er.b
-            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name),
-                                        callExt(b, "js_closure", [handle(idx), er.env])])
+            var isGen = genClosure
+            var clo = callExt(b, "js_closure", [handle(idx), er.env])
+            // A body with a yield in it is a generator FUNCTION: calling it makes a
+            // generator instead of running the body.
+            if (isGen) { clo = callExt(b, "js_genfn", [clo]) }
+            clo = emitSig(b, clo, plist)
+            clo = callExt(b, "js_pyfnname", [clo, emitStr(b, name)])
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), clo])
+            return b
+        }}
+    }
+    // class NAME(bases): the bases are evaluated, the class object is built (its
+    // MRO with them), the body runs in a scope of its own and js_pyclass_fill
+    // turns everything that scope bound into a class member.
+    function makeClass(items, pos) {
+        var name = anytype
+        var bases = []
+        var bodyT = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].cname != undefined) { name = items[i].cname }
+            else if (items[i].cbase != undefined) { bases.push(items[i].cbase) }
+            else { bodyT = items[i] }
+        }
+        return {dname: name, dstmt: function(b) {
+            var basesV = callExt(b, "js_arr_new", [])
+            for (var j = 0; j < bases.length; j++) {
+                var rb = bases[j](b)
+                b = rb.b
+                callExt(b, "js_arr_push", [basesV, rb.v])
+            }
+            var cls = callExt(b, "js_pyclass_new", [emitStr(b, name), basesV])
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            var bodyScope = curScopeV
+            b = bodyT(b)
+            callExt(b, "js_pyclass_fill", [cls, bodyScope])
+            curScopeV = saved
+            callExt(b, "js_pyset_var", [curScopeV, emitStr(b, name), cls])
+            return b
+        }}
+    }
+    // @deco1 @deco2 def f(): the definition runs, then the decorators are applied
+    // bottom-up (the one nearest the def first) and the result rebinds the name.
+    function makeDecorated(items) {
+        var decos = []
+        var target = anytype
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].deco != undefined) { decos.push(items[i].deco) }
+            else { target = items[i] }
+        }
+        return function(b) {
+            b = target.dstmt(b)
+            for (var j = decos.length - 1; j >= 0; j--) {
+                var rd = decos[j](b)
+                b = rd.b
+                var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, target.dname)])
+                var av = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [av, cur])
+                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, target.dname),
+                                            callExt(b, "js_pycall", [rd.v, av, hUndef])])
+            }
             return b
         }
     }
@@ -1244,15 +1690,40 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lambda: an own IR function like def, but the body is a single expression
     // whose value is returned; the lambda expression's value is the closure.
     function makeLambda(exprT, plist, pos) {
-        if (plist.complex) { notImpl("**kwargs/keyword-only lambda parameters", pos) }
         return function(b) {
             var idx = emitClosure(plist, function(fb) {
                 var r = exprT(fb)
                 return retStmt(r.b, r.v)
             }, false)
             var er = emitDefaultsEnv(b, plist)
-            return {b: er.b, v: callExt(er.b, "js_closure", [handle(idx), er.env])}
+            var lb = er.b
+            var clo = callExt(lb, "js_closure", [handle(idx), er.env])
+            return {b: lb, v: emitSig(lb, clo, plist)}
         }
+    }
+
+    // A one- or two-argument builtin that is exactly one extern: bind NAME to a
+    // small IR function forwarding its arguments to EXT.
+    function declBuiltin(b, name, ext, argc) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var fb = f.NewBlock("entry")
+        if (argc == 0) { // The whole argument array (max/min take any number).
+            fb.NewRet(fb.NewCall(getExtern(ext, 1), [f.Params[1]]))
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
+                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            return b
+        }
+        var a0 = fb.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(0)])
+        if (argc == 1) { fb.NewRet(fb.NewCall(getExtern(ext, 1), [a0])) }
+        else {
+            var a1 = fb.NewCall(getExtern("js_arg", 2), [f.Params[1], handle(1)])
+            fb.NewRet(fb.NewCall(getExtern(ext, 2), [a0, a1]))
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
+                                     callExt(b, "js_closure", [handle(idx), curScopeV])])
+        return b
     }
 
     // jsmain: declare the builtins, then run the file top to bottom.
@@ -1303,19 +1774,68 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         // abs from Math.
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
-        // The builtin exception types: ExcName(args...) -> {__class, args} via js_pyexc.
-        var excNames = ["Exception", "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError", "ZeroDivisionError"]
+        // type(v), str(v), int(v) and isinstance(v, C).
+        b = declBuiltin(b, "type", "js_pytype", 1)
+        b = declBuiltin(b, "str", "js_pystr", 1)
+        b = declBuiltin(b, "int", "js_pyint", 1)
+        b = declBuiltin(b, "isinstance", "js_pyisinst", 2)
+        b = declBuiltin(b, "dict", "js_pydict", 1)
+        b = declBuiltin(b, "max", "js_pymax", 0)
+        b = declBuiltin(b, "min", "js_pymin", 0)
+        // The builtin exception hierarchy, as REAL Python classes: Exception with
+        // an __init__ that stores its arguments in .args, and the concrete types
+        // deriving from it - so `class AppError(Exception)` and
+        // `isinstance(e, AppError)` are the ordinary class machinery, not a
+        // special case. (js_pyexc, the older {__class, args} shortcut, is still
+        // what the interpreter grammar uses.)
+        funcCount++
+        var eiIdx = funcCount
+        var ef = m.NewFunc("jsf_" + eiIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var eb = ef.NewBlock("entry")
+        var eSelf = eb.NewCall(getExtern("js_arg", 2), [ef.Params[1], handle(0)])
+        var eRest = eb.NewCall(getExtern("js_pyrest", 2), [ef.Params[1], handle(1)])
+        eb.NewCall(getExtern("js_set", 3), [eSelf, emitStr(eb, "args"), eRest])
+        eb.NewRet(hUndef)
+        var excBase = callExt(b, "js_pyclass_new", [emitStr(b, "Exception"), callExt(b, "js_arr_new", [])])
+        callExt(b, "js_set", [excBase, emitStr(b, "__init__"),
+                              callExt(b, "js_closure", [handle(eiIdx), curScopeV])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "Exception"), excBase])
+        var excNames = ["ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError",
+                        "ZeroDivisionError", "AttributeError", "NameError", "UnboundLocalError",
+                        "StopIteration", "ArithmeticError", "LookupError", "OSError", "ExceptionGroup"]
         for (var e0 = 0; e0 < excNames.length; e0++) {
-            funcCount++
-            var exIdx = funcCount
-            var xf = m.NewFunc("jsf_" + exIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-            var xb = xf.NewBlock("entry")
-            xb.NewRet(xb.NewCall(getExtern("js_pyexc", 2), [emitStr(xb, excNames[e0]), xf.Params[1]]))
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]), callExt(b, "js_closure", [handle(exIdx), curScopeV])])
+            var eBases = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [eBases, excBase])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, excNames[e0]),
+                                         callExt(b, "js_pyclass_new", [emitStr(b, excNames[e0]), eBases])])
         }
         b = emitImported(b)
         b = makeSeq(items)(b)
-        b.NewRet(hUndef)
+
+        // A module that defines a top-level main() (every ratchet file does) is run for
+        // its definitions and then ENTERED through it, and its return value becomes the
+        // exit status. Without this the module top level - which only defines functions -
+        // would run to completion and exit 0 while executing none of the checks.
+        //
+        // Whether main() exists is a runtime question here (the top level may bind it
+        // any way it likes), so the test is emitted: js_scope_typeof answers "undefined"
+        // for a name that is not bound anywhere instead of raising, which is exactly what
+        // makes it safe to ask about a name that may not exist. A script without a main()
+        // has already done its work top to bottom and simply returns.
+        var entry = c.mainName
+        if (entry == undefined || entry == "") { entry = "main" }
+        var tv = callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, entry)])
+        var isFn = emitBin(b, "==", tv, emitStr(b, "function"))
+        var callB = curF.NewBlock("")
+        var skipB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, isFn), callB, skipB)
+        var mainV = callExt(callB, "js_scope_get", [curScopeV, emitStr(callB, entry)])
+        var retV = callExt(callB, "js_call", [mainV, hUndef, callExt(callB, "js_arr_new", [])])
+        callB.NewBr(mergeB)
+        skipB.NewBr(mergeB)
+        mergeB.NewRet(mergeB.NewPhi([llvm.ir.NewIncoming(retV, callB),
+                                     llvm.ir.NewIncoming(hUndef, skipB)]))
     }
 
     // ----- Core library config (see lib/compile-core.js) -----

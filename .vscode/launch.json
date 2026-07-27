@@ -503,7 +503,7 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen.kt", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Kotlin unsupported syntax SHOULD FAIL",
+            "name": "Kotlin widen1 modifiers/casts/enum (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen.kt", "-q"]
@@ -521,7 +521,7 @@
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen3.kt", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Kotlin widen3 calls/when/this SHOULD FAIL",
+            "name": "Kotlin widen3 calls/when/this (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/kotlin-to-llvm-ir.abnf", "tests/kotlin-test-widen3.kt", "-q"]
@@ -677,7 +677,7 @@
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-widen.py", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Python widened surface SHOULD FAIL",
+            "name": "Python widened surface (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/python-to-llvm-ir.abnf", "tests/python-test-widen.py", "-q"]

@@ -1,53 +1,71 @@
 :title("Kotlin (subset) to LLVM IR compiler") ;
-:description("Compiles a Kotlin subset to an LLVM IR module and runs it with the built-in
+:description("Compiles Kotlin to an LLVM IR module and runs it with the built-in
 IR interpreter and the MetaJS handle runtime (llvm.RunJS).
 
-The subset: top level functions with block or expression bodies (fun add(a: Int, b: Int)
-: Int = a + b), val/var declarations with type inference (annotations are parsed and
-ignored, val is not enforced), if/else as statement and as expression, when expressions
-with and without subject (arms are expressions, multiple comma separated match values,
-else required for a value, range branches with in 1..9 and !in 1..9), the elvis
-operator a ?: b (b when a is null; short circuit), the safe calls x?.length and
-obj?.m() (null when the receiver is null; skipped calls do not evaluate their
-arguments), while, do-while, for over ranges (for (i in 1..n), 0 until n, n downTo 1,
-each with an optional positive step)
-and over lists, break/continue, lambdas as values ({ it * 2 }, { x: Int -> x * 2 },
-multi parameter, real closures over the defining scope; the body is one expression)
-with trailing lambda call syntax (list.map { it * 2 }), the list higher order methods
-map/filter/sumOf/forEach/count/any, classes with primary constructor properties
-(class Counter(val start: Int) { var value = start; fun next(): Int { ... } }) and
-implicit property access inside methods (value += step resolves against this), object
-creation without new (Counter(5)), string templates ('x=$x sum=${a+b}'), listOf() with
-.size, indexing, .add()/.get()/.contains(), the stdlib infix operators (a to b builds
-a Pair read via .first/.second; and/or/xor are boolean logical on two booleans and
-int32 bitwise otherwise; shl/shr/ushr are the int32 shifts), the builtins
-println/print/abs/max/min and
-exitProcess. Int arithmetic is 32 bit and / truncates; + concatenates when one side is
-a String; == compares structurally for strings and by identity for objects. Top level
-extension functions with a body (fun Recv.name(...) { ... }) are genuine: recv.name()
-binds the receiver to this - dispatch is by NAME (the receiver type is dropped), so an
-extension must not reuse a builtin or class method name (those win in both engines).
+The language: top level and local functions with block or expression bodies, DEFAULT
+parameter values, NAMED arguments, vararg parameters and the spread operator f(*arr);
+val/var declarations with type inference, if/else and when as statements and as
+expressions (subject, val-binding subject, comma separated values, range and is-type
+branches), the elvis operator, safe calls x?.length / obj?.m(), while, do-while,
+for over ranges and lists, break/continue, labelled loops with break@l / continue@l,
+labelled and non-local returns out of a lambda, try/catch/finally as a statement AND as
+an expression (the value is the winning clause's last expression), throw as a statement
+and as an expression (Nothing), lambdas (destructuring parameters included) and
+anonymous functions as values, lambdas WITH RECEIVER (val f: Int.(Int) -> Int), trailing
+lambda call syntax, the list higher order methods map/filter/sumOf/forEach/count/any,
+string templates and raw strings, listOf() and the typed arrayOf family, the stdlib
+infix operators (a to b builds a Pair, also readable via component1/component2;
+and/or/xor; shl/shr/ushr) and USER declared infix functions (a dot b is a.dot(b)),
+Int.inv(), the builtins println/print/abs/max/min and exitProcess.
 
-Delegated properties: `val x by lazy { init }` is genuine (the initializer runs once
-and its value becomes a plain field; eager, so it is computed at the declaration, not
-on first access); every other delegate (by inject(), custom getValue/setValue) is not
-in the subset.
+Types: classes with primary constructor properties, SECONDARY CONSTRUCTORS (dispatched
+by argument count), init blocks and property initializers run in declaration order,
+property ACCESSORS with a backing field (get()/set(v) and `field`), open/abstract classes
+and single INHERITANCE with super.m() calls, INTERFACES with default methods and
+interface DELEGATION (: I by impl), DATA and VALUE classes (componentN, equals, toString,
+copy with named arguments), ENUM classes (entries with constructor arguments, name,
+ordinal, members, bare entry names inside them), sealed hierarchies, objects and
+companion objects (named ones reachable as Cls.Name), object expressions, NESTED and
+INNER classes (this@Outer reads the stored outer receiver), GENERICS (erased, with the
+where clause) including REIFIED type parameters (x is T works, the type argument travels
+as a hidden parameter), destructuring declarations / for-loops / lambda parameters via
+the componentN convention, typealiases and annotation classes (both erased), and
+Kotlin's OPERATOR CONVENTIONS: plus/minus/times/div/rem, unaryMinus, get, invoke,
+contains and equals - each lowered with a runtime class probe, so a program that declares
+no convention method emits exactly the IR it emitted before.
 
-Not in the subset: inheritance, interfaces, generics, nullable types (? is parsed and
-ignored), member-level and bodiless extension functions, named/default arguments,
-multi statement lambda bodies,
-data class methods
-(the data modifier is parsed), init blocks, secondary constructors, non-lazy
-property delegates, and bare method
-calls (methods are called via this.m() or obj.m()).
+Extensions: top level and local extension FUNCTIONS with a body and extension
+PROPERTIES (val Recv.name get() = ...). Dispatch is by NAME (the receiver type is
+dropped), so an extension must not reuse a builtin or class member name - those win.
+
+Delegated properties: `val x by lazy { init }` is genuine (the initializer runs once and
+its value becomes a plain field; eager, so it is computed at the declaration, not on
+first access); every other delegate (by inject(), custom getValue/setValue) is not in
+the subset.
+
+Known gaps and deviations. Char is a character CODE, but the runtime's string indexing
+yields a one-character string, so 'a' + 1 == 'b' works while \"abc\"[1] == 'b' does not,
+and a Char put into a string renders as its number (a char literal interpolated directly,
+\"${'$'}\", is folded at compile time and is exact). An unqualified name inside an
+extension body resolves through js_kget, which falls back to the properties of `this`
+only when the receiver is an object - so a bare `length` on a String receiver fails
+(write this.length). A range VALUE is materialized as a list (Kotlin's progression is
+lazy). A non-local return is delivered by raising a marker object, so a user
+catch(e: Exception) between the lambda and its function would see it. componentN on a
+value that has none yields undefined instead of being rejected. Type arguments are
+erased, so variance, bounds and overload resolution by type are not enforced; a method
+name declared by two classes shares one named-argument slot list. Not in the subset:
+coroutines (suspend parses but nothing resumes), reflection, member-level extension
+functions, non-lazy property delegates.
 
 Functions, methods and lambdas become IR functions jsf_N(env, args) (methods get the
 instance prepended, lambdas close over their scope via js_closure), classes become
-descriptor objects, implicit property access goes through the
-js_kget/js_kset externals (locals first, then the properties of this), method calls
-dispatch through js_mcall (which also implements the list higher order methods), and
-?. compiles to a null test branching around the access (a phi merges the null).
-The whole program becomes jsmain(env, args).
+descriptor objects linked by __super (the chain the runtime walks for method lookup,
+super calls and `is`), accessors are js_defprop pairs on the descriptor, implicit
+property access goes through the js_kget/js_kset externals (locals first, then the
+properties of this), method calls dispatch through js_mcall (which also implements the
+list higher order methods), and ?. compiles to a null test branching around the access
+(a phi merges the null). The whole program becomes jsmain(env, args).
 The entry point is fun main(); self checking programs end with exitProcess(failures).
 The same language with the same semantics is interpreted directly by kotlin-interpreter.abnf.") ;
 
@@ -64,7 +82,7 @@ The same language with the same semantics is interpreted directly by kotlin-inte
 :whitespace(Whitespace) ;
 
 Program     <~~ buildMain(takeAll()) ~~>
-            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassDecl | PropAccessor | TopProp ) } ;
+            = { Annotation } [ Package ] { Import } { [ Modifiers ] ( UnsupType | FunDecl <~~ push(makeFunStmt(pop())) ~~> | ExtFun | UnsupFun | ClassDecl | ExtProp | TopAccProp | UnsupAccessor | TopProp ) } ;
 
 // Modifiers and annotations before a declaration are parsed and ignored (they do
 // not change what we lower). Annotations accept ALL forms: an argument list
@@ -78,20 +96,41 @@ Modifiers   = { Modifier | Annotation } ;
 // is actually a name: a real modifier is never immediately followed by `:`, but a
 // parameter or property named `data`/`value`/`inner` is (data: Intent?). Without the
 // guard [Modifiers] would eat the name and strand the `:`.
-Modifier    = ( "public" | "private" | "protected" | "internal" | "open" | "final"
-              | "abstract" | "sealed" | "data" | "override" | "lateinit" | "const"
-              | "inner" | "vararg" | "noinline" | "crossinline" | "tailrec"
+Modifier    = ContextClause
+            | ( DataMod | "inner" ) KwEnd NotColon NotClassW
+            | ( "public" | "private" | "protected" | "internal" | "open" | "final"
+              | "abstract" | "sealed" | "override" | "lateinit" | "const"
+              | "noinline" | "crossinline" | "tailrec"
               | "operator" | "infix" | "inline" | "external" | "suspend"
               | "expect" | "actual" | "reified" ) KwEnd NotColon ;
+// `data` and `value` are the two modifiers that CHANGE what is emitted (they make the
+// compiler synthesize componentN / equals / toString / copy), so ClassDecl has to see
+// them. As ignorable modifiers they would be eaten by the Modifiers run in front of
+// every declaration, hence the NotClassW guard: they only count as an ignorable
+// modifier when no `class` follows - i.e. when they are really a name.
+DataMod     = "data" | "value" ;
+// context(A, B) / context(a: A, _: B) - Kotlin's context receivers and context
+// parameters. They introduce ADDITIONAL implicit receivers, which the single-`this`
+// model cannot express, so the clause is parsed and DROPPED: the declaration itself
+// lowers as usual, and a body that really reads a context member does not resolve it.
+// `context` is a soft keyword, so only a `(` immediately after it makes it one - a
+// variable or a call named `context` is untouched (a Statement never runs Modifiers).
+ContextClause = "context" KwEnd "(" [ CtxParam { "," CtxParam } [ "," ] ] ")" ;
+// A context parameter may carry the parameter modifiers (context(noinline a: () -> Int)).
+CtxParam    = { Annotation } [ Modifiers ] [ KId ":" ] Type ;
 // An annotation: an optional use-site target, then either an @[...] set or a single
 // entry (a possibly-qualified name with an optional balanced argument list).
 Annotation  = "@" [ AnnTarget ":" ] ( AnnSet | AnnEntry ) ;
 // Use-site targets are word-bounded, so @fieldOf stays a plain annotation named
 // "fieldOf" rather than the target "field".
-AnnTarget   = ( "field" | "property" | "get" | "set" | "receiver" | "param"
-              | "setparam" | "delegate" | "file" ) KwEnd ;
+// ORDER MATTERS: the alternation is ordered choice and KwEnd sits AFTER it, so a
+// shorter alternative that is a PREFIX of a longer one must come second - with "set"
+// first, @setparam:x matched "set", then KwEnd failed on the `p` and the sequence died
+// without ever retrying "setparam".
+AnnTarget   = ( "field" | "property" | "setparam" | "set" | "get" | "receiver" | "param"
+              | "delegate" | "file" | "all" ) KwEnd ;
 AnnSet      = "[" { AnnEntry } "]" ;
-AnnEntry    = Id { "." Id } [ SkipParen ] ;
+AnnEntry    = KId { "." KId } [ SkipParen ] ;
 
 // package / import headers. The package name is parsed and ignored. Each import
 // is resolved against the runtime builtins (core.stdlibImports); one that does
@@ -99,14 +138,36 @@ AnnEntry    = Id { "." Id } [ SkipParen ] ;
 // warning (see resolveImport in the startScript). QualName also accepts a
 // trailing .* wildcard. Neither pushes a statement, so buildMain never sees them.
 Package     <~~ pop() ~~> = KwPackage QualName [ ";" ] ;
-Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport QualName [ KwAs Id ] [ ";" ] ;
-QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
+Import      <~~ resolveImport(pop(), up.pos) ~~> = KwImport QualName [ KwAs KId ] [ ";" ] ;
+QualName    <~~ push(stripWs(up.in)) ~~> = KId { "." KId } [ "." "*" ] ;
 
-// A top level val/var: its declaration thunk becomes a top level statement.
-TopProp     = DelegateDecl | Decl ;
+// A top level val/var: its declaration thunk becomes a top level statement. Unlike a
+// LOCAL declaration it may carry a visibility-only accessor (private set), which the
+// subset does not enforce but has to consume.
+TopProp     = DelegateDecl | TopDecl ;
+TopDecl     <~~ push(makeDecl(takeAll())) ~~>
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression { PropVis } [ ";" ] ;
 
-FunDecl     <~~ push(makeFun(takeAll())); retLblPop() ~~>
-            = KwFun [ SkipAngle ] Id <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] FunBody ;
+FunDecl     <~~ push(makeFun(takeAll(), retLblTop(), reifiedTop())); retLblPop(); reifiedPop() ~~>
+            = KwFun [ TypeParams ] KId <~~ push(up.in); retLblPush(up.in, "fun"); reifiedPush() ~~> ParamList [ ":" Type ] { WhereClause | ContractClause } FunBody ;
+// A function CONTRACT - fun f(): Int contract [ returns() implies (x != null) ] - is a
+// static promise to the compiler's smart-cast analysis with no run-time effect, so it is
+// parsed and dropped. Its entries are ordinary expressions (callsInPlace(...),
+// `returns() implies (...)` through the user-infix rule), discarded by DiscardExpr.
+ContractClause = KwContract "[" [ DiscardExpr { "," DiscardExpr } [ "," ] ] "]" ;
+// The type-parameter list of a generic function. Type parameters are erased - except a
+// `reified` one, which the body can TEST (`x is T`). Such a parameter is compiled to a
+// hidden extra parameter carrying the type NAME as a string, filled in at every call
+// site from its explicit type argument (see TypeArgs / makeCall), and `x is T` becomes
+// the ordinary js_is_type probe against that string.
+TypeParams  <~~ pendingReified = reifiedNamesOf(stripWs(up.in)) ~~>
+            = SkipAngle ;
+// A generic constraint clause - fun <T> larger(a: T, b: T): T where T : Comparable<T> = ...
+// (and the class form, class Box<T> : Base() where T : Any). Type parameters are erased
+// in the untyped handle world, so the whole clause is parsed and dropped; it pushes
+// nothing. Kotlin allows several comma separated constraints (where T : A, T : B).
+WhereClause = KwWhere TypeConstraint { "," TypeConstraint } ;
+TypeConstraint = { Annotation } KId ":" Type ;
 FunBody     = Block | "=" ExprBody ;
 ExprBody    <~~ push(makeExprBody(pop())) ~~>
             = Expression ;
@@ -117,9 +178,13 @@ ExprBody    <~~ push(makeExprBody(pop())) ~~>
 // recv.name(args) to it (see extResolves). The receiver type (dotted, generic,
 // nullable) is parsed and DROPPED: dispatch is by NAME, so an extension must not
 // reuse a builtin or class method name (those always win). RecvSeg pushes nothing.
-ExtFun      <~~ push(makeExtFunStmt(makeFun(takeAll()))); retLblPop() ~~>
-            = KwFun [ SkipAngle ] RecvSeg { RecvSeg } Id <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] FunBody ;
-RecvSeg     = Id [ SkipAngle ] [ "?" ] "." ;
+ExtFun      <~~ push(makeExtFunStmt(makeFun(takeAll(), retLblTop()))); retLblPop() ~~>
+            = KwFun [ SkipAngle ] RecvSeg { RecvSeg } KId <~~ push(up.in); retLblPush(up.in, "fun") ~~> ParamList [ ":" Type ] [ WhereClause ] FunBody ;
+// The receiver of an extension may carry annotations, including use-site targeted ones
+// (fun @receiver:Ann @Other Int.f()). They are erased like every other annotation.
+// The receiver may also be a PARENTHESIZED type - fun (() -> Unit).baz(),
+// fun (C & Any).dnnF() - which is how a function type or an intersection is used as one.
+RecvSeg     = { Annotation } ( "(" Type ")" | KId [ SkipAngle ] ) [ "?" ] "." ;
 
 // A function declaration outside the executable subset: a BODILESS extension or
 // abstract declaration (abstract fun name(): R / fun Recv.name(): R). A NON-dotted
@@ -128,37 +193,101 @@ RecvSeg     = Id [ SkipAngle ] [ "?" ] "." ;
 // the whole function into this notImpl. (Member-level extension functions also land
 // here: they carry two receivers, which the single-`this` subset cannot model.)
 UnsupFun    <~~ notImpl("extension or abstract function", up.pos) ~~>
-            = KwFun [ SkipAngle ] ( ExtFunName SkipParen [ ":" Type ] [ SkipBlock | "=" DiscardExpr ]
-                                  | Id [ SkipAngle ] SkipParen [ ":" Type ] ) ;
-ExtFunName  = Id [ SkipAngle ] "." Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+            = KwFun [ SkipAngle ] ( ExtFunName SkipParen [ ":" Type ] [ WhereClause ] [ SkipBlock | "=" DiscardExpr ]
+                                  | KId [ SkipAngle ] SkipParen [ ":" Type ] [ WhereClause ] ) ;
+// The receiver of a member-level (or bodiless) extension function: annotated,
+// parenthesized (fun (suspend () -> T).f()), nullable, dotted.
+ExtFunName  = { Annotation } ( "(" Type ")" | KId [ SkipAngle ] ) [ "?" ] "." KId [ SkipAngle ] { "." KId [ SkipAngle ] } ;
 
-ParamList   <~~ push({params: takeAll()}) ~~>
+// A parameter list carries three things the call sites and the callee need:
+// the NAMES (positional slots and named-argument resolution), the DEFAULT
+// expressions, and the index of a vararg parameter. See makeParamList / emitParamSig.
+ParamList   <~~ push(makeParamList(takeAll())) ~~>
             = "(" [ Param { "," Param } [ "," ] ] ")" ;
-// Parameter modifiers (vararg/noinline/crossinline) and a default value are parsed
-// and dropped - the default is not supplied at call sites, but the header parses.
-Param       = [ Modifiers ] Id <~~ push(up.in) ~~> ":" Type [ "=" DiscardExpr ] ;
+// `vararg` is NOT one of the ignorable Modifiers: it changes how the parameter binds
+// (it collects the remaining call arguments), so it is matched on its own. Kotlin
+// allows annotations on either side of it, hence the two Modifiers slots.
+Param       <~~ push(makeParam(takeAll())) ~~>
+            = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ Modifiers ]
+              KId <~~ push({pname: up.in}) ~~> ":" Type [ "=" ParamDefault ] ;
+ParamDefault <~~ push({pdef: pop()}) ~~>
+            = CollLit | Expression ;
+// [1, 2, 3] - Kotlin's collection literal. It is legal ONLY as an annotation argument
+// or as the default of an annotation-class parameter, so it lives here rather than in
+// Primary, where it would make `[a]` a valid expression anywhere. It builds a list.
+CollLit     <~~ push(makeCollLit(takeAll())) ~~>
+            = "[" [ Expression { "," Expression } [ "," ] ] "]" ;
 
 // class Counter(val start: Int, var step: Int) { var value = start; fun next() ... }
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ "data" KwEnd ] KwClass Id <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" SuperList ] [ "{" { Member } "}" ] ;
+            = [ DataMod <~~ push({dmod: up.in}) ~~> KwEnd ] KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] [ PrimaryCtorKw ] [ CtorParams ] [ ":" Supers ] [ WhereClause ] [ "{" { Member } "}" ] ;
+// The primary constructor may be written out - class Foo constructor(x: Int) - with its
+// own visibility and annotations (class A private @Inject constructor(...)). The keyword
+// and its modifiers carry no meaning the subset models, so they are parsed and dropped;
+// the parameter list that follows is the ordinary primary constructor.
+PrimaryCtorKw = [ Modifiers ] KwConstructor ;
+
+// The supertype list of a REAL (lowered) type declaration. Unlike the tag-less
+// SuperList used by the skipped forms, this one pushes what the emitter needs:
+// {supers: [{name, isCall, args, deleg}...]}. The FIRST supertype becomes the
+// descriptor's __super, which is the chain the runtime walks for method lookup
+// (memberCall), for `super.m()` (js_supercall) and for `is T` (js_is_type) - so
+// single inheritance is genuine, and a class extending a class that implements an
+// interface still answers `is Interface`. Any FURTHER supertype is an extra
+// interface: its default methods are copied into the descriptor (so they are
+// callable) but it is NOT on the __super chain, so `is SecondInterface` is false.
+// `: I by expr` records the delegate; `: C(args)` marks a superCLASS construction.
+Supers      <~~ push({supers: takeAll()}) ~~>
+            = SuperItem { "," SuperItem } ;
+SuperItem   <~~ push(makeSuper(takeAll())) ~~>
+            = SuperName [ "(" [ SArg { "," SArg } [ "," ] ] ")" <~~ push({iscall: true}) ~~> | KwBy SDeleg ] ;
+SuperName   <~~ push({sname: baseTypeName(stripWs(up.in))}) ~~> = Type ;
+SArg        <~~ push({sarg: pop()}) ~~> = Expression ;   // Positional only (a super constructor call).
+// The delegate of `: I by expr` must NOT be a full Expression: a bare name followed by
+// the class body - `: Greeter by base { override fun ... }` - would parse as the
+// trailing-lambda call `base { ... }` and swallow the whole body. So the delegate is a
+// postfix chain whose argument lists are always PARENTHESIZED, which covers every
+// realistic form (by base, by this.impl, by makeIt(), by holder.get(0)).
+SDeleg      <~~ push({sdeleg: pop()}) ~~> = DelegChain ;
+DelegChain  <~~ push(foldCallMember(takeAll())) ~~>
+            = ( "(" Expression ")" | DelegCall | VarRef ) { DelegMSfx | FieldSfx | IndexSfx } ;
+DelegCall   <~~ push(makeCall(takeAll())) ~~>
+            = KId <~~ push(up.in) ~~> [ SkipAngle ] "(" [ CallArgs ] ")" ;
+DelegMSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." KId <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" [ CallArgs ] ")" ;
 CtorParams  <~~ push({cparams: takeAll()}) ~~>
             = "(" [ CtorParam { "," CtorParam } [ "," ] ] ")" ;
 // A default value (= expr) is parsed and dropped, exactly like a function Param's:
 // the default is not supplied at call sites, but the header parses (common in data
 // classes - data class Spec(val action: String = "", val flags: Int = 0)).
 CtorParam   <~~ push(makeCtorParam(takeAll())) ~~>
-            = [ Modifiers ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] Id <~~ push(up.in) ~~> ":" Type [ "=" DiscardExpr ] ;
+            = [ Modifiers ] [ KwVararg <~~ push({isvararg: true}) ~~> ] [ ( "val" | "var" ) <~~ push({vv: up.in}) ~~> KwEnd ] KId <~~ push({pname: up.in}) ~~> ":" Type [ "=" ParamDefault ] ;
 
-Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedType | PropAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | UnsupFun ) ;
+// A nested typealias is erased exactly like a top-level one.
+Member      = [ Modifiers ] ( InitBlock | CompanionObject | SecondaryCtor | NestedClass | NestedType | TypeAlias | AccessorProp | UnsupAccessor | PropDelegate | PropDecl | FunDecl <~~ push({method: pop()}) ~~> | AbstractFun | UnsupFun ) ;
+// A member function WITHOUT a body: an abstract method of an abstract class, or an
+// interface method with no default. Nothing is emitted for it (the overriding class
+// provides the implementation), but its NAME and arity are recorded, which is what
+// interface delegation (`: I by impl`) needs to synthesize its forwarders. Tried
+// after FunDecl, so a function that HAS a body never lands here.
+AbstractFun <~~ push({absmethod: makeAbstract(takeAll())}) ~~>
+            = KwFun [ SkipAngle ] KId <~~ push(up.in) ~~> ParamList [ ":" Type ] [ WhereClause ] ;
+// A nested CLASS - class Nested { } / inner class Inner { } inside another class or
+// object - is genuine. Its descriptor is built exactly like a top-level one, and the
+// enclosing descriptor gets a factory under the nested name, so `Outer.Nested()` and
+// `outerInstance.Inner()` construct it. For an `inner` class the factory stores the
+// enclosing instance as __outer, which is what `this@Outer` reads (see makeThisAt).
+NestedClass <~~ push({nested: makeNested(takeAll())}) ~~>
+            = [ "inner" KwEnd <~~ push({isinner: true}) ~~> ] ClassDecl ;
 // A nested type declaration (a data/enum/annotation class, plain class, interface or
 // object inside another class or object). Recognised but not lowered - the subset has
 // a flat, non-nested class model - so it is reported as not implemented and its body
 // skipped; the `data` modifier was already consumed by the Member's Modifiers. notImpl
 // pushes nothing, so makeClassStmt simply skips it.
 NestedType  <~~ notImpl("nested type declaration", up.pos) ~~>
-            = [ KwEnum | KwAnnotation ] KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ SkipBlock ]
-            | KwInterface Id [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ]
-            | KwObject Id [ ":" SuperList ] [ SkipBlock ] ;
+            = [ KwEnum | KwAnnotation | DataMod KwEnd ] KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ SkipBlock ]
+            | [ KwFun ] KwInterface KId [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ]
+            | KwObject KId [ ":" SuperList ] [ SkipBlock ] ;
 // A trailing visibility-only accessor (var x = 0; private set) is parsed and ignored:
 // the subset does not enforce visibility, so the property still binds its initializer.
 // A body-carrying accessor (get() = ..., set(v) { ... }) has a `(` after get/set and is
@@ -168,7 +297,7 @@ NestedType  <~~ notImpl("nested type declaration", up.pos) ~~>
 // still exists - an implicit `name = ...` in a method resolves to this.name, and a read
 // before assignment yields null (the flat, dispatch-by-name model has no real subclass).
 PropDecl    <~~ push(makeProp(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" Expression ] { PropVis } [ ";" ] ;
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
 // is GENUINE (see LazyProp): the initializer is lowered once and its value becomes a
@@ -179,9 +308,9 @@ PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // accessor). LazyProp is tried first; a non-lazy delegate backtracks to UnsupDelegate.
 PropDelegate = LazyProp | UnsupDelegate ;
 LazyProp    <~~ push(makeProp(takeAll())) ~~>
-            = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
+            = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit { PropVis } [ ";" ] ;
 UnsupDelegate <~~ notImpl("delegated property", up.pos) ~~>
-            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] { PropVis } [ ";" ] ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] KId [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] { PropVis } [ ";" ] ;
 // The lazy initializer lambda, wrapped so it lowers to "build the closure, call it
 // once (no args)" - the property's init thunk. EAGER: the value is computed at the
 // declaration, not on first access (single-threaded, deterministic). Deviation: a
@@ -197,12 +326,18 @@ LazyInit    <~~ push(makeLazyInit(pop())) ~~>
 // parses: the inner function type is the group, then ? applies to the whole. A leading
 // `suspend` (a suspending function type: suspend () -> Unit, suspend Recv.() -> R) is
 // accepted and dropped - KwEnd stops it from eating a `suspend`-prefixed type name.
-Type        = { TypeAnno } [ "suspend" KwEnd ] ( "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" [ "->" Type ]
-            | Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ RecvFnTail ] ) [ "?" ] ;
+// The nullable marker carries a NotColon guard so the `?` of an ELVIS operator is never
+// mistaken for it: in `num as? Int ?: 0` the cast's type is `Int`, not `Int?` - without
+// the guard Type ate the `?` and stranded the `:`. It is accepted both BEFORE a receiver
+// tail (C?.() -> C: the nullable receiver of a lambda type) and after the whole type.
+// A trailing `& Type` run is Kotlin's definitely-non-null type (T & Any); like every
+// other type detail it is erased.
+Type        = { TypeAnno } [ "suspend" KwEnd ] ( "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" [ "?" NotColon ] [ "->" Type | RecvFnTail ]
+            | KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ "?" NotColon ] [ RecvFnTail ] ) [ "?" NotColon ] { "&" Type } ;
 // A function-type parameter: an optional name (Kotlin allows named function-type
 // parameters, onRun: (root: Boolean) -> Unit) then the type. Also serves the
 // grouped-type case (a bare type with no name, in parentheses without a following ->).
-FnTypeParam = [ Id ":" ] Type ;
+FnTypeParam = [ KId ":" ] Type ;
 // A receiver function type tail: Recv.() -> R / Recv.(A) -> R (a lambda-with-receiver
 // type, e.g. @Composable RowScope.() -> Unit). The receiver type is the dotted name;
 // this consumes the `.(params) -> Ret`. Parsed and ignored like any type.
@@ -210,7 +345,7 @@ RecvFnTail  = "." "(" [ FnTypeParam { "," FnTypeParam } [ "," ] ] ")" "->" Type 
 // A type annotation: an argument list is consumed only when a `->` does NOT follow,
 // so `@Composable () -> Unit` leaves the `()` for the function type (NotArrow rolls
 // the parens back), while `@Tag("x") Foo` keeps them as the annotation's arguments.
-TypeAnno    = "@" Id { "." Id } [ SkipParen NotArrow ] ;
+TypeAnno    = "@" KId { "." KId } [ SkipParen NotArrow ] ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 // A statement may carry a label (loop@ ...); the label is parsed and ignored, so the
@@ -226,7 +361,13 @@ Labeled     <~~ push(makeLabeled(takeAll(), up.pos)) ~~>
 // reuses makeFunStmt, which declares an own IR function's closure (over the current
 // scope, so it captures enclosing locals and can recurse) under the name in the
 // CURRENT scope. Comes before ExprStmt, which would read `fun` as an identifier.
-LocalFun    <~~ push(makeFunStmt(pop())) ~~>
+// A LOCAL extension function (fun Int.tripled(): Int = this * 3, inside a block) is
+// genuine too: ExtFun already pushes a whole statement thunk that declares "ext$name"
+// in the CURRENT scope, so the mcall suffix emitter finds it exactly like a top-level
+// one (dispatch is by name). Tried first because a non-dotted fun fails RecvSeg and
+// backtracks into the plain form.
+LocalFun    = ExtFun | LocalPlainFun ;
+LocalPlainFun <~~ push(makeFunStmt(pop())) ~~>
             = FunDecl ;
 
 // try/catch/finally and throw are implemented: throw calls js_throw (a Go panic the
@@ -240,7 +381,7 @@ TryStmt     <~~ push(makeTry(takeAll())) ~~>
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch "(" Id <~~ push(up.in) ~~> [ ":" Type ] ")" Block ;
+            = KwCatch "(" KId <~~ push(up.in) ~~> [ ":" Type ] ")" Block ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 Throw       <~~ push(makeThrow(pop())) ~~>
@@ -250,16 +391,23 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
 
 Decl        <~~ push(makeDecl(takeAll())) ~~>
-            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression [ ";" ] ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" DeclType ] "=" Expression [ ";" ] ;
+// The declared type of a local/top-level val or var. Types are erased, with ONE
+// exception that is observable: a lambda-with-receiver type (Int.(Int) -> Int) says the
+// lambda's first argument is its `this`, which changes how the lambda is emitted and how
+// `recv.name(args)` on the variable dispatches. So the type text is captured and
+// inspected for the `.(` receiver marker; everything else about it is dropped.
+DeclType    <~~ var dt = stripWs(up.in); pendingRecvLambda = isRecvFnType(dt); push({dtype: dt}) ~~>
+            = Type ;
 // A local or top-level delegated property (val x by <delegate>). Same split as
 // PropDelegate: `val x by lazy { init }` is GENUINE (LazyDecl - the initializer is
 // lowered once and x becomes an ordinary binding); every other delegate is not
 // implemented, with a placeholder so the rest still lowers under -warn-unsupported.
 DelegateDecl = LazyDecl | UnsupDelegateDecl ;
 LazyDecl    <~~ push(makeDecl(takeAll())) ~~>
-            = "val" KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
+            = "val" KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] KwBy KwLazy [ SkipParen ] LazyInit [ ";" ] ;
 UnsupDelegateDecl <~~ push(notImplStmt("delegated property", up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
+            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] KId [ ":" Type ] KwBy DiscardExpr [ SkipBlock ] [ ";" ] ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
@@ -277,24 +425,31 @@ Do          <~~ push(makeDo(pop(), pop())) ~~>
 // paren, which the other two reject).
 For         = ForRange | ForList | ForDestruct ;
 ForRange    <~~ push(makeForRange(takeAll())) ~~>
-            = KwFor "(" Id <~~ push(up.in) ~~> KwIn AddExpr RangeOp AddExpr [ StepSfx ] ")" Statement ;
-RangeOp     = ".." <~~ push({rop: ".."}) ~~>
+            = KwFor "(" KId <~~ push(up.in) ~~> KwIn AddExpr RangeOp AddExpr [ StepSfx ] ")" Statement ;
+// `..<` (Kotlin 1.9's open-ended range) must be tried before `..`, which would match
+// its first two characters and strand the `<`. It means exactly what `until` means.
+RangeOp     = "..<" <~~ push({rop: "until"}) ~~>
+            | ".." <~~ push({rop: ".."}) ~~>
             | KwUntil <~~ push({rop: "until"}) ~~>
             | KwDownTo <~~ push({rop: "downTo"}) ~~> ;
 StepSfx     <~~ push({step: pop()}) ~~>
             = KwStep AddExpr ;
 ForList     <~~ push(makeForList(pop(), pop(), pop())) ~~>
-            = KwFor "(" Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
-// A destructuring for-loop, for ((typeName, path) in byPath). The loop iterates the
-// collection genuinely (so the body runs once per element and its calls stay visible),
-// but the per-element destructuring is not modelled: each component name binds to
-// undefined, exactly like a destructuring lambda parameter or a val (a, b) = declaration.
+            = KwFor "(" KId <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
+// A destructuring for-loop, for ((px, py) in points): genuine. Each element is
+// destructured with the componentN convention (the same one val (a, b) = e uses), so
+// data classes and hand-written component1/component2 both work.
 ForDestruct <~~ push(makeForDestruct(takeAll(), up.pos)) ~~>
             = KwFor "(" DTuple KwIn Expression ")" Statement ;
 DTuple      <~~ push({dnames: takeAll()}) ~~>
-            = "(" DName { "," DName } [ "," ] ")" ;
+            = "(" DName { "," DName } [ "," ] ")" ;   // Each DName pushes {dn}.
 
-Return      <~~ push(makeReturn(takeAll())) ~~>
+// `return` inside a lambda argument returns from the ENCLOSING FUNCTION, not from the
+// lambda (Kotlin's non-local return, which its inline higher-order functions rely on:
+// xs.forEach { if (...) return it }). Whether this return is the non-local kind is a
+// purely lexical question, decided here at walk time from the return-target stack: the
+// top entry is a lambda's label exactly when we are inside a lambda argument.
+Return      <~~ var nl = inLambdaBody(); push(makeReturn(takeAll(), nl)) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
 
 Break       <~~ push(makeBreak()) ~~>    = KwBreak [ ";" ] ;
@@ -314,13 +469,13 @@ Assignment  <~~ push(makeAssign(takeAll())) ~~>
 // variable/field/index target: map.getOrPut(k) { ... } += v, foo(x).field = y. The
 // target is not a modelled lvalue (a call result or a plusAssign call), so the write
 // is not implemented; BOTH sides are still evaluated so their calls stay visible in a
-// call graph. Tried only after Assignment fails - i.e. when a plain Target (Id rooted,
+// call graph. Tried only after Assignment fails - i.e. when a plain Target (KId rooted,
 // dot/index steps) cannot cover the whole left side because a `(` call breaks the chain.
 CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
             = CallMember ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
 
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
+            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -336,7 +491,7 @@ WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
 // whose name is in scope in every arm body. The type annotation is parsed and ignored.
 WhenSubj    = WhenBind | WhenExprSubj ;
 WhenBind    <~~ var e = pop(); push({subj: e, subjName: pop()}) ~~>
-            = ( "val" | "var" ) KwEnd Id <~~ push(up.in) ~~> [ ":" Type ] "=" Expression ;
+            = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] "=" Expression ;
 WhenExprSubj <~~ push({subj: pop()}) ~~>
             = Expression ;
 // The else arm must be tried first: otherwise 'else' would parse as a variable arm
@@ -378,11 +533,13 @@ InExpr      <~~ push(makeInExpr(takeAll())) ~~>
             = TypeOp { InOp TypeOp } ;
 InOp        = "!" KwIn <~~ push({inop: "!in"}) ~~> | KwIn <~~ push({inop: "in"}) ~~> ;
 
-// Type operators: x as T / x as? T lower to x (an unchecked identity cast in the
-// untyped handle world); x is T / x !is T cannot be decided, so they are not
-// implemented (makeIsCheck). The suffix is optional, so plain expressions are
-// unaffected. Type is parsed and (apart from steering as/is) ignored.
-TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = Elvis [ IsSfx | AsSfx ] ;
+// The type-TEST operator level: x is T / x !is T, lowered to the dynamic js_is_type
+// probe (makeIsCheck). It sits directly under `in`, exactly where Kotlin's
+// infixOperation puts `is`, and above elvis - so `a ?: b is T` is `(a ?: b) is T`.
+// The CAST operator `as` binds far tighter (see AsExpr); keeping the two apart is what
+// lets `num as? Int ?: 0` parse (the cast is the elvis' LEFT operand, not its result).
+// The suffix is optional, so plain expressions are unaffected.
+TypeOp      <~~ push(applyTypeOp(takeAll())) ~~> = Elvis [ IsSfx ] ;
 // A postfix `is T` needs two guards, both defending the `when`-arm boundary where a
 // bare `is T` leads the NEXT arm. SameLine: the `is` must sit on the operand's line, so
 // an arm value never reaches across the newline to swallow the next arm's leading
@@ -433,6 +590,47 @@ NotParen    = :script(~~
     })()
 ~~) ;
 
+// A zero-width guard that fails when the next word is one of Kotlin's own - so a
+// user infix operator can never be a keyword. The list holds the hard keywords plus the
+// soft ones that open a declaration or a clause (a name would be indistinguishable from
+// an infix operator there); anything else is a legal simpleIdentifier.
+NotKeyword  = :script(~~
+    (function() {
+        var reserved = "|as|break|class|continue|do|else|false|for|fun|if|in|interface|is|null"
+            + "|object|package|return|super|this|throw|true|try|typealias|val|var|when|while"
+            + "|by|where|get|set|init|constructor|companion|catch|finally|out|vararg|import"
+            + "|override|private|public|protected|internal|abstract|open|final|sealed|data"
+            + "|value|enum|annotation|inline|infix|operator|suspend|lateinit|const|inner"
+            + "|tailrec|noinline|crossinline|external|expect|actual|reified|dynamic|field|"
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9) { i++; cc = c.peek(i) }
+        var w = ""
+        while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90) || (cc >= 48 && cc <= 57) || cc === 95) {
+            w = w + String.fromCharCode(cc)
+            i++
+            cc = c.peek(i)
+        }
+        return (w === "" || reserved.indexOf("|" + w + "|") >= 0)
+            ? abnf.newToken("\x01keyword-follows", 0)
+            : undefined
+    })()
+~~) ;
+
+// A zero-width guard that fails when the next word is `class`, so `data`/`value` are
+// left to ClassDecl (which needs them) instead of being consumed as ignorable modifiers.
+NotClassW   = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        return (cc === 99 && c.peek(i + 1) === 108 && c.peek(i + 2) === 97
+                && c.peek(i + 3) === 115 && c.peek(i + 4) === 115)
+            ? abnf.newToken("\x01class-follows", 0)
+            : undefined
+    })()
+~~) ;
+
 // A zero-width guard that fails when the next non-whitespace token is `:` - used so a
 // soft-keyword modifier (data/value/inner/...) that is really a parameter or property
 // NAME is not consumed as a modifier (a genuine modifier is never followed by `:`).
@@ -457,15 +655,31 @@ Elvis       <~~ push(makeElvis(takeAll())) ~~>
 // names are recognised; the names stay usable as identifiers (KwEnd word boundary).
 InfixExpr   <~~ push(makeInfix(takeAll())) ~~>
             = RangeExpr { InfixOp RangeExpr } ;
-InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) <~~ push({iop: up.in}) ~~> KwEnd ;
+InfixOp     = ( "to" | "and" | "or" | "xor" | "shl" | "shr" | "ushr" ) <~~ push({iop: up.in}) ~~> KwEnd
+            | UserInfix ;
+// A USER-declared `infix fun` used as an operator: `a dot b` is `a.dot(b)`, dispatched
+// through js_mcall like any method call. This is Kotlin's own rule (its
+// infixFunctionCall is `rangeExpression (simpleIdentifier rangeExpression)*`), and the
+// two guards are what make it safe here:
+//   SameLine   - the operator must sit on the left operand's line, so a statement on the
+//                NEXT line is never read as an infix call (newlines are otherwise
+//                insignificant in this grammar)
+//   NotKeyword - the name must not be one of Kotlin's own words, so `x else y`,
+//                `x is T`, `x as T`, `val`, `get`, ... keep their meaning
+// The step/until/downTo range words bind one level DOWN (RangeExpr), which is tried
+// first and consumes them, so they never reach here either.
+UserInfix   = SameLine NotKeyword KId <~~ push({iop: up.in, user: true}) ~~> ;
 
 // A range expression as a VALUE - a..b, a..<b, a until b, a downTo b, a step b - in
-// general operand position ((0 until n).joinToString(...)). The range value itself is
-// not modelled (no iterable range object), so a range is not implemented; both bounds
-// still run so their calls stay visible. Without a range operator RangeExpr is a pure
-// pass-through (its single AddExpr thunk is returned unchanged), so ordinary
-// expressions are byte-identical. The for-loop and when(x){ in a..b } forms bind their
-// bounds at AddExpr, below this level, so they keep splitting on their own range token.
+// general operand position (`3 in 1..5`, `for (i in r)`, `(0..n).map { ... }`). It is
+// MATERIALIZED as a list of its elements, which is what makes membership (a contains
+// call), iteration and the list higher-order methods all work with the machinery that is
+// already there. Deviation: Kotlin's progression is lazy, so an enormous range that
+// Kotlin would iterate cheaply is built element by element here. Without a range
+// operator RangeExpr is a pure pass-through (its single AddExpr thunk is returned
+// unchanged), so ordinary expressions stay byte-identical. The for-loop and the
+// when(x){ in a..b } forms bind their bounds at AddExpr, below this level, so they keep
+// splitting on their own range token and never materialize anything.
 RangeExpr   <~~ push(makeRange(takeAll(), up.pos)) ~~>
             = AddExpr { RangeInfix AddExpr } ;
 RangeInfix  = ( "..<" | ".." ) <~~ push({rop: up.in}) ~~>
@@ -477,9 +691,20 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
             = MulExpr { ( "+" | "-" ) <~~ push(up.in) ~~> MulExpr } ;
 
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
-            = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
+            = AsExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> AsExpr } ;
 
-UnaryExpr   = Neg | Not | PostfixExpr ;
+// The cast level: x as T / x as? T. Kotlin's asExpression binds tighter than every
+// binary operator and looser than the prefix unary, so `a + b as Int` is
+// `a + (b as Int)` and `num as? Int ?: 0` is `(num as? Int) ?: 0`. `as` is an
+// unchecked identity in the untyped handle world; `as?` yields null on a mismatch
+// (js_is_type decides). Casts chain left to right (x as A as B).
+AsExpr      <~~ push(applyTypeOp(takeAll())) ~~> = UnaryExpr { AsSfx } ;
+
+// A leading annotation on an EXPRESSION - when (@Ann "") { ... }, @Ann x += f() -
+// is legal wherever an expression starts. Annotations are erased, so an annotated
+// expression IS the expression; AnnExpr pushes nothing of its own.
+UnaryExpr   = AnnExpr | Neg | Not | PostfixExpr ;
+AnnExpr     = Annotation { Annotation } UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
@@ -498,14 +723,33 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}); retLblPop() ~~>
-            = "." Id <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
+            = "." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
 SafeMethodSfx <~~ push({kind:"mcall", name: popName(), args: takeAll(), safe: true}); retLblPop() ~~>
-            = "?." Id <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-SafeFieldSfx = "?." Id <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
+            = "?." KId <~~ push({mname: up.in}); retLblPush(up.in, "lam") ~~> [ SkipAngle ] MArgs ;
+FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
+SafeFieldSfx = "?." KId <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-MArgs       = "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lambda ;
+MArgs       = "(" [ CallArgs ] ")" [ TrailLambda ] | TrailLambda ;
+// A trailing lambda is the call's LAST argument, so it is wrapped in the same
+// {at} record the other arguments use.
+TrailLambda <~~ push({at: pop()}) ~~>
+            = Lambda ;
+// A call's argument list. Kotlin has three forms and they can be mixed:
+//   f(x)            positional
+//   f(name = x)     NAMED - resolved against the callee's parameter names at emit
+//                   time, when the whole file has been walked (see orderArgs)
+//   f(*arr)         SPREAD - the elements of arr become individual arguments
+// A named argument must be tried before the plain expression: `d = 7` would
+// otherwise parse as the assignment expression it looks like.
+CallArgs    = CallArg { "," CallArg } [ "," ] ;
+CallArg     = NamedArg | SpreadArg | PlainArg ;
+NamedArg    <~~ push({at: pop(), aname: pop().argn}) ~~>
+            = KId <~~ push({argn: up.in}) ~~> "=" Expression ;
+SpreadArg   <~~ push({at: pop(), spread: true}) ~~>
+            = "*" Expression ;
+PlainArg    <~~ push({at: pop()}) ~~>
+            = Expression ;
 
 // RawStr before Template (both open with "), FloatLit before IntLit (a plain integer
 // falls through), AnonFun/CallableRef before Call/VarRef (they would otherwise eat the
@@ -518,17 +762,42 @@ MArgs       = "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lam
 // else/arm bodies are full Expressions, so `if (c) a else b + 1` still binds b + 1 as
 // the else. A leading `if` at statement level is the If statement (matched before
 // ExprStmt); a leading `when` is this expression form.
-Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThisExpr | Call | VarRef ;
+Primary     = "(" Expression ")" | RawStr | Template | KHexLit | KBinLit | FloatLit | KIntLit | CharLit | True | False | Null | Lambda | AnonFun | CallableRef | ObjectExpr | IfExpr | WhenExpr | TryExpr | ThrowExpr | SuperCall | ThisExpr | Call | VarRef ;
+
+// super.m(args) - the base implementation of an overridden method. It compiles to
+// js_supercall(<the DEFINING class's superclass descriptor>, this, "m", args), which
+// walks the __super chain from there; taking the defining class (known while its
+// methods are emitted) rather than this.__class is what stops an override from
+// calling itself when the receiver is a further subclass. Outside a class body there
+// is no superclass, so it is reported as not implemented.
+SuperCall   <~~ push(makeSuperCall(takeAll(), up.pos)) ~~>
+            = KwSuper [ SkipAngle ] "." KId <~~ push({smname: up.in}) ~~> [ SkipAngle ] "(" [ CallArgs ] ")" ;
+
+// `throw e` in VALUE position - Kotlin types it Nothing, so it is a legal expression:
+// fun bail(m: String): Nothing = throw AppError(m), or `val x = a ?: throw E()`. It
+// emits the same js_throw the statement form does and then leaves a dead block, so the
+// value it "returns" is never observed. Statement-level `throw` still matches the Throw
+// statement first (PlainStmt is tried before ExprStmt), so nothing changes there.
+ThrowExpr   <~~ push(makeThrowExpr(pop())) ~~>
+            = KwThrow Expression ;
 
 // try { ... } catch (e) { ... } used as an EXPRESSION (val x = try { ... } catch ...,
-// or an expression-body function fun f() = try { ... } catch ...). The try/catch/finally
-// bodies genuinely run with exception handling (the same makeTry the statement form uses),
-// so their calls stay visible, but the VALUE of the try-expression is not modelled (a
-// statement block yields a control signal, not its last-expression value): it is reported
-// as not implemented and evaluates to a placeholder. Must precede Call/VarRef so `try`
-// is not read as an identifier.
-TryExpr     <~~ push(makeTryExpr(makeTry(takeAll()), up.pos)) ~~>
-            = KwTry TryBody { CatchClause } [ FinallyClause ] ;
+// or an expression-body function fun f() = try { ... } catch ...) is genuine. Its bodies
+// are VALUE blocks - their last expression is their value - wrapped so the body closure
+// RETURNS that value; js_try passes the winning clause's return value straight back, so
+// the value of the whole try-expression is simply js_try's result. A return/break/
+// continue leaving a body still travels as a control signal, which excDispatch re-issues
+// exactly as in the statement form. The finally clause is a statement block: it runs for
+// its effect and cannot change the value (unless it returns, which js_try honours).
+// Must precede Call/VarRef so `try` is not read as an identifier.
+TryExpr     <~~ push(makeTryValue(takeAll())) ~~>
+            = KwTry TryVBody { CatchVClause } [ FinallyClause ] ;
+TryVBody    <~~ push({trybody: valueBody(pop())}) ~~>
+            = ValueBlock ;
+CatchVClause <~~ push(makeCatch(takeAll())) ~~>
+            = KwCatch "(" KId <~~ push(up.in) ~~> [ ":" Type ] ")" CatchVBody ;
+CatchVBody  <~~ push(valueBody(pop())) ~~>
+            = ValueBlock ;
 
 // An anonymous object expression - object [: Supertypes] { members } - in value
 // position, e.g. passed as an argument (object : IHasComponent<Navigator> { ... }).
@@ -543,22 +812,26 @@ TryExpr     <~~ push(makeTryExpr(makeTry(takeAll()), up.pos)) ~~>
 // otherwise read `object` as an identifier.
 ObjectExpr  = ObjectExprReal | ObjectExprSkip ;
 ObjectExprReal <~~ push(makeObjectExpr(takeAll())) ~~>
-            = KwObject [ ":" SuperList ] "{" { Member } "}" ;
+            = KwObject [ ":" Supers ] "{" { Member } "}" ;
 ObjectExprSkip <~~ push(notImplExpr("object expression", up.pos)) ~~>
             = KwObject [ ":" SuperList ] SkipBlock ;
 
-// A labelled receiver - this@Label (this@TriangleApplication). The subset has a single
-// receiver, so it resolves to the nearest enclosing `this` exactly like a bare `this`;
-// the label names an outer scope we do not model, so it is parsed and ignored. Bare
+// A labelled receiver - this@Outer. When the label names the class whose members are
+// being emitted it is just `this`; when it names an ENCLOSING class it is the inner
+// instance's stored outer receiver (__outer), which is what an inner class needs. Bare
 // `this` is a plain VarRef; this must precede Call/VarRef so `this` is not read as an
 // identifier before the `@Label` is seen.
-ThisExpr    <~~ push(makeVarRef("this")) ~~>
-            = "this" KwEnd "@" Id ;
+ThisExpr    <~~ push(makeThisAt(pop().tlbl)) ~~>
+            = "this" KwEnd "@" KId <~~ push({tlbl: up.in}) ~~> ;
 
 // A lambda: { it * 2 }, { x -> x * 2 }, { a: Int, b: Int -> a + b }. The body is
 // one expression; without parameters the single argument is bound to 'it'.
+// A lambda may carry its own LABEL - exec lab@{ ... return@lab } - which becomes the
+// target of a return@lab inside it (instead of the callee's implicit label). LamLabel
+// registers it on the walk-time return-target stack; makeLambda pops it again.
 Lambda      <~~ push(makeLambda(takeAll())) ~~>
-            = "{" [ LambdaParams ] { LamStmt } "}" ;
+            = [ LamLabel ] "{" [ LambdaParams ] { LamStmt } "}" ;
+LamLabel    = KId <~~ push({lamlbl: up.in}); retLblPush(up.in, "lam") ~~> "@" ;
 // A { ... } in value position (an if / when arm) is a BLOCK, not a lambda: it runs its
 // statements in a fresh scope and its value is the last expression (Unit if it ends in a
 // statement). Tried before a plain Expression in those arms; a real lambda ({ x -> ... })
@@ -589,10 +862,10 @@ LambdaParams <~~ push({lparams: takeAll()}) ~~>
 // over a Pair/data-class/Triple argument. Destructuring is recognised but not lowered
 // (like a val destructuring declaration): the names bind to undefined and makeLambda
 // warns once, so the lambda still parses and lowers under -warn-unsupported.
-LParam      = DestructLParam | Id <~~ push(up.in) ~~> [ ":" Type ] ;
-DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>
+LParam      = DestructLParam | KId <~~ push(up.in) ~~> [ ":" Type ] ;
+DestructLParam <~~ push({destruct: takeAll(), pos: up.pos}) ~~>   // Each DName pushes {dn}.
             = "(" DName { "," DName } [ "," ] ")" [ ":" Type ] ;
-DName       = Id <~~ push(up.in) ~~> [ ":" Type ] ;
+DName       = KId <~~ push({dn: up.in}) ~~> [ ":" Type ] ;
 
 // f(a, b): a top level function, a builtin, or a class constructor. A trailing lambda
 // becomes the last argument (Kotlin): after a parenthesized list - f(a) { ... } - or on
@@ -600,7 +873,11 @@ DName       = Id <~~ push(up.in) ~~> [ ":" Type ] ;
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
 Call        <~~ push(makeCall(takeAll())); retLblPop() ~~>
-            = Id <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ SkipAngle ] ( "(" [ Expression { "," Expression } [ "," ] ] ")" [ Lambda ] | Lambda ) ;
+            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( "(" [ CallArgs ] ")" [ TrailLambda ] | TrailLambda ) ;
+// Explicit type arguments at a call site. Erased, except when the callee has a reified
+// type parameter: then the argument's NAME is what fills the callee's hidden parameter.
+TypeArgs    <~~ push({targs: stripWs(up.in)}) ~~>
+            = SkipAngle ;
 
 // String templates: "x=$x sum=${a + b}".
 Template    <~~ push(makeTemplate(takeAll())) ~~>
@@ -613,12 +890,16 @@ TplChunk    <~~ push({s: unescapeJs(up.in)}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
 TplEsc      = "\\" "\x20"..b"\x7e" ;
-TplPlain    = "\x20"..."\x21" | "\x23"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+// Everything but the closing quote, the escape backslash, the template `$` and a raw
+// newline. Kotlin allows the other control characters (a vertical tab, a form feed, a
+// NEL) inside a "..." literal, so the low range is included except \n and \r.
+TplPlain    = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x21" | "\x23"..."\x23"
+            | "\x25"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
-            = Id ;
+            = KId ;
 
 // ----- Widened surface: constructs accepted structurally but not lowered -----
 
@@ -637,8 +918,10 @@ SkipChEsc   = "\\" "\x00"..."\U0010ffff" ;
 SkipChChar  = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
-// A balanced < ... > run (generic parameters / arguments), parsed and ignored.
-SkipAngle   = "<" { SkipAngle | SkipAngleItem } ">" ;
+// A balanced < ... > run (generic parameters / arguments), parsed and ignored. `->` is
+// matched as one token, so a FUNCTION TYPE inside the run - Map<String, () -> Unit>,
+// <T3 : (Int) -> Int> - does not end it at the `>` of its arrow.
+SkipAngle   = "<" { SkipAngle | "->" | SkipAngleItem } ">" ;
 SkipAngleItem = "\x00"..."\x3b" | "\x3d" | "\x3f"..."\U0010ffff" ;
 
 // A balanced ( ... ) run (used to skip an anonymous function's parameter list, which
@@ -656,13 +939,13 @@ SkipParenItem = "\x00"..."\x27" | "\x2a"..."\U0010ffff" ;
 // walk-time retLabels stack decides (see makeReturnAt); a NON-LOCAL labelled
 // return (an outer lambda's label) stays not implemented, as does a labelled
 // break/continue out of a try body closure.
-LabelDef    = Id <~~ push({lbl: up.in}) ~~> "@" ;
+LabelDef    = KId <~~ push({lbl: up.in}) ~~> "@" ;
 BreakAt     <~~ push(makeBreakTo(pop().lbl, up.pos)) ~~>
-            = KwBreak "@" Id <~~ push({lbl: up.in}) ~~> [ ";" ] ;
+            = KwBreak "@" KId <~~ push({lbl: up.in}) ~~> [ ";" ] ;
 ContinueAt  <~~ push(makeContinueTo(pop().lbl, up.pos)) ~~>
-            = KwContinue "@" Id <~~ push({lbl: up.in}) ~~> [ ";" ] ;
+            = KwContinue "@" KId <~~ push({lbl: up.in}) ~~> [ ";" ] ;
 ReturnAt    <~~ push(makeReturnAt(takeAll(), up.pos)) ~~>
-            = KwReturn "@" Id <~~ push({rlbl: up.in}) ~~> [ SameLine Expression ] [ ";" ] ;
+            = KwReturn "@" KId <~~ push({rlbl: up.in}) ~~> [ SameLine Expression ] [ ";" ] ;
 
 // A floating-point literal (1.5, 2.0f, 1e9, 3.14E-2, digit-group underscores):
 // a genuine double value (parseFloat stops before the f/F suffix). Comparisons
@@ -681,15 +964,25 @@ FloatSfx    = "f" | "F" ;
 KHexLit     = NumHex [ IntSfx ] ;
 KBinLit     = NumBin [ IntSfx ] ;
 KIntLit     = NumInt [ IntSfx ] ;
-IntSfx      = "L" ;
+// Kotlin's integer literal suffixes: L (Long), u/U (unsigned) and the uL/UL pair.
+// The value model has one number type, so the suffix only has to be consumed. The
+// trailing KwEnd is essential: the literal's own whitespace is consumed before the
+// suffix is tried, so without a word boundary `0 until n` would read as `0u` followed
+// by the method call `ntil`.
+IntSfx      = ( ( "u" | "U" ) [ "L" ] | "L" ) KwEnd ;
 
-// A character literal: the value is the character code (a number), so char
-// comparisons and 'A' + 1 == 'B' arithmetic work; printing a Char shows the code.
-CharLit     <~~ push(makeConst(kCharCode(up.in))) ~~>
+// A character literal is a genuine Char value (the js_char extern boxes the code):
+// it RENDERS as its glyph in a string or in println, but COMPARES and does ARITHMETIC
+// on its code, so 'A' + 1 == 'B', 'z' > 'a' and "" + 'b' == "b" all hold. The
+// kotlin-interpreter grammar boxes the same value as {__char: code}; the two agree.
+CharLit     <~~ push(makeCharConst(kCharCode(up.in))) ~~>
             = "'" :whitespace() CharBody "'" :whitespace(Whitespace) ;
 CharBody    = "\\" ( "u" NumHexDig NumHexDig NumHexDig NumHexDig | CharEsc ) | CharPlain ;
 CharEsc     = "n" | "t" | "r" | "b" | "'" | '"' | "\\" | "$" | "0" ;
-CharPlain   = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
+// Everything but the closing quote, the escape backslash and a line break. Kotlin
+// allows the other control characters (a vertical tab, a form feed) in a char literal,
+// so the low range is included except \n and \r - the same rule TplPlain follows.
+CharPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 
 // A triple-quoted raw string: content up to the closing """ (internal runs of one
 // or two quotes are allowed), kept verbatim - no escape processing - with genuine
@@ -709,83 +1002,182 @@ RawTwoQ     = '"' '"' ( "\x00"..."\x21" | "\x23"..."\U0010ffff" ) ;
 // descriptor, which is not callable - out of the subset. A QUALIFIED reference
 // (Type::member, pkg.Type::member, recv::method) needs a bound-method value the
 // subset does not model: recognised, not implemented.
-CallableRef = BareRef | QualRef ;
-BareRef     = "::" Id <~~ push(makeVarRef(up.in)) ~~> ;
+CallableRef = IsInitRef | BareRef | QualRef ;
+// `this::prop.isInitialized` - Kotlin's lateinit check. A `lateinit var` has no
+// initializer, and a bodiless property defaults to null here, so "initialized" is
+// exactly "the field is not null".
+IsInitRef   <~~ push(makeIsInit(pop().irname)) ~~>
+            = "this" KwEnd "::" KId <~~ push({irname: up.in}) ~~> "." "isInitialized" KwEnd ;
+BareRef     = "::" KId <~~ push(makeVarRef(up.in)) ~~> ;
 QualRef     <~~ push(notImplExpr("callable reference", up.pos)) ~~>
-            = Id { "." Id } "::" Id ;
+            = KId { "." KId } "::" KId ;
 
-// An anonymous function expression: fun(params): T { ... } or fun(params) = expr. The
-// parameter list and body are skipped; recognised and reported as not implemented.
-AnonFun     <~~ push(notImplExpr("anonymous function", up.pos)) ~~>
-            = KwFun SkipParen [ ":" Type ] ( SkipBlock | "=" DiscardExpr ) ;
+// An anonymous function expression - fun(params): T { ... } or fun(params) = expr - is
+// genuine: it lowers to exactly what a named local function lowers to (an own IR
+// function plus a js_closure over the current scope), only without a name. Its `return`
+// returns from IT, which is the whole point of the form (unlike a lambda's).
+AnonFun     <~~ push(makeAnonFun(takeAll())) ~~>
+            = KwFun ParamList [ ":" Type ] ( Block | "=" ExprBody ) ;
 
 // A tag-less primary-constructor parameter list for headers we only skip.
 CtorParamsSkip = "(" [ CParamSkip { "," CParamSkip } [ "," ] ] ")" ;
-CParamSkip  = [ Modifiers ] [ ( "val" | "var" ) KwEnd ] Id ":" Type [ "=" DiscardExpr ] ;
+CParamSkip  = [ Modifiers ] [ KwVararg ] [ ( "val" | "var" ) KwEnd ] KId ":" Type [ "=" DiscardExpr ] ;
 
 // A supertype list (types with optional constructor-call args). No inheritance in
 // the subset, so it is parsed and ignored; DiscardExpr drops the arg thunks.
-SuperList   = SuperItem { "," SuperItem } ;
+SuperList   = SuperSkipItem { "," SuperSkipItem } ;
 // A supertype is a class (optional constructor-call args), an interface, or an
 // interface implemented by delegation (`: I by impl`). No inheritance in the
 // subset, so all three parse and are ignored; the delegate expression is discarded.
-SuperItem   = Type [ "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" | KwBy DiscardExpr ] ;
+SuperSkipItem = Type [ "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" | KwBy DiscardExpr ] ;
 DiscardExpr <~~ pop() ~~> = Expression ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a
 // full Kotlin file parses; -warn-unsupported lets the rest compile). Body is skipped.
 UnsupType   = Interface | ObjectDecl | EnumClass | AnnotationClass | TypeAlias ;
-// The body is optional: a marker interface (interface State) has no { } - it still
-// parses and is reported via notImpl exactly like a bodied one.
-Interface   <~~ push(notImplStmt("interface", up.pos)) ~~>
-            = KwInterface Id [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ] ;
+// An interface is lowered to a plain class descriptor: __isclass / __name / __super
+// plus the closures of its DEFAULT methods. It has no __ctor (it is never
+// constructed); its abstract members contribute only their names (see AbstractFun),
+// and its properties are abstract, so no field is emitted - the implementing class
+// initializes them on the instance, where js_kget finds them. An implementing class
+// puts the interface on its __super chain, so the runtime's memberCall finds the
+// default methods and js_is_type answers `x is Interface`. The body is optional (a
+// marker interface); a body outside the member subset falls back to InterfaceSkip.
+Interface   = InterfaceReal | InterfaceSkip ;
+// `fun interface` is a functional (SAM) interface. The `fun` only constrains how many
+// abstract members the interface may have, which changes nothing here, so it is parsed
+// and dropped and the declaration lowers like any other interface.
+InterfaceReal <~~ push(makeInterfaceStmt(takeAll())) ~~>
+            = [ KwFun ] KwInterface KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Supers ] [ WhereClause ] ( "{" { Member } "}" | !"{" ) ;
+InterfaceSkip <~~ push(notImplStmt("interface", up.pos)) ~~>
+            = [ KwFun ] KwInterface KId [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ] ;
 // object Name { ... } is a real singleton: its member body is lowered into a backing
 // js_obj_new (properties initialized once at program start, methods reachable via the
 // name and dispatched through js_mcall). A body outside the subset (e.g. a char
 // literal), or no body at all (a bodiless object), falls back to ObjectSkip
 // (notImplemented), so the widened surface still parses.
-ObjectDecl  = ObjectReal | ObjectSkip ;
+ObjectDecl  = ObjectReal | ObjectNoBody | ObjectSkip ;
 ObjectReal  <~~ push(makeObjectStmt(takeAll())) ~~>
-            = KwObject Id <~~ push(up.in) ~~> [ ":" SuperList ] "{" { Member } "}" ;
+            = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] "{" { Member } "}" ;
+// A BODILESS object declaration (object Zero : Expr) is a genuine singleton too - the
+// common shape of a sealed hierarchy's "no payload" case. The !"{" lookahead keeps it
+// from stealing an object whose body does not parse; that one still falls to ObjectSkip.
+ObjectNoBody <~~ push(makeObjectStmt(takeAll())) ~~>
+            = KwObject KId <~~ push(up.in) ~~> [ ":" Supers ] !"{" ;
 ObjectSkip  <~~ push(notImplStmt("object declaration", up.pos)) ~~>
-            = KwObject Id [ ":" SuperList ] [ SkipBlock ] ;
-EnumClass   <~~ push(notImplStmt("enum class", up.pos)) ~~>
-            = KwEnum KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
-AnnotationClass <~~ push(notImplStmt("annotation class", up.pos)) ~~>
-            = KwAnnotation KwClass Id [ SkipAngle ] [ CtorParamsSkip ] [ SkipBlock ] ;
-TypeAlias   <~~ push(notImplStmt("typealias", up.pos)) ~~>
-            = KwTypealias Id [ SkipAngle ] "=" Type [ ";" ] ;
+            = KwObject KId [ ":" SuperList ] [ SkipBlock ] ;
+// enum class E(ctorParams) { A(args), B(args); members }: genuine. The descriptor is an
+// ordinary class descriptor (so its methods dispatch and `x is E` works) and each entry
+// is a singleton instance built once at program start, carrying the synthesized `name`
+// and `ordinal` plus whatever the primary constructor set. The entries become both
+// properties of the descriptor (E.A) and bindings of a scope the enum's own members
+// close over, which is what makes the BARE entry names work inside them
+// (when (this) { A -> ... }). An entry with its own body, and a body outside the member
+// subset, fall back to EnumSkip.
+EnumClass   = EnumReal | EnumSkip ;
+EnumReal    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = KwEnum KwClass KId <~~ push(up.in) ~~> [ SkipAngle ] [ CtorParams ] [ ":" Supers ]
+              "{" [ EnumEntry { "," EnumEntry } [ "," ] ] [ ";" { Member } ] "}" ;
+EnumEntry   <~~ push(makeEnumEntry(takeAll())) ~~>
+            = { Annotation } KId <~~ push({ename: up.in}) ~~> [ "(" [ CallArgs ] ")" ] ;
+EnumSkip    <~~ push(notImplStmt("enum class", up.pos)) ~~>
+            = KwEnum KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] SkipBlock ;
+// An annotation class declares metadata only: annotations themselves are parsed and
+// dropped everywhere, so the declaration has nothing to emit - it is ERASED, not
+// unsupported. Same for a typealias: the alias names a type, and types are erased in
+// the untyped handle world, so every use of the alias already compiles.
+AnnotationClass <~~ push(makeErased()) ~~>
+            = KwAnnotation KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ SkipBlock ] ;
+TypeAlias   <~~ push(makeErased()) ~~>
+            = KwTypealias KId [ SkipAngle ] "=" Type [ ";" ] ;
 
 // Member forms accepted structurally, then reported as not implemented. Each fires
 // notImpl at compile time and pushes nothing, so makeClassStmt simply skips it.
-InitBlock   <~~ notImpl("init block", up.pos) ~~>
-            = KwInit SkipBlock ;
+// An init block: genuine. Its statements run in the constructor, interleaved with the
+// property initializers in DECLARATION order (Kotlin's rule), with `this` bound - so
+// an init block can read the constructor parameters and write the properties declared
+// above it. It pushes {initblk} and makeClassStmt keeps the source order.
+InitBlock   <~~ push({initblk: pop()}) ~~>
+            = KwInit Block ;
 // companion object { ... } inside a class: its members are attached to the class
 // descriptor (properties as fields, methods into a holder the descriptor's __class
 // points at), so ClassName.member and ClassName.m() work. A body outside the subset
 // falls back to CompanionSkip (notImplemented).
-CompanionObject = CompanionReal | CompanionSkip ;
+CompanionObject = CompanionBlock | CompanionReal | CompanionSkip ;
+// `companion { ... }` - the brace-only spelling of a companion object. Same members,
+// same lowering; it just has no `object` keyword and no name.
+CompanionBlock <~~ push({companion: takeAll()}) ~~>
+            = KwCompanion "{" { Member } "}" ;
 CompanionReal <~~ push({companion: takeAll()}) ~~>
-            = KwCompanion KwObject [ Id ] [ ":" SuperList ] "{" { Member } "}" ;
+            = KwCompanion KwObject [ KId <~~ push({cname: up.in}) ~~> ] [ ":" SuperList ] ( "{" { Member } "}" | !"{" ) ;
 CompanionSkip <~~ notImpl("companion object", up.pos) ~~>
-            = KwCompanion KwObject [ Id ] [ ":" SuperList ] SkipBlock ;
-// The body is optional: a purely delegating secondary constructor
-// (constructor(x) : this(x)) carries no { } - just the delegation. notImpl either way.
-SecondaryCtor <~~ notImpl("secondary constructor", up.pos) ~~>
-            = KwConstructor "(" [ SParam { "," SParam } [ "," ] ] ")" [ ":" Id "(" [ DiscardExpr { "," DiscardExpr } [ "," ] ] ")" ] [ SkipBlock ] ;
-SParam      = [ Modifiers ] Id ":" Type [ "=" DiscardExpr ] ;
-// Also matches an EXTENSION property (val Recv.name ... get() = ...): the receiver is
-// absorbed by the tag-less RecvSeg, exactly like an extension function. notImpl either
-// way. Reachable at top level too (a Program alternative), where an extension/computed
-// property otherwise falls to TopProp's Decl, which requires a plain `= init`.
-PropAccessor <~~ notImpl("property accessor", up.pos) ~~>
-            = ( "val" | "var" ) KwEnd [ RecvSeg { RecvSeg } ] Id [ ":" Type ] [ "=" DiscardExpr ] Accessor { Accessor } ;
-Accessor    = ( KwGet | KwSet ) "(" [ Id [ ":" Type ] ] ")" [ ":" Type ] [ SkipBlock | "=" DiscardExpr ] [ ";" ] ;
+            = KwCompanion KwObject [ KId ] [ ":" SuperList ] SkipBlock ;
+// A secondary constructor - constructor(a, b) : this(a + b) { ... } - is genuine. It
+// becomes its own IR function that first runs the delegation (the primary constructor on
+// the SAME instance, or the superclass constructor for `: super(...)`) and then its own
+// body. The class's __ctor becomes a small dispatcher that picks the constructor whose
+// parameter count matches the call, which is how the subset models constructor
+// overloading. The body is optional (a purely delegating secondary constructor).
+SecondaryCtor <~~ push({sctor: makeSecondaryCtor(takeAll())}) ~~>
+            = KwConstructor ParamList [ ":" CtorDelegate ] [ Block ] ;
+CtorDelegate <~~ push({cdeleg: takeAll()}) ~~>
+            = ( "this" | "super" ) <~~ push({dkind: up.in}) ~~> KwEnd "(" [ CallArgs ] ")" ;
+// A property with ACCESSORS - val/var name [: T] [= init] get() ... set(v) ... - is
+// genuine inside a class, an object or a companion. The pair becomes a js_defprop
+// accessor on the class DESCRIPTOR, and the runtime resolves it along the same
+// __class/__super chain it walks for methods, so plain `obj.name` reads and
+// `obj.name = v` writes run the accessor bodies without the call sites knowing.
+// The backing field lives on the INSTANCE under "name$f" - a descriptor accessor is
+// only consulted when the instance has no own property of that name, so the backing
+// field must NOT be called `name` - and `field` inside an accessor body is exactly that
+// slot (see the makeVarRef / makeAssign overrides). A property with only a getter and no
+// initializer has no backing field, which is the computed-property case.
+AccessorProp <~~ push({accprop: makeAccessorProp(takeAll())}) ~~>
+            = ( "val" | "var" ) KwEnd KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ "=" PropInit ] Accessor { Accessor } ;
+PropInit    <~~ push({apinit: pop()}) ~~>
+            = Expression ;
+Accessor    = GetAcc | SetAcc ;
+GetAcc      <~~ push({getter: pop()}) ~~>
+            = [ Modifiers ] KwGet "(" ")" [ ":" Type ] [ ContractClause ] AccBody [ ";" ] ;
+SetAcc      <~~ push(makeSetAcc(takeAll())) ~~>
+            = [ Modifiers ] KwSet "(" [ KId <~~ push({sparam: up.in}) ~~> [ ":" Type ] ] ")" [ ":" Type ] [ ContractClause ] AccBody [ ";" ] ;
+AccBody     = Block | "=" ExprBody ;
+// An EXTENSION property - val String.mid: Char get() = this[length / 2] - is genuine
+// too, and lowers exactly like an extension function: its getter becomes an IR function
+// with the receiver in the instance slot, declared as "extp$name", and the field-access
+// suffix emitter routes recv.name to it (dispatch is by NAME, see extPropResolves).
+ExtProp     <~~ push(makeExtProp(takeAll())) ~~>
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] RecvSeg { RecvSeg } KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] Accessor { Accessor } ;
+// A TOP-LEVEL computed property. There is no instance to hang an accessor on, so the
+// getter runs ONCE at the declaration and the name is bound to that value - a deviation
+// from Kotlin, which re-evaluates the getter on every read.
+TopAccProp  <~~ push(makeTopAccProp(takeAll())) ~~>
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] KId <~~ push({apname: up.in}) ~~> [ ":" Type ] [ WhereClause ] Accessor { Accessor } ;
+// The forms left over: a MEMBER extension property (two receivers, which the single
+// `this` model cannot express) and a delegated accessor property.
+UnsupAccessor <~~ push(notImplStmt("property accessor", up.pos)) ~~>
+            = ( "val" | "var" ) KwEnd [ SkipAngle ] [ RecvSeg { RecvSeg } ] KId [ ":" Type ] [ WhereClause ] [ "=" DiscardExpr ] Accessor { Accessor } ;
 
 // A destructuring declaration: accepted, reported as not implemented; the
 // initializer still runs so its calls stay visible under -warn-unsupported.
-Destructure <~~ push(makeDestructure(pop(), up.pos)) ~~>
-            = ( "val" | "var" ) KwEnd "(" Id { "," Id } [ "," ] ")" [ ":" Type ] "=" Expression [ ";" ] ;
+// val (a, b) = e: genuine. Kotlin defines it through the componentN operator
+// convention - component1() for the first name, component2() for the second - which is
+// what a data class synthesizes and what any class can declare by hand. A name of `_`
+// discards its component and its componentN() is not called, as in Kotlin.
+Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
+            = ( "val" | "var" ) KwEnd "(" DName { "," DName } [ "," ] ")" [ ":" Type ] "=" Expression [ ";" ] ;
+
+// Kotlin's identifiers, INCLUDING the backtick-quoted form: `top level`, `class`,
+// `is`. Any character but a backtick and a line break may appear between the quotes,
+// which is how a name that is a keyword, or that contains spaces, is written (test
+// names, and names coming from another JVM language). The quotes stay part of the
+// identifier TEXT here - a declaration and every use spell the name the same way, so
+// they still resolve to each other, and no name can collide with a plain identifier.
+// The shared lib/ident.abnf owns the unquoted form; KId is the Kotlin-level token that
+// every production in this grammar refers to.
+KId         = BQId | Id ;
+BQId        = "`" :whitespace() BQChar { BQChar } "`" :whitespace(Whitespace) ;
+BQChar      = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x5f" | "\x61"..."\U0010ffff" ;
 
 KwLazy      = "lazy" KwEnd ;
 KwInterface = "interface" KwEnd ;
@@ -825,6 +1217,10 @@ KwContinue  = "continue" KwEnd ;
 KwUntil     = "until" KwEnd ;
 KwDownTo    = "downTo" KwEnd ;
 KwStep      = "step" KwEnd ;
+KwWhere     = "where" KwEnd ;
+KwSuper     = "super" KwEnd ;
+KwVararg    = "vararg" KwEnd ;
+KwContract  = "contract" KwEnd ;
 
 // ---
 
@@ -837,6 +1233,27 @@ KwStep      = "step" KwEnd ;
 
     var hidCount = 0     // Names hidden loop counters.
     var classNames = {}  // Known class names (constructor calls).
+    var interfaceNames = {}   // Known interface names ("$" prefixed): descriptors without a __ctor.
+    // Every interface's method signature list [{name, params}], collected while the
+    // interface is walked. Interface DELEGATION (`class C(b: I) : I by b`) synthesizes
+    // one forwarder per entry the class does not override, so the arity has to be known.
+    var interfaceMethods = {}
+    // Names bound to a FUNCTION value (top-level and local fun declarations, extension
+    // functions). A bare call whose name is not one of these but IS a member method name
+    // is an implicit this.m() - Kotlin's ordinary way of calling an own or inherited
+    // method - and is dispatched through js_mcall on `this` (see makeCall).
+    var funNames = {}
+    // Parameter NAME lists by callee name, so a call site can place its named
+    // arguments: functions (and lambdas' owners) in funParams, member methods in
+    // methodParams. A method name declared by two classes keeps the first list -
+    // named arguments to an overloaded member name are resolved by that one.
+    var funParams = {}
+    var methodParams = {}
+    var ctorParamNames = {}   // Primary-constructor parameter names, for named arguments.
+    // The superclass name of the class whose METHOD BODIES are currently being emitted.
+    // super.m() reads it (emission of a class's methods happens inside makeClassStmt's
+    // thunk, so a dynamic variable is exactly the right scope); null outside a class.
+    var emitSuperName = null
 
     // ----- Extension functions: dispatch by name, the receiver becomes `this` -----
     // Method names the runtime implements on strings/lists/dicts (the interpreter
@@ -858,6 +1275,315 @@ KwStep      = "step" KwEnd ;
 
     // ----- Imports & errors -----
     function fail(msg) { println("kotlin compiler error: " + msg); exit(1) }
+
+    // ----- reified type parameters -----
+    // The reified type-parameter names of the function whose body is being walked. A
+    // stack, because a local fun can sit inside another function's body.
+    var reifiedStack = []
+    var pendingReified = []
+    var reifiedFuns = {}
+    function reifiedPush() { reifiedStack.push(pendingReified); pendingReified = [] }
+    function reifiedPop() { reifiedStack.pop() }
+    function reifiedTop() { return reifiedStack.length > 0 ? reifiedStack[reifiedStack.length - 1] : [] }
+    // "<reifiedT,U>" (whitespace already stripped) -> ["T"]. A parameter is reified when
+    // its entry starts with the `reified` modifier; everything else is erased.
+    function reifiedNamesOf(t) {
+        var out = []
+        if (t.length < 2) { return out }
+        var inner = t.substring(1, t.length - 1)
+        var parts = inner.split(",")
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i].substring(0, 7) == "reified") { out.push(parts[i].substring(7, parts[i].length)) }
+        }
+        return out
+    }
+    function isReifiedHere(name) {
+        var r = reifiedTop()
+        for (var i = 0; i < r.length; i++) { if (r[i] == name) { return true } }
+        return false
+    }
+    // The type-argument names of "<String,Int>" -> ["String", "Int"].
+    function typeArgNames(t) {
+        if (t == undefined || t.length < 2) { return [] }
+        return t.substring(1, t.length - 1).split(",")
+    }
+    // The hidden parameter carrying a reified type parameter's name.
+    function reifiedSlot(name) { return name + "$rt" }
+
+    // ----- Kotlin's operator conventions -----
+    // a + b is a.plus(b), -a is a.unaryMinus(), a[i] is a.get(i), a() is a.invoke(),
+    // x in c is c.contains(x), and a == b is a.equals(b) for a data/value class. The
+    // untyped handle world does not know an operand's type at compile time, so a
+    // convention is lowered only when SOME class in the program declares it: opClasses
+    // maps the convention method to those classes, and the emitted code probes with
+    // js_is_type (which walks the __super chain, so subclasses are covered) and falls
+    // back to the primitive operator. A program declaring no convention method emits
+    // exactly the IR it emitted before, byte for byte.
+    var opClasses = {}
+    var opConventions = {"$plus": true, "$minus": true, "$times": true, "$div": true,
+                         "$rem": true, "$mod": true, "$unaryMinus": true, "$unaryPlus": true,
+                         "$get": true, "$set": true, "$invoke": true, "$contains": true,
+                         "$compareTo": true, "$equals": true, "$rangeTo": true,
+                         "$inc": true, "$dec": true}
+    function declOp(mname, clsName) {
+        var l = opClasses["$" + mname]
+        if (l == undefined) { l = []; opClasses["$" + mname] = l }
+        for (var i = 0; i < l.length; i++) { if (l[i] == clsName) { return } }
+        l.push(clsName)
+    }
+    function declOpIfConvention(mname, clsName) {
+        if (opConventions["$" + mname] == true) { declOp(mname, clsName) }
+    }
+    // The convention method behind an operator token. A compound assignment reuses the
+    // plain operator's method (Kotlin falls back to plus when plusAssign is absent, and
+    // the subset has no plusAssign).
+    var opMethodOf = {"+": "plus", "-": "minus", "*": "times", "/": "div", "%": "rem",
+                      "+=": "plus", "-=": "minus", "*=": "times", "/=": "div", "%=": "rem",
+                      "==": "equals", "!=": "equals"}
+    // A zero-width "is one of these classes" probe, folded with or.
+    function emitClassProbe(b, v, cls) {
+        var hit = truthy(b, callExt(b, "js_is_type", [v, emitStr(b, cls[0])]))
+        for (var i = 1; i < cls.length; i++) {
+            hit = b.NewOr(hit, truthy(b, callExt(b, "js_is_type", [v, emitStr(b, cls[i])])))
+        }
+        return hit
+    }
+    // Emit `l op r`: the convention method when the left operand is an instance of a
+    // class that declares it, the primitive operator otherwise.
+    function emitOpBin(b, op, l, r) {
+        var mth = opMethodOf[op]
+        var cls = (mth != undefined) ? opClasses["$" + mth] : undefined
+        if (cls == undefined) { return {b: b, v: emitBin(b, op, l, r)} }
+        var objB = curF.NewBlock("")
+        var primB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(emitClassProbe(b, l, cls), objB, primB)
+        var argsV = callExt(objB, "js_arr_new", [])
+        callExt(objB, "js_arr_push", [argsV, r])
+        var ov = callExt(objB, "js_mcall", [l, emitStr(objB, mth), argsV])
+        if (op == "!=") { ov = callExt(objB, "js_not", [ov]) }
+        objB.NewBr(mergeB)
+        var pv = emitBin(primB, op, l, r)
+        primB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pv, primB)])}
+    }
+    // Every binary operator of the subset goes through the convention check.
+    foldBinary = function(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = items[i + 1](b)
+                b = rr.b
+                var ro = emitOpBin(b, items[i], v, rr.v)
+                b = ro.b
+                v = ro.v
+            }
+            return {b: b, v: v}
+        }
+    }
+    // -x: the unaryMinus convention, else the primitive negation.
+    makeNeg = function(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var cls = opClasses["$unaryMinus"]
+            if (cls == undefined) { return {b: b, v: intWrap(b, callExt(b, "js_neg", [r.v]))} }
+            var objB = curF.NewBlock("")
+            var primB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(emitClassProbe(b, r.v, cls), objB, primB)
+            var ov = callExt(objB, "js_mcall", [r.v, emitStr(objB, "unaryMinus"), callExt(objB, "js_arr_new", [])])
+            objB.NewBr(mergeB)
+            var pv = intWrap(primB, callExt(primB, "js_neg", [r.v]))
+            primB.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pv, primB)])}
+        }
+    }
+    // Like emitOpDispatch, but the arguments already sit in an emitted array.
+    function emitOpDispatchArr(b, recvV, mth, argsV, fallback) {
+        var cls = opClasses["$" + mth]
+        if (cls == undefined) { return {b: b, v: fallback(b)} }
+        var objB = curF.NewBlock("")
+        var primB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(emitClassProbe(b, recvV, cls), objB, primB)
+        var ov = callExt(objB, "js_mcall", [recvV, emitStr(objB, mth), argsV])
+        objB.NewBr(mergeB)
+        var pv = fallback(primB)
+        primB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pv, primB)])}
+    }
+    // A general "convention method or fallback" emitter for the postfix forms: the
+    // indexed read a[i] (get) and the call form a(args) (invoke).
+    function emitOpDispatch(b, recvV, mth, argVs, fallback) {
+        var cls = opClasses["$" + mth]
+        if (cls == undefined) { return {b: b, v: fallback(b)} }
+        var objB = curF.NewBlock("")
+        var primB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(emitClassProbe(b, recvV, cls), objB, primB)
+        var argsV = callExt(objB, "js_arr_new", [])
+        for (var i = 0; i < argVs.length; i++) { callExt(objB, "js_arr_push", [argsV, argVs[i]]) }
+        var ov = callExt(objB, "js_mcall", [recvV, emitStr(objB, mth), argsV])
+        objB.NewBr(mergeB)
+        var pv = fallback(primB)
+        primB.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(ov, objB), llvm.ir.NewIncoming(pv, primB)])}
+    }
+
+    // ----- Parameters, defaults, vararg and named arguments -----
+    // A parameter: {name, def, vararg}. The default is an expression thunk emitted
+    // INSIDE the callee (so it can read the earlier parameters and `this`), exactly
+    // where Kotlin evaluates it.
+    function makeParam(items) {
+        var rec = {name: null, def: null, vararg: false}
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].pname != undefined) { rec.name = items[i].pname }
+            else if (items[i].pdef != undefined) { rec.def = items[i].pdef }
+            else if (items[i].isvararg != undefined) { rec.vararg = true }
+        }
+        return rec
+    }
+    // {params: [names], defs: [thunk|null], varargAt: index|-1}. `params` keeps the
+    // plain name array every emitter already binds positionally.
+    function makeParamList(items) {
+        var names = []
+        var defs = []
+        var varargAt = -1
+        for (var i = 0; i < items.length; i++) {
+            names.push(items[i].name)
+            defs.push(items[i].def)
+            if (items[i].vararg) { varargAt = i }
+        }
+        return {params: names, defs: defs, varargAt: varargAt}
+    }
+    // Place named arguments into the callee's positional slots. Unnamed arguments fill
+    // from the left in order; a named one lands at its parameter's index; a slot no
+    // argument reaches stays undefined, which is exactly the signal emitParamSig turns
+    // into the declared default. Without a named argument (or without a known callee)
+    // the list is returned unchanged, so ordinary calls emit byte-identically.
+    function orderArgs(args, names) {
+        var named = false
+        for (var i = 0; i < args.length; i++) { if (args[i].aname != undefined) { named = true } }
+        if (!named) { return args }
+        if (names == undefined) { return args }
+        var out = []
+        var pos = 0
+        for (var j = 0; j < args.length; j++) {
+            if (args[j].aname == undefined) { out[pos] = args[j]; pos++; continue }
+            var slot = -1
+            for (var k = 0; k < names.length; k++) { if (names[k] == args[j].aname) { slot = k } }
+            if (slot < 0) { out[pos] = args[j]; pos++; continue }
+            out[slot] = args[j]
+        }
+        var n = names.length
+        if (out.length > n) { n = out.length }
+        var filled = []
+        for (var q = 0; q < n; q++) {
+            filled.push(out[q] != undefined ? out[q] : {at: makeConst(undefined)})
+        }
+        return filled
+    }
+    // Emit an argument list. Every entry is {at, aname?, spread?}: a spread argument
+    // (*arr) pushes each ELEMENT of the array instead of the array itself, which is
+    // done with an emitted index loop because the argument array is built at run time.
+    emitArgs = function(b, args) {
+        var argsV = callExt(b, "js_arr_new", [])
+        for (var j = 0; j < args.length; j++) {
+            var ar = args[j].at(b)
+            b = ar.b
+            if (args[j].spread != true) { callExt(b, "js_arr_push", [argsV, ar.v]); continue }
+            b = emitSpread(b, argsV, ar.v)
+        }
+        return {b: b, v: argsV}
+    }
+    // Append every element of the array srcV to dstV (an emitted counted loop).
+    function emitConcatArgs(b, dstV, srcV) { return emitSpread(b, dstV, srcV) }
+    // *arr: append every element of arr to the argument array (a counted loop over
+    // arr.length, since neither the length nor the elements are known at compile time).
+    function emitSpread(b, argsV, arrV) {
+        hidCount++
+        var iName = "$sp" + hidCount
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        var lenV = callExt(headB, "js_get", [arrV, emitStr(headB, "length")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        callExt(bodyB, "js_arr_push", [argsV, callExt(bodyB, "js_get", [arrV, iV2])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
+        bodyB.NewBr(headB)
+        curScopeV = saved
+        return exitB
+    }
+    // After the declared parameters are bound: collect a vararg parameter's extra
+    // arguments into a list, then re-bind every defaulted parameter the caller left
+    // out. A slot the call did not reach holds undefined - the one value Kotlin source
+    // cannot pass - so testing for it is a sound "argument absent" test.
+    function emitParamSig(b, sig, argsV, off) {
+        if (sig == undefined || sig == null) { return b }
+        if (sig.varargAt >= 0) {
+            callExt(b, "js_scope_set", [curScopeV, emitStr(b, sig.params[sig.varargAt]),
+                                        callExt(b, "js_pyrest", [argsV, handle(sig.varargAt + off)])])
+        }
+        for (var i = 0; i < sig.defs.length; i++) {
+            if (sig.defs[i] == null) { continue }
+            var nameV = emitStr(b, sig.params[i])
+            var curV = callExt(b, "js_scope_get", [curScopeV, nameV])
+            var defB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [curV, hUndef])), defB, mergeB)
+            var r = sig.defs[i](defB)
+            callExt(r.b, "js_scope_set", [curScopeV, nameV, r.v])
+            r.b.NewBr(mergeB)
+            b = mergeB
+        }
+        return b
+    }
+
+    // A declaration that is fully ERASED: it parses, contributes nothing to the module,
+    // and is NOT a gap (annotation classes and typealiases are metadata / type sugar).
+    function makeErased() { return function(b) { return b } }
+
+    // ----- Supertypes -----
+    // The bare name of a (possibly generic, possibly dotted) supertype: Box<T> -> Box,
+    // a.b.C -> C. The untyped handle world erases type arguments, and the descriptor
+    // that carries __name is bound under the simple name.
+    function baseTypeName(t) {
+        var cut = t.length
+        for (var i = 0; i < t.length; i++) { if (t.charAt(i) == "<" || t.charAt(i) == "?") { cut = i; break } }
+        t = t.substring(0, cut)
+        var dot = -1
+        for (var j = 0; j < t.length; j++) { if (t.charAt(j) == ".") { dot = j } }
+        return (dot >= 0) ? t.substring(dot + 1, t.length) : t
+    }
+    // items = [{sname}, ({sarg}... {iscall}) | {sdeleg}] -> one supertype record.
+    function makeSuper(items) {
+        var rec = {name: items[0].sname, iscall: false, args: [], deleg: null}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].sarg != undefined) { rec.args.push(items[i].sarg) }
+            else if (items[i].iscall != undefined) { rec.iscall = true }
+            else if (items[i].sdeleg != undefined) { rec.deleg = items[i].sdeleg }
+        }
+        return rec
+    }
+    // An abstract (bodiless) member function: only its name and arity matter.
+    function makeAbstract(items) { methodParams["$" + items[0]] = items[1].params; return {name: items[0], params: items[1].params} }
+    // Base types the runtime does not model as user classes but whose constructor
+    // argument programs DO observe: `class E(m: String) : Exception(m)` must make
+    // e.message readable, so the synthesized "super constructor" stores it.
+    var excBases = {"$Exception": true, "$RuntimeException": true, "$Throwable": true,
+                    "$Error": true, "$IllegalStateException": true, "$IllegalArgumentException": true,
+                    "$IllegalAccessException": true, "$ArithmeticException": true}
 
     // Import prefixes the runtime already satisfies: their symbols are provided
     // as builtins (abs/max/min, listOf, exitProcess, ...), so importing them is a
@@ -906,7 +1632,17 @@ KwStep      = "step" KwEnd ;
     // catch closure (a one-parameter function bound to the catch name) and always runs
     // finally. The first catch clause wins. See the TryStmt LIMITATION note above.
     // makeCatch is shared - see lib/compile-core.js.
-    function makeTry(items) {
+    // Wrap a VALUE block (function(b) -> {b, v}) as a body closure that RETURNS its
+    // value, which is how the try-EXPRESSION gets its value out of js_try.
+    function valueBody(vb) {
+        return function(b) {
+            var r = vb(b)
+            r.b.NewRet(r.v)
+            return deadBlock()
+        }
+    }
+    // The parts of a try, whichever form it came in.
+    function tryParts(items) {
         var tryT = anytype, catchT = anytype, catchName = anytype, finallyT = anytype
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
@@ -915,22 +1651,34 @@ KwStep      = "step" KwEnd ;
             }
             else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
         }
-        return function(b) {
-            // The try and catch bodies are ctl closures (isCtl), so a return/break/
-            // continue leaving them becomes a control signal that excDispatch re-issues.
-            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], tryT, false, true)), curScopeV])
-            var catchClo = hUndef
-            if (catchT != undefined) {
-                var cn = (catchName != undefined) ? catchName : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], catchT, false, true)), curScopeV])
-            }
-            var finClo = hUndef
-            if (finallyT != undefined) {
-                finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
-            }
-            var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
-            return excDispatch(b, ctl)
+        return {tryT: tryT, catchT: catchT, catchName: catchName, finallyT: finallyT}
+    }
+    // Emit the js_try call and the control-signal dispatch. Returns {b, v}: v is the
+    // value of whichever clause completed (undefined for statement bodies), valid on the
+    // returned block, where no signal is pending any more.
+    function emitTry(b, p) {
+        // The try and catch bodies are ctl closures (isCtl), so a return/break/
+        // continue leaving them becomes a control signal that excDispatch re-issues.
+        var tryClo = callExt(b, "js_closure", [handle(emitFunc([], p.tryT, false, true)), curScopeV])
+        var catchClo = hUndef
+        if (p.catchT != undefined) {
+            var cn = (p.catchName != undefined) ? p.catchName : "__caught"
+            catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], p.catchT, false, true)), curScopeV])
         }
+        var finClo = hUndef
+        if (p.finallyT != undefined) {
+            finClo = callExt(b, "js_closure", [handle(emitFunc([], p.finallyT, false, true)), curScopeV])
+        }
+        var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
+        return {b: excDispatch(b, ctl), v: ctl}
+    }
+    function makeTry(items) {
+        var p = tryParts(items)
+        return function(b) { return emitTry(b, p).b }
+    }
+    function makeTryValue(items) {
+        var p = tryParts(items)
+        return function(b) { return emitTry(b, p) }
     }
     // throw e: evaluate e and raise it with js_throw (a Go panic the runtime unwinds).
     function makeThrow(e) {
@@ -941,7 +1689,13 @@ KwStep      = "step" KwEnd ;
             return deadBlock()
         }
     }
-    // x is T / x !is T: undecidable without runtime types; evaluate x, yield undefined.
+    // `throw e` used as an expression (Nothing): the same js_throw, wrapped so it yields
+    // a {b, v} pair. The block it hands back is dead (js_throw never returns), so the
+    // placeholder value is unreachable - a phi merging it is valid but never taken.
+    function makeThrowExpr(e) {
+        var t = makeThrow(e)
+        return function(b) { return {b: t(b), v: hUndef} }
+    }
     // Decodes a character literal's source text ('A', '\n', '￿') to its code.
     function kCharCode(t) {
         if (t.charAt(1) == "\\") {
@@ -956,11 +1710,33 @@ KwStep      = "step" KwEnd ;
         }
         return t.charCodeAt(1)
     }
+    // [1, 2, 3] in an annotation argument / parameter default: a plain list value.
+    function makeCollLit(items) {
+        return function(b) {
+            var arrV = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [arrV, r.v])
+            }
+            return {b: b, v: arrV}
+        }
+    }
+    // A char literal as a value: js_char boxes the code into Kotlin's Char.
+    function makeCharConst(code) {
+        return function(b) { return {b: b, v: callExt(b, "js_char", [handle(code)])} }
+    }
     // x is T / x !is T: emits the shared dynamic type test (extern js_is_type).
     function makeIsCheck(operand, m) {
+        // `x is T` where T is a REIFIED type parameter of the enclosing function: the
+        // type name arrives in the hidden parameter, so the probe reads it from there.
+        var reifiedName = isReifiedHere(m.tname) ? reifiedSlot(m.tname) : null
         return function(b) {
             var r = operand(b)
-            var v = callExt(r.b, "js_is_type", [r.v, emitStr(r.b, m.tname)])
+            var tV = (reifiedName != null)
+                ? callExt(r.b, "js_scope_get", [curScopeV, emitStr(r.b, reifiedName)])
+                : emitStr(r.b, m.tname)
+            var v = callExt(r.b, "js_is_type", [r.v, tV])
             if (m.neg) { v = callExt(r.b, "js_not", [v]) }
             return {b: r.b, v: v}
         }
@@ -980,11 +1756,13 @@ KwStep      = "step" KwEnd ;
                 var op = items[i].iop
                 var r2 = items[i + 1](b)
                 b = r2.b
-                if (op == "to") {
-                    var pV = callExt(b, "js_obj_new", [])
-                    callExt(b, "js_set", [pV, emitStr(b, "first"), v])
-                    callExt(b, "js_set", [pV, emitStr(b, "second"), r2.v])
-                    v = pV
+                if (items[i].user == true) {
+                    // A user infix function: a.op(b) through the ordinary method path.
+                    var iargsV = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [iargsV, r2.v])
+                    v = callExt(b, "js_mcall", [v, emitStr(b, op), iargsV])
+                } else if (op == "to") {
+                    v = emitPair(b, v, r2.v)
                 } else if (op == "and") { v = callExt(b, "js_jband", [v, r2.v]) }
                 else if (op == "or") { v = callExt(b, "js_jbor", [v, r2.v]) }
                 else if (op == "xor") { v = callExt(b, "js_jbxor", [v, r2.v]) }
@@ -995,25 +1773,77 @@ KwStep      = "step" KwEnd ;
             return {b: b, v: v}
         }
     }
-    // A range value (a..b, a until b, a downTo b, a step b) in operand position. No
-    // iterable range object is modelled, so it is not implemented; both bounds are still
-    // emitted (they sit at the even indices - the {rop} markers are odd). A range-less
-    // RangeExpr is a pass-through: its single AddExpr thunk is returned unchanged.
+    // `a to b` builds a Pair. Beyond .first / .second, Kotlin's Pair also answers
+    // component1() / component2(), which is what for ((k, v) in pairs) and
+    // val (k, v) = pair destructure through, and it answers `is Pair`. So the object
+    // gets a descriptor carrying those two readers; the two IR functions behind them
+    // are emitted once for the whole module and shared by every Pair.
+    var pairC1 = 0
+    var pairC2 = 0
+    function emitPair(b, firstV, secondV) {
+        if (pairC1 == 0) {
+            pairC1 = emitComponentFunc("first")
+            pairC2 = emitComponentFunc("second")
+        }
+        var clsV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "Pair")])
+        callExt(b, "js_set", [clsV, emitStr(b, "component1"), callExt(b, "js_closure", [handle(pairC1), curScopeV])])
+        callExt(b, "js_set", [clsV, emitStr(b, "component2"), callExt(b, "js_closure", [handle(pairC2), curScopeV])])
+        var pV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [pV, emitStr(b, "__class"), clsV])
+        callExt(b, "js_set", [pV, emitStr(b, "first"), firstV])
+        callExt(b, "js_set", [pV, emitStr(b, "second"), secondV])
+        return pV
+    }
+    // A range value in operand position, materialized as a list. items alternates
+    // operands and {rop} markers: from, {rop}, to [, {rop:"step"}, step].
     function makeRange(items, pos) {
         if (items.length == 1) { return items[0] }
-        notImpl("range expression", pos)
-        return function(b) {
-            for (var i = 0; i < items.length; i += 2) { b = items[i](b).b }
-            return {b: b, v: hUndef}
+        var fromT = items[0]
+        var rop = items[1].rop
+        var toT = items[2]
+        var stepT = (items.length > 4) ? items[4] : null
+        if (items.length > 5 || (items.length == 5 && items[3].rop != "step")) {
+            notImpl("chained range expression", pos)
         }
-    }
-    // A try/catch used as an expression value. The statement thunk (makeTry) emits the
-    // try/catch/finally with real exception handling, so every call inside stays visible;
-    // the resulting value is not modelled (the block yields a signal, not a value), so the
-    // expression is not implemented and evaluates to a placeholder.
-    function makeTryExpr(stmtThunk, pos) {
-        notImpl("try expression", pos)
-        return function(b) { return {b: stmtThunk(b), v: hUndef} }
+        return function(b) {
+            var rf = fromT(b)
+            b = rf.b
+            var rt = toT(b)
+            b = rt.b
+            var modelV = rf.v
+            var boundV = callExt(b, "js_char_code", [rt.v])
+            if (rop == "until" || rop == "..<") { boundV = callExt(b, "js_sub", [boundV, emitNum(b, 1)]) }
+            var stepV = emitNum(b, 1)
+            if (stepT != null) {
+                var rs = stepT(b)
+                b = rs.b
+                stepV = rs.v
+            }
+            hidCount++
+            var iName = "$rg" + hidCount
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var arrV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), callExt(b, "js_char_code", [rf.v])])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+            var condExt = (rop == "downTo") ? "js_ge" : "js_le"
+            headB.NewCondBr(truthy(headB, callExt(headB, condExt, [iV, boundV])), bodyB, exitB)
+            var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            // Char bounds make a Char range: each element is boxed back like the bound.
+            callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_char_like", [modelV, iV2])])
+            var stepExt = (rop == "downTo") ? "js_sub" : "js_jadd"
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                            callExt(bodyB, stepExt, [iV2, stepV])])
+            bodyB.NewBr(headB)
+            curScopeV = saved
+            return {b: exitB, v: arrV}
+        }
     }
     // x in coll / x !in coll -> coll.contains(x) via js_mcall (the same call the
     // interpreter makes), so the engines agree; !in negates. items alternates
@@ -1040,8 +1870,13 @@ KwStep      = "step" KwEnd ;
     // production level (a sibling inline tag cannot pop the operand). as = identity.
     function applyTypeOp(items) {
         if (items.length == 1) { return items[0] }
+        // AsExpr may collect a chain (x as A as B); fold it left to right. TypeOp
+        // carries at most one `is` marker, so the loop runs once there.
         var operand = items[0]
-        var m = items[1]
+        for (var k = 1; k < items.length; k++) { operand = applyTypeOp1(operand, items[k]) }
+        return operand
+    }
+    function applyTypeOp1(operand, m) {
         if (m.asType) {
             if (!m.safe) { return operand } // x as T: identity (untyped values)
             return function(b) { // x as? T: the value when it matches, else null
@@ -1191,22 +2026,81 @@ KwStep      = "step" KwEnd ;
                     var efV = callExt(b, "js_kget", [curScopeV, emitStr(b, "ext$" + s.name)])
                     var eargsV = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [eargsV, cur])
-                    for (var ej = 0; ej < s.args.length; ej++) {
-                        var er = s.args[ej](b)
+                    var eargs = orderArgs(s.args, funParams["$" + s.name])
+                    for (var ej = 0; ej < eargs.length; ej++) {
+                        var er = eargs[ej].at(b)
                         b = er.b
-                        callExt(b, "js_arr_push", [eargsV, er.v])
+                        if (eargs[ej].spread != true) { callExt(b, "js_arr_push", [eargsV, er.v]); continue }
+                        b = emitSpread(b, eargsV, er.v)
                     }
                     return {b: b, v: callExt(b, "js_call", [efV, hUndef, eargsV])}
                 }
-                var ea = emitArgs(b, s.args)
+                // Int.inv(): the runtime has no method table for numbers, so the bitwise
+                // complement is emitted inline (unless a class declares its own `inv`).
+                if (s.name == "inv" && s.args.length == 0 && classMethodNames["$inv"] != true) {
+                    return {b: b, v: callExt(b, "js_bxor", [cur, emitNum(b, -1)])}
+                }
+                // recv.name(args) where `name` holds a lambda WITH RECEIVER: call the
+                // closure with the receiver in front. When a class ALSO declares a method
+                // of that name, a runtime probe picks the method for its instances.
+                if (recvLambdaNames["$" + s.name] == true) {
+                    var lamRecv = cur
+                    var lea = emitArgs(b, orderArgs(s.args, undefined))
+                    var lb = lea.b
+                    var lamV = callExt(lb, "js_kget", [curScopeV, emitStr(lb, s.name)])
+                    var callArgsV = callExt(lb, "js_arr_new", [])
+                    callExt(lb, "js_arr_push", [callArgsV, lamRecv])
+                    b = emitConcatArgs(lb, callArgsV, lea.v)
+                    var mcls = methodClasses["$" + s.name]
+                    if (mcls == undefined) {
+                        return {b: b, v: callExt(b, "js_call", [lamV, hUndef, callArgsV])}
+                    }
+                    var margsV = lea.v
+                    var objB2 = curF.NewBlock("")
+                    var lamB = curF.NewBlock("")
+                    var mrg = curF.NewBlock("")
+                    b.NewCondBr(emitClassProbe(b, lamRecv, mcls), objB2, lamB)
+                    var mv = callExt(objB2, "js_mcall", [lamRecv, emitStr(objB2, s.name), margsV])
+                    objB2.NewBr(mrg)
+                    var lv2 = callExt(lamB, "js_call", [lamV, hUndef, callArgsV])
+                    lamB.NewBr(mrg)
+                    return {b: mrg, v: mrg.NewPhi([llvm.ir.NewIncoming(mv, objB2), llvm.ir.NewIncoming(lv2, lamB)])}
+                }
+                var ea = emitArgs(b, orderArgs(s.args, methodParams["$" + s.name]))
+                // f.invoke(x) on a function VALUE is a plain call; on an instance of a
+                // class declaring the invoke convention it is that method.
+                if (s.name == "invoke" && classMethodNames["$invoke"] != true) {
+                    return {b: ea.b, v: callExt(ea.b, "js_call", [cur, hUndef, ea.v])}
+                }
+                if (s.name == "invoke") {
+                    var invRecv = cur
+                    var invArgs = ea.v
+                    return emitOpDispatchArr(ea.b, invRecv, "invoke", invArgs, function(bb) {
+                        return callExt(bb, "js_call", [invRecv, hUndef, invArgs])
+                    })
+                }
                 return {b: ea.b, v: callExt(ea.b, "js_mcall", [cur, emitStr(ea.b, s.name), ea.v])}
             }
             if (s.kind == "field") {
+                // An extension property wins only when no builtin and no class property
+                // uses the name: call its getter with the receiver as `this`.
+                if (extPropResolves(s.name)) {
+                    var gV = callExt(b, "js_kget", [curScopeV, emitStr(b, "extp$" + s.name)])
+                    var gargsV = callExt(b, "js_arr_new", [])
+                    callExt(b, "js_arr_push", [gargsV, cur])
+                    return {b: b, v: callExt(b, "js_call", [gV, hUndef, gargsV])}
+                }
                 var fname = s.name == "size" ? "length" : s.name
                 return {b: b, v: callExt(b, "js_get", [cur, emitStr(b, fname)])}
             }
+            // a[i]: the `get` convention when some class declares it, else the plain
+            // read. js_kindex, not js_get, so a STRING yields the Char at that index
+            // (Kotlin's CharSequence.get) while a list still yields its element.
             var ir2 = s.idx(b)
-            return {b: ir2.b, v: callExt(ir2.b, "js_get", [cur, ir2.v])}
+            var keyV = ir2.v
+            return emitOpDispatch(ir2.b, cur, "get", [keyV], function(bb) {
+                return callExt(bb, "js_kindex", [cur, keyV])
+            })
         }
         return function(b) {
             var r = primary(b)
@@ -1243,13 +2137,19 @@ KwStep      = "step" KwEnd ;
     function makeLambda(items) {
         var params = ["it"]
         var start = 0
+        // A labelled lambda: drop the marker and release its return-target entry.
+        if (items.length > 0 && items[0] != undefined && items[0].lamlbl != undefined) {
+            retLblPop()
+            items = items.slice(1)
+        }
         if (items.length > 0 && items[0] != undefined && items[0].lparams != undefined) {
             params = items[0].lparams
             start = 1
         }
-        // A destructuring parameter ({ (a, b) -> ... }) is recognised but not lowered:
-        // warn at build time, give its arg slot a hidden name, and declare each
-        // component name as undefined in the body. argNames holds one name per arg slot.
+        // A destructuring parameter ({ (a, b) -> ... }) is genuine: its argument slot
+        // gets a hidden name and the component names are bound from that value's
+        // componentN() calls, exactly like a val (a, b) = e declaration.
+        // argNames holds one name per argument slot.
         var argNames = []
         var destructs = []
         for (var pi = 0; pi < params.length; pi++) {
@@ -1257,15 +2157,18 @@ KwStep      = "step" KwEnd ;
             if (typeof p == "string") {
                 argNames.push(p)
             } else {
-                notImpl("destructuring lambda parameter", p.pos)
-                argNames.push("$d" + pi)
-                for (var dd = 0; dd < p.destruct.length; dd++) { destructs.push(p.destruct[dd]) }
+                var slot = "$d" + pi
+                argNames.push(slot)
+                var dnames = []
+                for (var dd = 0; dd < p.destruct.length; dd++) { dnames.push(p.destruct[dd].dn) }
+                destructs.push({slot: slot, names: dnames})
             }
         }
         var body = items.slice(start)
         var bodyStmt = function(b) {
             for (var di = 0; di < destructs.length; di++) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, destructs[di]), hUndef])
+                b = emitComponents(b, callExt(b, "js_scope_get", [curScopeV, emitStr(b, destructs[di].slot)]),
+                                   destructs[di].names)
             }
             var v = hUndef
             for (var k = 0; k < body.length; k++) {
@@ -1281,8 +2184,13 @@ KwStep      = "step" KwEnd ;
             b.NewRet(v)
             return deadBlock()
         }
+        // A lambda whose declared type has a receiver (val f: Int.(Int) -> Int = { ... })
+        // takes its `this` from the first argument slot, so it is emitted as an INSTANCE
+        // function: f(recv, a) and recv.f(a) then mean the same call, as in Kotlin.
+        var withRecv = pendingRecvLambda
+        pendingRecvLambda = false
         return function(b) {
-            var idx = emitFunc(argNames, bodyStmt, false)
+            var idx = emitFunc(argNames, bodyStmt, withRecv)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
@@ -1307,11 +2215,65 @@ KwStep      = "step" KwEnd ;
             return {b: b, v: v}
         }
     }
-    // A destructuring declaration is not lowered; evaluate the initializer (so its
-    // calls stay visible) and bind nothing.
-    function makeDestructure(init, pos) {
-        notImpl("destructuring declaration", pos)
-        return function(b) { var r = init(b); return r.b }
+    // val (a, b) = e: bind each name to the corresponding componentN() of the
+    // initializer. `_` discards its component and does not call componentN, as in Kotlin.
+    // Shared by the declaration, the for-loop form and destructuring lambda parameters.
+    // One component read. Kotlin resolves componentN three ways and so does this:
+    //   * a List / Array answers componentN as the element at that index (the stdlib
+    //     declares component1()..component5() as extensions on List)
+    //   * an object answers with its own componentN() method (a data class synthesizes
+    //     it, a class can declare it with `operator fun component1()`)
+    //   * anything else has no componentN. Real Kotlin rejects that at compile time;
+    //     with no types available here the component simply yields undefined, so a
+    //     nonsensical destructuring degrades instead of crashing the program.
+    function emitComponent(b, srcV, k) {
+        var listB = curF.NewBlock("")
+        var notListB = curF.NewBlock("")
+        var objB = curF.NewBlock("")
+        var elseB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_is_type", [srcV, emitStr(b, "List")])), listB, notListB)
+        var lv = callExt(listB, "js_get", [srcV, emitNum(listB, k)])
+        listB.NewBr(mergeB)
+        var isObj = notListB.NewAnd(truthy(notListB, callExt(notListB, "js_seq",
+                                        [callExt(notListB, "js_typeof", [srcV]), emitStr(notListB, "object")])),
+                                    truthy(notListB, callExt(notListB, "js_sne", [srcV, hNull])))
+        notListB.NewCondBr(isObj, objB, elseB)
+        var ov = callExt(objB, "js_mcall", [srcV, emitStr(objB, "component" + (k + 1)),
+                                           callExt(objB, "js_arr_new", [])])
+        objB.NewBr(mergeB)
+        elseB.NewBr(mergeB)
+        var phi = mergeB.NewPhi([llvm.ir.NewIncoming(lv, listB), llvm.ir.NewIncoming(ov, objB),
+                                 llvm.ir.NewIncoming(hUndef, elseB)])
+        return {b: mergeB, v: phi}
+    }
+    function emitComponents(b, srcV, names) {
+        for (var k = 0; k < names.length; k++) {
+            if (names[k] == "_") { continue }
+            var r = emitComponent(b, srcV, k)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[k]), r.v])
+        }
+        return b
+    }
+    function makeDestructure(items, pos) {
+        var names = []
+        for (var i = 0; i < items.length - 1; i++) { names.push(items[i].dn) }
+        var init = items[items.length - 1]
+        return function(b) {
+            var r = init(b)
+            return emitComponents(r.b, r.v, names)
+        }
+    }
+    // An anonymous function expression: the same lowering as a named local function
+    // (own IR function + js_closure over the current scope), without the binding.
+    function makeAnonFun(items) {
+        var sig = items[0]
+        var body = items[1]
+        return function(b) {
+            var idx = emitFunc(sig.params, body, false, false, sig)
+            return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
+        }
     }
 
     // `by lazy { init }`: the init thunk emits the lambda closure and calls it once
@@ -1339,13 +2301,103 @@ KwStep      = "step" KwEnd ;
     function splitMembers(items, start) {
         var props = []
         var methods = []
+        var accprops = []
+        var nested = []
+        var sctors = []
+        var abstracts = []
+        var inits = []          // Property initializers AND init blocks, in DECLARATION order.
         var companion = null
+        var compName = null
         for (var i = start; i < items.length; i++) {
-            if (items[i].companion != undefined) { companion = items[i].companion }
-            else if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]) }
+            if (items[i].companion != undefined) {
+                companion = items[i].companion
+                for (var ci = 0; ci < companion.length; ci++) {
+                    if (companion[ci].cname != undefined) { compName = companion[ci].cname }
+                }
+            }
+            else if (items[i].nested != undefined) { nested.push(items[i].nested) }
+            else if (items[i].sctor != undefined) { sctors.push(items[i].sctor) }
+            else if (items[i].accprop != undefined) {
+                accprops.push(items[i].accprop)
+                // Only a property WITH an initializer has a backing field to fill.
+                if (items[i].accprop.init != null) {
+                    inits.push({prop: backingName(items[i].accprop.name), init: items[i].accprop.init})
+                }
+            }
+            else if (items[i].initblk != undefined) { inits.push(items[i]) }
+            else if (items[i].absmethod != undefined) { abstracts.push(items[i].absmethod) }
+            else if (items[i].prop != undefined && items[i].init != undefined) { props.push(items[i]); inits.push(items[i]) }
             else if (items[i].method != undefined) { methods.push(items[i].method) }
         }
-        return {props: props, methods: methods, companion: companion}
+        return {props: props, methods: methods, accprops: accprops, abstracts: abstracts,
+                nested: nested, sctors: sctors, inits: inits, companion: companion, compName: compName}
+    }
+    // The leading non-member entries of a walked type declaration: the supertype list
+    // ({supers}) and, for a class, the primary constructor parameters ({cparams}).
+    // Returns {i, cparams, supers, sup} - i is the index the members start at, sup the
+    // FIRST supertype (the __super link) or null.
+    function takeHeader(items, start) {
+        var i = start
+        var cparams = []
+        var supers = []
+        if (items.length > i && items[i] != undefined && items[i].cparams != undefined) { cparams = items[i].cparams; i++ }
+        if (items.length > i && items[i] != undefined && items[i].supers != undefined) { supers = items[i].supers; i++ }
+        return {i: i, cparams: cparams, supers: supers, sup: (supers.length > 0 ? supers[0] : null)}
+    }
+    // True when `name` names a type this compile emits a descriptor for, so its
+    // descriptor value can be read out of the scope at run time.
+    function knownType(name) { return classNames[name] == 1 || interfaceNames["$" + name] == true }
+    // Link clsV to its supertypes: the first becomes __super (the chain the runtime
+    // walks); every further one is an extra interface whose default methods are copied
+    // in (own is not on the chain, so `is` does not see it - see the Supers comment).
+    function emitSuperLinks(b, clsV, supers, ownMethods) {
+        if (supers.length > 0 && knownType(supers[0].name)) {
+            callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, supers[0].name)])])
+        }
+        for (var k = 1; k < supers.length; k++) {
+            var sig = interfaceMethods["$" + supers[k].name]
+            if (sig == undefined) { continue }
+            var ifV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, supers[k].name)])
+            for (var j = 0; j < sig.length; j++) {
+                if (ownMethods["$" + sig[j].name] == true) { continue }
+                callExt(b, "js_set", [clsV, emitStr(b, sig[j].name),
+                                      callExt(b, "js_get", [ifV, emitStr(b, sig[j].name)])])
+            }
+        }
+        return b
+    }
+    // Interface DELEGATION: `class C(b: I) : I by b` must answer every method of I that
+    // C does not define by forwarding to the stored delegate. One forwarder IR function
+    // per such method - it reads this.__delegN and re-dispatches through js_mcall, so
+    // the delegate's own overrides win, exactly like Kotlin's generated bridges.
+    function emitDelegates(b, clsV, supers, ownMethods) {
+        for (var k = 0; k < supers.length; k++) {
+            if (supers[k].deleg == null) { continue }
+            var sig = interfaceMethods["$" + supers[k].name]
+            if (sig == undefined) { continue }
+            var slot = "__deleg" + k
+            for (var j = 0; j < sig.length; j++) {
+                if (ownMethods["$" + sig[j].name] == true) { continue }
+                var idx = emitForwarder(slot, sig[j].name, sig[j].params)
+                callExt(b, "js_set", [clsV, emitStr(b, sig[j].name),
+                                      callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+        }
+        return b
+    }
+    function emitForwarder(slot, mname, params) {
+        var body = function(b) {
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            var dV = callExt(b, "js_get", [thisV, emitStr(b, slot)])
+            var argsV = callExt(b, "js_arr_new", [])
+            for (var i = 0; i < params.length; i++) {
+                callExt(b, "js_arr_push", [argsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, params[i])])])
+            }
+            b.NewRet(callExt(b, "js_mcall", [dV, emitStr(b, mname), argsV]))
+            return deadBlock()
+        }
+        return emitFunc(params, body, true)
     }
     // Emit a class-style descriptor (methods closed over the current scope via js_closure)
     // plus an instance whose __class is the descriptor, then run the property initializers
@@ -1353,14 +2405,25 @@ KwStep      = "step" KwEnd ;
     // instance as a value) and the object DECLARATION (which also binds the singleton to its
     // name); the only per-caller difference is the __name string and what happens with the
     // instance afterwards.
-    function emitObjectInstance(b, name, methods, props) {
+    function emitObjectInstance(b, name, methods, props, supers, accprops) {
+        if (supers == undefined) { supers = [] }
+        if (accprops == undefined) { accprops = [] }
+        var own = {}
+        for (var oi = 0; oi < methods.length; oi++) { own["$" + methods[oi].name] = true }
         var clsV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
         callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+        b = emitSuperLinks(b, clsV, supers, own)
+        var savedSuper = emitSuperName
+        emitClassNames.push(name)
+        emitSuperName = (supers.length > 0 && knownType(supers[0].name)) ? supers[0].name : null
         for (var k = 0; k < methods.length; k++) {
-            var idx = emitFunc(methods[k].params, methods[k].body, true)
+            var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
             callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
         }
+        for (var ap = 0; ap < accprops.length; ap++) { b = emitAccessorPair(b, clsV, accprops[ap]) }
+        emitClassNames.pop()
+        emitSuperName = savedSuper
         var objV = callExt(b, "js_obj_new", [])
         callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
         var saved = curScopeV
@@ -1375,38 +2438,74 @@ KwStep      = "step" KwEnd ;
         return {b: b, v: objV}
     }
     function makeObjectExpr(items) {
-        var parts = splitMembers(items, 0)
+        var hdr = takeHeader(items, 0)
+        var parts = splitMembers(items, hdr.i)
         var props = parts.props
         var methods = parts.methods
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
-            return emitObjectInstance(b, "<object>", methods, props)
+            return emitObjectInstance(b, "<object>", methods, props, hdr.supers, parts.accprops)
         }
     }
 
     // f(args): a class constructor (known at compile time) or a function value.
     function makeCall(items) {
         var name = items[0]
-        var args = items.slice(1)
+        var at = 1
+        var targs = []
+        if (items[at] != undefined && items[at].targs != undefined) { targs = typeArgNames(items[at].targs); at++ }
+        var args = items.slice(at)
+        // A callee with reified type parameters gets the type-argument names appended as
+        // plain string arguments, in declaration order.
+        var reified = reifiedFuns["$" + name]
+        if (reified != undefined) {
+            for (var ri = 0; ri < reified.length; ri++) {
+                args = args.concat([{at: makeConst(targs.length > ri ? targs[ri] : "Any")}])
+            }
+        }
         return function(b) {
+            // A BARE call to a method of the enclosing class (own or inherited):
+            // `secret()` inside a method is `this.secret()`. Decided at emission time,
+            // when the whole file has been walked: we are inside a type body (so there IS
+            // a `this`), the name is a known member method, and nothing declares a
+            // function of that name - no other reading is possible. js_mcall then walks
+            // the __super chain like any m() call. The emitClassTop test matters: some
+            // OTHER class may declare a method of this name while the call sits at top
+            // level, where it is an ordinary call on a value of that name.
+            if (emitClassTop() != null && classNames[name] == undefined
+                && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
+                var selfV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                var ma = emitArgs(b, orderArgs(args, methodParams["$" + name]))
+                return {b: ma.b, v: callExt(ma.b, "js_mcall", [selfV, emitStr(ma.b, name), ma.v])}
+            }
             if (classNames[name] == 1) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
                 var objV = callExt(b, "js_obj_new", [])
                 callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+                var cargs = orderArgs(args, ctorParamNames["$" + name])
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, objV])
-                for (var i = 0; i < args.length; i++) {
-                    var r = args[i](b)
+                for (var i = 0; i < cargs.length; i++) {
+                    var r = cargs[i].at(b)
                     b = r.b
-                    callExt(b, "js_arr_push", [argsV, r.v])
+                    if (cargs[i].spread != true) { callExt(b, "js_arr_push", [argsV, r.v]); continue }
+                    b = emitSpread(b, argsV, r.v)
                 }
                 var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
                 callExt(b, "js_call", [ctorV, hUndef, argsV])
                 return {b: b, v: objV}
             }
             var fV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
-            var ea = emitArgs(b, args)
+            var ea = emitArgs(b, orderArgs(args, funParams["$" + name]))
             b = ea.b
+            // `v(args)` where v holds an instance of a class declaring the invoke
+            // convention is v.invoke(args); a function value is called directly.
+            if (opClasses["$invoke"] != undefined && funNames["$" + name] != true) {
+                var eaV = ea.v
+                return emitOpDispatchArr(b, fV, "invoke", eaV, function(bb) {
+                    return callExt(bb, "js_call", [fV, hUndef, eaV])
+                })
+            }
             return {b: b, v: callExt(b, "js_call", [fV, hUndef, ea.v])}
         }
     }
@@ -1436,11 +2535,24 @@ KwStep      = "step" KwEnd ;
             var r = valT(b)
             b = r.b
             var v = r.v
-            if (ref.path.length == 0) {
+            if (ref.name == "field" && ref.path.length == 0 && emitBackingField != null) {
+                // `field = v` inside an accessor writes the backing field of its property.
+                var fThisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                var fNameV = emitStr(b, emitBackingField)
+                if (op != "=") {
+                    var oldF = callExt(b, "js_get", [fThisV, fNameV])
+                    var rf = emitOpBin(b, op, oldF, v)
+                    b = rf.b
+                    v = rf.v
+                }
+                callExt(b, "js_set", [fThisV, fNameV, v])
+            } else if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 if (op != "=") {
                     var old = callExt(b, "js_kget", [curScopeV, nameV])
-                    v = emitBin(b, op, old, v)
+                    var ro = emitOpBin(b, op, old, v)
+                    b = ro.b
+                    v = ro.v
                 }
                 callExt(b, "js_kset", [curScopeV, nameV, v])
             } else {
@@ -1448,7 +2560,9 @@ KwStep      = "step" KwEnd ;
                 b = p.b
                 if (op != "=") {
                     var oldM = callExt(b, "js_get", [p.obj, p.key])
-                    v = emitBin(b, op, oldM, v)
+                    var rm = emitOpBin(b, op, oldM, v)
+                    b = rm.b
+                    v = rm.v
                 }
                 callExt(b, "js_set", [p.obj, p.key, v])
             }
@@ -1510,7 +2624,12 @@ KwStep      = "step" KwEnd ;
 
     function makeDecl(items) {
         var name = items[0]
-        var init = items[1]
+        var at = 1
+        if (items[at] != undefined && items[at].dtype != undefined) {
+            if (isRecvFnType(items[at].dtype)) { recvLambdaNames["$" + name] = true }
+            at++
+        }
+        var init = items[at]
         return function(b) {
             var r = init(b)
             b = r.b
@@ -1561,15 +2680,37 @@ KwStep      = "step" KwEnd ;
     // is the CURRENT IR function, and makeReturn's retStmt stays try-closure-aware.
     // Anything else is non-local: recognised, not implemented.
     var retLabels = []
-    function retLblPush(name, kind) { retLabels.push({lbl: name, kind: kind}) }
+    function retLblPush(name, kind) { retLabels.push({lbl: name, kind: kind, nl: false}) }
     function retLblPop() { retLabels.pop() }
     function retLblTop() { return retLabels.length > 0 ? retLabels[retLabels.length - 1] : null }
-    // items = [{rlbl}, valueThunk?]
+    // True when the innermost return target is a lambda's (implicit or explicit) label -
+    // i.e. a bare `return` here is Kotlin's NON-LOCAL return. Also marks the enclosing
+    // function declaration, whose body then gets the catch wrapper (see wrapNonLocal);
+    // with no enclosing function there is nothing to return from, so it stays local.
+    function inLambdaBody() {
+        var top = retLblTop()
+        if (top == null || top.kind != "lam") { return false }
+        for (var i = retLabels.length - 1; i >= 0; i--) {
+            if (retLabels[i].kind == "fun") { retLabels[i].nl = true; return true }
+        }
+        return false
+    }
+    // items = [{rlbl}, valueThunk?]. return@l is LOCAL when l is the innermost target
+    // (the lambda we are in, or the function itself); otherwise it is a non-local return
+    // to an OUTER lambda, which the subset cannot express.
     function makeReturnAt(items, pos) {
         var lbl = items[0].rlbl
         var top = retLblTop()
         if (top != null && top.lbl == lbl) {
-            return makeReturn(items.slice(1))
+            return makeReturn(items.slice(1), false)
+        }
+        // return@outerFun from inside a lambda: the enclosing function's wrapper can
+        // deliver it, exactly like a bare non-local return.
+        for (var i = retLabels.length - 1; i >= 0; i--) {
+            if (retLabels[i].kind == "fun" && retLabels[i].lbl == lbl) {
+                retLabels[i].nl = true
+                return makeReturn(items.slice(1), true)
+            }
         }
         return notImplStmt("non-local labelled return", pos)
     }
@@ -1625,7 +2766,10 @@ KwStep      = "step" KwEnd ;
     }
     // items = [name, fromT, {rop}, toT, {step}?, bodyT]. The bounds and the step are
     // evaluated once (until subtracts one from the bound up front); downTo flips the
-    // condition to >= and steps backwards. The loop variable drives the loop.
+    // condition to >= and steps backwards. A hidden NUMERIC counter drives the loop and
+    // the loop variable is re-boxed from it each iteration with js_char_like, so
+    // `for (ch in 'a'..'c')` yields Chars and `for (i in 1..3)` yields Ints out of the
+    // same emitted loop (js_char_like is the identity when the bound is not a Char).
     function makeForRange(items) {
         var name = items[0]
         var fromT = items[1]
@@ -1640,12 +2784,17 @@ KwStep      = "step" KwEnd ;
             var sName = "$st" + hidCount
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var cName = "$ct" + hidCount
+            var mName = "$md" + hidCount
             var rf = fromT(b)
             b = rf.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, mName), rf.v])          // the element-type model
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cName),
+                                         callExt(b, "js_char_code", [rf.v])])          // the numeric counter
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), rf.v])
             var rt = toT(b)
             b = rt.b
-            var boundV = rt.v
+            var boundV = callExt(b, "js_char_code", [rt.v])
             if (rop == "until") boundV = callExt(b, "js_sub", [boundV, emitNum(b, 1)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, tName), boundV])
             var stepV = emitNum(b, 1)
@@ -1660,17 +2809,21 @@ KwStep      = "step" KwEnd ;
             var postB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(headB)
-            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, name)])
+            var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cName)])
             var tV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, tName)])
             var condExt = (rop == "downTo") ? "js_ge" : "js_le"
             headB.NewCondBr(truthy(headB, callExt(headB, condExt, [iV, tV])), bodyB, exitB)
+            var cVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, cName)])
+            var mVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, mName)])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name),
+                                            callExt(bodyB, "js_char_like", [mVb, cVb])])
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
-            var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, name)])
+            var iV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, cName)])
             var sV2 = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, sName)])
             var stepExt = (rop == "downTo") ? "js_sub" : "js_jadd"
-            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, name), callExt(postB, stepExt, [iV2, sV2])])
+            callExt(postB, "js_scope_set", [curScopeV, emitStr(postB, cName), callExt(postB, stepExt, [iV2, sV2])])
             postB.NewBr(headB)
             curScopeV = saved
             return exitB
@@ -1700,7 +2853,7 @@ KwStep      = "step" KwEnd ;
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
             var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
             var aV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [aV2, iV2])])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_kindex", [aV2, iV2])])
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
@@ -1716,8 +2869,8 @@ KwStep      = "step" KwEnd ;
     // and never bound to arr[i]. A non-list collection (e.g. a map) has no length and so
     // iterates zero times, exactly as in the interpreter.
     function makeForDestruct(items, pos) {
-        notImpl("destructuring for-loop", pos)
-        var names = items[0].dnames
+        var names = []
+        for (var n0 = 0; n0 < items[0].dnames.length; n0++) { names.push(items[0].dnames[n0].dn) }
         var collT = items[1]
         var bodyT = items[2]
         return function(b) {
@@ -1731,9 +2884,6 @@ KwStep      = "step" KwEnd ;
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, aName), r.v])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, 0)])
-            for (var n = 0; n < names.length; n++) {
-                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, names[n]), hUndef])
-            }
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -1743,6 +2893,11 @@ KwStep      = "step" KwEnd ;
             var aV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, aName)])
             var lenV = callExt(headB, "js_get", [aV, emitStr(headB, "length")])
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+            // The component names are (re)declared per iteration in the loop's own scope
+            // from the element's componentN() calls.
+            var iVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+            var aVb = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, aName)])
+            bodyB = emitComponents(bodyB, callExt(bodyB, "js_get", [aVb, iVb]), names)
             loopStack.push({cont: postB, brk: exitB, label: lbl})
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
@@ -1753,7 +2908,7 @@ KwStep      = "step" KwEnd ;
             return exitB
         }
     }
-    function makeReturn(items) {
+    function makeReturn(items, nonLocal) {
         var t = items.length > 0 ? items[0] : null
         return function(b) {
             var v = hUndef
@@ -1762,7 +2917,53 @@ KwStep      = "step" KwEnd ;
                 b = r.b
                 v = r.v
             }
+            if (nonLocal == true) { return retNonLocal(b, v) }
             return retStmt(b, v) // plain ret, or a control signal when leaving a try body
+        }
+    }
+    // ----- non-local return: the marker protocol -----
+    // A `return` inside a lambda cannot ret the enclosing frame (the lambda is its own IR
+    // function, and the higher-order callee in between is the runtime's). It raises a
+    // marker object instead, and the enclosing function's body - wrapped by wrapNonLocal
+    // - catches it and returns its value. This is the untyped stand-in for the inlining
+    // real Kotlin performs; a user catch(e: Exception) between the two would see the
+    // marker, which is the one visible difference.
+    function retNonLocal(b, v) {
+        var mV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [mV, emitStr(b, "__nlret"), hTrue])
+        callExt(b, "js_set", [mV, emitStr(b, "__nlvalue"), v])
+        callExt(b, "js_throw", [mV])
+        b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+        return deadBlock()
+    }
+    // The catch body of the wrapper: a marker becomes this function's return value,
+    // anything else is re-raised unchanged. The object test comes first, so a thrown
+    // string or number is never probed for a property.
+    function nlCatchBody(b) {
+        var mV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "__nl")])
+        var objB = curF.NewBlock("")
+        var reB = curF.NewBlock("")
+        var hitB = curF.NewBlock("")
+        var isObj = b.NewAnd(truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [mV]), emitStr(b, "object")])),
+                             truthy(b, callExt(b, "js_sne", [mV, hNull])))
+        b.NewCondBr(isObj, objB, reB)
+        objB.NewCondBr(truthy(objB, callExt(objB, "js_get", [mV, emitStr(objB, "__nlret")])), hitB, reB)
+        hitB.NewRet(callExt(hitB, "js_get", [mV, emitStr(hitB, "__nlvalue")]))
+        callExt(reB, "js_throw", [mV])
+        reB.NewRet(hUndef)
+        return deadBlock()
+    }
+    // Wrap a function body so a non-local return inside it lands here. The body becomes a
+    // ctl closure (so an ORDINARY return leaving it still travels as a control signal that
+    // excDispatch re-issues), and js_try routes the marker to nlCatchBody.
+    function wrapNonLocal(bodyT) {
+        return function(b) {
+            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], bodyT, false, true)), curScopeV])
+            var catchClo = callExt(b, "js_closure", [handle(emitFunc(["__nl"], nlCatchBody, false, false)), curScopeV])
+            var ctl = callExt(b, "js_try", [tryClo, catchClo, hUndef])
+            var nb = excDispatch(b, ctl)
+            nb.NewRet(ctl)
+            return deadBlock()
         }
     }
     function makeExprBody(t) {
@@ -1777,7 +2978,7 @@ KwStep      = "step" KwEnd ;
 
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
-    function emitFunc(params, body, isInstance, isCtl) {
+    function emitFunc(params, body, isInstance, isCtl, sig, dynThis) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1792,7 +2993,12 @@ KwStep      = "step" KwEnd ;
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var off = 0
-        if (isInstance) {
+        if (dynThis == true) {
+            // An accessor: the runtime calls a getter/setter with the instance as the
+            // DYNAMIC this (rt.call(acc.get, obj, nil)), not prepended to the arguments
+            // the way memberCall calls a method - so `this` comes from js_this.
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])])
+        } else if (isInstance) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
         }
@@ -1800,6 +3006,7 @@ KwStep      = "step" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
                                          callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
         }
+        b = emitParamSig(b, sig, f.Params[1], off)
         var endB = body(b)
         endB.NewRet(hUndef)
         if (isCtl) { ctlLeave() }
@@ -1809,12 +3016,34 @@ KwStep      = "step" KwEnd ;
         curFTag = savedTag
         return idx
     }
-    function makeFun(items) {
-        return {name: items[0], params: items[1].params, body: items[2]}
+    function makeFun(items, retEntry, reified) {
+        var sig = items[1]
+        var params = sig.params
+        // A reified type parameter becomes a hidden trailing parameter holding the type
+        // name; the call sites append the matching type argument. Note the rebuild: a
+        // record that travelled through the tag stack hands back a FRESH array on every
+        // property read, so pushing into `sig.params` in place would be lost - the new
+        // arrays have to be assembled locally and stored in a new signature record.
+        if (reified != null && reified.length > 0) {
+            reifiedFuns["$" + items[0]] = reified
+            var defs = sig.defs
+            for (var r = 0; r < reified.length; r++) {
+                params.push(reifiedSlot(reified[r]))
+                defs.push(null)
+            }
+            sig = {params: params, defs: defs, varargAt: sig.varargAt}
+        }
+        funParams["$" + items[0]] = params
+        var body = items[2]
+        // A non-local return somewhere inside marked this function's return-target entry;
+        // its body then needs the catch wrapper that delivers the marker as a return.
+        if (retEntry != null && retEntry.nl == true) { body = wrapNonLocal(body) }
+        return {name: items[0], params: params, sig: sig, body: body}
     }
     function makeFunStmt(f) {
+        funNames["$" + f.name] = true
         return function(b) {
-            var idx = emitFunc(f.params, f.body, false)
+            var idx = emitFunc(f.params, f.body, false, false, f.sig)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, f.name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b
@@ -1827,17 +3056,40 @@ KwStep      = "step" KwEnd ;
     function makeExtFunStmt(f) {
         extFunNames["$" + f.name] = true
         return function(b) {
-            var idx = emitFunc(f.params, f.body, true)
+            var idx = emitFunc(f.params, f.body, true, false, f.sig)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "ext$" + f.name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return b
         }
     }
+    // A primary constructor parameter: a name, whether `val`/`var` makes it a property,
+    // and the same default / vararg information an ordinary parameter carries.
     function makeCtorParam(items) {
-        if (items.length > 1) return {name: items[1], prop: true}
-        return {name: items[0], prop: false}
+        var rec = {name: null, prop: false, def: null, vararg: false}
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].pname != undefined) { rec.name = items[i].pname }
+            else if (items[i].vv != undefined) { rec.prop = true }
+            else if (items[i].pdef != undefined) { rec.def = items[i].pdef }
+            else if (items[i].isvararg != undefined) { rec.vararg = true }
+        }
+        return rec
     }
+    // The signature of a primary constructor, in the shape emitParamSig consumes.
+    function ctorSig(cparams) {
+        var names = []
+        var defs = []
+        var varargAt = -1
+        for (var i = 0; i < cparams.length; i++) {
+            names.push(cparams[i].name)
+            defs.push(cparams[i].def)
+            if (cparams[i].vararg) { varargAt = i }
+        }
+        return {params: names, defs: defs, varargAt: varargAt}
+    }
+    // Property names declared by some class: an extension property never shadows them.
+    function notePropName(name) { classPropNames["$" + name] = true }
     function makeProp(items) {
+        notePropName(items[0])
         // A bodiless property (abstract/lateinit/interface: no `= init`) still needs a
         // backing field so an implicit `name = ...` in a method resolves to this.name and
         // reads before assignment are defined. Default it to null (identical to `= null`).
@@ -1845,9 +3097,36 @@ KwStep      = "step" KwEnd ;
         return {prop: items[0], init: items[1]}
     }
 
+    // The super-constructor call of `class C(...) : Base(args)`. A user Base runs its
+    // own __ctor on the SAME instance (fields land on `this`, so an inherited property
+    // is a plain field of the object); a built-in exception base is synthesized - its
+    // first argument becomes `this.message`, which is what `e.message` reads. A
+    // supertype without an argument list is an interface: nothing to construct.
+    function emitSuperCtor(b, thisV, sup) {
+        if (sup == null || !sup.iscall) { return b }
+        var argVs = []
+        for (var i = 0; i < sup.args.length; i++) {
+            var r = sup.args[i](b)
+            b = r.b
+            argVs.push(r.v)
+        }
+        if (classNames[sup.name] == 1) {
+            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, sup.name)])
+            var ctorV = callExt(b, "js_get", [supV, emitStr(b, "__ctor")])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, thisV])
+            for (var j = 0; j < argVs.length; j++) { callExt(b, "js_arr_push", [argsV, argVs[j]]) }
+            callExt(b, "js_call", [ctorV, hUndef, argsV])
+        } else if (excBases["$" + sup.name] == true && argVs.length > 0) {
+            callExt(b, "js_set", [thisV, emitStr(b, "message"), argVs[0]])
+        }
+        return b
+    }
     // The constructor: bind the primary constructor parameters, store the property
-    // parameters on this, then run the property initializers.
-    function emitCtor(cparams, props) {
+    // parameters on this, store any interface-delegation targets, delegate to the
+    // superclass constructor, then run the property initializers and init blocks in
+    // DECLARATION order (Kotlin evaluates them top to bottom, interleaved).
+    function emitCtor(cparams, inits, supers) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1867,10 +3146,20 @@ KwStep      = "step" KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, cparams[k].name), pv])
             if (cparams[k].prop) callExt(b, "js_set", [thisV, emitStr(b, cparams[k].name), pv])
         }
-        for (var p = 0; p < props.length; p++) {
-            var r = props[p].init(b)
+        if (supers == undefined) { supers = [] }
+        for (var d = 0; d < supers.length; d++) {
+            if (supers[d].deleg == null) { continue }
+            var rd = supers[d].deleg(b)
+            b = rd.b
+            callExt(b, "js_set", [thisV, emitStr(b, "__deleg" + d), rd.v])
+        }
+        b = emitParamSig(b, ctorSig(cparams), f.Params[1], 1)
+        b = emitSuperCtor(b, thisV, (supers.length > 0 ? supers[0] : null))
+        for (var p = 0; p < inits.length; p++) {
+            if (inits[p].initblk != undefined) { b = inits[p].initblk(b); continue }
+            var r = inits[p].init(b)
             b = r.b
-            callExt(b, "js_set", [thisV, emitStr(b, props[p].prop), r.v])
+            callExt(b, "js_set", [thisV, emitStr(b, inits[p].prop), r.v])
         }
         b.NewRet(hUndef)
         curF = savedF
@@ -1880,21 +3169,445 @@ KwStep      = "step" KwEnd ;
         return idx
     }
 
-    // items = [name, {cparams}?, ({prop}|{method})...]
-    function makeClassStmt(items) {
-        var name = items[0]
-        var i = 1
-        var cparams = []
-        if (items.length > 1 && items[1] != undefined && items[1].cparams != undefined) {
-            cparams = items[1].cparams
-            i = 2
+    // ----- property accessors -----
+    // items = [{apname}, {apinit}?, ({getter}|{setter})...] -> the record splitMembers
+    // and the class emitters consume.
+    function makeAccessorProp(items) {
+        var rec = {name: null, init: null, getter: null, setter: null, setParam: "value"}
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].apname != undefined) { rec.name = items[i].apname }
+            else if (items[i].apinit != undefined) { rec.init = items[i].apinit }
+            else if (items[i].getter != undefined) { rec.getter = items[i].getter }
+            else if (items[i].setter != undefined) { rec.setter = items[i].setter; rec.setParam = items[i].setname }
         }
-        var parts = splitMembers(items, i)
-        var props = parts.props
+        return rec
+    }
+    // items = [{sparam}?, bodyThunk]. Kotlin's implicit setter parameter is `value`.
+    function makeSetAcc(items) {
+        if (items.length > 1) { return {setter: items[1], setname: items[0].sparam} }
+        return {setter: items[0], setname: "value"}
+    }
+    // The name of the backing field of property `name`. Not `name` itself: the runtime
+    // consults a descriptor accessor only when the instance has no OWN property of that
+    // name, so an own `name` slot would shadow the accessor permanently.
+    function backingName(name) { return name + "$f" }
+    // The backing field the accessor bodies currently being emitted belong to, so a
+    // `field` reference inside them resolves to this.<name>$f (see the makeVarRef and
+    // makeAssign overrides). null outside an accessor body, where `field` is a plain name.
+    var emitBackingField = null
+    // Emit the accessor pair of one property onto the descriptor clsV.
+    function emitAccessorPair(b, clsV, rec) {
+        var savedField = emitBackingField
+        emitBackingField = backingName(rec.name)
+        var getV = hUndef
+        var setV = hUndef
+        if (rec.getter != null) {
+            getV = callExt(b, "js_closure", [handle(emitFunc([], rec.getter, false, false, undefined, true)), curScopeV])
+        }
+        if (rec.setter != null) {
+            setV = callExt(b, "js_closure", [handle(emitFunc([rec.setParam], rec.setter, false, false, undefined, true)), curScopeV])
+        }
+        emitBackingField = savedField
+        callExt(b, "js_defprop", [clsV, emitStr(b, rec.name), getV, setV])
+        return b
+    }
+    // A `field` reference inside an accessor body is the backing field of that property;
+    // everywhere else `field` is an ordinary name (it is only a soft keyword in Kotlin).
+    makeVarRef = function(name) {
+        return function(b) {
+            if (emitOuterProps != null && emitOuterProps["$" + name] == true) {
+                var itV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                return {b: b, v: callExt(b, "js_get", [callExt(b, "js_get", [itV, emitStr(b, "__outer")]),
+                                                       emitStr(b, name)])}
+            }
+            if (name == "field" && emitBackingField != null) {
+                var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+                return {b: b, v: callExt(b, "js_get", [thisV, emitStr(b, emitBackingField)])}
+            }
+            return {b: b, v: callExt(b, core.scopeGetExt, [curScopeV, emitStr(b, name)])}
+        }
+    }
+    // An EXTENSION property: the getter becomes an IR function with the receiver in the
+    // instance slot, bound as "extp$name". Only the getter is modelled (an extension
+    // property with a setter would need an lvalue path the subset does not have).
+    // Variables holding a lambda WITH RECEIVER (declared type Recv.(A) -> R). Their
+    // lambda binds its first argument as `this`, so `40.dot(2)` and `dot(40, 2)` are the
+    // same call - Kotlin's rule for a receiver function type.
+    var recvLambdaNames = {}
+    // Set while such a val/var is walked; the lambda that is its initializer consumes it
+    // (the declared type is walked immediately before the initializer).
+    var pendingRecvLambda = false
+    // Which classes declare a method of a given name, so a name that is BOTH a member
+    // method and a receiver-lambda variable can be told apart at run time.
+    var methodClasses = {}
+    function noteMethodClass(mname, clsName) {
+        var l = methodClasses["$" + mname]
+        if (l == undefined) { l = []; methodClasses["$" + mname] = l }
+        for (var i = 0; i < l.length; i++) { if (l[i] == clsName) { return } }
+        l.push(clsName)
+    }
+    // A function TYPE with a receiver carries `.(` - Recv.(A) -> R, Recv.() -> R - which
+    // no other type shape does (a dotted name is followed by an identifier, never `(`).
+    function isRecvFnType(t) {
+        for (var i = 0; i + 1 < t.length; i++) {
+            if (t.charAt(i) == "." && t.charAt(i + 1) == "(") { return true }
+        }
+        return false
+    }
+    var extPropNames = {}
+    var classPropNames = {}   // Property names some class declares - they win over an extension.
+    // Per class, the set of its own property names. An INNER class's members resolve an
+    // unqualified name that names a property of the ENCLOSING class against the stored
+    // outer receiver, which is how `tag` works inside `inner class Inner` of
+    // `class Outer(val tag: String)`. emitOuterProps holds that set while such a class's
+    // members are emitted. Limitation: a LOCAL of the same name inside an inner method
+    // would also be redirected (locals are not tracked at compile time).
+    var classOwnProps = {}
+    var emitOuterProps = null
+    function extPropResolves(name) {
+        if (extPropNames["$" + name] != true) { return false }
+        if (builtinMethodNames["$" + name] == true) { return false }
+        if (classPropNames["$" + name] == true) { return false }
+        return true
+    }
+    function makeExtProp(items) {
+        var rec = makeAccessorProp(items)
+        extPropNames["$" + rec.name] = true
+        return function(b) {
+            if (rec.getter == null) { return b }
+            var idx = emitFunc([], rec.getter, true)
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "extp$" + rec.name),
+                                         callExt(b, "js_closure", [handle(idx), curScopeV])])
+            return b
+        }
+    }
+    // A top-level computed property: the getter runs once, at the declaration.
+    function makeTopAccProp(items) {
+        var rec = makeAccessorProp(items)
+        return function(b) {
+            if (rec.getter == null) {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.name), hUndef])
+                return b
+            }
+            var cl = callExt(b, "js_closure", [handle(emitFunc([], rec.getter, false)), curScopeV])
+            var v = callExt(b, "js_call", [cl, hUndef, callExt(b, "js_arr_new", [])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rec.name), v])
+            return b
+        }
+    }
+
+    // ----- data / value class: the synthesized members -----
+    // Kotlin generates componentN, equals, toString and copy for a `data class` (and
+    // equals/toString for a `value class`). They are emitted as ordinary methods on the
+    // descriptor, so p.component2(), p == q, p.toString() and p.copy(y = 9) all travel
+    // the normal js_mcall and named-argument paths. Only the PRIMARY CONSTRUCTOR
+    // properties take part, exactly as in Kotlin.
+    function dataProps(cparams) {
+        var props = []
+        for (var i = 0; i < cparams.length; i++) { if (cparams[i].prop) { props.push(cparams[i].name) } }
+        return props
+    }
+    // componentN(): read one property of `this`. A factory, so each emitted function
+    // captures its OWN property name (a plain loop variable is shared under `var`).
+    function emitComponentFunc(prop) {
+        return emitFunc([], function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            bb.NewRet(callExt(bb, "js_get", [thisV, emitStr(bb, prop)]))
+            return deadBlock()
+        }, true)
+    }
+    // equals(other): the same class (js_is_type walks the __super chain) and every
+    // property structurally equal (js_seq, folded with the boolean js_jband).
+    function emitEqualsFunc(name, props) {
+        return emitFunc(["other"], function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            var otherV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "other")])
+            var cmpB = curF.NewBlock("")
+            var noB = curF.NewBlock("")
+            bb.NewCondBr(truthy(bb, callExt(bb, "js_is_type", [otherV, emitStr(bb, name)])), cmpB, noB)
+            var acc = anytype
+            for (var k = 0; k < props.length; k++) {
+                var eq = callExt(cmpB, "js_seq", [callExt(cmpB, "js_get", [thisV, emitStr(cmpB, props[k])]),
+                                                 callExt(cmpB, "js_get", [otherV, emitStr(cmpB, props[k])])])
+                acc = (k == 0) ? eq : callExt(cmpB, "js_jband", [acc, eq])
+            }
+            cmpB.NewRet(acc)
+            noB.NewRet(hFalse)
+            return deadBlock()
+        }, true)
+    }
+    // toString(): Kotlin's data-class rendering, Name(p1=v1, p2=v2).
+    function emitToStringFunc(name, props) {
+        return emitFunc([], function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            var v = emitStr(bb, name + "(")
+            for (var k = 0; k < props.length; k++) {
+                var lead = (k == 0) ? (props[k] + "=") : (", " + props[k] + "=")
+                v = callExt(bb, "js_jadd", [v, emitStr(bb, lead)])
+                v = callExt(bb, "js_jadd", [v, callExt(bb, "js_get", [thisV, emitStr(bb, props[k])])])
+            }
+            bb.NewRet(callExt(bb, "js_jadd", [v, emitStr(bb, ")")]))
+            return deadBlock()
+        }, true)
+    }
+    // copy(p1 = ..., p2 = ...): a fresh instance of the same class. Each parameter
+    // defaults to the current property of `this` - a slot the call did not reach arrives
+    // as undefined, so the select picks this.p there. Named arguments get it to the
+    // right slot (methodParams registers the property names for "copy").
+    function emitCopyFunc(clsName, props) {
+        return emitFunc(props, function(bb) {
+            var thisV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "this")])
+            var clsV2 = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, clsName)])
+            var objV = callExt(bb, "js_obj_new", [])
+            callExt(bb, "js_set", [objV, emitStr(bb, "__class"), clsV2])
+            var argsV = callExt(bb, "js_arr_new", [])
+            callExt(bb, "js_arr_push", [argsV, objV])
+            for (var k = 0; k < props.length; k++) {
+                var pv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, props[k])])
+                var absent = truthy(bb, callExt(bb, "js_seq", [pv, hUndef]))
+                var own = callExt(bb, "js_get", [thisV, emitStr(bb, props[k])])
+                callExt(bb, "js_arr_push", [argsV, bb.NewSelect(absent, own, pv)])
+            }
+            callExt(bb, "js_call", [callExt(bb, "js_get", [clsV2, emitStr(bb, "__ctor")]), hUndef, argsV])
+            bb.NewRet(objV)
+            return deadBlock()
+        }, true)
+    }
+    // Emit the synthesized members onto clsV. isData also gets componentN and copy;
+    // a value class gets only the equality/rendering pair, like Kotlin.
+    function emitDataMembers(b, clsV, name, cparams, isData, own) {
+        var props = dataProps(cparams)
+        if (props.length == 0) { return b }
+        if (own["$equals"] != true) {
+            callExt(b, "js_set", [clsV, emitStr(b, "equals"),
+                                  callExt(b, "js_closure", [handle(emitEqualsFunc(name, props)), curScopeV])])
+        }
+        if (own["$toString"] != true) {
+            callExt(b, "js_set", [clsV, emitStr(b, "toString"),
+                                  callExt(b, "js_closure", [handle(emitToStringFunc(name, props)), curScopeV])])
+        }
+        if (!isData) { return b }
+        for (var k = 0; k < props.length; k++) {
+            callExt(b, "js_set", [clsV, emitStr(b, "component" + (k + 1)),
+                                  callExt(b, "js_closure", [handle(emitComponentFunc(props[k])), curScopeV])])
+        }
+        if (own["$copy"] != true) {
+            callExt(b, "js_set", [clsV, emitStr(b, "copy"),
+                                  callExt(b, "js_closure", [handle(emitCopyFunc(name, props)), curScopeV])])
+        }
+        return b
+    }
+
+    // ----- nested and inner classes -----
+    // makeClassStmt records the name it just declared so the enclosing NestedClass tag,
+    // which runs immediately afterwards, can name its factory.
+    var lastDeclaredClass = null
+    // items = [{isinner}?, classStatementThunk]
+    function makeNested(items) {
+        var inner = false
+        var at = 0
+        if (items[at] != undefined && items[at].isinner != undefined) { inner = true; at++ }
+        return {name: lastDeclaredClass, inner: inner, stmt: items[at]}
+    }
+    // The factory the enclosing descriptor exposes under the nested class's name. It is
+    // an ordinary callable property, so `Outer.Nested(a)` (memberCall on a descriptor
+    // calls the property directly) and `outer.Inner(a)` (memberCall on an INSTANCE
+    // prepends the receiver) both reach it. For an inner class the prepended receiver is
+    // the enclosing instance and is stored as __outer; a plain nested class has no
+    // receiver in front, so its arguments start at slot 0.
+    function emitNestedFactory(clsName, inner) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF, savedScope = curScopeV, savedLoops = loopStack, savedTag = curFTag
+        curF = f
+        curFTag = idx
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
+        var objV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        var ctorArgsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [ctorArgsV, objV])
+        var from = 0
+        if (inner) {
+            callExt(b, "js_set", [objV, emitStr(b, "__outer"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
+            from = 1
+        }
+        b = emitTailArgs(b, ctorArgsV, f.Params[1], from)
+        callExt(b, "js_call", [callExt(b, "js_get", [clsV, emitStr(b, "__ctor")]), hUndef, ctorArgsV])
+        b.NewRet(objV)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return idx
+    }
+    // Append srcV[from..] to dstV with an emitted counted loop.
+    function emitTailArgs(b, dstV, srcV, from) {
+        hidCount++
+        var iName = "$ta" + hidCount
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [curScopeV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, iName), emitNum(b, from)])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, iName)])
+        var lenV = callExt(headB, "js_get", [srcV, emitStr(headB, "length")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var iV2 = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, iName)])
+        callExt(bodyB, "js_arr_push", [dstV, callExt(bodyB, "js_get", [srcV, iV2])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, iName),
+                                        callExt(bodyB, "js_jadd", [iV2, emitNum(bodyB, 1)])])
+        bodyB.NewBr(headB)
+        curScopeV = saved
+        return exitB
+    }
+
+    // ----- secondary constructors -----
+    // items = [{params...}, {cdeleg}?, bodyThunk?]
+    function makeSecondaryCtor(items) {
+        var sig = items[0]
+        var deleg = null
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i].cdeleg != undefined) { deleg = items[i].cdeleg }
+            else { body = items[i] }
+        }
+        var kind = null
+        var args = []
+        if (deleg != null) {
+            for (var d = 0; d < deleg.length; d++) {
+                if (deleg[d].dkind != undefined) { kind = deleg[d].dkind }
+                else { args.push(deleg[d]) }
+            }
+        }
+        return {sig: sig, kind: kind, args: args, body: body}
+    }
+    // One secondary constructor: run the delegation on the same instance, then the body.
+    function emitSecondaryCtor(sec, primaryIdx, supName) {
+        var bodyT = function(b) {
+            var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
+            var argsV = callExt(b, "js_arr_new", [])
+            callExt(b, "js_arr_push", [argsV, thisV])
+            var dargs = orderArgs(sec.args, undefined)
+            for (var i = 0; i < dargs.length; i++) {
+                var r = dargs[i].at(b)
+                b = r.b
+                callExt(b, "js_arr_push", [argsV, r.v])
+            }
+            if (sec.kind == "super" && supName != null) {
+                var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, supName)])
+                callExt(b, "js_call", [callExt(b, "js_get", [supV, emitStr(b, "__ctor")]), hUndef, argsV])
+            } else {
+                callExt(b, "js_call", [callExt(b, "js_closure", [handle(primaryIdx), curScopeV]), hUndef, argsV])
+            }
+            if (sec.body != null) { b = sec.body(b) }
+            return b
+        }
+        return emitFunc(sec.sig.params, bodyT, true, false, sec.sig)
+    }
+    // The __ctor the call sites see when a class has secondary constructors: a dispatcher
+    // that picks by argument count (the instance occupies slot 0, hence the +1).
+    function emitCtorDispatch(primaryIdx, primaryArity, secs) {
+        funcCount++
+        var idx = funcCount
+        var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var savedF = curF, savedScope = curScopeV, savedLoops = loopStack, savedTag = curFTag
+        curF = f
+        curFTag = idx
+        loopStack = []
+        var b = f.NewBlock("entry")
+        curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
+        var argsV = f.Params[1]
+        var nV = callExt(b, "js_get", [argsV, emitStr(b, "length")])
+        for (var i = 0; i < secs.length; i++) {
+            var hitB = curF.NewBlock("")
+            var nextB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_seq", [nV, emitNum(b, secs[i].arity + 1)])), hitB, nextB)
+            callExt(hitB, "js_call", [callExt(hitB, "js_closure", [handle(secs[i].idx), curScopeV]), hUndef, argsV])
+            hitB.NewRet(hUndef)
+            b = nextB
+        }
+        callExt(b, "js_call", [callExt(b, "js_closure", [handle(primaryIdx), curScopeV]), hUndef, argsV])
+        b.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedTag
+        return idx
+    }
+    // this@Label and this::prop.isInitialized.
+    var emitClassNames = []
+    function emitClassTop() { return emitClassNames.length > 0 ? emitClassNames[emitClassNames.length - 1] : null }
+    function makeThisAt(lbl) {
+        return function(b) {
+            var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+            var top = emitClassTop()
+            // A label naming an ENCLOSING class is the inner instance's outer receiver.
+            if (top != null && top != lbl) {
+                var outerV = callExt(b, "js_get", [thisV, emitStr(b, "__outer")])
+                return {b: b, v: outerV}
+            }
+            return {b: b, v: thisV}
+        }
+    }
+    function makeIsInit(name) {
+        return function(b) {
+            var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+            return {b: b, v: callExt(b, "js_sne", [callExt(b, "js_get", [thisV, emitStr(b, name)]), hNull])}
+        }
+    }
+
+    // items = [name, {cparams}?, {supers}?, ({prop}|{method}|{initblk}|{absmethod})...]
+    function makeClassStmt(items) {
+        var at = 0
+        var dmod = null
+        if (items[at] != undefined && items[at].dmod != undefined) { dmod = items[at].dmod; at++ }
+        var name = items[at]
+        var hdr = takeHeader(items, at + 1)
+        var parts = splitMembers(items, hdr.i)
         var methods = parts.methods
         var comp = parts.companion
         classNames[name] = 1
-        for (var cm = 0; cm < methods.length; cm++) { classMethodNames["$" + methods[cm].name] = true }
+        lastDeclaredClass = name
+        ctorParamNames["$" + name] = ctorSig(hdr.cparams).params
+        var own = {}
+        var ownProps = {}
+        for (var cp = 0; cp < hdr.cparams.length; cp++) {
+            if (hdr.cparams[cp].prop) { notePropName(hdr.cparams[cp].name); ownProps["$" + hdr.cparams[cp].name] = true }
+        }
+        for (var pp = 0; pp < parts.props.length; pp++) { ownProps["$" + parts.props[pp].prop] = true }
+        for (var ac = 0; ac < parts.accprops.length; ac++) {
+            notePropName(parts.accprops[ac].name)
+            ownProps["$" + parts.accprops[ac].name] = true
+        }
+        classOwnProps["$" + name] = ownProps
+        for (var cm = 0; cm < methods.length; cm++) {
+            classMethodNames["$" + methods[cm].name] = true
+            methodParams["$" + methods[cm].name] = methods[cm].params
+            own["$" + methods[cm].name] = true
+            noteMethodClass(methods[cm].name, name)
+            declOpIfConvention(methods[cm].name, name)
+        }
+        // A data / value class declares the equality convention (and, for data, copy's
+        // named-argument slots and the componentN destructuring convention) implicitly.
+        if (dmod != null) {
+            var dprops = dataProps(hdr.cparams)
+            if (dprops.length > 0) {
+                declOp("equals", name)
+                classMethodNames["$equals"] = true
+                classMethodNames["$toString"] = true
+                if (dmod == "data") {
+                    methodParams["$copy"] = dprops
+                    classMethodNames["$copy"] = true
+                    for (var dc = 0; dc < dprops.length; dc++) { classMethodNames["$component" + (dc + 1)] = true }
+                }
+            }
+        }
         if (comp != null) {
             for (var cc = 0; cc < comp.length; cc++) {
                 if (comp[cc].method != undefined) { classMethodNames["$" + comp[cc].method.name] = true }
@@ -1905,13 +3618,110 @@ KwStep      = "step" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
-            var ctorIdx = emitCtor(cparams, props)
-            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+            b = emitSuperLinks(b, clsV, hdr.supers, own)
+            b = emitDelegates(b, clsV, hdr.supers, own)
+            var savedSuper = emitSuperName
+            emitSuperName = (hdr.sup != null && knownType(hdr.sup.name)) ? hdr.sup.name : null
+            emitClassNames.push(name)
+            var ctorIdx = emitCtor(hdr.cparams, parts.inits, hdr.supers)
+            var entryIdx = ctorIdx
+            if (parts.sctors.length > 0) {
+                var secs = []
+                for (var sc = 0; sc < parts.sctors.length; sc++) {
+                    secs.push({idx: emitSecondaryCtor(parts.sctors[sc], ctorIdx, emitSuperName),
+                               arity: parts.sctors[sc].sig.params.length})
+                }
+                entryIdx = emitCtorDispatch(ctorIdx, hdr.cparams.length, secs)
+            }
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(entryIdx), curScopeV])])
             for (var k = 0; k < methods.length; k++) {
-                var idx = emitFunc(methods[k].params, methods[k].body, true)
+                var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
-            if (comp != null) { b = emitCompanion(b, clsV, comp) }
+            for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
+            emitClassNames.pop()
+            // Nested classes: their own declaration runs first (it binds the descriptor
+            // under its simple name), then the enclosing descriptor gets the factory.
+            for (var nc = 0; nc < parts.nested.length; nc++) {
+                var savedOuter = emitOuterProps
+                if (parts.nested[nc].inner) { emitOuterProps = classOwnProps["$" + name] }
+                b = parts.nested[nc].stmt(b)
+                emitOuterProps = savedOuter
+                callExt(b, "js_set", [clsV, emitStr(b, parts.nested[nc].name),
+                                      callExt(b, "js_closure", [handle(emitNestedFactory(parts.nested[nc].name,
+                                                                                         parts.nested[nc].inner)), curScopeV])])
+            }
+            emitSuperName = savedSuper
+            if (dmod != null) { b = emitDataMembers(b, clsV, name, hdr.cparams, dmod == "data", own) }
+            if (comp != null) { b = emitCompanion(b, clsV, comp, parts.compName) }
+            return b
+        }
+    }
+
+    // ----- enum classes -----
+    // items = [{ename}, argRecords...] -> one entry: its name and constructor arguments.
+    function makeEnumEntry(items) {
+        return {ename: items[0].ename, args: items.slice(1)}
+    }
+    // items = [name, {cparams}?, {supers}?, entries..., members...]
+    function makeEnumStmt(items) {
+        var name = items[0]
+        var hdr = takeHeader(items, 1)
+        var entries = []
+        var i = hdr.i
+        while (i < items.length && items[i] != undefined && items[i].ename != undefined) { entries.push(items[i]); i++ }
+        var parts = splitMembers(items, i)
+        var methods = parts.methods
+        classNames[name] = 1
+        ctorParamNames["$" + name] = ctorSig(hdr.cparams).params
+        var own = {}
+        for (var cm = 0; cm < methods.length; cm++) {
+            classMethodNames["$" + methods[cm].name] = true
+            methodParams["$" + methods[cm].name] = methods[cm].params
+            own["$" + methods[cm].name] = true
+            declOpIfConvention(methods[cm].name, name)
+        }
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            b = emitSuperLinks(b, clsV, hdr.supers, own)
+            var ctorIdx = emitCtor(hdr.cparams, parts.inits, hdr.supers)
+            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+            // The entry scope: the entries are declared into it AND the enum's own
+            // methods close over it, so a bare entry name resolves inside them. The
+            // closures capture the scope handle, so declaring the entries after the
+            // methods are emitted is fine - the reads happen at call time.
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [curScopeV])
+            var savedSuper = emitSuperName
+            emitClassNames.push(name)
+            emitSuperName = (hdr.sup != null && knownType(hdr.sup.name)) ? hdr.sup.name : null
+            for (var k = 0; k < methods.length; k++) {
+                var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
+                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+            emitClassNames.pop()
+            emitSuperName = savedSuper
+            for (var e = 0; e < entries.length; e++) {
+                var objV = callExt(b, "js_obj_new", [])
+                callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+                var eargs = orderArgs(entries[e].args, ctorParamNames["$" + name])
+                var argsV = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [argsV, objV])
+                for (var a = 0; a < eargs.length; a++) {
+                    var ra = eargs[a].at(b)
+                    b = ra.b
+                    callExt(b, "js_arr_push", [argsV, ra.v])
+                }
+                callExt(b, "js_call", [callExt(b, "js_get", [clsV, emitStr(b, "__ctor")]), hUndef, argsV])
+                callExt(b, "js_set", [objV, emitStr(b, "name"), emitStr(b, entries[e].ename)])
+                callExt(b, "js_set", [objV, emitStr(b, "ordinal"), emitNum(b, e)])
+                callExt(b, "js_set", [clsV, emitStr(b, entries[e].ename), objV])
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, entries[e].ename), objV])
+            }
+            curScopeV = saved
             return b
         }
     }
@@ -1920,18 +3730,20 @@ KwStep      = "step" KwEnd ;
     // into a holder that clsV.__class points at (so ClassName.m() dispatches through
     // js_mcall, which prepends clsV as the receiver), properties become fields of clsV
     // (so ClassName.prop reads them). The property initializers see clsV as 'this'.
-    function emitCompanion(b, clsV, comp) {
+    function emitCompanion(b, clsV, comp, compName) {
         var cparts = splitMembers(comp, 0)
         var cprops = cparts.props
         var cmethods = cparts.methods
+        emitClassNames.push("<companion>")
         if (cmethods.length > 0) {
             var holderV = callExt(b, "js_obj_new", [])
             for (var k = 0; k < cmethods.length; k++) {
-                var idx = emitFunc(cmethods[k].params, cmethods[k].body, true)
+                var idx = emitFunc(cmethods[k].params, cmethods[k].body, true, false, cmethods[k].sig)
                 callExt(b, "js_set", [holderV, emitStr(b, cmethods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
             callExt(b, "js_set", [clsV, emitStr(b, "__class"), holderV])
         }
+        for (var ap = 0; ap < cparts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, cparts.accprops[ap]) }
         var saved = curScopeV
         curScopeV = callExt(b, "js_scope_new", [curScopeV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), clsV])
@@ -1941,6 +3753,12 @@ KwStep      = "step" KwEnd ;
             callExt(b, "js_set", [clsV, emitStr(b, cprops[p].prop), r.v])
         }
         curScopeV = saved
+        // A NAMED companion (companion object Maker) is also reachable through its own
+        // name - Cls.Maker.SEED and Cls.Maker.of(...). The class descriptor already
+        // carries the properties and (via __class) the methods, so the name is simply
+        // bound to the descriptor itself rather than to a second copy.
+        if (compName != null) { callExt(b, "js_set", [clsV, emitStr(b, compName), clsV]) }
+        emitClassNames.pop()
         return b
     }
 
@@ -1951,15 +3769,70 @@ KwStep      = "step" KwEnd ;
     // calls dispatch through js_mcall exactly like class instances.
     function makeObjectStmt(items) {
         var name = items[0]
-        var parts = splitMembers(items, 1)
+        var hdr = takeHeader(items, 1)
+        var parts = splitMembers(items, hdr.i)
         var props = parts.props
         var methods = parts.methods
+        classNames[name] = 2   // A singleton: named like a class, but never constructed.
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
-            var r = emitObjectInstance(b, name, methods, props)
+            var r = emitObjectInstance(b, name, methods, props, hdr.supers, parts.accprops)
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
             return b
+        }
+    }
+    // interface I [: Supers] { defaults }: a descriptor with the default-method closures
+    // and no __ctor. Its signature list feeds interface delegation.
+    function makeInterfaceStmt(items) {
+        var name = items[0]
+        var hdr = takeHeader(items, 1)
+        var parts = splitMembers(items, hdr.i)
+        var methods = parts.methods
+        interfaceNames["$" + name] = true
+        var sig = []
+        for (var i = 0; i < methods.length; i++) {
+            sig.push({name: methods[i].name, params: methods[i].params})
+            classMethodNames["$" + methods[i].name] = true
+        }
+        for (var a = 0; a < parts.abstracts.length; a++) {
+            sig.push({name: parts.abstracts[a].name, params: parts.abstracts[a].params})
+            classMethodNames["$" + parts.abstracts[a].name] = true
+        }
+        interfaceMethods["$" + name] = sig
+        var own = {}
+        for (var o = 0; o < methods.length; o++) { own["$" + methods[o].name] = true }
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            b = emitSuperLinks(b, clsV, hdr.supers, own)
+            var savedSuper = emitSuperName
+            emitClassNames.push(name)
+            emitSuperName = (hdr.sup != null && knownType(hdr.sup.name)) ? hdr.sup.name : null
+            for (var k = 0; k < methods.length; k++) {
+                var idx = emitFunc(methods[k].params, methods[k].body, true, false, methods[k].sig)
+                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+            }
+            for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
+            emitClassNames.pop()
+            emitSuperName = savedSuper
+            return b
+        }
+    }
+    // super.m(args): js_supercall walks the __super chain from the DEFINING class's
+    // superclass descriptor (emitSuperName, valid while that class's methods emit).
+    function makeSuperCall(items, pos) {
+        var mname = items[0].smname
+        var args = items.slice(1)
+        return function(b) {
+            if (emitSuperName == null) { notImpl("super call outside a subclass", pos); return {b: b, v: hUndef} }
+            var supV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, emitSuperName)])
+            var thisV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
+            var ea = emitArgs(b, args)
+            b = ea.b
+            return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, mname), ea.v])}
         }
     }
 
@@ -1994,6 +3867,15 @@ KwStep      = "step" KwEnd ;
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "hashSetOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "linkedSetOf"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "sortedSetOf"), loV])
+        // The typed array constructors are the same "return the argument array"
+        // function: intArrayOf(1, 2) is a list of those elements in this value model.
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "intArrayOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "longArrayOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "doubleArrayOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "floatArrayOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "booleanArrayOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "charArrayOf"), loV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "listOfNotNull"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptyList"), loV])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "emptySet"), loV])
         // abs/max/min from Math, exitProcess from exit.

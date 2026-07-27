@@ -74,15 +74,73 @@ KwFrom      = "from" KwEnd ;
 KwAs        = "as" KwEnd ;
 
 // Compound statements own their suites; small statements end with a newline.
-Statement   = If | While | For | TryStmt | With | Class | Decorated | AsyncDef | Def | SmallLine ;
+Statement   = If | While | For | TryStmt | With | Match | Class | Decorated | AsyncDef | AsyncFor | AsyncWith | Def | SmallLine ;
 
-SmallLine   = ( Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
-              | AugAssign | ParallelAssign | AnnAssign | Assign | ExprSmall ) NL ;
+SmallLine   = SmallStmt { ";" SmallStmt } [ ";" ] NL ;
+SmallStmt   = TypeAliasStmt | Return | Break | Continue | Pass | Raise | Assert | Global | Nonlocal | Del | YieldStmt
+            | AugAssign | AnnAssign | Assign | ExprSmall ;
 
 // A suite: ':' NEWLINE INDENT statements DEDENT. Every further statement of the
 // suite starts at the same level; the first one defined the level via Indent.
+// A suite is either an indented block - ':' NEWLINE INDENT statements DEDENT, every
+// further statement at the same level - or the ONE-LINE form, ':' followed by small
+// statements on the same line (def f(self): return 1, if c: t = 5).
 Suite       <~~ push(makeSeq(takeAll())) ~~>
-            = ":" NL Indent Statement { SameLevel Statement } Dedent ;
+            = ":" ( NL Indent Statement { SameLevel Statement } Dedent | SmallLine ) ;
+
+// match SUBJECT: case PATTERN [if GUARD]: SUITE ... - the structural pattern match of
+// PEP 634. `match` and `case` are soft keywords, so a Match only commits once the
+// `:` NEWLINE INDENT `case` shape is there.
+Match       <~~ push(makeMatch(takeAll())) ~~>
+            = "match" KwEnd ExprList ":" NL Indent CaseClause { SameLevel CaseClause } Dedent ;
+CaseClause  <~~ push(makeCase(takeAll())) ~~>
+            = "case" KwEnd Patterns [ CaseGuard ] Suite ;
+CaseGuard   <~~ push({guard: pop()}) ~~>
+            = "if" KwEnd Expression ;
+// A comma-separated pattern list is a sequence pattern (case 1, 2:); a single
+// pattern with no comma stays itself.
+Patterns    <~~ push(makeSeqPattern(takeAll(), false)) ~~>
+            = OrPattern { "," <~~ push({pcomma: true}) ~~> OrPattern } [ "," <~~ push({pcomma: true}) ~~> ] ;
+OrPattern   <~~ push(makeOrPattern(takeAll())) ~~>
+            = ClosedPattern { "|" ClosedPattern } [ AsPattern ] ;
+AsPattern   = KwAs Id <~~ push({asname: up.in}) ~~> ;
+ClosedPattern = GroupPattern | SeqPatternB | MapPattern | ClassPattern | ValuePattern | LitPattern | StarPattern | WildPattern | CapturePattern ;
+GroupPattern <~~ push(makeSeqPattern(takeAll(), false)) ~~>
+            = "(" :whitespace(WhitespaceNL) [ OrPattern { "," <~~ push({pcomma: true}) ~~> [ OrPattern ] } ] ")" :whitespace(Whitespace) ;
+SeqPatternB <~~ push(makeSeqPattern(takeAll(), true)) ~~>
+            = "[" :whitespace(WhitespaceNL) [ OrPattern { "," OrPattern } [ "," ] ] "]" :whitespace(Whitespace) ;
+MapPattern  <~~ push(makeMapPattern(takeAll())) ~~>
+            = "{" :whitespace(WhitespaceNL) [ MapItem { "," MapItem } [ "," ] ] "}" :whitespace(Whitespace) ;
+MapItem     = MapRest | MapEntry ;
+MapRest     <~~ push({maprest: up.in}) ~~>
+            = "**" Id ;
+MapEntry    <~~ var p2 = pop(); push({mkey: pop(), mpat: p2}) ~~>
+            = Expression ":" OrPattern ;
+ClassPattern <~~ push(makeClassPattern(takeAll())) ~~>
+            = DottedRef "(" :whitespace(WhitespaceNL) [ ClassPatArg { "," ClassPatArg } [ "," ] ] ")" :whitespace(Whitespace) ;
+ClassPatArg = ClassPatKw | ClassPatPos ;
+ClassPatKw  <~~ var p3 = pop(); push({ckey: pop(), cpat: p3}) ~~>
+            = Id <~~ push(up.in) ~~> "=" NotEqSign OrPattern ;
+ClassPatPos <~~ push({cpos: pop()}) ~~>
+            = OrPattern ;
+// A dotted name in a pattern is a VALUE pattern (case K.LIMIT:), a bare name a
+// capture; both need the class-pattern form to be tried first.
+ValuePattern <~~ push(makeValuePattern(pop())) ~~>
+            = DottedRef2 ;
+DottedRef   <~~ push(makeVarRef(stripWs(up.in))) ~~>
+            = Id { "." Id } ;
+DottedRef2  <~~ push(makeDotted(stripWs(up.in))) ~~>
+            = Id "." Id { "." Id } ;
+LitPattern  <~~ push(makeValuePattern(pop())) ~~>
+            = ( StringLit | NegNumLit | DecLit | True | False | None ) ;
+NegNumLit   <~~ push(makeNeg(pop())) ~~>
+            = "-" DecLit ;
+StarPattern <~~ push({pstar: up.in}) ~~>
+            = "*" Id ;
+WildPattern <~~ push({wild: true}) ~~>
+            = "_" KwEnd ;
+CapturePattern <~~ push({capture: up.in}) ~~>
+            = Id ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = "if" KwEnd Expression Suite { Elif } [ Else ] ;
@@ -91,33 +149,39 @@ Elif        <~~ push(makeElif(pop(), pop())) ~~>
 Else        <~~ push(makeElse(pop())) ~~>
             = SameLevel "else" KwEnd Suite ;
 
-While       <~~ push(makeWhile(pop(), pop())) ~~>
-            = "while" KwEnd Expression Suite ;
+// A loop `else` suite runs when the loop finished without a break.
+While       <~~ push(makeWhileElse(takeAll())) ~~>
+            = "while" KwEnd NamedTest Suite [ LoopElse ] ;
+LoopElse    <~~ push({loopelse: pop()}) ~~>
+            = SameLevel "else" KwEnd Suite ;
 
 // for x in ITER: a single name (genuinely executed). A tuple target
 // (for a, b in ...  /  for (a, b) in ...) is accepted and reported as not
 // implemented (the subset has no tuple unpacking in the loop head).
-For         = ForOne | ForTup ;
-ForOne      <~~ push(makeFor(pop(), pop(), pop())) ~~>
-            = "for" KwEnd Id <~~ push(up.in) ~~> "in" KwEnd Expression Suite ;
-ForTup      <~~ takeAll(); push(notImplStmt("for-loop tuple unpacking", up.pos)) ~~>
-            = "for" KwEnd ForTargets "in" KwEnd Expression Suite ;
-ForTargets  = "(" Id { "," Id } [ "," ] ")" | Id "," Id { "," Id } [ "," ] ;
+// for TARGETS in ITER: the target is a full target list, so `for head, *tail in xs`
+// unpacks each element. An `else` suite runs when the loop was not broken.
+For         <~~ push(makeForStmt(takeAll())) ~~>
+            = "for" KwEnd TargetList "in" KwEnd ExprList Suite [ LoopElse ] ;
 
+// genPush/genPop bracket the body so makeYield can mark the def as a GENERATOR
+// function (calling it then yields a generator object rather than running the body).
 Def         <~~ push(makeDef(pop(), pop(), pop(), up.pos)) ~~>
-            = "def" KwEnd Id <~~ push(up.in) ~~> ParamList [ "->" DiscardType ] Suite ;
+            = "def" KwEnd Id <~~ push(up.in); genPush() ~~> [ SkipBracket ] ParamList [ "->" DiscardType ] Suite ;
 // Parameter lists: plain names, default values (evaluated once, when the def
 // statement runs - like real Python) and a *args rest parameter all work;
 // **kwargs, the bare '*' and '/' markers and keyword-only parameters after
 // *args are reported as not implemented. Annotations parse and are ignored.
 ParamList   <~~ push(makeParamList(takeAll())) ~~>
-            = "(" [ Param { "," Param } [ "," ] ] ")" ;
+            = "(" :whitespace(WhitespaceNL) [ Param { "," Param } [ "," ] ] ")" :whitespace(Whitespace) ;
+// The full Python parameter grammar: positional-or-keyword names with defaults, the
+// `/` marker that ends the positional-ONLY group, `*args` (or a bare `*`) after which
+// every name is keyword-ONLY, and a final `**kwargs`.
 Param       = DblStarParam | StarParam | SlashParam | NamedParam ;
-DblStarParam <~~ push({pcomplex: true}) ~~>
-            = "**" [ Id [ ":" DiscardType ] ] ;
+DblStarParam <~~ push({pkwrest: up.in}) ~~>
+            = "**" Id [ ":" DiscardType ] ;
 StarParam   <~~ push(makeRestParam(takeAll())) ~~>
             = "*" [ Id <~~ push(up.in) ~~> [ ":" DiscardType ] ] ;
-SlashParam  <~~ push({pcomplex: true}) ~~>
+SlashParam  <~~ push({pslash: true}) ~~>
             = "/" ;
 NamedParam  <~~ push(makeNamedParam(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ":" DiscardType ] [ ParamDefault ] ;
@@ -126,45 +190,76 @@ ParamDefault <~~ push({pdefault: pop()}) ~~>
 
 // A decorated def / async-def / class: the decorators parse (their call
 // expressions are dropped) and the function/class is defined unwrapped.
-Decorated   = Decorator { SameLevel Decorator } SameLevel ( Def | AsyncDef | Class ) ;
-Decorator   = "@" DiscardExpr NL ;
+// Decorators are applied bottom-up to the defined name, exactly as in Python; PEP 614
+// allows any expression, so the decorator is a full expression (registry["t"]).
+Decorated   <~~ push(makeDecorated(takeAll())) ~~>
+            = Decorator { SameLevel Decorator } SameLevel ( Def | AsyncDef | Class ) ;
+Decorator   <~~ push({deco: pop()}) ~~>
+            = "@" Expression NL ;
 
 // class Name[(bases, metaclass=..., ...)]: SUITE - accepted structurally and
 // reported as not implemented (the subset has no user-defined classes). The base
 // list reuses the call-argument surface (positional bases, keyword and *unpacked
 // arguments); the whole body is parsed and dropped.
-Class       <~~ takeAll(); push(notImplStmt("class definition", up.pos)) ~~>
-            = "class" KwEnd Id [ "(" [ CallArg { "," CallArg } [ "," ] ] ")" ] Suite ;
+// class Name[[T, ...]][(bases, ...)]: SUITE. The body is a real suite run in a fresh
+// namespace scope, so plain statements (loops, conditionals) inside a class body work
+// and every name it binds - including its defs - becomes a class attribute.
+Class       <~~ push(makeClass(takeAll())) ~~>
+            = "class" KwEnd Id <~~ push(up.in) ~~> [ SkipBracket ] [ ClassBases ] Suite ;
+ClassBases  <~~ push({bases: takeAll()}) ~~>
+            = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
+// A PEP 695 type-parameter list, [T], [A, B] - parsed and dropped (types are erased).
+SkipBracket = "[" { SkipBracket | SkipBracketItem } "]" ;
+SkipBracketItem = "\x00"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
 
 // async def / await: accepted structurally, reported as not implemented.
-AsyncDef    <~~ takeAll(); push(notImplStmt("async def", up.pos)) ~~>
-            = "async" KwEnd "def" KwEnd Id ParamList [ "->" DiscardType ] Suite ;
+// async def / async for / async with / await: the SYNTAX is genuine - an async
+// function is an ordinary function value here, so it can be defined, named, decorated
+// and inspected. There is no event loop, so awaiting merely evaluates its operand;
+// running real coroutines is out of the subset.
+AsyncDef    <~~ push(pop()) ~~>
+            = "async" KwEnd Def ;
+AsyncFor    <~~ push(pop()) ~~>
+            = "async" KwEnd For ;
+AsyncWith   <~~ push(pop()) ~~>
+            = "async" KwEnd With ;
 
 // try/except/else/finally: accepted; under -warn-unsupported the try body (and a
 // finally body) run, so calls inside them stay visible. There is no exception
 // model, so the except/else handlers are parsed and dropped.
-TryStmt     <~~ push(makeTry(takeAll(), up.pos)) ~~>
+TryStmt     <~~ push(makeTry(takeAll())) ~~>
             = "try" KwEnd TryBody ( ExceptClause { ExceptClause } [ TryElse ] [ TryFinally ] | TryFinally ) ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Suite ;
+// except [TYPE [as NAME]]: / except* TYPE as NAME: - the handler type is a real
+// expression (a class, or a tuple of classes) and decides which clause runs.
 ExceptClause <~~ push(makeExcept(takeAll())) ~~>
-            = SameLevel "except" KwEnd [ DiscardExpr [ KwAs Id <~~ push(up.in) ~~> ] ] Suite ;
+            = SameLevel "except" KwEnd [ "*" <~~ push({star: true}) ~~> ] [ ExceptType [ KwAs Id <~~ push({hname: up.in}) ~~> ] ] Suite ;
+ExceptType  <~~ push({htype: pop()}) ~~>
+            = Expression ;
 TryElse     <~~ push({elsebody: pop()}) ~~>
             = SameLevel "else" KwEnd Suite ;
 TryFinally  <~~ push({finalbody: pop()}) ~~>
             = SameLevel "finally" KwEnd Suite ;
 
 // raise: accepted, reported as not implemented; the raised expression still runs.
-Raise       <~~ push(makeRaise(takeAll(), up.pos)) ~~>
-            = "raise" KwEnd [ Expression [ KwFrom Expression ] ] ;
+// raise EXPR [from CAUSE] and the bare `raise` that re-raises the active exception.
+Raise       <~~ push(makeRaise(takeAll())) ~~>
+            = "raise" KwEnd [ Expression [ KwFrom RaiseCause ] ] ;
+RaiseCause  <~~ push({cause: pop()}) ~~>
+            = Expression ;
 
 // with EXPR [as TARGET]: a simple form - the context expression runs, the target
 // is bound to its value and the body runs (no __enter__/__exit__ protocol), so it
 // is reported as not implemented but stays visible under -warn-unsupported.
-With        <~~ push(makeWith(takeAll(), up.pos)) ~~>
-            = "with" KwEnd WithItem { "," WithItem } WithBody ;
+// with EXPR [as TARGET], ...: the real context-manager protocol - __enter__ before
+// the body, __exit__ after it (also on the way out of an exception, and a truthy
+// result swallows it). The 3.10 parenthesized item list is accepted too.
+With        <~~ push(makeWith(takeAll())) ~~>
+            = "with" KwEnd ( WithParen | WithItem { "," WithItem } ) WithBody ;
+WithParen   = "(" :whitespace(WhitespaceNL) WithItem { "," WithItem } [ "," ] ")" :whitespace(Whitespace) ;
 WithItem    <~~ push(makeWithItem(takeAll())) ~~>
-            = Expression [ KwAs Target ] ;
+            = Expression [ KwAs TargetItem ] ;
 WithBody    <~~ push({withbody: pop()}) ~~>
             = Suite ;
 
@@ -181,32 +276,49 @@ Global      <~~ push(makeGlobal(takeAll(), up.pos)) ~~>
             = "global" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
 Nonlocal    <~~ push(makeNonlocal(takeAll(), up.pos)) ~~>
             = "nonlocal" KwEnd Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } ;
-Del         <~~ takeAll(); push(notImplStmt("del statement", up.pos)) ~~>
-            = "del" KwEnd Expression { "," Expression } ;
+// del NAME / del obj.attr / del seq[i] / del seq[a:b:c]: the binding or the element
+// is genuinely removed, so a later read of the name raises like Python's
+// UnboundLocalError.
+Del         <~~ push(makeDel(takeAll())) ~~>
+            = "del" KwEnd Target { "," Target } ;
 
 // yield: accepted as a statement, reported as not implemented (no generators).
-YieldStmt   <~~ takeAll(); push(notImplStmt("yield", up.pos)) ~~>
-            = "yield" KwEnd [ KwFrom ] [ Expression ] ;
+YieldStmt   <~~ push(exprToStmt(pop())) ~~>
+            = YieldExpr ;
 
-// a, b = x, y (and a, b = b, a): all right-hand values are evaluated before any
-// target is written; a single right-hand iterable is unpacked positionally.
-ParallelAssign <~~ push(makeParallelAssign(takeAll())) ~~>
-            = Target "," Target { "," Target } "=" Expression { "," Expression } ;
+
 
 // name: Type [= value]: the annotation is parsed and ignored; with a value it is a
 // plain assignment, without one it is a no-op declaration.
+// name: Type [= value]. The annotation is erased, but the NAME is recorded so a class
+// body can answer __annotations__; with a value it is a plain assignment.
+// name: Type [= value]. The annotation is erased, but the target's NAME is recorded
+// so a class body can answer __annotations__; with a value it is a plain assignment.
 AnnAssign   <~~ push(makeAnnAssign(takeAll())) ~~>
-            = Target ":" DiscardType [ "=" Expression ] ;
+            = Target ":" AnnType [ "=" ExprList ] ;
+AnnType     <~~ push({atype: stripWs(up.in)}) ~~>
+            = DiscardType ;
 
 // A type annotation, parsed and ignored: dotted names, [..]-subscripts (commas
 // allowed) and | unions.
+// A type annotation, parsed and DROPPED (types are erased at run time): dotted names,
+// [..] subscripts, | unions, tuples, string annotations ("str"), the ... of
+// tuple[int, ...] and a parenthesized group.
 DiscardType = TypeAtom { "|" TypeAtom } ;
-TypeAtom    = Id { "." Id } [ TypeSub ] | TypeSub ;
-TypeSub     = "[" [ TypeItem { "," TypeItem } ] "]" ;
+// Every literal alternative pops its own thunk again: a type annotation must leave
+// the value stack exactly as it found it (a parameter list collects what is pushed).
+TypeAtom    = ( StringLit | Ellipsis | None | True | False | DecLit ) <~~ pop() ~~>
+            | Id { "." Id } [ TypeSub ] | TypeSub | TypeGroup ;
+TypeSub     = "[" :whitespace(WhitespaceNL) [ TypeItem { "," TypeItem } [ "," ] ] "]" :whitespace(Whitespace) ;
+TypeGroup   = "(" :whitespace(WhitespaceNL) [ TypeItem { "," TypeItem } [ "," ] ] ")" :whitespace(Whitespace) ;
 TypeItem    = DiscardType ;
-// An expression whose value is dropped (decorator calls, except types, defaults).
-DiscardExpr <~~ pop() ~~>
-            = Expression ;
+
+// type Name[T] = TYPE (PEP 695): the alias is a value carrying __name__ and
+// __value__, so it can be inspected; types themselves are erased.
+TypeAliasStmt <~~ push(makeTypeAlias(takeAll())) ~~>
+            = "type" KwEnd Id <~~ push(up.in) ~~> [ SkipBracket ] "=" TypeValue ;
+TypeValue   <~~ push(makeTypeValue(stripWs(up.in))) ~~>
+            = DiscardType ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = "return" KwEnd [ Expression ] ;
@@ -214,14 +326,44 @@ Break       <~~ push(makeBreak()) ~~>    = "break" KwEnd ;
 Continue    <~~ push(makeContinue()) ~~> = "continue" KwEnd ;
 Pass        <~~ push(function() {}) ~~>  = "pass" KwEnd ;
 
+// The augmented assignments, all of Python's. `//=` and `**=` must be tried before
+// `/=` and `*=`.
 AugAssign   <~~ push(makeAugAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" ) <~~ push({op: up.in}) ~~> Expression ;
-Assign      <~~ push(makeAssign(pop(), pop())) ~~>
-            = Target "=" Expression ;
+            = Target ( "+=" | "-=" | "**=" | "*=" | "//=" | "/=" | "%=" | "@="
+                     | "|=" | "&=" | "^=" | "<<=" | ">>=" ) <~~ push({op: up.in}) ~~> ExprList ;
+// a = b = value: every head is a target LIST, so `a, *b = xs`, `(h, (i, j)) = t` and
+// `xs[1:3] = ys` all go through the same unpacking writer.
+Assign      <~~ push(makeAssignStmt(takeAll())) ~~>
+            = AssignHead { AssignHead } ExprList ;
+AssignHead  <~~ push({tlist: pop()}) ~~>
+            = TargetList "=" NotEqSign ;
+TargetList  <~~ push(makeTargetList(takeAll())) ~~>
+            = TargetItem { "," TargetItem } [ "," ] ;
+TargetItem  = StarTarget | TupleTarget | Target ;
+// *rest in a target list swallows the middle of the sequence.
+StarTarget  <~~ push({startgt: pop()}) ~~>
+            = "*" TargetItem ;
+TupleTarget <~~ push(makeTargetList(takeAll())) ~~>
+            = "(" :whitespace(WhitespaceNL) TargetItem { "," TargetItem } [ "," ] ")" :whitespace(Whitespace)
+            | "[" :whitespace(WhitespaceNL) TargetItem { "," TargetItem } [ "," ] "]" :whitespace(Whitespace) ;
+// A comma-separated value list is a tuple; a single value stays itself.
+ExprList    <~~ push(makeExprList(takeAll())) ~~>
+            = StarExpr { "," StarExpr } [ "," <~~ push({tcomma: true}) ~~> ] ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { TIndex | TAttr } ;
+            = Id <~~ push(up.in) ~~> { TSlice | TIndex | TAttr } ;
 TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = "[" :whitespace(WhitespaceNL) Expression "]" :whitespace(Whitespace) ;
+// A slice target: xs[1:3] = [9], xs[::2] = [7, 8], del xs[::2].
+TSlice      <~~ push(makeSliceSfx(takeAll())) ~~>
+            = "[" :whitespace(WhitespaceNL) [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" :whitespace(Whitespace) ;
+
+// A zero-width guard that fails when the very next character is `=`, so `a == b` is
+// never read as an assignment to `a`.
+NotEqSign   = :script(~~
+    (function() {
+        return (c.peek(0) === 61) ? abnf.newToken("\x01eq-follows", 0) : undefined
+    })()
+~~) ;
 // obj.attr = ... : an attribute target (common in class methods: self.x = ...).
 TAttr       <~~ push({tattr: true, name: pop().taname, pos: up.pos}) ~~>
             = "." Id <~~ push({taname: up.in}) ~~> ;
@@ -232,18 +374,28 @@ ExprSmall   <~~ push(exprToStmt(pop())) ~~>
 // Every expression production pushes exactly one thunk: function() -> value.
 // A lambda binds loosest; then the a-if-c-else-b conditional expression; then
 // the boolean/arith layers.
-Expression  = Lambda | Ternary ;
+Expression  = Lambda | YieldExpr | Walrus | Ternary ;
+// yield / yield from as an EXPRESSION (v = yield x): see makeYield.
+YieldExpr   <~~ push(makeYield(takeAll(), up.pos)) ~~>
+            = "yield" KwEnd ( KwFrom Expression <~~ push({yfrom: true}) ~~> | [ ExprList ] ) ;
+// The walrus operator, name := value: it assigns and yields the value.
+Walrus      <~~ var v = pop(); push(makeWalrus(pop(), v)) ~~>
+            = Id <~~ push(up.in) ~~> ":=" Expression ;
+// A condition position where a walrus is allowed unparenthesized.
+NamedTest   = Expression ;
 Ternary     <~~ push(makeTernary(takeAll())) ~~>
             = OrExpr [ "if" KwEnd OrExpr "else" KwEnd Expression ] ;
 Lambda      <~~ push(makeLambda(pop(), makeParamList(takeAll()), up.pos)) ~~>
             = "lambda" KwEnd [ LamParam { "," LamParam } ] ":" Expression ;
 // Lambda parameters take no annotation (the ':' ends the header); defaults
 // and *args work like in def, **kwargs is reported as not implemented.
-LamParam    = LamDblStar | LamStar | LamNamed ;
-LamDblStar  <~~ push({pcomplex: true}) ~~>
-            = "**" [ Id ] ;
+LamParam    = LamDblStar | LamStar | LamSlash | LamNamed ;
+LamDblStar  <~~ push({pkwrest: up.in}) ~~>
+            = "**" Id ;
 LamStar     <~~ push(makeRestParam(takeAll())) ~~>
             = "*" [ Id <~~ push(up.in) ~~> ] ;
+LamSlash    <~~ push({pslash: true}) ~~>
+            = "/" ;
 LamNamed    <~~ push(makeNamedParam(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> [ ParamDefault ] ;
 
@@ -255,128 +407,221 @@ NotExpr     = Not | Comparison ;
 Not         <~~ push(makeNot(pop())) ~~>
             = "not" KwEnd NotExpr ;
 
-// 'is' / 'is not' are identity comparisons; in this subset (== already compares
-// lists and dicts by identity) they evaluate as the same == / != operators.
-Comparison  <~~ push(foldBinary(takeAll())) ~~>
-            = BitExpr [ ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> BitExpr
-                    | ( "not" KwEnd "in" KwEnd ) <~~ push("not in") ~~> BitExpr
-                    | ( "is" KwEnd "not" KwEnd ) <~~ push("!=") ~~> BitExpr
-                    | ( "is" KwEnd ) <~~ push("==") ~~> BitExpr
-                    | ( "in" KwEnd ) <~~ push("in") ~~> BitExpr ] ;
+// Comparisons CHAIN, as in Python: a < b < c is (a < b) and (b < c) with b evaluated
+// once, and the chain short-circuits. `is` / `is not` are genuine identity tests (==
+// compares structurally, so they are not the same operator).
+Comparison  <~~ push(makeCompare(takeAll())) ~~>
+            = BitExpr { CmpOp BitExpr } ;
+CmpOp       = ( "==" | "!=" | "<=" | ">=" | "<" | ">" ) <~~ push({cop: up.in}) ~~>
+            | ( "not" KwEnd "in" KwEnd ) <~~ push({cop: "not in"}) ~~>
+            | ( "is" KwEnd "not" KwEnd ) <~~ push({cop: "is not"}) ~~>
+            | ( "is" KwEnd ) <~~ push({cop: "is"}) ~~>
+            | ( "in" KwEnd ) <~~ push({cop: "in"}) ~~> ;
 
 // Bitwise / shift operators ( | ^ & << >> ) sit just above comparison; they are
 // accepted and reported as not implemented (no integer-bit support in the subset).
 // With no such operator the layer is transparent (returns the single operand).
-BitExpr     <~~ push(makeBit(takeAll(), up.pos)) ~~>
-            = Arith { ( "|" | "^" | "&" | "<<" | ">>" ) <~~ push(up.in) ~~> Arith } ;
+// Bitwise / shift operators. On ints they are the 32-bit bit operations; on sets
+// | ^ & - are union, symmetric difference, intersection and difference; a user class
+// may define __or__ / __and__ / ... . Precedence follows Python: | then ^ then &
+// then the shifts.
+BitExpr     <~~ push(foldBinary(takeAll())) ~~>
+            = BitXor { "|" <~~ push("|") ~~> BitXor } ;
+BitXor      <~~ push(foldBinary(takeAll())) ~~>
+            = BitAnd { "^" <~~ push("^") ~~> BitAnd } ;
+BitAnd      <~~ push(foldBinary(takeAll())) ~~>
+            = ShiftExpr { "&" <~~ push("&") ~~> ShiftExpr } ;
+ShiftExpr   <~~ push(foldBinary(takeAll())) ~~>
+            = Arith { ( "<<" | ">>" ) <~~ push(up.in) ~~> Arith } ;
 
 Arith       <~~ push(foldBinary(takeAll())) ~~>
             = Term { ( "+" | "-" ) <~~ push(up.in) ~~> Term } ;
 
 // The floor division // must be tried before /.
 Term        <~~ push(foldBinary(takeAll())) ~~>
-            = Factor { ( "*" | "//" | "/" | "%" ) <~~ push(up.in) ~~> Factor } ;
+            = Factor { ( "*" | "//" | "/" | "%" | "@" ) <~~ push(up.in) ~~> Factor } ;
 
 Factor      = Neg | Invert | Await | Power ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" Factor ;
 // ~x bitwise-not: accepted, reported as not implemented.
-Invert      <~~ takeAll(); push(notImplExpr("~ operator", up.pos)) ~~>
+Invert      <~~ push(makeInvert(pop())) ~~>
             = "~" Factor ;
 // await EXPR: accepted, reported as not implemented (no coroutines).
-Await       <~~ takeAll(); push(notImplExpr("await", up.pos)) ~~>
+// await EXPR: there is no event loop, so it yields its operand's value. That is
+// enough for the SYNTAX to be defined, named and inspected, which is what an async
+// function can be here; genuinely resuming a coroutine is out of the subset.
+Await       <~~ push(pop()) ~~>
             = "await" KwEnd Factor ;
 
 // a ** b exponentiation: accepted, reported as not implemented. With no '**' the
 // layer is transparent (returns the single operand).
-Power       <~~ push(makePower(takeAll(), up.pos)) ~~>
+Power       <~~ push(makePower(takeAll())) ~~>
             = PostfixExpr [ "**" Factor ] ;
 
 // f(a), s[i], s[a:b], lst.append(x), obj.attr (attribute access is not implemented).
 PostfixExpr = CallMember ;
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { CallSfx | MethodSfx | SliceSfx | IndexSfx | AttrSfx } ;
-CallSfx     <~~ push(makeCallSfx(takeAll(), up.pos)) ~~>
-            = "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
-MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll(), up.pos)) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ CallArg { "," CallArg } [ "," ] ] ")" ;
+CallSfx     <~~ push(makeCallSfx(takeAll())) ~~>
+            = "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
+MethodSfx   <~~ push(makeMethodSfx(popName(), takeAll())) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> "(" :whitespace(WhitespaceNL) [ CallArg { "," CallArg } [ "," ] ] ")" :whitespace(Whitespace) ;
 // obj.attr with no call: a genuine attribute read (pyattr).
 AttrSfx     <~~ push({kind: "attr", name: pop().aname, pos: up.pos}) ~~>
             = "." Id <~~ push({aname: up.in}) ~~> ;
 // A call argument: keyword (name=value) and *seq / **map unpacking are accepted
 // as markers (the call becomes not implemented); a plain positional is executed.
-CallArg     = CallKw | CallStar | CallPos ;
-CallKw      <~~ pop(); push({ckw: true}) ~~>
-            = Id "=" Expression ;
-CallStar    <~~ pop(); push({ckw: true}) ~~>
-            = ( "**" | "*" ) Expression ;
-CallPos     = Expression ;
+// A call argument: keyword (name=value), *seq / **map unpacking, or positional -
+// all genuine (see kevalArgs). A generator expression may also be the sole argument.
+CallArg     = CallKw | CallDblStar | CallStar | CallPos ;
+CallKw      <~~ var v = pop(); push({ckwname: pop(), ckwval: v}) ~~>
+            = Id <~~ push(up.in) ~~> "=" NotEqSign Expression ;
+CallDblStar <~~ push({cdblstar: pop()}) ~~>
+            = "**" Expression ;
+CallStar    <~~ push({splat: pop()}) ~~>
+            = "*" Expression ;
+CallPos     = GenExpArg | Expression ;
 // A slice s[lo:hi] with both ends optional; tried before plain indexing (the
 // missing ':' makes it fail fast there).
 SliceSfx    <~~ push(makeSliceSfx(takeAll())) ~~>
-            = "[" [ SliceLo ] ":" [ SliceHi ] "]" ;
+            = "[" :whitespace(WhitespaceNL) [ SliceLo ] ":" [ SliceHi ] [ ":" [ SliceStep ] ] "]" :whitespace(Whitespace) ;
 SliceLo     <~~ push({slo: pop()}) ~~> = Expression ;
 SliceHi     <~~ push({shi: pop()}) ~~> = Expression ;
+SliceStep   <~~ push({sstep: pop()}) ~~> = Expression ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = "[" :whitespace(WhitespaceNL) ExprList "]" :whitespace(Whitespace) ;
 
-Primary     = EmptyTuple | Grouped | FString | StringLit | DecLit | True | False | None
+Primary     = EmptyTuple | GenExpParen | Grouped | FString | StringLit | Ellipsis | DecLit | True | False | None
             | ListComp | ListLit | DictComp | DictLit | SetComp | SetLit | VarRef ;
 
 // ( ) empty tuple and ( a, b, ... ) / ( a, ) tuples are accepted and reported as
 // not implemented; a single parenthesized expression ( a ) is plain grouping.
-EmptyTuple  <~~ push(notImplExpr("tuple", up.pos)) ~~>
-            = "(" ")" ;
-Grouped     <~~ push(makeParen(takeAll(), up.pos)) ~~>
-            = "(" Expression { "," <~~ push({tcomma: true}) ~~> [ Expression ] } ")" ;
+// () is the empty tuple; ( a ) is plain grouping; ( a, b ) / ( a, ) is a TUPLE.
+// A tuple is modelled as a plain list - the value model has one sequence type - so
+// indexing, len, iteration, slicing and == all work on it unchanged.
+EmptyTuple  <~~ push(makeConst([])) ~~>
+            = "(" :whitespace(WhitespaceNL) ")" :whitespace(Whitespace) ;
+Grouped     <~~ push(makeParen(takeAll())) ~~>
+            = "(" :whitespace(WhitespaceNL) StarExpr { "," <~~ push({tcomma: true}) ~~> [ StarExpr ] } ")" :whitespace(Whitespace) ;
 
 // { e for x in it [if c] } set comprehension and { a, b, ... } set literal: both
 // accepted and reported as not implemented (the subset has no set type). Tried
 // after the dict forms so { k: v } and { k: v for ... } still parse as dicts.
-SetComp     <~~ takeAll(); push(notImplExpr("set comprehension", up.pos)) ~~>
-            = "{" Expression "for" KwEnd Id "in" KwEnd Expression [ "if" KwEnd Expression ] "}" ;
-SetLit      <~~ takeAll(); push(notImplExpr("set literal", up.pos)) ~~>
-            = "{" Expression { "," Expression } [ "," ] "}" ;
+// { e for x in it [if c] } and { a, b, ... }: a genuine set - a dict whose keys are
+// the members (so membership, len and insertion order come for free) marked __set.
+// ( e for x in it [if c] ): a parenthesized generator expression.
+GenExpParen <~~ push(makeListComp(takeAll())) ~~>
+            = "(" :whitespace(WhitespaceNL) Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression
+              [ CompIf ] ")" :whitespace(Whitespace) ;
+// list(v * v for v in range(4)): a generator expression as the sole call argument.
+// The value model has no lazy iterator, so it is built eagerly as a list - which
+// behaves the same for every use in this subset (iterate it, or hand it to list()).
+GenExpArg   <~~ push(makeListComp(takeAll())) ~~>
+            = Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression [ CompIf ] ;
+SetComp     <~~ push(makeSetComp(takeAll())) ~~>
+            = "{" Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression [ CompIf ] "}" ;
+SetLit      <~~ push(makeSet(takeAll())) ~~>
+            = "{" :whitespace(WhitespaceNL) StarExpr { "," StarExpr } [ "," ] "}" :whitespace(Whitespace) ;
 
 // [expr for x in iterable if cond] builds a list; the variable is comprehension local.
 ListComp    <~~ push(makeListComp(takeAll())) ~~>
-            = "[" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~> "in" KwEnd Expression
-              [ CompIf ] "]" ;
+            = "[" :whitespace(WhitespaceNL) Expression [ "async" KwEnd ] "for" KwEnd CompTarget "in" KwEnd Expression
+              [ CompIf ] "]" :whitespace(Whitespace) ;
+// The loop target of a comprehension: one name or a tuple of names.
+CompTarget  <~~ push({cvar: takeAll()}) ~~>
+            = "(" CompName { "," CompName } [ "," ] ")" | CompName { "," CompName } ;
+CompName    <~~ push(up.in) ~~> = Id ;
 CompIf      <~~ push({cif: pop()}) ~~>
             = "if" KwEnd Expression ;
 
 // {k: v for x in iterable if cond} builds a dict; tried before DictLit ('for' after
 // the first entry is what tells them apart) and the variable is comprehension local.
 DictComp    <~~ push(makeDictComp(takeAll())) ~~>
-            = "{" Expression ":" Expression "for" KwEnd Id <~~ push({cvar: up.in}) ~~>
+            = "{" Expression ":" Expression [ "async" KwEnd ] "for" KwEnd CompTarget
               "in" KwEnd Expression [ CompIf ] "}" ;
 
 // {k: v, ...}: keys and values are expressions; entries keep their insertion order.
 DictLit     <~~ push(makeDict(takeAll())) ~~>
-            = "{" [ DictEntry { "," DictEntry } ] "}" ;
+            = "{" :whitespace(WhitespaceNL) [ DictItem { "," DictItem } [ "," ] ] "}" :whitespace(Whitespace) ;
+DictItem    = DictSplat | DictEntry ;
+DictSplat   <~~ push({dsplat: pop()}) ~~>
+            = "**" Expression ;
 DictEntry   <~~ var dv = pop(); push({dk: pop(), dv: dv}) ~~>
             = Expression ":" Expression ;
 
 // f-string: literal chunks and {expression} parts; every expression renders like str().
+// An f-string piece. All four quote styles, and the `rf`/`fr` prefix orders; the
+// replacement fields carry the full 3.12 surface - a nested f-string, a conversion
+// (!r / !s / !a), a format spec that may itself contain a {nested} field, and the
+// `=` debug form that echoes the source text of the expression.
 FString     <~~ push(makeFString(takeAll())) ~~>
-            = ( 'f"' | 'F"' ) :whitespace() { FExpr | FChunk } '"' :whitespace(Whitespace) ;
-FExpr       = "{" :whitespace(Whitespace) Expression "}" :whitespace() ;
-FChunk      <~~ push({chunk: unescapeJs(up.in)}) ~~>
-            = FChar { FChar } ;
-FChar       = StrEsc | FPlain ;
-// Everything printable except the quote, the braces and the backslash.
-FPlain      = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "|" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+            = FPrefix ( FTripleDq | FTripleSq | FDq | FSq ) ;
+FPrefix     = ( "rf" | "rF" | "Rf" | "RF" | "fr" | "fR" | "Fr" | "FR" | "f" | "F" ) :whitespace() ;
+FTripleDq   = '"""' :whitespace() { FExpr | FChunk3D } '"""' :whitespace(Whitespace) ;
+FTripleSq   = "'''" :whitespace() { FExpr | FChunk3S } "'''" :whitespace(Whitespace) ;
+FDq         = '"' :whitespace() { FExpr | FChunkD } '"' :whitespace(Whitespace) ;
+FSq         = "'" :whitespace() { FExpr | FChunkS } "'" :whitespace(Whitespace) ;
+// up.in is the whole `{...}` field, which is what the `=` debug form needs: it echoes
+// the SOURCE TEXT of the expression, whitespace included (f"{x = }" -> "x = 5").
+FExpr       <~~ push(makeFField(takeAll(), up.in)) ~~>
+            = "{" :whitespace(Whitespace) Expression [ FDebug ] [ FConv ] [ FSpec ] "}" :whitespace() ;
+FDebug      <~~ push({fdebug: true}) ~~> = "=" NotEqSign ;
+FConv       = "!" ( "r" | "s" | "a" ) <~~ push({fconv: up.in}) ~~> ;
+FSpec       <~~ push({fspec: takeAll()}) ~~>
+            = ":" :whitespace() { FSpecField | FSpecChunk } ;
+FSpecField  = "{" :whitespace(Whitespace) Expression "}" :whitespace() ;
+FSpecChunk  <~~ push({chunk: up.in}) ~~>
+            = FSpecChar { FSpecChar } ;
+FSpecChar   = "\x20"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+FChunkD     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharD { FCharD } ;
+FCharD      = FBrace | StrEsc | FPlainD ;
+FChunkS     <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FCharS { FCharS } ;
+FCharS      = FBrace | StrEsc | FPlainS ;
+FChunk3D    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3D { FChar3D } ;
+FChar3D     = FBrace | StrEsc | FPlain3D ;
+FChunk3S    <~~ push({chunk: pyUnescape(up.in, false)}) ~~> = FChar3S { FChar3S } ;
+FChar3S     = FBrace | StrEsc | FPlain3S ;
+// {{ and }} are the escaped braces.
+FBrace      = "{{" | "}}" ;
+FPlainD     = "\x20"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+FPlainS     = "\x20"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e" | @"\t" | "\x7f"..."\U0010ffff" ;
+FPlain3D    = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+FPlain3S    = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 
 ListLit     <~~ push(makeList(takeAll())) ~~>
-            = "[" [ Expression { "," Expression } ] "]" ;
+            = "[" :whitespace(WhitespaceNL) [ StarExpr { "," StarExpr } [ "," ] ] "]" :whitespace(Whitespace) ;
+// An element of a display that may be splatted in: *iterable.
+StarExpr    = StarItem | Expression ;
+StarItem    <~~ push({splat: pop()}) ~~>
+            = "*" Expression ;
 
 // Triple-quoted strings (docstrings, multi-line text) are genuinely evaluated as
 // ordinary string constants; they are tried before the single-quoted forms so
 // """...""" is not misread as an empty "" string. The body may span newlines and
 // contain lone or doubled quotes; only three quotes in a row close it.
-StringLit   = TripleDqStr | TripleSqStr | DqString | SqString ;
-TripleDqStr = '"""' :whitespace() { TStrEsc | TdqChar | TdqQ1 | TdqQ2 } <~~ push(makeConst(unescapeJs(up.in))) ~~> '"""' :whitespace(Whitespace) ;
-TripleSqStr = "'''" :whitespace() { TStrEsc | TsqChar | TsqQ1 | TsqQ2 } <~~ push(makeConst(unescapeJs(up.in))) ~~> "'''" :whitespace(Whitespace) ;
+// A string literal is a run of ADJACENT pieces - Python concatenates them implicitly
+// ("ab" "cd", f"a{1}" "b") - each with its own prefix and quote style. A piece with an
+// `f` prefix is an f-string (its {expressions} are parsed); every other piece is a
+// constant whose PREFIX decides how it is decoded: `r` keeps the backslashes, `b`
+// makes it a bytes value (a list of byte numbers), `u` is accepted and ignored.
+StringLit   <~~ push(makeStrConcat(takeAll())) ~~>
+            = StrPiece { StrPiece } ;
+StrPiece    = FString | TextPiece ;
+TextPiece   <~~ push(makeStrPiece(up.in)) ~~>
+            = [ StrPrefix ] ( TripleDqStr | TripleSqStr | DqStr2 | SqStr2 ) ;
+// The prefix letters, longest first (rb before r), glued to the quote.
+StrPrefix   = ( "rb" | "rB" | "Rb" | "RB" | "br" | "bR" | "Br" | "BR"
+              | "r" | "R" | "b" | "B" | "u" | "U" ) :whitespace() ;
+TripleDqStr = '"""' :whitespace() { TStrEsc | TdqChar | TdqQ1 | TdqQ2 } '"""' :whitespace(Whitespace) ;
+TripleSqStr = "'''" :whitespace() { TStrEsc | TsqChar | TsqQ1 | TsqQ2 } "'''" :whitespace(Whitespace) ;
+// A single-quoted piece. The shared DqString/SqString productions push a cooked value,
+// which the prefix-aware decoder does not want, so these are spelled out.
+DqStr2      = '"' :whitespace() { StrEsc2 | DqChar2 } '"' :whitespace(Whitespace) ;
+SqStr2      = "'" :whitespace() { StrEsc2 | SqChar2 } "'" :whitespace(Whitespace) ;
+StrEsc2     = "\\" "\x00"..."\U0010ffff" ;
+DqChar2     = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
+SqChar2     = "\x00"..."\x26" | "\x28"..."\x5b" | "\x5d"..."\U0010ffff" ;
 TStrEsc     = "\\" "\x20"..b"\x7e" ;
 // A non-quote, non-backslash char (newlines and spaces included: the body is raw).
 TdqChar     = "\x00"..."\x21" | "\x23"..."\x5b" | "\x5d"..."\U0010ffff" ;
@@ -388,6 +633,8 @@ TsqQ2       = "''" ( TStrEsc | TsqChar ) ;
 True        <~~ push(makeConst(true)) ~~>      = "True" KwEnd ;
 False       <~~ push(makeConst(false)) ~~>     = "False" KwEnd ;
 None        <~~ push(makeConst(undefined)) ~~> = "None" KwEnd ;
+// The Ellipsis literal. It is a singleton object, so `x is ...` compares by identity.
+Ellipsis    <~~ push(makeConst(pyEllipsis)) ~~> = "..." ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~>
             = Id ;
@@ -446,6 +693,11 @@ SameLevel = :script(~~
 
 // Whitespace never includes newlines: they are structure, not noise.
 Whitespace  = { @+" \t" | Comment } ;
+// Inside (), [] and {} a newline is NOT structure - Python joins those lines
+// implicitly - so the bracketed productions switch to this whitespace and switch back
+// on the closing bracket. A backslash at the end of a line joins the next one too.
+WhitespaceNL = { @+" \t\r\n" | Comment | LineJoin } ;
+LineJoin    = "\\" "\n" ;
 Comment     = "#" :whitespace() { NotNewline } :whitespace(Whitespace) ;
 NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
@@ -486,7 +738,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         println(out)
     }
     hostGlobals["len"] = function(x) {
+        if (typeof x == "string") return pyLen(x)
         if (isDict(x)) return x.keys.length
+        if (pyUser(x)) {
+            var f = clsFind(x.__class, "__len__")
+            if (f != null) { return f(x) }
+        }
         return x.length
     }
     // list(x): a fresh list from any iterable (lists copy, dicts give their keys).
@@ -499,13 +756,105 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = from; i < to; i++) out.push(i)
         return out
     }
+    // The builtin TYPE objects. They are class descriptors like any other, so
+    // isinstance(x, str), type(x) is Dog and the class patterns of `match` all go
+    // through the same machinery.
+    var pyTypeNames = ["object", "type", "str", "int", "float", "bool", "list", "tuple",
+                       "dict", "set", "bytes", "function", "NoneType", "complex"]
+    for (var pti = 0; pti < pyTypeNames.length; pti++) {
+        hostGlobals[pyTypeNames[pti]] = {__isclass: true, __name: pyTypeNames[pti], __bases: [], __builtin: true}
+    }
+    // type(v): the class of a user instance, else the builtin type object.
+    function pyTypeOf(v) {
+        if (pyUser(v)) { return v.__class }
+        if (v === undefined || v === null) { return hostGlobals["NoneType"] }
+        if (typeof v == "string") { return hostGlobals["str"] }
+        if (typeof v == "boolean") { return hostGlobals["bool"] }
+        if (typeof v == "number") { return (Math.floor(v) == v) ? hostGlobals["int"] : hostGlobals["float"] }
+        if (Array.isArray(v)) { return hostGlobals["list"] }
+        if (isSet(v)) { return hostGlobals["set"] }
+        if (isDict(v)) { return hostGlobals["dict"] }
+        if (typeof v == "function") { return hostGlobals["function"] }
+        if (v.__isclass == true) { return hostGlobals["type"] }
+        return hostGlobals["object"] 
+    }
+    // Calling a builtin type object is a CONVERSION - str(x), int(x), list(x) - which
+    // pyCall routes here rather than instantiating a class.
+    function pyConvert(name, args) {
+        var v = args.length > 0 ? args[0] : undefined
+        if (name == "str") { return args.length == 0 ? "" : pstr(v) }
+        if (name == "int") { return typeof v == "string" ? parseInt(v) : (v | 0) }
+        if (name == "float") { return typeof v == "string" ? parseFloat(v) : v }
+        if (name == "bool") { return pytruthy(v) }
+        if (name == "list") { return args.length == 0 ? [] : iterToList(v).slice(0) }
+        if (name == "tuple") { return args.length == 0 ? [] : iterToList(v).slice(0) }
+        if (name == "set") {
+            var out = newSet()
+            if (args.length > 0) { var a = iterToList(v); for (var i = 0; i < a.length; i++) { setAdd(out, a[i]) } }
+            return out
+        }
+        if (name == "dict") { return args.length == 0 ? newDict() : v }
+        if (name == "type") { return pyTypeOf(v) }
+        fail("TypeError: cannot construct " + name)
+    }
+    hostGlobals["next"] = function(g, d) {
+        if (isGen(g)) { return genSend(g, undefined) }
+        var a = iterToList(g)
+        return a.length > 0 ? a[0] : d
+    }
+    hostGlobals["isinstance"] = function(v, cls) { return pyIsInstance(v, cls) }
+    hostGlobals["issubclass"] = function(c1, c2) { return clsIsSub(c1, c2) }
+    hostGlobals["repr"] = function(v) { return prepr(v) }
+    hostGlobals["sum"] = function(v) { var a = iterToList(v); var t = 0; for (var i = 0; i < a.length; i++) { t += a[i] }; return t }
     hostGlobals["exit"] = function(code) { exit(code | 0) }
+    // println is the harness\'s own one-value printer, used by the ratchet files.
+    hostGlobals["println"] = function(x) { println(pstr(x)) }
     hostGlobals["abs"] = function(v) { return v < 0 ? -v : v }
 
     // ----- Dicts: {__dict, keys, vals} with two parallel arrays. The arrays keep
     // the insertion order (like Python) and allow any === comparable key. -----
     // isDict/dictFind/dictSet are shared - see lib/interp-core.js.
     function newDict() { return {__dict: true, keys: [], vals: []} }
+    // A set is a dict whose keys ARE the members (the values are unused), so
+    // membership, len and insertion order come from the dict machinery unchanged.
+    function newSet() { return {__dict: true, __set: true, keys: [], vals: []} }
+    function isSet(v) { return v !== null && v !== undefined && typeof v == "object" && v.__set === true }
+    function setAdd(s2, v) { if (dictFind(s2, v) < 0) { s2.keys.push(v); s2.vals.push(true); s2.__idx = null } }
+    // Structural equality, Python\'s ==: sequences element-wise, dicts and sets by
+    // their contents (a set ignores order), everything else by identity. A user class
+    // may override it with __eq__.
+    function pyEq(a, b) {
+        if (a === b) { return true }
+        if (a !== null && a !== undefined && b !== null && b !== undefined
+            && typeof a == "object" && typeof b == "object"
+            && a.__genalias === true && b.__genalias === true) {
+            return a.origin === b.origin && pyEq(a.targs, b.targs)
+        }
+        if (a === null || a === undefined || b === null || b === undefined) { return false }
+        var ua = pyUser(a) ? clsFind(a.__class, "__eq__") : null
+        if (ua != null) { return pytruthy(ua(a, b)) }
+        var ub = pyUser(b) ? clsFind(b.__class, "__eq__") : null
+        if (ub != null) { return pytruthy(ub(b, a)) }
+        if (Array.isArray(a) && Array.isArray(b)) {
+            if (a.length != b.length) { return false }
+            for (var i = 0; i < a.length; i++) { if (!pyEq(a[i], b[i])) { return false } }
+            return true
+        }
+        if (isSet(a) && isSet(b)) {
+            if (a.keys.length != b.keys.length) { return false }
+            for (var s3 = 0; s3 < a.keys.length; s3++) { if (dictFind(b, a.keys[s3]) < 0) { return false } }
+            return true
+        }
+        if (isDict(a) && isDict(b) && !isSet(a) && !isSet(b)) {
+            if (a.keys.length != b.keys.length) { return false }
+            for (var k = 0; k < a.keys.length; k++) {
+                var j = dictFind(b, a.keys[k])
+                if (j < 0 || !pyEq(a.vals[k], b.vals[j])) { return false }
+            }
+            return true
+        }
+        return false
+    }
 
     // Python style rendering: True/False/None, lists in brackets, dicts in braces.
     function prepr(v) {
@@ -524,6 +873,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return out + "]"
         }
+        if (isSet(v)) {
+            if (v.keys.length == 0) { return "set()" }
+            var out3 = "{"
+            for (var j = 0; j < v.keys.length; j++) {
+                if (j > 0) out3 += ", "
+                out3 += prepr(v.keys[j])
+            }
+            return out3 + "}"
+        }
         if (isDict(v)) {
             var out2 = "{"
             for (var k = 0; k < v.keys.length; k++) {
@@ -532,7 +890,34 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
             return out2 + "}"
         }
+        // A user object renders through its __repr__ / __str__, else like Python's
+        // default <Name object>.
+        if (pyUser(v)) {
+            var f = clsFind(v.__class, "__repr__")
+            if (f != null) { return "" + f(v) }
+            // An exception renders as Name(args...), like Python's default repr.
+            if (hasOwn(v, "args")) {
+                var out4 = v.__class.__name + "("
+                for (var i = 0; i < v.args.length; i++) { if (i > 0) { out4 += ", " }; out4 += prepr(v.args[i]) }
+                return out4 + ")"
+            }
+            return "<" + v.__class.__name + " object>"
+        }
         return "" + v
+    }
+    // Walk a class and its bases (left to right, depth first - the MRO this model
+    // needs) for a member.
+    function clsFind(cls, name) {
+        if (cls == undefined || cls == null) { return null }
+        if (hasOwn(cls, name)) { return cls[name] }
+        var bs = cls.__bases
+        if (bs != undefined && bs != null) {
+            for (var i = 0; i < bs.length; i++) {
+                var r = clsFind(bs[i], name)
+                if (r != null) { return r }
+            }
+        }
+        return null
     }
     // Python truthiness: empty lists and dicts are falsy.
     function pytruthy(v) {
@@ -543,6 +928,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     function pyget(o, i) {
+        if (pyUser(o)) {
+            var gi = clsFind(o.__class, "__getitem__")
+            if (gi != null) { return gi(o, i) }
+        }
+        // A subscripted TYPE is a generic alias (list[int]); types are erased, so the
+        // alias is only a value to compare and inspect.
+        if (o != null && o != undefined && typeof o == "object" && o.__isclass == true) {
+            return {__genalias: true, origin: o, targs: Array.isArray(i) ? i : [i]}
+        }
         if (isDict(o)) {
             var di = dictFind(o, i)
             if (di < 0) fail("KeyError: " + pstr(i))
@@ -572,6 +966,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // (a snapshot), strings their characters.
     function iterToList(v) {
         if (Array.isArray(v)) return v
+        if (isGen(v)) return genToList(v)
         if (isDict(v)) return v.keys.slice(0)
         if (typeof v == "string") {
             var out = []
@@ -581,6 +976,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         fail("iteration over " + pstr(v))
     }
     function mcall(target, name, args) {
+        if (isGen(target)) {
+            if (name == "send") { return genSend(target, args.length > 0 ? args[0] : undefined) }
+            if (name == "__next__") { return genSend(target, undefined) }
+            if (name == "close") { target.st.done = true; return undefined }
+            fail("unknown generator method: " + name)
+        }
         if (Array.isArray(target)) {
             if (name == "append") { target.push(args[0]); return undefined }
             if (name == "pop") {
@@ -614,7 +1015,17 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ----- Expression thunks -----
 
-    makeNeg = function(t) { return function() { return -t() } }
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (pyUser(v)) {
+                var f = clsFind(v.__class, "__neg__")
+                if (f != null) { return f(v) }
+            }
+            return -v
+        }
+    }
     makeNot = function(t) { return function() { return !pytruthy(t()) } }
 
     function fdiv(a, b) { return Math.floor(a / b) }
@@ -623,42 +1034,354 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (r != 0 && ((r < 0) != (b < 0))) r += b
         return r
     }
+    // The set algebra: | union, & intersection, - difference, ^ symmetric difference.
+    function setOp(op, l, r) {
+        var out = newSet()
+        var i
+        if (op == "|") {
+            for (i = 0; i < l.keys.length; i++) { setAdd(out, l.keys[i]) }
+            for (i = 0; i < r.keys.length; i++) { setAdd(out, r.keys[i]) }
+        } else if (op == "&") {
+            for (i = 0; i < l.keys.length; i++) { if (dictFind(r, l.keys[i]) >= 0) { setAdd(out, l.keys[i]) } }
+        } else if (op == "-") {
+            for (i = 0; i < l.keys.length; i++) { if (dictFind(r, l.keys[i]) < 0) { setAdd(out, l.keys[i]) } }
+        } else {
+            for (i = 0; i < l.keys.length; i++) { if (dictFind(r, l.keys[i]) < 0) { setAdd(out, l.keys[i]) } }
+            for (i = 0; i < r.keys.length; i++) { if (dictFind(l, r.keys[i]) < 0) { setAdd(out, r.keys[i]) } }
+        }
+        return out
+    }
+    // The operator-overloading dunder for each operator, so a user class joins in.
+    var pyDunder = {}
+    pyDunder["+"] = "__add__"
+    pyDunder["-"] = "__sub__"
+    pyDunder["*"] = "__mul__"
+    pyDunder["/"] = "__truediv__"
+    pyDunder["//"] = "__floordiv__"
+    pyDunder["%"] = "__mod__"
+    pyDunder["**"] = "__pow__"
+    pyDunder["@"] = "__matmul__"
+    pyDunder["|"] = "__or__"
+    pyDunder["&"] = "__and__"
+    pyDunder["^"] = "__xor__"
+    pyDunder["<<"] = "__lshift__"
+    pyDunder[">>"] = "__rshift__"
+    pyDunder["<"] = "__lt__"
+    pyDunder[">"] = "__gt__"
+    pyDunder["<="] = "__le__"
+    pyDunder[">="] = "__ge__"
+    function pyUser(v) {
+        return v !== null && v !== undefined && typeof v == "object" && v.__class != undefined && v.__class != null
+    }
+    // An operator offered to the left operand\'s class, then (reflected) to the right.
+    function userOp(op, l, r) {
+        var n = hasOwn(pyDunder, op) ? pyDunder[op] : null
+        if (n == null) { return null }
+        if (pyUser(l)) { var f = clsFind(l.__class, n); if (f != null) { return {v: f(l, r)} } }
+        if (pyUser(r)) {
+            var rn = "__r" + n.substring(2)
+            var g = clsFind(r.__class, rn)
+            if (g != null) { return {v: g(r, l)} }
+        }
+        return null
+    }
     binOp = function(op, l, r) {
-        if (op == "+") return l + r
-        if (op == "-") return l - r
-        if (op == "*") return l * r
+        if (pyUser(l) || pyUser(r)) {
+            var uo = userOp(op, l, r)
+            if (uo != null) return uo.v
+        }
+        if (op == "+") {
+            if (Array.isArray(l) && Array.isArray(r)) return l.concat(r)
+            return l + r
+        }
+        if (op == "-") { if (isSet(l) && isSet(r)) return setOp("-", l, r); return l - r }
+        if (op == "*") {
+            if (Array.isArray(l) && typeof r == "number") return listRepeat(l, r)
+            if (Array.isArray(r) && typeof l == "number") return listRepeat(r, l)
+            if (typeof l == "string" && typeof r == "number") return strRepeat(l, r)
+            return l * r
+        }
         if (op == "/") return l / r
         if (op == "//") return fdiv(l, r)
         if (op == "%") return fmod(l, r)
-        if (op == "==") return l === r
-        if (op == "!=") return l !== r
+        if (op == "**") return Math.pow(l, r)
+        if (op == "==") return pyEq(l, r)
+        if (op == "!=") return !pyEq(l, r)
+        if (op == "is") return l === r
+        if (op == "is not") return l !== r
         if (op == "<")  return l < r
         if (op == ">")  return l > r
         if (op == "<=") return l <= r
         if (op == ">=") return l >= r
         if (op == "in") return pyIn(l, r)
         if (op == "not in") return !pyIn(l, r)
+        if (op == "|") { if (isSet(l)) return setOp("|", l, r); return l | r }
+        if (op == "&") { if (isSet(l)) return setOp("&", l, r); return l & r }
+        if (op == "^") { if (isSet(l)) return setOp("^", l, r); return l ^ r }
+        if (op == "<<") return l << r
+        if (op == ">>") return l >> r
+        if (op == "@") return null
+        fail("unsupported operator " + op)
+    }
+    function listRepeat(a, n) {
+        var out = []
+        for (var i = 0; i < n; i++) { for (var j = 0; j < a.length; j++) { out.push(a[j]) } }
+        return out
+    }
+    function strRepeat(s2, n) {
+        var out = ""
+        for (var i = 0; i < n; i++) { out += s2 }
+        return out
     }
     // Python 'x in y' for lists, strings and dict keys.
     function pyIn(l, r) {
         if (typeof r == "string") return r.indexOf(l) >= 0
         if (isDict(r)) return dictFind(r, l) >= 0
+        if (pyUser(r)) {
+            var f = clsFind(r.__class, "__contains__")
+            if (f != null) { return pytruthy(f(r, l)) }
+        }
         for (var i = 0; i < r.length; i++) {
-            if (r[i] === l) return true
+            if (pyEq(r[i], l)) return true
         }
         return false
     }
-    // items = [{chunk: text} | expression thunk, ...] -> the f-string value.
+    // ----- String, bytes and f-string literals -----
+    // Decode a Python string body. `raw` keeps every backslash; otherwise the escapes
+    // are Python's: the single-character ones, \OOO octal, \xHH, \uXXXX, \UXXXXXXXX,
+    // \N{NAME} (a small table of the names a program is likely to spell out) and a
+    // backslash before a newline, which joins the lines.
+    var pyUniNames = {}
+    pyUniNames["BULLET"] = 8226
+    pyUniNames["DEGREE SIGN"] = 176
+    pyUniNames["EURO SIGN"] = 8364
+    pyUniNames["GREEK SMALL LETTER ALPHA"] = 945
+    pyUniNames["GREEK SMALL LETTER PI"] = 960
+    pyUniNames["EM DASH"] = 8212
+    pyUniNames["SNOWMAN"] = 9731
+    pyUniNames["NO-BREAK SPACE"] = 160
+    function pyUnescape(text, raw) {
+        if (raw) { return text }
+        var out = ""
+        var i = 0
+        while (i < text.length) {
+            var c1 = text.charAt(i)
+            if (c1 != "\\") { out += c1; i++; continue }
+            var e = text.charAt(i + 1)
+            if (e == "n") { out += "\n"; i += 2; continue }
+            if (e == "t") { out += "\t"; i += 2; continue }
+            if (e == "r") { out += "\r"; i += 2; continue }
+            if (e == "a") { out += String.fromCharCode(7); i += 2; continue }
+            if (e == "b") { out += String.fromCharCode(8); i += 2; continue }
+            if (e == "f") { out += String.fromCharCode(12); i += 2; continue }
+            if (e == "v") { out += String.fromCharCode(11); i += 2; continue }
+            if (e == "\n") { i += 2; continue }
+            if (e == "\\") { out += "\\"; i += 2; continue }
+            if (e == "'") { out += "'"; i += 2; continue }
+            if (e == '"') { out += '"'; i += 2; continue }
+            if (e == "x") { out += String.fromCharCode(hexAt(text, i + 2, 2)); i += 4; continue }
+            if (e == "u") { out += String.fromCharCode(hexAt(text, i + 2, 4)); i += 6; continue }
+            if (e == "U") { out += codePoint(hexAt(text, i + 2, 8)); i += 10; continue }
+            if (e == "N" && text.charAt(i + 2) == "{") {
+                var close = text.indexOf("}", i + 3)
+                if (close > 0) {
+                    var nm = text.substring(i + 3, close)
+                    out += hasOwn(pyUniNames, nm) ? codePoint(pyUniNames[nm]) : ""
+                    i = close + 1
+                    continue
+                }
+            }
+            if (e >= "0" && e <= "7") {
+                var oct = ""
+                var k = i + 1
+                while (k < text.length && oct.length < 3 && text.charAt(k) >= "0" && text.charAt(k) <= "7") {
+                    oct += text.charAt(k)
+                    k++
+                }
+                out += String.fromCharCode(parseInt(oct, 8))
+                i = k
+                continue
+            }
+            out += "\\"
+            i++
+        }
+        return out
+    }
+    // A code point above the BMP becomes its UTF-16 surrogate pair; pyLen counts code
+    // points again, so len of a single astral character is 1, as in Python.
+    function codePoint(n) {
+        if (n <= 65535) { return String.fromCharCode(n) }
+        var v = n - 65536
+        return String.fromCharCode(55296 + (v >> 10)) + String.fromCharCode(56320 + (v & 1023))
+    }
+    function pyLen(s2) {
+        var n = 0
+        for (var i = 0; i < s2.length; i++) {
+            var c1 = s2.charCodeAt(i)
+            if (c1 >= 55296 && c1 <= 56319 && i + 1 < s2.length) { i++ }
+            n++
+        }
+        return n
+    }
+    // The source text of one literal piece, prefix and quotes included. Everything is
+    // decided here rather than in the grammar, which keeps it to one rule per quote
+    // style instead of one per prefix/quote combination.
+    function makeStrPiece(text) {
+        var i = 0
+        var raw = false
+        var isb = false
+        while (i < text.length) {
+            var c1 = text.charAt(i)
+            if (c1 == "r" || c1 == "R") { raw = true; i++ }
+            else if (c1 == "b" || c1 == "B") { isb = true; i++ }
+            else if (c1 == "u" || c1 == "U") { i++ }
+            else { break }
+        }
+        var q = 1
+        var head = text.substring(i, i + 3)
+        if (head == '"""' || head == "'''") { q = 3 }
+        var body = text.substring(i + q, text.length - q)
+        var v = pyUnescape(body, raw)
+        if (isb) { return {bytes: strToBytes(v)} }
+        return {str: v}
+    }
+    // bytes are modelled as a list of byte numbers, so b"AB"[0] is 65, b"a" + b"b"
+    // concatenates and len counts bytes - all through the ordinary list machinery.
+    function strToBytes(v) {
+        var out = []
+        for (var i = 0; i < v.length; i++) { out.push(v.charCodeAt(i) & 255) }
+        return out
+    }
+    // Adjacent pieces concatenate. All-constant text folds at build time.
+    function makeStrConcat(items) {
+        if (items.length == 1 && items[0].bytes != undefined) { return makeConst(items[0].bytes) }
+        var allConst = true
+        for (var i = 0; i < items.length; i++) { if (items[i].str == undefined) { allConst = false } }
+        if (allConst) {
+            var lit = ""
+            for (var k = 0; k < items.length; k++) { lit += items[k].str }
+            return makeConst(lit)
+        }
+        return function() {
+            var out = ""
+            for (var j = 0; j < items.length; j++) {
+                if (items[j].str != undefined) { out += items[j].str }
+                else if (items[j].bytes != undefined) { out += pstr(items[j].bytes) }
+                else { out += items[j]() }
+            }
+            return out
+        }
+    }
+    // items = [{chunk} | fieldThunk, ...] -> the f-string value.
     function makeFString(items) {
         return function() {
             var out = ""
             for (var i = 0; i < items.length; i++) {
                 var it = items[i]
-                if (typeof it == "function") out += pstr(it())
-                else out += it.chunk
+                if (typeof it == "function") { out += it() }
+                else { out += fixBraces(it.chunk) }
             }
             return out
         }
+    }
+    function fixBraces(t) { return t.split("{{").join("{").split("}}").join("}") }
+    // One replacement field: {expr[=][!conv][:spec]}. The `=` debug form prepends the
+    // SOURCE TEXT of the expression (which is why FSrcStart/FSrcEnd record its span)
+    // and switches the default conversion to repr.
+    function makeFField(items, srcText) {
+        var exprT = null
+        var spec = null
+        var conv = null
+        var debug = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { if (exprT == null) { exprT = it } }
+            else if (it.fdebug != undefined) { debug = true }
+            else if (it.fconv != undefined) {
+                conv = stripWs(it.fconv)
+                if (conv.charAt(0) == "!") { conv = conv.substring(1) }
+            }
+            else if (it.fspec != undefined) { spec = it.fspec }
+        }
+        // The debug prefix: everything between `{` and the `=`, then the `=` and the
+        // whitespace that followed it - Python reproduces the spacing exactly.
+        var prefix = ""
+        if (debug) {
+            var eq = srcText.indexOf("=")
+            if (eq > 0) {
+                prefix = srcText.substring(1, eq) + "="
+                var j = eq + 1
+                while (j < srcText.length && (srcText.charAt(j) == " " || srcText.charAt(j) == "\t")) {
+                    prefix += srcText.charAt(j)
+                    j++
+                }
+            }
+        }
+        return function() {
+            var v = anytype
+            v = exprT()
+            var body = anytype
+            body = (conv == "r" || (debug && conv == null && spec == null)) ? prepr(v) : pstr(v)
+            if (spec != null) { body = pyFormat(v, specText(spec), conv) }
+            return prefix + body
+        }
+    }
+    function specText(spec) {
+        var out = ""
+        for (var i = 0; i < spec.length; i++) {
+            if (typeof spec[i] == "function") { out += pstr(spec[i]()) }
+            else { out += spec[i].chunk }
+        }
+        return out
+    }
+    // The slice of the format mini-language a program actually writes:
+    // [[fill]align][sign][0][width][.precision][type].
+    function pyFormat(v, spec, conv) {
+        if (spec == "") { return (conv == "r") ? prepr(v) : pstr(v) }
+        var i = 0
+        var fill = " "
+        var align = ""
+        if (spec.length > 1 && isAlign(spec.charAt(1))) { fill = spec.charAt(0); align = spec.charAt(1); i = 2 }
+        else if (spec.length > 0 && isAlign(spec.charAt(0))) { align = spec.charAt(0); i = 1 }
+        var sign = ""
+        if (i < spec.length && (spec.charAt(i) == "+" || spec.charAt(i) == "-" || spec.charAt(i) == " ")) { sign = spec.charAt(i); i++ }
+        if (i < spec.length && spec.charAt(i) == "0" && align == "") { fill = "0"; align = "="; i++ }
+        var width = ""
+        while (i < spec.length && spec.charAt(i) >= "0" && spec.charAt(i) <= "9") { width += spec.charAt(i); i++ }
+        var prec = -1
+        if (i < spec.length && spec.charAt(i) == ".") {
+            i++
+            var p2 = ""
+            while (i < spec.length && spec.charAt(i) >= "0" && spec.charAt(i) <= "9") { p2 += spec.charAt(i); i++ }
+            prec = parseInt(p2)
+        }
+        var typ = (i < spec.length) ? spec.charAt(i) : ""
+        var body = anytype
+        body = pyFormatBody(v, typ, prec, sign, conv)
+        var w = (width == "") ? 0 : parseInt(width)
+        var pad = w - pyLen(body)
+        if (pad <= 0) { return body }
+        // A number right-aligns by default, everything else left-aligns.
+        if (align == ">" || align == "=" || (align == "" && typeof v == "number")) { return strRepeat(fill, pad) + body }
+        if (align == "^") {
+            var left = pad >> 1
+            return strRepeat(fill, left) + body + strRepeat(fill, pad - left)
+        }
+        return body + strRepeat(fill, pad)
+    }
+    function isAlign(ch) { return ch == "<" || ch == ">" || ch == "^" || ch == "=" }
+    function pyFormatBody(v, typ, prec, sign, conv) {
+        var body = anytype
+        if (typ == "f" || typ == "F") { body = (prec < 0 ? v.toFixed(6) : v.toFixed(prec)) }
+        else if (typ == "d") { body = "" + (v | 0) }
+        else if (typ == "x") { body = (v | 0).toString(16) }
+        else if (typ == "X") { body = (v | 0).toString(16).toUpperCase() }
+        else if (typ == "b") { body = (v | 0).toString(2) }
+        else if (typ == "o") { body = (v | 0).toString(8) }
+        else if (conv == "r") { body = prepr(v) }
+        else { body = pstr(v) }
+        if (sign == "+" && typeof v == "number" && v >= 0) { body = "+" + body }
+        return body
     }
     // and/or return the deciding operand, with Python truthiness.
     makeOrAnd = function(items, isOr) {
@@ -675,60 +1398,168 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
-    // Detect the newly recognized-but-unsupported suffixes (attribute access, and
-    // keyword / *starred call arguments) at build time: the whole postfix chain
-    // becomes not implemented and yields undefined, matching the other notImpl expr.
-    function complexSuffix(suffixes) {
-        for (var i = 0; i < suffixes.length; i++) {
-            if (suffixes[i].complex == true) { return {what: "keyword/starred call arguments", pos: suffixes[i].pos} }
+    // ----- Generators, driven by REPLAY -----
+    // There are no coroutines in the value model - a thunk cannot be suspended half way
+    // - so every send() re-runs the body from the top, hands the yields that already
+    // happened the values they were sent, and stops at the next one by throwing a
+    // signal the driver catches. A PURE generator behaves exactly right; one with side
+    // effects repeats them, which is the honest price of not having a stack to freeze
+    // (the same model languages/js-interpreter.abnf uses, and it is stated in the
+    // :description header). genRuns is the stack of active replays, innermost last, so
+    // a generator driven from inside another one still finds its own run.
+    var genRuns = []
+    // The walk-time marker: a `yield` anywhere in a def's body makes it a generator.
+    var genFlags = []
+    function genPush() { genFlags.push(false) }
+    function genPop() { return genFlags.pop() }
+    function genMark() { if (genFlags.length > 0) { genFlags[genFlags.length - 1] = true } }
+    // The value of one `yield`: a replay of an already-produced yield answers with the
+    // value the corresponding send(v) passed in and carries on; the one being produced
+    // now throws out to genSend. `yield from xs` DELEGATES - every element of xs is a
+    // yield of its own, and they replay individually.
+    function doYield(isFrom, v) {
+        var run = genRuns[genRuns.length - 1]
+        if (run == undefined) { fail("yield outside a generator") }
+        if (isFrom) {
+            var last = anytype
+            last = undefined
+            var arr = iterToList(v)
+            for (var i = 0; i < arr.length; i++) { last = doYield(false, arr[i]) }
+            return last
         }
-        return null
+        if (run.k < run.target) {
+            var sent = run.sent[run.k + 1]
+            run.k = run.k + 1
+            return sent
+        }
+        run.k = run.k + 1
+        throw {__genYield: true, v: v}
     }
-    // obj.attr: a read on any object-like value (instances, exception values).
-    // A missing attribute fails like Python's AttributeError; the compiled twin
-    // reads through js_get (a missing attribute yields undefined there - only
-    // invalid programs diverge).
-    function pyattr(o, name) {
-        if (o !== null && o !== undefined && typeof o == "object" && hasOwn(o, name)) { return o[name] }
-        fail("AttributeError: '" + name + "'")
-    }
-    // A call suffix: complex (keyword/starred) args mark it not implemented.
-    function makeCallSfx(items, pos) {
+    // items = [valueThunk?, {yfrom}?]
+    function makeYield(items, pos) {
+        genMark()
+        var t = null
+        var isFrom = false
         for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].ckw == true) { return {kind: "call", complex: true, pos: pos} }
+            if (typeof items[i] == "function") { t = items[i] }
+            else if (items[i].yfrom != undefined) { isFrom = true }
         }
-        return {kind: "call", args: items}
+        var vt = (t != null) ? t : makeConst(undefined)
+        return function() { return doYield(isFrom, vt()) }
     }
-    function makeMethodSfx(name, items, pos) {
-        for (var i = 0; i < items.length; i++) {
-            if (items[i] != undefined && items[i].ckw == true) { return {kind: "mcall", name: name, complex: true, pos: pos} }
+    function newGenObject(bodyT, defScopes, plist, dflts, args, named) {
+        return {__gen: true, st: {sent: [], count: 0, done: false, ret: undefined},
+                body: bodyT, env: defScopes, plist: plist, dflts: dflts, args: args, named: named}
+    }
+    // One step. Returns {yielded, value}; when the body runs to completion the
+    // generator is done and its return value is kept for the StopIteration.
+    function genStep(g, sendv) {
+        var st = g.st
+        if (st.done) { return {yielded: false, value: st.ret} }
+        st.sent.push(sendv)
+        var run = {target: st.count, k: 0, sent: st.sent}
+        genRuns.push(run)
+        var saved = scopes
+        var out = anytype
+        out = undefined
+        var yielded = false
+        try {
+            scopes = callScopes(g.env, g.plist, g.dflts, g.args, g.named)
+            var r = g.body()
+            st.ret = (r != undefined && r.isRet) ? r.v : undefined
+            st.done = true
+        } catch (e) {
+            if (e != undefined && e != null && e.__genYield == true) { yielded = true; out = e.v }
+            else { scopes = saved; genRuns.pop(); throw e }
         }
-        return {kind: "mcall", name: name, args: items}
+        scopes = saved
+        genRuns.pop()
+        if (yielded) { st.count = st.count + 1 }
+        return {yielded: yielded, value: yielded ? out : st.ret}
     }
+    // gen.send(v) / next(gen): the next value, or StopIteration carrying the return
+    // value once the body has finished - exactly Python's protocol.
+    function genSend(g, sendv) {
+        var r = genStep(g, sendv)
+        if (!r.yielded) {
+            var exc = pyMakeExc("StopIteration", [r.value])
+            exc.value = r.value
+            pyRaise(exc)
+        }
+        return r.value
+    }
+    function isGen(v) { return v !== null && v !== undefined && typeof v == "object" && v.__gen === true }
+    // Drive a generator to exhaustion, which is what a for-loop or list() needs.
+    function genToList(g) {
+        var out = []
+        var guard = 0
+        while (guard < 1000000) {
+            guard++
+            var r = genStep(g, undefined)
+            if (!r.yielded) { return out }
+            out.push(r.value)
+        }
+        fail("generator did not terminate")
+    }
+    // type Name = VALUE: a named alias object. The right-hand side is erased, so its
+    // __value__ is the same structural alias a subscripted type builds (list[int]).
+    function makeTypeAlias(items) {
+        var name = items[0]
+        var valT = items[1]
+        return function() {
+            noteBound(name)
+            setVar(name, {__alias: true, __name__: name, __value__: valT()})
+        }
+    }
+    // The value of a type expression: a subscripted builtin becomes a generic alias,
+    // anything else stays its own source text (types are erased).
+    function makeTypeValue(text) {
+        var cut = text.indexOf("[")
+        return function() {
+            if (cut > 0 && text.charAt(text.length - 1) == "]") {
+                var base = text.substring(0, cut)
+                var inner = text.substring(cut + 1, text.length - 1)
+                if (hasOwn(hostGlobals, base)) {
+                    var parts = inner.split(",")
+                    var targs = []
+                    for (var i = 0; i < parts.length; i++) {
+                        targs.push(hasOwn(hostGlobals, parts[i]) ? hostGlobals[parts[i]] : parts[i])
+                    }
+                    return {__genalias: true, origin: hostGlobals[base], targs: targs}
+                }
+            }
+            return text
+        }
+    }
+    function makeCallSfx(items) { return {kind: "call", args: items} }
+    function makeMethodSfx(name, items) { return {kind: "mcall", name: name, args: items} }
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        var bad = complexSuffix(suffixes)
-        if (bad != null) { return notImplExpr(bad.what, bad.pos) }
         return function() {
             var cur = anytype // A member chain hops between types.
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
                 if (s.kind == "call") {
-                    var argv = []
-                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
-                    if (typeof cur != "function") fail("call of a non function")
-                    cur = cur.apply(undefined, argv)
+                    var spec = kevalArgs(s.args)
+                    cur = pyCall(cur, spec.pos, spec.named)
                 } else if (s.kind == "mcall") {
-                    var argv2 = []
-                    for (var j2 = 0; j2 < s.args.length; j2++) argv2.push(s.args[j2]())
-                    cur = mcall(cur, s.name, argv2)
+                    var spec2 = kevalArgs(s.args)
+                    // A method call is an attribute read followed by a call, so a user
+                    // object dispatches through its class exactly like Python.
+                    if (pyUser(cur) || (cur != null && cur != undefined && cur.__isclass == true)) {
+                        cur = pyCall(pyattr(cur, s.name), spec2.pos, spec2.named)
+                    } else {
+                        cur = mcall(cur, s.name, spec2.pos)
+                    }
                 } else if (s.kind == "attr") {
                     cur = pyattr(cur, s.name)
                 } else if (s.kind == "slice") {
-                    cur = pySlice(cur, s.lo != null ? s.lo() : undefined, s.hi != null ? s.hi() : undefined)
+                    cur = pySliceStep(cur, s.lo != null ? s.lo() : undefined,
+                                      s.hi != null ? s.hi() : undefined,
+                                      s.step != null ? s.step() : undefined)
                 } else {
                     cur = pyget(cur, s.idx())
                 }
@@ -737,36 +1568,100 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // A display element list: a plain thunk contributes its value, a {splat} marker
+    // splices the elements of its iterable in ([0, *xs], (0, *xs), {0, *xs}).
     function makeList(items) {
         return function() {
             var a = []
-            for (var i = 0; i < items.length; i++) a.push(items[i]())
+            for (var i = 0; i < items.length; i++) {
+                if (typeof items[i] == "function") { a.push(items[i]()) }
+                else {
+                    var sp = iterToList(items[i].splat())
+                    for (var j = 0; j < sp.length; j++) { a.push(sp[j]) }
+                }
+            }
             return a
         }
     }
+    function makeSet(items) {
+        var listT = makeList(items)
+        return function() {
+            var arr = listT()
+            var out = newSet()
+            for (var i = 0; i < arr.length; i++) { setAdd(out, arr[i]) }
+            return out
+        }
+    }
     // items = [{dk, dv}...] -> a dict built in source order.
+    // {k: v, **other}: entries in source order, a **mapping splices its pairs in and
+    // a later key overwrites an earlier one (Python's rule).
     function makeDict(items) {
         return function() {
             var d = newDict()
-            for (var i = 0; i < items.length; i++) dictSet(d, items[i].dk(), items[i].dv())
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].dsplat != undefined) {
+                    var m = items[i].dsplat()
+                    for (var j = 0; j < m.keys.length; j++) { dictSet(d, m.keys[j], m.vals[j]) }
+                } else { dictSet(d, items[i].dk(), items[i].dv()) }
+            }
             return d
         }
     }
-    // items = [{slo}?, {shi}?] -> a slice suffix descriptor.
+    // items = [{slo}?, {shi}?, {sstep}?] -> a slice suffix descriptor.
     function makeSliceSfx(items) {
         var lo = null
         var hi = null
+        var st = null
         for (var i = 0; i < items.length; i++) {
             if (items[i].slo != undefined) lo = items[i].slo
             if (items[i].shi != undefined) hi = items[i].shi
+            if (items[i].sstep != undefined) st = items[i].sstep
         }
-        return {kind: "slice", lo: lo, hi: hi}
+        return {kind: "slice", lo: lo, hi: hi, step: st}
+    }
+    // The indices a slice selects, in order - Python's rules: negative bounds wrap,
+    // open ends follow the direction, and a negative step walks backwards.
+    function sliceIdx(n, lo, hi, st) {
+        if (st === undefined || st === null) { st = 1 }
+        if (st === 0) { fail("ValueError: slice step cannot be zero") }
+        var out = []
+        var i
+        if (st > 0) {
+            if (lo === undefined || lo === null) { lo = 0 } else { if (lo < 0) lo += n; if (lo < 0) lo = 0; if (lo > n) lo = n }
+            if (hi === undefined || hi === null) { hi = n } else { if (hi < 0) hi += n; if (hi < 0) hi = 0; if (hi > n) hi = n }
+            for (i = lo; i < hi; i += st) { out.push(i) }
+        } else {
+            if (lo === undefined || lo === null) { lo = n - 1 } else { if (lo < 0) lo += n; if (lo < 0) lo = -1; if (lo > n - 1) lo = n - 1 }
+            if (hi === undefined || hi === null) { hi = -1 } else { if (hi < 0) hi += n; if (hi < -1) hi = -1; if (hi > n) hi = n }
+            for (i = lo; i > hi; i += st) { out.push(i) }
+        }
+        return out
+    }
+    function pySliceStep(o, lo, hi, st) {
+        var ix = sliceIdx(o.length, lo, hi, st)
+        if (typeof o == "string") {
+            var s2 = ""
+            for (var i = 0; i < ix.length; i++) { s2 += o.charAt(ix[i]) }
+            return s2
+        }
+        var out = []
+        for (var j = 0; j < ix.length; j++) { out.push(o[ix[j]]) }
+        return out
     }
     // items = [exprT, {cvar}, iterT, {cif}?]. The variable lives in an own scope
     // (Python 3 comprehension scoping: it does not leak).
+    // Bind a comprehension / for-loop target: one name takes the element, several
+    // names unpack it positionally (for a, b in pairs).
+    function bindTarget(names, v) {
+        if (names.length == 1) { scopePut(scopes[scopes.length - 1], names[0], v); return }
+        var it = iterToList(v)
+        for (var i = 0; i < names.length; i++) {
+            scopePut(scopes[scopes.length - 1], names[i], i < it.length ? it[i] : undefined)
+        }
+    }
     function makeListComp(items) {
         var exprT = items[0]
-        var name = items[1].cvar
+        var names = items[1].cvar
         var iterT = items[2]
         var condT = items.length > 3 ? items[3].cif : null
         return function() {
@@ -774,10 +1669,19 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var out = []
             scopes.push({})
             for (var i = 0; i < arr.length; i++) {
-                scopes[scopes.length - 1][name] = arr[i]
+                bindTarget(names, arr[i])
                 if (condT == null || pytruthy(condT())) out.push(exprT())
             }
             scopes.pop()
+            return out
+        }
+    }
+    function makeSetComp(items) {
+        var listT = makeListComp(items)
+        return function() {
+            var arr = listT()
+            var out = newSet()
+            for (var i = 0; i < arr.length; i++) { setAdd(out, arr[i]) }
             return out
         }
     }
@@ -786,7 +1690,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function makeDictComp(items) {
         var kExprT = items[0]
         var vExprT = items[1]
-        var name = items[2].cvar
+        var names = items[2].cvar
         var iterT = items[3]
         var condT = items.length > 4 ? items[4].cif : null
         return function() {
@@ -794,7 +1698,7 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var d = newDict()
             scopes.push({})
             for (var i = 0; i < arr.length; i++) {
-                scopes[scopes.length - 1][name] = arr[i]
+                bindTarget(names, arr[i])
                 if (condT == null || pytruthy(condT())) dictSet(d, kExprT(), vExprT())
             }
             scopes.pop()
@@ -805,6 +1709,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // One step along a target path: an index ([i]) or an attribute (.name).
     function pathStep(o, step) {
         if (step.tattr == true) { return pyattr(o, step.name) }
+        if (step.kind == "slice") {
+            return pySliceStep(o, step.lo != null ? step.lo() : undefined,
+                               step.hi != null ? step.hi() : undefined,
+                               step.step != null ? step.step() : undefined)
+        }
         return pyget(o, step.idx())
     }
     function assignRef(ref, v) {
@@ -815,10 +1724,35 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var last = ref.path[ref.path.length - 1]
         if (last.tattr == true) {
             if (o === null || o === undefined || typeof o != "object") fail("AttributeError: '" + last.name + "'")
-            o[last.name] = v
+            pySetAttr(o, last.name, v)
+            return
+        }
+        // xs[a:b:c] = values: a contiguous slice may change length, an extended one
+        // must receive exactly as many values as it selects (Python's rule).
+        if (last.kind == "slice") {
+            var lo = last.lo != null ? last.lo() : undefined
+            var hi = last.hi != null ? last.hi() : undefined
+            var st = last.step != null ? last.step() : undefined
+            var vals = iterToList(v)
+            if (st === undefined || st === null || st === 1) {
+                var ixc = sliceIdx(o.length, lo, hi, 1)
+                var at = ixc.length > 0 ? ixc[0] : (lo === undefined || lo === null ? 0 : (lo < 0 ? lo + o.length : (lo > o.length ? o.length : lo)))
+                var tail = o.slice(at + ixc.length)
+                listTruncate(o, at)
+                for (var a2 = 0; a2 < vals.length; a2++) { o.push(vals[a2]) }
+                for (var t2 = 0; t2 < tail.length; t2++) { o.push(tail[t2]) }
+                return
+            }
+            var ixe = sliceIdx(o.length, lo, hi, st)
+            if (ixe.length != vals.length) { fail("ValueError: attempt to assign sequence of size " + vals.length + " to extended slice of size " + ixe.length) }
+            for (var e2 = 0; e2 < ixe.length; e2++) { o[ixe[e2]] = vals[e2] }
             return
         }
         var idx = last.idx()
+        if (pyUser(o)) {
+            var si = clsFind(o.__class, "__setitem__")
+            if (si != null) { si(o, idx, v); return }
+        }
         if (isDict(o)) { dictSet(o, idx, v); return }
         if (idx < 0) idx += o.length
         if (idx < 0 || idx >= o.length) fail("list assignment index out of range")
@@ -831,6 +1765,119 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         for (var i = 0; i < ref.path.length; i++) o = pathStep(o, ref.path[i])
         return o
     }
+    // A target LIST: one target stays itself, several become a tuple pattern that
+    // unpacks the value. A {startgt} entry is the *rest target.
+    function makeTargetList(items) {
+        if (items.length == 1 && items[0].startgt == undefined) { return items[0] }
+        return {tuple: items}
+    }
+    // Write a value through a target: a plain reference, a nested tuple pattern (with
+    // an optional starred rest), or a slice.
+    function writeTarget(t, v) {
+        if (t.tuple == undefined) { assignRef(t, v); return }
+        var items = t.tuple
+        var vals = iterToList(v)
+        var star = -1
+        for (var i = 0; i < items.length; i++) { if (items[i].startgt != undefined) { star = i } }
+        if (star < 0) {
+            if (vals.length != items.length) { fail("ValueError: cannot unpack " + vals.length + " values into " + items.length + " targets") }
+            for (var k = 0; k < items.length; k++) { writeTarget(items[k], vals[k]) }
+            return
+        }
+        var after = items.length - star - 1
+        if (vals.length < items.length - 1) { fail("ValueError: not enough values to unpack") }
+        for (var a = 0; a < star; a++) { writeTarget(items[a], vals[a]) }
+        var mid = []
+        for (var m = star; m < vals.length - after; m++) { mid.push(vals[m]) }
+        writeTarget(items[star].startgt, mid)
+        for (var b = 0; b < after; b++) { writeTarget(items[star + 1 + b], vals[vals.length - after + b]) }
+    }
+    // items = [{tlist}..., valueThunk]: every head is written with the same value,
+    // left to right (a = b = value).
+    function makeAssignStmt(items) {
+        var heads = []
+        var valT = items[items.length - 1]
+        for (var i = 0; i < items.length - 1; i++) { heads.push(items[i].tlist) }
+        return function() {
+            var v = anytype // The assigned value may be of any type.
+            v = valT()
+            for (var k = 0; k < heads.length; k++) { writeTarget(heads[k], v) }
+        }
+    }
+    // A comma-separated expression list is a tuple; a single expression stays itself.
+    // A comma-separated expression list is a TUPLE; a single expression with no comma
+    // stays itself, but a trailing comma (one = 7,) still makes a one-element tuple.
+    function makeExprList(items) {
+        var parts = []
+        var sawComma = items.length > 1
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].tcomma != undefined) { sawComma = true }
+            else { parts.push(items[i]) }
+        }
+        if (parts.length == 1 && !sawComma) { return parts[0] }
+        return makeList(parts)
+    }
+    // name := value: assign in the enclosing scope and yield the value.
+    function makeWalrus(name, valT) {
+        return function() {
+            var v = anytype
+            v = valT()
+            setVar(name, v)
+            return v
+        }
+    }
+    // del: remove the binding, the attribute or the element(s).
+    function makeDel(items) {
+        return function() {
+            for (var i = 0; i < items.length; i++) { delTarget(items[i]) }
+        }
+    }
+    function delTarget(ref) {
+        if (ref.path.length == 0) {
+            for (var s2 = scopes.length - 1; s2 >= 0; s2--) {
+                if (hasOwn(scopes[s2], ref.name)) { delete scopes[s2][ref.name]; return }
+            }
+            fail("NameError: " + ref.name)
+        }
+        var o = anytype
+        o = getVar(ref.name)
+        for (var i = 0; i < ref.path.length - 1; i++) { o = pathStep(o, ref.path[i]) }
+        var last = ref.path[ref.path.length - 1]
+        if (last.tattr == true) { delete o[last.name]; return }
+        if (last.kind == "slice") {
+            var ix = sliceIdx(o.length, last.lo != null ? last.lo() : undefined,
+                              last.hi != null ? last.hi() : undefined,
+                              last.step != null ? last.step() : undefined)
+            var drop = newSet()
+            for (var d = 0; d < ix.length; d++) { setAdd(drop, ix[d]) }
+            var keep = []
+            for (var j = 0; j < o.length; j++) { if (dictFind(drop, j) < 0) { keep.push(o[j]) } }
+            listTruncate(o, 0)
+            for (var q = 0; q < keep.length; q++) { o.push(keep[q]) }
+            return
+        }
+        var idx = last.idx()
+        if (isDict(o)) {
+            var di = dictFind(o, idx)
+            if (di < 0) { fail("KeyError: " + pstr(idx)) }
+            listRemoveAt(o.keys, di)
+            listRemoveAt(o.vals, di)
+            o.__idx = null
+            return
+        }
+        if (idx < 0) { idx += o.length }
+        listRemoveAt(o, idx)
+    }
+    // Remove one element in place. splice is not available on the frozen engine's
+    // arrays, so the tail is shifted down and the array truncated.
+    // Remove one element in place. splice is not available on the frozen engine's
+    // arrays and `length` is not assignable there, so the tail shifts down and the
+    // last slot is popped off.
+    function listRemoveAt(a, i) {
+        for (var k = i; k < a.length - 1; k++) { a[k] = a[k + 1] }
+        a.pop()
+    }
+    function listTruncate(a, n) { while (a.length > n) { a.pop() } }
     function makeAssign(valT, ref) {
         return function() { assignRef(ref, valT()) }
     }
@@ -838,15 +1885,13 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var ref = items[0]
         var op = items[1].op
         var valT = items[2]
+        var bop = op.substring(0, op.length - 1)
         return function() {
-            var a = readRef(ref)
-            var b = valT()
-            var v
-            if (op == "+=") { v = a + b }
-            else if (op == "-=") { v = a - b }
-            else if (op == "*=") { v = a * b }
-            else { v = a / b }
-            assignRef(ref, v)
+            var a = anytype // The target may hold any type.
+            a = readRef(ref)
+            var b = anytype
+            b = valT()
+            assignRef(ref, binOp(bop, a, b))
         }
     }
 
@@ -872,17 +1917,41 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (elseT != null) return elseT()
         }
     }
-    function makeFor(bodyT, listT, name) {
+    // items = [targetList, iterThunk, bodyThunk, {loopelse}?]
+    function makeForStmt(items) {
+        var tgt = items[0]
+        var listT = items[1]
+        var bodyT = items[2]
+        var elseT = (items.length > 3 && items[3] != undefined && items[3].loopelse != undefined) ? items[3].loopelse : null
         return function() {
             var arr = iterToList(listT())
+            var broke = false
             for (var i = 0; i < arr.length; i++) {
-                setVar(name, arr[i])
+                writeTarget(tgt, arr[i])
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) break
+                    if (r === BRK) { broke = true; break }
                     if (r !== CONT) return r
                 }
             }
+            if (!broke && elseT != null) { return elseT() }
+        }
+    }
+    // items = [condThunk, bodyThunk, {loopelse}?]
+    function makeWhileElse(items) {
+        var condT = items[0]
+        var bodyT = items[1]
+        var elseT = (items.length > 2 && items[2] != undefined && items[2].loopelse != undefined) ? items[2].loopelse : null
+        return function() {
+            var broke = false
+            while (pytruthy(condT())) {
+                var r = bodyT()
+                if (r != undefined) {
+                    if (r === BRK) { broke = true; break }
+                    if (r !== CONT) return r
+                }
+            }
+            if (!broke && elseT != null) { return elseT() }
         }
     }
     function makeReturn(items) {
@@ -893,21 +1962,39 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // a ** b: reported as not implemented; with no '**' the single operand passes
     // through unchanged (keeping the expression layer transparent).
-    function makePower(items, pos) {
+    function makePower(items) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("** power operator", pos)
+        var b = items[0]
+        var e = items[1]
+        return function() { return binOp("**", b(), e()) }
     }
-    // a | b, a & b, a << b, ...: reported as not implemented; with no bit operator
-    // the single operand passes through unchanged.
-    function makeBit(items, pos) {
+    function makeInvert(t) { return function() { return ~t() } }
+    // items alternates operands and {cop} markers. Each operand is evaluated once and
+    // the chain stops at the first false link (Python's semantics exactly).
+    function makeCompare(items) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("bitwise/shift operator", pos)
+        return function() {
+            var l = anytype // The operands of a chain may be of mixed types.
+            l = items[0]()
+            for (var i = 1; i < items.length; i += 2) {
+                var r = anytype
+                r = items[i + 1]()
+                if (!pytruthy(binOp(items[i].cop, l, r))) { return false }
+                l = r
+            }
+            return true
+        }
     }
-    // ( a ): plain grouping. ( a, b, ... ) / ( a, ): a tuple, reported as not
-    // implemented (a comma pushed a {tcomma} marker, so items has more than one).
-    function makeParen(items, pos) {
-        if (items.length == 1) { return items[0] }
-        return notImplExpr("tuple", pos)
+    // ( a ): plain grouping. ( a, b, ... ) / ( a, ): a TUPLE, built as a list (a
+    // comma pushed a {tcomma} marker, so items has more than one entry). A *starred
+    // element splices its iterable in.
+    function makeParen(items) {
+        if (items.length == 1 && typeof items[0] == "function") { return items[0] }
+        var parts = []
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function" || items[i].splat != undefined) { parts.push(items[i]) }
+        }
+        return makeList(parts)
     }
     // a if c else b: genuinely lowered, short-circuiting like Python.
     function makeTernary(items) {
@@ -943,11 +2030,27 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // name: Type [= value]: the annotation is ignored; assign when a value is given.
+    // items = [ref, {aname}, {atype}, valueThunk?]
     function makeAnnAssign(items) {
         var ref = items[0]
-        if (items.length < 2) { return function() {} }
-        var valT = items[1]
-        return function() { assignRef(ref, valT()) }
+        var name = (ref.path.length == 0) ? ref.name : null
+        var tname = null
+        var valT = null
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "function") { valT = items[i] }
+            else if (items[i].atype != undefined) { tname = items[i].atype }
+        }
+        return function() {
+            // Inside a class body (a recording namespace scope) the annotation is kept
+            // so the class can answer __annotations__.
+            var sc = scopes[scopes.length - 1]
+            if (name != null && hasOwn(sc, "__nskeys")) {
+                if (!hasOwn(sc, "__annots")) { sc.__annots = {names: [], types: []} }
+                sc.__annots.names.push(name)
+                sc.__annots.types.push(tname)
+            }
+            if (valT != null) { assignRef(ref, valT()) }
+        }
     }
     // assert COND [, MSG]: a false condition aborts with AssertionError.
     function makeAssert(items) {
@@ -960,28 +2063,103 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             }
         }
     }
-    // try/except/else/finally: not implemented (no exception model). Under
-    // -warn-unsupported the try body and any finally body run in sequence; the
-    // except/else handlers are dropped.
-    // items = [name, suiteThunk] or [suiteThunk] (except with no `as` binding).
-    function makeExcept(items) {
-        if (items.length > 1) { return {handler: items[1], hname: items[0]} }
-        return {handler: items[0], hname: undefined}
+    // ----- Exceptions -----
+    // The builtin hierarchy. Each entry is a class descriptor exactly like a user
+    // class, so `class AppError(Exception)` subclasses it and `except AppError` walks
+    // the same __bases chain. An instance carries its constructor arguments as .args.
+    var pyExcNames = ["BaseException", "Exception", "ArithmeticError", "ZeroDivisionError",
+                      "LookupError", "IndexError", "KeyError", "ValueError", "TypeError",
+                      "NameError", "UnboundLocalError", "AttributeError", "RuntimeError",
+                      "StopIteration", "NotImplementedError", "AssertionError",
+                      "OSError", "ExceptionGroup"]
+    var pyExcParent = {}
+    pyExcParent["Exception"] = "BaseException"
+    pyExcParent["ArithmeticError"] = "Exception"
+    pyExcParent["ZeroDivisionError"] = "ArithmeticError"
+    pyExcParent["LookupError"] = "Exception"
+    pyExcParent["IndexError"] = "LookupError"
+    pyExcParent["KeyError"] = "LookupError"
+    pyExcParent["ValueError"] = "Exception"
+    pyExcParent["TypeError"] = "Exception"
+    pyExcParent["NameError"] = "Exception"
+    pyExcParent["UnboundLocalError"] = "NameError"
+    pyExcParent["AttributeError"] = "Exception"
+    pyExcParent["RuntimeError"] = "Exception"
+    pyExcParent["StopIteration"] = "Exception"
+    pyExcParent["NotImplementedError"] = "RuntimeError"
+    pyExcParent["AssertionError"] = "Exception"
+    pyExcParent["OSError"] = "Exception"
+    pyExcParent["ExceptionGroup"] = "Exception"
+    function installExceptions() {
+        for (var i = 0; i < pyExcNames.length; i++) {
+            var n = pyExcNames[i]
+            var cls = {__isclass: true, __name: n, __bases: []}
+            hostGlobals[n] = cls
+        }
+        for (var k = 0; k < pyExcNames.length; k++) {
+            var m = pyExcNames[k]
+            if (hasOwn(pyExcParent, m)) { hostGlobals[m].__bases = [hostGlobals[pyExcParent[m]]] }
+        }
     }
-    // try/except/else/finally: raise unwinds to the first except (exception types are
-    // parsed but not discriminated), which binds the value to its `as` name; else runs
-    // only if the body completed without an exception or a return/break/continue;
-    // finally always runs. The body's control-flow signals still propagate. The scope
-    // chain is restored on the way out of a raise.
-    function makeTry(items, pos) {
-        var tryT = anytype, handlerT = anytype, hname = anytype, elseT = anytype, finallyT = anytype
+    installExceptions()
+    // Build an exception instance of a builtin type.
+    function pyMakeExc(name, args) {
+        var inst = {__class: hostGlobals[name], args: args}
+        if (name == "ExceptionGroup" && args.length > 1) { inst.exceptions = args[1] }
+        return inst
+    }
+    function pyRaise(v) { throw {__exc: true, v: v} }
+    // The exception currently being handled, for a bare `raise`.
+    var pyCurExc = []
+    // The Ellipsis singleton (`...`), used as a body placeholder and as a value.
+    var pyEllipsis = {__ellipsis: true}
+    // Does a value match an `except` type - a class, or a tuple of classes?
+    function excMatchType(v, t) {
+        if (Array.isArray(t)) {
+            for (var i = 0; i < t.length; i++) { if (excMatchType(v, t[i])) { return true } }
+            return false
+        }
+        if (t == undefined || t == null) { return true }
+        // The value model lets any value be raised (the feature test raises a bare
+        // string), so the ROOT types accept anything; every other type discriminates
+        // through the class chain.
+        if (!pyUser(v)) { return t === hostGlobals["Exception"] || t === hostGlobals["BaseException"] }
+        return clsIsSub(v.__class, t)
+    }
+    function clsIsSub(cls, base) {
+        if (cls == undefined || cls == null) { return false }
+        if (cls === base) { return true }
+        var bs = cls.__bases
+        if (bs != undefined && bs != null) {
+            for (var i = 0; i < bs.length; i++) { if (clsIsSub(bs[i], base)) { return true } }
+        }
+        return false
+    }
+    // items = [{star}?, {htype}?, {hname}?, suiteThunk]
+    function makeExcept(items) {
+        var h = {handler: null, hname: undefined, htype: null, star: false}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (typeof it == "function") { h.handler = it }
+            else if (it.star != undefined) { h.star = true }
+            else if (it.htype != undefined) { h.htype = it.htype }
+            else if (it.hname != undefined) { h.hname = it.hname }
+        }
+        return h
+    }
+    // try/except/else/finally with real type discrimination. The first clause whose
+    // type accepts the value wins; `else` runs only when the body completed normally;
+    // `finally` always runs and its own control transfer overrides. `except*` splits an
+    // ExceptionGroup: each clause sees a group of the members it matches.
+    function makeTry(items) {
+        var tryT = null, elseT = null, finallyT = null
+        var clauses = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
-            else if (items[i].handler != undefined) {
-                if (handlerT == undefined) { handlerT = items[i].handler; hname = items[i].hname }
-            }
             else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
             else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
+            else if (items[i].handler != undefined) { clauses.push(items[i]) }
         }
         return function() {
             var savedChain = scopes.slice()
@@ -991,88 +2169,570 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 box.sig = tryT()
             } catch (e) {
                 scopes = savedChain.slice()
-                if (excIsUser(e) && handlerT != undefined) {
-                    threw = true
-                    scopes.push({})
-                    if (hname != undefined) { declVar(hname, e.v) }
-                    box.sig = handlerT()
-                    scopes.pop()
-                } else {
-                    throw e
-                }
+                if (!excIsUser(e)) { throw e }
+                threw = true
+                box.sig = runHandlers(clauses, e)
             } finally {
                 scopes = savedChain.slice()
-                if (!threw && box.sig == undefined && elseT != undefined) {
-                    box.sig = elseT()
-                }
-                if (finallyT != undefined) {
+                if (!threw && box.sig == undefined && elseT != null) { box.sig = elseT() }
+                if (finallyT != null) {
                     var fr = finallyT()
-                    // An abrupt finally overrides the completion and cancels a
-                    // rethrown exception, like in JS (see lib/interp-core.js).
                     if (fr != undefined) { return fr }
                 }
             }
             return box.sig
         }
     }
-    // raise EXPR: wrap the value and raise it as a real host exception (a bare raise
-    // re-raise is approximated by raising undefined). The `from` cause is ignored.
-    function makeRaise(items, pos) {
-        var t = items.length > 0 ? items[0] : null
-        return function() { throw {__exc: true, v: (t != null ? t() : undefined)} }
+    function runHandlers(clauses, e) {
+        var isStar = clauses.length > 0 && clauses[0].star
+        if (isStar) { return runStarHandlers(clauses, e) }
+        for (var k = 0; k < clauses.length; k++) {
+            var t = clauses[k].htype != null ? clauses[k].htype() : null
+            if (!excMatchType(e.v, t)) { continue }
+            return runHandler(clauses[k], e.v)
+        }
+        throw e
     }
-    // with EXPR [as T]: a simple form (no context-manager protocol) - run each
-    // context expression, bind the target to its value, then run the body.
+    function runHandler(cl, val) {
+        pyCurExc.push(val)
+        scopes.push({})
+        if (cl.hname != undefined) { declVar(cl.hname, val) }
+        var r = anytype
+        try { r = cl.handler() } finally { scopes.pop(); pyCurExc.pop() }
+        return r
+    }
+    // except*: the raised ExceptionGroup is split, and every clause that matches at
+    // least one member runs once with a group of exactly those members.
+    function runStarHandlers(clauses, e) {
+        var members = (pyUser(e.v) && e.v.exceptions != undefined) ? e.v.exceptions : [e.v]
+        var rest = []
+        for (var m = 0; m < members.length; m++) { rest.push(members[m]) }
+        var sig = undefined
+        for (var k = 0; k < clauses.length; k++) {
+            var t = clauses[k].htype != null ? clauses[k].htype() : null
+            var hit = []
+            var keep = []
+            for (var i = 0; i < rest.length; i++) {
+                if (excMatchType(rest[i], t)) { hit.push(rest[i]) } else { keep.push(rest[i]) }
+            }
+            rest = keep
+            if (hit.length == 0) { continue }
+            var grp = pyMakeExc("ExceptionGroup", ["", hit])
+            grp.exceptions = hit
+            var r = runHandler(clauses[k], grp)
+            if (r != undefined) { sig = r }
+        }
+        if (rest.length > 0) { throw e }
+        return sig
+    }
+    // raise EXPR [from CAUSE]; a bare `raise` re-raises the exception being handled.
+    function makeRaise(items) {
+        var t = null
+        var causeT = null
+        for (var i = 0; i < items.length; i++) {
+            if (typeof items[i] == "function") { t = items[i] }
+            else if (items[i].cause != undefined) { causeT = items[i].cause }
+        }
+        return function() {
+            if (t == null) {
+                if (pyCurExc.length == 0) { fail("RuntimeError: no active exception to re-raise") }
+                pyRaise(pyCurExc[pyCurExc.length - 1])
+            }
+            var v = anytype
+            v = t()
+            // `raise SomeClass` (not an instance) instantiates it, like Python.
+            if (v != null && v != undefined && v.__isclass == true) { v = pyNew(v, [], null) }
+            if (causeT != null && pyUser(v)) { v.__cause__ = causeT() }
+            pyRaise(v)
+        }
+    }
+
+    // ----- with -----
     function makeWithItem(items) {
         var target = items.length > 1 ? items[1] : null
         return {ctxitem: items[0], target: target}
     }
-    function makeWith(items, pos) {
-        notImpl("with statement", pos)
+    // The context-manager protocol: __enter__ before the body, __exit__ after it -
+    // also while an exception unwinds, innermost manager first, and a truthy __exit__
+    // result swallows that exception.
+    function makeWith(items) {
         var body = null
         var mgrs = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].withbody != undefined) { body = items[i].withbody }
             else if (items[i].ctxitem != undefined) { mgrs.push(items[i]) }
         }
+        return function() { return runWith(mgrs, 0, body) }
+    }
+    function runWith(mgrs, i, body) {
+        if (i >= mgrs.length) { return body != null ? body() : undefined }
+        var mgr = anytype
+        mgr = mgrs[i].ctxitem()
+        var ent = pyUser(mgr) ? clsFind(mgr.__class, "__enter__") : null
+        var val = anytype
+        val = (ent != null) ? ent(mgr) : mgr
+        if (mgrs[i].target != null) { writeTarget(mgrs[i].target, val) }
+        var ex = pyUser(mgr) ? clsFind(mgr.__class, "__exit__") : null
+        var r = anytype
+        try {
+            r = runWith(mgrs, i + 1, body)
+        } catch (e) {
+            if (ex != null && excIsUser(e)) {
+                var cls = pyUser(e.v) ? e.v.__class : undefined
+                if (pytruthy(ex(mgr, cls, e.v, undefined))) { return undefined }
+            } else if (ex != null) { ex(mgr, undefined, undefined, undefined) }
+            throw e
+        }
+        if (ex != null) { ex(mgr, undefined, undefined, undefined) }
+        return r
+    }
+
+    // ----- Classes -----
+    // items = [name, {bases}?, bodyThunk]. The body runs in a fresh namespace scope,
+    // so every name it binds - values, nested classes and its defs - becomes a class
+    // attribute, and ordinary statements (loops, conditionals) work in a class body.
+    function makeClass(items) {
+        var name = items[0]
+        var baseArgs = null
+        var bodyT = items[items.length - 1]
+        for (var i = 1; i < items.length - 1; i++) {
+            if (items[i] != undefined && items[i] != null && items[i].bases != undefined) { baseArgs = items[i].bases }
+        }
         return function() {
-            for (var j = 0; j < mgrs.length; j++) {
-                var v = mgrs[j].ctxitem()
-                if (mgrs[j].target != null) { assignRef(mgrs[j].target, v) }
+            var bases = []
+            if (baseArgs != null) {
+                var spec = kevalArgs(baseArgs)
+                for (var b = 0; b < spec.pos.length; b++) {
+                    if (spec.pos[b] != null && spec.pos[b] != undefined && spec.pos[b].__isclass) { bases.push(spec.pos[b]) }
+                }
             }
-            if (body != null) { return body() }
-            return undefined
+            // The class body binds into a RECORDING namespace scope: core.setMiss
+            // appends every new name to __nskeys, because the value model has no
+            // key enumeration (MetaJS has no for..in).
+            var ns = {__nskeys: []}
+            scopes.push(ns)
+            bodyT()
+            scopes.pop()
+            var cls = {__isclass: true, __name: name, __bases: bases}
+            for (var k = 0; k < ns.__nskeys.length; k++) {
+                scopePut(cls, ns.__nskeys[k], ns[ns.__nskeys[k]])
+            }
+            var ann = newDict()
+            if (hasOwn(ns, "__annots")) {
+                for (var a2 = 0; a2 < ns.__annots.names.length; a2++) {
+                    dictSet(ann, ns.__annots.names[a2], ns.__annots.types[a2])
+                }
+            }
+            cls.__annotations__ = ann
+            setVar(name, cls)
+            noteBound(name)
         }
     }
+    // Cls(args): a fresh instance whose __init__ runs with it as self.
+    function pyNew(cls, args, named) {
+        var obj = {__class: cls}
+        var init = clsFind(cls, "__init__")
+        if (init != null) {
+            kSetNamed(named)
+            init.apply(undefined, concat2impl([obj], args))
+        }
+        // Every exception carries its constructor arguments as .args, whether or not
+        // the class defines __init__ (a subclass that calls Base.__init__ sets it too).
+        if (clsIsSub(cls, hostGlobals["BaseException"]) && !hasOwn(obj, "args")) {
+            obj.args = args
+            if (args.length > 1 && Array.isArray(args[1])) { obj.exceptions = args[1] }
+        }
+        return obj
+    }
+    // Reading an attribute off an INSTANCE: own value first, then the class chain -
+    // where a descriptor's __get__ takes over and a plain function becomes a bound
+    // method. Reading off a CLASS gives the raw attribute (so Base.m(self) works).
+    // Writing an attribute: a data descriptor's __set__ takes over, and __slots__
+    // (when the class declares them) restricts which names an instance may carry.
+    function pySetAttr(o, name, v) {
+        var cls = o.__class
+        if (cls != undefined && cls != null) {
+            var d = clsFind(cls, name)
+            if (d != null && pyUser(d)) {
+                var st = clsFind(d.__class, "__set__")
+                if (st != null) { st(d, o, v); return }
+            }
+            var slots = clsFind(cls, "__slots__")
+            if (slots != null && !hasOwn(o, name)) {
+                var ok = false
+                var sl = iterToList(slots)
+                for (var i = 0; i < sl.length; i++) { if (sl[i] === name) { ok = true } }
+                if (!ok) { pyRaise(pyMakeExc("AttributeError", ["'" + cls.__name + "' object has no attribute '" + name + "'"])) }
+            }
+        }
+        if (!hasOwn(o, name)) {
+            if (!hasOwn(o, "__attrs")) { o.__attrs = [] }
+            o.__attrs.push(name)
+        }
+        scopePut(o, name, v)
+    }
+    function pyattr(o, name) {
+        if (o === null || o === undefined) { fail("AttributeError: '" + name + "' of None") }
+        if (typeof o == "object" && o.__isclass == true) {
+            if (name == "__name__") { return o.__name }
+            var cv = clsFind(o, name)
+            if (cv != null) { return cv }
+            // The builtin exception constructor, reachable as Base.__init__(self, ...).
+            if (name == "__init__" && clsIsSub(o, hostGlobals["BaseException"])) {
+                return function() {
+                    var self = arguments[0]
+                    var rest = []
+                    for (var i = 1; i < arguments.length; i++) { rest.push(arguments[i]) }
+                    self.args = rest
+                    if (rest.length > 1 && Array.isArray(rest[1])) { self.exceptions = rest[1] }
+                }
+            }
+            fail("AttributeError: type object '" + o.__name + "' has no attribute '" + name + "'")
+        }
+        if (typeof o == "object" && hasOwn(o, name)) { return o[name] }
+        if (pyUser(o)) {
+            if (name == "__dict__") { return instDict(o) }
+            if (name == "__class__") { return o.__class }
+            var m = clsFind(o.__class, name)
+            if (m != null) {
+                if (pyUser(m)) {
+                    var g = clsFind(m.__class, "__get__")
+                    if (g != null) { return g(m, o, o.__class) }
+                }
+                if (typeof m == "function") { return bindMethod(o, m) }
+                return m
+            }
+        }
+        if (typeof o == "function" && name == "__name__") { return fnName(o) }
+        pyRaise(pyMakeExc("AttributeError", ["'" + name + "'"]))
+    }
+    // The instance attribute dict. pySetAttr records the order it created names in.
+    function instDict(o) {
+        var d = newDict()
+        var ks = hasOwn(o, "__attrs") ? o.__attrs : []
+        for (var k = 0; k < ks.length; k++) { if (hasOwn(o, ks[k])) { dictSet(d, ks[k], o[ks[k]]) } }
+        return d
+    }
+    function bindMethod(self, f) {
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            return f.apply(undefined, concat2impl([self], args))
+        }
+    }
+    // Function objects have no expando slot under the frozen engine, so a def records
+    // its name in a side table keyed by an identity scan of the known functions.
+    var fnNames = {fns: [], names: []}
+    function fnNameSet(f, n) { fnNames.fns.push(f); fnNames.names.push(n) }
+    function fnName(f) {
+        for (var i = fnNames.fns.length - 1; i >= 0; i--) { if (fnNames.fns[i] === f) { return fnNames.names[i] } }
+        return "<lambda>"
+    }
+
+    // ----- Decorators -----
+    // items = [{deco}..., defThunk]: the def/class statement runs, then each decorator
+    // is applied to the bound name from the bottom up.
+    function makeDecorated(items) {
+        var decos = []
+        var defT = items[items.length - 1]
+        for (var i = 0; i < items.length - 1; i++) { decos.push(items[i].deco) }
+        return function() {
+            lastBound = null
+            defT()
+            var name = lastBound
+            if (name == null) { return }
+            var v = anytype
+            v = getVar(name)
+            for (var k = decos.length - 1; k >= 0; k--) {
+                var d = anytype
+                d = decos[k]()
+                v = pyCall(d, [v], null)
+            }
+            setVar(name, v)
+        }
+    }
+    // The name a def/class statement just bound: Def and Class record it here as they
+    // run, which is cheaper - and enumerable - compared with diffing the scope.
+    var lastBound = null
+    function noteBound(n) { lastBound = n }
+
+    // ----- Calls with keyword and starred arguments -----
+    // A call argument list evaluates into {pos, named}: a plain thunk is positional, a
+    // {splat} splices its iterable in, a {cdblstar} splices a mapping into the keyword
+    // map and a {ckwname} is one keyword argument.
+    function kevalArgs(items) {
+        var pos = []
+        var named = null
+        for (var i = 0; i < items.length; i++) {
+            var a = items[i]
+            if (typeof a == "function") { pos.push(a()); continue }
+            if (a.splat != undefined) {
+                var arr = iterToList(a.splat())
+                for (var j = 0; j < arr.length; j++) { pos.push(arr[j]) }
+                continue
+            }
+            if (a.cdblstar != undefined) {
+                var m = a.cdblstar()
+                if (named == null) { named = newDict() }
+                for (var q = 0; q < m.keys.length; q++) { dictSet(named, m.keys[q], m.vals[q]) }
+                continue
+            }
+            if (named == null) { named = newDict() }
+            dictSet(named, a.ckwname, a.ckwval())
+        }
+        return {pos: pos, named: named}
+    }
+    // Keyword arguments travel out of band: a callee is a plain closure (the frozen
+    // engine cannot carry an expando property on one) and the positional arguments
+    // still go through apply(). Every call site sets this, so a stale map cannot
+    // survive into the next frame.
+    var kNamedArgs = null
+    function kSetNamed(n) { kNamedArgs = n }
+    function kTakeNamed() { var n = kNamedArgs; kNamedArgs = null; return n }
+    function pyCall(f, args, named) {
+        if (f != null && f != undefined && f.__isclass == true) {
+            if (f.__builtin == true) { return pyConvert(f.__name, args) }
+            return pyNew(f, args, named)
+        }
+        if (typeof f != "function") {
+            if (pyUser(f)) {
+                var c2 = clsFind(f.__class, "__call__")
+                if (c2 != null) { kSetNamed(named); return c2.apply(undefined, concat2impl([f], args)) }
+            }
+            fail("TypeError: object is not callable")
+        }
+        kSetNamed(named)
+        return f.apply(undefined, args)
+    }
+
+    // ----- match -----
+    function makeCase(items) {
+        var c3 = {pat: items[0], guard: null, body: items[items.length - 1]}
+        for (var i = 1; i < items.length - 1; i++) {
+            if (items[i] != undefined && items[i].guard != undefined) { c3.guard = items[i].guard }
+        }
+        return c3
+    }
+    function makeMatch(items) {
+        var subjT = items[0]
+        var cases = items.slice(1)
+        return function() {
+            var v = anytype
+            v = subjT()
+            for (var i = 0; i < cases.length; i++) {
+                // The captures are collected as parallel name/value arrays (the value
+                // model has no key enumeration) and written only once the whole
+                // pattern, and then its guard, has matched.
+                var binds = {names: [], vals: []}
+                if (patMatch(cases[i].pat, v, binds)) {
+                    if (cases[i].guard != null) {
+                        for (var g = 0; g < binds.names.length; g++) { setVar(binds.names[g], binds.vals[g]) }
+                        if (!pytruthy(cases[i].guard())) { continue }
+                    }
+                    for (var k = 0; k < binds.names.length; k++) { setVar(binds.names[k], binds.vals[k]) }
+                    return cases[i].body()
+                }
+            }
+        }
+    }
+    function makeOrPattern(items) {
+        var alts = []
+        var asname = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].asname != undefined) { asname = items[i].asname }
+            else { alts.push(items[i]) }
+        }
+        if (alts.length == 1 && asname == null) { return alts[0] }
+        return {por: alts, asname: asname}
+    }
+    // A parenthesized group with no comma is just the pattern; with commas (or in
+    // brackets) it is a SEQUENCE pattern.
+    // A bracketed pattern list is ALWAYS a sequence pattern; a parenthesized or
+    // top-level one only when it carries a comma.
+    function makeSeqPattern(items, always) {
+        var parts = []
+        var sawComma = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].pcomma != undefined) { sawComma = true }
+            else { parts.push(items[i]) }
+        }
+        if (!always && !sawComma && parts.length == 1) { return parts[0] }
+        return {pseq: parts}
+    }
+    function makeMapPattern(items) {
+        var entries = []
+        var rest = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].maprest != undefined) { rest = stripWs(items[i].maprest).substring(2) }
+            else { entries.push(items[i]) }
+        }
+        return {pmap: entries, prest: rest}
+    }
+    function makeClassPattern(items) {
+        var clsT = items[0]
+        var pos = []
+        var kw = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].ckey != undefined) { kw.push(items[i]) }
+            else { pos.push(items[i].cpos) }
+        }
+        return {pcls: clsT, ppos: pos, pkw: kw}
+    }
+    function makeValuePattern(t) { return {pval: t} }
+    function makeDotted(path) {
+        var parts = path.split(".")
+        return function() {
+            var v = anytype
+            v = getVar(parts[0])
+            for (var i = 1; i < parts.length; i++) { v = pyattr(v, parts[i]) }
+            return v
+        }
+    }
+    // The pattern matcher. `binds` collects the captures; they are written only when
+    // the whole pattern (and its guard) has matched.
+    function bindPut(binds, n, v) { binds.names.push(n); binds.vals.push(v) }
+    function patMatch(p, v, binds) {
+        if (p.wild != undefined) { return true }
+        if (p.capture != undefined) { bindPut(binds, p.capture, v); return true }
+        if (p.pval != undefined) { return pyEq(p.pval(), v) }
+        if (p.por != undefined) {
+            for (var i = 0; i < p.por.length; i++) {
+                if (patMatch(p.por[i], v, binds)) {
+                    if (p.asname != null) { bindPut(binds, p.asname, v) }
+                    return true
+                }
+            }
+            return false
+        }
+        if (p.asname != undefined && p.asname != null) { bindPut(binds, p.asname, v); return true }
+        if (p.pseq != undefined) { return seqMatch(p.pseq, v, binds) }
+        if (p.pmap != undefined) { return mapMatch(p, v, binds) }
+        if (p.pcls != undefined) { return clsMatch(p, v, binds) }
+        return false
+    }
+    // A sequence pattern matches lists and tuples (not strings or dicts), with at most
+    // one *rest element.
+    function seqMatch(parts, v, binds) {
+        if (!Array.isArray(v)) { return false }
+        var star = -1
+        for (var i = 0; i < parts.length; i++) { if (parts[i].pstar != undefined) { star = i } }
+        if (star < 0) {
+            if (v.length != parts.length) { return false }
+            for (var k = 0; k < parts.length; k++) { if (!patMatch(parts[k], v[k], binds)) { return false } }
+            return true
+        }
+        var after = parts.length - star - 1
+        if (v.length < parts.length - 1) { return false }
+        for (var a = 0; a < star; a++) { if (!patMatch(parts[a], v[a], binds)) { return false } }
+        var mid = []
+        for (var m = star; m < v.length - after; m++) { mid.push(v[m]) }
+        var sname = stripWs(parts[star].pstar).substring(1)
+        if (sname != "_") { bindPut(binds, sname, mid) }
+        for (var b = 0; b < after; b++) {
+            if (!patMatch(parts[star + 1 + b], v[v.length - after + b], binds)) { return false }
+        }
+        return true
+    }
+    function mapMatch(p, v, binds) {
+        if (!isDict(v) || isSet(v)) { return false }
+        var used = []
+        for (var i = 0; i < p.pmap.length; i++) {
+            var key = p.pmap[i].mkey()
+            var j = dictFind(v, key)
+            if (j < 0) { return false }
+            if (!patMatch(p.pmap[i].mpat, v.vals[j], binds)) { return false }
+            used.push(key)
+        }
+        if (p.prest != null) {
+            var rest = newDict()
+            for (var k = 0; k < v.keys.length; k++) {
+                var skip = false
+                for (var u = 0; u < used.length; u++) { if (used[u] === v.keys[k]) { skip = true } }
+                if (!skip) { dictSet(rest, v.keys[k], v.vals[k]) }
+            }
+            bindPut(binds, p.prest, rest)
+        }
+        return true
+    }
+    // A class pattern: the value must be an instance of the class, then the positional
+    // sub-patterns line up with __match_args__ and the keyword ones with attributes.
+    // The builtin names (str, int, ...) match the corresponding primitive.
+    function clsMatch(p, v, binds) {
+        var cls = anytype
+        cls = p.pcls()
+        if (!pyIsInstance(v, cls)) { return false }
+        if (p.ppos.length > 0) {
+            var ma = (cls != null && cls.__isclass) ? clsFind(cls, "__match_args__") : null
+            if (ma == null) {
+                // A builtin one-argument pattern (str(sv)) captures the value itself.
+                if (p.ppos.length == 1) { return patMatch(p.ppos[0], v, binds) }
+                return false
+            }
+            var names = iterToList(ma)
+            if (p.ppos.length > names.length) { return false }
+            for (var i = 0; i < p.ppos.length; i++) {
+                if (!patMatch(p.ppos[i], pyattr(v, names[i]), binds)) { return false }
+            }
+        }
+        for (var k = 0; k < p.pkw.length; k++) {
+            if (!patMatch(p.pkw[k].cpat, pyattr(v, p.pkw[k].ckey), binds)) { return false }
+        }
+        return true
+    }
+    // isinstance, including the builtin type objects.
+    function pyIsInstance(v, cls) {
+        if (cls == null || cls == undefined) { return false }
+        if (Array.isArray(cls)) {
+            for (var i = 0; i < cls.length; i++) { if (pyIsInstance(v, cls[i])) { return true } }
+            return false
+        }
+        if (cls.__builtin == true) {
+            // A builtin type object matches the corresponding primitive.
+            if (cls.__name == "object") { return true }
+            return pyTypeOf(v) === cls
+        }
+        if (!pyUser(v)) { return false }
+        return clsIsSub(v.__class, cls)
+    }
+
     // A parameter list: positional names with optional default thunks, plus an
+
     // optional *args rest name; **kwargs, bare '*'/'/' markers and keyword-only
     // names after *args flag the list as unsupported.
+    // The parameter list of a def or lambda: an ordered slot list plus the two rest
+    // names. `/` marks every slot before it positional-ONLY; a `*args` or a bare `*`
+    // marks every slot after it keyword-ONLY.
     function makeParamList(items) {
-        var names = []
+        var slots = []
         var dflts = []
         var rest = null
-        var complex = false
+        var kwrest = null
+        var afterStar = false
         for (var i = 0; i < items.length; i++) {
             var it = items[i]
-            if (it.pcomplex == true) { complex = true }
-            else if (it.prest == true) {
-                if (rest != null) { complex = true }
-                rest = it.pname
+            if (it.pslash == true) {
+                for (var k = 0; k < slots.length; k++) { slots[k].posonly = true }
+            } else if (it.pkwrest != undefined) {
+                kwrest = stripWs(it.pkwrest).substring(2)
+            } else if (it.pstar == true) {
+                afterStar = true
+                if (it.pname != undefined) { rest = it.pname }
             } else if (it.pname != undefined) {
-                if (rest != null) { complex = true }
-                names.push(it.pname)
+                slots.push({name: it.pname, kwonly: afterStar, posonly: false})
                 dflts.push(it.pdflt != undefined ? it.pdflt : null)
             }
         }
-        return {params: names, dflts: dflts, rest: rest, complex: complex}
+        return {slots: slots, dflts: dflts, rest: rest, kwrest: kwrest}
     }
     function makeNamedParam(items) {
         if (items.length > 1) { return {pname: items[0], pdflt: items[1].pdefault} }
         return {pname: items[0]}
     }
+    // `*` alone opens the keyword-only group; `*name` additionally collects the extra
+    // positional arguments.
     function makeRestParam(items) {
-        if (items.length == 0) { return {pcomplex: true} }
-        return {pname: items[0], prest: true}
+        if (items.length == 0) { return {pstar: true} }
+        return {pname: items[0], pstar: true}
     }
 
     // def: bind the closure; calls get a fresh function scope chained onto the
@@ -1087,34 +2747,82 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return vals
     }
-    function callScopes(defScopes, plist, dflts, args) {
+    // Bind one call: positional arguments fill the slots left to right (skipping the
+    // keyword-only ones), a keyword argument fills its slot by name unless that slot is
+    // positional-only, an unfilled slot falls back to its default - evaluated ONCE at
+    // def time, which is where Python's shared-mutable-default behaviour comes from -
+    // and the leftovers go to *args and **kwargs.
+    function callScopes(defScopes, plist, dflts, args, named) {
         var fscope = {}
-        for (var p = 0; p < plist.params.length; p++) {
-            fscope[plist.params[p]] = p < args.length ? args[p] : dflts[p]
+        var slots = plist.slots
+        var used = null
+        var ai = 0
+        for (var p = 0; p < slots.length; p++) {
+            var sl = slots[p]
+            var got = false
+            var v = anytype
+            v = undefined
+            if (!sl.kwonly && ai < args.length) { v = args[ai]; ai++; got = true }
+            if (!got && named != null && !sl.posonly) {
+                var j = dictFind(named, sl.name)
+                if (j >= 0) {
+                    v = named.vals[j]
+                    got = true
+                    if (used == null) { used = newSet() }
+                    setAdd(used, sl.name)
+                }
+            }
+            if (!got) {
+                if (dflts[p] === undefined && plist.dflts[p] == null) {
+                    pyRaise(pyMakeExc("TypeError", ["missing required argument: '" + sl.name + "'"]))
+                }
+                v = dflts[p]
+            }
+            scopePut(fscope, sl.name, v)
         }
         if (plist.rest != null) {
-            var rest = []
-            for (var k = plist.params.length; k < args.length; k++) { rest.push(args[k]) }
-            fscope[plist.rest] = rest
+            var extra = []
+            for (var k = ai; k < args.length; k++) { extra.push(args[k]) }
+            scopePut(fscope, plist.rest, extra)
+        }
+        if (plist.kwrest != null) {
+            var kw = newDict()
+            if (named != null) {
+                for (var q = 0; q < named.keys.length; q++) {
+                    if (used == null || dictFind(used, named.keys[q]) < 0) { dictSet(kw, named.keys[q], named.vals[q]) }
+                }
+            }
+            scopePut(fscope, plist.kwrest, kw)
         }
         var chain = defScopes.slice()
         chain.push(fscope)
         return chain
     }
     function makeDef(bodyT, plist, name, pos) {
-        if (plist.complex) { notImpl("**kwargs/keyword-only parameters", pos) }
+        var isGenFn = genPop()
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
-            setVar(name, function() {
+            noteBound(name)
+            var fn = function() {
+                // `arguments` is copied out before anything else: the frozen engine
+                // does not resolve it from inside a nested block, and kTakeNamed must
+                // run before any argument expression could set a new map.
+                var argv = arguments
+                var named = kTakeNamed()
                 var args = []
-                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+                for (var i = 0; i < argv.length; i++) args.push(argv[i])
+                // A generator function runs nothing on call: it captures the arguments
+                // and hands back a generator object.
+                if (isGenFn) { return newGenObject(bodyT, defScopes, plist, dflts, args, named) }
                 var saved = scopes
-                scopes = callScopes(defScopes, plist, dflts, args)
-                var r = bodyT()
-                scopes = saved
+                scopes = callScopes(defScopes, plist, dflts, args, named)
+                var r = anytype
+                try { r = bodyT() } finally { scopes = saved }
                 return (r != undefined && r.isRet) ? r.v : undefined
-            })
+            }
+            fnNameSet(fn, name)
+            setVar(name, fn)
         }
     }
 
@@ -1147,17 +2855,18 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // lambda: a real single-expression function value, with the same lexical
     // capture, defaults and call scoping as def.
     function makeLambda(exprT, plist, pos) {
-        if (plist.complex) { notImpl("**kwargs/keyword-only lambda parameters", pos) }
         return function() {
             var defScopes = scopes.slice()
             var dflts = evalDefaults(plist)
             return function() {
+                var argv = arguments
+                var named = kTakeNamed()
                 var args = []
-                for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
+                for (var i = 0; i < argv.length; i++) args.push(argv[i])
                 var saved = scopes
-                scopes = callScopes(defScopes, plist, dflts, args)
-                var r = exprT()
-                scopes = saved
+                scopes = callScopes(defScopes, plist, dflts, args, named)
+                var r = anytype
+                try { r = exprT() } finally { scopes = saved }
                 return r
             }
         }
@@ -1170,16 +2879,29 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         try {
             progT()
         } catch (e) {
-            if (excIsUser(e)) { fail("uncaught exception: " + e.v) }
+            if (excIsUser(e)) { fail("uncaught exception: " + pstr(excValue(e))) }
             throw e
         }
     }
+    function excValue(e) { return e.v }
 
     // ----- Core library config (see lib/interp-core.js) -----
     core.lang = "python"
     core.test = pytruthy
     // Assignment creates the name in the innermost scope (Python declares by assigning).
-    core.setMiss = function(name, value) { scopes[scopes.length - 1][name] = value; return true }
+    // An unknown name RAISES NameError (catchable) instead of aborting, so the
+    // UnboundLocalError a `del` leaves behind can be caught like in Python. Returning
+    // null lets getVar go on to the host builtins.
+    core.varMiss = function(name) {
+        if (hasOwn(hostGlobals, name)) { return null }
+        pyRaise(pyMakeExc("NameError", ["name '" + name + "' is not defined"]))
+    }
+    core.setMiss = function(name, value) {
+        var sc = scopes[scopes.length - 1]
+        if (hasOwn(sc, "__nskeys")) { sc.__nskeys.push(name) }
+        scopePut(sc, name, value)
+        return true
+    }
     // Python stdlib modules the runtime provides (resolveImport lives in
     // lib/interp-core.js; prefix match, so os.path resolves against "os").
     core.stdlibImports = ["sys", "os", "math", "collections", "itertools", "functools", "re", "json", "typing", "random", "string", "time", "dataclasses", "abc"]
@@ -1214,6 +2936,21 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     c.compile(c.asg)
 
+    // A module that defines a top-level main() (the ratchet files do) is run for its
+    // definitions and then entered through it; its return value is the exit status.
+    // A script without one has already done its work top to bottom.
+    var entry = c.mainName
+    if (entry == undefined || entry == "") { entry = "main" }
+    if (hasOwn(globalScope, entry) && typeof globalScope[entry] == "function") {
+        var ret = anytype
+        try {
+            ret = globalScope[entry]()
+        } catch (e) {
+            if (excIsUser(e)) { fail("uncaught exception: " + pstr(excValue(e))) }
+            throw e
+        }
+        exit(ret === undefined || ret === null ? 0 : ret | 0)
+    }
     println("python interpreter: program ran to completion")
     exit(0)
 

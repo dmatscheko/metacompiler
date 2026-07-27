@@ -119,6 +119,12 @@ full_isolate() {
             }
         ' "$work" > "$iso"
         out="$(RUN "$BIN" "$G" "$iso" -q 2>&1)"; rc=$?
+        # Same vacuity trap as in full_probe: a section that "passes" without the
+        # summary line never ran at all, so treat a missing summary as a failure.
+        if [ "$rc" -eq 0 ] && ! printf '%s\n' "$out" | grep -Eq '^full: [0-9]+ checks, [0-9]+ failures$'; then
+            rc=1
+            out="VACUOUS: exits 0 but never printed the summary line - main() is not being run"
+        fi
         if [ "$rc" -ne 0 ]; then
             name="$(awk -v want="$id" '/===== SECTION [0-9]+:/ {
                 line = $0; sub(/.*SECTION /, "", line); id = line; sub(/:.*/, "", id)
@@ -143,6 +149,18 @@ full_probe() {
             if [ "$iter" -gt 60 ]; then printf '    (stopped after 60 rounds)\n'; break; fi
             out="$(RUN "$BIN" "$G" "$work" -q 2>&1)"; rc=$?
             if [ "$rc" -eq 0 ]; then
+                # A zero exit is NOT enough. Every *-test-full.* file ends main()
+                # with the summary line 'full: <checks> checks, <failures> failures'
+                # (see the conventions in tests/js-test-full.js). If a grammar runs
+                # the file top to bottom without ever entering main() - which is
+                # exactly what the python grammar did until 2026-07-27 - it exits 0
+                # having executed NOTHING, and this probe used to report that as
+                # full support. Demand the summary line, so an empty ratchet is
+                # loud instead of green.
+                if ! printf '%s\n' "$out" | grep -Eq '^full: [0-9]+ checks, [0-9]+ failures$'; then
+                    printf '    VACUOUS - exits 0 but never printed the summary line: main() is not being run\n'
+                    break
+                fi
                 if [ "$gaps" -eq 0 ]; then
                     RUN "$BIN" "$G" "$F" -q          > "$work.g" 2>/dev/null
                     RUN "$BIN" "$G" "$F" -q -frozen  > "$work.f" 2>/dev/null

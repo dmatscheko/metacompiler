@@ -2,9 +2,42 @@
 :description("Compiles normal, dynamically typed JavaScript to an LLVM IR module and runs it
 with the built-in IR interpreter.
 
-The language is exactly the one of js-interpreter.abnf; see there for a description
-(including the bitwise operators and assignment targets that reach through calls). Unlike
-MetaJS, variables are NOT type pinned: declarations and assignments go through the
+The accepted language is the practical ECMAScript 2022 syntax, and tests/js-test-full.js
+(the full-syntax ratchet, ./test.sh --full) passes completely: the numeric literal forms
+(hex/binary/octal/separators/leading dot/BigInt), the whole string and template escape
+grammar including tagged templates with strings.raw, ** and every compound and logical
+assignment, optional chaining and ??, arrow functions, default/rest/destructuring
+parameters and trailing commas, the full object literal (shorthand, computed keys,
+methods, get/set accessors), destructuring in every position (binding, assignment,
+parameter, catch, for-of - with defaults, holes, nesting and array/object rest), spread,
+dynamic `this` and `new` on plain constructor functions, classes with fields, static
+blocks, accessors, private and computed members, inheritance, super and class
+expressions, every iteration statement plus labels with labelled break/continue,
+generators (function*, yield, yield*, next(v)), the async SYNTAX, regular expression
+literals, the comma/void/in/instanceof/delete/typeof operators and new.target.
+
+Beyond that ratchet it also takes the surface that test262-parser-tests exercises: Unicode
+identifiers (including the unicode-escape spelling of any of their characters, validated
+against the identifier classes), the Annex B HTML-like comments, array elisions, and the
+full LeftHandSideExpression as an assignment target - parenthesized ('(a) = 1', '((a.b)).c
+= 2') and based on an arbitrary primary ('[1].a = 2', '(a ** b).c = 1'). The assignments
+and for-in/of heads that the spec parses and then rejects as EARLY errors ('0 = 0',
+'[0] = 0', 'for (0 of 0)') are accepted here too and abort at compile time, since this
+grammar has no early-error pass.
+
+What is accepted but NOT lowered (each aborts with a file:line message, or warns and is
+skipped under -warn-unsupported): a super PROPERTY as a value or an assignment target,
+the general `new` forms (a member-path or parenthesized callee, a nested new, no argument
+list), a class heritage that is not a plain name, for-in/of over a member path, export
+statements and `with`. Deliberate semantic simplifications, because the runtime has no
+model for them: `await` is the identity (there is no promise type and no job queue, so an
+async function is an ordinary function that returns its value), a regular expression
+literal evaluates to a RegExp-shaped object with source/flags but no matching engine, a
+for-of over a generator materializes it first (the loop iterates by index), a BigInt that
+meets a double in an arithmetic operator converts instead of raising a TypeError, and the
+string parts of a tagged template are an object with index keys rather than an Array.
+
+Unlike MetaJS, variables are NOT type pinned: declarations and assignments go through the
 UNPINNED scope externals js_scope_decl / js_scope_set / js_scope_get, so a variable can
 hold values of any type over its lifetime.
 
@@ -20,6 +53,17 @@ environment: a function expression becomes an own IR function jsf_N(env, args) p
 js_closure(N, currentScope) at the site of its creation. String and number literals
 enter through module globals (js_str_mem) and js_num_i/js_num_str.
 
+`this` is dynamic: a call hands its receiver to js_call, the runtime keeps it on a stack,
+and every function that is not an arrow (and not one of the try/catch/finally closures)
+binds it from js_this at entry - so an arrow's `this` resolves up the scope chain to its
+enclosing function, exactly as the spec prescribes. Class methods keep their own
+convention, where the receiver is args[0]. Accessor properties (get/set) are registered
+with js_defprop and are called with the object as the receiver; an instance finds the
+accessors of its class by following the __class/__super chain. A generator body is an
+ordinary IR function whose closure is wrapped by js_genfn, so `yield` needs no code
+transformation at all: it is one more external call, and the runtime runs the body on its
+own goroutine, alternating with next() over a channel handshake.
+
 Every tag composes a small code generator function (a 'thunk') out of the thunks of its
 children. Expression thunks get the current basic block and return {b: endBlock,
 v: handle value}; statement thunks get the current block and return the block that the
@@ -29,7 +73,7 @@ which runs the program statements and then calls main().
 
 The exit code of the metacompiler run is the value that main() returns, so the test
 programs are self checking: they return 0 on success.
-The same language with the same semantics is interpreted directly by js-interpreter.abnf.
+The same language is interpreted directly by js-interpreter.abnf.
 
 A plain `=` assignment to a name that was never declared becomes an implicit global
 (created in the root scope) through js_scope_set_or_create, matching the non-strict
@@ -40,8 +84,31 @@ the old value first and so still requires a prior var/let/const declaration.") ;
 // --- main rules
 
 // Shared token productions (languages/lib).
-:include("lib/cstyle-comments.abnf") ;
-:include("lib/ident-dollar.abnf") ;
+// NOT lib/cstyle-comments.abnf: on top of the shared // and /* */ comments, JavaScript has the Annex B B.1.3
+// HTML-like comments, which the web depends on: '<!--' opens a single-line comment
+// anywhere, and '-->' opens one when nothing but whitespace and comments precedes it on
+// the line (that is the SingleLineHTMLCloseComment production - '-->' after a value is
+// still the two operators, as in 'a = b-->1'). Whitespace is redefined here rather than in
+// the shared lib because only JavaScript has them.
+Whitespace  = { @+" \t\r\n\v\f" | Comment | HtmlOpenComment | HtmlCloseComment | UniSpace } ;
+HtmlOpenComment = "<!--" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+// The '-->' form must see a line terminator (or the start of the file) behind it, which
+// AtLineStart checks by looking BACKWARDS over the blanks and comments already skipped.
+HtmlCloseComment = AtLineStart "-->" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+// The Unicode space characters JavaScript counts as whitespace: NBSP, the Ogham space,
+// the general punctuation spaces, the line/paragraph separators and the byte order mark.
+UniSpace    = "\u00a0" | "\u1680" | "\u2000"..."\u200a" | "\u2028" | "\u2029"
+            | "\u202f" | "\u205f" | "\u3000" | "\ufeff" ;
+Comment     = LineComment | BlockComment ;
+LineComment = "//" :whitespace() { NotNewline } :whitespace(Whitespace) ;
+BlockComment = "/*" :whitespace() { NotStar | "*" { "*" } NotStarSlash } "*" { "*" } "/" :whitespace(Whitespace) ;
+NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
+NotStar     = "\x00"..."\x29" | "\x2b"..."\U0010ffff" ;
+NotStarSlash = "\x00"..."\x29" | "\x2b"..."\x2e" | "\x30"..."\U0010ffff" ;
+// NOT lib/ident-dollar.abnf: that lib's Id is the ASCII identifier that Java, MetaJS
+// and the rest share, while a JavaScript IdentifierName is a Unicode one that may also
+// be spelled with \u escapes. Id and the keyword boundary KwEnd are defined at the
+// bottom of the rules instead.
 :include("lib/dq-strings.abnf") ;
 :include("lib/numbers.abnf") ;
 :include("lib/bools.abnf") ;
@@ -56,7 +123,20 @@ Program     <~~ buildMain(takeAll()) ~~>
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | ImportStmt | ExportStmt | ClassDecl | ClassDeclWidened | TryStmt | Destructure | VarDecl | If | While | Do | ForOf | For | Switch | Return | Break | Continue
-            | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncDecl | Empty | ExprStmt ;
+            | Throw | Debugger | With | AsyncFuncDecl | GenFuncDecl | FuncDecl | Labeled | Empty | ExprStmt ;
+
+// A labeled statement: 'outer: for (...) ...', 'l1: { ... break l1 ... }'. The two
+// forms are separate productions because only a LOOP has a continue target: the loop
+// alternative hands its label down (pendingLabel) so the loop builder can register its
+// own post block as the label's continue block, while a labeled non-loop only ever
+// answers 'break label'. Tried before ExprStmt, so a bare 'foo' still is one.
+Labeled     = LabeledLoop | LabeledStmt ;
+LabeledLoop <~~ push(makeLabeledLoop(pop(), pop())) ~~>
+            = LabelName ":" LoopStmt ;
+LabeledStmt <~~ push(makeLabeledStmt(pop(), pop())) ~~>
+            = LabelName ":" Statement ;
+LoopStmt    = While | Do | ForOf | For ;
+LabelName   = NotReserved Id <~~ push(idName(up.in)) ~~> ;
 
 // JavaScript has TWO statement positions. A StatementList (the program, a block, a
 // switch body) takes Statement OR Declaration; the single-statement BODY of if/else,
@@ -91,8 +171,14 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 VarDecl     = VarDeclCore [ ";" ] ;
 VarDeclCore <~~ push(makeSeq(takeAll())) ~~>
             = KwVar Declarator { "," Declarator } ;
-Declarator  <~~ push(makeDecl(takeAll())) ~~>
-            = NotBindName Id <~~ push(up.in) ~~> [ "=" AssignExpr ] ;
+// One declaration list may MIX plain names and destructuring patterns
+// ('var a, [b] = 1'), and a pattern declarator is also what makes
+// 'for (var [d] = 1;;)' a legal for-loop initializer.
+Declarator  = PatternDeclarator | NameDeclarator ;
+NameDeclarator <~~ push(makeDecl(takeAll())) ~~>
+            = NotBindName Id <~~ push(idName(up.in)) ~~> [ "=" AssignExpr ] ;
+PatternDeclarator <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
+            = DPattern "=" AssignExpr ;
 
 // [condThunk, thenThunk] or [condThunk, thenThunk, elseThunk].
 If          <~~ push(makeIf(takeAll())) ~~>
@@ -118,18 +204,22 @@ ForPost     <~~ push({k:"post", t:exprToClause(pop())}) ~~> = Expression ;
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] [ ";" ] ;
 
-Break       <~~ push(makeBreak()) ~~>
-            = KwBreak [ ";" ] ;
+// 'break'/'continue' take an optional label. Automatic semicolon insertion puts a
+// line terminator between the keyword and the label out of bounds ('break \n foo' is
+// a bare break followed by the expression statement 'foo'), so the label is guarded
+// with SameLine.
+Break       <~~ push(makeBreakStmt(takeAll())) ~~>
+            = KwBreak [ SameLine LabelName ] [ ";" ] ;
 
-Continue    <~~ push(makeContinue()) ~~>
-            = KwContinue [ ";" ] ;
+Continue    <~~ push(makeContinueStmt(takeAll())) ~~>
+            = KwContinue [ SameLine LabelName ] [ ";" ] ;
 
 Throw       <~~ push(makeThrow(pop())) ~~>
             = KwThrow Expression [ ";" ] ;
 
 // A function declaration binds the closure in the current scope when it executes.
 FuncDecl    <~~ push(makeFuncDecl(pop(), pop(), pop())) ~~>
-            = KwFunction NotBindName Id <~~ push(up.in) ~~> ParamList Block ;
+            = KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList Block ;
 
 ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. */ ~~>
             = "(" [ ParamSeq ] ")" ;
@@ -138,21 +228,27 @@ ParamList   <~~ push(takeAll()) /* Collect the parameter names into one array. *
 ParamSeq    = RestArg | Param { "," Param } [ "," [ RestArg ] ] ;
 RestArg     = RestParam | RestPattern ;
 
-// A parameter: a plain name (genuine), or a default/rest parameter, which are ACCEPTED
-// (the bare name is still bound) but fire notImplemented for the dropped default/rest.
+// A parameter: a plain name, a default parameter (bound to its initializer whenever the
+// argument is missing or undefined) or a rest parameter (bound to an array of the
+// remaining arguments). A plain parameter pushes its bare name and the two others a
+// descriptor, which is what bindParams tells them apart by.
 Param       = DefaultParam | PatternParam | PlainParam ;
-PlainParam  <~~ push(up.in) ~~>
+PlainParam  <~~ push(idName(up.in)) ~~>
             = NotBindName Id ;
-DefaultParam <~~ pop(); notImpl("default parameter", up.pos) ~~>
-            = NotBindName Id <~~ push(up.in) ~~> "=" AssignExpr ;
-RestParam   <~~ notImpl("rest parameter", up.pos) ~~>
-            = "..." NotBindName Id <~~ push(up.in) ~~> ;
-// A destructuring parameter binds nothing (the pattern is not lowered), but it still
-// occupies its position, so it pushes a placeholder name to keep the arity right.
-PatternParam <~~ takeAll(); push("(pattern)"); notImpl("destructuring parameter", up.pos) ~~>
-            = WPattern ;
-RestPattern <~~ takeAll(); push("(pattern)"); notImpl("rest parameter", up.pos) ~~>
-            = "..." WPattern ;
+DefaultParam <~~ push(makeDefaultParam(takeAll())) ~~>
+            = NotBindName Id <~~ push(idName(up.in)) ~~> "=" AssignExpr ;
+RestParam   <~~ push({pname: pop(), rest: true}) ~~>
+            = "..." NotBindName Id <~~ push(idName(up.in)) ~~> ;
+// A destructuring parameter: the argument at this position is matched against the
+// pattern, binding its leaves in the function scope (bindParams -> bindPattern). It may
+// carry a default of its own ('function f({a} = {})'), which fires when the argument is
+// missing or undefined, exactly like a plain default parameter.
+PatternParam <~~ push({ppat: withDefault(takeAll())}) ~~>
+            = DPattern [ "=" AssignExpr ] ;
+// A rest parameter whose target is a pattern ('function f(...[a, b])'): the collected
+// rest array is matched against the pattern.
+RestPattern <~~ push({ppat: pop(), rest: true}) ~~>
+            = "..." DPattern ;
 
 Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
@@ -167,37 +263,90 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 Expression  <~~ push(makeSequence(takeAll(), up.pos)) ~~>
             = AssignExpr { "," AssignExpr } ;
 
-// Assignment is an expression and associates to the right: a = b = c.
-// If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
+// A destructuring ASSIGNMENT: '[a, b] = [b, a]', '({x, y} = o)'. It is the same pattern
+// grammar as the 'var' binding, but it writes to existing places instead of declaring.
+// It sits directly in front of CondExpr, so an ordinary expression only pays for the
+// attempt when it actually starts with '[' or '{'.
+DestructAssign <~~ push(makeDestructAssign(takeAll())) ~~>
+            = APattern "=" AssignExpr ;
 
-// Assignment is an expression and associates to the right: a = b = c.
-// If the assignment shape does not fit (e.g. 'a == b'), the parser falls back to CondExpr.
-AssignExpr  = Assignment | AssignExtended | SuperAssign | Yield | CondExpr ;
-Assignment  <~~ push(makeAssign(takeAll())) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+// Every assignment form starts by re-parsing the same left-hand text, and that text can be
+// an arbitrarily nested array/object/parenthesized expression - so trying the forms one
+// after the other multiplies the work at EVERY nesting level and goes exponential on
+// '[[[[ ... ]]]]' or '(((( ... ))))'. Two things keep it linear. First AssignAhead: one
+// cheap forward scan that answers whether an assignment operator follows the balanced
+// left-hand side at all, so an expression that is not an assignment never tries any of
+// these. Second, the sixteen operators share ONE production (Assignment below) instead of
+// three, so the target is parsed once rather than three times.
+AssignExpr  = AssignForm | Yield | CondExpr ;
+AssignForm  = AssignAhead ( Assignment | SuperAssign | DestructAssign | AssignNoRef ) ;
 
-// The extended compound assignments (** <<  >> >>> & ^ | && || ?? forms) and yield are
-// accepted but not lowered; the longer operators are tried before their prefixes.
-AssignExtended <~~ takeAll(); push(notImplExpr("compound assignment", up.pos)) ~~>
-            = Target ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|=" ) AssignExpr ;
+// An assignment whose left side is not a reference at all: '0 = 0', '[0] = 0',
+// '({a} = 0)', '[a] *= 0', '({get a(){}} = 0)'. In the spec these PARSE - the cover
+// grammar accepts them - and are rejected afterwards as an early error, which is why
+// test262 files them under early/ and not under fail/. This grammar has no early-error
+// pass, so they are accepted here and abort at compile time with a clean message. It is
+// the LAST assignment alternative, so every assignable shape above has already had its
+// chance and nothing that could be lowered ends up here.
+AssignNoRef <~~ takeAll(); push(notImplExpr("assignment to a non-reference", up.pos)) ~~>
+            = NoRefPrimary { TargetSuffix } "=" AssignExpr ;
+// The left side of such an assignment is a LeftHandSideExpression and nothing wider:
+// '0 = 0' and '[0] = 0' parse (and are early errors), while 'i + 2 = 42' and '+i = 42' are
+// genuine SYNTAX errors, because an additive or unary expression is not a LeftHandSide one
+// at all. That is also why the parenthesized form is absent here: '(1 + 1) = 10' and
+// '({a: 0}) = 1' are syntax errors, whereas a parenthesized ASSIGNABLE target - '(a) = 1' -
+// has already been taken by TargetParen above. The compound operators are here too:
+// test262 files '[a] *= 0', '({a} += 0)' and '0 /= 0' under early/ as well, so they parse
+// and abort exactly like the plain form.
+NoRefPrimary = NewTarget | NewExpr | NewWidened | SuperProp | AsyncFuncExpr | GenFuncExpr
+             | FunctionExpr | ClassExpr | TemplateLit | RegexLit | ObjectLit | ArrayLit
+             | StringLit | NumberLit | True | False | Null | Undefined | VarRef ;
+// Assignment is an expression and associates to the right: a = b = c. ONE production for
+// all sixteen operators, so the target is parsed exactly once; makeAnyAssign splits them
+// again by meaning. The plain and the arithmetic/bitwise compound forms read the old value,
+// apply the operator and store the result; the logical assignments &&= ||= ??= are SHORT
+// CIRCUITING - the right side is evaluated, and the store happens, only when the old value
+// asks for it - and get their own builder.
+Assignment  <~~ push(makeAnyAssign(takeAll())) ~~>
+            = Target AssignOp <~~ push(up.in) ~~> AssignExpr ;
+// Longest first, so a prefix never wins over the operator it starts: '**=' before '*=',
+// '>>>=' before '>>=', '&&=' before '&='.
+AssignOp    = "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
+            | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ;
 
 // Assigning THROUGH super - 'super.b = 1', 'super[1] = 2', 'super.c[1] = 2' - inside a
 // method. Target starts at 'NotReserved Id', which refuses the reserved word 'super',
 // so the assignment form cannot come from Target the way every other path does; it is
 // spelled out here on top of the SuperProp value form. Accepted, not lowered.
 SuperAssign <~~ takeAll(); push(notImplExpr("super property assignment", up.pos)) ~~>
-            = SuperProp { CallSuffix | DotSuffix | IndexSuffix }
-              ( "**=" | ">>>=" | "<<=" | ">>=" | "&&=" | "||=" | "??=" | "&=" | "^=" | "|="
-              | "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) AssignExpr ;
+            = SuperProp { TargetSuffix } AssignOp AssignExpr ;
 
-Yield       <~~ takeAll(); push(notImplExpr("yield expression", up.pos)) ~~>
-            = KwYield [ "*" ] [ AssignExpr ] ;
+// 'yield e' suspends the running generator and hands e to the pending next(); the
+// expression evaluates to whatever the following next(x) sends back in. 'yield* e'
+// delegates: every element of e is yielded in turn.
+Yield       = YieldStar | YieldOne ;
+YieldStar   <~~ push(makeYieldStar(pop())) ~~>
+            = KwYield "*" AssignExpr ;
+YieldOne    <~~ push(makeYield(takeAll())) ~~>
+            = KwYield [ AssignExpr ] ;
 
-// An assignable place: a variable, or a member path that may reach through calls
-// but must end in a member: findScope(name)[name] = value.
-// The local stack holds [name, suffix marker, suffix marker, ...].
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = NotReserved Id <~~ push(up.in) ~~> { CallSuffix | DotSuffix | IndexSuffix } ;
+// An assignable place. JavaScript's LeftHandSideExpression is a full expression - the
+// spec parses it with a cover grammar and only decides afterwards, as an EARLY error,
+// whether it was assignable - so a target here is much wider than a name:
+//   a, a.b, a[i], a(x).b     the name form, which is the one that lowers
+//   (a), ((a.b)), (a).c      a parenthesized target IS that target, at any nesting
+//   [1].a, (a ** b).c, f().x a target whose base is an arbitrary primary expression
+// The three alternatives are ordered so that the lowerable name form always wins: the
+// parenthesized one is the only one that can start with '(', and the based one demands at
+// least one member suffix, which a bare name never has left over.
+Target      = TargetParen | TargetNamed | TargetBased ;
+TargetNamed <~~ push(makeTargetRef(takeAll())) ~~>
+            = NotReserved Id <~~ push(idName(up.in)) ~~> { TargetSuffix } ;
+TargetParen <~~ push(retarget(takeAll())) ~~>
+            = "(" Target ")" { TargetSuffix } ;
+TargetBased <~~ push(makeTargetBase(takeAll())) ~~>
+            = Primary TargetSuffix { TargetSuffix } ;
+TargetSuffix = CallSuffix | DotSuffix | IndexSuffix ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = NullishExpr [ "?" AssignExpr ":" AssignExpr ] ;
@@ -227,11 +376,13 @@ BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
 EqExpr      <~~ push(foldBinary(takeAll())) ~~>
             = InExpr { ( "===" | "!==" | "==" | "!=" ) <~~ push(up.in) ~~> InExpr } ;
 
-// The 'instanceof' and 'in' relational operators are accepted but not lowered
-// (no prototype chain / key-membership model in the subset). With neither operator
-// present this level is a transparent pass-through.
+// The two relational word operators. 'k in o' asks whether o has the property k
+// (js_has: own properties of an object, indices and 'length' of an array or string);
+// 'v instanceof C' walks the __class/__super chain of the instance (js_instanceof), which
+// is this runtime's stand-in for the prototype chain. With neither operator present this
+// level is a transparent pass-through of its single operand.
 InExpr      <~~ push(makeInInstanceof(takeAll(), up.pos)) ~~>
-            = RelExpr { ( KwInstanceof | KwIn ) <~~ push("op") ~~> RelExpr } ;
+            = RelExpr { ( KwInstanceof | KwIn ) <~~ push(up.in) ~~> RelExpr } ;
 
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = ShiftExpr { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> ShiftExpr } ;
@@ -250,53 +401,98 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
 ExpExpr     <~~ push(makeExp(takeAll(), up.pos)) ~~>
             = UnaryExpr { "**" UnaryExpr } ;
 
-UnaryExpr   = PreIncDec | Neg | Not | BitNot | Typeof | Delete | Void | Await | PostfixExpr ;
-// delete, void and await are accepted but not lowered.
-Delete      <~~ pop(); push(notImplExpr("delete operator", up.pos)) ~~>
+UnaryExpr   = PreIncDec | Neg | Plus | Not | BitNot | Typeof | Delete | Void | Await | PostfixExpr ;
+// 'delete o.k' drops the property and answers true; 'delete x' on a plain variable cannot
+// remove a binding and answers false, as in sloppy mode. The operand of the member form is
+// a Target - the same assignable-place production the assignments use - so a path that
+// reaches through calls ('delete a(x).k') works too.
+Delete      = DeleteMember | DeleteOther ;
+DeleteMember <~~ push(makeDelete(pop())) ~~>
+            = KwDelete Target ;
+DeleteOther <~~ pop(); push(makeConst(true)) ~~>
             = KwDelete UnaryExpr ;
-Void        <~~ pop(); push(notImplExpr("void operator", up.pos)) ~~>
+// 'void e' evaluates e for its side effects and is always undefined.
+Void        <~~ push(makeVoid(pop())) ~~>
             = KwVoid UnaryExpr ;
-Await       <~~ pop(); push(notImplExpr("await expression", up.pos)) ~~>
+// 'await e' has no event loop behind it: this runtime has no promises and no job queue,
+// so awaiting is the identity on the value. That is exactly right for a non-promise
+// operand and a deliberate simplification for a promise one, which cannot exist here.
+Await       <~~ push(pop()) ~~>
             = KwAwait UnaryExpr ;
 // Prefix ++/--: the expression value is the new one.
 PreIncDec   <~~ push(makePreIncDec(pop(), pop())) ~~>
             = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
 Neg         <~~ push(makeUnary(pop(), "js_neg")) ~~>
             = "-" UnaryExpr ;
+// Unary plus is ToNumber, not a no-op: '+"3"' is the number 3. It is tried after
+// PreIncDec so that '++x' stays an increment instead of '+(+x)'.
+Plus        <~~ push(makeUnary(pop(), "js_tonum")) ~~>
+            = "+" UnaryExpr ;
 Not         <~~ push(makeUnary(pop(), "js_not")) ~~>
             = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~>
             = "~" UnaryExpr ;
-Typeof      <~~ push(makeUnary(pop(), "js_typeof")) ~~>
+// 'typeof' is the one operator that may be applied to an UNDECLARED name without
+// raising: 'typeof nowhere === "undefined"' is the classic existence test. A bare
+// identifier therefore gets its own form, which goes through js_scope_typeof (an unbound
+// name is "undefined" rather than a reference error). NotChain keeps it to a BARE name -
+// with a '.', '[', '(' or a template behind it the general form has to run, because there
+// the property/call, not the name, is what is being typed.
+Typeof      = TypeofName | TypeofExpr ;
+TypeofName  <~~ push(makeTypeofName(pop())) ~~>
+            = KwTypeof NotReserved Id <~~ push(idName(up.in)) ~~> NotChain ;
+TypeofExpr  <~~ push(makeUnary(pop(), "js_typeof")) ~~>
             = KwTypeof UnaryExpr ;
 
 // The postfix forms: i++ evaluates to the old value.
 PostfixExpr = IncDec | SuperCall | CallMember ;
+// The postfix target is the NAME form only, not the whole Target. IncDec is tried in front
+// of CallMember, so a wider target here would parse every primary expression twice - once
+// as a target that then finds no '++', once as the expression it really was - and that
+// doubles at every nesting level, which is what made '((((((...1...))))))' explode. The
+// forms this gives up, '(a)++' and '[1].a++', are assignable only in the same contrived way
+// as the rest of the parenthesized-target surface.
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
-            = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
+            = TargetNamed ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // super(args) delegates to the parent constructor; super.m(args) invokes the parent's
 // method on 'this'. popName pulls the optional '.m' out, leaving the argument thunks.
 SuperCall   <~~ push(makeSuperCall(popName(), takeAll())) ~~>
-            = KwSuper [ "." Id <~~ push({mname: up.in}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwSuper [ "." Id <~~ push({mname: idName(up.in)}) ~~> ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A primary expression followed by any mix of calls and member accesses: a.b[i](x).c().
 // A call after a member access is a method call: the object becomes 'this' of the callee.
-// An optional-chaining suffix (?. ?.[ ?.( ) is accepted but routes the whole chain to
-// notImplemented (no short-circuit-on-nullish model in the subset).
+// An optional-chaining suffix (?. ?.[ ?.( ) tests the value in front of it for null or
+// undefined and, if it is either, short circuits the WHOLE remaining chain to undefined
+// (see foldCallMember).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix } ;
+            = Primary { CallSuffix | DotSuffix | IndexSuffix | OptChainSuffix | TagSuffix } ;
+// A template literal directly behind a callee is a TAGGED template: tag`a${1}b` calls
+// tag(strings, 1) with the string parts in strings (and their unescaped source text in
+// strings.raw). It is a call suffix like '(' so that it chains - String.raw`x`.length.
+TagSuffix   <~~ push({kind: "tag", parts: takeAll()}) ~~>
+            = TplBody ;
 CallSuffix  <~~ push({kind:"call", args: takeAll()}) ~~>
             = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-DotSuffix   = "." Id <~~ push({kind:"member", key: makeConst(up.in)}) ~~> ;
+DotSuffix   = "." ( PrivSuffix | Id <~~ push({kind:"member", key: makeConst(idName(up.in))}) ~~> ) ;
+// 'this.#x': a private name. It is stored under the mangled key '__#x' (see ClassPrivate),
+// which is what keeps it out of js_keys, so out of for-in and object spread.
+PrivSuffix  = "#" Id <~~ push({kind:"member", key: makeConst(privName(idName(up.in)))}) ~~> ;
 IndexSuffix <~~ push({kind:"member", key: pop()}) ~~>
             = "[" Expression "]" ;
-OptChainSuffix <~~ takeAll(); push({kind:"optchain", pos: up.pos}) ~~>
-            = "?." ( CallSuffix | IndexSuffix | Id ) ;
+// The three optional forms carry the same payload as their plain counterparts plus the
+// 'opt' kind, which is what makes foldCallMember emit the nullish guard in front of them.
+OptChainSuffix = OptCallSuffix | OptIndexSuffix | OptDotSuffix ;
+OptCallSuffix <~~ push({kind:"optcall", args: takeAll()}) ~~>
+            = "?." "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+OptIndexSuffix <~~ push({kind:"optmember", key: pop()}) ~~>
+            = "?." "[" Expression "]" ;
+OptDotSuffix = "?." Id <~~ push({kind:"optmember", key: makeConst(idName(up.in))}) ~~> ;
 
-// A call/array/new argument; the spread form (...expr) is accepted but not lowered.
+// A call/array/new argument. The spread form (...expr) pushes a marker instead of a
+// value thunk; pushArgs recognizes it and appends the ELEMENTS of the spread value.
 Arg         = SpreadElem | AssignExpr ;
-SpreadElem  <~~ pop(); push(notImplExpr("spread element", up.pos)) ~~>
+SpreadElem  <~~ push({spreadT: pop()}) ~~>
             = "..." AssignExpr ;
 
 Primary     = AsyncArrow | ArrowFn | NewTarget | NewExpr | NewWidened | SuperProp | "(" Expression ")" | AsyncFuncExpr | GenFuncExpr | FunctionExpr | ClassExpr
@@ -306,7 +502,7 @@ Primary     = AsyncArrow | ArrowFn | NewTarget | NewExpr | NewWidened | SuperPro
 // new C(args): build an instance of the class named C. Member/call suffixes may follow
 // (new C().m()).
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew NotReserved Id <~~ push({cls: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = KwNew NotReserved Id <~~ push({cls: idName(up.in)}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // The general 'new' forms - a member-path or parenthesized callee, a nested 'new', no
 // argument list at all - are ACCEPTED but not lowered (makeNew only knows 'new C(args)').
@@ -321,60 +517,110 @@ SuperProp   <~~ takeAll(); push(notImplExpr("super property", up.pos)) ~~>
 
 // new.target, async arrows, async/generator function expressions and class expressions
 // are all accepted but not lowered.
-NewTarget   <~~ push(notImplExpr("new.target", up.pos)) ~~>
+// 'new.target': the constructor the running call was made with, or undefined for an
+// ordinary call. makeNew's function form goes through js_call_new, which is what arms it.
+NewTarget   <~~ push(makeNewTarget()) ~~>
             = KwNew "." "target" KwEnd ;
-AsyncArrow  <~~ takeAll(); push(notImplExpr("async arrow function", up.pos)) ~~>
-            = KwAsync ArrowParams "=>" ArrowBody ;
-AsyncFuncExpr <~~ takeAll(); push(notImplExpr("async function expression", up.pos)) ~~>
-            = KwAsync KwFunction [ "*" ] [ NotBindName Id ] ParamList Block ;
-GenFuncExpr <~~ takeAll(); push(notImplExpr("generator function expression", up.pos)) ~~>
+AsyncArrow  <~~ push(makeArrow(takeAll())) ~~>
+            = KwAsync ArrowAhead ArrowParams "=>" ArrowBody ;
+// An async function expression is compiled exactly like a plain one (see Await); an async
+// GENERATOR is compiled as a generator. The optional name is accepted but not bound.
+AsyncFuncExpr = AsyncGenExpr | AsyncPlainExpr ;
+AsyncGenExpr <~~ push(makeGenFuncExpr(takeAll())) ~~>
+            = KwAsync KwFunction "*" [ NotBindName Id ] ParamList Block ;
+AsyncPlainExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
+            = KwAsync KwFunction [ NotBindName Id ] ParamList Block ;
+// 'function* () {}': the body is an ordinary IR function, and js_genfn turns the closure
+// into a generator function, so calling it produces a generator object.
+GenFuncExpr <~~ push(makeGenFuncExpr(takeAll())) ~~>
             = KwFunction "*" [ NotBindName Id ] ParamList Block ;
-ClassExpr   <~~ takeAll(); push(notImplExpr("class expression", up.pos)) ~~>
-            = KwClass [ NotBindName Id ] [ KwExtends ClassHeritage ] "{" { ClassMember } "}" ;
+// A class EXPRESSION - 'var P = class { ... }' - builds the very same descriptor as a
+// class declaration and evaluates TO it. An anonymous one still needs a name, because
+// super() and the method closures resolve their defining class by name; ClassAnonName
+// invents a 0-prefixed one that no source identifier can collide with, and an explicit
+// name overrides it.
+ClassExpr   = ClassExprLowered | ClassExprWidened ;
+ClassExprLowered <~~ push(makeClassExpr(takeAll())) ~~>
+            = KwClass ClassAnonName [ ClassExprName ]
+              [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ] "{" { ClassMember } "}" ;
+ClassAnonName <~~ classSeq = classSeq + 1; curClassName = "0class" + classSeq; push({cname: curClassName}) ~~>
+            = Nothing ;
+ClassExprName <~~ curClassName = idName(up.in); push({cname: idName(up.in)}) ~~>
+            = NotBindName Id ;
+// A class expression with a heritage EXPRESSION ('class extends f() {}'): only the
+// 'extends Name' form can be lowered, so this stays accepted-but-not-implemented.
+ClassExprWidened <~~ takeAll(); push(notImplExpr("class expression heritage", up.pos)) ~~>
+            = KwClass [ NotBindName Id ] KwExtends ClassHeritage "{" { ClassMember } "}" ;
 
 // The optional name of a function expression is accepted but not bound.
 FunctionExpr <~~ push(makeFunctionExpr(pop(), pop())) ~~>
             = KwFunction [ NotBindName Id ] ParamList Block ;
 
-// The object literal accepts, besides the genuine `key: value` form, the modern
-// property forms - spread, computed keys, getters/setters, shorthand methods (incl.
-// async/generator) and shorthand names - each ACCEPTED and routed to notImplemented.
+// The object literal, with the whole ES2015+ property surface: `key: value`, spread,
+// computed keys, shorthand names, shorthand methods (incl. the async form) and
+// getter/setter accessors. A KEY is a property position, so reserved words need no guard
+// there ('{ class: 1, new: 2 }' is legal); only the SHORTHAND form, which names a
+// variable, is guarded.
 ObjectLit   <~~ push(makeObject(takeAll())) ~~>
             = "{" [ ObjMember { "," ObjMember } [ "," ] ] "}" ;
 ObjMember   = SpreadProp | ComputedProp | GetSetProp | MethodProp | PropDef | ShorthandProp ;
 PropDef     <~~ push(makeProp(pop(), pop())) ~~>
             = PropKey ":" AssignExpr ;
-PropKey     = Id <~~ push(up.in) ~~> | StringLit ;
-SpreadProp  <~~ takeAll(); push(notImplProp("object spread", up.pos)) ~~>
+// A static key contributes its NAME as a plain string; makeProp turns that into a
+// constant. A string or number literal key already pushes a value thunk.
+PropKey     = Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit ;
+// Object spread copies the own enumerable properties of the source into the literal at
+// the position it stands in, so a later property wins over a spread one.
+SpreadProp  <~~ push({spreadT: pop()}) ~~>
             = "..." AssignExpr ;
 // A computed KEY is an AssignExpr, not an Expression: '({[a, b]: 0})' is a syntax
-// error even though the comma operator is fine inside 'a[b, c]'.
-ComputedProp <~~ takeAll(); push(notImplProp("computed property", up.pos)) ~~>
+// error even though the comma operator is fine inside 'a[b, c]'. The '(' form is the
+// computed shorthand METHOD '{[k](x) {}}'.
+ComputedProp <~~ push(makeComputedProp(takeAll())) ~~>
             = "[" AssignExpr "]" ( ":" AssignExpr | ParamList Block ) ;
 // A getter takes no parameter and a setter takes exactly one - that is in the grammar
-// of the accessor productions, not an early error, so it is enforced here.
-// A getter takes no parameter and a setter takes exactly one - that is in the grammar
-// of the accessor productions, not an early error, so it is enforced here.
-GetSetProp  <~~ takeAll(); push(notImplProp("accessor property", up.pos)) ~~>
-            = ( "get" KwEnd PropKey GetterParams | "set" KwEnd PropKey SetterParams ) Block ;
+// of the accessor productions, not an early error, so it is enforced here. The pair
+// becomes an accessor property (js_defprop): reading the key runs the getter with the
+// object as 'this', writing it runs the setter.
+// MemberKey rather than PropKey: an accessor key may be COMPUTED as well
+// ('({get [a]() {}, set [a](b) {}})').
+GetSetProp  <~~ push(makeAccessorProp(takeAll())) ~~>
+            = ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams
+              | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) Block ;
 GetterParams = "(" ")" ;
 SetterParams = "(" Param ")" ;
-MethodProp  <~~ takeAll(); push(notImplProp("method property", up.pos)) ~~>
-            = [ "async" KwEnd ] [ "*" ] PropKey ParamList Block ;
-ShorthandProp <~~ push(notImplProp("shorthand property", up.pos)) ~~>
-            = Id ;
+// A shorthand method: '{ m(x) { ... } }', with the async and generator prefixes.
+MethodProp  <~~ push(makeMethodProp(takeAll())) ~~>
+            = [ AsyncMod ] [ GenMod ] MemberKey ParamList Block ;
+AsyncMod    <~~ push({amod: true}) ~~> = "async" KwEnd ;
+GenMod      <~~ push({gmod: true}) ~~> = "*" ;
+// '{ val }' is '{ val: val }'.
+ShorthandProp <~~ push(makeProp(makeVarRef(idName(up.in)), idName(up.in))) ~~>
+            = NotReserved Id ;
 
+// An array literal has ELISIONS: '[1,,2]' is three elements whose middle one is a hole,
+// and every hole still occupies its index. ArrHole matches nothing at all, so a position
+// left empty is still a position - the same device the array PATTERN uses. A single
+// trailing hole is the trailing comma and is dropped again by makeArray, which is what
+// keeps '[1,2,3,]' three elements long while '[1,2,3,,]' is four.
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
-            = "[" [ Arg { "," Arg } [ "," ] ] "]" ;
+            = "[" ArrElem { "," ArrElem } "]" ;
+ArrElem     = Arg | ArrHole ;
+ArrHole     <~~ push({hole: true}) ~~> = Nothing ;
 
 // Arrow functions: x => x+1, (a, b) => a+b, () => { ... }. They reuse the same
 // closure machinery (emitFunction/js_closure) as function expressions; an expression
 // body is an implicit 'return <expr>'. Tried before "(" Expression ")" and VarRef.
+// The parenthesized parameter list of an arrow is indistinguishable from a parenthesized
+// EXPRESSION until the '=>' behind it settles the question, so without a lookahead every
+// '( ... )' is parsed twice - once as a parameter list that then fails, once as the
+// expression it really was - and that doubles at every nesting level. ArrowAhead answers
+// that one question cheaply: skip the balanced parentheses and see whether '=>' follows.
 ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
-            = ArrowParams "=>" ArrowBody ;
+            = ArrowAhead ArrowParams "=>" ArrowBody ;
 ArrowParams <~~ push({aparams: takeAll()}) ~~>
             = "(" [ ParamSeq ] ")"
-            | NotBindName Id <~~ push(up.in) ~~> ;
+            | NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ArrowBody   = ArrowBlock | ArrowExpr ;
 ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
@@ -383,10 +629,16 @@ ArrowExpr   <~~ push({ebody: pop()}) ~~> = AssignExpr ;
 // string (js_add); the result is always a string. Whitespace is disabled inside the
 // backticks and re-enabled inside a ${...}. A lone '$' is a literal character.
 TemplateLit <~~ push(makeTemplate(takeAll())) ~~>
-            = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
+            = TplBody ;
+// The same body behind a callee is a TAGGED template (see TagSuffix in CallMember): the
+// tag function is called with the string parts and the interpolated values, so both
+// spellings need the identical part list and only their tag differs.
+TplBody     = "`" :whitespace() { TplExpr | TplChars | TplDollar } "`" :whitespace(Whitespace) ;
 TplExpr     <~~ push({expr: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
-TplChars    <~~ push({str: unescapeJs(up.in)}) ~~>
+// Both the cooked text (escapes resolved) and the raw text are kept: a tagged template
+// hands the raw one to the tag function as strings.raw.
+TplChars    <~~ push({str: unescapeJs(up.in), raw: up.in}) ~~>
             = TplChar { TplChar } ;
 TplChar     = TplEsc | TplPlain ;
 // A template forbids the legacy OCTAL escapes UNCONDITIONALLY - not merely in
@@ -400,7 +652,7 @@ TplNulEsc   = "0" NotDigit ;
 TplEscChar  = !@"xu0123456789" ;
 NotDigit    = !"0" !"1" !"2" !"3" !"4" !"5" !"6" !"7" !"8" !"9" ;
 TplPlain    = "\x00"..."\x23" | "\x25"..."\x5b" | "\x5d"..."\x5f" | "\x61"..."\U0010ffff" ;
-TplDollar   <~~ push({str: "$"}) ~~>
+TplDollar   <~~ push({str: "$", raw: "$"}) ~~>
             = "$" ;
 
 // for-of over an array or string iterates its elements/characters (genuine).
@@ -414,16 +666,24 @@ TplDollar   <~~ push({str: "$"}) ~~>
 // The declared and the bare name are two alternatives rather than one '[ KwVar ] Id'
 // because an optional keeps what it matched: in 'for (let in a)' - a loop over the
 // ordinary variable named 'let' - KwVar would swallow the 'let' and leave no name.
-ForOf       = ForOfName | ForOfPath ;
+ForOf       = ForOfPat | ForOfName | ForOfPath | ForOfNoRef ;
+// A destructuring loop target: 'for (var [k, v] of pairs)'. The element is matched against
+// the pattern once per iteration, binding its leaves in the loop's own scope.
+// With 'var' the target is a BINDING pattern, without it an ASSIGNMENT pattern - so
+// 'for (var [a] of xs)' declares a while 'for ([o.a] of xs)' writes through a member.
+ForOfPat    <~~ push(makeForOf(takeAll(), up.pos)) ~~>
+            = KwFor [ KwAwait ] "(" ( KwVar DPattern | APattern ) ForOfOp Expression ")" NestedStatement ;
+// 'for await (x of xs)' iterates the same way: without a job queue an async iterable is
+// just an iterable (see Await).
 ForOfName   <~~ push(makeForOf(takeAll(), up.pos)) ~~>
-            = KwFor "(" ForOfHead Expression ")" NestedStatement ;
+            = KwFor [ KwAwait ] "(" ForOfHead Expression ")" NestedStatement ;
 // The head pushes the loop name and then the operator. A target that starts with 'let'
 // is reachable only through the for-IN alternative: 'for (let x of y)' declares, and
 // 'for (let of y)' / 'for (let.a of 0)' are the syntax errors the spec makes them, while
 // the same shapes with 'in' are legal uses of an ordinary variable named 'let'.
 ForOfHead   = ForOfDecl ForOfOp | NotLet ForOfBare ForOfOp | ForOfBare ForInOp ;
-ForOfDecl   = KwVar NotBindName Id <~~ push(up.in) ~~> ;
-ForOfBare   = NotBindName Id <~~ push(up.in) ~~> ;
+ForOfDecl   = KwVar NotBindName Id <~~ push(idName(up.in)) ~~> ;
+ForOfBare   = NotBindName Id <~~ push(idName(up.in)) ~~> ;
 ForOfOp     = ( KwOf | KwIn ) <~~ push(up.in) ~~> ;
 ForInOp     = KwIn <~~ push(up.in) ~~> ;
 // The widened member-path target. At least one suffix is required, otherwise this would
@@ -433,55 +693,109 @@ ForOfPath   <~~ takeAll(); push(notImplStmt("for-in/of over a member path", up.p
 ForOfPathHead = NotLet ForOfTarget ( KwOf | KwIn ) | ForOfTarget KwIn ;
 ForOfTarget = NotReserved Id ForOfSuffix { ForOfSuffix } ;
 ForOfSuffix = CallSuffix | DotSuffix | IndexSuffix ;
+// A for-in/of whose loop target is not a reference at all: 'for (0 of 0)',
+// 'for ([0] in 0)', 'for ({a: 0} of 0)'. Like AssignNoRef these PARSE in the spec and are
+// early errors, so they are accepted here and abort at compile time. Also like AssignNoRef
+// the head is a LeftHandSideExpression and nothing wider, so 'for (([a]) of 0)' - where the
+// parentheses make the reinterpretation as a pattern impossible - stays a syntax error, and
+// 'this' and a 'let'-headed target are refused outright. Last alternative, after every
+// shape that can actually bind something.
+ForOfNoRef  <~~ takeAll(); push(notImplStmt("for-in/of over a non-reference", up.pos)) ~~>
+            = KwFor [ KwAwait ] "(" NotLet NotThis NoRefPrimary { TargetSuffix }
+              ( KwOf | KwIn ) Expression ")" NestedStatement ;
 
-// A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and nested
-// combinations of the two. The pattern is reified on the stack (arr/obj/id nodes)
-// and lowered by makeDestructure: the initializer runs once, then every leaf name
-// is declared with js_scope_decl to its array element (js_get by index) or object
-// property (js_get by key). The interpreter grammar mirrors this exactly.
-Destructure = DestructureBind | DestructureWide ;
-DestructureBind <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
+// A destructuring binding: var [a, b] = xs, var {x, y: alias} = o, and every nesting of
+// the two. The pattern is reified on the stack as a tree of nodes and lowered by
+// bindPattern: the initializer runs once, then every leaf is bound to its array element
+// (js_get by index) or object property (js_get by key). The tree covers the whole
+// ECMAScript pattern surface - defaults ('[a = 1]'), holes ('[, a]'), array and object
+// rest ('[a, ...r]', '{a, ...r}'), computed and literal keys ('{[k]: v}', '{"a": b}') and
+// arbitrary nesting - so the same production serves the binding here, a destructuring
+// ASSIGNMENT, a destructuring parameter and a destructuring for-of head.
+Destructure <~~ push(makeDestructure(takeAll(), up.pos)) ~~>
             = KwVar DPattern "=" AssignExpr [ ";" ] ;
-DPattern    = ArrPattern | ObjPattern ;
-ArrPattern  <~~ push({dtype: "arr", elems: takeAll()}) ~~>
-            = "[" [ DElem { "," DElem } ] "]" ;
-ObjPattern  <~~ push({dtype: "obj", fields: takeAll()}) ~~>
-            = "{" [ DField { "," DField } ] "}" ;
-DElem       = DIdElem | DPattern ;
-DIdElem     <~~ push({dtype: "id", name: up.in}) ~~>
-            = NotBindName Id ;
-DField      <~~ push(makeDField(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ ":" DElem ] ;
 
-// The rest of the destructuring surface - a default value ('var [a = b] = c'), a rest
-// element ('catch ([a, ...b])'), a hole ('var [, a] = xs') and a computed key
-// ('function a({[b]: c}) {}') - has no counterpart in makeDestructure, so it must stay
-// OUT of DPattern: that production may only ever produce the arr/obj/id nodes the
-// lowering understands. It gets its own, wider grammar instead, WPattern, which is
-// consumed exclusively by productions that throw the pattern away again - the widened
-// binding right here, and the parameter/rest/catch patterns, which already push a
-// placeholder instead of binding anything. DestructureBind is tried first, so the
-// genuinely lowered shapes keep their lowering.
-DestructureWide <~~ takeAll(); push(notImplStmt("extended destructuring binding", up.pos)) ~~>
-            = KwVar WPattern "=" AssignExpr [ ";" ] ;
-WPattern    = WArrPattern | WObjPattern ;
-// Every array position is optional, which is what makes the holes ('[, a]') and the
-// trailing comma work. The rest element sits OUTSIDE the repetition, because it must be
-// the last thing in the pattern: '[a, ...b,]' and '[...a,]' are syntax errors.
-WArrPattern = "[" [ WElem ] { "," [ WElem ] } [ WRest ] "]" ;
-WObjPattern = "{" [ WField { "," WField } [ "," ] ] "}" ;
-WField      = WRest | WKeyedField | WShorthandField ;
-// A key is a PROPERTY position, so reserved words are fine there ('{ if: a }'); the
-// shorthand form names a VARIABLE and is guarded accordingly.
-WKeyedField = WKey ":" WElem ;
-WShorthandField = NotBindName Id [ "=" WExpr ] ;
-WKey        = "[" WExpr "]" | Id | StringLit | NumberLit ;
-WElem       = ( WPattern | NotBindName Id ) [ "=" WExpr ] ;
-WRest       = "..." ( WPattern | NotBindName Id ) ;
+DPattern    = ArrPattern | ObjPattern ;
+// Every array position may be empty, which is what makes the holes ('[, a]') and the
+// trailing comma work: DHole matches nothing at all and still occupies its index, so the
+// positions behind a hole keep their numbers. DRest is one of the element alternatives
+// rather than a trailer, because it has to be recognized BEFORE the empty DHole could
+// swallow its position.
+ArrPattern  <~~ push({dtype: "arr", elems: takeAll()}) ~~>
+            = "[" DElemOpt { "," DElemOpt } "]" ;
+DElemOpt    = DRest | DElem | DHole ;
+DRest       <~~ push({dtype: "rest", pat: pop()}) ~~>
+            = "..." DElem ;
+DHole       <~~ push({dtype: "hole"}) ~~>
+            = Nothing ;
+Nothing     = :script(~~ undefined ~~) ;
+// An element is a nested pattern or a name, with an optional default.
+DElem       = DPatElem | DIdElem ;
+DPatElem    <~~ push(withDefault(takeAll())) ~~>
+            = DPattern [ "=" WExpr ] ;
+DIdElem     <~~ push(withDefault(takeAll())) ~~>
+            = NotBindName Id <~~ push({dtype: "id", name: idName(up.in)}) ~~> [ "=" WExpr ] ;
+
+// The object form. A trailing comma is not a hole here (an object pattern has no
+// positions), so it is an explicit trailer: the repetition rolls its last iteration back
+// when no field follows the comma.
+ObjPattern  <~~ push({dtype: "obj", fields: takeAll()}) ~~>
+            = "{" [ DField { "," DField } [ "," ] ] "}" ;
+DField      = DFieldRest | DFieldKeyed | DFieldShort ;
+DFieldRest  <~~ push({dtype: "orest", name: pop()}) ~~>
+            = "..." NotBindName Id <~~ push(idName(up.in)) ~~> ;
+DFieldKeyed <~~ push(makeDFieldKeyed(takeAll())) ~~>
+            = DKey ":" DElem ;
+// The shorthand '{x}' / '{x = 1}' names a VARIABLE, so it is guarded; a KEY is a property
+// position, where reserved words are fine ('{ if: a }').
+DFieldShort <~~ push(makeDFieldShort(takeAll())) ~~>
+            = NotBindName Id <~~ push(idName(up.in)) ~~> [ "=" WExpr ] ;
+// A static key contributes its NAME (dkey), which the object rest needs in order to skip
+// the properties the pattern already took; a computed or literal key contributes a value
+// thunk (dkeyT) instead, and a rest next to one cannot know what it consumed.
+DKey        = DKeyName | DKeyStr | DKeyNum | DKeyComputed ;
+DKeyName    <~~ push({dkey: idName(up.in)}) ~~> = Id ;
+DKeyStr     <~~ push({dkeyT: pop()}) ~~> = StringLit ;
+DKeyNum     <~~ push({dkeyT: pop()}) ~~> = NumberLit ;
+DKeyComputed <~~ push({dkeyT: pop()}) ~~> = "[" WExpr "]" ;
+
+// ----- The ASSIGNMENT pattern -----
+// A destructuring ASSIGNMENT writes to places that already exist, so its leaves may be
+// member targets on top of plain names: '[a.b] = c', '[...a[1]] = 2', '({a: b()[c]} = 1)'.
+// A BINDING pattern (var/let/const, a parameter, a catch clause) may not - 'var [a.b] = 0'
+// and 'function f({e: a.b}) {}' are syntax errors - which is exactly why the two patterns
+// are separate productions rather than one wide pattern policed after the fact. Everything
+// else about them is identical, so APattern mirrors DPattern node for node and produces
+// the same node tree, only with the extra "target" leaf.
+APattern    = AArrPattern | AObjPattern ;
+AArrPattern <~~ push({dtype: "arr", elems: takeAll()}) ~~>
+            = "[" AElemOpt { "," AElemOpt } "]" ;
+AElemOpt    = ARest | AElem | DHole ;
+ARest       <~~ push({dtype: "rest", pat: pop()}) ~~>
+            = "..." AElem ;
+// The target form is tried before the bare name because ordered choice never comes back:
+// DIdElem would happily match the 'a' of 'a.b' and leave the '.b' to fail the pattern.
+AElem       = APatElem | ATargetElem | DIdElem ;
+APatElem    <~~ push(withDefault(takeAll())) ~~>
+            = APattern [ "=" WExpr ] ;
+ATargetElem <~~ push(withDefault(takeAll())) ~~>
+            = ATargetRef [ "=" WExpr ] ;
+ATargetRef  <~~ push({dtype: "target", ref: pop()}) ~~>
+            = TargetParen | TargetSuffixed ;
+// A name with at least one member suffix - the shape that distinguishes a target element
+// from the plain binding name behind it.
+TargetSuffixed <~~ push(makeTargetRef(takeAll())) ~~>
+            = NotReserved Id <~~ push(idName(up.in)) ~~> TargetSuffix { TargetSuffix } ;
+AObjPattern <~~ push({dtype: "obj", fields: takeAll()}) ~~>
+            = "{" [ AField { "," AField } [ "," ] ] "}" ;
+AField      = DFieldRest | AFieldKeyed | DFieldShort ;
+AFieldKeyed <~~ push(makeDFieldKeyed(takeAll())) ~~>
+            = DKey ":" AElem ;
+
 // A default value and a computed key are an AssignExpr WITHOUT the yield form: a
 // pattern is a binding position, and '{x: y = yield 3}' is a syntax error there even
 // inside a generator.
-WExpr       = Assignment | AssignExtended | SuperAssign | CondExpr ;
+WExpr       = AssignForm | CondExpr ;
 
 // try/catch/finally and throw are implemented: throw calls js_throw, each try/catch/
 // finally body compiles to its own closure handed to js_try, and a return/break/
@@ -492,11 +806,12 @@ TryStmt     <~~ push(makeTry(takeAll())) ~~>
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
 CatchClause <~~ push(makeCatch(takeAll())) ~~>
-            = KwCatch [ "(" ( NotBindName Id <~~ push(up.in) ~~> | CatchPattern ) ")" ] Block ;
-// A destructuring catch binding is accepted but not lowered; like a pattern parameter
-// it pushes a placeholder so the clause still has the shape excCatch expects.
-CatchPattern <~~ takeAll(); push("(pattern)"); notImpl("destructuring catch binding", up.pos) ~~>
-            = WPattern ;
+            = KwCatch [ "(" ( NotBindName Id <~~ push(idName(up.in)) ~~> | CatchPattern ) ")" ] Block ;
+// A destructuring catch binding: the thrown value is matched against the pattern. The
+// catch body is an own closure whose single parameter IS the binding, so the pattern
+// travels as the same {ppat} descriptor a destructuring parameter uses.
+CatchPattern <~~ push({ppat: pop()}) ~~>
+            = DPattern ;
 FinallyClause <~~ push({finbody: pop()}) ~~>
             = KwFinally Block ;
 
@@ -505,8 +820,8 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // holds the methods; a method call dispatches through js_mcall, super through
 // js_supercall). An instance is a plain object; static members live on the descriptor.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = KwClass NotBindName Id <~~ push({cname: up.in}); curClassName = up.in ~~>
-              [ KwExtends NotReserved Id <~~ push({ext: up.in}) ~~> ]
+            = KwClass NotBindName Id <~~ push({cname: idName(up.in)}); curClassName = idName(up.in) ~~>
+              [ KwExtends NotReserved Id <~~ push({ext: idName(up.in)}) ~~> ]
               "{" { ClassMember } "}" ;
 
 // The heritage clause is a full LeftHandSideExpression in JavaScript: 'extends 1',
@@ -522,34 +837,45 @@ ClassDeclWidened <~~ takeAll(); push(notImplStmt("class heritage expression", up
 // heritage expression.
 ClassHeritage = CallMember ;
 
-// The members: a constructor, methods and fields (tried in that order so 'constructor'
-// and a method's '(' are recognized before the field form). A stray ';' is skipped.
-// The modern member forms (static block, accessors, async/generator/computed/private
-// methods and fields) are ACCEPTED and routed to notImplemented (they push a skip
-// marker so makeClassStmt ignores them).
+// The members: a constructor, methods, fields, accessors, static blocks, private and
+// computed members. They are tried longest-form first, so that 'constructor', a method's
+// '(' and an accessor's 'get'/'set' are recognized before the bare field form (the LAST
+// alternative, which whatever the others reject falls into). A stray ';' is skipped.
 ClassMember = ClassSemi | ClassStaticBlock | CtorDef | ClassGetSet | ClassSpecialMethod | ClassPrivate | ClassComputed | ClassLiteralMember | MethodDef | FieldDef ;
 ClassSemi   <~~ push({skip: true}) ~~> = ";" ;
-ClassStaticBlock <~~ takeAll(); push(notImplMember("static block", up.pos)) ~~>
+// 'static { ... }': a block that runs once, at class definition time, with 'this' bound
+// to the class itself.
+ClassStaticBlock <~~ push({kind: "sblock", body: pop()}) ~~>
             = "static" KwEnd Block ;
-ClassGetSet <~~ takeAll(); push(notImplMember("accessor member", up.pos)) ~~>
-            = MemberMods ( "get" KwEnd MemberKey GetterParams | "set" KwEnd MemberKey SetterParams ) Block ;
-ClassSpecialMethod <~~ takeAll(); push(notImplMember("async/generator method", up.pos)) ~~>
-            = MemberMods ( "async" KwEnd [ "*" ] | "*" ) MemberKey ParamList Block ;
-ClassPrivate <~~ takeAll(); push(notImplMember("private member", up.pos)) ~~>
-            = MemberMods "#" Id ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
-ClassComputed <~~ takeAll(); push(notImplMember("computed member", up.pos)) ~~>
+// An accessor member. Reading or writing the key on an instance runs the getter/setter
+// with the instance as 'this' - the accessor lives on the class descriptor, and the
+// member lookup follows the __class/__super chain to find it.
+ClassGetSet <~~ push(makeClassAccessor(takeAll())) ~~>
+            = MemberMods ( "get" KwEnd <~~ push("get") ~~> MemberKey GetterParams
+                         | "set" KwEnd <~~ push("set") ~~> MemberKey SetterParams ) Block ;
+// 'async m() {}' and the generator forms. An async method is compiled as an ordinary
+// method (see the Await rule for what 'await' means without an event loop); a generator
+// method goes through the generator lowering.
+ClassSpecialMethod <~~ push(makeClassSpecial(takeAll())) ~~>
+            = MemberMods ( "async" KwEnd <~~ push({amod: true}) ~~> [ GenMod ] | GenMod ) MemberKey ParamList Block ;
+// A private member '#x'. Private names are not properties in the spec, but they behave
+// exactly like non-enumerable ones, so they are stored under the mangled key '__#x': the
+// '__' prefix is what keeps them out of js_keys, and so out of for-in and object spread.
+ClassPrivate <~~ push(makeClassPrivate(takeAll())) ~~>
+            = MemberMods "#" Id <~~ push(privName(idName(up.in))) ~~> ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
+// A computed key: 'class A { ["a" + "b"]() {} }'. The key expression is evaluated once,
+// when the class is defined.
+ClassComputed <~~ push(makeClassComputed(takeAll())) ~~>
             = MemberMods "[" AssignExpr "]" ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
 // A member whose key is a string or number literal - class a { 'constructor'() {} },
-// class a { 1 = 2 }. The class model keys its members by identifier name, so these are
-// ACCEPTED and routed to notImplemented. Tried before MethodDef/FieldDef, which only
-// know the bare-Id form.
-ClassLiteralMember <~~ takeAll(); push(notImplMember("literal-keyed member", up.pos)) ~~>
+// class a { 1 = 2 }. Tried before MethodDef/FieldDef, which only know the bare-Id form.
+ClassLiteralMember <~~ push(makeClassComputed(takeAll())) ~~>
             = MemberMods ( StringLit | NumberLit ) ( ParamList Block | [ "=" AssignExpr ] [ ";" ] ) ;
 // The key of a widened member: a name, a string/number literal or a computed [expr].
 // PropKey (the object-literal key) has no computed form because ComputedProp spells that
 // case out separately; here the computed form has to be part of the key itself, because
 // 'static *[b]() {}' carries a modifier and a '*' in front of it.
-MemberKey   = Id <~~ push(up.in) ~~> | StringLit | NumberLit | "[" AssignExpr "]" ;
+MemberKey   = Id <~~ push(idName(up.in)) ~~> | StringLit | NumberLit | "[" AssignExpr "]" ;
 
 // A constructor.
 CtorDef     <~~ push(makeCtor(takeAll())) ~~>
@@ -559,11 +885,11 @@ CtorParams  <~~ push(takeAll()) ~~>
 
 // A method (instance unless 'static').
 MethodDef   <~~ push(makeMethod(takeAll())) ~~>
-            = MemberMods Id <~~ push({mname: up.in}) ~~> ParamList Block ;
+            = MemberMods Id <~~ push({mname: idName(up.in)}) ~~> ParamList Block ;
 
 // A field (instance unless 'static'), with an optional initializer.
 FieldDef    <~~ push(makeField(takeAll())) ~~>
-            = MemberMods Id <~~ push({fname: up.in}) ~~> FieldNameEnd [ "=" AssignExpr ] [ ";" ] ;
+            = MemberMods Id <~~ push({fname: idName(up.in)}) ~~> FieldNameEnd [ "=" AssignExpr ] [ ";" ] ;
 // FieldDef is the LAST member alternative, so whatever the earlier ones reject lands
 // here - and without this guard a malformed member silently becomes a field plus a
 // method: 'class A { get prop(x) {} }' (a getter with a parameter, a syntax error)
@@ -639,15 +965,19 @@ With        <~~ takeAll(); push(notImplStmt("with statement", up.pos)) ~~>
             = KwWith "(" Expression ")" NestedStatement ;
 Debugger    <~~ push(notImplStmt("debugger statement", up.pos)) ~~>
             = KwDebugger [ ";" ] ;
-AsyncFuncDecl <~~ takeAll(); push(notImplStmt("async function", up.pos)) ~~>
-            = KwAsync KwFunction [ "*" ] NotBindName Id ParamList Block ;
-GenFuncDecl <~~ takeAll(); push(notImplStmt("generator function", up.pos)) ~~>
-            = KwFunction "*" NotBindName Id ParamList Block ;
+// The declaration forms of the same three: async, async generator and generator.
+AsyncFuncDecl = AsyncGenDecl | AsyncPlainDecl ;
+AsyncGenDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
+            = KwAsync KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList Block ;
+AsyncPlainDecl <~~ push(makeFuncDeclItems(takeAll())) ~~>
+            = KwAsync KwFunction NotBindName Id <~~ push(idName(up.in)) ~~> ParamList Block ;
+GenFuncDecl <~~ push(makeGenFuncDecl(takeAll())) ~~>
+            = KwFunction "*" NotBindName Id <~~ push(idName(up.in)) ~~> ParamList Block ;
 
 Null        <~~ push(makeHandleConst(1)) ~~>   = "null" KwEnd ;
 Undefined   <~~ push(makeHandleConst(0)) ~~>   = "undefined" KwEnd ;
 
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
+VarRef      <~~ push(makeVarRef(idName(up.in))) ~~>
             = NotReserved Id ;
 
 // JavaScript's own string literals, deliberately NOT the shared lib's
@@ -668,7 +998,12 @@ JsSqString  = "'" :whitespace() { JsStrEsc | SqPlain } <~~ push(makeConst(unesca
 // question this grammar does not answer. '\8' and '\9' have no octal reading at
 // all, so they are excluded - as are a bare 'x' and 'u', which must not fall
 // through to JsEscChar when the digits they require are missing or wrong.
-JsStrEsc    = "\\" ( JsHexEsc | JsUniEsc | JsEscChar ) ;
+// A backslash directly in front of a line terminator is a LineContinuation: the
+// backslash and the break vanish from the value, which is how a string literal spans
+// several source lines. It has to come before JsEscChar, which only covers printable
+// characters and would leave the break unconsumed.
+JsStrEsc    = "\\" ( JsHexEsc | JsUniEsc | JsLineCont | JsEscChar ) ;
+JsLineCont  = "\r\n" | "\n" | "\r" | "\u2028" | "\u2029" ;
 JsEscChar   = !"x" !"u" !"8" !"9" "\x20"..b"\x7e" ;
 
 // \xHH is exactly two hex digits; \u is either exactly four, or a braced code
@@ -683,43 +1018,62 @@ JsCpPlane16 = "1" "0" HexDigit HexDigit HexDigit HexDigit ;
 JsCpUpTo5   = HexNonZero [ HexDigit ] [ HexDigit ] [ HexDigit ] [ HexDigit ] ;
 HexNonZero  = "1"..."9" | "a"..."f" | "A"..."F" ;
 
-// The genuine numeric literals (hex tried before decimal) plus the widened forms -
-// binary, octal, BigInt and numeric separators - which are ACCEPTED but not lowered.
-// Every one of them ends in KwEnd: a literal may not be glued to an identifier char,
-// so '0b1a', '3x', '0o9' and '3in[]' are the syntax errors they are in JavaScript
-// instead of a literal followed by a second, semicolon-less statement.
-NumberLit   = HexLit | BinLit | OctLit | BigIntLit | SepNumLit | JsDecLit ;
+// The numeric literals: hex, binary, octal, BigInt, a decimal with numeric separators,
+// the plain decimal and the leading-dot form. Every one of them ends in KwEnd: a literal
+// may not be glued to an identifier char, so '0b1a', '3x', '0o9' and '3in[]' are the
+// syntax errors they are in JavaScript instead of a literal followed by a second,
+// semicolon-less statement. All but BigInt are lowered to the double they denote (the
+// only numeric type of the runtime); a BigInt is a separate ECMAScript type with its own
+// arithmetic, which the runtime has no representation for, so it stays not implemented.
+NumberLit   = HexLit | BinLit | OctLit | BigIntLit | SepNumLit | JsDecLit | DotDecLit ;
 
 // Hex must be tried before decimal, otherwise '0x1A' would stop after the '0'.
-HexLit      <~~ push(makeConst(hexAt(up.in, 2, up.in.length - 2))) ~~>
-            = ( "0x" | "0X" ) :whitespace() HexDigit { HexDigit } KwEnd :whitespace(Whitespace) ;
+HexLit      <~~ push(makeConst(radixVal(up.in, 2, 16))) ~~>
+            = HexPrefix HexDigit { HexDigit | "_" } KwEnd :whitespace(Whitespace) ;
+HexPrefix   = ( "0x" | "0X" ) :whitespace() ;
 HexDigit    = "0"..."9" | "a"..."f" | "A"..."F" ;
-BinLit      <~~ push(notImplExpr("binary literal", up.pos)) ~~>
-            = ( "0b" | "0B" ) :whitespace() BinDigit { BinDigit | "_" } KwEnd :whitespace(Whitespace) ;
+BinLit      <~~ push(makeConst(radixVal(up.in, 2, 2))) ~~>
+            = BinPrefix BinDigit { BinDigit | "_" } KwEnd :whitespace(Whitespace) ;
+BinPrefix   = ( "0b" | "0B" ) :whitespace() ;
 BinDigit    = "0"..."1" ;
-OctLit      <~~ push(notImplExpr("octal literal", up.pos)) ~~>
-            = ( "0o" | "0O" ) :whitespace() OctDigit { OctDigit | "_" } KwEnd :whitespace(Whitespace) ;
+OctLit      <~~ push(makeConst(radixVal(up.in, 2, 8))) ~~>
+            = OctPrefix OctDigit { OctDigit | "_" } KwEnd :whitespace(Whitespace) ;
+OctPrefix   = ( "0o" | "0O" ) :whitespace() ;
 OctDigit    = "0"..."7" ;
-// A decimal BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is
-// not orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit).
-BigIntLit   <~~ push(notImplExpr("BigInt literal", up.pos)) ~~>
-            = Digit :whitespace() { Digit | "_" } "n" KwEnd :whitespace(Whitespace) ;
+// A BigInt literal ends in 'n'; tried before the plain decimal so the 'n' is not
+// orphaned (a non-BigInt number fails the 'n' and rolls back to DecLit). BigInt is a
+// value type of its own (typeof 10n is "bigint"), so it cannot go through makeConst,
+// which only knows the double numbers: js_bigint parses the digits into an arbitrary
+// precision integer at run time. The hex/binary/octal BigInt forms ('0xffn') keep their
+// prefix, which js_bigint reads too.
+BigIntLit   <~~ push(makeBigInt(up.in)) ~~>
+            = ( HexPrefix HexDigit { HexDigit | "_" } | BinPrefix BinDigit { BinDigit | "_" }
+              | OctPrefix OctDigit { OctDigit | "_" } | Digit :whitespace() { Digit | "_" } )
+              "n" KwEnd :whitespace(Whitespace) ;
 // A decimal with numeric separators (1_000, 3.141_59); requires at least one '_'.
-SepNumLit   <~~ push(notImplExpr("numeric separator", up.pos)) ~~>
-            = Digit :whitespace() { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] KwEnd :whitespace(Whitespace) ;
+// Tried before JsDecLit, which would stop at the first '_' and leave it dangling.
+SepNumLit   <~~ push(makeConst(parseFloat(stripSeps(up.in)))) ~~>
+            = Digit :whitespace() { Digit } "_" { Digit | "_" } [ "." Digit { Digit | "_" } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
 // The plain decimal. It is spelled out here rather than taken from lib/numbers.abnf
 // because JavaScript has the exponent form, which that DecLit does not: without it
 // '1e3' is the number 1 followed by the variable 'e3', which parses and then means
 // something else entirely.
 JsDecLit    <~~ push(makeConst(parseFloat(up.in))) ~~>
             = Digit :whitespace() { Digit } [ "." { Digit } ] [ DecExp ] KwEnd :whitespace(Whitespace) ;
+// The leading-dot form '.5'. It needs at least one digit behind the dot, which is what
+// keeps it out of the way of a member access: the '.' of 'a.b' is never a number.
+DotDecLit   <~~ push(makeConst(parseFloat("0" + up.in))) ~~>
+            = "." :whitespace() Digit { Digit } [ DecExp ] KwEnd :whitespace(Whitespace) ;
 DecExp      = ( "e" | "E" ) [ "+" | "-" ] Digit { Digit } ;
 Digit       = "0"..."9" ;
 
 // A regular-expression literal in a primary position: /pattern/flags. A leading '/' at
 // an operand position is division (handled at MulExpr), so this is only ever reached
-// where a regex is genuinely valid. Accepted but not lowered (no regex engine).
-RegexLit    <~~ push(notImplExpr("regular expression literal", up.pos)) ~~>
+// where a regex is genuinely valid. There is no regex ENGINE behind it: the literal
+// evaluates to a plain RegExp-shaped object carrying `source`, `flags` and the
+// `lastIndex` of a fresh regex, so the literal itself, its typeof and its inspection
+// work; matching (test/exec/String.prototype.match) is not implemented.
+RegexLit    <~~ push(makeRegex(up.in)) ~~>
             = "/" :whitespace() RegexFirst { RegexPart } "/" { RegexFlag } :whitespace(Whitespace) ;
 RegexFirst  = RegexEsc | RegexClass | RegexFirstChar ;
 RegexPart   = RegexEsc | RegexClass | RegexBodyChar ;
@@ -768,6 +1122,163 @@ KwYield     = "yield" KwEnd ;
 KwDelete    = "delete" KwEnd ;
 KwVoid      = "void" KwEnd ;
 KwInstanceof = "instanceof" KwEnd ;
+
+// ----- The JavaScript identifier -----
+// An IdentifierName is a UNICODE name, not the ASCII one lib/ident-dollar.abnf gives the
+// other languages: it starts with a Unicode ID_Start character, '$' or '_' and continues
+// with ID_Continue, and ANY of its characters may instead be written as a \u escape
+// ('var \u0061' declares 'a'). The escape is part of the identifier GRAMMAR, not of some
+// earlier lexing pass, so it has to be here; idName resolves it back to the real name.
+//
+// The Unicode classes themselves are approximated by ranges rather than enumerated: every
+// code point above ASCII counts, minus the ones that can appear in JavaScript source as
+// something else - the space and line separators (00A0, 1680, 2000-200A, 2028, 2029, 202F,
+// 205F, 3000, FEFF), the Latin-1 punctuation and the two Latin-1 signs (00D7 multiplication,
+// 00F7 division). The zero-width joiners 200C/200D continue an identifier but cannot start
+// one, which is the one place where the start and the continue set really differ here.
+Id          = IdStart :whitespace() { IdPart } :whitespace(Whitespace) ;
+IdStart     = "a"..."z" | "A"..."Z" | "_" | "$" | ( IdEscStartOk IdEscape ) | IdStartUni ;
+IdPart      = "a"..."z" | "A"..."Z" | "0"..."9" | "_" | "$" | ( IdEscPartOk IdEscape ) | IdPartUni ;
+IdEscape    = "\\u" ( "{" HexDigit { HexDigit } "}" | HexDigit HexDigit HexDigit HexDigit ) ;
+IdStartUni  = "\u00aa" | "\u00b5" | "\u00ba" | "\u00c0"..."\u00d6" | "\u00d8"..."\u00f6"
+            | "\u00f8"..."\u167f" | "\u1681"..."\u1fff" | "\u200b" | "\u200e"..."\u2027"
+            | "\u202a"..."\u202e" | "\u2030"..."\u203e" | "\u2041"..."\u205e" | "\u2060"..."\u2fff"
+            | "\u3001"..."\ufefe" | "\uff21"..."\U0010ffff" ;
+// The two connector punctuation marks U+203F/U+2040 and the zero-width joiners continue an
+// identifier but cannot start one, which is the only place where the two sets really differ.
+IdPartUni   = IdStartUni | "\u200c" | "\u200d" | "\u203f" | "\u2040" ;
+
+// A \u escape in an identifier must denote a character that IS an identifier character:
+// '\u005c' (a backslash), '\u0020' (a space) and '\uD800' (a lone surrogate) are not
+// identifiers however they are spelled. The escape is unreadable to a character range, so
+// the check runs as a guard in front of it: it reads the escape from the source, computes
+// the code point and answers the impossible token when the code point is not allowed here.
+// The two guards differ by exactly the digits and the two zero-width joiners, which
+// continue an identifier but cannot start one.
+IdEscStartOk = :script(~~
+    (function() {
+        // An identifier START is reached with the whitespace in front of it not yet
+        // skipped (the :whitespace() of Id only takes effect from the second character
+        // on), so step over it here the way the other lookahead guards do. Nothing is
+        // consumed either way - the guard only reads.
+        var w = 0
+        var wc = c.peek(0)
+        while (wc === 32 || wc === 9 || wc === 10 || wc === 13 || wc === 11 || wc === 12) {
+            w = w + 1
+            wc = c.peek(w)
+        }
+        if (c.peek(w) !== 92 || c.peek(w + 1) !== 117) { return abnf.newToken("\x01bad-id-escape", 0) }
+        var cp = 0
+        if (c.peek(w + 2) === 123) { // \u{ H+ }
+            var i = w + 3
+            var n = 0
+            while (true) {
+                var cc = c.peek(i)
+                if (cc === 125) { break }
+                var d = -1
+                if (cc >= 48 && cc <= 57) { d = cc - 48 }
+                else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+                else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+                if (d < 0 || n > 7) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d
+                n = n + 1
+                i = i + 1
+            }
+            if (n === 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+        } else { // \uHHHH
+            for (var k = 0; k < 4; k++) {
+                var c2 = c.peek(w + 2 + k)
+                var d2 = -1
+                if (c2 >= 48 && c2 <= 57) { d2 = c2 - 48 }
+                else if (c2 >= 97 && c2 <= 102) { d2 = c2 - 87 }
+                else if (c2 >= 65 && c2 <= 70) { d2 = c2 - 55 }
+                if (d2 < 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d2
+            }
+        }
+        var isStart = true
+        var ok = false
+        if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
+        else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
+        else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
+        else if (cp >= 128) {
+            // The same approximation as IdStartUni: everything above ASCII except the
+            // space and line separators, the surrogates, the Latin-1 punctuation and the
+            // multiplication/division signs.
+            ok = !(cp === 160 || cp === 5760 || (cp >= 8192 && cp <= 8202)
+                || cp === 8232 || cp === 8233 || cp === 8239 || cp === 8287
+                || cp === 12288 || cp === 65279
+                || (cp >= 55296 && cp <= 57343)
+                || (cp >= 161 && cp <= 191 && cp !== 170 && cp !== 181 && cp !== 186)
+                || cp === 215 || cp === 247)
+        }
+        return ok ? undefined : abnf.newToken("\x01bad-id-escape", 0)
+    })()
+~~) ;
+IdEscPartOk = :script(~~
+    (function() {
+        // Sitting on the backslash of the escape; read it without consuming anything.
+        if (c.peek(0) !== 92 || c.peek(1) !== 117) { return abnf.newToken("\x01bad-id-escape", 0) }
+        var cp = 0
+        if (c.peek(2) === 123) { // \u{ H+ }
+            var i = 3
+            var n = 0
+            while (true) {
+                var cc = c.peek(i)
+                if (cc === 125) { break }
+                var d = -1
+                if (cc >= 48 && cc <= 57) { d = cc - 48 }
+                else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+                else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+                if (d < 0 || n > 7) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d
+                n = n + 1
+                i = i + 1
+            }
+            if (n === 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+        } else { // \uHHHH
+            for (var k = 0; k < 4; k++) {
+                var c2 = c.peek(2 + k)
+                var d2 = -1
+                if (c2 >= 48 && c2 <= 57) { d2 = c2 - 48 }
+                else if (c2 >= 97 && c2 <= 102) { d2 = c2 - 87 }
+                else if (c2 >= 65 && c2 <= 70) { d2 = c2 - 55 }
+                if (d2 < 0) { return abnf.newToken("\x01bad-id-escape", 0) }
+                cp = cp * 16 + d2
+            }
+        }
+        var isStart = false
+        var ok = false
+        if ((cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp === 95 || cp === 36) { ok = true }
+        else if (!isStart && cp >= 48 && cp <= 57) { ok = true }
+        else if (cp === 8204 || cp === 8205) { ok = !isStart } // ZWNJ / ZWJ continue only
+        else if (cp >= 128) {
+            // The same approximation as IdStartUni: everything above ASCII except the
+            // space and line separators, the surrogates, the Latin-1 punctuation and the
+            // multiplication/division signs.
+            ok = !(cp === 160 || cp === 5760 || (cp >= 8192 && cp <= 8202)
+                || cp === 8232 || cp === 8233 || cp === 8239 || cp === 8287
+                || cp === 12288 || cp === 65279
+                || (cp >= 55296 && cp <= 57343)
+                || (cp >= 161 && cp <= 191 && cp !== 170 && cp !== 181 && cp !== 186)
+                || cp === 215 || cp === 247)
+        }
+        return ok ? undefined : abnf.newToken("\x01bad-id-escape", 0)
+    })()
+~~) ;
+
+// The keyword boundary: a keyword may not be glued to an identifier character. It is the
+// JavaScript identifier set, so it also stops at a non-ASCII letter and at the backslash
+// of a \u escape ('var\u0061' is one identifier, not 'var' plus a name).
+KwEnd = :script(~~
+    (function() {
+        var cc = c.peek(0)
+        return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36
+                || (cc >= 97 && cc <= 122) || cc === 92 || cc >= 128)
+            ? abnf.newToken("\x01keyword-boundary", 0)
+            : undefined
+    })()
+~~) ;
 
 // A reserved word is not an identifier. Without this guard every construct whose
 // keyword form fails to parse quietly falls back to a bare variable reference named
@@ -847,6 +1358,259 @@ NotLet      = :script(~~
         return ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122))
             ? undefined
             : abnf.newToken("\x01let-head", 0)
+    })()
+~~) ;
+
+// Fails when the next token continues a member/call chain ('.', '?.', '[', '(' or a
+// template backtick). 'typeof' uses it to tell the bare-name form from the general one.
+NotChain    = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        var bad = cc === 46 || cc === 91 || cc === 40 || cc === 96
+            || (cc === 63 && c.peek(i + 1) === 46)
+        return bad ? abnf.newToken("\x01chain", 0) : undefined
+    })()
+~~) ;
+
+// True at the start of a line: everything between the previous line terminator and here
+// is blank. It reads BACKWARDS from the current position through the source, so it sees
+// what the whitespace rule has already consumed - which is what makes '\n /* c */ -->' a
+// close comment while 'a = b-->1' is not. The start of the file counts as a line start.
+AtLineStart = :script(~~
+    (function() {
+        // The guard sits in the whitespace rule, so it is asked at nearly every position
+        // in the file. Answer the overwhelmingly common case - there is no '-->' here at
+        // all - with three forward peeks, before the backward scan below can cost anything.
+        if (c.peek(0) !== 45 || c.peek(1) !== 45 || c.peek(2) !== 62) {
+            return abnf.newToken("\x01not-line-start", 0)
+        }
+        var i = 1
+        var steps = 0
+        while (true) {
+            // The scan walks BACKWARDS. Out of range, c.peek answers -1 (identically in
+            // both engines: parserscript.go and frozen.go). Testing only for 0/undefined
+            // therefore MISSES the file boundary and spins to the cap on every call, which
+            // is quadratic over a file - so every out-of-range test here checks '< 0'
+            // first. The caps stay as a backstop: a '-->' not reached within the cap is
+            // simply not treated as one.
+            steps = steps + 1
+            if (steps > 20000) { return abnf.newToken("\x01not-line-start", 0) }
+            var cc = c.peek(-i)
+            if (cc === 32 || cc === 9 || cc === 11 || cc === 12) { i = i + 1; continue }
+            // peek before the first character yields -1: the file starts here.
+            if (cc === 10 || cc === 13 || cc < 0 || cc === 0 || cc === undefined) { return undefined }
+            // A block comment may sit between the line start and the '-->', so step back
+            // over it and keep looking. (A // comment always ends AT a line terminator,
+            // which the test above already accepts.)
+            if (cc === 47 && c.peek(-(i + 1)) === 42) {
+                i = i + 2
+                while (true) {
+                    steps = steps + 1
+                    if (steps > 20000) { return abnf.newToken("\x01not-line-start", 0) }
+                    var pc = c.peek(-i)
+                    if (pc < 0 || pc === 0 || pc === undefined) { return abnf.newToken("\x01not-line-start", 0) }
+                    if (pc === 42 && c.peek(-(i + 1)) === 47) { i = i + 2; break }
+                    i = i + 1
+                }
+                continue
+            }
+            return abnf.newToken("\x01not-line-start", 0)
+        }
+    })()
+~~) ;
+
+// AssignAhead: does an ASSIGNMENT operator follow the (balanced) left-hand side that
+// starts here? It scans forward once, counting () [] {} nesting and stepping over strings,
+// template literals and comments, and stops at the first depth-0 character that ends a
+// left-hand side: a closing bracket that was never opened, a ';', a ',', the '?' of a
+// conditional or of '??', or a ':'. Finding a depth-0 assignment operator on the way -
+// including the '??=' that starts with such a '?' - SUCCEEDS the guard, and
+// anything else FAILS it - which is what keeps an ordinary expression from trying the four
+// assignment productions at all, and with them their nested re-parses.
+//
+// It errs on the side of allowing: an unterminated string, a comment running to the end of
+// the file or a scan longer than the cap all answer "maybe an assignment", so the guard can
+// only ever cost time, never reject an assignment that is really there. Every loop counts
+// against the same step cap, including the ones that skip a string or a comment - reading
+// past the end of the file is not guaranteed to answer 0, so an unterminated one would
+// otherwise spin forever. The one shape it
+// does not model is a regular expression literal in front of the operator ('x[/]/.source]
+// = 1'), whose brackets are counted as brackets.
+AssignAhead = :script(~~
+    (function() {
+        var i = 0
+        var depth = 0
+        var steps = 0
+        while (true) {
+            steps = steps + 1
+            if (steps > 200000) { return undefined } // Too long to decide: allow.
+            var cc = c.peek(i)
+            if (cc < 0 || cc === 0 || cc === undefined) { return abnf.newToken("\x01no-assign", 0) }
+            // A string or a template literal: skip it whole.
+            if (cc === 34 || cc === 39 || cc === 96) {
+                var q = cc
+                i = i + 1
+                while (true) {
+                    steps = steps + 1
+                    if (steps > 200000) { return undefined }
+                    var sc = c.peek(i)
+                    if (sc < 0 || sc === 0 || sc === undefined) { return undefined }
+                    if (sc === 92) { i = i + 2; continue }
+                    if (sc === q) { i = i + 1; break }
+                    i = i + 1
+                }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 47) { // line comment
+                i = i + 2
+                while (true) {
+                    steps = steps + 1
+                    if (steps > 200000) { return undefined }
+                    var lc = c.peek(i)
+                    if (lc < 0 || lc === 0 || lc === undefined || lc === 10) { break }
+                    i = i + 1
+                }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) { // block comment
+                i = i + 2
+                while (true) {
+                    steps = steps + 1
+                    if (steps > 200000) { return undefined }
+                    var bc = c.peek(i)
+                    if (bc < 0 || bc === 0 || bc === undefined) { return undefined }
+                    if (bc === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i = i + 1
+                }
+                continue
+            }
+            if (cc === 40 || cc === 91 || cc === 123) { depth = depth + 1; i = i + 1; continue }
+            if (cc === 41 || cc === 93 || cc === 125) {
+                if (depth === 0) { return abnf.newToken("\x01no-assign", 0) }
+                depth = depth - 1
+                i = i + 1
+                continue
+            }
+            if (depth === 0) {
+                if (cc === 59 || cc === 44 || cc === 58) {
+                    return abnf.newToken("\x01no-assign", 0) // ; , : end the left-hand side
+                }
+                if (cc === 63) { // '?' - three different operators start with it
+                    if (c.peek(i + 1) === 46) { i = i + 2; continue }  // '?.' optional chaining
+                    if (c.peek(i + 1) === 63 && c.peek(i + 2) === 61) { return undefined } // '??='
+                    return abnf.newToken("\x01no-assign", 0) // '??' or the conditional '?'
+                }
+                if (cc === 61) { // '='
+                    var run = 0
+                    while (c.peek(i + run) === 61) { run = run + 1 }
+                    if (run >= 2) { i = i + run; continue }        // == === !== ...
+                    if (c.peek(i + 1) === 62) { return abnf.newToken("\x01no-assign", 0) } // =>
+                    var pv = c.peek(i - 1)
+                    var pv2 = c.peek(i - 2)
+                    // '!=' , '<=' and '>=' are comparisons; '<<=', '>>=' and '>>>=' are not.
+                    if (pv === 33) { i = i + 1; continue }
+                    if (pv === 60 && pv2 !== 60) { i = i + 1; continue }
+                    if (pv === 62 && pv2 !== 62) { i = i + 1; continue }
+                    return undefined // an assignment operator at depth 0
+                }
+            }
+            i = i + 1
+        }
+    })()
+~~) ;
+
+// ArrowAhead: is the '(' that starts here the parameter list of an arrow function, i.e.
+// does '=>' follow its matching ')'? A bare-name parameter list ('x => x') needs no
+// lookahead and is let through unexamined. Same conventions as AssignAhead: strings and
+// comments are stepped over, and anything undecidable answers "maybe".
+ArrowAhead  = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 40) { return undefined } // Not the parenthesized form: nothing to decide.
+        var depth = 0
+        var steps = 0
+        while (true) {
+            steps = steps + 1
+            if (steps > 200000) { return undefined }
+            var ch = c.peek(i)
+            if (ch < 0 || ch === 0 || ch === undefined) { return abnf.newToken("\x01no-arrow", 0) }
+            if (ch === 34 || ch === 39 || ch === 96) {
+                var q = ch
+                i = i + 1
+                while (true) {
+                    steps = steps + 1
+                    if (steps > 200000) { return undefined }
+                    var sc = c.peek(i)
+                    if (sc < 0 || sc === 0 || sc === undefined) { return undefined }
+                    if (sc === 92) { i = i + 2; continue }
+                    if (sc === q) { i = i + 1; break }
+                    i = i + 1
+                }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                while (true) {
+                    steps = steps + 1
+                    if (steps > 200000) { return undefined }
+                    var lc = c.peek(i)
+                    if (lc < 0 || lc === 0 || lc === undefined || lc === 10) { break }
+                    i = i + 1
+                }
+                continue
+            }
+            if (ch === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (true) {
+                    steps = steps + 1
+                    if (steps > 200000) { return undefined }
+                    var bc = c.peek(i)
+                    if (bc < 0 || bc === 0 || bc === undefined) { return undefined }
+                    if (bc === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i = i + 1
+                }
+                continue
+            }
+            if (ch === 40 || ch === 91 || ch === 123) { depth = depth + 1; i = i + 1; continue }
+            if (ch === 41 || ch === 93 || ch === 125) {
+                depth = depth - 1
+                i = i + 1
+                if (depth === 0) { break } // Just closed the opening parenthesis.
+                continue
+            }
+            i = i + 1
+        }
+        var nc = c.peek(i)
+        while (nc === 32 || nc === 9 || nc === 10 || nc === 13 || nc === 11 || nc === 12) {
+            i = i + 1
+            nc = c.peek(i)
+        }
+        return (nc === 61 && c.peek(i + 1) === 62) ? undefined : abnf.newToken("\x01no-arrow", 0)
+    })()
+~~) ;
+
+// The restricted-production guard of ASI: succeeds only when no line terminator sits
+// between here and the next token. 'break'/'continue' use it in front of their optional
+// label, so 'break \n foo' stays a bare break plus the statement 'foo'. Only spaces and
+// tabs are stepped over; anything else (including the '/' of a comment) is left to the
+// production behind the guard.
+SameLine    = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        return (cc === 10 || cc === 13) ? abnf.newToken("\x01line-break", 0) : undefined
     })()
 ~~) ;
 
@@ -945,6 +1709,146 @@ NotFuncHead = :script(~~
     // for constructs that parse but cannot be lowered).
     function fail(msg) { println("js compiler error: " + msg); exit(1) }
 
+    // ----- Numeric literal values -----
+
+    // The value of a radix-prefixed literal (0x.., 0b.., 0o..). Numeric separators are
+    // skipped and the scan stops at the first character that is not a digit of the radix,
+    // so a trailing KwEnd or whitespace in the matched text cannot corrupt the value.
+    function radixVal(s, start, radix) {
+        var v = 0
+        for (var i = start; i < s.length; i++) {
+            var cc = s.charCodeAt(i)
+            if (cc == 95) { continue } // '_'
+            var d = -1
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 102) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 70) { d = cc - 55 }
+            if (d < 0 || d >= radix) { break }
+            v = v * radix + d
+        }
+        return v
+    }
+    // A BigInt literal: strip the separators and the trailing 'n' and let the runtime parse
+    // the remaining digits (js_bigint understands the 0x/0b/0o prefixes as well).
+    function makeBigInt(src) {
+        var digits = ""
+        for (var i = 0; i < src.length; i++) {
+            var cc = src.charCodeAt(i)
+            if (cc == 95) { continue }                       // '_'
+            if (cc == 110 && digits.length > 0) { break }    // the closing 'n'
+            if (cc == 32 || cc == 9 || cc == 10 || cc == 13) { break }
+            digits = digits + src.charAt(i)
+        }
+        return function(b) { return {b: b, v: callExt(b, "js_bigint", [emitStr(b, digits)])} }
+    }
+    // Drop the numeric separators of a decimal literal so parseFloat sees a plain number.
+    function stripSeps(s) {
+        var out = ""
+        for (var i = 0; i < s.length; i++) { if (s.charCodeAt(i) != 95) { out = out + s.charAt(i) } }
+        return out
+    }
+
+    // The real name behind an IdentifierName: any \u escape in it stands for the character
+    // it denotes, so '\u0061bc', 'a\u0062c' and 'abc' are three spellings of ONE name and
+    // have to resolve to the same string before anything looks the name up in a scope.
+    // The fast path is the overwhelmingly common one: a name with no backslash at all.
+    function idName(src) {
+        var hasEsc = false
+        for (var i = 0; i < src.length; i++) { if (src.charCodeAt(i) == 92) { hasEsc = true } }
+        if (!hasEsc) { return src }
+        var out = ""
+        var j = 0
+        while (j < src.length) {
+            if (src.charCodeAt(j) != 92) { out = out + src.charAt(j); j = j + 1; continue }
+            // '\u{...}' or '\uHHHH'; the grammar guarantees one of the two shapes.
+            if (src.charCodeAt(j + 2) == 123) {
+                var k = j + 3
+                var cp = 0
+                while (k < src.length && src.charCodeAt(k) != 125) {
+                    cp = cp * 16 + hexAt(src, k, 1)
+                    k = k + 1
+                }
+                out = out + codePointStr(cp)
+                j = k + 1
+            } else {
+                out = out + String.fromCharCode(hexAt(src, j + 2, 4))
+                j = j + 6
+            }
+        }
+        return out
+    }
+
+    // ----- JavaScript string escapes -----
+    // The shared unescapeJs of compile-core.js is the common denominator of every C-like
+    // language (\n \t \r \0 \xNN \uNNNN); JavaScript's own escape grammar is wider, so
+    // this grammar overrides it. On top of the shared set it resolves \b \f \v, the
+    // braced code point \u{...} (encoded as the UTF-16 surrogate pair a JS string holds,
+    // which is what makes '\u{1F600}'.length === 2), the legacy octal escapes (\1, \07,
+    // \377 - still legal in sloppy mode) and the LineContinuation, where a backslash in
+    // front of a line terminator contributes nothing at all.
+    unescapeJs = function(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var cc = s.charCodeAt(i)
+            if (cc != 92) { out = out + String.fromCharCode(cc); i = i + 1; continue }
+            var e = s.charCodeAt(i + 1)
+            if (e == 110) { out = out + "\n"; i = i + 2; continue }          // \n
+            if (e == 116) { out = out + "\t"; i = i + 2; continue }          // \t
+            if (e == 114) { out = out + "\r"; i = i + 2; continue }          // \r
+            if (e == 98)  { out = out + String.fromCharCode(8); i = i + 2; continue }  // \b
+            if (e == 102) { out = out + String.fromCharCode(12); i = i + 2; continue } // \f
+            if (e == 118) { out = out + String.fromCharCode(11); i = i + 2; continue } // \v
+            // A LineContinuation: \ CR LF, \ CR, \ LF, \ U+2028 and \ U+2029 all vanish.
+            if (e == 13) { i = (s.charCodeAt(i + 2) == 10) ? i + 3 : i + 2; continue }
+            if (e == 10 || e == 8232 || e == 8233) { i = i + 2; continue }
+            if (e == 120) { out = out + String.fromCharCode(hexAt(s, i + 2, 2)); i = i + 4; continue }
+            if (e == 117) {
+                if (s.charCodeAt(i + 2) == 123) { // \u{ ... }
+                    var j = i + 3
+                    var cp = 0
+                    while (j < s.length && s.charCodeAt(j) != 125) {
+                        cp = cp * 16 + hexAt(s, j, 1)
+                        j = j + 1
+                    }
+                    out = out + codePointStr(cp)
+                    i = j + 1
+                    continue
+                }
+                out = out + String.fromCharCode(hexAt(s, i + 2, 4))
+                i = i + 6
+                continue
+            }
+            // A legacy octal escape: up to three octal digits, at most 0377.
+            if (e >= 48 && e <= 55) {
+                var v = 0
+                var k = i + 1
+                while (k < s.length && k < i + 4) {
+                    var oc = s.charCodeAt(k)
+                    if (oc < 48 || oc > 55) { break }
+                    var nv = v * 8 + (oc - 48)
+                    if (nv > 255) { break }
+                    v = nv
+                    k = k + 1
+                }
+                out = out + String.fromCharCode(v)
+                i = k
+                continue
+            }
+            out = out + String.fromCharCode(e)
+            i = i + 2
+        }
+        return out
+    }
+    // A code point as the UTF-16 code units a JavaScript string is made of: astral code
+    // points become a surrogate pair (and so count as TWO towards .length). The arithmetic
+    // avoids shifts and masks so it reads the same on both engines.
+    function codePointStr(cp) {
+        if (cp < 65536) { return String.fromCharCode(cp) }
+        var off = cp - 65536
+        return String.fromCharCode(55296 + Math.floor(off / 1024)) + String.fromCharCode(56320 + (off % 1024))
+    }
+
     // ----- Project-file imports (see the ImportStmt rule) -----
 
     // Build an import statement: resolve the referenced file at compile time - which
@@ -1022,25 +1926,235 @@ NotFuncHead = :script(~~
         }
     }
 
-    // ----- Widened-surface helpers: transparent pass-through with one operand, else
-    // ACCEPTED-but-not-lowered (notImplExpr). The single-operand fast path keeps the
-    // emitted IR byte-identical to the pre-widening grammar for ordinary expressions. -----
-    function makeNullish(items, pos) { if (items.length == 1) return items[0]; return notImplExpr("nullish coalescing (??)", pos) }
-    function makeExp(items, pos)     { if (items.length == 1) return items[0]; return notImplExpr("exponentiation (**)", pos) }
-    function makeInInstanceof(items, pos) { if (items.length == 1) return items[0]; return notImplExpr("instanceof / in operator", pos) }
-    function makeSequence(items, pos) { if (items.length == 1) return items[0]; return notImplExpr("sequence expression", pos) }
-    // A not-lowered object property: a deterministic placeholder descriptor whose value
-    // thunk is a notImplExpr (both engines emit the same placeholder key/value).
-    function notImplProp(name, pos) { return makeProp(notImplExpr(name, pos), "0notImpl") }
-    // A not-lowered class member: warn and push a skip marker makeClassStmt ignores.
-    function notImplMember(name, pos) { notImpl(name, pos); return {skip: true} }
+    // ----- Spread (...) -----
+    // Every argument/element list goes through pushArgs: an ordinary item contributes its
+    // value, a spread marker ({spreadT}) contributes the ELEMENTS of its value. That makes
+    // '...' work the same in a call, an array literal, a 'new' and a super() call.
+    function pushArgs(b, arrV, items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].hole == true) {
+                callExt(b, "js_arr_push", [arrV, hUndef])
+            } else if (items[i].spreadT != undefined) {
+                b = emitSpreadInto(b, arrV, items[i].spreadT)
+            } else {
+                var r = items[i](b)
+                b = r.b
+                callExt(b, "js_arr_push", [arrV, r.v])
+            }
+        }
+        return b
+    }
+    // Append the elements of an iterable to arrV. The subset iterates by index over the
+    // 'length' of the value, which covers arrays and strings ('[..."ab"]' spreads the two
+    // characters) - the same model the for-of lowering uses. A user defined
+    // Symbol.iterator is not consulted; there are no symbols in the subset.
+    // The loop counter lives in a fresh scope so that two spreads in one list, or a spread
+    // inside a spread's expression, cannot overwrite each other's slot.
+    function emitSpreadInto(b, arrV, t) {
+        var r = t(b)
+        b = r.b
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [saved])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0sp"), r.v])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0spi"), callExt(b, "js_num_i", [handle(0)])])
+        var lenV = callExt(b, "js_tonum", [callExt(b, "js_get", [r.v, emitStr(b, "length")])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0splen"), lenV])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0spi")])
+        var lH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0splen")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0spi")])
+        var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0sp")])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [srcB, iB])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0spi"),
+                                   callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+        bodyB.NewBr(headB)
+        curScopeV = saved
+        return exitB
+    }
+    // '{...src}': copy src's own keys into the literal under construction. js_keys yields
+    // them in insertion order (and skips the __-prefixed internal slots), so the copy walks
+    // that key array by index.
+    function emitObjSpread(b, objV, t) {
+        var r = t(b)
+        b = r.b
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [saved])
+        var keysV = callExt(b, "js_keys", [r.v])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osk"), keysV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osrc"), r.v])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0osi"), callExt(b, "js_num_i", [handle(0)])])
+        var lenV = callExt(b, "js_tonum", [callExt(b, "js_get", [keysV, emitStr(b, "length")])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0oslen"), lenV])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0osi")])
+        var lH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0oslen")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osi")])
+        var ksB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osk")])
+        var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0osrc")])
+        var keyB = callExt(bodyB, "js_get", [ksB, iB])
+        callExt(bodyB, "js_set", [objV, keyB, callExt(bodyB, "js_get", [srcB, keyB])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0osi"),
+                                   callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+        bodyB.NewBr(headB)
+        curScopeV = saved
+        return exitB
+    }
+
+    // A regex literal /source/flags -> a RegExp-shaped object. The matched text still
+    // carries the trailing whitespace the production re-enabled, so it is trimmed first;
+    // the LAST '/' separates the source from the flags (an inner '/' is always escaped
+    // or inside a character class, both of which the RegexPart rules keep out of the way).
+    function makeRegex(src) {
+        var s = src
+        while (s.length > 0) {
+            var lc = s.charCodeAt(s.length - 1)
+            if (lc != 32 && lc != 9 && lc != 10 && lc != 13) { break }
+            s = s.substring(0, s.length - 1)
+        }
+        var cut = s.length
+        while (cut > 0 && s.charAt(cut - 1) != "/") { cut = cut - 1 }
+        var body = s.substring(1, cut - 1)
+        var flags = s.substring(cut)
+        return function(b) {
+            var o = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [o, emitStr(b, "source"), emitStr(b, body)])
+            callExt(b, "js_set", [o, emitStr(b, "flags"), emitStr(b, flags)])
+            callExt(b, "js_set", [o, emitStr(b, "lastIndex"), callExt(b, "js_num_i", [handle(0)])])
+            return {b: b, v: o}
+        }
+    }
+
+    // ----- Binary operator levels that are a pass-through with a single operand -----
+    // The one-operand fast path returns the operand's own thunk, so an ordinary expression
+    // emits exactly the IR it would without these levels in the grammar at all.
+    // items = [thunk, "in"|"instanceof", thunk, ...], folded left. 'in' takes its operands
+    // the other way round than the external does ('key in obj' is js_has(obj, key)).
+    function makeInInstanceof(items, pos) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i = i + 2) {
+                var rr = items[i + 1](b)
+                b = rr.b
+                if (items[i] == "in") { v = callExt(b, "js_has", [rr.v, v]) }
+                else { v = callExt(b, "js_instanceof", [v, rr.v]) }
+            }
+            return {b: b, v: v}
+        }
+    }
+    // 'delete o.k' / 'delete o[k]': evaluate the path once and drop the property.
+    // A bare variable is not deletable, so the expression is simply false.
+    function makeDelete(ref) {
+        if (ref.path.length == 0) { return makeConst(false) }
+        return function(b) {
+            var p = emitRefPath(b, ref)
+            return {b: p.b, v: callExt(p.b, "js_del", [p.obj, p.key])}
+        }
+    }
+    // 'void e': evaluate and discard.
+    function makeVoid(t) {
+        return function(b) { return {b: t(b).b, v: hUndef} }
+    }
+    // 'typeof name' for a possibly undeclared name.
+    function makeTypeofName(name) {
+        return function(b) {
+            return {b: b, v: callExt(b, "js_scope_typeof", [curScopeV, emitStr(b, name)])}
+        }
+    }
+
+    // ----- Exponentiation -----
+    // The runtime has no js_pow external, and it does not need one: Math.pow is a host
+    // global of the same runtime, so '**' lowers to a method call on it. js_mcall is the
+    // dispatch that finds a host function property on a plain object.
+    function emitPow(b, l, r) {
+        var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
+        var argsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsV, l])
+        callExt(b, "js_arr_push", [argsV, r])
+        return callExt(b, "js_mcall", [mathV, emitStr(b, "pow"), argsV])
+    }
+    // One binary operator, by its source spelling (the compound '<op>=' forms map to the
+    // same operator). Everything but '**' is a single external out of binExt.
+    function emitBinOp(b, op, l, r) {
+        if (op == "**" || op == "**=") { return emitPow(b, l, r) }
+        return callExt(b, binExt[op], [l, r])
+    }
+    // '**' is the one RIGHT associative binary operator of JavaScript: 2 ** 3 ** 2 is
+    // 2 ** (3 ** 2) == 512. The operands are still evaluated left to right (that is
+    // observable through side effects), so they are emitted in order first and only the
+    // pow applications are folded from the right.
+    function makeExp(items, pos) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var vals = []
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                vals.push(r.v)
+            }
+            var v = vals[vals.length - 1]
+            for (var j = vals.length - 2; j >= 0; j--) { v = emitPow(b, vals[j], v) }
+            return {b: b, v: v}
+        }
+    }
+
+    // ----- Nullish coalescing and the comma operator -----
+    // 'a ?? b' keeps a unless a is null or undefined. The nullish test is the loose
+    // equality with null, which in JavaScript is true for exactly those two values, so it
+    // is one js_eq rather than two comparisons. Like || and && it short circuits, so the
+    // right side gets its own block and a phi merges the two results.
+    function makeNullish(items, pos) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var r = items[0](b)
+            b = r.b
+            var v = r.v
+            for (var i = 1; i < items.length; i++) {
+                var rightB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                b.NewCondBr(truthy(b, callExt(b, "js_eq", [v, hNull])), rightB, mergeB)
+                var r2 = items[i](rightB)
+                r2.b.NewBr(mergeB)
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r2.v, r2.b), llvm.ir.NewIncoming(v, b)])
+                b = mergeB
+                v = phi
+            }
+            return {b: b, v: v}
+        }
+    }
+    // The comma (sequence) operator: evaluate every operand left to right, the value is
+    // the last one.
+    function makeSequence(items, pos) {
+        if (items.length == 1) return items[0]
+        return function(b) {
+            var v = hUndef
+            for (var i = 0; i < items.length; i++) {
+                var r = items[i](b)
+                b = r.b
+                v = r.v
+            }
+            return {b: b, v: v}
+        }
+    }
 
     binExt = {"+": "js_add", "-": "js_sub", "*": "js_mul", "/": "js_div", "%": "js_mod",
                   "==": "js_eq", "!=": "js_ne", "===": "js_seq", "!==": "js_sne",
                   "<": "js_lt", ">": "js_gt", "<=": "js_le", ">=": "js_ge",
                   "|": "js_bor", "^": "js_bxor", "&": "js_band",
                   "<<": "js_shl", ">>": "js_shr", ">>>": "js_ushr",
-                  "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div", "%=": "js_mod"}
+                  "+=": "js_add", "-=": "js_sub", "*=": "js_mul", "/=": "js_div", "%=": "js_mod",
+                  "&=": "js_band", "^=": "js_bxor", "|=": "js_bor",
+                  "<<=": "js_shl", ">>=": "js_shr", ">>>=": "js_ushr"}
     wraps = {} // MetaJS numbers are not wrapped to 32 bit.
 
     // items = [thunk, op, thunk, op, thunk, ...] -> one left folded thunk.
@@ -1064,14 +2178,17 @@ NotFuncHead = :script(~~
         }
     }
 
+    // The elements of an array literal, with the elisions resolved: a hole contributes
+    // undefined at its index, and ONE trailing hole is the trailing comma and contributes
+    // nothing ('[1,2,3,]' has three elements, '[1,2,3,,]' four).
     function makeArray(items) {
+        var elems = items
+        if (elems.length > 0 && elems[elems.length - 1].hole == true) {
+            elems = elems.slice(0, elems.length - 1)
+        }
         return function(b) {
             var arr = callExt(b, "js_arr_new", [])
-            for (var i = 0; i < items.length; i++) {
-                var r = items[i](b)
-                b = r.b
-                callExt(b, "js_arr_push", [arr, r.v])
-            }
+            b = pushArgs(b, arr, elems)
             return {b: b, v: arr}
         }
     }
@@ -1083,14 +2200,135 @@ NotFuncHead = :script(~~
         return function(b) {
             var obj = callExt(b, "js_obj_new", [])
             for (var i = 0; i < props.length; i++) {
+                if (props[i].spreadT != undefined) {
+                    b = emitObjSpread(b, obj, props[i].spreadT)
+                    continue
+                }
                 var kr = props[i].kt(b)
                 b = kr.b
+                if (props[i].acc != undefined) {
+                    // An accessor: the function becomes a closure over the literal's own
+                    // scope and is registered as the get or the set half of the property.
+                    // Two halves of one key merge inside js_defprop.
+                    var idx = emitFunction(props[i].params, props[i].body)
+                    var clo = callExt(b, "js_closure", [handle(idx), curScopeV])
+                    var gV = (props[i].acc == "get") ? clo : hUndef
+                    var sV = (props[i].acc == "set") ? clo : hUndef
+                    callExt(b, "js_defprop", [obj, kr.v, gV, sV])
+                    continue
+                }
                 var vr = props[i].t(b)
                 b = vr.b
                 callExt(b, "js_set", [obj, kr.v, vr.v])
             }
             return {b: b, v: obj}
         }
+    }
+    // ----- Generators -----
+    // A generator body is an ORDINARY IR function; what makes it a generator is that the
+    // closure is handed to js_genfn, so calling the result creates a generator object over
+    // it instead of running it. The body then runs on its own goroutine on the host side,
+    // and 'yield' is a handshake with the pending next() (see abnf/jsrt.go). The upshot for
+    // the compiler is that a generator needs no code transformation at all: 'yield' is one
+    // more external call, and every statement form works inside a generator unchanged.
+    function makeGenFn(params, bodyT) {
+        return function(b) {
+            var idx = emitFunction(params, bodyT)
+            return {b: b, v: callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])}
+        }
+    }
+    // items = [name?, params, bodyThunk] - the optional name of a function EXPRESSION is
+    // accepted but not bound, so the last two items are what matters.
+    function makeGenFuncExpr(items) {
+        return makeGenFn(items[items.length - 2], items[items.length - 1])
+    }
+    // items = [name, params, bodyThunk]: bind the generator function under its name.
+    function makeGenFuncDecl(items) {
+        var fnT = makeGenFn(items[1], items[2])
+        var name = items[0]
+        return function(b) {
+            var r = fnT(b)
+            b = r.b
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
+            return b
+        }
+    }
+    // The items form of makeFuncDecl (which takes its three parts as separate pops).
+    function makeFuncDeclItems(items) { return makeFuncDecl(items[2], items[1], items[0]) }
+    // items = [] ('yield') or [valueThunk] ('yield e').
+    function makeYield(items) {
+        var t = items.length > 0 ? items[0] : null
+        return function(b) {
+            var v = hUndef
+            if (t != null) {
+                var r = t(b)
+                b = r.b
+                v = r.v
+            }
+            return {b: b, v: callExt(b, "js_yield", [v])}
+        }
+    }
+    // 'yield* e': yield every element of e in turn. The value of the expression is the
+    // delegate's return value, which this subset does not model, so it is undefined.
+    function makeYieldStar(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var saved = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [saved])
+            var seqV = callExt(b, "js_iterable", [r.v])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ysrc"), seqV])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0yi"), callExt(b, "js_num_i", [handle(0)])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ylen"),
+                                    callExt(b, "js_tonum", [callExt(b, "js_get", [seqV, emitStr(b, "length")])])])
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0yi")])
+            var lH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0ylen")])
+            headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
+            var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0yi")])
+            var sB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ysrc")])
+            callExt(bodyB, "js_yield", [callExt(bodyB, "js_get", [sB, iB])])
+            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0yi"),
+                                       callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+            bodyB.NewBr(headB)
+            curScopeV = saved
+            return {b: exitB, v: hUndef}
+        }
+    }
+
+    // A key that is either a name string (from the Id form) or a value thunk (a string /
+    // number literal, or a computed [expr]), as a thunk in both cases.
+    function keyThunk(k) { return (typeof k == "string") ? makeConst(k) : k }
+    // items = ["get"|"set", key, param..., bodyThunk]. The kind is always first and the
+    // body always last, so the parameters are whatever lies between - none for a getter,
+    // exactly one for a setter.
+    function makeAccessorProp(items) {
+        return {kt: keyThunk(items[1]), acc: items[0],
+                params: items.slice(2, items.length - 1), body: items[items.length - 1]}
+    }
+    // items = [{amod}?, {gmod}?, key, params, bodyThunk]. A shorthand method is an ordinary
+    // property whose value is a function expression; 'async' only matters for 'await'
+    // inside the body (see the Await rule) and a generator method goes through makeGenFn.
+    function makeMethodProp(items) {
+        var isGen = false
+        var rest = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].gmod == true) { isGen = true }
+            else if (items[i] != undefined && items[i].amod == true) { continue }
+            else { rest.push(items[i]) }
+        }
+        var fnT = makeFunctionExpr(rest[2], rest[1])
+        if (isGen) { fnT = makeGenFn(rest[1], rest[2]) }
+        return {kt: keyThunk(rest[0]), t: fnT}
+    }
+    // items = [keyThunk, valueThunk] for '{[k]: v}' or [keyThunk, params, bodyThunk] for
+    // the computed shorthand method '{[k](x) {}}'.
+    function makeComputedProp(items) {
+        if (items.length == 2) { return {kt: items[0], t: items[1]} }
+        return {kt: items[0], t: makeFunctionExpr(items[2], items[1])}
     }
 
     // items = [primaryThunk, {kind:"call"|"member", ...}...]. A member access remembers
@@ -1101,24 +2339,37 @@ NotFuncHead = :script(~~
     // working exactly as before; otherwise it is a __class instance method, dispatched
     // through js_mcall (which prepends the receiver and follows __super). A call not
     // preceded by a member is a plain function call.
+    // An optional link (?. ?.[ ?.( ) short circuits the WHOLE chain, not just its own
+    // step: 'a?.b.c' is undefined when a is nullish, and c is never looked up. That is
+    // why the guard blocks collect into shortIn and every one of them feeds undefined
+    // into a single phi at the END of the chain, instead of merging step by step.
+    // The nullish test is the loose equality with null, which is true for exactly null
+    // and undefined.
     foldCallMember = function(items) {
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
-        // Any optional-chaining suffix (?. ?.[ ?.( ) routes the whole chain to
-        // notImplemented: there is no short-circuit-on-nullish model in the subset.
+        var hasOpt = false
         for (var oi = 0; oi < suffixes.length; oi++) {
-            if (suffixes[oi].kind == "optchain") return notImplExpr("optional chaining (?.)", suffixes[oi].pos)
+            if (suffixes[oi].kind == "optmember" || suffixes[oi].kind == "optcall") { hasOpt = true }
         }
         return function(b) {
             var r = primary(b)
             b = r.b
             var cur = r.v
             var curThis = hUndef
+            var shortIn = []
             var i = 0
             while (i < suffixes.length) {
                 var s = suffixes[i]
-                if (s.kind == "member") {
+                if (s.kind == "optmember" || s.kind == "optcall") {
+                    var contB = curF.NewBlock("")
+                    var skipB = curF.NewBlock("")
+                    b.NewCondBr(truthy(b, callExt(b, "js_eq", [cur, hNull])), skipB, contB)
+                    shortIn.push(skipB)
+                    b = contB
+                }
+                if (s.kind == "member" || s.kind == "optmember") {
                     var kr = s.key(b)
                     b = kr.b
                     if (i + 1 < suffixes.length && suffixes[i + 1].kind == "call") {
@@ -1127,11 +2378,7 @@ NotFuncHead = :script(~~
                         var keyV = kr.v
                         var fV = callExt(b, "js_get", [objV, keyV])
                         var argsV = callExt(b, "js_arr_new", [])
-                        for (var j = 0; j < callS.args.length; j++) {
-                            var ar = callS.args[j](b)
-                            b = ar.b
-                            callExt(b, "js_arr_push", [argsV, ar.v])
-                        }
+                        b = pushArgs(b, argsV, callS.args)
                         var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [fV]), emitStr(b, "function")]))
                         var thenB = curF.NewBlock("")
                         var elseB = curF.NewBlock("")
@@ -1150,27 +2397,53 @@ NotFuncHead = :script(~~
                         cur = callExt(b, "js_get", [cur, kr.v])
                         i = i + 1
                     }
+                } else if (s.kind == "tag") {
+                    var tr = emitTagCall(b, cur, curThis, s.parts)
+                    b = tr.b
+                    cur = tr.v
+                    curThis = hUndef
+                    i = i + 1
                 } else {
                     var argsV2 = callExt(b, "js_arr_new", [])
-                    for (var k = 0; k < s.args.length; k++) {
-                        var ar2 = s.args[k](b)
-                        b = ar2.b
-                        callExt(b, "js_arr_push", [argsV2, ar2.v])
-                    }
+                    b = pushArgs(b, argsV2, s.args)
                     cur = callExt(b, "js_call", [cur, curThis, argsV2])
                     curThis = hUndef
                     i = i + 1
                 }
             }
-            return {b: b, v: cur}
+            if (!hasOpt) { return {b: b, v: cur} }
+            var mergeB = curF.NewBlock("")
+            b.NewBr(mergeB)
+            var inc = [llvm.ir.NewIncoming(cur, b)]
+            for (var k = 0; k < shortIn.length; k++) {
+                shortIn[k].NewBr(mergeB)
+                inc.push(llvm.ir.NewIncoming(hUndef, shortIn[k]))
+            }
+            return {b: mergeB, v: mergeB.NewPhi(inc)}
         }
     }
 
     // Target items = [nameString, suffix marker...] -> reference descriptor.
     // Walks a target path (members and calls) up to the last element, which must
     // be a member. Returns {b, obj, key} with the object and the last key evaluated.
+    // A target reference is {name, path} for the ordinary 'a.b[i]' form and {base, path}
+    // when the path hangs off an arbitrary expression instead of a name ('[1].a = 2',
+    // '(a ** b).c = 1'). retarget re-roots a parenthesized target and appends whatever
+    // suffixes follow the ')', so '(a).b' is the very same reference as 'a.b'.
+    function makeTargetBase(items) { return {base: items[0], path: items.slice(1)} }
+    function retarget(items) {
+        var inner = items[0]
+        return {name: inner.name, base: inner.base, path: inner.path.concat(items.slice(1))}
+    }
     function emitRefPath(b, ref) {
-        var cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        var cur = anytype
+        if (ref.base != undefined) {
+            var br = ref.base(b)
+            b = br.b
+            cur = br.v
+        } else {
+            cur = callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])
+        }
         var curThis = hUndef
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
@@ -1181,17 +2454,20 @@ NotFuncHead = :script(~~
                 cur = callExt(b, "js_get", [cur, kr.v])
             } else {
                 var argsV = callExt(b, "js_arr_new", [])
-                for (var j = 0; j < s.args.length; j++) {
-                    var ar = s.args[j](b)
-                    b = ar.b
-                    callExt(b, "js_arr_push", [argsV, ar.v])
-                }
+                b = pushArgs(b, argsV, s.args)
                 cur = callExt(b, "js_call", [cur, curThis, argsV])
                 curThis = hUndef
             }
         }
         var last = ref.path[ref.path.length - 1].key(b)
         return {b: last.b, obj: cur, key: last.v}
+    }
+    // items = [ref, opString, valueThunk]. The logical operators short circuit and so need
+    // their own lowering; every other operator goes through makeAssign.
+    function makeAnyAssign(items) {
+        var op = items[1]
+        if (op == "&&=" || op == "||=" || op == "??=") { return makeLogicalAssign(items) }
+        return makeAssign(items)
     }
     // items = [ref, opString, valueThunk]. The value of an assignment is the assigned value.
     function makeAssign(items) {
@@ -1210,7 +2486,7 @@ NotFuncHead = :script(~~
                 var setExt = "js_scope_set_or_create"
                 if (op != "=") {
                     var old = callExt(b, "js_scope_get", [curScopeV, nameV])
-                    v = callExt(b, binExt[op], [old, v])
+                    v = emitBinOp(b, op, old, v)
                     setExt = "js_scope_set"
                 }
                 callExt(b, setExt, [curScopeV, nameV, v])
@@ -1219,13 +2495,53 @@ NotFuncHead = :script(~~
                 b = p.b
                 if (op != "=") {
                     var oldM = callExt(b, "js_get", [p.obj, p.key])
-                    v = callExt(b, binExt[op], [oldM, v])
+                    v = emitBinOp(b, op, oldM, v)
                 }
                 callExt(b, "js_set", [p.obj, p.key, v])
             }
             return {b: b, v: v}
         }
     }
+    // items = [ref, "&&="|"||="|"??=", valueThunk]. A logical assignment SHORT CIRCUITS:
+    // the target is read once, and only if the old value asks for it (falsy for ||=,
+    // truthy for &&=, null/undefined for ??=) is the right side evaluated and stored. The
+    // member path of a target is evaluated exactly once, before the branch, so
+    // 'a[i()] ||= b' calls i() once whichever way the branch goes. The expression value is
+    // the old value or the newly stored one, merged by a phi.
+    function makeLogicalAssign(items) {
+        var ref = items[0]
+        var op = items[1]
+        var valT = items[2]
+        return function(b) {
+            var nameV = null, objV = null, keyV = null, oldV = null
+            if (ref.path.length == 0) {
+                nameV = emitStr(b, ref.name)
+                oldV = callExt(b, "js_scope_get", [curScopeV, nameV])
+            } else {
+                var p = emitRefPath(b, ref)
+                b = p.b
+                objV = p.obj
+                keyV = p.key
+                oldV = callExt(b, "js_get", [objV, keyV])
+            }
+            var assignB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            var condI = anytype
+            if (op == "??=") { condI = truthy(b, callExt(b, "js_eq", [oldV, hNull])) }
+            else if (op == "||=") { condI = b.NewICmp(llvm.enum.IPredEQ, callExt(b, core.truthyExt, [oldV]), handle(0)) }
+            else { condI = truthy(b, oldV) }
+            var fromB = b
+            b.NewCondBr(condI, assignB, mergeB)
+            var r = valT(assignB)
+            var ab = r.b
+            if (nameV != null) { callExt(ab, "js_scope_set", [curScopeV, emitStr(ab, ref.name), r.v]) }
+            else { callExt(ab, "js_set", [objV, keyV, r.v]) }
+            ab.NewBr(mergeB)
+            var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, ab), llvm.ir.NewIncoming(oldV, fromB)])
+            return {b: mergeB, v: phi}
+        }
+    }
+
     // items = [ref, "++"|"--"]. Post increment: the expression value is the old (coerced) one.
     function makeIncDec(items) {
         var ref = items[0]
@@ -1266,11 +2582,81 @@ NotFuncHead = :script(~~
         }
     }
 
+    // ----- Parameter binding -----
+    // A parameter list entry is either a bare name string (the plain form) or a
+    // descriptor: {pname, def} for a default and {pname, rest: true} for a rest
+    // parameter. The parameters are bound in source order into the freshly opened
+    // function scope, so a later default may refer to an earlier parameter
+    // ('function f(a, b = a + 1)'), exactly as the spec's parameter environment does.
+    // off is the index the parameters start at in the argument array (1 for an instance
+    // method, whose args[0] is the receiver).
+    function makeDefaultParam(items) { return {pname: items[0], def: items[1]} }
+    function bindParams(b, params, argsV, off) {
+        for (var i = 0; i < params.length; i++) {
+            var p = params[i]
+            if (typeof p == "string") {
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, p),
+                                        callExt(b, "js_arg", [argsV, handle(i + off)])])
+            } else if (p.ppat != undefined) {
+                // A destructuring parameter: match the argument (or, for '...[a, b]', the
+                // collected rest array) against the pattern.
+                if (p.rest == true) {
+                    b = emitArrRest(b, p.ppat, argsV, i + off, "js_scope_decl")
+                } else {
+                    b = bindPattern(b, p.ppat, callExt(b, "js_arg", [argsV, handle(i + off)]), "js_scope_decl")
+                }
+            } else if (p.rest == true) {
+                b = emitRestBind(b, p.pname, argsV, i + off)
+            } else {
+                // A default fires for a MISSING argument and for an explicit undefined
+                // ('f(undefined)' takes the default), which is exactly 'arg === undefined'.
+                var av = callExt(b, "js_arg", [argsV, handle(i + off)])
+                var defB = curF.NewBlock("")
+                var mergeB = curF.NewBlock("")
+                var fromB = b
+                b.NewCondBr(truthy(b, callExt(b, "js_seq", [av, hUndef])), defB, mergeB)
+                var r = p.def(defB)
+                r.b.NewBr(mergeB)
+                var phi = mergeB.NewPhi([llvm.ir.NewIncoming(r.v, r.b), llvm.ir.NewIncoming(av, fromB)])
+                callExt(mergeB, "js_scope_decl", [curScopeV, emitStr(mergeB, p.pname), phi])
+                b = mergeB
+            }
+        }
+        return b
+    }
+    // '...rest': a fresh array filled with the arguments from index `start` on. The index
+    // lives in a hidden 0-prefixed scope slot (no JS identifier can collide with it), the
+    // same trick the for-of lowering uses.
+    function emitRestBind(b, name, argsV, start) {
+        var arrV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), arrV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0rest"), callExt(b, "js_num_i", [handle(start)])])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0rest")])
+        var lenV = callExt(headB, "js_get", [argsV, emitStr(headB, "length")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iV, lenV])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0rest")])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [argsV, iB])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0rest"),
+                                   callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+        bodyB.NewBr(headB)
+        return exitB
+    }
+
     // A function body: an own IR function jsf_N(env, args) whose entry opens a scope on
     // the passed environment, binds the parameters and 'arguments', and runs the body.
     // isCtl marks a try/catch body closure: a return/break/continue leaving it emits a
     // control signal instead of a ret/br (see compile-core inCtlBody / excDispatch).
-    function emitFunction(paramNames, bodyT, isCtl) {
+    // lexThis marks a body with a LEXICAL 'this' - an arrow function and the try/catch/
+    // finally closures, which are an implementation device and not JS functions at all.
+    // Those do not bind 'this' at all, so a reference to it resolves up the scope chain to
+    // the enclosing function's binding, which is exactly what the spec prescribes for an
+    // arrow. Every other function binds the DYNAMIC this of its call (js_this, fed by the
+    // receiver that the call site handed to js_call).
+    function emitFunction(paramNames, bodyT, isCtl, lexThis) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -1286,10 +2672,10 @@ NotFuncHead = :script(~~
 
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
-        for (var i = 0; i < paramNames.length; i++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, paramNames[i]),
-                                    callExt(b, "js_arg", [f.Params[1], handle(i)])])
+        if (!isCtl && lexThis != true) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_this", [])])
         }
+        b = bindParams(b, paramNames, f.Params[1], 0)
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "arguments"), f.Params[1]])
         var endB = bodyT(b)
         endB.NewRet(hUndef) // A function without return returns undefined.
@@ -1321,7 +2707,7 @@ NotFuncHead = :script(~~
             bodyT = function(b) { var r = et(b); r.b.NewRet(r.v); return deadBlock() }
         }
         return function(b) {
-            var idx = emitFunction(params, bodyT)
+            var idx = emitFunction(params, bodyT, false, true)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }
     }
@@ -1345,6 +2731,52 @@ NotFuncHead = :script(~~
         }
     }
 
+    // A tagged template call: tag(strings, ...values). The string parts are the text
+    // BETWEEN the interpolations, so there is always one more of them than there are
+    // values ('x${1}y${2}' has the parts "x", "y" and the trailing ""). The parts object
+    // carries them under the index keys plus 'length' and the raw (unescaped) texts under
+    // 'raw' - a plain object rather than a js_arr_new array, because the runtime's arrays
+    // are pure element sequences and cannot carry the 'raw' property the tag protocol
+    // needs. Index reads (strings[0]) work either way: a member read stringifies its key.
+    function emitTagCall(b, fnV, thisV, parts) {
+        var cooked = []
+        var raws = []
+        var exprs = []
+        var curStr = ""
+        var curRaw = ""
+        for (var i = 0; i < parts.length; i++) {
+            if (parts[i].expr != undefined) {
+                cooked.push(curStr)
+                raws.push(curRaw)
+                curStr = ""
+                curRaw = ""
+                exprs.push(parts[i].expr)
+            } else {
+                curStr = curStr + parts[i].str
+                curRaw = curRaw + parts[i].raw
+            }
+        }
+        cooked.push(curStr)
+        raws.push(curRaw)
+        var stringsV = callExt(b, "js_obj_new", [])
+        var rawV = callExt(b, "js_obj_new", [])
+        for (var j = 0; j < cooked.length; j++) {
+            callExt(b, "js_set", [stringsV, emitStr(b, "" + j), emitStr(b, cooked[j])])
+            callExt(b, "js_set", [rawV, emitStr(b, "" + j), emitStr(b, raws[j])])
+        }
+        callExt(b, "js_set", [stringsV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(cooked.length)])])
+        callExt(b, "js_set", [rawV, emitStr(b, "length"), callExt(b, "js_num_i", [handle(raws.length)])])
+        callExt(b, "js_set", [stringsV, emitStr(b, "raw"), rawV])
+        var argsV = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [argsV, stringsV])
+        for (var k = 0; k < exprs.length; k++) {
+            var r = exprs[k](b)
+            b = r.b
+            callExt(b, "js_arr_push", [argsV, r.v])
+        }
+        return {b: b, v: callExt(b, "js_call", [fnV, thisV, argsV])}
+    }
+
     // for-of / for-in. items = [name, "of"|"in", iterThunk, bodyThunk].
     // for-of genuinely iterates by index over an array/string: it opens its own scope
     // holding the iterable, the length, and the index (hidden 0-prefixed names that no
@@ -1357,18 +2789,23 @@ NotFuncHead = :script(~~
         var iterT = items[2]
         var bodyT = items[3]
         var isIn = items[1] == "in"
+        // The target is either a plain name (a string) or a destructuring pattern node.
+        var isPat = typeof name != "string"
         return function(b) {
+            var lbl = takeLabel()
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [saved])
             var ir = iterT(b)
             b = ir.b
-            var seqV = ir.v
+            // js_iterable is the identity on arrays, strings and objects and materializes
+            // a generator, so a for-of over one works with the same index loop.
+            var seqV = callExt(b, "js_iterable", [ir.v])
             if (isIn) { seqV = callExt(b, "js_keys", [seqV]) }
             var lenV = callExt(b, "js_tonum", [callExt(b, "js_get", [seqV, emitStr(b, "length")])])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0it"), seqV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0len"), lenV])
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0i"), callExt(b, "js_num_i", [handle(0)])])
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef])
+            if (!isPat) { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), hUndef]) }
             var headB = curF.NewBlock("")
             var bodyB = curF.NewBlock("")
             var postB = curF.NewBlock("")
@@ -1379,8 +2816,13 @@ NotFuncHead = :script(~~
             headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iC, lC])), bodyB, exitB)
             var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0i")])
             var itB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0it")])
-            callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), callExt(bodyB, "js_get", [itB, iB])])
+            var elemV = callExt(bodyB, "js_get", [itB, iB])
+            // A pattern target is re-bound per iteration (its leaves are fresh
+            // declarations in the loop scope); a plain name reuses its single slot.
+            if (isPat) { bodyB = bindPattern(bodyB, name, elemV, "js_scope_decl") }
+            else { callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, name), elemV]) }
             loopStack.push({cont: postB, brk: exitB})
+            if (lbl != "") { bindLabelCont(lbl, postB) }
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var iP = callExt(postB, "js_scope_get", [curScopeV, emitStr(postB, "0i")])
@@ -1392,31 +2834,182 @@ NotFuncHead = :script(~~
         }
     }
 
-    // A destructuring binding. makeDField turns a parsed object field into
-    // {key, pat}: a shorthand {x} binds property x to a name x, {x: t} binds
-    // property x to the sub-pattern t. bindPatternC walks a pattern node
-    // ({dtype:"id"|"arr"|"obj"}) against a value handle, emitting js_scope_decl for
-    // each leaf name; array elements are fetched by js_get with a numeric index,
-    // object properties by js_get with the key string. Same tree as the interpreter.
-    function makeDField(items) {
-        if (items.length == 1) return {key: items[0], pat: {dtype: "id", name: items[0]}}
-        return {key: items[0], pat: items[1]}
+    // ----- Destructuring patterns -----
+    // A pattern is a tree of nodes built by the D* productions:
+    //   {dtype:"id",   name, def?}        a leaf name, with an optional default
+    //   {dtype:"hole"}                    an array position that binds nothing
+    //   {dtype:"arr",  elems[], def?}     positional, elems may hold a "rest" node
+    //   {dtype:"obj",  fields[], def?}    by key, fields may hold an "orest" node
+    //   {dtype:"rest", pat}               '...' inside an array pattern
+    //   {dtype:"orest",name}              '...' inside an object pattern
+    // An object field is {dkey|dkeyT, pat}: a static key name, or a value thunk for a
+    // computed/literal key.
+    // bindPattern walks the tree against a value handle and emits ONE binding external per
+    // leaf. Which external that is decides what the pattern means: js_scope_decl for a
+    // 'var/let/const' binding and a parameter, js_scope_set_or_create for a destructuring
+    // ASSIGNMENT ('[a, b] = [b, a]'), which writes to existing variables.
+
+    // Attach an optional default to a freshly parsed pattern node: items is [node] or
+    // [node, defaultThunk].
+    function withDefault(items) {
+        var node = items[0]
+        if (items.length > 1) { node.def = items[1] }
+        return node
     }
-    function bindPatternC(b, pat, valueH) {
+    function makeDFieldKeyed(items) {
+        var k = items[0]
+        return {dkey: k.dkey, dkeyT: k.dkeyT, pat: items[1]}
+    }
+    // '{x}' and '{x = 1}': the key and the bound name are the same identifier.
+    function makeDFieldShort(items) {
+        var node = {dtype: "id", name: items[0]}
+        if (items.length > 1) { node.def = items[1] }
+        return {dkey: items[0], pat: node}
+    }
+
+    // Apply a node's default: the value is replaced by the default exactly when it is
+    // undefined (a present-but-undefined property takes the default too, which is what
+    // 'var {r = 5} = {}' relies on). Returns {b, v}.
+    function applyDefault(b, node, valueH) {
+        if (node.def == undefined) { return {b: b, v: valueH} }
+        var defB = curF.NewBlock("")
+        var mergeB = curF.NewBlock("")
+        var fromB = b
+        b.NewCondBr(truthy(b, callExt(b, "js_seq", [valueH, hUndef])), defB, mergeB)
+        var r = node.def(defB)
+        r.b.NewBr(mergeB)
+        return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(r.v, r.b), llvm.ir.NewIncoming(valueH, fromB)])}
+    }
+    // Store a value through a target reference: a scope write for a bare name, a member
+    // write for a path. Shared by the plain assignment and by a destructuring ASSIGNMENT,
+    // whose leaves may be member targets ('[a.b] = c').
+    function assignRef(b, ref, valueH) {
+        if (ref.path.length == 0 && ref.base == undefined) {
+            callExt(b, "js_scope_set_or_create", [curScopeV, emitStr(b, ref.name), valueH])
+            return b
+        }
+        var p = emitRefPath(b, ref)
+        callExt(p.b, "js_set", [p.obj, p.key, valueH])
+        return p.b
+    }
+    function bindPattern(b, pat, valueH, declExt) {
+        if (pat.dtype == "hole") { return b }
+        if (pat.dtype == "target") {
+            // A member target is only a target in an ASSIGNMENT pattern; in a binding one
+            // ('var [a.b] = c', 'function f([a.b])') there is nothing to declare.
+            if (declExt != "js_scope_set_or_create") {
+                notImpl("destructuring binding with a member target", 0)
+                return b
+            }
+            var dt = applyDefault(b, pat, valueH)
+            return assignRef(dt.b, pat.ref, dt.v)
+        }
+        var d = applyDefault(b, pat, valueH)
+        b = d.b
+        valueH = d.v
         if (pat.dtype == "id") {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, pat.name), valueH])
-        } else if (pat.dtype == "arr") {
+            callExt(b, declExt, [curScopeV, emitStr(b, pat.name), valueH])
+            return b
+        }
+        if (pat.dtype == "arr") {
             for (var i = 0; i < pat.elems.length; i++) {
-                var subA = callExt(b, "js_get", [valueH, callExt(b, "js_num_i", [handle(i)])])
-                b = bindPatternC(b, pat.elems[i], subA)
+                var e = pat.elems[i]
+                if (e.dtype == "rest") { return emitArrRest(b, e.pat, valueH, i, declExt) }
+                b = bindPattern(b, e, callExt(b, "js_get", [valueH, callExt(b, "js_num_i", [handle(i)])]), declExt)
             }
-        } else {
-            for (var j = 0; j < pat.fields.length; j++) {
-                var subO = callExt(b, "js_get", [valueH, emitStr(b, pat.fields[j].key)])
-                b = bindPatternC(b, pat.fields[j].pat, subO)
+            return b
+        }
+        // An object pattern. taken collects the static keys the pattern consumed, so a
+        // '...rest' field knows which properties it must leave out.
+        var taken = []
+        for (var j = 0; j < pat.fields.length; j++) {
+            var f = pat.fields[j]
+            if (f.dtype == "orest") {
+                b = emitObjRest(b, f.name, valueH, taken, declExt)
+                continue
             }
+            var keyV = anytype
+            if (f.dkeyT != undefined) {
+                var kr = f.dkeyT(b)
+                b = kr.b
+                keyV = kr.v
+            } else {
+                keyV = emitStr(b, f.dkey)
+                taken.push(f.dkey)
+            }
+            b = bindPattern(b, f.pat, callExt(b, "js_get", [valueH, keyV]), declExt)
         }
         return b
+    }
+    // '[a, ...rest]': collect the elements from index `start` on into a fresh array and
+    // match the sub-pattern against it. The loop counter lives in a throw-away scope, so
+    // several rest patterns in one function cannot overwrite each other's slot.
+    function emitArrRest(b, subPat, valueH, start, declExt) {
+        var arrV = callExt(b, "js_arr_new", [])
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [saved])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0rsrc"), valueH])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ri"), callExt(b, "js_num_i", [handle(start)])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0rlen"),
+                                callExt(b, "js_tonum", [callExt(b, "js_get", [valueH, emitStr(b, "length")])])])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0ri")])
+        var lH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0rlen")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ri")])
+        var sB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0rsrc")])
+        callExt(bodyB, "js_arr_push", [arrV, callExt(bodyB, "js_get", [sB, iB])])
+        callExt(bodyB, "js_scope_set", [curScopeV, emitStr(bodyB, "0ri"),
+                                   callExt(bodyB, "js_add", [iB, callExt(bodyB, "js_num_i", [handle(1)])])])
+        bodyB.NewBr(headB)
+        curScopeV = saved
+        return bindPattern(exitB, subPat, arrV, declExt)
+    }
+    // '{a, ...rest}': a fresh object with every own key of the source that the pattern did
+    // not name. js_keys yields the keys in insertion order; the loop body skips a key when
+    // it equals one of the statically taken ones (a compile-time chain of comparisons).
+    function emitObjRest(b, name, valueH, taken, declExt) {
+        var restV = callExt(b, "js_obj_new", [])
+        var saved = curScopeV
+        curScopeV = callExt(b, "js_scope_new", [saved])
+        var keysV = callExt(b, "js_keys", [valueH])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ork"), keysV])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0orsrc"), valueH])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ori"), callExt(b, "js_num_i", [handle(0)])])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0orlen"),
+                                callExt(b, "js_tonum", [callExt(b, "js_get", [keysV, emitStr(b, "length")])])])
+        var headB = curF.NewBlock("")
+        var bodyB = curF.NewBlock("")
+        var setB = curF.NewBlock("")
+        var contB = curF.NewBlock("")
+        var exitB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0ori")])
+        var lH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0orlen")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_lt", [iH, lH])), bodyB, exitB)
+        var ksB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ork")])
+        var iB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0ori")])
+        var srcB = callExt(bodyB, "js_scope_get", [curScopeV, emitStr(bodyB, "0orsrc")])
+        var keyB = callExt(bodyB, "js_get", [ksB, iB])
+        var cb = bodyB
+        for (var t = 0; t < taken.length; t++) {
+            var nextB = curF.NewBlock("")
+            cb.NewCondBr(truthy(cb, callExt(cb, "js_seq", [keyB, emitStr(cb, taken[t])])), contB, nextB)
+            cb = nextB
+        }
+        cb.NewBr(setB)
+        callExt(setB, "js_set", [restV, keyB, callExt(setB, "js_get", [srcB, keyB])])
+        setB.NewBr(contB)
+        var iC = callExt(contB, "js_scope_get", [curScopeV, emitStr(contB, "0ori")])
+        callExt(contB, "js_scope_set", [curScopeV, emitStr(contB, "0ori"),
+                                   callExt(contB, "js_add", [iC, callExt(contB, "js_num_i", [handle(1)])])])
+        contB.NewBr(headB)
+        curScopeV = saved
+        callExt(exitB, declExt, [curScopeV, emitStr(exitB, name), restV])
+        return exitB
     }
     // items = [patternNode, initThunk]. Evaluate the initializer once, then bind.
     function makeDestructure(items, pos) {
@@ -1424,9 +3017,18 @@ NotFuncHead = :script(~~
         var init = items[1]
         return function(b) {
             var r = init(b)
-            b = r.b
-            b = bindPatternC(b, pat, r.v)
-            return b
+            return bindPattern(r.b, pat, r.v, "js_scope_decl")
+        }
+    }
+    // A destructuring ASSIGNMENT ('[a, b] = [b, a]', '({x} = o)'): the very same pattern,
+    // but the leaves are ASSIGNED rather than declared. The expression value is the right
+    // hand side, as for every assignment.
+    function makeDestructAssign(items) {
+        var pat = items[0]
+        var valT = items[1]
+        return function(b) {
+            var r = valT(b)
+            return {b: bindPattern(r.b, pat, r.v, "js_scope_set_or_create"), v: r.v}
         }
     }
 
@@ -1463,28 +3065,90 @@ NotFuncHead = :script(~~
     // method call dispatches through js_mcall (which prepends the instance as the
     // receiver and follows __super for inheritance); super.m() goes through js_supercall.
 
-    // The class whose body is being built, captured by super() / super.m() at build time.
+    // The class whose body is being built, captured by super() / super.m() at build time,
+    // and the counter that names an anonymous class expression.
     var curClassName = ""
+    var classSeq = 0
 
+    // A private name '#x' is stored under the mangled key '__#x'. The '__' prefix is the
+    // runtime's marker for an internal slot, which js_keys skips - so a private field stays
+    // out of for-in, Object.keys and object spread, as a real private name does.
+    function privName(name) { return "__#" + name }
+
+    // ----- Class members -----
+    // Every member production pushes ONE descriptor:
+    //   {kind:"ctor",     params, body}
+    //   {kind:"method",   name|nameT, statik, params, body}
+    //   {kind:"field",    name|nameT, statik, init}
+    //   {kind:"accessor", name|nameT, statik, acc:"get"|"set", params, body}
+    //   {kind:"sblock",   body}
+    //   {skip:true}                     a ';' or a member that could not be lowered
+    // A name is either a plain string or, for a computed/literal key, a value thunk
+    // (nameT) that emitClass evaluates once at class definition time.
+    function isStaticMods(mods) {
+        for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { return true } }
+        return false
+    }
+    // A key descriptor as a {b, v} pair in the class-definition block.
+    function emitMemberKey(b, m) {
+        if (m.nameT != undefined) { return m.nameT(b) }
+        return {b: b, v: emitStr(b, m.name)}
+    }
     function makeMethod(items) {
-        var mods = items[0].mods
-        var name = items[1].mname
-        var params = items[2]   // The parameter names array (from ParamList).
-        var body = items[3]
-        var isStatic = false
-        for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
-        return {kind: "method", name: name, statik: isStatic, params: params, body: body}
+        return {kind: "method", name: items[1].mname, statik: isStaticMods(items[0].mods),
+                params: items[2], body: items[3]}
     }
     function makeCtor(items) {
         return {kind: "ctor", params: items[0], body: items[1]}
     }
     function makeField(items) {
+        return {kind: "field", name: items[1].fname, statik: isStaticMods(items[0].mods),
+                init: items.length > 2 ? items[2] : null}
+    }
+    // items = [mods, "get"|"set", key, param..., bodyThunk]: the kind is always second and
+    // the body always last, so the parameters are whatever lies between (none for a getter,
+    // exactly one for a setter).
+    function makeClassAccessor(items) {
+        return {kind: "accessor", acc: items[1], statik: isStaticMods(items[0].mods),
+                name: (typeof items[2] == "string") ? items[2] : undefined,
+                nameT: (typeof items[2] == "string") ? undefined : items[2],
+                params: items.slice(3, items.length - 1), body: items[items.length - 1]}
+    }
+    // items = [mods, {amod}?, {gmod}?, key, params, bodyThunk]. An async method compiles as
+    // an ordinary method; a generator method goes through the generator lowering.
+    function makeClassSpecial(items) {
         var mods = items[0].mods
-        var name = items[1].fname
-        var init = items.length > 2 ? items[2] : null
-        var isStatic = false
-        for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
-        return {kind: "field", name: name, statik: isStatic, init: init}
+        var isGen = false
+        var rest = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i] != undefined && items[i].gmod == true) { isGen = true }
+            else if (items[i] != undefined && items[i].amod == true) { continue }
+            else { rest.push(items[i]) }
+        }
+        return {kind: "method", statik: isStaticMods(mods), gen: isGen,
+                name: (typeof rest[0] == "string") ? rest[0] : undefined,
+                nameT: (typeof rest[0] == "string") ? undefined : rest[0],
+                params: rest[1], body: rest[2]}
+    }
+    // items = [mods, mangledName, params, bodyThunk] for a private METHOD and
+    // [mods, mangledName] / [mods, mangledName, initThunk] for a private FIELD - a method
+    // is the only form that carries both a parameter list and a body, hence the length.
+    function makeClassPrivate(items) {
+        var statik = isStaticMods(items[0].mods)
+        if (items.length > 3) {
+            return {kind: "method", name: items[1], statik: statik, params: items[2], body: items[3]}
+        }
+        return {kind: "field", name: items[1], statik: statik,
+                init: items.length > 2 ? items[2] : null}
+    }
+    // The same shapes with a computed or literal KEY, which arrives as a value thunk.
+    function makeClassComputed(items) {
+        var statik = isStaticMods(items[0].mods)
+        if (items.length > 3) {
+            return {kind: "method", nameT: items[1], statik: statik, params: items[2], body: items[3]}
+        }
+        return {kind: "field", nameT: items[1], statik: statik,
+                init: items.length > 2 ? items[2] : null}
     }
 
     // Emits one method/constructor as jsf_N(env, args). For an instance function args[0]
@@ -1507,10 +3171,7 @@ NotFuncHead = :script(~~
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
         }
-        for (var i = 0; i < params.length; i++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                    callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
-        }
+        b = bindParams(b, params, f.Params[1], off)
         if (implicitSuper != undefined && implicitSuper != null) {
             var supCls = callExt(b, "js_scope_get", [curScopeV, emitStr(b, implicitSuper)])
             var supCtor = callExt(b, "js_get", [supCls, emitStr(b, "__ctor")])
@@ -1538,80 +3199,137 @@ NotFuncHead = :script(~~
         return idx
     }
 
-    // A class declaration: build the descriptor object, bind it in the current scope,
-    // then attach static fields, the constructor and the methods.
+    // ----- The class descriptor -----
+    // Sort the parsed members and remember the name and the parent. Shared by the
+    // declaration and the expression form.
+    function makeClassInfo(items) {
+        var info = {name: "", superName: null, fields: [], statics: [], methods: [],
+                    accessors: [], sblocks: [], ctor: null}
+        for (var i = 0; i < items.length; i++) {
+            var m = items[i]
+            if (m == undefined || m.skip != undefined) { continue }
+            if (m.cname != undefined) { info.name = m.cname; continue }
+            if (m.ext != undefined) { info.superName = m.ext; continue }
+            if (m.kind == "ctor") { info.ctor = m }
+            else if (m.kind == "sblock") { info.sblocks.push(m) }
+            else if (m.kind == "accessor") { info.accessors.push(m) }
+            else if (m.kind == "method") { info.methods.push(m) }
+            else if (m.statik) { info.statics.push(m) }
+            else { info.fields.push(m) }
+        }
+        return info
+    }
+    // Build the descriptor object, bind it under the class name, then attach the static
+    // fields, the constructor, the methods and the accessors, and finally run the static
+    // blocks (with 'this' bound to the class, which is what a static block's this is).
+    function emitClass(b, info) {
+        var clsV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+        callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, info.name)])
+        if (info.superName != null) {
+            callExt(b, "js_set", [clsV, emitStr(b, "__super"),
+                                  callExt(b, "js_scope_get", [curScopeV, emitStr(b, info.superName)])])
+        }
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, info.name), clsV])
+        for (var s = 0; s < info.statics.length; s++) {
+            var kr = emitMemberKey(b, info.statics[s])
+            b = kr.b
+            var sv = hUndef
+            if (info.statics[s].init != null && info.statics[s].init != undefined) {
+                var rs = info.statics[s].init(b)
+                b = rs.b
+                sv = rs.v
+            }
+            callExt(b, "js_set", [clsV, kr.v, sv])
+        }
+        var ctorIdx = anytype
+        if (info.ctor != null) {
+            ctorIdx = emitClassFunc(info.ctor.params, info.ctor.body, true, info.fields, null)
+        } else {
+            ctorIdx = emitClassFunc([], null, true, info.fields, info.superName)
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
+        for (var mi = 0; mi < info.methods.length; mi++) {
+            var mm = info.methods[mi]
+            var mk = emitMemberKey(b, mm)
+            b = mk.b
+            var idx = anytype
+            if (mm.gen == true) {
+                // A generator method: the same body, wrapped so that calling it produces a
+                // generator object instead of running it.
+                idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
+                callExt(b, "js_set", [clsV, mk.v,
+                    callExt(b, "js_genfn", [callExt(b, "js_closure", [handle(idx), curScopeV])])])
+                continue
+            }
+            idx = emitClassFunc(mm.params, mm.body, !mm.statik, null, null)
+            callExt(b, "js_set", [clsV, mk.v, callExt(b, "js_closure", [handle(idx), curScopeV])])
+        }
+        for (var ai = 0; ai < info.accessors.length; ai++) {
+            var aa = info.accessors[ai]
+            var ak = emitMemberKey(b, aa)
+            b = ak.b
+            // An accessor is invoked with the object as the RECEIVER (js_get/js_set hand it
+            // to the getter/setter as `this`), not with it prepended to the arguments the
+            // way a method call does, so it is emitted as an ordinary function: `this`
+            // comes from js_this and the setter's value is args[0].
+            var aidx = emitFunction(aa.params, aa.body, false, false)
+            var aclo = callExt(b, "js_closure", [handle(aidx), curScopeV])
+            var gV = (aa.acc == "get") ? aclo : hUndef
+            var sV = (aa.acc == "set") ? aclo : hUndef
+            callExt(b, "js_defprop", [clsV, ak.v, gV, sV])
+        }
+        for (var bi = 0; bi < info.sblocks.length; bi++) {
+            var bidx = emitFunction([], info.sblocks[bi].body, false, false)
+            callExt(b, "js_call", [callExt(b, "js_closure", [handle(bidx), curScopeV]), clsV,
+                                   callExt(b, "js_arr_new", [])])
+        }
+        return {b: b, v: clsV}
+    }
     function makeClassStmt(items) {
-        var name = items[0].cname
-        var superName = null
-        var members = []
-        for (var i = 1; i < items.length; i++) {
-            if (items[i] == undefined) { continue }
-            if (items[i].ext != undefined) { superName = items[i].ext }
-            else if (items[i].skip != undefined) { continue }
-            else { members.push(items[i]) }
-        }
-        var fields = []
-        var methods = []
-        var statics = []
-        var ctorInfo = null
-        for (var j = 0; j < members.length; j++) {
-            var mm = members[j]
-            if (mm.kind == "field") { if (mm.statik) { statics.push(mm) } else { fields.push(mm) } }
-            else if (mm.kind == "method") { methods.push(mm) }
-            else if (mm.kind == "ctor") { ctorInfo = mm }
-        }
-        return function(b) {
-            var clsV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
-            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
-            if (superName != null) {
-                callExt(b, "js_set", [clsV, emitStr(b, "__super"),
-                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
-            }
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
-            for (var s = 0; s < statics.length; s++) {
-                var sv = hUndef
-                if (statics[s].init != null && statics[s].init != undefined) {
-                    var rs = statics[s].init(b)
-                    b = rs.b
-                    sv = rs.v
-                }
-                callExt(b, "js_set", [clsV, emitStr(b, statics[s].name), sv])
-            }
-            var ctorIdx
-            if (ctorInfo != null) {
-                ctorIdx = emitClassFunc(ctorInfo.params, ctorInfo.body, true, fields, null)
-            } else {
-                ctorIdx = emitClassFunc([], null, true, fields, superName)
-            }
-            callExt(b, "js_set", [clsV, emitStr(b, "__ctor"), callExt(b, "js_closure", [handle(ctorIdx), curScopeV])])
-            for (var mi = 0; mi < methods.length; mi++) {
-                var idx = emitClassFunc(methods[mi].params, methods[mi].body, !methods[mi].statik, null, null)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[mi].name), callExt(b, "js_closure", [handle(idx), curScopeV])])
-            }
-            return b
-        }
+        var info = makeClassInfo(items)
+        return function(b) { return emitClass(b, info).b }
+    }
+    function makeClassExpr(items) {
+        var info = makeClassInfo(items)
+        return function(b) { return emitClass(b, info) }
+    }
+    // 'new.target'.
+    function makeNewTarget() {
+        return function(b) { return {b: b, v: callExt(b, "js_newtarget", [])} }
     }
 
-    // new C(args): build the instance, attach __class, run the constructor as
-    // __ctor(instance, args...).
+    // 'new C(args)'. C is either a CLASS descriptor - build the instance, attach __class
+    // and run __ctor(instance, args...) - or an ordinary FUNCTION used as a constructor
+    // ('function Ctor(n) { this.n = n }'), where the fresh object is simply the receiver
+    // of a normal call. Which one it is can only be decided at run time, so both are
+    // emitted and a typeof test picks: a class descriptor is an object, a function is not.
     function makeNew(items) {
         var clsName = items[0].cls
         var argThunks = items.slice(1)
         return function(b) {
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, clsName)])
-            var objV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
             var argsV = callExt(b, "js_arr_new", [])
-            callExt(b, "js_arr_push", [argsV, objV])
-            for (var i = 0; i < argThunks.length; i++) {
-                var r = argThunks[i](b)
-                b = r.b
-                callExt(b, "js_arr_push", [argsV, r.v])
-            }
-            var ctorV = callExt(b, "js_get", [clsV, emitStr(b, "__ctor")])
-            callExt(b, "js_call", [ctorV, hUndef, argsV])
-            return {b: b, v: objV}
+            b = pushArgs(b, argsV, argThunks)
+            var isFn = truthy(b, callExt(b, "js_seq", [callExt(b, "js_typeof", [clsV]), emitStr(b, "function")]))
+            var fnB = curF.NewBlock("")
+            var clsB = curF.NewBlock("")
+            var mergeB = curF.NewBlock("")
+            b.NewCondBr(isFn, fnB, clsB)
+            // The function form: 'this' is the new object, the arguments are unchanged.
+            var oF = callExt(fnB, "js_obj_new", [])
+            callExt(fnB, "js_call_new", [clsV, oF, argsV])
+            fnB.NewBr(mergeB)
+            // The class form: the constructor convention prepends the instance.
+            var oC = callExt(clsB, "js_obj_new", [])
+            callExt(clsB, "js_set", [oC, emitStr(clsB, "__class"), clsV])
+            var cargs = callExt(clsB, "js_arr_new", [])
+            callExt(clsB, "js_arr_push", [cargs, oC])
+            var cb = emitSpreadInto(clsB, cargs, function(bb) { return {b: bb, v: argsV} })
+            var ctorV = callExt(cb, "js_get", [clsV, emitStr(cb, "__ctor")])
+            callExt(cb, "js_call", [ctorV, hUndef, cargs])
+            cb.NewBr(mergeB)
+            return {b: mergeB, v: mergeB.NewPhi([llvm.ir.NewIncoming(oF, fnB), llvm.ir.NewIncoming(oC, cb)])}
         }
     }
 
@@ -1628,11 +3346,7 @@ NotFuncHead = :script(~~
                 var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, thisV])
-                for (var i = 0; i < argThunks.length; i++) {
-                    var r = argThunks[i](b)
-                    b = r.b
-                    callExt(b, "js_arr_push", [argsV, r.v])
-                }
+                b = pushArgs(b, argsV, argThunks)
                 callExt(b, "js_call", [supCtor, hUndef, argsV])
                 return {b: b, v: hUndef}
             }
@@ -1642,16 +3356,91 @@ NotFuncHead = :script(~~
             var supV = callExt(b, "js_get", [clsV, emitStr(b, "__super")])
             var thisV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "this")])
             var argsV = callExt(b, "js_arr_new", [])
-            for (var i = 0; i < argThunks.length; i++) {
-                var r = argThunks[i](b)
-                b = r.b
-                callExt(b, "js_arr_push", [argsV, r.v])
-            }
+            b = pushArgs(b, argsV, argThunks)
             return {b: b, v: callExt(b, "js_supercall", [supV, thisV, emitStr(b, name), argsV])}
         }
     }
 
+    // ----- Labeled statements -----
+    // labelStack holds one entry per enclosing label: {name, brk, cont}. 'break L'
+    // branches to brk (the block right after the labeled statement) and 'continue L' to
+    // cont (the post block of the labeled LOOP; a labeled non-loop has none, and
+    // 'continue' on it is the syntax error it is in JavaScript). pendingLabel carries the
+    // name from the LabeledLoop production down into the loop builder: every loop thunk
+    // takes it at entry (takeLabel, which also CLEARS it, so an unlabeled loop nested in a
+    // labeled block cannot steal the label) and registers its own continue target.
+    var labelStack = []
+    var pendingLabel = ""
+    function takeLabel() { var l = pendingLabel; pendingLabel = ""; return l }
+    function bindLabelCont(name, contB) {
+        for (var i = labelStack.length - 1; i >= 0; i--) {
+            if (labelStack[i].name == name) { labelStack[i].cont = contB; return }
+        }
+    }
+    function findLabel(name) {
+        for (var i = labelStack.length - 1; i >= 0; i--) {
+            if (labelStack[i].name == name) { return labelStack[i] }
+        }
+        println("js compiler error: undefined label '" + name + "'")
+        exit(1)
+    }
+    function makeLabeledStmt(t, name) {
+        return function(b) {
+            var exitB = curF.NewBlock("")
+            labelStack.push({name: name, brk: exitB, cont: null})
+            var eb = t(b)
+            labelStack.pop()
+            eb.NewBr(exitB)
+            return exitB
+        }
+    }
+    function makeLabeledLoop(t, name) {
+        var inner = makeLabeledStmt(t, name)
+        return function(b) {
+            pendingLabel = name
+            return inner(b)
+        }
+    }
+    // items = [] (a plain break/continue) or [labelName].
+    function makeBreakStmt(items) {
+        if (items.length == 0) return makeBreak()
+        var name = items[0]
+        return function(b) { b.NewBr(findLabel(name).brk); return deadBlock() }
+    }
+    function makeContinueStmt(items) {
+        if (items.length == 0) return makeContinue()
+        var name = items[0]
+        return function(b) {
+            var l = findLabel(name)
+            if (l.cont == null) {
+                println("js compiler error: 'continue " + name + "' does not label a loop")
+                exit(1)
+            }
+            b.NewBr(l.cont)
+            return deadBlock()
+        }
+    }
+
     // ----- Statement thunks: function(block) -> block to continue in -----
+
+    // The shared makeWhile with the label hook (see labelStack above); otherwise
+    // byte-identical to lib/compile-core.js.
+    makeWhile = function(bodyT, condT) {
+        return function(b) {
+            var lbl = takeLabel()
+            var headB = curF.NewBlock("")
+            var bodyB = curF.NewBlock("")
+            var exitB = curF.NewBlock("")
+            b.NewBr(headB)
+            var r = condT(headB)
+            r.b.NewCondBr(truthy(r.b, r.v), bodyB, exitB)
+            loopStack.push({cont: headB, brk: exitB})
+            if (lbl != "") { bindLabelCont(lbl, headB) }
+            bodyT(bodyB).NewBr(headB)
+            loopStack.pop()
+            return exitB
+        }
+    }
 
     // An expression in statement position: evaluate the value and record it as the
     // program completion value (what a goja Run() would return; js_getret reads it).
@@ -1685,11 +3474,13 @@ NotFuncHead = :script(~~
     // Note: the childs lie on the stack in source order, so pop() delivers them reversed.
     function makeDo(condT, bodyT) {
         return function(b) {
+            var lbl = takeLabel()
             var bodyB = curF.NewBlock("")
             var condB = curF.NewBlock("")
             var exitB = curF.NewBlock("")
             b.NewBr(bodyB)
             loopStack.push({cont: condB, brk: exitB})
+            if (lbl != "") { bindLabelCont(lbl, condB) }
             bodyT(bodyB).NewBr(condB)
             loopStack.pop()
             var r = condT(condB)
@@ -1707,6 +3498,7 @@ NotFuncHead = :script(~~
             if (items[i].k == "post") post = items[i].t
         }
         return function(b) {
+            var lbl = takeLabel()
             var saved = curScopeV
             curScopeV = callExt(b, "js_scope_new", [curScopeV]) // The for header is its own scope.
             if (init != null) b = init(b)
@@ -1722,6 +3514,7 @@ NotFuncHead = :script(~~
                 headB.NewBr(bodyB)
             }
             loopStack.push({cont: postB, brk: exitB})
+            if (lbl != "") { bindLabelCont(lbl, postB) }
             bodyT(bodyB).NewBr(postB)
             loopStack.pop()
             var pb = postB
@@ -1832,6 +3625,10 @@ NotFuncHead = :script(~~
         var b = f.NewBlock("entry")
         curScopeV = f.Params[0]
         callExt(b, "js_setret", [hUndef]) // A program without expression statements completes with undefined.
+        // The top level 'this'. A sloppy script's would be the global object, which this
+        // runtime has no value for, so it is undefined - and declaring it here is what
+        // keeps a top level 'this' from raising "variable not defined".
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "this"), hUndef])
         b = emitImported(b)
         b = makeSeq(items)(b)
         b.NewRet(callExt(b, "js_getret", []))

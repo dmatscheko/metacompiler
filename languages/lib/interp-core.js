@@ -593,3 +593,62 @@ function dictSet(d, k, v) {
         ix.n = d.keys.length
     }
 }
+
+// ----- Typed catch clauses (shared) -----
+// excTry above always runs the FIRST catch clause: the original interpreters had no
+// runtime type test, so a `catch (e: IOException)` and a `catch (e: Exception)` could
+// not be told apart. excTryTyped is the same protocol with that one difference - a
+// clause may carry the DECLARED type of its catch parameter as `catchtype`, and it
+// only runs when core.excMatches(thrownValue, catchtype) accepts it. Every language
+// here whose grammar spells that type out - Java, Kotlin, C#, Swift, Dart, PHP,
+// Python - can move its try/catch production onto this function by recording the type
+// name in the clause; the rest of the shape is unchanged, so excCatch's existing
+// {catchbody, catchname} entries keep working.
+//
+// A clause with no catchtype catches everything (Kotlin's `catch (e)`, Python's bare
+// `except:`), the clauses are tried in source order and the first match wins, an
+// unmatched exception is rethrown so an outer try can still see it, and `finally`
+// always runs and its own control-flow signal overrides - exactly as in excTry. A
+// language that has not set core.excMatches gets first-clause-wins behavior back, so
+// adopting this rule is safe before the predicate exists.
+//
+// items = [{trybody}, {catchbody, catchname, catchtype?}*, {finbody}?].
+function excTryTyped(items) {
+    var tryT = anytype, finallyT = anytype
+    var clauses = []
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].trybody != undefined) { tryT = items[i].trybody }
+        else if (items[i].catchbody != undefined) { clauses.push(items[i]) }
+        else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+    }
+    return function() {
+        var savedChain = scopes.slice()
+        var box = {sig: undefined}
+        try {
+            box.sig = tryT()
+        } catch (e) {
+            scopes = savedChain.slice()
+            var hit = null
+            if (excIsUser(e)) {
+                for (var k = 0; k < clauses.length; k++) {
+                    if (clauses[k].catchtype == undefined || core.excMatches == null
+                        || core.excMatches(e.v, clauses[k].catchtype)) { hit = clauses[k]; break }
+                }
+            }
+            if (hit == null) { throw e }
+            scopes.push({})
+            if (hit.catchname != undefined) { declVar(hit.catchname, e.v) }
+            box.sig = hit.catchbody()
+            scopes.pop()
+        } finally {
+            scopes = savedChain.slice()
+            if (finallyT != undefined) {
+                var fr = finallyT()
+                // Returning from the host finally overrides the try/catch completion
+                // AND cancels a rethrown exception, like in JS.
+                if (fr != undefined) { return fr }
+            }
+        }
+        return box.sig
+    }
+}

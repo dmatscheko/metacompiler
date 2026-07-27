@@ -11,3 +11,12 @@ KwEnd = :script(~~
             : undefined
     })()
 ~~) ;
+
+// A backtick-quoted identifier: `class`, `1M`, `one two`. Several JVM languages
+// (Kotlin, Groovy, Scala, F#) spell a name that clashes with a keyword - or that is
+// not a legal bare identifier at all - this way. OPT-IN, like the extended number
+// literals: nothing references it unless a grammar wires it into its own name
+// production, and it must come BEFORE Id there (PEG first-match). The content is any
+// character except the closing backtick and a line break.
+IdBacktick  = "`" :whitespace() IdBtChar { IdBtChar } "`" :whitespace(Whitespace) ;
+IdBtChar    = "\x20"..."\x5f" | "\x61"..."\U0010ffff" ;

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"os"
 	"reflect"
 	"strconv"
@@ -324,6 +325,173 @@ type jsrt struct {
 	traceDepth int
 	traceNames map[*jsClosure]string // Under which name a closure was stored.
 	curPos     int                   // Source offset of the executing statement (js_srcpos), -1 = unknown.
+
+	// thisStack is the dynamic `this` of the compiled closures currently on the
+	// call stack: callInner pushes the receiver a call was made with and pops it
+	// again, and js_this reads the top. A compiled function that mentions `this`
+	// binds it from there at entry; one that does not pays nothing. js_try
+	// truncates the stack back to its own depth when a throw unwinds past a call.
+	thisStack []interface{}
+
+	// newTargetStack is the `new.target` of the compiled closures on the call
+	// stack, filled the same way as thisStack: js_call_new arms pendingNewTarget
+	// for the ONE call that follows, callInner consumes it, and js_newtarget reads
+	// the top. An ordinary call pushes nil, so new.target is undefined in it.
+	newTargetStack   []interface{}
+	pendingNewTarget interface{}
+
+	// trackThis is set by attach when the module actually declares js_this or
+	// js_newtarget, i.e. when the grammar that produced it has a dynamic `this`.
+	// Only then does callInner maintain the two per-call stacks below; for every
+	// other grammar (MetaJS, Java, Kotlin, Go, Python, ...) a call costs exactly
+	// what it cost before: one boolean test.
+	trackThis bool
+
+	// accessorCount counts the getter/setter properties js_defprop has defined in
+	// this runtime. While it is zero - which it stays for every grammar that never
+	// emits js_defprop, and for every JS program without an accessor - getMember
+	// and setMember take their original path and never look for an accessor.
+	accessorCount int
+
+	// hasBigInt says whether a BigInt value was ever created in this runtime.
+	// BigInt is the only value type the arithmetic externals cannot handle as a
+	// double, so while this is false they take exactly their original path and the
+	// arbitrary-precision check costs one boolean test - nothing for the grammars
+	// that have no BigInt literal at all.
+	hasBigInt bool
+
+	// pyTypes memoizes the synthetic class object type() hands out for a BUILTIN
+	// Python type, so `type(1) is type(2)` holds; pyFuncNames remembers the name a
+	// `def` bound a closure under, which is what f.__name__ answers. Both stay nil
+	// for every grammar that never compiles Python.
+	pyTypes     map[string]*jsObject
+	pyFuncNames map[interface{}]string
+	pySigs      map[interface{}]*pySig
+	pyEllipsis  *jsObject
+
+	// curGen is the generator whose body is currently running, so js_yield knows
+	// which one to suspend. Only one goroutine ever runs (the handshake below is
+	// strictly alternating), so a single field is enough and step() saves and
+	// restores it around a resume, which makes generators nest.
+	curGen *jsGenerator
+}
+
+// ----------------------------------------------------------------------------
+// Generators
+//
+// A generator body is compiled as an ordinary IR function; what makes it a
+// generator is that calling it does not RUN it (js_genfn wraps the closure) but
+// creates a jsGenerator, whose body then runs on its own goroutine. next() and
+// yield are a strictly alternating handshake over two unbuffered channels, so at
+// any moment exactly one of the two goroutines runs and the shared runtime state
+// needs no locking - only a context switch of the per-call stacks (thisStack,
+// newTargetStack), which step() does around every resume.
+//
+// A generator that is never exhausted leaves its goroutine parked on <-resume
+// for the rest of the process; nothing else keeps it alive, so it costs one
+// blocked goroutine and is collected when the program ends.
+type jsGenerator struct {
+	fn      interface{}
+	args    []interface{}
+	started bool
+	done    bool
+
+	resume chan interface{} // next(v) -> the body
+	yields chan *genStep    // yield v / return -> next()
+
+	// The call stacks of the SUSPENDED body, swapped in while it runs.
+	savedThis []interface{}
+	savedNT   []interface{}
+}
+
+// genStep is one handshake result: a yielded value, the return value (done), or a
+// panic (a throw or a runtime error) that has to be re-raised in the resumer.
+type genStep struct {
+	value    interface{}
+	done     bool
+	panicVal interface{}
+}
+
+// step runs the body until its next yield or its return and answers the
+// {value, done} object of the iterator protocol.
+func (g *jsGenerator) step(rt *jsrt, sent interface{}) interface{} {
+	res := newJSObject()
+	if g.done {
+		res.set("value", jsUndef)
+		res.set("done", true)
+		return res
+	}
+	if !g.started {
+		g.started = true
+		g.resume = make(chan interface{})
+		g.yields = make(chan *genStep)
+		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					g.yields <- &genStep{done: true, panicVal: p}
+				}
+			}()
+			<-g.resume // The body starts only on the first next().
+			ret := rt.call(g.fn, jsUndef, g.args)
+			g.yields <- &genStep{value: ret, done: true}
+		}()
+	}
+	savedThis, savedNT := rt.thisStack, rt.newTargetStack
+	rt.thisStack, rt.newTargetStack = g.savedThis, g.savedNT
+	prevGen := rt.curGen
+	rt.curGen = g
+	g.resume <- sent
+	st := <-g.yields
+	rt.curGen = prevGen
+	g.savedThis, g.savedNT = rt.thisStack, rt.newTargetStack
+	rt.thisStack, rt.newTargetStack = savedThis, savedNT
+	if st.panicVal != nil {
+		g.done = true
+		panic(st.panicVal)
+	}
+	if st.done {
+		g.done = true
+	}
+	res.set("value", st.value)
+	res.set("done", st.done)
+	return res
+}
+
+// finish abandons the body without resuming it (generator.return(v)).
+func (g *jsGenerator) finish(v interface{}) interface{} {
+	g.done = true
+	res := newJSObject()
+	res.set("value", v)
+	res.set("done", true)
+	return res
+}
+
+// drain materializes the remaining values of a generator, which is how a for-of
+// loop over one gets its sequence (see js_iterable).
+func (g *jsGenerator) drain(rt *jsrt) *jsArray {
+	out := &jsArray{}
+	for {
+		st, ok := g.step(rt, jsUndef).(*jsObject)
+		if !ok {
+			break
+		}
+		if d, _ := st.props["done"].(bool); d {
+			break
+		}
+		out.elems = append(out.elems, st.props["value"])
+	}
+	return out
+}
+
+// jsAccessor is a getter/setter property: the value stored under a key when the
+// property was defined with js_defprop (an object literal's `get x() {}` / `set
+// x(v) {}`, or the accessor member of a class). getMember calls the getter with
+// the object as the receiver instead of returning the record, and setMember calls
+// the setter instead of overwriting it - the record itself never escapes to
+// compiled code.
+type jsAccessor struct {
+	get interface{}
+	set interface{}
 }
 
 // noteGet records a member lookup cheaply; failure messages format them lazily.
@@ -370,6 +538,14 @@ func (rt *jsrt) attach(m *ir.Module) *machine {
 	ma := newMachine(m, "")
 	ma.externs = rt.externs(ma)
 	ma.bindExterns() // Resolve every declared function to its handler now, not per call.
+	// A module declares only the externs it uses, so its function list says whether
+	// this program can ever ask for a dynamic `this` (see trackThis).
+	for _, f := range m.Funcs {
+		if f.GlobalIdent.Name() == "js_this" || f.GlobalIdent.Name() == "js_newtarget" {
+			rt.trackThis = true
+			break
+		}
+	}
 	ma.relNew, ma.relThru = jsReclaimable, jsThroughArgs
 	ma.release, ma.pin = rt.releaseHandle, rt.pinArray
 	return ma
@@ -645,6 +821,8 @@ func (rt *jsrt) truthy(v interface{}) bool {
 		return t != 0 && t == t
 	case string:
 		return len(t) > 0
+	case *jsBigInt:
+		return t.v.Sign() != 0
 	default:
 		return true
 	}
@@ -652,6 +830,8 @@ func (rt *jsrt) truthy(v interface{}) bool {
 
 func (rt *jsrt) toNumber(v interface{}) float64 {
 	switch t := v.(type) {
+	case jsChar: // Kotlin's Char does arithmetic and compares as its code.
+		return float64(t.code)
 	case jsUndefT:
 		return math.NaN()
 	case jsNullT:
@@ -715,6 +895,8 @@ func jsNumString(f float64) string {
 
 func (rt *jsrt) toString(v interface{}) string {
 	switch t := v.(type) {
+	case jsChar: // Kotlin's Char renders as its glyph, not as its code.
+		return string(rune(t.code))
 	case jsUndefT:
 		return "undefined"
 	case jsNullT:
@@ -740,6 +922,8 @@ func (rt *jsrt) toString(v interface{}) string {
 			parts[i] = rt.toString(e)
 		}
 		return strJoin(parts, ",")
+	case *jsBigInt:
+		return t.v.String()
 	case *jsObject:
 		return "[object Object]"
 	case *jsClosure, *hostFunc, *boundMethod:
@@ -754,6 +938,8 @@ func (rt *jsrt) toString(v interface{}) string {
 // goja, so fmt verbs like %d and %c work.
 func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 	switch t := v.(type) {
+	case jsChar: // print/println show the glyph.
+		return string(rune(t.code))
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -808,6 +994,11 @@ func (rt *jsrt) jsAdd(a, b interface{}) interface{} {
 	if _, ok := b.(*jsObject); ok {
 		return strConcat(rt.toString(a), rt.toString(b))
 	}
+	if rt.hasBigInt {
+		if r, ok := bigArith('+', a, b); ok {
+			return r
+		}
+	}
 	return rt.toNumber(a) + rt.toNumber(b)
 }
 
@@ -820,6 +1011,15 @@ func isUndefOrNull(v interface{}) bool {
 }
 
 func (rt *jsrt) strictEq(a, b interface{}) bool {
+	// Kotlin's Char: unbox both sides first, so a Char equals a Char of the same code
+	// and equals that code as an Int (the interpreter's kEq does exactly this).
+	if av, isChar := charCode(a); isChar {
+		bv, _ := charCode(b)
+		return rt.strictEq(av, bv)
+	}
+	if bv, isChar := charCode(b); isChar {
+		return rt.strictEq(a, bv)
+	}
 	switch at := a.(type) {
 	case jsUndefT:
 		_, ok := b.(jsUndefT)
@@ -836,6 +1036,9 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 	case string:
 		bt, ok := b.(string)
 		return ok && at == bt
+	case *jsBigInt:
+		bt, ok := b.(*jsBigInt)
+		return ok && at.v.Cmp(bt.v) == 0
 	default:
 		// Objects, arrays, closures and Go natives compare by identity.
 		return identityEq(a, b)
@@ -866,6 +1069,13 @@ func identityEq(a, b interface{}) bool {
 }
 
 func (rt *jsrt) looseEq(a, b interface{}) bool {
+	if av, isChar := charCode(a); isChar {
+		bv, _ := charCode(b)
+		return rt.looseEq(av, bv)
+	}
+	if bv, isChar := charCode(b); isChar {
+		return rt.looseEq(a, bv)
+	}
 	if isUndefOrNull(a) && isUndefOrNull(b) {
 		return true
 	}
@@ -919,6 +1129,11 @@ func (rt *jsrt) jsCompare(a, b interface{}) int {
 			return 0
 		}
 	}
+	if rt.hasBigInt {
+		if x, y, both := bigPair(a, b); both {
+			return x.Cmp(y)
+		}
+	}
 	an := rt.toNumber(a)
 	bn := rt.toNumber(b)
 	if an != an || bn != bn {
@@ -936,6 +1151,8 @@ func (rt *jsrt) jsCompare(a, b interface{}) int {
 
 func (rt *jsrt) typeOf(v interface{}) string {
 	switch v.(type) {
+	case jsChar:
+		return "char"
 	case jsUndefT:
 		return "undefined"
 	case jsNullT:
@@ -948,7 +1165,9 @@ func (rt *jsrt) typeOf(v interface{}) string {
 		return "string"
 	case *jsClosure, *hostFunc, *boundMethod:
 		return "function"
-	case *jsObject, *jsArray:
+	case *jsBigInt:
+		return "bigint"
+	case *jsObject, *jsArray, *jsGenerator:
 		return "object"
 	default:
 		if reflect.ValueOf(v).Kind() == reflect.Func {
@@ -975,6 +1194,13 @@ func (rt *jsrt) scopeOf(h uint64) *jsScope {
 func (rt *jsrt) scopeGet(sc *jsScope, name string) interface{} {
 	for s := sc; s != nil; s = s.parent {
 		if v, ok := s.get(name); ok {
+			// Python's `del x` leaves the slot behind holding this sentinel, so a
+			// later read raises UnboundLocalError - a catchable exception - instead
+			// of resolving to an enclosing binding of the same name.
+			if v == pyDeleted {
+				panic(&jsThrown{value: rt.pyExcInstance("UnboundLocalError",
+					"local variable '"+name+"' referenced before assignment")})
+			}
 			if rt.traced {
 				rt.trVar("read", name, v)
 			}
@@ -1140,8 +1366,30 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 	}
 	switch o := obj.(type) {
 	case *jsObject:
-		if v, ok := o.props[rt.toString(key)]; ok {
+		name := rt.toString(key)
+		v, ok := o.props[name]
+		if rt.accessorCount == 0 { // No accessor exists at all: the original path.
+			if ok {
+				return v
+			}
+			return jsUndef
+		}
+		if ok {
+			if acc, isAcc := v.(*jsAccessor); isAcc {
+				if acc.get == nil {
+					return jsUndef
+				}
+				return rt.call(acc.get, o, nil)
+			}
 			return v
+		}
+		// An instance does not carry its class's accessors; they live on the
+		// __class descriptor (and its __super chain), like the methods do.
+		if acc := rt.findClassAccessor(o, name); acc != nil {
+			if acc.get == nil {
+				return jsUndef
+			}
+			return rt.call(acc.get, o, nil)
 		}
 		return jsUndef
 	case *jsArray:
@@ -1159,6 +1407,18 @@ func (rt *jsrt) getMember(obj interface{}, key interface{}) interface{} {
 		idx := rt.toNumber(key)
 		if idx == math.Trunc(idx) && idx >= 0 && int(idx) < len(o.elems) {
 			return o.elems[int(idx)]
+		}
+		return jsUndef
+	case *jsGenerator:
+		switch rt.toString(key) {
+		case "next":
+			return jsHostFunc("next", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return o.step(rt, argAt(args, 0))
+			})
+		case "return":
+			return jsHostFunc("return", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return o.finish(argAt(args, 0))
+			})
 		}
 		return jsUndef
 	case string:
@@ -1270,7 +1530,23 @@ func (rt *jsrt) setMember(obj interface{}, key interface{}, val interface{}) {
 	}
 	switch o := obj.(type) {
 	case *jsObject:
-		o.set(rt.toString(key), val)
+		name := rt.toString(key)
+		if rt.accessorCount > 0 { // Skipped entirely while no accessor exists.
+			if v, ok := o.props[name]; ok {
+				if acc, isAcc := v.(*jsAccessor); isAcc {
+					if acc.set != nil {
+						rt.call(acc.set, o, []interface{}{val})
+					}
+					return
+				}
+			} else if acc := rt.findClassAccessor(o, name); acc != nil {
+				if acc.set != nil {
+					rt.call(acc.set, o, []interface{}{val})
+				}
+				return
+			}
+		}
+		o.set(name, val)
 	case *jsArray:
 		if !maybeNumeric(key) {
 			rt.fail("invalid array index %s", rt.toString(key))
@@ -1360,7 +1636,16 @@ func (rt *jsrt) callInner(callee interface{}, this interface{}, args []interface
 		// parameters into the callee's frame before anything can run, so a
 		// nested call may overwrite the buffer afterwards.
 		rt.callBuf[0], rt.callBuf[1] = c.env, argsH
+		if !rt.trackThis {
+			return rt.unwrap(c.ma.call(c.fn, rt.callBuf[:]))
+		}
+		rt.thisStack = append(rt.thisStack, this)
+		nt := rt.pendingNewTarget
+		rt.pendingNewTarget = nil
+		rt.newTargetStack = append(rt.newTargetStack, nt)
 		ret := c.ma.call(c.fn, rt.callBuf[:])
+		rt.thisStack = rt.thisStack[:len(rt.thisStack)-1]
+		rt.newTargetStack = rt.newTargetStack[:len(rt.newTargetStack)-1]
 		return rt.unwrap(ret)
 	case *hostFunc:
 		return c.fn(rt, rt.wrap(this), args)
@@ -1718,6 +2003,109 @@ func (rt *jsrt) javaString(v interface{}) string {
 		return "null"
 	}
 	return rt.toString(v)
+}
+
+// findClassAccessor looks a getter/setter up on the __class descriptor chain of an
+// instance. Accessors are stored on the class, not on the instance, so an instance
+// read/write has to follow the same single-inheritance chain that memberCall walks
+// for methods. Returns nil when the name is not an accessor anywhere on the chain.
+func (rt *jsrt) findClassAccessor(o *jsObject, name string) *jsAccessor {
+	cls, ok := o.props["__class"]
+	if !ok {
+		return nil
+	}
+	for cls != nil {
+		clsObj, isObj := cls.(*jsObject)
+		if !isObj {
+			return nil
+		}
+		if v, found := clsObj.props[name]; found {
+			if acc, isAcc := v.(*jsAccessor); isAcc {
+				return acc
+			}
+			return nil
+		}
+		cls = clsObj.props["__super"]
+	}
+	return nil
+}
+
+// jsBigInt is the ECMAScript BigInt type: an arbitrary precision integer, a value
+// type of its own (typeof is "bigint") that never silently mixes with the double
+// numbers. The runtime models the type, its literals, its printing, its equality
+// and comparison, and the arithmetic BETWEEN two BigInts; a BigInt that meets a
+// double in an arithmetic operator is converted to a double instead of raising the
+// TypeError the spec asks for, which is the one simplification here.
+type jsBigInt struct {
+	v *big.Int
+}
+
+// jsChar is Kotlin's Char: neither an Int nor a one-character String. It RENDERS as
+// its glyph (in a string template, in println, in string concatenation) but COMPARES
+// and does ARITHMETIC on its code, so `'A' + 1 == 'B'`, `'z' > 'a'` and `"" + 'b' ==
+// "b"` all hold at once - which no single unboxed representation can give. The
+// kotlin-interpreter grammar models the same value as a boxed {__char: code}; the
+// semantics here are matched to it so the two engines agree.
+//
+// Only the Kotlin compiler grammar ever creates one (the js_char / js_kindex externs
+// below), so every branch added for this type is unreachable from MetaJS, JS, Java,
+// Go, Python and the rest: their behaviour is untouched.
+type jsChar struct {
+	code int32
+}
+
+// charCode unboxes a Char to its code and leaves every other value alone, so the
+// arithmetic and comparison paths can treat a Char as its code without special cases.
+func charCode(v interface{}) (interface{}, bool) {
+	if c, ok := v.(jsChar); ok {
+		return float64(c.code), true
+	}
+	return v, false
+}
+
+// bigPair answers the two operands as big.Ints when BOTH are BigInts, which is when
+// an arithmetic operator has to stay in arbitrary precision.
+func bigPair(a, b interface{}) (*big.Int, *big.Int, bool) {
+	ab, aok := a.(*jsBigInt)
+	if !aok {
+		return nil, nil, false
+	}
+	bb, bok := b.(*jsBigInt)
+	if !bok {
+		return nil, nil, false
+	}
+	return ab.v, bb.v, true
+}
+
+// bigArith is the BigInt path of the binary arithmetic externals. ok is false when
+// the operands are not both BigInts, and the caller falls back to double arithmetic.
+func bigArith(op byte, a, b interface{}) (res interface{}, ok bool) {
+	x, y, both := bigPair(a, b)
+	if !both {
+		return nil, false
+	}
+	out := new(big.Int)
+	switch op {
+	case '+':
+		out.Add(x, y)
+	case '-':
+		out.Sub(x, y)
+	case '*':
+		out.Mul(x, y)
+	case '/':
+		if y.Sign() == 0 {
+			return nil, false // Let the double path produce the usual error/Inf.
+		}
+		out.Quo(x, y) // BigInt division truncates towards zero.
+	case '%':
+		if y.Sign() == 0 {
+			return nil, false
+		}
+		out.Rem(x, y)
+	default:
+		return nil, false
+	}
+	return &jsBigInt{v: out}, true
 }
 
 // memberCall implements the method call convention that the class based
@@ -2634,6 +3022,20 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 							}
 							return w(v)
 						}
+					} else if !isUndefOrNull(t) {
+						// A receiver that is NOT an object still has members: a String
+						// has length, an Array has length and its indexes. Inside an
+						// extension function or property (fun String.f() = length) the
+						// unqualified name has to reach them, exactly as it reaches an
+						// object's properties above. getMember answers undefined for a
+						// name it does not know, which falls through to the failure
+						// below - so this only ever turns a hard error into a read.
+						if v := rt.getMember(t, name); !isUndefOrNull(v) {
+							if rt.traced {
+								rt.trVar("read", name, v)
+							}
+							return w(v)
+						}
 					}
 					break
 				}
@@ -2880,10 +3282,38 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return rt.wrapNum(float64(rt.toInt32(u(a[0])) ^ rt.toInt32(u(a[1]))))
 		},
-		"js_sub": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) - rt.toNumber(u(a[1]))) },
-		"js_mul": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) * rt.toNumber(u(a[1]))) },
-		"js_div": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0])) / rt.toNumber(u(a[1]))) },
-		"js_mod": func(a []uint64) uint64 { return rt.wrapNum(math.Mod(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])))) },
+		"js_sub": func(a []uint64) uint64 {
+			if rt.hasBigInt {
+				if r, ok := bigArith('-', u(a[0]), u(a[1])); ok {
+					return w(r)
+				}
+			}
+			return rt.wrapNum(rt.toNumber(u(a[0])) - rt.toNumber(u(a[1])))
+		},
+		"js_mul": func(a []uint64) uint64 {
+			if rt.hasBigInt {
+				if r, ok := bigArith('*', u(a[0]), u(a[1])); ok {
+					return w(r)
+				}
+			}
+			return rt.wrapNum(rt.toNumber(u(a[0])) * rt.toNumber(u(a[1])))
+		},
+		"js_div": func(a []uint64) uint64 {
+			if rt.hasBigInt {
+				if r, ok := bigArith('/', u(a[0]), u(a[1])); ok {
+					return w(r)
+				}
+			}
+			return rt.wrapNum(rt.toNumber(u(a[0])) / rt.toNumber(u(a[1])))
+		},
+		"js_mod": func(a []uint64) uint64 {
+			if rt.hasBigInt {
+				if r, ok := bigArith('%', u(a[0]), u(a[1])); ok {
+					return w(r)
+				}
+			}
+			return rt.wrapNum(math.Mod(rt.toNumber(u(a[0])), rt.toNumber(u(a[1]))))
+		},
 		"js_eq":  func(a []uint64) uint64 { return boolH(rt.looseEq(u(a[0]), u(a[1]))) },
 		"js_ne":  func(a []uint64) uint64 { return boolH(!rt.looseEq(u(a[0]), u(a[1]))) },
 		"js_seq": func(a []uint64) uint64 { return boolH(rt.strictEq(u(a[0]), u(a[1]))) },
@@ -2911,7 +3341,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		"js_ushr": func(a []uint64) uint64 {
 			return rt.wrapNum(float64(uint32(rt.toInt32(u(a[0]))) >> (uint32(rt.toInt32(u(a[1]))) & 31)))
 		},
-		"js_neg":    func(a []uint64) uint64 { return rt.wrapNum(-rt.toNumber(u(a[0]))) },
+		"js_neg": func(a []uint64) uint64 {
+			if rt.hasBigInt {
+				if bi, ok := u(a[0]).(*jsBigInt); ok {
+					return w(&jsBigInt{v: new(big.Int).Neg(bi.v)})
+				}
+			}
+			return rt.wrapNum(-rt.toNumber(u(a[0])))
+		},
 		"js_not":    func(a []uint64) uint64 { return boolH(!rt.truthy(u(a[0]))) },
 		"js_typeof": func(a []uint64) uint64 { return rt.wrapStr(rt.typeOf(u(a[0]))) },
 		// The shared dynamic type test behind `is`/`instanceof`-style checks of the
@@ -2953,7 +3390,20 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			// throw or a runtime error), so the finally clause still runs and
 			// the panic can be re-raised afterwards.
 			run := func(c interface{}, args []interface{}) (res interface{}, caught interface{}) {
-				defer func() { caught = recover() }()
+				// A panic unwinds the callInner frames without their pops, so the
+				// `this` stack has to be cut back to the depth of this try.
+				depth := len(rt.thisStack)
+				ntDepth := len(rt.newTargetStack)
+				defer func() {
+					if caught = recover(); caught != nil && rt.trackThis {
+						if len(rt.thisStack) > depth {
+							rt.thisStack = rt.thisStack[:depth]
+						}
+						if len(rt.newTargetStack) > ntDepth {
+							rt.newTargetStack = rt.newTargetStack[:ntDepth]
+						}
+					}
+				}()
 				res = rt.call(c, jsUndef, args)
 				return
 			}
@@ -2983,6 +3433,204 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return w(result)
 		},
+		// The dynamic `this` of the innermost compiled call (see thisStack). Outside
+		// every call - at the top level - it is undefined, like a sloppy-mode script's.
+		"js_this": func(a []uint64) uint64 {
+			if len(rt.thisStack) == 0 {
+				return jsHUndefined
+			}
+			return w(rt.thisStack[len(rt.thisStack)-1])
+		},
+		// A BigInt literal: the digits of '123n' as an arbitrary precision integer.
+		"js_bigint": func(a []uint64) uint64 {
+			v, ok := new(big.Int).SetString(rt.toString(u(a[0])), 0)
+			if !ok {
+				rt.fail("invalid BigInt literal %q", rt.toString(u(a[0])))
+			}
+			rt.hasBigInt = true
+			return w(&jsBigInt{v: v})
+		},
+		// Wrap a compiled closure into a generator FUNCTION: calling the result does not
+		// run the body but hands back a generator object over it.
+		"js_genfn": func(a []uint64) uint64 {
+			body := u(a[0])
+			return w(jsHostFunc("generator", func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				return &jsGenerator{fn: body, args: append([]interface{}{}, args...)}
+			}))
+		},
+		// 'yield v' from inside a generator body: suspend, hand v to the pending next()
+		// and answer the value that the following next(x) sends in.
+		"js_yield": func(a []uint64) uint64 {
+			g := rt.curGen
+			if g == nil {
+				rt.fail("yield outside of a generator")
+			}
+			g.yields <- &genStep{value: u(a[0]), done: false}
+			return w(<-g.resume)
+		},
+		// The sequence a for-of loop iterates: arrays, strings and objects are their own,
+		// a generator is materialized (the subset iterates by index, so a lazy source has
+		// to be drained first).
+		"js_iterable": func(a []uint64) uint64 {
+			if g, ok := u(a[0]).(*jsGenerator); ok {
+				return w(g.drain(rt))
+			}
+			return a[0]
+		},
+		// Like js_call, but the callee is invoked AS A CONSTRUCTOR, so new.target inside
+		// it is the callee instead of undefined.
+		"js_call_new": func(a []uint64) uint64 {
+			args, ok := u(a[2]).(*jsArray)
+			if !ok {
+				rt.fail("js_call_new args must be an array")
+			}
+			rt.pendingNewTarget = u(a[0])
+			return w(rt.callH(u(a[0]), u(a[1]), args.elems, a[2]))
+		},
+		// 'new.target': the constructor of the innermost call, or undefined.
+		"js_newtarget": func(a []uint64) uint64 {
+			if len(rt.newTargetStack) == 0 || rt.newTargetStack[len(rt.newTargetStack)-1] == nil {
+				return jsHUndefined
+			}
+			return w(rt.newTargetStack[len(rt.newTargetStack)-1])
+		},
+		// 'key in obj' / Object.prototype.hasOwnProperty: own properties of an object,
+		// index and 'length' of an array or string.
+		"js_has": func(a []uint64) uint64 {
+			key := rt.toString(u(a[1]))
+			switch o := u(a[0]).(type) {
+			case *jsObject:
+				_, ok := o.props[key]
+				if !ok {
+					ok = rt.findClassAccessor(o, key) != nil
+				}
+				return boolH(ok)
+			case *jsArray:
+				if key == "length" {
+					return boolH(true)
+				}
+				if !maybeNumeric(u(a[1])) {
+					return boolH(false)
+				}
+				idx := rt.toNumber(u(a[1]))
+				return boolH(idx == math.Trunc(idx) && idx >= 0 && int(idx) < len(o.elems))
+			case string:
+				if key == "length" {
+					return boolH(true)
+				}
+				if !maybeNumeric(u(a[1])) {
+					return boolH(false)
+				}
+				idx := rt.toNumber(u(a[1]))
+				return boolH(idx == math.Trunc(idx) && idx >= 0 && int(idx) < rt.strLen(o))
+			}
+			rt.fail("'in' needs an object on the right side")
+			return boolH(false)
+		},
+		// 'delete obj.key': drop an own property (and its key-order entry). Like in JS
+		// it answers true even when there was nothing to delete.
+		"js_del": func(a []uint64) uint64 {
+			key := rt.toString(u(a[1]))
+			if o, ok := u(a[0]).(*jsObject); ok {
+				if _, had := o.props[key]; had {
+					delete(o.props, key)
+					for i, k := range o.keys {
+						if k == key {
+							o.keys = append(o.keys[:i], o.keys[i+1:]...)
+							break
+						}
+					}
+				}
+			}
+			return boolH(true)
+		},
+		// 'typeof name' for a name that need not be declared: an unbound name is
+		// "undefined" rather than the reference error a plain js_scope_get raises.
+		"js_scope_typeof": func(a []uint64) uint64 {
+			name := rt.toString(u(a[1]))
+			for sc := rt.scopeOf(a[0]); sc != nil; sc = sc.parent {
+				if v, ok := sc.get(name); ok {
+					return rt.wrapStr(rt.typeOf(v))
+				}
+			}
+			return rt.wrapStr("undefined")
+		},
+		// 'v instanceof C': walk the __class/__super chain of the instance and compare
+		// with the class descriptor. Anything that is not an instance answers false.
+		"js_instanceof": func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				return boolH(false)
+			}
+			target := u(a[1])
+			for cls := o.props["__class"]; cls != nil; {
+				if cls == target {
+					return boolH(true)
+				}
+				clsObj, isObj := cls.(*jsObject)
+				if !isObj {
+					break
+				}
+				cls = clsObj.props["__super"]
+			}
+			return boolH(false)
+		},
+		// ----- Kotlin's Char (see the jsChar type) -----
+		// A Char from its code. The Kotlin grammars' char literals compile to this.
+		"js_char": func(a []uint64) uint64 { return w(jsChar{code: int32(int64(a[0]))}) },
+		// The code of a Char, and the identity for everything else - so a caller can
+		// drive a counter with it without knowing whether it holds a Char.
+		"js_char_code": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
+		// Box `v` back into a Char when `model` is one, else hand `v` back unchanged.
+		// This is how a range keeps its element type: 'a'..'c' counts numerically and
+		// re-boxes each element, so `for (ch in 'a'..'c')` yields Chars while
+		// `for (i in 1..3)` yields Ints, from one emitted loop.
+		"js_char_like": func(a []uint64) uint64 {
+			if _, isChar := u(a[0]).(jsChar); isChar {
+				return w(jsChar{code: int32(int64(rt.toNumber(u(a[1]))))})
+			}
+			return a[1]
+		},
+		// Kotlin's indexed read s[i]: a String yields the Char at that index (Kotlin's
+		// CharSequence.get), everything else reads the member like js_get. A separate
+		// external because plain js_get must keep yielding a one-character STRING for
+		// JS, Python and the other languages that index strings.
+		"js_kindex": func(a []uint64) uint64 {
+			if s, isStr := u(a[0]).(string); isStr {
+				i := jsToInt(rt.toNumber(u(a[1])))
+				ch := rt.strAt(s, i)
+				if ch == "" {
+					rt.fail("string index %d out of range for %q", i, s)
+				}
+				return w(jsChar{code: int32([]rune(ch)[0])})
+			}
+			rt.noteGet(a[0], a[1])
+			return w(rt.getMember(u(a[0]), u(a[1])))
+		},
+		// Define a getter/setter property: (obj, key, getter|undef, setter|undef). Two
+		// calls for the same key merge, so 'get x' and 'set x' of one accessor pair meet
+		// on one record.
+		"js_defprop": func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				rt.fail("js_defprop needs an object")
+			}
+			key := rt.toString(u(a[1]))
+			acc, _ := o.props[key].(*jsAccessor)
+			if acc == nil {
+				acc = &jsAccessor{}
+			}
+			if g := u(a[2]); isCallable(g) {
+				acc.get = g
+			}
+			if st := u(a[3]); isCallable(st) {
+				acc.set = st
+			}
+			o.set(key, acc)
+			rt.accessorCount++
+			return 0
+		},
+
 		// Control-flow signals for a return/break/continue that leaves a try body.
 		"js_ctl_return":   func(a []uint64) uint64 { return w(&jsCtl{kind: 1, value: u(a[0])}) },
 		"js_ctl_break":    func(a []uint64) uint64 { return w(&jsCtl{kind: 2}) },
@@ -3031,6 +3679,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pyget": func(a []uint64) uint64 { // Sequence indexing (negative wraps) and dict lookup.
+			if _, cls, isInst := pyInstance(u(a[0])); isInst { // A user class may define __getitem__.
+				if m, found := pyLookup(cls, "__getitem__"); found && isCallable(m) {
+					return w(rt.call(m, jsUndef, []interface{}{u(a[0]), u(a[1])}))
+				}
+			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				i := rt.dictFind(keys, u(a[1]))
 				if i < 0 {
@@ -3062,6 +3715,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pyset": func(a []uint64) uint64 { // List element (negative wraps) or dict entry assignment.
+			if _, cls, isInst := pyInstance(u(a[0])); isInst { // A user class may define __setitem__.
+				if m, found := pyLookup(cls, "__setitem__"); found && isCallable(m) {
+					rt.call(m, jsUndef, []interface{}{u(a[0]), u(a[1]), u(a[2])})
+					return 0
+				}
+			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
 					vals.elems[i] = u(a[2])
@@ -3171,6 +3830,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pylen": func(a []uint64) uint64 { // len() for strings, lists and dicts.
+			if _, cls, isInst := pyInstance(u(a[0])); isInst { // A user class may define __len__.
+				if m, found := pyLookup(cls, "__len__"); found && isCallable(m) {
+					return w(rt.call(m, jsUndef, []interface{}{u(a[0])}))
+				}
+			}
 			switch o := u(a[0]).(type) {
 			case string:
 				return rt.wrapNum(float64(rt.strLen(o)))
@@ -3184,6 +3848,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pylist": func(a []uint64) uint64 { // list(x): always a fresh list.
+			if g, ok := u(a[0]).(*jsGenerator); ok {
+				return w(g.drain(rt))
+			}
 			switch o := u(a[0]).(type) {
 			case *jsArray:
 				return w(&jsArray{elems: append([]interface{}{}, o.elems...)})
@@ -3201,6 +3868,9 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return 0
 		},
 		"js_pyiter": func(a []uint64) uint64 { // The list a for loop runs over: dicts iterate
+			if g, ok := u(a[0]).(*jsGenerator); ok { // A generator is drained first.
+				return w(g.drain(rt))
+			}
 			switch o := u(a[0]).(type) { // their keys, strings their characters.
 			case *jsArray:
 				return a[0]
@@ -3310,6 +3980,382 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			rt.fail("'in' needs a list, a string or a dict on the right side")
 			return boolH(false)
+		},
+		// Python's == compares CONTAINERS BY VALUE, unlike JavaScript's, where two
+		// distinct arrays are never equal. js_pyeq/js_pyne are the Python spelling:
+		// lists compare element by element and dicts key by key (order-insensitively,
+		// as Python does), recursively; everything else falls back to strict equality.
+		// 'is' keeps using js_seq, because that one really is identity.
+		"js_pyeq": func(a []uint64) uint64 { return boolH(rt.pyEqual(u(a[0]), u(a[1]))) },
+		"js_pyne": func(a []uint64) uint64 { return boolH(!rt.pyEqual(u(a[0]), u(a[1]))) },
+
+		// ----- Python classes (see languages/python-to-llvm-ir.abnf) -----
+		//
+		// A Python class object is a plain jsObject carrying "__name", the C3
+		// linearized "__mro" (a jsArray of class objects, the class itself first)
+		// and "__super" (the FIRST base, so every existing __super walker -
+		// memberCall, js_instanceof, rtIsType - keeps working on single
+		// inheritance). An instance is a jsObject with "__class" pointing at its
+		// class; that is the same shape js_pyexc already produces, and it is
+		// exactly the receiver-prepending convention rt.memberCall implements.
+		// Multiple inheritance is resolved ONCE, here, so every later lookup is a
+		// flat walk of "__mro".
+		"js_pyclass_new": func(a []uint64) uint64 { // (name, bases array) -> class
+			name := rt.toString(u(a[0]))
+			bases, _ := u(a[1]).(*jsArray)
+			cls := newJSObject()
+			cls.set("__name", name)
+			var baseObjs []*jsObject
+			if bases != nil {
+				for _, b := range bases.elems {
+					bo, ok := b.(*jsObject)
+					if !ok {
+						rt.fail("class %s: base is not a class", name)
+					}
+					baseObjs = append(baseObjs, bo)
+				}
+			}
+			if len(baseObjs) > 0 {
+				cls.set("__super", baseObjs[0])
+			}
+			mro := &jsArray{elems: []interface{}{cls}}
+			for _, c := range pyLinearize(baseObjs) {
+				mro.elems = append(mro.elems, c)
+			}
+			cls.set("__mro", mro)
+			return w(cls)
+		},
+		// The class body is a suite: it runs in a scope of its own and every name
+		// it bound (methods, class attributes, __slots__) becomes a class member.
+		"js_pyclass_fill": func(a []uint64) uint64 { // (class, class-body scope)
+			cls, ok := u(a[0]).(*jsObject)
+			if !ok {
+				rt.fail("js_pyclass_fill: not a class object")
+			}
+			sc := rt.scopeOf(a[1])
+			for i, n := range sc.names {
+				cls.set(n, sc.vals[i])
+			}
+			return 0
+		},
+		// obj.name: an instance checks its own attributes, then the MRO of its
+		// class (running a __get__ descriptor found there); a class checks its own
+		// MRO. Anything else takes the ordinary member read.
+		"js_pygetattr": func(a []uint64) uint64 { // (object, name) -> value
+			return w(rt.pyGetAttr(u(a[0]), rt.toString(u(a[1]))))
+		},
+		// obj.name = v: a __set__ descriptor on the class wins; __slots__ (when the
+		// class declares it) rejects an unknown name by raising, like Python.
+		"js_pysetattr": func(a []uint64) uint64 { // (object, name, value)
+			rt.pySetAttr(u(a[0]), rt.toString(u(a[1])), u(a[2]))
+			return 0
+		},
+		// obj.name(args): an instance dispatches along the MRO with itself
+		// prepended (Python's `self`); a CLASS dispatches unbound, which is what
+		// makes the explicit `Base.m(self)` super-call spelling work.
+		"js_pymcall": func(a []uint64) uint64 { // (target, method name, args array, keyword dict|undef)
+			args, ok := u(a[2]).(*jsArray)
+			if !ok {
+				rt.fail("js_pymcall args must be an array")
+			}
+			return w(rt.pyMethodCall(u(a[0]), rt.toString(u(a[1])), args.elems, u(a[3])))
+		},
+		// f(args, kwargs): calling a CLASS instantiates it (allocate, then __init__
+		// with self prepended); calling an instance runs its __call__. The keyword
+		// dict is mapped onto the callee's parameters by pyBindCall.
+		"js_pycall": func(a []uint64) uint64 { // (callee, positional array, keyword dict|undef)
+			args, ok := u(a[1]).(*jsArray)
+			if !ok {
+				rt.fail("js_pycall args must be an array")
+			}
+			callee, kw := u(a[0]), u(a[2])
+			if cls, ok := pyClassObj(callee); ok {
+				inst := newJSObject()
+				inst.set("__class", cls)
+				if init, found := pyLookup(cls, "__init__"); found && isCallable(init) {
+					self := append([]interface{}{inst}, args.elems...)
+					rt.call(init, jsUndef, rt.pyBindCall(init, self, kw))
+				}
+				return w(inst)
+			}
+			if _, cls, ok := pyInstance(callee); ok {
+				if m, found := pyLookup(cls, "__call__"); found && isCallable(m) {
+					self := append([]interface{}{callee}, args.elems...)
+					return w(rt.call(m, jsUndef, rt.pyBindCall(m, self, kw)))
+				}
+			}
+			bound := rt.pyBindCall(callee, args.elems, kw)
+			if len(bound) == len(args.elems) {
+				return w(rt.callH(callee, jsUndef, args.elems, a[1]))
+			}
+			return w(rt.call(callee, jsUndef, bound))
+		},
+		// Register a def's parameter shape, so a keyword call can be bound to it.
+		"js_pysig": func(a []uint64) uint64 { // (closure, name array, kw-only count, extended?)
+			if rt.pySigs == nil {
+				rt.pySigs = map[interface{}]*pySig{}
+			}
+			names, _ := u(a[1]).(*jsArray)
+			sig := &pySig{nkwonly: int(rt.toNumber(u(a[2]))), ext: rt.truthy(u(a[3]))}
+			if names != nil {
+				for _, n := range names.elems {
+					sig.names = append(sig.names, rt.toString(n))
+				}
+			}
+			rt.pySigs[u(a[0])] = sig
+			return a[0]
+		},
+		// *seq / **map unpacking at a call site: append / merge into the array or
+		// dict the call is building.
+		"js_pyspread": func(a []uint64) uint64 { // (positional array, iterable)
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("js_pyspread needs an array")
+			}
+			switch o := u(a[1]).(type) {
+			case *jsArray:
+				arr.dropIdx()
+				arr.elems = append(arr.elems, o.elems...)
+				return 0
+			case string:
+				arr.dropIdx()
+				for i, n := 0, rt.strLen(o); i < n; i++ {
+					arr.elems = append(arr.elems, rt.strAt(o, i))
+				}
+				return 0
+			}
+			if keys, _, ok := dictParts(u(a[1])); ok {
+				arr.dropIdx()
+				arr.elems = append(arr.elems, keys.elems...)
+				return 0
+			}
+			rt.fail("cannot unpack a %s with *", rt.typeOf(u(a[1])))
+			return 0
+		},
+		"js_pykwspread": func(a []uint64) uint64 { // (keyword dict, mapping)
+			keys, vals, ok := dictParts(u(a[0]))
+			if !ok {
+				rt.fail("js_pykwspread needs a dict")
+			}
+			sk, sv, ok := dictParts(u(a[1]))
+			if !ok {
+				rt.fail("cannot unpack a %s with **", rt.typeOf(u(a[1])))
+			}
+			for i, k := range sk.elems {
+				if j := rt.dictFind(keys, k); j >= 0 {
+					vals.elems[j] = sv.elems[i]
+				} else {
+					dictAppend(keys, vals, k, sv.elems[i])
+				}
+			}
+			return 0
+		},
+		// type(v): the class object of an instance, else a synthetic class object
+		// naming the builtin type (so type(x).__name__ answers for everything).
+		"js_pytype": func(a []uint64) uint64 {
+			v := u(a[0])
+			if _, cls, ok := pyInstance(v); ok {
+				return w(cls)
+			}
+			return w(rt.pyBuiltinClass(pyTypeName(rt, v)))
+		},
+		// isinstance(v, C) / isinstance(v, (A, B)): a walk of the instance's MRO.
+		"js_pyisinst": func(a []uint64) uint64 {
+			return boolH(rt.pyIsInstance(u(a[0]), u(a[1])))
+		},
+		// Every user visible binary operator of the Python compiler goes through
+		// here so an instance of a user class can answer it with a dunder
+		// (__add__, __lt__, __eq__, __contains__, ...). Everything that is not
+		// such an instance takes exactly the path its plain js_* extern takes.
+		"js_pybin": func(a []uint64) uint64 { // (operator, left, right)
+			op := rt.toString(u(a[0]))
+			l, r := u(a[1]), u(a[2])
+			switch op {
+			case "is":
+				return boolH(rt.strictEq(l, r))
+			case "is not":
+				return boolH(!rt.strictEq(l, r))
+			case "in", "not in":
+				want := op == "in"
+				if _, cls, ok := pyInstance(r); ok {
+					if m, found := pyLookup(cls, "__contains__"); found && isCallable(m) {
+						hit := rt.truthy(rt.call(m, jsUndef, []interface{}{r, l}))
+						return boolH(hit == want)
+					}
+				}
+				return boolH(rt.pyContains(l, r) == want)
+			}
+			if v, ok := rt.pyDunderBin(op, l, r); ok {
+				return w(v)
+			}
+			switch op {
+			case "+":
+				return w(rt.jsAdd(l, r))
+			case "-", "*", "/":
+				return w(rt.pyArith(op[0], l, r))
+			case "//":
+				return rt.wrapNum(math.Floor(rt.toNumber(l) / rt.toNumber(r)))
+			case "%":
+				return rt.wrapNum(pyFloorMod(rt.toNumber(l), rt.toNumber(r)))
+			case "==":
+				return boolH(rt.pyEqual(l, r))
+			case "!=":
+				return boolH(!rt.pyEqual(l, r))
+			case "<":
+				return boolH(rt.jsCompare(l, r) == -1)
+			case ">":
+				return boolH(rt.jsCompare(l, r) == 1)
+			case "<=":
+				c := rt.jsCompare(l, r)
+				return boolH(c == -1 || c == 0)
+			case ">=":
+				c := rt.jsCompare(l, r)
+				return boolH(c == 1 || c == 0)
+			}
+			rt.fail("unsupported operand type for %s: %s and %s", op, rt.typeOf(l), rt.typeOf(r))
+			return 0
+		},
+		// dict(...): a fresh dict from a mapping (or from the keyword arguments,
+		// which reach a signature-less builtin as one trailing dict).
+		"js_pydict": func(a []uint64) uint64 {
+			keys, vals := &jsArray{}, &jsArray{}
+			if sk, sv, ok := dictParts(u(a[0])); ok {
+				for i, k := range sk.elems {
+					dictAppend(keys, vals, k, sv.elems[i])
+				}
+			}
+			return w(&jsObject{props: map[string]interface{}{
+				"__dict": true, "keys": keys, "vals": vals,
+			}})
+		},
+		// max(...) / min(...): over the arguments, or over a single iterable one.
+		"js_pymax": func(a []uint64) uint64 { return rt.pyMinMax(u(a[0]), 1) },
+		"js_pymin": func(a []uint64) uint64 { return rt.pyMinMax(u(a[0]), -1) },
+		// The context-manager protocol. A context expression that is NOT a context
+		// manager (no __enter__) binds its own value and runs the body: that is the
+		// approximation `with` had before the protocol existed, kept as the
+		// fallback so a plain value still works instead of aborting.
+		"js_pyenter": func(a []uint64) uint64 {
+			if _, cls, ok := pyInstance(u(a[0])); ok {
+				if m, found := pyLookup(cls, "__enter__"); found && isCallable(m) {
+					return w(rt.call(m, jsUndef, []interface{}{u(a[0])}))
+				}
+			}
+			return a[0]
+		},
+		// __exit__(type, value, traceback) -> truthy swallows the exception.
+		"js_pyexit": func(a []uint64) uint64 {
+			if _, cls, ok := pyInstance(u(a[0])); ok {
+				if m, found := pyLookup(cls, "__exit__"); found && isCallable(m) {
+					e := u(a[1])
+					return w(rt.call(m, jsUndef, []interface{}{u(a[0]), e, e, jsUndef}))
+				}
+			}
+			return jsHFalse
+		},
+		// The Ellipsis singleton: `...` is a value of its own, and `x is ...` has to
+		// hold, so there is exactly one of it per runtime.
+		"js_pyellipsis": func(a []uint64) uint64 {
+			if rt.pyEllipsis == nil {
+				o := newJSObject()
+				o.set("__name", "ellipsis")
+				rt.pyEllipsis = o
+			}
+			return w(rt.pyEllipsis)
+		},
+		// del NAME: the binding stays, holding the deleted sentinel, so a later
+		// read raises instead of falling through to an enclosing binding.
+		"js_pydel_var": func(a []uint64) uint64 {
+			sc := rt.scopeOf(a[0])
+			name := rt.toString(u(a[1]))
+			for s := sc; s != nil; s = s.parent {
+				if s.has(name) {
+					s.put(name, pyDeleted)
+					return 0
+				}
+			}
+			panic(&jsThrown{value: rt.pyExcInstance("NameError", "name '"+name+"' is not defined")})
+		},
+		// del obj[k] / del obj.name.
+		"js_pydel_item": func(a []uint64) uint64 {
+			if keys, vals, ok := dictParts(u(a[0])); ok {
+				i := rt.dictFind(keys, u(a[1]))
+				if i < 0 {
+					panic(&jsThrown{value: rt.pyExcInstance("KeyError", rt.pyString(u(a[1])))})
+				}
+				keys.dropIdx()
+				keys.elems = append(keys.elems[:i], keys.elems[i+1:]...)
+				vals.elems = append(vals.elems[:i], vals.elems[i+1:]...)
+				return 0
+			}
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				rt.fail("del on a %s", rt.typeOf(u(a[0])))
+			}
+			i := int(rt.toNumber(u(a[1])))
+			if i < 0 {
+				i += len(arr.elems)
+			}
+			if i < 0 || i >= len(arr.elems) {
+				panic(&jsThrown{value: rt.pyExcInstance("IndexError", "list index out of range")})
+			}
+			arr.dropIdx()
+			arr.elems = append(arr.elems[:i], arr.elems[i+1:]...)
+			return 0
+		},
+		"js_pydel_attr": func(a []uint64) uint64 {
+			o, ok := u(a[0]).(*jsObject)
+			if !ok {
+				rt.fail("attribute deletion on a %s", rt.typeOf(u(a[0])))
+			}
+			name := rt.toString(u(a[1]))
+			delete(o.props, name)
+			for i, k := range o.keys {
+				if k == name {
+					o.keys = append(o.keys[:i], o.keys[i+1:]...)
+					break
+				}
+			}
+			return 0
+		},
+		// int(v): Python's truncation toward zero (a bigint stays exact).
+		"js_pyint": func(a []uint64) uint64 {
+			if bi, ok := u(a[0]).(*jsBigInt); ok {
+				return w(bi)
+			}
+			return rt.wrapNum(math.Trunc(rt.toNumber(u(a[0]))))
+		},
+		// Remember the name a `def` bound a closure under and hand the closure back,
+		// so f.__name__ can answer it (a closure carries no name of its own).
+		"js_pyfnname": func(a []uint64) uint64 { // (closure, name) -> closure
+			if rt.pyFuncNames == nil {
+				rt.pyFuncNames = map[interface{}]string{}
+			}
+			rt.pyFuncNames[u(a[0])] = rt.toString(u(a[1]))
+			return a[0]
+		},
+		// Unary - / ~ with the __neg__ / __invert__ fallback.
+		"js_pyunary": func(a []uint64) uint64 { // (operator, value)
+			op := rt.toString(u(a[0]))
+			v := u(a[1])
+			name := "__neg__"
+			if op == "~" {
+				name = "__invert__"
+			}
+			if _, cls, ok := pyInstance(v); ok {
+				if m, found := pyLookup(cls, name); found && isCallable(m) {
+					return w(rt.call(m, jsUndef, []interface{}{v}))
+				}
+			}
+			if op == "~" {
+				return rt.wrapNum(float64(^rt.toInt32(v)))
+			}
+			if rt.hasBigInt {
+				if bi, ok := v.(*jsBigInt); ok {
+					return w(&jsBigInt{v: new(big.Int).Neg(bi.v)})
+				}
+			}
+			return rt.wrapNum(-rt.toNumber(v))
 		},
 		"js_pystr": func(a []uint64) uint64 { // str(v) with Python style rendering.
 			return rt.wrapStr(rt.pyString(u(a[0])))
@@ -3705,6 +4751,12 @@ func (rt *jsrt) isTypeName(v interface{}, t string) bool {
 	case nil, jsUndefT, jsNullT:
 		return opt
 	}
+	// Kotlin's Char is its own type: `c is Char` holds, `c is Int` does not. Tested
+	// before the name switch below, whose "Char" case answers for the plain numbers
+	// the other languages use (Java/C# Character, Go rune).
+	if _, isChar := v.(jsChar); isChar {
+		return t == "Char" || t == "Character" || t == "Any" || t == "Comparable"
+	}
 	switch t {
 	case "Any", "Object":
 		return true
@@ -3784,4 +4836,680 @@ func runJSModule(m *ir.Module, entry string) *RunResult {
 	}()
 	h := rt.callEntry(ma, entry, 0)
 	return &RunResult{Ret: uint32(rt.toInt32(rt.unwrap(h))), Out: ""}
+}
+
+// pyEqual is Python's ==: containers compare by VALUE, recursively. A list equals a
+// list of the same length whose elements are all equal; a dict equals a dict with the
+// same key set and equal values for every key (insertion order does not matter, as in
+// Python). Everything else - numbers, strings, booleans, None, functions, instances -
+// falls back to the strict equality the rest of the runtime uses, so identity still
+// decides where Python says it should. Cycles are not expected in this value model and
+// are not guarded against.
+func (rt *jsrt) pyEqual(x, y interface{}) bool {
+	if xa, ok := x.(*jsArray); ok {
+		ya, ok2 := y.(*jsArray)
+		if !ok2 || len(xa.elems) != len(ya.elems) {
+			return false
+		}
+		for i := range xa.elems {
+			if !rt.pyEqual(xa.elems[i], ya.elems[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	if xk, xv, ok := dictParts(x); ok {
+		yk, yv, ok2 := dictParts(y)
+		if !ok2 || len(xk.elems) != len(yk.elems) {
+			return false
+		}
+		for i, k := range xk.elems {
+			j := rt.dictFind(yk, k)
+			if j < 0 || !rt.pyEqual(xv.elems[i], yv.elems[j]) {
+				return false
+			}
+		}
+		return true
+	}
+	return rt.strictEq(x, y)
+}
+
+// ----------------------------------------------------------------------------
+// Python classes
+//
+// The shape is deliberately the one the class based languages already use (see
+// memberCall): an instance is {__class: <class object>}, a class object carries
+// its methods and class attributes as plain properties. What Python adds is the
+// MRO: "__mro" is the C3 linearization computed once, when the class object is
+// built, so every attribute read and every method call stays a flat walk even
+// with multiple inheritance. "__super" is kept in step with the first base so
+// the single-inheritance walkers elsewhere in this file still see a chain.
+
+// pyClassObj reports whether v is a Python class object (it carries an MRO).
+func pyClassObj(v interface{}) (*jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	if _, has := o.props["__mro"]; !has {
+		return nil, false
+	}
+	return o, true
+}
+
+// pyInstance reports whether v is an instance of a Python class, and of which.
+func pyInstance(v interface{}) (*jsObject, *jsObject, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, nil, false
+	}
+	cls, ok := o.props["__class"].(*jsObject)
+	if !ok {
+		return nil, nil, false
+	}
+	return o, cls, true
+}
+
+// pyMRO is the resolution order of a class, itself first. A class object that
+// predates the MRO (js_pyexc's builtin exception descriptors) answers with its
+// __super chain, so the two shapes stay interchangeable.
+func pyMRO(c *jsObject) []*jsObject {
+	if m, ok := c.props["__mro"].(*jsArray); ok {
+		out := make([]*jsObject, 0, len(m.elems))
+		for _, e := range m.elems {
+			if o, ok := e.(*jsObject); ok {
+				out = append(out, o)
+			}
+		}
+		return out
+	}
+	var out []*jsObject
+	for k := c; k != nil; {
+		out = append(out, k)
+		sup, _ := k.props["__super"].(*jsObject)
+		k = sup
+	}
+	return out
+}
+
+// pyLinearize is the C3 merge of the bases' MROs with the base list itself -
+// the order Python computes, minus the class itself (the caller prepends it).
+// A hierarchy C3 cannot resolve consistently falls back to first-seen order
+// rather than aborting the program.
+func pyLinearize(bases []*jsObject) []*jsObject {
+	if len(bases) == 0 {
+		return nil
+	}
+	var seqs [][]*jsObject
+	for _, b := range bases {
+		seqs = append(seqs, pyMRO(b))
+	}
+	seqs = append(seqs, append([]*jsObject{}, bases...))
+	var out []*jsObject
+	for {
+		empty := true
+		for _, s := range seqs {
+			if len(s) > 0 {
+				empty = false
+			}
+		}
+		if empty {
+			return out
+		}
+		var pick *jsObject
+		for _, s := range seqs {
+			if len(s) == 0 {
+				continue
+			}
+			head := s[0]
+			inTail := false
+			for _, t := range seqs {
+				for i := 1; i < len(t); i++ {
+					if t[i] == head {
+						inTail = true
+					}
+				}
+			}
+			if !inTail {
+				pick = head
+				break
+			}
+		}
+		if pick == nil { // Inconsistent hierarchy: take the first head there is.
+			for _, s := range seqs {
+				if len(s) > 0 {
+					pick = s[0]
+					break
+				}
+			}
+		}
+		out = append(out, pick)
+		for i, s := range seqs {
+			if len(s) > 0 && s[0] == pick {
+				seqs[i] = s[1:]
+			}
+		}
+	}
+}
+
+// pyLookup finds a name along the MRO of a class.
+func pyLookup(c *jsObject, name string) (interface{}, bool) {
+	if name == "" {
+		return nil, false
+	}
+	for _, k := range pyMRO(c) {
+		if v, ok := k.props[name]; ok {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// pyIsDescriptor reports whether v is an instance whose class defines the given
+// descriptor hook (__get__ / __set__).
+func pyIsDescriptor(v interface{}, hook string) (interface{}, bool) {
+	_, cls, ok := pyInstance(v)
+	if !ok {
+		return nil, false
+	}
+	m, found := pyLookup(cls, hook)
+	if !found || !isCallable(m) {
+		return nil, false
+	}
+	return m, true
+}
+
+// pyGetAttr reads obj.name with Python's lookup order.
+func (rt *jsrt) pyGetAttr(obj interface{}, name string) interface{} {
+	if cls, ok := pyClassObj(obj); ok {
+		switch name {
+		case "__name__":
+			return cls.props["__name"]
+		case "__mro__":
+			return cls.props["__mro"]
+		}
+		if v, found := pyLookup(cls, name); found {
+			return v
+		}
+		rt.fail("type object '%s' has no attribute '%s'", rt.toString(cls.props["__name"]), name)
+	}
+	if inst, cls, ok := pyInstance(obj); ok {
+		switch name {
+		case "__class__":
+			return cls
+		case "__dict__":
+			return rt.pyInstanceDict(inst)
+		}
+		if v, found := inst.props[name]; found {
+			return v
+		}
+		if v, found := pyLookup(cls, name); found {
+			if get, isDesc := pyIsDescriptor(v, "__get__"); isDesc {
+				return rt.call(get, jsUndef, []interface{}{v, obj, cls})
+			}
+			return v
+		}
+		rt.fail("'%s' object has no attribute '%s'", rt.toString(cls.props["__name"]), name)
+	}
+	if name == "__name__" {
+		// A synthetic class object for a BUILTIN type (what type(3) hands out)
+		// carries only its name, and a closure carries none of its own - the name
+		// its def bound it under was recorded by js_pyfnname.
+		if o, ok := obj.(*jsObject); ok {
+			if n, has := o.props["__name"]; has {
+				return n
+			}
+		}
+		if fn, ok := rt.pyFuncNames[obj]; ok {
+			return fn
+		}
+	}
+	return rt.getMember(obj, name)
+}
+
+// pyInstanceDict renders an instance's own attributes as a Python dict.
+func (rt *jsrt) pyInstanceDict(inst *jsObject) interface{} {
+	keys, vals := &jsArray{}, &jsArray{}
+	for _, k := range inst.keys {
+		if len(k) >= 2 && k[0] == '_' && k[1] == '_' {
+			continue
+		}
+		dictAppend(keys, vals, k, inst.props[k])
+	}
+	d := newJSObject()
+	d.set("__dict", true)
+	d.set("keys", keys)
+	d.set("vals", vals)
+	return d
+}
+
+// pySetAttr writes obj.name, honouring a __set__ descriptor and __slots__.
+func (rt *jsrt) pySetAttr(obj interface{}, name string, v interface{}) {
+	if inst, cls, ok := pyInstance(obj); ok {
+		if cur, found := pyLookup(cls, name); found {
+			if set, isDesc := pyIsDescriptor(cur, "__set__"); isDesc {
+				rt.call(set, jsUndef, []interface{}{cur, obj, v})
+				return
+			}
+		}
+		if slots, found := pyLookup(cls, "__slots__"); found {
+			if !pySlotAllows(rt, slots, name) {
+				panic(&jsThrown{value: rt.pyAttrError(cls, name)})
+			}
+		}
+		inst.set(name, v)
+		return
+	}
+	if cls, ok := pyClassObj(obj); ok {
+		cls.set(name, v)
+		return
+	}
+	rt.setMember(obj, name, v)
+}
+
+// pySlotAllows answers whether __slots__ (a list, a tuple-as-list or a single
+// string) permits an attribute name.
+func pySlotAllows(rt *jsrt, slots interface{}, name string) bool {
+	switch s := slots.(type) {
+	case *jsArray:
+		for _, e := range s.elems {
+			if rt.toString(e) == name {
+				return true
+			}
+		}
+		return false
+	case string:
+		return s == name
+	}
+	return true
+}
+
+// pyAttrError builds the AttributeError instance a rejected __slots__ write
+// raises, in the shape the except clauses match ({__class:{__name}, args}).
+func (rt *jsrt) pyAttrError(cls *jsObject, name string) interface{} {
+	ec := newJSObject()
+	ec.set("__name", "AttributeError")
+	inst := newJSObject()
+	inst.set("__class", ec)
+	inst.set("args", &jsArray{elems: []interface{}{
+		"'" + rt.toString(cls.props["__name"]) + "' object has no attribute '" + name + "'"}})
+	return inst
+}
+
+// pyMethodCall is obj.name(args) with Python's binding rule: an instance
+// prepends itself, a class object does not (so Base.m(self) works).
+func (rt *jsrt) pyMethodCall(target interface{}, name string, args []interface{}, kw interface{}) interface{} {
+	// A generator's own protocol. Python's send()/next() answer the YIELDED value
+	// and raise StopIteration - carrying the body's return value - at the end,
+	// where JavaScript's next() answers a {value, done} record.
+	if g, ok := target.(*jsGenerator); ok {
+		switch name {
+		case "send", "next", "__next__":
+			var sent interface{} = jsUndef
+			if len(args) > 0 {
+				sent = args[0]
+			}
+			st, _ := g.step(rt, sent).(*jsObject)
+			if st == nil {
+				rt.fail("generator step failed")
+			}
+			if done, _ := st.props["done"].(bool); done {
+				exc := rt.pyExcInstance("StopIteration", "")
+				exc.(*jsObject).set("value", st.props["value"])
+				panic(&jsThrown{value: exc})
+			}
+			return st.props["value"]
+		case "close":
+			return g.finish(jsUndef)
+		}
+	}
+	if cls, ok := pyClassObj(target); ok {
+		if m, found := pyLookup(cls, name); found {
+			if isCallable(m) {
+				return rt.call(m, jsUndef, rt.pyBindCall(m, args, kw))
+			}
+			return rt.callPyValue(m, args, kw)
+		}
+		rt.fail("type object '%s' has no method '%s'", rt.toString(cls.props["__name"]), name)
+	}
+	if inst, cls, ok := pyInstance(target); ok {
+		if v, found := inst.props[name]; found && isCallable(v) {
+			return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw)) // A plain function in an attribute.
+		}
+		if m, found := pyLookup(cls, name); found {
+			if isCallable(m) {
+				self := append([]interface{}{target}, args...)
+				return rt.call(m, jsUndef, rt.pyBindCall(m, self, kw))
+			}
+			return rt.callPyValue(m, args, kw)
+		}
+		if _, isDict := inst.props["__dict"]; !isDict {
+			rt.fail("'%s' object has no method '%s'", rt.toString(cls.props["__name"]), name)
+		}
+	}
+	return rt.memberCall(target, name, args)
+}
+
+// callPyValue calls a value that may itself be a class or a __call__ instance.
+func (rt *jsrt) callPyValue(v interface{}, args []interface{}, kw interface{}) interface{} {
+	if cls, ok := pyClassObj(v); ok {
+		inst := newJSObject()
+		inst.set("__class", cls)
+		if init, found := pyLookup(cls, "__init__"); found && isCallable(init) {
+			self := append([]interface{}{inst}, args...)
+			rt.call(init, jsUndef, rt.pyBindCall(init, self, kw))
+		}
+		return inst
+	}
+	if _, cls, ok := pyInstance(v); ok {
+		if m, found := pyLookup(cls, "__call__"); found && isCallable(m) {
+			self := append([]interface{}{v}, args...)
+			return rt.call(m, jsUndef, rt.pyBindCall(m, self, kw))
+		}
+	}
+	return rt.call(v, jsUndef, rt.pyBindCall(v, args, kw))
+}
+
+// pyIsInstance is isinstance(v, C), with a list/tuple of classes accepted.
+func (rt *jsrt) pyIsInstance(v interface{}, target interface{}) bool {
+	if arr, ok := target.(*jsArray); ok {
+		for _, e := range arr.elems {
+			if rt.pyIsInstance(v, e) {
+				return true
+			}
+		}
+		return false
+	}
+	_, cls, ok := pyInstance(v)
+	if !ok {
+		// A builtin value against a builtin class object (int, str, ...).
+		if tc, isCls := target.(*jsObject); isCls {
+			if n, has := tc.props["__name"]; has && !hasKey(tc, "__mro") {
+				return pyTypeName(rt, v) == rt.toString(n)
+			}
+		}
+		return false
+	}
+	for _, k := range pyMRO(cls) {
+		if k == target {
+			return true
+		}
+	}
+	// Builtin exception classes are matched by name, the way js_is_type does.
+	if tc, isCls := target.(*jsObject); isCls {
+		want, has := tc.props["__name"]
+		if has {
+			for _, k := range pyMRO(cls) {
+				if n, ok := k.props["__name"]; ok && rt.toString(n) == rt.toString(want) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func hasKey(o *jsObject, k string) bool {
+	_, ok := o.props[k]
+	return ok
+}
+
+// pyTypeName is the Python name of a builtin value's type.
+func pyTypeName(rt *jsrt, v interface{}) string {
+	switch t := v.(type) {
+	case jsUndefT, jsNullT:
+		return "NoneType"
+	case bool:
+		return "bool"
+	case string:
+		return "str"
+	case *jsBigInt:
+		return "int"
+	case float64:
+		if t == math.Trunc(t) && !math.IsInf(t, 0) {
+			return "int"
+		}
+		return "float"
+	case *jsArray:
+		return "list"
+	case *jsClosure, *hostFunc, *boundMethod:
+		return "function"
+	}
+	if _, _, ok := dictParts(v); ok {
+		return "dict"
+	}
+	return "object"
+}
+
+// pyBuiltinClass hands out one stable class object per builtin type name, so
+// type(x) is type(y) holds for two values of the same builtin type.
+func (rt *jsrt) pyBuiltinClass(name string) *jsObject {
+	if rt.pyTypes == nil {
+		rt.pyTypes = map[string]*jsObject{}
+	}
+	if c, ok := rt.pyTypes[name]; ok {
+		return c
+	}
+	c := newJSObject()
+	c.set("__name", name)
+	rt.pyTypes[name] = c
+	return c
+}
+
+// pyContains is 'x in y' for the builtin containers (the js_pyin logic, reached
+// from js_pybin once no __contains__ answered).
+func (rt *jsrt) pyContains(x, y interface{}) bool {
+	switch c := y.(type) {
+	case *jsArray:
+		for _, e := range c.elems {
+			if rt.pyEqual(e, x) {
+				return true
+			}
+		}
+		return false
+	case string:
+		return strings.Contains(c, rt.toString(x))
+	}
+	if keys, _, ok := dictParts(y); ok {
+		return rt.dictFind(keys, x) >= 0
+	}
+	rt.fail("'in' needs a list, a string, a dict or an object with __contains__")
+	return false
+}
+
+// pyFloorMod is Python's %: the result takes the sign of the divisor.
+func pyFloorMod(x, y float64) float64 {
+	r := math.Mod(x, y)
+	if r != 0 && (r < 0) != (y < 0) {
+		r += y
+	}
+	return r
+}
+
+// pyArith is -, * and / with the bigint path js_sub/js_mul/js_div take.
+func (rt *jsrt) pyArith(op byte, l, r interface{}) interface{} {
+	if rt.hasBigInt {
+		if v, ok := bigArith(op, l, r); ok {
+			return v
+		}
+	}
+	switch op {
+	case '-':
+		return rt.toNumber(l) - rt.toNumber(r)
+	case '*':
+		return rt.toNumber(l) * rt.toNumber(r)
+	}
+	return rt.toNumber(l) / rt.toNumber(r)
+}
+
+// pyBinDunder / pyBinReflected map an operator to the method an instance on the
+// left (resp. on the right) may answer it with.
+var pyBinDunder = map[string]string{
+	"+": "__add__", "-": "__sub__", "*": "__mul__", "/": "__truediv__",
+	"//": "__floordiv__", "%": "__mod__", "@": "__matmul__",
+	"==": "__eq__", "!=": "__ne__", "<": "__lt__", ">": "__gt__",
+	"<=": "__le__", ">=": "__ge__",
+}
+var pyBinReflected = map[string]string{
+	"+": "__radd__", "-": "__rsub__", "*": "__rmul__", "/": "__rtruediv__",
+	"//": "__rfloordiv__", "%": "__rmod__", "@": "__rmatmul__",
+	"==": "__eq__", "!=": "__ne__", "<": "__gt__", ">": "__lt__",
+	"<=": "__ge__", ">=": "__le__",
+}
+
+// pyDunderBin answers a binary operator through a user class's dunder, trying
+// the left operand first and then the right one's reflected form. ok is false
+// when neither side defines one - the caller then takes the builtin path.
+func (rt *jsrt) pyDunderBin(op string, l, r interface{}) (interface{}, bool) {
+	if _, cls, ok := pyInstance(l); ok {
+		if m, found := pyLookup(cls, pyBinDunder[op]); found && isCallable(m) {
+			return rt.call(m, jsUndef, []interface{}{l, r}), true
+		}
+	}
+	if _, cls, ok := pyInstance(r); ok {
+		if m, found := pyLookup(cls, pyBinReflected[op]); found && isCallable(m) {
+			return rt.call(m, jsUndef, []interface{}{r, l}), true
+		}
+	}
+	if op == "!=" { // Python's default __ne__ is the negation of __eq__.
+		if v, ok := rt.pyDunderBin("==", l, r); ok {
+			return !rt.truthy(v), true
+		}
+	}
+	return nil, false
+}
+
+// ----------------------------------------------------------------------------
+// Python call binding
+//
+// A Python call carries positional AND keyword arguments, while a compiled
+// function reads a flat array by index. The def registers its signature
+// (js_pysig) and pyBindCall maps one onto the other at the call site.
+//
+// Two prologue layouts exist, and which one a function uses is fixed at compile
+// time by its own parameter list:
+//   A  [p0 .. pn-1, extra positionals ...]   - the layout every def had before
+//      keyword parameters existed; a *args rest parameter reads the extras with
+//      js_pyrest(args, n).
+//   B  [p0 .. pn-1, *args list, **kwargs dict]  - used as soon as the def has
+//      keyword-only parameters or a **kwargs one, because those cannot be
+//      recovered from a flat positional array.
+type pySig struct {
+	names   []string
+	nkwonly int // The LAST nkwonly names are keyword-only.
+	ext     bool
+}
+
+// pyBindCall turns (positional, keyword dict) into the callee's argument array.
+func (rt *jsrt) pyBindCall(callee interface{}, pos []interface{}, kw interface{}) []interface{} {
+	kwKeys, kwVals, hasKw := dictParts(kw)
+	if hasKw && len(kwKeys.elems) == 0 {
+		hasKw = false
+	}
+	var sig *pySig
+	if rt.pySigs != nil {
+		sig = rt.pySigs[callee]
+	}
+	if sig == nil {
+		// A builtin (no declared signature) takes the keyword dict as one extra
+		// trailing argument - which is exactly what dict(a=1) / dict(**m) want.
+		if hasKw {
+			return append(append([]interface{}{}, pos...), kw)
+		}
+		return pos
+	}
+	if !sig.ext && !hasKw {
+		return pos
+	}
+	n := len(sig.names)
+	npos := n - sig.nkwonly
+	out := make([]interface{}, n)
+	for i := range out {
+		out[i] = jsUndef
+	}
+	for i := 0; i < npos && i < len(pos); i++ {
+		out[i] = pos[i]
+	}
+	used := map[string]bool{}
+	fromKw := func(i int) {
+		if !hasKw {
+			return
+		}
+		for j, k := range kwKeys.elems {
+			if rt.toString(k) == sig.names[i] {
+				out[i] = kwVals.elems[j]
+				used[sig.names[i]] = true
+			}
+		}
+	}
+	for i := 0; i < npos; i++ {
+		if i >= len(pos) {
+			fromKw(i)
+		}
+	}
+	for i := npos; i < n; i++ {
+		fromKw(i)
+	}
+	var extra []interface{}
+	if len(pos) > npos {
+		extra = pos[npos:]
+	}
+	if !sig.ext {
+		return append(out, extra...)
+	}
+	rest := &jsArray{elems: append([]interface{}{}, extra...)}
+	lk, lv := &jsArray{}, &jsArray{}
+	if hasKw {
+		for j, k := range kwKeys.elems {
+			if !used[rt.toString(k)] {
+				dictAppend(lk, lv, k, kwVals.elems[j])
+			}
+		}
+	}
+	left := &jsObject{props: map[string]interface{}{"__dict": true, "keys": lk, "vals": lv}}
+	return append(out, rest, left)
+}
+
+// pyMinMax is the max()/min() builtin: over the call arguments, or over the
+// elements of a single iterable argument. want is +1 for max, -1 for min.
+func (rt *jsrt) pyMinMax(argsV interface{}, want int) uint64 {
+	args, ok := argsV.(*jsArray)
+	if !ok {
+		rt.fail("max/min needs an argument array")
+	}
+	elems := args.elems
+	if len(elems) == 1 {
+		if inner, ok := elems[0].(*jsArray); ok {
+			elems = inner.elems
+		}
+	}
+	if len(elems) == 0 {
+		rt.fail("max/min of an empty sequence")
+	}
+	best := elems[0]
+	for _, e := range elems[1:] {
+		if rt.jsCompare(e, best) == want {
+			best = e
+		}
+	}
+	return rt.wrap(best)
+}
+
+// pyDeletedT is the value `del x` leaves in the scope slot; scopeGet turns a
+// read of it into UnboundLocalError. It is a type of its own so nothing a
+// program can produce ever compares equal to it.
+type pyDeletedT struct{}
+
+var pyDeleted interface{} = pyDeletedT{}
+
+// pyExcInstance builds a builtin exception instance - the {__class:{__name},
+// args} shape the except clauses match - for a runtime error the program is
+// meant to be able to catch.
+func (rt *jsrt) pyExcInstance(name string, msg string) interface{} {
+	cls := newJSObject()
+	cls.set("__name", name)
+	inst := newJSObject()
+	inst.set("__class", cls)
+	inst.set("args", &jsArray{elems: []interface{}{msg}})
+	return inst
 }
