@@ -171,6 +171,27 @@ parses as the lambda `S -> 1` if a general expression alternative is tried
 first — the same ordered-choice trap as everywhere else, but easy to miss
 because both readings are syntactically valid.
 
+## Emitting a runtime dispatch (compiler grammars)
+
+**`js_has` ABORTS on a number, string, boolean or null** — its switch only knows
+objects, arrays and strings, and falls through to `'in' needs an object on the
+right side`. So it cannot be used as an "is this a class instance" guard around
+an operand of unknown type. `js_is_type(v, "Name")` is the safe probe: it answers
+false for every value it does not recognize. The working shape for operator
+overloading in `csharp-to-llvm-ir.abnf` is therefore to collect, at WALK time,
+which classes declare which operator (`__op2_+ -> ["Vec"]`) and emit one
+`js_is_type` probe per declaring class — which also means a program that declares
+no operator emits exactly the IR it did before.
+
+**`js_defprop` accessors never see `this` in a C-style compiler grammar.** The
+runtime calls them as `rt.call(acc.get, o, nil)`, and `this` only reaches a
+closure through `rt.thisStack`, which is filled only when `trackThis` is on (the
+JS/TS grammars). A grammar whose `emitFunc` reads `this` out of `args[0]` — every
+C-family one here — must emit a property accessor as an ORDINARY method
+(`__get_X` / `__set_X`) and call it with `js_mcall`, which does pass the receiver
+as the first argument. Kotlin gets away with `js_defprop` because it resolves
+`this` through `js_kget` instead.
+
 ## `:script` productions
 
 **A guard that scans FORWARD for a token on "this line" must skip the leading
@@ -232,3 +253,17 @@ Related ordering trap from the same work: keyword-shaped call forms —
 `typeof(T)`, `nameof(x)`, `sizeof(T)`, `default(T)` — look exactly like a bare
 call, so they must be tried BEFORE the general call seed. Otherwise
 `typeof(IShape)` parses as a call of a variable named `typeof`.
+
+## A one-character operator that is the prefix of a two-character one
+
+Adding a unary `&` (address-of) to a grammar that already has `&&` breaks `a && b`,
+and the failure is not the obvious one. `BitAnd`'s `"&"` matches the FIRST `&` of
+`&&`, and the right-hand side then *succeeds* as the unary `&b` — so the sequence
+never fails, never rolls back, and the expression quietly parses as
+`a & (&b)`. Spell the binary form as `( "&" !"&" )` so it declines the
+double form outright. The same shape applies to `|` vs `||`, `<` vs `<<`, and
+`?` vs `??`/`?.`.
+
+This is a specific case of the ordered-choice rule at the top of this file, but
+it is worth its own entry because the usual symptom of a bad alternative — a
+parse failure — does not appear. You get a wrong parse tree instead.

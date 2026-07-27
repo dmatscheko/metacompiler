@@ -259,14 +259,20 @@ int main() {
   check("arith-truncdiv", 20 ~/ 3 == 6);
   check("arith-truncdiv-neg", -7 ~/ 2 == -3);
   check("arith-mod", 7 % 3 == 1);
-  check("arith-mod-neg", -7 % 3 == -1);
-  check("arith-div", 7 / 2 == 3);
+  // Dart's % returns a result in [0, b.abs()), so this is 2, not -1.
+  // (-1 is what (-7).remainder(3) gives.)
+  check("arith-mod-neg", -7 % 3 == 2);
+  // num.operator/ ALWAYS returns a double in Dart; ~/ is the truncating one
+  // (used correctly two lines above). dart-test-full.dart:72 asserts the same.
+  check("arith-div", 7 / 2 == 3.5);
   int ca = 5;
   ca += 3;
   ca -= 2;
   ca *= 4;
   check("compound-arith", ca == 24);
-  ca /= 5;
+  // ca is an int, and /= yields a double, which is a compile error in Dart.
+  // ~/= is the int-preserving form and keeps the intended value.
+  ca ~/= 5;
   check("compound-div", ca == 4);
   ca %= 3;
   check("compound-mod", ca == 1);

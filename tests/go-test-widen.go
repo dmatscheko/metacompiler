@@ -2,22 +2,19 @@
 
 // Go subset widening test.
 //
-// GENUINELY implemented and checked here: the single-result type assertion x.(T),
-// which is the identity on the value (the target type is parsed and ignored).
+// EVERY construct here is genuinely implemented now, in both grammars: the type
+// assertion x.(T), the type switch, the interface declaration (a no-op, since the value
+// model is dynamic and satisfaction is therefore implicit), the goroutine, the channel
+// make/send/receive, and the select. `go work(5)` really runs, so tally reaches 6 via a
+// genuine goroutine rather than via a warned no-op.
 //
-// The TYPE SWITCH is genuinely implemented now too, and its arm runs.
+// The file runs to os.Exit(fails) with fails == 0, with or without -warn-unsupported,
+// and a run with the flag reports no unsupported construct at all.
 //
-// Accepted but reported "not implemented" (they need concurrency / channel semantics
-// the subset does not model): an interface type declaration, a goroutine (go f()), a
-// channel make/send/receive, and a select. Where operands exist (the goroutine callee,
-// the send / receive channel and value) they still run, so their calls stay visible in
-// call graphs.
-//
-// Without a flag the compile stops at the FIRST not-implemented construct (the
-// Stringer interface) with a clean file:line message - this file SHOULD FAIL by
-// default. With -warn-unsupported every not-implemented construct warns and its
-// operands run, so main() reaches os.Exit(fails) with fails == 0 (every type-assertion
-// check passes, and the goroutine callee ran).
+// History: this was a by-design SHOULD-FAIL guard, because a flagless run aborted at the
+// first not-implemented construct (the Stringer interface). The full-syntax work
+// implemented all of them - concurrency last - which removed the guard's premise, so the
+// matrix entry became an ordinary one. Do not re-arm it.
 
 package main
 

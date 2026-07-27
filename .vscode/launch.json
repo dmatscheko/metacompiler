@@ -659,7 +659,7 @@
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-widen.go", "-q", "-warn-unsupported"]
         },
         {
-            "name": "Go widened surface SHOULD FAIL",
+            "name": "Go widened surface (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/go-to-llvm-ir.abnf", "tests/go-test-widen.go", "-q"]
@@ -1541,7 +1541,7 @@
             "program": "${workspaceFolder}","args": ["languages/typescript-to-llvm-ir.abnf", "tests/typescript-test-recognize.ts", "-q", "-warn-unsupported"]
         },
         {
-            "name": "C# recognition SHOULD FAIL",
+            "name": "C# recognition (compiler, no flags)",
             "type": "go",
             "request": "launch",
             "program": "${workspaceFolder}","args": ["languages/csharp-to-llvm-ir.abnf", "tests/csharp-test-recognize.cs", "-q"]

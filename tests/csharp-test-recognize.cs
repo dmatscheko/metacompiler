@@ -5,10 +5,16 @@
 // char literal, the extended numeric literals (0x.., 0b.., 1_000, 100L, 1.5), a where
 // constraint, an expression bodied constructor, and the checked / lock / using statements.
 //
-// RECOGNIZED but reported as NOT IMPLEMENTED (so this file is a should-fail by default and
-// only exits 0 under -warn-unsupported): an interface, an enum, a { get; set; } property,
-// verbatim strings, ?? and ??=, is / as tests, null-conditional ?. access, and
-// typeof / nameof. Each fires one 'not implemented' warning and leaves a placeholder.
+// ALSO GENUINELY COMPILED NOW: an interface, an enum, a { get; set; } property, verbatim
+// strings, ?? and ??=, is / as tests, null-conditional ?. access, and typeof / nameof.
+// The file runs and prints 123 with or without -warn-unsupported, and a run with the flag
+// reports no unsupported construct at all.
+//
+// History: those constructs used to be recognized-but-not-implemented, so a flagless run
+// aborted at the first of them and this file was a by-design SHOULD-FAIL guard. The
+// full-syntax work implemented every one (properties and is/as were the last two), which
+// removed the guard's premise, so the matrix entry became an ordinary one. Do not re-arm
+// it: the C# here is valid and is meant to keep working.
 global using System;
 using System.Collections.Generic;
 using System.Text;

@@ -67,9 +67,10 @@ QualName    = Id { "." Id } ;
 // declaration of a variable x with the (identifier-shaped) type 'return'.
 Statement   = [ Annotations ] StatementBody ;
 StatementBody = Block | ClassDecl | EnumDecl | MixinDecl | ExtensionDecl | TypedefDecl
-            | If | Switch | While | DoWhile | For | TryStmt | Return
-            | Break | Continue | Rethrow | Assert | FuncDecl | VarDecl | LabeledStmt
-            | Empty | ExprStmt ;
+            | IfCase | If | Switch | While | DoWhile | For | TryStmt | Return
+            | Break | Continue | Rethrow | ThrowStmt | Yield | Assert | TopGetter | TopSetter
+            | FuncDecl | VarDecl | LabeledStmt
+            | Empty | PatAssign | ExprStmt ;
 
 // Metadata annotations (@Foo, @Foo.bar, @Foo(args)) are parsed and erased, like in Java.
 Annotations = Annotation { Annotation } ;
@@ -77,15 +78,42 @@ Annotation  = "@" Id { "." Id } [ SkipParen ] ;
 
 // Top-level declarations accepted structurally and reported as not implemented; their
 // bodies are matched with SkipBlock so a full file parses.
-EnumDecl    <~~ push(notImplStmt("enum declaration", up.pos)) ~~>
-            = KwEnum Id [ SkipAngle ] [ KwWith Type { "," Type } ] [ KwImplements Type { "," Type } ] SkipBlock ;
-MixinDecl   <~~ push(notImplStmt("mixin declaration", up.pos)) ~~>
-            = KwMixin [ KwClass ] Id [ SkipAngle ] [ KwOn Type { "," Type } ] [ KwImplements Type { "," Type } ] SkipBlock ;
-ExtensionDecl <~~ push(notImplStmt("extension declaration", up.pos)) ~~>
-            = KwExtension [ KwType ] [ Id ] [ SkipAngle ] KwOn Type SkipBlock ;
-TypedefDecl <~~ push(notImplStmt("typedef declaration", up.pos)) ~~>
+// An enum is a class whose values are canonical instances: the value list comes first,
+// then (after a ";") the ordinary members of an enhanced enum. Every value gets .index,
+// and the enum itself a static .values list.
+EnumDecl    <~~ push(makeEnumStmt(takeAll())) ~~>
+            = KwEnum CName [ SkipAngle ] [ WithClause ] [ ImplementsClause ]
+              "{" EnumValue { "," EnumValue } [ "," ] [ ";" { Member } ] "}" ;
+EnumValue   <~~ push(makeEnumValue(takeAll())) ~~>
+            = EVName [ SkipAngle ] [ EnumArgs ] ;
+EVName      <~~ push({evname: up.in}) ~~> = Id ;
+EnumArgs    <~~ push({eargs: takeAll()}) ~~> = "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+
+// A mixin is a class body with no constructor. Its `on` types are the superclass
+// interface it may call through with super; the linearisation puts it between the using
+// class and that superclass.
+MixinDecl   <~~ push(makeClassStmt(takeAll())) ~~>
+            = [ MixinMods ] KwMixin [ KwClass ] CName [ SkipAngle ] [ KwOn OnType { "," OnType } ]
+              [ ImplementsClause ] "{" { Member } "}" ;
+OnType      <~~ push({con: up.in}) ~~> = TypeNamed ;
+
+// extension Name on T { ... } adds members to an existing type; extension type N(T v)
+// declares a wrapper type. The extension-type form comes first (it starts with the same
+// two keywords).
+ExtensionDecl = ExtensionType | ExtensionOn ;
+ExtensionOn <~~ push(makeExtensionStmt(takeAll())) ~~>
+            = KwExtension [ EXName ] [ SkipAngle ] KwOn ExtOnType "{" { Member } "}" ;
+EXName      <~~ push({exname: up.in}) ~~> = Id ;
+ExtOnType   <~~ push({exton: up.in}) ~~> = Type ;
+ExtensionType <~~ push(makeExtTypeStmt(takeAll())) ~~>
+            = KwExtension KwType [ KwConst ] CName [ SkipAngle ] "(" ExtTypeField ")"
+              [ ImplementsClause ] "{" { Member } "}" ;
+ExtTypeField <~~ push({etfield: popName()}) ~~> = Type Id <~~ push({mname: up.in}) ~~> ;
+
+// A typedef only names a type, and all types are erased here, so it compiles to nothing.
+TypedefDecl <~~ push(function() {}) ~~>
             = KwTypedef ( TypedefNew | TypedefOld ) ;
-TypedefNew  = Id [ SkipAngle ] "=" Type [ KwFunction [ SkipAngle ] SkipParen ] [ "?" ] ";" ;
+TypedefNew  = Id [ SkipAngle ] "=" Type ";" ;
 TypedefOld  = Type Id [ SkipAngle ] SkipParen ";" ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
@@ -95,58 +123,86 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 // interface, sealed, mixin) are parsed and erased so the class still compiles.
 // Inheritance/mixins are not implemented.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = [ ClassMods ] KwClass Id <~~ push({cname: up.in}); curClassName = up.in ~~>
-              [ SkipAngle ] [ SuperClause ] "{" { Member } "}" ;
+            = [ ClassMods ] KwClass CName [ SkipAngle ]
+              [ ExtendsClause ] [ WithClause ] [ ImplementsClause ] "{" { Member } "}" ;
+CName       <~~ push({cname: up.in}); curClassName = up.in ~~> = Id ;
 ClassMods   = { ClassMod } ;
 ClassMod    = ( "abstract" | "base" | "final" | "interface" | "sealed" | "mixin" ) KwEnd ;
-SuperClause <~~ notImpl("inheritance/mixins", up.pos) ~~>
-            = SuperPart { SuperPart } ;
-SuperPart   = ( KwExtends | KwWith | KwImplements ) Type { "," Type } ;
+// The same modifiers WITHOUT "mixin": a greedy ClassMods would eat the `mixin` keyword of
+// a mixin declaration itself, and this is a PEG - the committed repetition never gives it back.
+MixinMods   = MixinMod { MixinMod } ;
+MixinMod    = ( "abstract" | "base" | "final" | "interface" | "sealed" ) KwEnd ;
+// extends contributes implementation, with contributes mixins (a later one wins over an
+// earlier one) and implements contributes nothing but a nominal type.
+ExtendsClause = KwExtends SuperType ;
+SuperType   <~~ push({csuper: up.in}) ~~> = TypeNamed ;
+WithClause  = KwWith MixinType { "," MixinType } ;
+MixinType   <~~ push({cmixin: up.in}) ~~> = TypeNamed ;
+ImplementsClause = KwImplements IfaceType { "," IfaceType } ;
+IfaceType   <~~ push({ciface: up.in}) ~~> = TypeNamed ;
 
 // A member is a field, a method (Type? name(params) body) or a constructor (name == the
 // class name). NamedCtorMember is a named constructor - accepted, not implemented.
 // Metadata annotations and member modifiers (static/covariant/external/abstract) are
 // parsed and erased; getters, setters, operators and factory constructors are accepted
 // and not implemented.
-Member      = [ Annotations ] [ MemberMods ] MemberCore ;
+// One Member can declare SEVERAL things (`final int x, y;`), so the tag pushes one
+// descriptor per declared member rather than a single one.
+Member      <~~ pushMembers(takeAll()) ~~>
+            = [ Annotations ] [ MemberMods ] MemberCore ;
 MemberCore  = GetterMember | SetterMember | OperatorMember | FactoryMember
             | NamedCtorMember | PlainFnMember | TypedFnMember | FieldMember ;
-MemberMods  = { MemberMod } ;
-MemberMod   = ( "static" | "covariant" | "external" | "abstract" ) KwEnd ;
+MemberMods  = MemberMod { MemberMod } ;
+MemberMod   <~~ push({mmod: up.in}) ~~>
+            = ( "static" | "covariant" | "external" | "abstract" ) KwEnd ;
 // The bare (no return type) form is tried first: an optional leading Type would greedily
 // consume the get/set/operator keyword itself (it is a valid identifier) and then commit.
-GetterMember   <~~ takeAll(); push({skip: notImpl("getter", up.pos)}) ~~>
-            = KwGet Id MemberBody | Type KwGet Id MemberBody ;
-SetterMember   <~~ takeAll(); push({skip: notImpl("setter", up.pos)}) ~~>
-            = KwSet Id ParamList MemberBody | Type KwSet Id ParamList MemberBody ;
-OperatorMember <~~ takeAll(); push({skip: notImpl("operator overload", up.pos)}) ~~>
-            = KwOperator OverloadableOp ParamList MemberBody | Type KwOperator OverloadableOp ParamList MemberBody ;
-FactoryMember  <~~ takeAll(); push({skip: notImpl("factory constructor", up.pos)}) ~~>
-            = [ KwConst ] KwFactory Id [ "." Id ] ParamList ( MemberBody | "=" Type [ "." Id ] ";" ) ;
+// A getter becomes the class entry "get$name", a setter "set$name" and an operator its
+// own symbol, so a field read / write / binary operation can find them by key.
+GetterMember   <~~ push(makeAccessor("get$", takeAll())) ~~>
+            = KwGet MName MemberBody | Type KwGet MName MemberBody ;
+SetterMember   <~~ push(makeAccessor("set$", takeAll())) ~~>
+            = KwSet MName ParamList MemberBody | Type KwSet MName ParamList MemberBody ;
+OperatorMember <~~ push(makeAccessor("", takeAll())) ~~>
+            = KwOperator OpName ParamList MemberBody | Type KwOperator OpName ParamList MemberBody ;
+OpName      <~~ push({mn: up.in}) ~~> = OverloadableOp ;
+// A factory constructor: it RETURNS an instance rather than initialising a fresh one.
+FactoryMember  <~~ push(makeCtorMember(true, takeAll())) ~~>
+            = [ KwConst ] KwFactory Id [ "." MName ] ParamList ( MemberBody | FactoryRedirect ) ;
+FactoryRedirect <~~ push(makeFactoryRedirect(takeAll())) ~~> = "=" FRTarget ";" ;
+FRTarget    <~~ push({frto: up.in}) ~~> = Type [ "." Id ] ;
 OverloadableOp = "[]=" | "[]" | "==" | "<=" | ">=" | ">>>" | "<<" | ">>" | "~/"
             | "+" | "-" | "*" | "/" | "%" | "<" | ">" | "&" | "|" | "^" | "~" ;
-NamedCtorMember <~~ takeAll(); push({skip: notImpl("named constructor", up.pos)}) ~~>
-            = Id "." Id ParamList [ CtorInit ] MemberBody ;
+NamedCtorMember <~~ push(makeCtorMember(false, takeAll())) ~~>
+            = [ KwConst ] Id "." MName [ SkipAngle ] ParamList [ CtorInit ] MemberBody ;
 PlainFnMember <~~ push(makeMember(false, takeAll())) ~~>
-            = MName ParamList [ CtorInit ] MemberBody ;
+            = [ KwConst ] MName [ SkipAngle ] ParamList [ CtorInit ] MemberBody ;
 TypedFnMember <~~ push(makeMember(true, takeAll())) ~~>
-            = Type MName ParamList MemberBody ;
+            = Type MName [ SkipAngle ] ParamList MemberBody ;
 MName       <~~ push({mn: up.in}) ~~> = Id ;
 
-// A constructor initializer list ( : super(...), : this.x = e ) is accepted and reported
-// as not implemented; the super/redirect chain and field initializers are dropped.
-CtorInit    <~~ takeAll(); notImpl("constructor initializer list", up.pos) ~~>
-            = ":" InitItem { "," InitItem } ;
-InitItem    = SuperOrRedirect | FieldInit ;
-SuperOrRedirect = ( "super" | "this" ) KwEnd [ "." Id ] "(" [ AssignExpr { "," AssignExpr } ] ")" ;
-FieldInit   = [ "this" KwEnd "." ] Id "=" AssignExpr ;
+// A constructor initializer list: `: assert(c), this.x = e, super(a)` or the redirect
+// `: this(1, 1)`. The asserts are evaluated, the field initialisers run before the body,
+// and the super / redirect call chains to the other constructor.
+CtorInit    = ":" InitItem { "," InitItem } ;
+InitItem    = CtorAssert | SuperCall | RedirectCall | FieldInit ;
+CtorAssert  <~~ push({ciassert: takeAll()}) ~~>
+            = KwAssert "(" Expression [ "," Expression ] [ "," ] ")" ;
+SuperCall   <~~ push(makeSuperCall(takeAll())) ~~>
+            = "super" KwEnd [ "." SCName ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+RedirectCall <~~ push(makeRedirectCall(takeAll())) ~~>
+            = "this" KwEnd [ "." SCName ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+SCName      <~~ push({scname: up.in}) ~~> = Id ;
+FieldInit   <~~ push(makeFieldInit(takeAll())) ~~>
+            = [ "this" KwEnd "." ] FIName "=" AssignExpr ;
+FIName      <~~ push({finame: up.in}) ~~> = Id ;
 
 MemberBody  = [ AsyncMod ] MemberBodyKind ;
 MemberBodyKind = MBlock | MArrow | MSemi ;
 MBlock      <~~ push({body: pop()}) ~~>  = Block ;
 MArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
 MSemi       <~~ push({none: true}) ~~>   = ";" ;
-AsyncMod    <~~ notImpl("async function", up.pos) ~~> = ( "async" | "sync" ) KwEnd [ "*" ] ;
+AsyncMod    <~~ push({amod: up.in}) ~~> = ( "async" | "sync" ) KwEnd [ "*" ] ;
 
 // Fields: (Type | var | final [Type]) name [= init] { , name [= init] } ; - separate
 // complete alternatives so the leading-type / no-type cases never get stuck in an optional.
@@ -166,9 +222,9 @@ FieldDecl   <~~ push(makeFieldDecl(takeAll())) ~~>
 // type does not get stuck when it is absent.
 FuncDecl    = FuncTyped | FuncPlain ;
 FuncTyped   <~~ push(makeFuncDecl(takeAll())) ~~>
-            = Type FName ParamList FnBody ;
+            = Type FName [ SkipAngle ] ParamList FnBody ;
 FuncPlain   <~~ push(makeFuncDecl(takeAll())) ~~>
-            = FName ParamList FnBody ;
+            = FName [ SkipAngle ] ParamList FnBody ;
 FName       <~~ push({fname: up.in}) ~~> = Id ;
 FnBody      = [ AsyncMod ] FnBodyKind ;
 FnBodyKind  = FBlock | FArrow ;
@@ -179,39 +235,149 @@ FArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
 // parameter. TypedParam is tried before PlainParam (both are separate alternatives).
 ParamList   <~~ push({params: takeAll()}) ~~>
             = "(" [ ParamItems ] ")" ;
-ParamItems  = NamedGroup | Param { "," Param } [ "," NamedGroup ] [ "," ] ;
-Param       = ThisParam | TypedParam | PlainParam ;
+ParamItems  = TailGroup | Param { "," Param } [ "," TailGroup ] [ "," ] ;
+TailGroup   = NamedGroup | OptGroup ;
+Param       = [ ParamMods ] ParamCore ;
+ParamCore   = ThisParam | SuperParam | TypedParam | PlainParam ;
+ParamMods   = ParamMod { ParamMod } ;
+ParamMod    = ( "covariant" | "required" | "final" ) KwEnd ;
 ThisParam   <~~ push({thisf: popName()}) ~~>
-            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> ;
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+// A super parameter (2.17): IhKid(super.v) forwards v to the superclass constructor.
+SuperParam  <~~ push(makeSuperParam(false, takeAll())) ~~>
+            = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
 TypedParam  <~~ push({pname: popName()}) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> ;
+            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
 PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
 
-// Named (curly) parameters: foo({int a = 1, this.x = 0}). Optional, each with a default;
-// unsupplied ones fall back to the default, else null. Marked named:true in the descriptor.
+// Named (curly) parameters: foo({int a = 1, required int b, this.x = 0}). Optional, each
+// with a default; unsupplied ones fall back to the default, else null. Marked named:true.
 NamedGroup  = "{" NamedParam { "," NamedParam } [ "," ] "}" ;
-NamedParam  = NamedThisParam | NamedTypedParam | NamedPlainParam ;
+NamedParam  = [ ParamMods ] NamedParamCore ;
+NamedParamCore = NamedThisParam | NamedSuperParam | NamedTypedParam | NamedPlainParam ;
 NamedThisParam  <~~ push(makeNamedParam(true, takeAll())) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+NamedSuperParam <~~ push(makeSuperParam(true, takeAll())) ~~>
+            = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 NamedTypedParam <~~ push(makeNamedParam(false, takeAll())) ~~>
             = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 NamedPlainParam <~~ push(makeNamedParam(false, takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
-// A type: name with optional generics <...> (skipped), dotted names and a nullable ? marker,
-// all parsed and erased.
-Type        = Id [ SkipAngle ] { "." Id [ SkipAngle ] } [ "?" ] ;
+// Optional POSITIONAL parameters: foo(int a, [int b = 2, int? c]). Positional like the
+// plain ones, but a missing argument falls back to the default (else null).
+OptGroup    = "[" OptParam { "," OptParam } [ "," ] "]" ;
+OptParam    = [ ParamMods ] OptParamCore ;
+OptParamCore = OptThisParam | OptSuperParam | OptTypedParam | OptPlainParam ;
+OptThisParam  <~~ push(makeOptParam(true, takeAll())) ~~>
+            = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+OptSuperParam <~~ push(makeSuperParam(false, takeAll())) ~~>
+            = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+OptTypedParam <~~ push(makeOptParam(false, takeAll())) ~~>
+            = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+OptPlainParam <~~ push(makeOptParam(false, takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+
+// A type: a name with optional generics <...> (skipped) and dotted qualification, a record
+// type ( (int, String) , ({int w, int h}) ) matched as a balanced paren run, and the
+// Function(...) form that may follow either. Everything is parsed and erased.
+Type        = TypePrim { TypeFn } ;
+TypePrim    = TypeRecord | TypeFn | TypeNamed ;
+TypeRecord  = SkipParen [ "?" ] ;
+TypeNamed   = Id [ TypeArgs ] { "." Id [ TypeArgs ] } [ "?" ] ;
+// A type-ARGUMENT list is parsed as real types, not as a balanced <...> run. The balanced
+// run would happily span `i < 2; ... =>` to reach the ">" of a "=>" ten lines later and
+// then find the "(" a generic call needs - which is exactly what it did.
+TypeArgs    = "<" TypeArg { "," TypeArg } ">" ;
+TypeArg     = Type ;
+TypeFn      = KwFunction [ SkipAngle ] SkipParen [ "?" ] ;
+
+// --- patterns (Dart 3) ---------------------------------------------------------------
+// One pattern grammar serves every context (declaration, assignment, for-in, if-case,
+// switch statement and switch expression). A BARE identifier is ambiguous - a binder in a
+// declaration, an assignment target in a pattern assignment, a constant elsewhere - so it
+// parses to an "idref" descriptor that the use site resolves (resolvePat, below).
+Pattern     = PatOr ;
+PatOr       <~~ push(makeOrPat(takeAll())) ~~>  = PatAnd { "||" PatAnd } ;
+PatAnd      <~~ push(makeAndPat(takeAll())) ~~> = PatUnary { "&&" PatUnary } ;
+PatUnary    = PatRelOp | PatPostfix ;
+// A relational pattern (< 10, >= 20) compares the matched value with a constant.
+PatRelOp    <~~ push(makeRelPat(takeAll())) ~~> = PatRelSym RelExpr ;
+PatRelSym   <~~ push({relop: up.in}) ~~> = "==" | "!=" | "<=" | ">=" | "<" | ">" ;
+PatPostfix  <~~ push(makePostPat(takeAll())) ~~>
+            = PatPrimary { PatNullCheck | PatNullAssert | PatCast } ;
+PatNullCheck  <~~ push({post: "?"}) ~~> = "?" ;
+PatNullAssert <~~ push({post: "!"}) ~~> = "!" !"=" ;
+PatCast     = KwAs PatCastType ;
+PatCastType <~~ push({post: "as", ty: up.in}) ~~> = Type ;
+
+PatPrimary  = PatList | PatMap | PatRecP | PatVarTyped | PatObject | PatBareId | PatConst ;
+PatList     <~~ push(makeListPat(takeAll())) ~~>
+            = "[" [ PatListElem { "," PatListElem } [ "," ] ] "]" ;
+PatListElem = PatRest | PatElemP ;
+// [a, ..., b] skips the middle; [a, ...rest] binds it.
+PatRest     <~~ push(makeRestPat(takeAll())) ~~> = "..." [ Pattern ] ;
+PatElemP    <~~ push({pelem: pop()}) ~~> = Pattern ;
+PatMap      <~~ push(makeMapPat(takeAll())) ~~>
+            = "{" [ PatMapEntry { "," PatMapEntry } [ "," ] ] "}" ;
+PatMapEntry <~~ var mp = pop(); push({mkey: pop(), mpat: mp}) ~~> = RelExpr ":" Pattern ;
+PatRecP     <~~ push(makeRecPat(takeAll())) ~~>
+            = "(" [ PatFieldP { "," PatFieldP } [ "," ] ] ")" ;
+PatFieldP   = PatNamedFieldP | PatPosFieldP ;
+PatNamedFieldP <~~ var fp = pop(); push({pfname: popName2(), pfpat: fp}) ~~>
+            = Id <~~ push({rn: up.in}) ~~> ":" Pattern ;
+PatPosFieldP <~~ push({pfname: "", pfpat: pop()}) ~~> = Pattern ;
+// A typed / var / final binder: `var v`, `int a`, `final String s`.
+PatVarTyped <~~ push(makeVarPat(takeAll())) ~~> = PatVarLead PatName ;
+PatVarLead  = KwVar | KwFinal [ TypeNamed ] | TypeNamed ;
+PatName     <~~ push({pvname: up.in}) ~~> = NotPatKw Id ;
+// A zero-width guard that fails when the next word is one of the operators that may
+// FOLLOW a pattern (as / when / in / is). Without it `ci as int` reads `ci` as the type
+// and `as` as the variable name, and the enclosing alternative is already committed.
+NotPatKw = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i = i + 1; cc = c.peek(i) }
+        var c1 = c.peek(i + 1)
+        var len = 0
+        if (cc === 97 && c1 === 115) { len = 2 }                   // as
+        else if (cc === 105 && (c1 === 115 || c1 === 110)) { len = 2 } // is / in
+        else if (cc === 119 && c1 === 104 && c.peek(i + 2) === 101 && c.peek(i + 3) === 110) { len = 4 } // when
+        if (len === 0) { return undefined }
+        var n = c.peek(i + len)
+        var isWord = (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n === 95
+        return isWord ? undefined : abnf.newToken("\x01pattern-keyword", 0)
+    })()
+~~) ;
+// An object pattern: Type(field: subpattern, :shorthand).
+PatObject   <~~ push(makeObjPat(takeAll())) ~~>
+            = PatObjType "(" [ PatObjField { "," PatObjField } [ "," ] ] ")" ;
+PatObjType  <~~ push({otype: up.in}) ~~> = TypeNamed ;
+PatObjField = PatObjNamed | PatObjShort ;
+PatObjNamed <~~ var op2 = pop(); push({pfname: popName2(), pfpat: op2}) ~~>
+            = Id <~~ push({rn: up.in}) ~~> ":" Pattern ;
+PatObjShort <~~ push(makeShortField(pop())) ~~> = ":" Pattern ;
+// A bare name. The !"." / !"(" lookaheads keep a qualified constant (EnDir.north) and an
+// object pattern out of this alternative.
+PatBareId   <~~ push({p: "idref", name: up.in}) ~~> = PatBareName ;
+PatBareName = Id !"." !"(" ;
+PatConst    <~~ push({p: "const", t: pop()}) ~~> = RelExpr ;
 
 // Local variable declarations. Separate complete alternatives avoid the optional-type trap.
-// A 'late' modifier is accepted and reported as not implemented (the initialiser still runs).
-VarDecl     = VarLate | VarKwDecl | VarFinalTyped | VarFinal | VarConstTyped | VarConst | VarTyped ;
-VarLate     <~~ notImpl("late variable", up.pos) ~~>
-            = KwLate ( KwFinal Type | KwFinal | Type ) DeclTail ;
+VarDecl     = PatVarDecl | VarLate | VarKwDecl | VarFinalTyped | VarFinal | VarConstTyped | VarConst | VarTyped ;
+// A pattern variable declaration: var (a, b) = e; final [x, ...r] = e;
+PatVarDecl  <~~ push(makePatDecl(takeAll())) ~~>
+            = ( KwVar | KwFinal ) PatDeclHead "=" Expression ";" ;
+PatDeclHead = PatList | PatMap | PatRecP ;
+// `late` only delays the initialisation check, which this front end does not make, so a
+// late declaration is an ordinary one (uninitialised means null).
+VarLate     = KwLate ( KwFinal Type | KwFinal | KwVar | Type ) DeclTail ;
 VarKwDecl     = KwVar         DeclTail ;
 VarFinalTyped = KwFinal Type  DeclTail ;
 VarFinal      = KwFinal       DeclTail ;
-VarConstTyped = KwConst Type  DeclTail ;
-VarConst      = KwConst       DeclTail ;
+VarConstTyped <~~ push(constify(pop())) ~~> = KwConst Type  DeclTail ;
+VarConst      <~~ push(constify(pop())) ~~> = KwConst       DeclTail ;
 VarTyped      = Type          DeclTail ;
 DeclTail    <~~ push(makeSeq(takeAll())) ~~>
             = Declarator { "," Declarator } ";" ;
@@ -220,12 +386,24 @@ Declarator  <~~ push(makeDecl(takeAll())) ~~>
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
+// if (e case pattern when guard) - the pattern's bindings are in scope in the then branch.
+IfCase      <~~ push(makeIfCase(takeAll())) ~~>
+            = KwIf "(" Expression KwCase Pattern [ SwGuard ] ")" Statement [ KwElse Statement ] ;
+// A pattern assignment: (a, b) = (b, a); - the names must already exist.
+PatAssign   <~~ push(makePatAssign(takeAll())) ~~>
+            = PatDeclHead "=" Expression ";" ;
 
 While       <~~ push(makeWhile(pop(), pop())) ~~>
             = KwWhile "(" Expression ")" Statement ;
 
 // for (x in coll) is tried before the C-style for; both start with 'for ('.
-For         = ForInTyped | ForInBare | ForCStyle ;
+For         = ForAwait | ForInPat | ForInTyped | ForInBare | ForCStyle ;
+// await for (v in stream): with no event loop the stream is already a plain iterable.
+ForAwait    = KwAwait ForInAny ;
+ForInAny    = ForInPat | ForInTyped | ForInBare ;
+// for (var (a, b) in pairs) - a pattern per element.
+ForInPat    <~~ push(makeForInPat(takeAll())) ~~>
+            = KwFor "(" ( KwVar | KwFinal ) PatDeclHead KwIn Expression ")" Statement ;
 ForInTyped  <~~ push(makeForIn(takeAll())) ~~>
             = KwFor "(" ForInLead Id <~~ push(up.in) ~~> KwIn Expression ")" Statement ;
 ForInBare   <~~ push(makeForIn(takeAll())) ~~>
@@ -238,23 +416,70 @@ ForVar      <~~ push(makeSeq(takeAll())) ~~> = ForVarHead Declarator { "," Decla
 ForVarHead  = KwVar | KwFinal Type | KwFinal | Type ;
 ForExpr     <~~ push(exprToStmt(pop())) ~~> = Expression ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
-ForPost     <~~ push({k:"post", t:exprToStmt(pop())}) ~~> = Expression ;
+ForPost     <~~ push({k:"post", t: makeSeq(takeAll())}) ~~> = ForPostOne { "," ForPostOne } ;
+ForPostOne  <~~ push(exprToStmt(pop())) ~~> = Expression ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
 // break / continue accept an optional target label (the labeled loop is not implemented,
 // so the label warns and the break/continue still targets the innermost loop).
-Break       <~~ push(makeBreak()) ~~>    = KwBreak [ LoopLabel ] ";" ;
-Continue    <~~ push(makeContinue()) ~~> = KwContinue [ LoopLabel ] ";" ;
-LoopLabel   <~~ notImpl("labeled break/continue", up.pos) ~~> = Id ;
+Break       <~~ push(makeBreakL(takeAll())) ~~>    = KwBreak [ LoopLabel ] ";" ;
+Continue    <~~ push(makeContinueL(takeAll())) ~~> = KwContinue [ LoopLabel ] ";" ;
+LoopLabel   <~~ push({label: up.in}) ~~> = Id ;
 Empty       <~~ push(function() {}) ~~>  = ";" ;
 
-// switch and do-while: accepted, not implemented. Their bodies are matched with the
-// balanced skips (SkipParen / SkipBlock) so the whole construct parses; do-while
-// evaluates nothing (takeAll drops the child thunks).
-Switch      <~~ push(notImplStmt("switch statement", up.pos)) ~~>
-            = KwSwitch SkipParen SkipBlock ;
-DoWhile     <~~ takeAll(); push(notImplStmt("do-while loop", up.pos)) ~~>
+// A switch statement over patterns. There is no fallthrough in Dart: a non-empty case
+// body ends the switch, while an EMPTY body shares the next case's body (makeSwitch runs
+// the first non-empty body at or after the matching case). break is allowed and swallowed.
+Switch      <~~ push(makeSwitch(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" { SwitchMember } "}" ;
+SwitchMember = SwitchCase | SwitchDefault ;
+SwitchCase  <~~ push(makeSwCase(takeAll())) ~~>
+            = KwCase Pattern [ SwGuard ] ":" SwBody ;
+SwitchDefault <~~ push(makeSwDefault(takeAll())) ~~>
+            = KwDefault ":" SwBody ;
+SwGuard     <~~ push({guard: pop()}) ~~> = KwWhen Expression ;
+SwBody      <~~ push(makeSwBody(takeAll())) ~~> = { NotSwEnd Statement } ;
+// A zero-width guard that stops a case body at the next `case` / `default`. Without it the
+// body swallows `default: ...` as a LABELED STATEMENT (default is a plain identifier here).
+NotSwEnd = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        // Whitespace is NOT skipped before a :script guard, and a case body is routinely
+        // followed by a trailing comment, so both have to be stepped over by hand.
+        var spin = 0
+        while (spin < 200000) {
+            spin = spin + 1
+            if (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                cc = c.peek(i)
+                while (cc >= 0 && cc !== 10) { i = i + 1; cc = c.peek(i) }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                cc = c.peek(i)
+                while (cc >= 0 && !(cc === 42 && c.peek(i + 1) === 47)) { i = i + 1; cc = c.peek(i) }
+                i = i + 2
+                cc = c.peek(i)
+                continue
+            }
+            break
+        }
+        var len = 0
+        if (cc === 99 && c.peek(i + 1) === 97 && c.peek(i + 2) === 115 && c.peek(i + 3) === 101) { len = 4 }
+        else if (cc === 100 && c.peek(i + 1) === 101 && c.peek(i + 2) === 102 && c.peek(i + 3) === 97
+                 && c.peek(i + 4) === 117 && c.peek(i + 5) === 108 && c.peek(i + 6) === 116) { len = 7 }
+        if (len === 0) { return undefined }
+        var n = c.peek(i + len)
+        var isWord = (n >= 48 && n <= 57) || (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || n === 95
+        return isWord ? undefined : abnf.newToken("\x01switch-member", 0)
+    })()
+~~) ;
+
+DoWhile     <~~ push(makeDoWhile(takeAll())) ~~>
             = KwDo Statement KwWhile "(" Expression ")" ";" ;
 
 // try/catch/finally and throw are implemented (excThrow/excTry, languages/lib): throw
@@ -262,7 +487,7 @@ DoWhile     <~~ takeAll(); push(notImplStmt("do-while loop", up.pos)) ~~>
 // parsed but not discriminated), finally always runs. return/break/continue inside a try
 // still propagate to the enclosing loop or function. Each part is marked so excTry can
 // tell them apart on the stack.
-TryStmt     <~~ push(excTry(takeAll())) ~~>
+TryStmt     <~~ push(dartTry(takeAll())) ~~>
             = KwTry TryBody { CatchClause } [ FinallyClause ] ;
 TryBody     <~~ push({trybody: pop()}) ~~>
             = Block ;
@@ -272,19 +497,35 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 // binding), `catch (e)`, `catch (e, st)`. The `on Type` type is parsed and discarded; the
 // first binder is the caught value's name (pushed), the optional second binder (the stack
 // trace) is parsed and dropped. excCatch reads [name?, blockThunk].
-CatchClause <~~ push(excCatch(takeAll())) ~~>
-            = ( KwOn Type [ KwCatch "(" Id <~~ push(up.in) ~~> [ "," Id ] ")" ]
-              | KwCatch "(" Id <~~ push(up.in) ~~> [ "," Id ] ")" ) Block ;
+CatchClause <~~ push(makeCatchClause(takeAll())) ~~>
+            = ( KwOn CatchType [ KwCatch "(" CatchName [ "," Id ] ")" ]
+              | KwCatch "(" CatchName [ "," Id ] ")" ) Block ;
+CatchType   <~~ push({catchtype: up.in}) ~~> = Type ;
+CatchName   <~~ push({catchname: up.in}) ~~> = Id ;
 // rethrow re-raises inside a catch. There is no current-exception register, so it is
 // approximated as `throw null` (a genuine unwind carrying an undefined value).
-Rethrow     <~~ push(excThrow(makeConst(undefined))) ~~>
+Rethrow     <~~ push(makeRethrow()) ~~>
             = KwRethrow ";" ;
-Assert      <~~ takeAll(); push(notImplStmt("assert statement", up.pos)) ~~>
+Assert      <~~ push(makeAssert(takeAll())) ~~>
             = KwAssert "(" Expression [ "," Expression ] [ "," ] ")" ";" ;
+// yield / yield* inside a sync* or async* body.
+Yield       <~~ push(makeYield(takeAll())) ~~> = KwYield [ YieldStar ] Expression ";" ;
+YieldStar   <~~ push({ystar: true}) ~~> = "*" ;
+// Top-level getters and setters: int get x => e; set x(v) { ... }
+TopGetter   <~~ push(makeTopAccessor(true, takeAll())) ~~>
+            = KwGet FName FnBody | Type KwGet FName FnBody ;
+TopSetter   <~~ push(makeTopAccessor(false, takeAll())) ~~>
+            = KwSet FName ParamList FnBody | Type KwSet FName ParamList FnBody ;
 // A labeled statement (label: stmt). The label targeting is not implemented, but the
 // labeled statement still runs.
-LabeledStmt <~~ notImpl("statement label", up.pos) ~~>
-            = Id ":" Statement ;
+LabeledStmt <~~ push(makeLabeled(takeAll())) ~~>
+            = StmtLabel ":" Statement ;
+StmtLabel   <~~ push({slabel: up.in}) ~~> = Id ;
+
+// `throw e;` needs its own statement alternative BEFORE VarDecl: `throw t;` otherwise
+// parses as a declaration of a variable t whose (identifier-shaped) type is `throw`.
+ThrowStmt   <~~ push(exprToStmt(pop())) ~~>
+            = ThrowExpr ";" ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression ";" ;
@@ -298,18 +539,26 @@ AssignExpr  = ThrowExpr | Assignment | Cascade ;
 ThrowExpr   <~~ push(excThrow(pop())) ~~>
             = KwThrow AssignExpr ;
 Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
-            = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "??=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
+            = Target ( "+=" | "-=" | "*=" | "~/=" | "/=" | "%=" | "??=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "=" ) <~~ push(up.in) ~~> AssignExpr ;
 
 // Cascade: target..m(args)..field = v . Every section acts on the one target and the
 // whole expression evaluates to that target. With no sections it is just the CondExpr,
 // so ordinary expressions stay unaffected.
 Cascade     <~~ push(makeCascade(takeAll())) ~~>
             = CondExpr { CascadeSection } ;
-CascadeSection = CascadeCall | CascadeSet ;
-CascadeCall <~~ push({kind: "ccall", name: popName(), args: takeAll()}) ~~>
-            = ".." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-CascadeSet  <~~ var cv = pop(); var cn = pop(); push({kind: "cset", name: cn.mname, val: cv}) ~~>
-            = ".." Id <~~ push({mname: up.in}) ~~> "=" CondExpr ;
+// A section is `..` (or the null-aware `?..`) then a selector chain, optionally ending in
+// an assignment: ..a = 1 , ..[1] = 9 , ..m(x) , ..a.b = 2 . The assigned value is parsed
+// at the conditional level, not the cascade level, so `..a = 1..[1] = 9` reads the second
+// `..` as the next section of the OUTER cascade rather than a cascade on the value 1.
+CascadeSection <~~ push(makeCascadeSec(takeAll())) ~~>
+            = CascadeOp CascadeHead { MethodSfx | FieldSfx | IndexSfx } [ CascadeAssign ] ;
+CascadeOp   <~~ push({casc: up.in}) ~~> = "?.." | ".." ;
+CascadeHead = CascadeMcall | CascadeField | IndexSfx ;
+CascadeMcall <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
+            = Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+CascadeField = Id <~~ push({kind: "field", name: up.in}) ~~> ;
+CascadeAssign <~~ push({cassign: pop()}) ~~> = "=" CascadeValue ;
+CascadeValue = ThrowExpr | CondExpr ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
 DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
@@ -332,10 +581,11 @@ RelExpr     <~~ push(foldBinary(takeAll())) ~~>
 // is / is! / as type tests, at relational precedence. 'as' is an identity cast (operand
 // evaluated, type erased); 'is' / 'is!' are accepted and not implemented.
 TypeTestExpr <~~ push(makeTypeTest(takeAll())) ~~>
-            = BitOrExpr [ TypeTestOp Type ] ;
+            = BitOrExpr [ TypeTestOp TestType ] ;
+TestType    <~~ push({tname: up.in}) ~~> = Type ;
 TypeTestOp  = IsOp | AsOp ;
-IsOp        <~~ push({tt: "is", pos: up.pos}) ~~> = KwIs [ "!" ] ;
-AsOp        <~~ push({tt: "as", pos: up.pos}) ~~> = KwAs ;
+IsOp        <~~ push({tt: up.in}) ~~> = KwIs [ "!" ] ;
+AsOp        <~~ push({tt: "as"}) ~~> = KwAs ;
 // Bitwise and shift levels sit between the relational and additive levels, as in Dart.
 // A lone "|" that begins "||" fails its right operand and the iteration rolls back
 // (likewise "&" below "&&"), so the logical levels above keep working.
@@ -353,12 +603,17 @@ MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "~/" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
 UnaryExpr   = Await | Neg | Not | BitNot | PostfixExpr ;
-Await       <~~ notImpl("await", up.pos) ~~> = "await" KwEnd UnaryExpr ;
+// await has no event loop here: a Future is already its value, so await is the identity
+// (the child pushes the operand thunk unchanged).
+Await       = KwAwait UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~> = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~> = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~> = "~" UnaryExpr ;
 
-PostfixExpr = IncDec | CallMember ;
+PostfixExpr = IncDec | ConstMember | CallMember ;
+// A const expression: `const Kn.fix(2, 3)`. Const instances are canonicalized, so two
+// const creations with equal arguments are identical().
+ConstMember <~~ push(constify(pop())) ~~> = KwConst CallMember ;
 IncDec      <~~ push(makeIncDec(takeAll())) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
@@ -366,46 +621,103 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
             = Primary { MethodSfx | FieldSfx | IndexSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
-BangSfx     <~~ notImpl("null-assertion", up.pos); push({kind:"bang"}) ~~> = "!" !"=" ;
-// Null-aware access (?., ?.(), ?[]): accepted, not implemented; behaves like the plain
-// access under -warn-unsupported. Pushes the same markers foldCallMember already knows.
-NullMethodSfx <~~ notImpl("null-aware method call", up.pos); push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+BangSfx     <~~ push({kind:"bang"}) ~~> = "!" !"=" ;
+// Null-aware access (?., ?.(), ?[]): a null receiver short-circuits the whole remaining
+// suffix chain to null, exactly like Dart.
+NullMethodSfx <~~ push({kind:"nmcall", name: popName(), args: takeAll()}) ~~>
             = "?." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-NullFieldSfx <~~ notImpl("null-aware field access", up.pos) ~~>
-            = "?." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-NullIndexSfx <~~ notImpl("null-aware index", up.pos); push({kind:"index", idx: pop()}) ~~>
-            = "?" "[" Expression "]" ;
+NullFieldSfx = "?." Id <~~ push({kind:"nfield", name: up.in}) ~~> ;
+// "?[" is one fused token on purpose: with a space allowed between the two characters
+// the ternary `b ? [9] : null` would parse as a null-aware index and then die on the ":".
+NullIndexSfx <~~ push({kind:"nindex", idx: pop()}) ~~>
+            = "?[" Expression "]" ;
 MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+            = "." Id <~~ push({mname: up.in}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+FieldSfx    = "." FieldName ;
+// A field name is an identifier or a record's positional field ($1, $2, ...).
+FieldName   <~~ push({kind:"field", name: up.in}) ~~> = RecPosName | Id ;
+RecPosName  = "$" :whitespace() "0"..."9" { "0"..."9" } :whitespace(Whitespace) ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = ArrowFn | "(" Expression ")" | TypedColl | ListLit | MapLit | SetLit | StrLit | IntLit
-            | True | False | Null | NewExpr | Call | VarRef ;
+Primary     = ArrowFn | SuperExpr | SwitchExpr | RecordLit | "(" Expression ")" | TypedColl | ListLit | MapLit
+            | SetLit | StrLit | NumLit | True | False | Null | NewExpr | QualCall | QualRef
+            | Call | VarRef ;
+
+// A generic type used as a receiver: List<int>.filled(10, null), Future<Object?>.value().
+// Without these two the type arguments are read as a comparison and the parse dies on the
+// following ".", which is the single biggest failure cluster of the Dart corpus.
+QualCall    <~~ push(makeQualCall(takeAll())) ~~>
+            = Id <~~ push({qbase: up.in}) ~~> TypeArgs "." QRName "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+QualRef     <~~ push(makeQualRef(takeAll())) ~~>
+            = Id <~~ push({qbase: up.in}) ~~> TypeArgs "." QRName ;
+QRName      <~~ push({qname: up.in}) ~~> = Id ;
+
+// super.m(args) / super.field: the lookup starts BELOW the class the running method was
+// declared in, walking the receiver's linearisation (so a mixin's super reaches the class
+// it was mixed in over).
+SuperExpr   = SuperMcall | SuperFieldExpr ;
+SuperMcall  <~~ push(makeSuperMcall(takeAll())) ~~>
+            = KwSuper "." SMName "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+SuperFieldExpr <~~ push(makeSuperFieldExpr(takeAll())) ~~> = KwSuper "." SMName ;
+SMName      <~~ push({smname: up.in}) ~~> = Id ;
+
+// A switch expression: switch (e) { pattern => value, ... }. Unmatched is a runtime error
+// (Dart checks exhaustiveness statically, which this front end does not).
+SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
+            = KwSwitch "(" Expression ")" "{" [ SwExprCase { "," SwExprCase } [ "," ] ] "}" ;
+SwExprCase  <~~ push(makeSwExprCase(takeAll())) ~~>
+            = Pattern [ SwGuard ] "=>" AssignExpr ;
+
+// A record literal (Dart 3). It is told apart from a parenthesized expression by needing
+// either two fields, a trailing comma after a single one, or a named field - which is why
+// the three shapes are separate alternatives and RecordLit comes before "(" Expression ")".
+RecordLit   = RecMulti | RecSingle | RecNamedOne ;
+RecMulti    <~~ push(makeRecord(takeAll())) ~~>
+            = "(" RecField "," RecField { "," RecField } [ "," ] ")" ;
+RecSingle   <~~ push(makeRecord(takeAll())) ~~>
+            = "(" RecField "," ")" ;
+RecNamedOne <~~ push(makeRecord(takeAll())) ~~>
+            = "(" NamedRecField [ "," ] ")" ;
+RecField    = NamedRecField | PosRecField ;
+NamedRecField <~~ var rv = pop(); push({rname: popName2(), t: rv}) ~~>
+            = Id <~~ push({rn: up.in}) ~~> ":" AssignExpr ;
+PosRecField <~~ push({rname: "", t: pop()}) ~~> = AssignExpr ;
+
+// Dart number literals: hex (0x..), then the fractional/exponent form, then the plain
+// integer. All three accept '_' digit separators (Dart 3.6). The longest/prefixed forms
+// come first because this is a PEG.
+NumLit      = NumHex | NumDec | NumInt ;
 
 // A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
 // argument is erased and the list/map/set is built as usual.
-TypedColl   = SkipAngle ( ListLit | MapLit | SetLit ) ;
+// The type argument of a collection literal is REMEMBERED (as __etype) so that a reified
+// test like `<Object>[1] is! List<int>` can answer what Dart answers.
+TypedColl   <~~ push(makeTypedColl(takeAll())) ~~>
+            = CollTypeArgs ( ListLit | MapLit | SetLit ) ;
+CollTypeArgs <~~ push({ctargs: up.in}) ~~> = TypeArgs ;
 
-// A set literal { e, e, ... } (a non-map { } with no key:value pairs). Accepted and not
-// implemented; every element is still evaluated so its calls stay visible.
-SetLit      <~~ push(makeSet(takeAll(), up.pos)) ~~>
-            = "{" AssignExpr { "," AssignExpr } [ "," ] "}" ;
+// A set literal { e, e, ... }: a brace literal whose elements are not key:value pairs.
+// MapLit is tried first, so a bare {} and every {k: v, ...} is a map and only the rest
+// reaches here.
+SetLit      <~~ push(makeSet(takeAll())) ~~>
+            = "{" CollElem { "," CollElem } [ "," ] "}" ;
 
 // A closure: (params) => expr or (params) { statements }.
 ArrowFn     <~~ push(makeArrow(takeAll())) ~~>
-            = ParamList ArrowTail ;
+            = ParamList [ AsyncMod ] ArrowTail ;
 ArrowTail   = ArrowExpr | ArrowBlock ;
 ArrowExpr   <~~ push({ebody: pop()}) ~~> = "=>" AssignExpr ;
 ArrowBlock  <~~ push({body: pop()}) ~~>  = Block ;
 
-// new Type(args) - equivalent to Type(args); both construct.
-NewExpr     = KwNew Call ;
+// new Type(args) - equivalent to Type(args); both construct. The operand is a whole
+// member chain, so `new C.foo()` reaches the named constructor foo through the ordinary
+// method-call suffix (which is exactly how an unprefixed C.foo() resolves too).
+NewExpr     = KwNew CallMember ;
 
 // f(args): a top level function, a builtin, or (when the name is a class) a constructor.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = Id <~~ push(up.in) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 
 // A call argument is positional (a bare expression, pushed as a thunk) or named
 // (name: expr, pushed as a {named, val} marker collected into a trailing options dict).
@@ -414,35 +726,79 @@ NamedArg    <~~ var av = pop(); var an = pop(); push({named: an.aname, val: av})
             = Id <~~ push({aname: up.in}) ~~> ":" AssignExpr ;
 
 ListLit     <~~ push(makeList(takeAll())) ~~>
-            = "[" [ ListElem { "," ListElem } [ "," ] ] "]" ;
-// A list element is a plain expression, a spread (...e / ...?e splicing e's elements)
-// or a collection-if (conditionally include an element).
-ListElem    = SpreadElem | IfElem | ExprElem ;
-SpreadElem  <~~ push({ekind: "spread", t: pop()}) ~~> = "..." [ "?" ] AssignExpr ;
+            = "[" [ CollElem { "," CollElem } [ "," ] ] "]" ;
+// A collection element is a plain expression, a spread (...e splicing e's elements, ...?e
+// contributing nothing when e is null), a collection-if or a collection-for. The same
+// three control forms exist for map entries, one level down (MapElem).
+CollElem    = SpreadElem | IfElem | ForElem | ExprElem ;
+SpreadElem  <~~ push(makeSpread(takeAll())) ~~> = "..." [ "?" <~~ push({nullaware: true}) ~~> ] AssignExpr ;
 IfElem      <~~ push(makeIfElem(takeAll())) ~~>
-            = KwIf "(" Expression ")" ListElem [ KwElse ListElem ] ;
+            = KwIf "(" Expression ")" CollElem [ KwElse CollElem ] ;
+ForElem     <~~ push(makeForElem(takeAll())) ~~>
+            = KwFor "(" ForElemHead ")" CollElem ;
 ExprElem    <~~ push({ekind: "val", t: pop()}) ~~> = AssignExpr ;
+// The head of a collection-for is either `x in e` or the C-style triple; both reuse the
+// statement-level pieces, so the markers arrive in the same shape.
+ForElemHead = ForElemIn | ForElemC ;
+ForElemIn   = [ ForInLead ] Id <~~ push({feName: up.in}) ~~> KwIn ForElemIter ;
+ForElemIter <~~ push({feIter: pop()}) ~~> = Expression ;
+ForElemC    = [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ;
+
 MapLit      <~~ push(makeMap(takeAll())) ~~>
-            = "{" [ MapEntry { "," MapEntry } [ "," ] ] "}" ;
-MapEntry    <~~ var v = pop(); push({mk: pop(), mv: v}) ~~>
+            = "{" [ MapElem { "," MapElem } [ "," ] ] "}" ;
+MapElem     = SpreadElem | IfMapElem | ForMapElem | MapEntry ;
+IfMapElem   <~~ push(makeIfElem(takeAll())) ~~>
+            = KwIf "(" Expression ")" MapElem [ KwElse MapElem ] ;
+ForMapElem  <~~ push(makeForElem(takeAll())) ~~>
+            = KwFor "(" ForElemHead ")" MapElem ;
+MapEntry    <~~ var v = pop(); push({ekind: "entry", mk: pop(), mv: v}) ~~>
             = AssignExpr ":" AssignExpr ;
 
 VarRef      <~~ push(makeVarRef(up.in)) ~~> = Id ;
 Null        <~~ push(makeConst(null)) ~~>   = "null" KwEnd ;
 
-// Single and double quoted strings, both interpolating $name and ${expr}.
-StrLit      = SqTpl | DqTpl ;
+// Dart string literals. Adjacent literals concatenate ('a' 'b' == "ab"), so a StrLit is
+// one or more pieces. A piece is raw (r'...', no escapes and no interpolation), triple
+// quoted (''' / """, spanning lines) or plain; all non-raw forms interpolate $name and
+// ${expr}. The prefixed and longer forms come first (PEG ordered choice).
+StrLit      <~~ push(makeStrCat(takeAll())) ~~>
+            = StrPiece { StrPiece } ;
+StrPiece    = RawTqSq | RawTqDq | RawSq | RawDq | TqSqTpl | TqDqTpl | SqTpl | DqTpl ;
 SqTpl       <~~ push(makeTemplate(takeAll())) ~~>
             = "'" :whitespace() { TplExpr | TplVar | TplDollar | SqChunk } "'" :whitespace(Whitespace) ;
 DqTpl       <~~ push(makeTemplate(takeAll())) ~~>
             = '"' :whitespace() { TplExpr | TplVar | TplDollar | DqChunk } '"' :whitespace(Whitespace) ;
+// Triple-quoted: the closing delimiter is three quotes, so a single quote inside the body
+// is ordinary text. The !"''" / !'""' lookaheads (literal lookahead is the only kind this
+// dialect has) keep a lone quote in the chunk and stop at the real terminator.
+TqSqTpl     <~~ push(makeTemplate(takeAll())) ~~>
+            = "'''" :whitespace() { TplExpr | TplVar | TplDollar | TqSqChunk } "'''" :whitespace(Whitespace) ;
+TqDqTpl     <~~ push(makeTemplate(takeAll())) ~~>
+            = '"""' :whitespace() { TplExpr | TplVar | TplDollar | TqDqChunk } '"""' :whitespace(Whitespace) ;
+TqSqChunk   <~~ push({s: unescapeDart(up.in)}) ~~> = TqSqCh { TqSqCh } ;
+TqDqChunk   <~~ push({s: unescapeDart(up.in)}) ~~> = TqDqCh { TqDqCh } ;
+TqSqCh      = TplEsc | TqSqQuote | SqPlain ;
+TqDqCh      = TplEsc | TqDqQuote | DqPlain ;
+TqSqQuote   = "'" !"''" ;
+TqDqQuote   = '"' !'""' ;
+// Raw strings: every character is literal, including backslashes and $.
+RawTqSq     = "r" :whitespace() "'''" RawTqSqBody "'''" :whitespace(Whitespace) ;
+RawTqDq     = "r" :whitespace() '"""' RawTqDqBody '"""' :whitespace(Whitespace) ;
+RawSq       = "r" :whitespace() "'" RawSqBody "'" :whitespace(Whitespace) ;
+RawDq       = "r" :whitespace() '"' RawDqBody '"' :whitespace(Whitespace) ;
+RawTqSqBody <~~ push(makeConst(up.in)) ~~> = { TqSqQuote | RawSqPlain } ;
+RawTqDqBody <~~ push(makeConst(up.in)) ~~> = { TqDqQuote | RawDqPlain } ;
+RawSqBody   <~~ push(makeConst(up.in)) ~~> = { RawSqPlain } ;
+RawDqBody   <~~ push(makeConst(up.in)) ~~> = { RawDqPlain } ;
+RawSqPlain  = "\x00"..."\x26" | "\x28"..."\U0010ffff" ;
+RawDqPlain  = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
 TplExpr     <~~ push({e: pop()}) ~~>
             = "${" :whitespace(Whitespace) Expression "}" ;
 TplVar      = "$" TplName <~~ push({e: makeVarRef(up.in)}) ~~> ;
 TplName     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
 TplDollar   <~~ push({s: "$"}) ~~> = "$" ;
-SqChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = SqTChar { SqTChar } ;
-DqChunk     <~~ push({s: unescapeJs(up.in)}) ~~> = DqTChar { DqTChar } ;
+SqChunk     <~~ push({s: unescapeDart(up.in)}) ~~> = SqTChar { SqTChar } ;
+DqChunk     <~~ push({s: unescapeDart(up.in)}) ~~> = DqTChar { DqTChar } ;
 SqTChar     = TplEsc | SqPlain ;
 DqTChar     = TplEsc | DqPlain ;
 TplEsc      = "\\" "\x00"..."\U0010ffff" ;
@@ -515,6 +871,12 @@ KwGet       = "get" KwEnd ;
 KwSet       = "set" KwEnd ;
 KwOperator  = "operator" KwEnd ;
 KwFactory   = "factory" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwDefault   = "default" KwEnd ;
+KwWhen      = "when" KwEnd ;
+KwYield     = "yield" KwEnd ;
+KwAwait     = "await" KwEnd ;
+KwSuper     = "super" KwEnd ;
 
 // ---
 
@@ -542,10 +904,69 @@ KwFactory   = "factory" KwEnd ;
         return "" + v
     }
 
-    // ----- integer ~/ division and bitwise/shift ops on top of the shared binOp -----
+    // ----- Dart escapes -----
+    // Dart's escape set is JS's plus \u{...} (a variable-length code point, surrogate
+    // encoded so '\u{1F600}'.length is 2 like a real Dart string).
+    function unescapeDart(s) {
+        if (s.indexOf("\\u{") < 0) { return unescapeJs(s) }
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            var c = s.charCodeAt(i)
+            if (c != 92) { out = out + s.charAt(i); i = i + 1; continue }
+            if (s.charCodeAt(i + 1) == 117 && s.charCodeAt(i + 2) == 123) {
+                var j = i + 3
+                var cp = 0
+                while (j < s.length && s.charCodeAt(j) != 125) { cp = cp * 16 + hexAt(s, j, 1); j = j + 1 }
+                if (cp > 0xFFFF) {
+                    var u = cp - 0x10000
+                    out = out + String.fromCharCode(0xD800 + ((u / 1024) | 0)) + String.fromCharCode(0xDC00 + (u % 1024))
+                } else { out = out + String.fromCharCode(cp) }
+                i = j + 1
+                continue
+            }
+            out = out + unescapeJs(s.substring(i, i + 2))
+            // \x.. and \u.... are longer than two characters; re-measure.
+            var e = s.charCodeAt(i + 1)
+            if (e == 120) { out = out.substring(0, out.length - 1) + String.fromCharCode(hexAt(s, i + 2, 2)); i = i + 4 }
+            else if (e == 117) { out = out.substring(0, out.length - 1) + String.fromCharCode(hexAt(s, i + 2, 4)); i = i + 6 }
+            else { i = i + 2 }
+        }
+        return out
+    }
+
+    // Adjacent string literals concatenate at parse time when they are all constant, and
+    // at run time otherwise ('a' '$b' is one string).
+    function makeStrCat(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var out = ""
+            for (var i = 0; i < items.length; i++) { out = out + dstr(items[i]()) }
+            return out
+        }
+    }
+
+    // ----- Dart arithmetic -----
+    // Dart has one numeric tower with real doubles: only ~/ and the bitwise operators
+    // truncate. / is always double division, and % follows the sign of the divisor.
+    function dartMod(l, r) {
+        var m = l % r
+        if (m < 0) { m = m + (r < 0 ? 0 - r : r) }
+        return m
+    }
     var baseBinOp = binOp
     binOp = function(op, l, r) {
+        if (hasUserOp(l) && op != "==" && op != "!=") {
+            var uv = userBinOp(op, l, r)
+            if (uv != undefined) { return uv }
+        }
         if (op == "~/") { return (l / r) | 0 }
+        if (op == "/") { return l / r }
+        if (op == "-") { return l - r }
+        if (op == "*") { return l * r }
+        if (op == "%") { return dartMod(l, r) }
+        if (op == "==") { return dartEq(l, r) }
+        if (op == "!=") { return !dartEq(l, r) }
         if (op == "&") { return l & r }
         if (op == "|") { return l | r }
         if (op == "^") { return l ^ r }
@@ -554,77 +975,605 @@ KwFactory   = "factory" KwEnd ;
         if (op == ">>>") { return l >>> r }
         return baseBinOp(op, l, r)
     }
+    var baseApplyOp = applyOp
+    applyOp = function(op, a, b) {
+        if (hasUserOp(a)) {
+            var uv = userBinOp(op.substring(0, op.length - 1), a, b)
+            if (uv != undefined) { return uv }
+        }
+        if (op == "&=") { return a & b }
+        if (op == "|=") { return a | b }
+        if (op == "^=") { return a ^ b }
+        if (op == "<<=") { return a << b }
+        if (op == ">>=") { return a >> b }
+        if (op == "-=") { return a - b }
+        if (op == "*=") { return a * b }
+        if (op == "/=") { return a / b }
+        if (op == "%=") { return dartMod(a, b) }
+        if (op == "~/=") { return (a / b) | 0 }
+        return baseApplyOp(op, a, b)
+    }
+    // -x keeps doubles (the shared makeNeg wraps to 32 bits).
+    // -x : a user `operator -()` with no argument when the operand is an object.
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (hasUserOp(v)) {
+                var m = findMember(v.__class, "-")
+                if (m != null) { return m.fn.apply(undefined, [v]) }
+            }
+            return 0 - v
+        }
+    }
 
     // ~v flips the bits of the ToInt32 value (agrees with the compiler's js_bxor -1).
     function makeBitNot(t) { return function() { return ~t() } }
 
-    // A type test: items = [operand] or [operand, {tt, pos}]. 'as' erases to an identity
-    // cast; 'is' / 'is!' warn as not implemented but still evaluate the operand.
+    // A type test: items = [operand] or [operand, {tt}, {tname}]. `as` is an identity cast
+    // (types are erased here), `is` / `is!` are real runtime tests.
     function makeTypeTest(items) {
         if (items.length == 1) { return items[0] }
         var operand = items[0]
-        var mk = items[1]
-        if (mk.tt == "as") { return operand }
-        notImpl(mk.tt + " type test", mk.pos)
-        return function() { operand(); return undefined }
+        var kind = stripWs(items[1].tt)
+        var tname = items[2].tname
+        if (kind == "as") { return operand }
+        var negate = kind != "is"
+        return function() {
+            var r = dartIsType(operand(), tname)
+            return negate ? !r : r
+        }
     }
 
     // throw / rethrow are wired to excThrow (lib/interp-core.js); try/catch/finally to
     // excTry/excCatch. No local makeThrow is needed.
-    // a ?? b ?? c : items = [op, marker, op, marker, ...]. Not implemented; evaluate
-    // every operand (calls stay visible) and yield the first. Single operand: pass-through.
+    // a ?? b ?? c : the first operand that is not null; the rest are not evaluated.
+    // items = [op, marker, op, marker, ...]; a single operand passes through.
     function makeIfNull(items) {
         if (items.length == 1) { return items[0] }
-        notImpl("?? operator", items[1].pos)
         var ops = []
         for (var i = 0; i < items.length; i += 2) { ops.push(items[i]) }
         return function() {
-            var first = anytype
-            first = undefined
-            for (var j = 0; j < ops.length; j++) { var v = ops[j](); if (j == 0) { first = v } }
-            return first
-        }
-    }
-    // A set literal: accepted, not implemented. Every element is evaluated; the value is
-    // an undefined placeholder.
-    function makeSet(items, pos) {
-        notImpl("set literal", pos)
-        return function() {
-            for (var i = 0; i < items.length; i++) { items[i]() }
-            return undefined
+            var v = anytype
+            v = null
+            for (var j = 0; j < ops.length; j++) {
+                v = ops[j]()
+                if (v !== null && v !== undefined) { return v }
+            }
+            return v
         }
     }
 
     // ----- Maps (dicts): insertion-ordered {keys, vals} boxes -----
     // Dictionaries (isDict/dictFind/dictSet) are shared - see lib/interp-core.js.
-    function makeMap(entries) {
+    // ----- patterns (Dart 3) -----
+    // The grammar builds one descriptor tree per pattern; a bare name arrives as
+    // {p:"idref"} because only the use site knows whether it declares, assigns or names a
+    // constant. resolvePat rewrites the tree for the context ("decl" / "assign" / "match")
+    // once, at build time, so matching itself never re-decides.
+    function makeOrPat(items) {
+        if (items.length == 1) { return items[0] }
+        return {p: "or", alts: items}
+    }
+    function makeAndPat(items) {
+        if (items.length == 1) { return items[0] }
+        return {p: "and", alts: items}
+    }
+    function makeRelPat(items) { return {p: "rel", op: items[0].relop, t: items[1]} }
+    function makePostPat(items) {
+        var pt = items[0]
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].post == "?") { pt = {p: "nullcheck", inner: pt} }
+            else if (items[i].post == "!") { pt = {p: "nullassert", inner: pt} }
+            else { pt = {p: "cast", inner: pt, ty: items[i].ty} }
+        }
+        return pt
+    }
+    function makeListPat(items) {
+        var elems = []
+        var restAt = -1
+        var restPat = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].prest === true) { restAt = elems.length; restPat = items[i].rpat }
+            else { elems.push(items[i].pelem) }
+        }
+        return {p: "list", elems: elems, restAt: restAt, restPat: restPat}
+    }
+    function makeRestPat(items) { return {prest: true, rpat: items.length > 0 ? items[0] : null} }
+    function makeMapPat(items) { return {p: "map", entries: items} }
+    function makeRecPat(items) { return {p: "rec", fields: items} }
+    function makeVarPat(items) { return {p: "bind", name: items[items.length - 1].pvname} }
+    function makeObjPat(items) { return {p: "obj", ty: items[0].otype, fields: items.slice(1)} }
+    // :var side  ==  side: var side  (the getter name comes from the bound variable).
+    function makeShortField(pat) {
+        var nm = ""
+        if (pat.p == "bind") { nm = pat.name }
+        else if (pat.p == "idref") { nm = pat.name }
+        else { fail("an object-pattern shorthand needs a variable pattern") }
+        return {pfname: nm, pfpat: pat}
+    }
+    // Resolve the idref leaves for one context. mode: "decl" (declare), "assign" (assign to
+    // an existing variable) or "match" (a constant to compare against).
+    function resolvePat(pat, mode) {
+        if (pat.p == "idref") {
+            if (pat.name == "_") { return {p: "wild"} }
+            if (mode == "decl") { return {p: "bind", name: pat.name} }
+            if (mode == "assign") { return {p: "setvar", name: pat.name} }
+            if (pat.name == "null") { return {p: "const", t: makeConst(null)} }
+            if (pat.name == "true") { return {p: "const", t: makeConst(true)} }
+            if (pat.name == "false") { return {p: "const", t: makeConst(false)} }
+            return {p: "const", t: makeVarRef(pat.name)}
+        }
+        if (pat.p == "bind" && pat.name == "_") { return {p: "wild"} }
+        if (pat.p == "or" || pat.p == "and") {
+            var alts = []
+            for (var i = 0; i < pat.alts.length; i++) { alts.push(resolvePat(pat.alts[i], mode)) }
+            return {p: pat.p, alts: alts}
+        }
+        if (pat.p == "nullcheck" || pat.p == "nullassert") { return {p: pat.p, inner: resolvePat(pat.inner, mode)} }
+        if (pat.p == "cast") { return {p: "cast", inner: resolvePat(pat.inner, mode), ty: pat.ty} }
+        if (pat.p == "list") {
+            var elems = []
+            for (var j = 0; j < pat.elems.length; j++) { elems.push(resolvePat(pat.elems[j], mode)) }
+            var rp = (pat.restPat != null) ? resolvePat(pat.restPat, mode) : null
+            return {p: "list", elems: elems, restAt: pat.restAt, restPat: rp}
+        }
+        if (pat.p == "map") {
+            var ents = []
+            for (var k = 0; k < pat.entries.length; k++) {
+                ents.push({mkey: pat.entries[k].mkey, mpat: resolvePat(pat.entries[k].mpat, mode)})
+            }
+            return {p: "map", entries: ents}
+        }
+        if (pat.p == "rec" || pat.p == "obj") {
+            var fs = []
+            for (var m = 0; m < pat.fields.length; m++) {
+                fs.push({pfname: pat.fields[m].pfname, pfpat: resolvePat(pat.fields[m].pfpat, mode)})
+            }
+            if (pat.p == "obj") { return {p: "obj", ty: pat.ty, fields: fs} }
+            return {p: "rec", fields: fs}
+        }
+        return pat
+    }
+    // Match v against pat, binding into the current scope. Returns true on a match.
+    function patMatch(pat, v) {
+        var k = pat.p
+        if (k == "wild") { return true }
+        if (k == "bind") { declVar(pat.name, v); return true }
+        if (k == "setvar") { setVar(pat.name, v); return true }
+        if (k == "const") { return dartEq(pat.t(), v) }
+        if (k == "rel") {
+            var rv = pat.t()
+            if (pat.op == "==") { return dartEq(v, rv) }
+            if (pat.op == "!=") { return !dartEq(v, rv) }
+            return binOp(pat.op, v, rv)
+        }
+        if (k == "or") {
+            for (var i = 0; i < pat.alts.length; i++) { if (patMatch(pat.alts[i], v)) { return true } }
+            return false
+        }
+        if (k == "and") {
+            for (var j = 0; j < pat.alts.length; j++) { if (!patMatch(pat.alts[j], v)) { return false } }
+            return true
+        }
+        if (k == "nullcheck") { if (v === null || v === undefined) { return false } return patMatch(pat.inner, v) }
+        if (k == "nullassert") {
+            if (v === null || v === undefined) { fail("null check pattern matched a null value") }
+            return patMatch(pat.inner, v)
+        }
+        if (k == "cast") { return patMatch(pat.inner, v) }
+        if (k == "rec") {
+            if (!isRec(v)) { return false }
+            var pos = 0
+            for (var f = 0; f < pat.fields.length; f++) {
+                var nm = pat.fields[f].pfname
+                if (nm == "") { pos = pos + 1; nm = "$" + pos }
+                var idx = -1
+                for (var q = 0; q < v.keys.length; q++) { if (v.keys[q] == nm) { idx = q } }
+                if (idx < 0) { return false }
+                if (!patMatch(pat.fields[f].pfpat, v.vals[idx])) { return false }
+            }
+            return true
+        }
+        if (k == "list") {
+            if (v === null || v === undefined || isDict(v) || typeof v == "string") { return false }
+            if (!Array.isArray(v)) { return false }
+            var need = pat.elems.length
+            if (pat.restAt < 0) {
+                if (v.length != need) { return false }
+                for (var e = 0; e < need; e++) { if (!patMatch(pat.elems[e], v[e])) { return false } }
+                return true
+            }
+            if (v.length < need) { return false }
+            var extra = v.length - need
+            for (var a = 0; a < pat.restAt; a++) { if (!patMatch(pat.elems[a], v[a])) { return false } }
+            if (pat.restPat != null) { if (!patMatch(pat.restPat, v.slice(pat.restAt, pat.restAt + extra))) { return false } }
+            for (var b = pat.restAt; b < need; b++) { if (!patMatch(pat.elems[b], v[b + extra])) { return false } }
+            return true
+        }
+        if (k == "map") {
+            if (!isDict(v)) { return false }
+            for (var g = 0; g < pat.entries.length; g++) {
+                var di = dictFind(v, pat.entries[g].mkey())
+                if (di < 0) { return false }
+                if (!patMatch(pat.entries[g].mpat, v.vals[di])) { return false }
+            }
+            return true
+        }
+        if (k == "obj") {
+            if (!dartIsType(v, pat.ty)) { return false }
+            for (var o = 0; o < pat.fields.length; o++) {
+                if (!patMatch(pat.fields[o].pfpat, readMember(v, pat.fields[o].pfname))) { return false }
+            }
+            return true
+        }
+        fail("unknown pattern kind " + k)
+    }
+    // A field or a no-argument getter/method, whichever the object has.
+    function readMember(v, name) {
+        if (isRec(v)) { return recGet(v, name) }
+        if (v != null && v != undefined && v.__class != undefined && !hasOwn(v, name)) {
+            if (hasOwn(v.__class, name)) { return mcall(v, name, []) }
+        }
+        return readField(v, name)
+    }
+
+    // Dart's runtime type test. The names differ from the shared rtIsType's JVM-flavoured
+    // ones, so the dart:core types are answered here and everything else (user classes,
+    // the ? suffix, generic arguments) falls through to the shared walker.
+    function dartIsType(v, tname) {
+        var t = tname.split("<")[0]
+        t = stripWs(t)
+        var opt = false
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1); opt = true }
+        if (v === null || v === undefined) { return opt || t == "Null" }
+        if (t == "dynamic" || t == "Object" || t == "var") { return true }
+        if (t == "int") { return typeof v == "number" && Math.floor(v) == v }
+        if (t == "double" || t == "num") { return typeof v == "number" }
+        if (t == "String") { return typeof v == "string" }
+        if (t == "bool") { return typeof v == "boolean" }
+        if (t == "List" || t == "Iterable") {
+            if (!Array.isArray(v)) { return false }
+            // Generics are reified in Dart: <Object>[1] is not a List<int>.
+            var arg = tname.indexOf("<") >= 0 ? stripWs(tname.split("<")[1].split(">")[0]) : ""
+            if (arg != "") {
+                var et = getEType(v)
+                if (et != "") { return et == arg }
+            }
+            return true
+        }
+        if (t == "Map") { return isDict(v) && !hasOwn(v, "__set") }
+        if (t == "Set") { return isDict(v) && hasOwn(v, "__set") }
+        if (t == "Record") { return isRec(v) }
+        if (t == "Function") { return typeof v == "function" }
+        return rtIsType(v, t)
+    }
+
+    // ----- pattern statements: declaration, assignment, for-in, if-case -----
+    function makePatDecl(items) {
+        var pat = resolvePat(items[0], "decl")
+        var init = items[1]
         return function() {
-            var d = {__dict: true, keys: [], vals: []}
-            for (var i = 0; i < entries.length; i++) { dictSet(d, entries[i].mk(), entries[i].mv()) }
-            return d
+            if (!patMatch(pat, init())) { fail("pattern did not match the initialiser") }
         }
     }
-    // items are element descriptors: {ekind:"val"|"spread", t} or {ekind:"if", cond, then, els}.
+    function makePatAssign(items) {
+        var pat = resolvePat(items[0], "assign")
+        var rhs = items[1]
+        return function() {
+            if (!patMatch(pat, rhs())) { fail("pattern assignment did not match") }
+        }
+    }
+    function makeForInPat(items) {
+        var pat = resolvePat(items[0], "decl")
+        var iterT = items[1]
+        var bodyT = items[2]
+        return function() {
+            var it = anytype
+            it = iterT()
+            if (isDict(it)) { it = it.keys.slice(0) }
+            var myLabel = takeLabel()
+            var res = undefined
+            var n = dlen(it)
+            for (var i = 0; i < n; i++) {
+                scopes.push({})
+                var ok = patMatch(pat, dget(it, i))
+                var r = ok ? bodyT() : undefined
+                scopes.pop()
+                if (r != undefined) {
+                    var act = loopRoute(r, myLabel)
+                    if (act == "break") { break }
+                    if (act == "propagate") { res = r; break }
+                }
+            }
+            return res
+        }
+    }
+    // items = [subject, pattern, guard?, then, else?]
+    function makeIfCase(items) {
+        var subj = items[0]
+        var pat = resolvePat(items[1], "decl")
+        var idx = 2
+        var guard = null
+        if (items[idx] != undefined && items[idx].guard != undefined) { guard = items[idx].guard; idx = idx + 1 }
+        var thenT = items[idx]
+        var elseT = (idx + 1 < items.length) ? items[idx + 1] : null
+        return function() {
+            scopes.push({})
+            var ok = patMatch(pat, subj())
+            if (ok && guard != null) { ok = core.test(guard()) }
+            var r = ok ? thenT() : undefined
+            scopes.pop()
+            if (!ok && elseT != null) { return elseT() }
+            return r
+        }
+    }
+
+    // ----- switch statement and switch expression -----
+    function makeSwBody(items) { return {swbody: makeSeq(items), swempty: items.length == 0} }
+    function makeSwCase(items) {
+        var c = {pat: resolvePat(items[0], "decl"), guard: null, body: null, empty: true, isdef: false}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].guard != undefined) { c.guard = items[i].guard }
+            else { c.body = items[i].swbody; c.empty = items[i].swempty }
+        }
+        return c
+    }
+    function makeSwDefault(items) {
+        var c = {pat: null, guard: null, body: null, empty: true, isdef: true}
+        for (var i = 0; i < items.length; i++) { c.body = items[i].swbody; c.empty = items[i].swempty }
+        return c
+    }
+    function makeSwitch(items) {
+        var subj = items[0]
+        var cases = items.slice(1)
+        return function() {
+            var v = anytype
+            v = subj()
+            var res = undefined
+            for (var i = 0; i < cases.length; i++) {
+                scopes.push({})
+                var hit = cases[i].isdef
+                if (!hit) { hit = patMatch(cases[i].pat, v) }
+                if (hit && cases[i].guard != null) { hit = core.test(cases[i].guard()) }
+                if (!hit) { scopes.pop(); continue }
+                // An empty case body shares the next case's body (the only fallthrough
+                // Dart has); a non-empty one ends the switch.
+                var j = i
+                while (j < cases.length && cases[j].empty) { j = j + 1 }
+                var r = (j < cases.length) ? cases[j].body() : undefined
+                scopes.pop()
+                if (r != undefined && r !== BRK) { res = r }
+                break
+            }
+            return res
+        }
+    }
+    function makeSwExprCase(items) {
+        var c = {pat: resolvePat(items[0], "decl"), guard: null, val: null}
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].guard != undefined) { c.guard = items[i].guard }
+            else { c.val = items[i] }
+        }
+        return c
+    }
+    function makeSwitchExpr(items) {
+        var subj = items[0]
+        var cases = items.slice(1)
+        return function() {
+            var v = anytype
+            v = subj()
+            var out = anytype
+            out = null
+            for (var i = 0; i < cases.length; i++) {
+                scopes.push({})
+                var hit = patMatch(cases[i].pat, v)
+                if (hit && cases[i].guard != null) { hit = core.test(cases[i].guard()) }
+                if (hit) { out = cases[i].val() }
+                scopes.pop()
+                if (hit) { return out }
+            }
+            fail("no case of the switch expression matched")
+        }
+    }
+    function makeDoWhile(items) {
+        var bodyT = items[0]
+        var condT = items[1]
+        return function() {
+            var myLabel = takeLabel()
+            var go = true
+            while (go) {
+                var r = bodyT()
+                if (r != undefined) {
+                    var act = loopRoute(r, myLabel)
+                    if (act == "break") { break }
+                    if (act == "propagate") { return r }
+                }
+                go = core.test(condT())
+            }
+            return undefined
+        }
+    }
+
+    // ----- records (Dart 3) -----
+    // A record is {__rec, keys, vals}: the positional fields are keyed "$1", "$2", ... and
+    // the named ones by their name, so a field read is one key lookup and equality is a
+    // name-keyed comparison (so (x: 1, y: 2) == (y: 2, x: 1), as Dart requires).
+    function popName2() { return pop().rn }
+    function isRec(v) { return v !== null && v !== undefined && typeof v == "object" && v.__rec === true }
+    function makeRecord(items) {
+        return function() {
+            var r = {__rec: true, keys: [], vals: []}
+            var pos = 0
+            for (var i = 0; i < items.length; i++) {
+                var nm = items[i].rname
+                if (nm == "") { pos = pos + 1; nm = "$" + pos }
+                r.keys.push(nm)
+                r.vals.push(items[i].t())
+            }
+            return r
+        }
+    }
+    function recGet(r, name) {
+        for (var i = 0; i < r.keys.length; i++) { if (r.keys[i] == name) { return r.vals[i] } }
+        fail("record has no field " + name)
+    }
+    function recEq(a, b) {
+        if (a.keys.length != b.keys.length) { return false }
+        for (var i = 0; i < a.keys.length; i++) {
+            var j = 0
+            var found = false
+            for (j = 0; j < b.keys.length; j++) { if (b.keys[j] == a.keys[i]) { found = true; break } }
+            if (!found) { return false }
+            if (!dartEq(a.vals[i], b.vals[j])) { return false }
+        }
+        return true
+    }
+    // Dart's == : identity for the primitives, structural for records, and a user
+    // `operator ==` when the left operand defines one.
+    function dartEq(l, r) {
+        if (isRec(l) && isRec(r)) { return recEq(l, r) }
+        if (hasUserOp(l)) {
+            var m = findMember(l.__class, "==")
+            if (m != null) { return m.fn.apply(undefined, [l, r]) ? true : false }
+        }
+        return l === r
+    }
+    // A binary operator on an object dispatches to its `operator op` when it has one.
+    function hasUserOp(l) {
+        return l != null && l != undefined && typeof l == "object" && l.__class != undefined
+    }
+    function userBinOp(op, l, r) {
+        var m = findMember(l.__class, op)
+        if (m != null) { return m.fn.apply(undefined, [l, r]) }
+        return undefined
+    }
+
+    // ----- collection literals -----
+    // Every element of a list / set / map literal is one descriptor:
+    //   {ekind:"val", t} {ekind:"entry", mk, mv} {ekind:"spread", t, nullaware}
+    //   {ekind:"if", cond, then, els} {ekind:"for", ...}
+    // emitElem walks a descriptor and calls the sink for each value it contributes, so
+    // list, set and map literals share the whole control layer.
+    function makeSpread(items) {
+        var na = false
+        var t = items[items.length - 1]
+        if (items.length > 1) { na = true }
+        return {ekind: "spread", t: t, nullaware: na}
+    }
     function makeIfElem(items) {
         return {ekind: "if", cond: items[0], then: items[1], els: items.length > 2 ? items[2] : null}
     }
-    function appendElem(a, e) {
-        if (e.ekind == "val") { a.push(e.t()) }
-        else if (e.ekind == "spread") {
+    // items = head markers ({feName}/{feIter} or {k:"init"|"cond"|"post"}) plus the body
+    // descriptor last.
+    function makeForElem(items) {
+        var d = {ekind: "for", name: null, iter: null, init: null, cond: null, post: null,
+                 body: items[items.length - 1]}
+        for (var i = 0; i < items.length - 1; i++) {
+            var it = items[i]
+            if (it.feName != undefined) { d.name = it.feName }
+            else if (it.feIter != undefined) { d.iter = it.feIter }
+            else if (it.k == "init") { d.init = it.t }
+            else if (it.k == "cond") { d.cond = it.t }
+            else if (it.k == "post") { d.post = it.t }
+        }
+        return d
+    }
+    // sink(key, val, isEntry): a list/set sink ignores isEntry==false's val.
+    function emitElem(e, sink) {
+        if (e.ekind == "val") { sink(e.t(), null, false); return }
+        if (e.ekind == "entry") { sink(e.mk(), e.mv(), true); return }
+        if (e.ekind == "spread") {
             var s = anytype
             s = e.t()
+            if (s === null || s === undefined) {
+                if (e.nullaware) { return }
+                fail("spread of null")
+            }
+            if (isDict(s)) {
+                var isEntry = !hasOwn(s, "__set")
+                for (var k = 0; k < s.keys.length; k++) { sink(s.keys[k], s.vals[k], isEntry) }
+                return
+            }
             var n = dlen(s)
-            for (var i = 0; i < n; i++) { a.push(dget(s, i)) }
+            for (var i = 0; i < n; i++) { sink(dget(s, i), null, false) }
+            return
+        }
+        if (e.ekind == "if") {
+            if (core.test(e.cond())) { emitElem(e.then, sink) }
+            else if (e.els != null) { emitElem(e.els, sink) }
+            return
+        }
+        // collection-for, in both the for-in and the C-style shape
+        scopes.push({})
+        if (e.iter != null) {
+            var src = anytype
+            src = e.iter()
+            if (isDict(src)) { src = src.keys.slice(0) }
+            var cnt = dlen(src)
+            for (var j = 0; j < cnt; j++) { declVar(e.name, dget(src, j)); emitElem(e.body, sink) }
         } else {
-            if (core.test(e.cond())) { appendElem(a, e.then) }
-            else if (e.els != null) { appendElem(a, e.els) }
+            if (e.init != null) { e.init() }
+            while (e.cond == null || core.test(e.cond())) {
+                emitElem(e.body, sink)
+                if (e.post != null) { e.post() }
+            }
+        }
+        scopes.pop()
+    }
+    // Dart reifies generic arguments, so a list literal has to remember the type argument
+    // it was written with. It cannot be stored ON the list: the frozen engine's arrays take
+    // no properties. A small identity-keyed side table holds it instead; it is capped, so a
+    // literal evaluated in a long loop cannot grow it without bound (the test then simply
+    // falls back to the unreified answer).
+    var etypeK = []
+    var etypeV = []
+    function setEType(v, ty) {
+        if (v === null || v === undefined || typeof v != "object") { return }
+        for (var i = 0; i < etypeK.length; i++) { if (etypeK[i] === v) { etypeV[i] = ty; return } }
+        if (etypeK.length >= 256) { return }
+        etypeK.push(v)
+        etypeV.push(ty)
+    }
+    function getEType(v) {
+        for (var i = 0; i < etypeK.length; i++) { if (etypeK[i] === v) { return etypeV[i] } }
+        return ""
+    }
+    function makeTypedColl(items) {
+        var ty = stripWs(items[0].ctargs)
+        ty = ty.substring(1, ty.length - 1)
+        var t = items[1]
+        return function() {
+            var v = anytype
+            v = t()
+            setEType(v, ty)
+            return v
         }
     }
     function makeList(items) {
         return function() {
             var a = []
-            for (var i = 0; i < items.length; i++) { appendElem(a, items[i]) }
+            var sink = function(k, v, isEntry) { a.push(k) }
+            for (var i = 0; i < items.length; i++) { emitElem(items[i], sink) }
             return a
+        }
+    }
+    // A Set is a dict marked __set: its keys ARE the elements, so length, for-in, contains
+    // and spread all fall out of the shared dictionary machinery.
+    function makeSet(items) {
+        return function() {
+            var d = {__dict: true, __set: true, keys: [], vals: []}
+            var sink = function(k, v, isEntry) { dictSet(d, k, true) }
+            for (var i = 0; i < items.length; i++) { emitElem(items[i], sink) }
+            return d
+        }
+    }
+    function makeMap(items) {
+        return function() {
+            var d = {__dict: true, keys: [], vals: []}
+            var sink = function(k, v, isEntry) { dictSet(d, k, isEntry ? v : null) }
+            for (var i = 0; i < items.length; i++) { emitElem(items[i], sink) }
+            return d
         }
     }
 
@@ -635,6 +1584,10 @@ KwFactory   = "factory" KwEnd ;
         return v.length
     }
     function dget(o, i) {
+        if (o != null && o != undefined && typeof o == "object" && o.__class != undefined) {
+            var m = findMember(o.__class, "[]")
+            if (m != null) { return m.fn.apply(undefined, [o, i]) }
+        }
         if (isDict(o)) {
             var di = dictFind(o, i)
             if (di < 0) { fail("map has no key " + dstr(i)) }
@@ -653,12 +1606,72 @@ KwFactory   = "factory" KwEnd ;
         if (o === null || o === undefined) { fail("index assign on null") }
         o[i] = v
     }
+    // A field write that honours a user `set name(v)` setter and a user `operator []=`;
+    // the accessors live on the class descriptor under the "set$name" / "[]=" keys.
+    function setFieldD(o, name, v) {
+        if (o === null || o === undefined) { fail("field ." + name + " of null") }
+        if (typeof o == "object" && o.__class != undefined) {
+            var st = findMember(o.__class, "set$" + name)
+            if (st != null) { st.fn.apply(undefined, [o, v]); return }
+        }
+        if (typeof o == "object" && o.__isclass === true) { o.__statics[name] = v; return }
+        o[name] = v
+    }
+    function dsetIndexD(o, i, v) {
+        if (o != null && o != undefined && typeof o == "object" && o.__class != undefined) {
+            var m = findMember(o.__class, "[]=")
+            if (m != null) { m.fn.apply(undefined, [o, i, v]); return }
+        }
+        dsetIndex(o, i, v)
+    }
     function getFieldD(o, name) {
         if (o === null || o === undefined) { fail("field ." + name + " of null") }
         // Own-property read: a bare o[name] resolved inherited Object.prototype
         // members (toString, valueOf, ...) under a host JS engine.
         if (hasOwn(o, name)) { return o[name] }
         return undefined
+    }
+
+    // A field read: the handful of dart:core properties that are getters on the built-in
+    // types, then the object's own field.
+    function readField(cur, name) {
+        if (isRec(cur)) { return recGet(cur, name) }
+        if (cur != null && cur != undefined && typeof cur == "object" && cur.__isclass === true) {
+            if (hasOwn(cur.__statics, name)) { return cur.__statics[name] }
+            // A constructor tear-off: FnBox.new / FnBox.twin is a function that constructs.
+            var cn = (name == "new") ? "" : name
+            if (findCtor(cur, cn) != null) { return makeCtorTearOff(cur, cn) }
+            fail("unknown static member '" + name + "' on " + cur.__name)
+        }
+        if (cur != null && cur != undefined && typeof cur == "object" && cur.__class != undefined) {
+            if (hasOwn(cur, name)) { return cur[name] }
+            var g = findMember(cur.__class, "get$" + name)
+            if (g != null) { return g.fn.apply(undefined, [cur]) }
+            var mm = findMember(cur.__class, name)
+            if (mm != null) { return makeTearOff(cur, mm.fn) }   // a method tear-off
+        }
+        if (name == "length") { return dlen(cur) }
+        if (name == "isEmpty") { return dlen(cur) == 0 }
+        if (name == "isNotEmpty") { return dlen(cur) != 0 }
+        if (name == "keys") { return mcall(cur, "keys", []) }
+        if (name == "values") { return mcall(cur, "values", []) }
+        var ex2 = extLookup(name)
+        if (ex2 != null) { return ex2.apply(undefined, [cur]) }
+        return getFieldD(cur, name)
+    }
+    function makeTearOff(self, fn) {
+        return function() {
+            var a = []
+            for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+            return fn.apply(undefined, concat2impl([self], a))
+        }
+    }
+    function makeCtorTearOff(cls, ctorName) {
+        return function() {
+            var a = []
+            for (var i = 0; i < arguments.length; i++) { a.push(arguments[i]) }
+            return construct(cls, ctorName, a)
+        }
     }
 
     // ----- member chains: .method(args), .field, [index] -----
@@ -672,19 +1685,22 @@ KwFactory   = "factory" KwEnd ;
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
-                if (s.kind == "mcall") {
+                // A null-aware suffix on a null receiver yields null for the WHOLE chain.
+                if (s.kind == "nmcall" || s.kind == "nfield" || s.kind == "nindex") {
+                    if (cur === null || cur === undefined) { return null }
+                }
+                if (s.kind == "nmcall") { cur = mcall(cur, s.name, evalArgs(s.args)) }
+                else if (s.kind == "nfield") { cur = readField(cur, s.name) }
+                else if (s.kind == "nindex") { cur = dget(cur, s.idx()) }
+                else if (s.kind == "mcall") {
                     var argv = evalArgs(s.args)
                     if (s.name == "containsKey") { cur = dictFind(cur, argv[0]) >= 0 }
                     else { cur = mcall(cur, s.name, argv) }
                 } else if (s.kind == "field") {
-                    if (s.name == "length") { cur = dlen(cur) }
-                    else if (s.name == "isEmpty") { cur = dlen(cur) == 0 }
-                    else if (s.name == "isNotEmpty") { cur = dlen(cur) != 0 }
-                    else if (s.name == "keys") { cur = mcall(cur, "keys", []) }
-                    else if (s.name == "values") { cur = mcall(cur, "values", []) }
-                    else { cur = getFieldD(cur, s.name) }
+                    cur = readField(cur, s.name)
                 } else if (s.kind == "bang") {
-                    cur = cur // the postfix ! is a no-op (accepted, not implemented)
+                    // The postfix null assertion: a null operand is a runtime error.
+                    if (cur === null || cur === undefined) { fail("null check operator used on a null value") }
                 } else {
                     cur = dget(cur, s.idx())
                 }
@@ -700,31 +1716,73 @@ KwFactory   = "factory" KwEnd ;
             if (name == "indexOf") { return target.indexOf(args[0]) }
             if (name == "charAt") { return target.charAt(args[0]) }
             if (name == "isEmpty") { return target.length == 0 }
-            fail("unknown String method: " + name)
+            return extCall(target, name, args, "String")
         }
         if (isDict(target)) {
             if (name == "keys") { return target.keys.slice(0) }
             if (name == "values") { return target.vals.slice(0) }
-            fail("unknown Map method: " + name)
+            if (name == "containsKey") { return dictFind(target, args[0]) >= 0 }
+            // Set methods: a Set is a dict whose keys are the elements.
+            if (name == "contains") { return dictFind(target, args[0]) >= 0 }
+            if (name == "add") { var had = dictFind(target, args[0]) >= 0; dictSet(target, args[0], true); return !had }
+            return extCall(target, name, args, "Map")
         }
         if (Array.isArray(target)) {
             if (name == "add") { target.push(args[0]); return true }
             if (name == "contains") { return target.indexOf(args[0]) >= 0 }
             if (name == "get") { return target[args[0]] }
             if (name == "removeLast") { return target.pop() }
-            fail("unknown List method: " + name)
+            return extCall(target, name, args, "List")
         }
-        if (target != null && target != undefined && target.__class != undefined) {
-            // Own-property read: a bare [name] resolved inherited Object.prototype
-            // members (toString, valueOf, ...) under a host JS engine.
-            var m = hasOwn(target.__class, name) ? target.__class[name] : undefined
-            if (typeof m != "function") { fail("unknown method '" + name + "' on " + target.__class.__name) }
-            return m.apply(undefined, concat2impl([target], args))
+        // A call ON a class object: a static method, or a named / factory constructor.
+        if (target != null && target != undefined && typeof target == "object" && target.__isclass === true) {
+            if (hasOwn(target.__statics, name) && typeof target.__statics[name] == "function") {
+                return target.__statics[name].apply(undefined, args)
+            }
+            if (findCtor(target, name) != null) { return construct(target, name, args) }
+            fail("unknown static member '" + name + "' on " + target.__name)
         }
+        if (target != null && target != undefined && typeof target == "object" && target.__class != undefined) {
+            var m = findMember(target.__class, name)
+            if (m == null) {
+                // A no-argument getter can be called like a method.
+                var g = findMember(target.__class, "get$" + name)
+                if (g != null) { return g.fn.apply(undefined, [target]) }
+                var ex = extLookup(name)
+                if (ex != null) { return ex.apply(undefined, concat2impl([target], args)) }
+                fail("unknown method '" + name + "' on " + target.__class.__name)
+            }
+            return m.fn.apply(undefined, concat2impl([target], args))
+        }
+        // An extension method on a built-in value (3.squared, [7, 8].orElse(1, 0)).
+        var ext = extLookup(name)
+        if (ext != null) { return ext.apply(undefined, concat2impl([target], args)) }
         fail("method call '" + name + "' on " + dstr(target))
+    }
+    // The last resort for a method call on a built-in: an extension member of that name.
+    function extCall(target, name, args, what) {
+        var ex = extLookup(name)
+        if (ex != null) { return ex.apply(undefined, concat2impl([target], args)) }
+        fail("unknown " + what + " method: " + name)
+    }
+    function extLookup(name) {
+        if (hasOwn(extMembers, "$" + name)) { return extMembers["$" + name] }
+        if (hasOwn(extMembers, "$get$" + name)) { return extMembers["$get$" + name] }
+        return null
     }
 
     // ----- cascade: t..m()..f = v evaluates the target once and returns it -----
+    // items = [{casc}, selector suffixes..., {cassign}?]
+    function makeCascadeSec(items) {
+        var sec = {nullaware: items[0].casc == "?..", path: [], assign: null}
+        var path = []
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].cassign != undefined) { sec.assign = items[i].cassign }
+            else { path.push(items[i]) }
+        }
+        sec.path = path
+        return sec
+    }
     function makeCascade(items) {
         if (items.length == 1) { return items[0] }
         var targetT = items[0]
@@ -734,14 +1792,29 @@ KwFactory   = "factory" KwEnd ;
             t = targetT()
             for (var i = 0; i < sections.length; i++) {
                 var s = sections[i]
-                if (s.kind == "ccall") {
-                    mcall(t, s.name, evalArgs(s.args))
+                if (s.nullaware && (t === null || t === undefined)) { return null }
+                var path = s.path
+                var cur = anytype
+                cur = t
+                var last = path.length - 1
+                if (s.assign == null) {
+                    for (var j = 0; j <= last; j++) { cur = applySfx(cur, path[j]) }
                 } else {
-                    t[s.name] = s.val()
+                    for (var k = 0; k < last; k++) { cur = applySfx(cur, path[k]) }
+                    var v = anytype
+                    v = s.assign()
+                    if (path[last].kind == "index") { dsetIndexD(cur, path[last].idx(), v) }
+                    else { setFieldD(cur, path[last].name, v) }
                 }
             }
             return t
         }
+    }
+    // One selector step of a cascade section (a read).
+    function applySfx(cur, s) {
+        if (s.kind == "mcall") { return mcall(cur, s.name, evalArgs(s.args)) }
+        if (s.kind == "field") { return readMember(cur, s.name) }
+        return dget(cur, s.idx())
     }
 
     // ----- functions, closures, classes -----
@@ -765,6 +1838,34 @@ KwFactory   = "factory" KwEnd ;
         }
         if (isThis) { return {thisf: nm, named: true, def: def} }
         return {pname: nm, named: true, def: def}
+    }
+    // An optional POSITIONAL parameter ([int b = 2]): positional, with a default.
+    function makeOptParam(isThis, items) {
+        var nm = ""
+        var def = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { nm = items[i].mname }
+            else { def = items[i] }
+        }
+        if (isThis) { return {thisf: nm, def: def} }
+        return {pname: nm, def: def}
+    }
+    // A super parameter (super.v): binds like a plain parameter of the same name and is
+    // forwarded to the superclass constructor by makeCtorFn.
+    function makeSuperParam(isNamed, items) {
+        var nm = ""
+        var def = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].mname != undefined) { nm = items[i].mname }
+            else { def = items[i] }
+        }
+        if (isNamed) { return {pname: nm, superf: nm, named: true, def: def} }
+        return {pname: nm, superf: nm, def: def}
+    }
+    // The default of an optional parameter, or null when it has none.
+    function defOf(p) {
+        if (hasOwn(p, "def") && p.def != null) { return p.def() }
+        return null
     }
     // The trailing options dict a caller passes for the named args, or undefined.
     function optsAt(args, idx) {
@@ -791,7 +1892,7 @@ KwFactory   = "factory" KwEnd ;
         var i
         for (i = 0; i < params.length; i++) {
             if (params[i].named === true) { continue }
-            sc[params[i].pname] = (off + posCount < args.length) ? args[off + posCount] : null
+            sc[params[i].pname] = (off + posCount < args.length) ? args[off + posCount] : defOf(params[i])
             posCount++
         }
         if (posCount < params.length) {
@@ -809,7 +1910,7 @@ KwFactory   = "factory" KwEnd ;
         for (i = 0; i < params.length; i++) {
             if (params[i].named === true) { continue }
             var pv = anytype
-            pv = (off + posCount < args.length) ? args[off + posCount] : null
+            pv = (off + posCount < args.length) ? args[off + posCount] : defOf(params[i])
             if (params[i].thisf != undefined) { sc[params[i].thisf] = pv; self[params[i].thisf] = pv }
             else { sc[params[i].pname] = pv }
             posCount++
@@ -843,7 +1944,7 @@ KwFactory   = "factory" KwEnd ;
         if (named != null) { argv.push(named) }
         return argv
     }
-    function makeClosure(params, bodyStmt, defScopes) {
+    function makeClosure(params, bodyStmt, defScopes, gen) {
         var env = defScopes.slice()
         return function() {
             var args = []
@@ -853,21 +1954,54 @@ KwFactory   = "factory" KwEnd ;
             var sc = {}
             scopes.push(sc)
             bindPlainParams(sc, params, args, 0)
-            var r = bodyStmt()
+            var r = gen ? runGenerator(bodyStmt) : bodyStmt()
             scopes = saved
+            if (gen) { return r }
             return (r != undefined && r.isRet) ? r.v : undefined
         }
     }
     function makeArrow(items) {
-        var params = items[0].params
-        var bodyStmt = bodyToStmt(items[1])
-        return function() { return makeClosure(params, bodyStmt, scopes) }
+        var m = collectFn2(items)
+        var bodyStmt = bodyToStmt(m.body)
+        var params = m.params
+        var gen = m.amod == "sync*" || m.amod == "async*"
+        return function() { return makeClosure(params, bodyStmt, scopes, gen) }
     }
     function makeFuncDecl(items) {
-        var name = items[0].fname
-        var params = items[1].params
-        var bodyStmt = bodyToStmt(items[2])
-        return function() { declVar(name, makeClosure(params, bodyStmt, scopes)) }
+        var m = collectFn2(items)
+        var bodyStmt = bodyToStmt(m.body)
+        var params = m.params
+        var gen = m.amod == "sync*" || m.amod == "async*"
+        return function() { declVar(m.name, makeClosure(params, bodyStmt, scopes, gen)) }
+    }
+
+    // ----- generators -----
+    // sync* / async* bodies are run EAGERLY and their yields collected into a list: there
+    // is no event loop and no coroutine here, so a generator IS its (finite) element list.
+    // Nested generators nest the sink, so `yield*` splices a delegate's elements.
+    var yieldSinks = []
+    function runGenerator(bodyStmt) {
+        var out = []
+        yieldSinks.push(out)
+        bodyStmt()
+        yieldSinks.pop()
+        return out
+    }
+    function makeYield(items) {
+        var star = false
+        var t = items[items.length - 1]
+        if (items.length > 1) { star = true }
+        return function() {
+            if (yieldSinks.length == 0) { fail("yield outside a generator") }
+            var sink = yieldSinks[yieldSinks.length - 1]
+            var v = anytype
+            v = t()
+            if (star) {
+                var n = dlen(v)
+                for (var i = 0; i < n; i++) { sink.push(dget(v, i)) }
+            } else { sink.push(v) }
+            return undefined
+        }
     }
     function pnames(params) {
         var out = []
@@ -875,57 +2009,295 @@ KwFactory   = "factory" KwEnd ;
         return out
     }
 
+    // Resolve a name that may not exist, without the hard failure of getVar.
+    function tryGetVar(name) {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], name)) { return {v: scopes[i][name]} }
+        }
+        if (hasOwn(hostGlobals, name)) { return {v: hostGlobals[name]} }
+        return null
+    }
+    function makeQualCall(items) {
+        var base = items[0].qbase
+        var name = items[1].qname
+        var args = items.slice(2)
+        return function() { return mcall(getVar(base), name, evalArgs(args)) }
+    }
+    function makeQualRef(items) {
+        var base = items[0].qbase
+        var name = items[1].qname
+        return function() { return readField(getVar(base), name) }
+    }
     function makeCall(items) {
         var name = items[0]
         var args = items.slice(1)
         return function() {
             var argv = evalArgs(args)
-            var f = getVar(name)
-            if (f != undefined && f != null && f.__isclass === true) { return construct(f, argv) }
+            var box = tryGetVar(name)
+            if (box == null) {
+                // An unqualified call inside a method reaches the receiver's own members.
+                var self = findThis()
+                if (self != undefined && self != null && self.__class != undefined
+                    && findMember(self.__class, name) != null) { return mcall(self, name, argv) }
+                // An extension type applied explicitly (ExInt(6)) is the identity.
+                if (hasOwn(extensionTypes, "$" + name)) { return argv[0] }
+                fail("unknown name: " + name)
+            }
+            var f = anytype
+            f = box.v
+            if (f != undefined && f != null && f.__isclass === true) { return construct(f, "", argv) }
             if (typeof f != "function") { fail("call of a non-function: " + name) }
             return f.apply(undefined, argv)
         }
     }
-    function construct(cls, argv) {
+    // Construct an instance of cls with the constructor named ctorName ("" = unnamed).
+    // A factory constructor returns its own value instead of initialising a fresh object.
+    function construct(cls, ctorName, argv) {
+        var cd = findCtor(cls, ctorName)
+        if (cd == null) { fail("class " + cls.__name + " has no constructor " + ctorName) }
+        if (cd.factory) { return cd.fn.apply(undefined, argv) }
+        var ck = ""
+        if (constDepth > 0) {
+            ck = "$" + constKey(cls, ctorName, argv)
+            if (hasOwn(constCache, ck)) { return constCache[ck] }
+        }
         var obj = {__class: cls}
-        cls.__ctor.apply(undefined, concat2impl([obj], argv))
+        if (ck != "") { constCache[ck] = obj }
+        cd.fn.apply(undefined, concat2impl([obj], argv))
         return obj
     }
+    // Const construction: while constDepth > 0, construct() returns a canonical instance
+    // per (class, constructor, argument values), which is what makes `identical(k1, const
+    // Kn.fix(2, 3))` true.
+    var constDepth = 0
+    var constCache = {}
+    function constify(t) {
+        return function() {
+            constDepth = constDepth + 1
+            var r = t()
+            constDepth = constDepth - 1
+            return r
+        }
+    }
+    function constKey(cls, ctorName, argv) {
+        var k = cls.__name + "|" + ctorName
+        for (var i = 0; i < argv.length; i++) { k = k + "|" + dstr(argv[i]) }
+        return k
+    }
+    function findCtor(cls, ctorName) {
+        var key = "$" + ctorName
+        if (hasOwn(cls.__ctors, key)) { return cls.__ctors[key] }
+        return null
+    }
+    // The first class in the receiver's linearisation that declares `name`, or null.
+    // The linearisation is [class, mixinN..mixin1, superclass's linearisation], so a later
+    // mixin wins over an earlier one and both win over the superclass.
+    function findMember(cls, name) {
+        var lin = cls.__lin
+        for (var i = 0; i < lin.length; i++) {
+            if (hasOwn(lin[i].__own, name)) { return {fn: lin[i].__own[name], at: i} }
+        }
+        return null
+    }
+    // The same lookup, but starting BELOW the class the running method was declared in -
+    // this is what `super.m()` resolves to.
+    function findSuperMember(cls, ownerName, name) {
+        var lin = cls.__lin
+        var from = 0
+        for (var i = 0; i < lin.length; i++) { if (lin[i].__name == ownerName) { from = i + 1; break } }
+        for (var j = from; j < lin.length; j++) {
+            if (hasOwn(lin[j].__own, name)) { return {fn: lin[j].__own[name], at: j} }
+        }
+        return null
+    }
 
-    // items = [{cname}, member markers...]. A member is {field}, {method}, {ctor} or {skip}.
+    // ----- class declarations -----
+    // items = [{mmod}..., memberDescriptor...]
+    function pushMembers(items) {
+        var isStatic = false
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && hasOwn(items[i], "mmod")) {
+                if (items[i].mmod == "static") { isStatic = true }
+            }
+        }
+        for (var j = 0; j < items.length; j++) {
+            var d = items[j]
+            if (d == undefined || d == null || hasOwn(d, "mmod")) { continue }
+            if (isStatic) { d.isStatic = true }
+            push(d)
+        }
+    }
+    // A plain member: a method, or (bare name == the class name) the unnamed constructor.
     function makeMember(isTyped, items) {
-        var name = items[0].mn
-        var params = items[1].params
-        var bodyDesc = items[items.length - 1]
-        if (!isTyped && name == curClassName) { return {ctor: {params: params, body: bodyDesc}} }
-        return {method: {name: name, params: params, body: bodyDesc}}
+        var m = collectFn(items)
+        if (!isTyped && m.name == curClassName) {
+            return {ctor: {name: "", params: m.params, body: m.body, inits: m.inits, factory: false}}
+        }
+        return {method: {name: m.name, params: m.params, body: m.body, amod: m.amod}}
+    }
+    // A getter / setter / operator: stored under "get$x", "set$x" or the operator symbol.
+    function makeAccessor(prefix, items) {
+        var m = collectFn(items)
+        return {method: {name: prefix + m.name, params: m.params, body: m.body, amod: m.amod}}
+    }
+    // A named or factory constructor.
+    function makeCtorMember(isFactory, items) {
+        var m = collectFn(items)
+        return {ctor: {name: m.name, params: m.params, body: m.body, inits: m.inits, factory: isFactory}}
+    }
+    function makeFactoryRedirect(items) {
+        return {redirectTo: items[0].frto}
+    }
+    // Gather the pieces a member production pushes, in whatever order they arrive.
+    function collectFn(items) {
+        var m = {name: "", params: [], body: null, inits: [], amod: ""}
+        var inits = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (hasOwn(it, "mn")) { m.name = it.mn }
+            else if (hasOwn(it, "params")) { m.params = it.params }
+            else if (hasOwn(it, "amod")) { m.amod = it.amod }
+            else if (hasOwn(it, "body") || hasOwn(it, "ebody") || hasOwn(it, "none")) { m.body = it }
+            else if (hasOwn(it, "redirectTo")) { m.body = {redirectTo: it.redirectTo} }
+            else { inits.push(it) }
+        }
+        m.inits = inits
+        return m
+    }
+    // Initializer-list items.
+    function makeSuperCall(items) {
+        var nm = ""
+        var args = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && hasOwn(items[i], "scname")) { nm = items[i].scname }
+            else { args.push(items[i]) }
+        }
+        return {cisuper: nm, args: args}
+    }
+    function makeRedirectCall(items) {
+        var nm = ""
+        var args = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && hasOwn(items[i], "scname")) { nm = items[i].scname }
+            else { args.push(items[i]) }
+        }
+        return {ciredirect: nm, args: args}
+    }
+    function makeFieldInit(items) {
+        return {cifield: items[0].finame, t: items[1]}
     }
     function makeFieldDecl(items) {
         return {field: items[0].fn, init: items.length > 1 ? items[1] : null}
     }
+
+    // The class registry: name -> descriptor, so extends/with can find a supertype that
+    // was declared later in the file.
+    var classReg = {}
+    var extensionTypes = {}
+
+    // items = [{cname}, {csuper}?, {cmixin}*, {ciface}*, {con}*, member descriptors...]
     function makeClassStmt(items) {
         var name = items[0].cname
+        var superName = ""
+        var mixinNames = []
         var fields = []
+        var statics = []
         var methods = []
-        var ctor = null
+        var ctors = []
         for (var i = 1; i < items.length; i++) {
             var it = items[i]
-            if (it == undefined) { continue }
-            if (it.field != undefined) { fields.push(it) }
-            else if (it.method != undefined) { methods.push(it.method) }
-            else if (it.ctor != undefined) { ctor = it.ctor }
+            if (it == undefined || it == null) { continue }
+            if (hasOwn(it, "csuper")) { superName = bareTypeName(it.csuper) }
+            else if (hasOwn(it, "cmixin")) { mixinNames.push(bareTypeName(it.cmixin)) }
+            else if (hasOwn(it, "ciface")) { continue }
+            else if (hasOwn(it, "con")) { superName = bareTypeName(it.con) }
+            else if (hasOwn(it, "field")) { if (it.isStatic === true) { statics.push(it) } else { fields.push(it) } }
+            else if (hasOwn(it, "method")) { if (it.isStatic === true) { statics.push(it) } else { methods.push(it.method) } }
+            else if (hasOwn(it, "ctor")) { ctors.push(it.ctor) }
         }
         return function() {
-            var cls = {__isclass: true, __name: name}
-            cls.__ctor = makeCtorFn(fields, ctor)
-            for (var m = 0; m < methods.length; m++) { cls[methods[m].name] = makeMethodClosure(methods[m]) }
-            declVar(name, cls)
+            declVar(name, buildClass(name, superName, mixinNames, fields, statics, methods, ctors, []))
         }
     }
-    function makeCtorFn(fields, ctor) {
-        var cparams = ctor != null ? ctor.params : []
-        var bodyDesc = ctor != null ? ctor.body : null
-        var bodyStmt = (bodyDesc != null && bodyDesc.none == undefined) ? bodyToStmt(bodyDesc) : null
+    // Strip the generic arguments and any nullability marker off a type name.
+    function bareTypeName(t) {
+        var s2 = stripWs(t.split("<")[0])
+        if (s2.length > 0 && s2.charAt(s2.length - 1) == "?") { s2 = s2.substring(0, s2.length - 1) }
+        return s2
+    }
+    function buildClass(name, superName, mixinNames, fields, statics, methods, ctors, enumVals) {
+        var cls = {__isclass: true, __name: name, __own: {}, __ctors: {}, __statics: {},
+                   __fields: fields, __lin: []}
+        classReg["$" + name] = cls
+        // Linearisation: this class, then the mixins right to left, then the superclass's.
+        var lin = [cls]
+        for (var m = mixinNames.length - 1; m >= 0; m--) {
+            var mx = hasOwn(classReg, "$" + mixinNames[m]) ? classReg["$" + mixinNames[m]] : null
+            if (mx != null) { for (var q = 0; q < mx.__lin.length; q++) { lin.push(mx.__lin[q]) } }
+        }
+        var sup = null
+        if (superName != "" && hasOwn(classReg, "$" + superName)) { sup = classReg["$" + superName] }
+        if (sup != null) { for (var r = 0; r < sup.__lin.length; r++) { lin.push(sup.__lin[r]) } }
+        cls.__lin = lin
+        cls.__super = sup
+        for (var i = 0; i < methods.length; i++) {
+            cls.__own[methods[i].name] = makeMethodClosure(methods[i], name)
+        }
+        // Statics live on the class object itself (FnBox.made, FnBox.twiceOf(21)).
+        for (var s3 = 0; s3 < statics.length; s3++) {
+            var st = statics[s3]
+            if (hasOwn(st, "field")) { cls.__statics[st.field] = (st.init != null) ? st.init() : null }
+            else { cls.__statics[st.method.name] = makeStaticClosure(st.method) }
+        }
+        var haveUnnamed = false
+        for (var c2 = 0; c2 < ctors.length; c2++) {
+            if (ctors[c2].name == "") { haveUnnamed = true }
+            cls.__ctors["$" + ctors[c2].name] = makeCtorEntry(cls, ctors[c2])
+        }
+        if (!haveUnnamed) {
+            cls.__ctors["$"] = makeCtorEntry(cls, {name: "", params: [], body: {none: true}, inits: [], factory: false})
+        }
+        // The enum values are canonical instances built once, plus the static .values list.
+        if (enumVals.length > 0) {
+            var vals = []
+            for (var e2 = 0; e2 < enumVals.length; e2++) {
+                var inst = construct(cls, "", evalArgs(enumVals[e2].eargs))
+                inst.index = e2
+                inst.__enumName = enumVals[e2].evname
+                cls.__statics[enumVals[e2].evname] = inst
+                vals.push(inst)
+            }
+            cls.__statics["values"] = vals
+        }
+        return cls
+    }
+    // A constructor entry: {fn, factory}. fn(self, args...) for a generative constructor,
+    // fn(args...) -> instance for a factory.
+    function makeCtorEntry(cls, ctor) {
+        if (ctor.factory) { return {fn: makeFactoryFn(cls, ctor), factory: true} }
+        return {fn: makeCtorFn(cls, ctor), factory: false}
+    }
+    function makeFactoryFn(cls, ctor) {
+        var bodyStmt = (ctor.body != null && !hasOwn(ctor.body, "none")) ? bodyToStmt(ctor.body) : null
+        var params = ctor.params
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            var saved = scopes
+            scopes = [globalScope, {}]
+            var sc = scopes[scopes.length - 1]
+            bindPlainParams(sc, params, args, 0)
+            var r = (bodyStmt != null) ? bodyStmt() : undefined
+            scopes = saved
+            return (r != undefined && r.isRet) ? r.v : null
+        }
+    }
+    function makeCtorFn(cls, ctor) {
+        var cparams = ctor.params
+        var bodyDesc = ctor.body
+        var bodyStmt = (bodyDesc != null && !hasOwn(bodyDesc, "none")) ? bodyToStmt(bodyDesc) : null
+        var inits = ctor.inits
         return function() {
             var self = arguments[0]
             var args = []
@@ -933,19 +2305,70 @@ KwFactory   = "factory" KwEnd ;
             var saved = scopes
             scopes = [globalScope, {}]
             declVar("this", self)
+            declVar("__owner", cls.__name)
             var sc = scopes[scopes.length - 1]
-            for (var f = 0; f < fields.length; f++) { self[fields[f].field] = null }
+            // The field defaults come FIRST: a `this.x` formal must win over them.
+            initFields(self, cls)
             bindCtorParams(sc, self, cparams, args, 1)
-            for (var fi = 0; fi < fields.length; fi++) {
-                if (fields[fi].init != null) { self[fields[fi].field] = fields[fi].init() }
+            var redirected = false
+            // A redirecting constructor (`: this(1, 1)`) runs the other one instead.
+            for (var d = 0; d < inits.length; d++) {
+                if (hasOwn(inits[d], "ciredirect")) {
+                    var cd = findCtor(cls, inits[d].ciredirect)
+                    if (cd == null) { fail("no constructor " + inits[d].ciredirect + " on " + cls.__name) }
+                    cd.fn.apply(undefined, concat2impl([self], evalArgs(inits[d].args)))
+                    redirected = true
+                }
             }
-            if (bodyStmt != null) { bodyStmt() }
+            if (!redirected) {
+                for (var e = 0; e < inits.length; e++) {
+                    var ini = inits[e]
+                    if (hasOwn(ini, "ciassert")) {
+                        if (!core.test(ini.ciassert[0]())) { fail("assertion failed in a constructor of " + cls.__name) }
+                    } else if (hasOwn(ini, "cifield")) { self[ini.cifield] = ini.t() }
+                }
+                // Chain to the superclass constructor: an explicit `super(...)` if there is
+                // one, otherwise the unnamed one with the declared super parameters.
+                var didSuper = false
+                for (var f = 0; f < inits.length; f++) {
+                    if (hasOwn(inits[f], "cisuper")) {
+                        callSuperCtor(self, cls, inits[f].cisuper, evalArgs(inits[f].args))
+                        didSuper = true
+                    }
+                }
+                if (!didSuper) { callSuperCtor(self, cls, "", superArgs(sc, cparams)) }
+                if (bodyStmt != null) { bodyStmt() }
+            }
             scopes = saved
         }
     }
-    function makeMethodClosure(mth) {
+    // Field defaults for the whole linearisation, subclass last so it wins.
+    function initFields(self, cls) {
+        var lin = cls.__lin
+        for (var i = lin.length - 1; i >= 0; i--) {
+            var fs = lin[i].__fields
+            for (var j = 0; j < fs.length; j++) {
+                self[fs[j].field] = (fs[j].init != null) ? fs[j].init() : null
+            }
+        }
+    }
+    function superArgs(sc, params) {
+        var out = []
+        for (var i = 0; i < params.length; i++) {
+            if (hasOwn(params[i], "superf")) { out.push(sc[params[i].superf]) }
+        }
+        return out
+    }
+    function callSuperCtor(self, cls, ctorName, argv) {
+        if (cls.__super == null) { return }
+        var cd = findCtor(cls.__super, ctorName)
+        if (cd == null) { return }
+        cd.fn.apply(undefined, concat2impl([self], argv))
+    }
+    function makeMethodClosure(mth, ownerName) {
         var bodyStmt = bodyToStmt(mth.body)
         var params = mth.params
+        var gen = mth.amod == "sync*" || mth.amod == "async*"
         return function() {
             var self = arguments[0]
             var args = []
@@ -953,11 +2376,213 @@ KwFactory   = "factory" KwEnd ;
             var saved = scopes
             scopes = [globalScope, {}]
             declVar("this", self)
+            declVar("__owner", ownerName)
             var sc = scopes[scopes.length - 1]
             bindPlainParams(sc, params, args, 1)
-            var r = bodyStmt()
+            var r = gen ? runGenerator(bodyStmt) : bodyStmt()
             scopes = saved
+            if (gen) { return r }
             return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+    function makeStaticClosure(mth) {
+        var bodyStmt = bodyToStmt(mth.body)
+        var params = mth.params
+        var gen = mth.amod == "sync*" || mth.amod == "async*"
+        return function() {
+            var args = []
+            for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]) }
+            var saved = scopes
+            scopes = [globalScope, {}]
+            var sc = scopes[scopes.length - 1]
+            bindPlainParams(sc, params, args, 0)
+            var r = gen ? runGenerator(bodyStmt) : bodyStmt()
+            scopes = saved
+            if (gen) { return r }
+            return (r != undefined && r.isRet) ? r.v : undefined
+        }
+    }
+
+    // ----- enums -----
+    function makeEnumValue(items) {
+        var v = {evname: "", eargs: []}
+        for (var i = 0; i < items.length; i++) {
+            if (hasOwn(items[i], "evname")) { v.evname = items[i].evname }
+            else if (hasOwn(items[i], "eargs")) { v.eargs = items[i].eargs }
+        }
+        return v
+    }
+    function makeEnumStmt(items) {
+        var name = items[0].cname
+        var vals = []
+        var fields = []
+        var statics = []
+        var methods = []
+        var ctors = []
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (hasOwn(it, "evname")) { vals.push(it) }
+            else if (hasOwn(it, "cmixin") || hasOwn(it, "ciface")) { continue }
+            else if (hasOwn(it, "field")) { if (it.isStatic === true) { statics.push(it) } else { fields.push(it) } }
+            else if (hasOwn(it, "method")) { if (it.isStatic === true) { statics.push(it) } else { methods.push(it.method) } }
+            else if (hasOwn(it, "ctor")) { ctors.push(it.ctor) }
+        }
+        return function() { declVar(name, buildClass(name, "", [], fields, statics, methods, ctors, vals)) }
+    }
+
+    // ----- extensions -----
+    // extension X on T { ... }: the members are registered by name and found by mcall /
+    // readMember when the receiver has no member of its own.
+    var extMembers = {}
+    function makeExtensionStmt(items) {
+        var methods = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (hasOwn(it, "exname")) { extensionTypes["$" + it.exname] = true }
+            else if (hasOwn(it, "method")) { methods.push(it.method) }
+        }
+        return function() {
+            for (var j = 0; j < methods.length; j++) {
+                extMembers["$" + methods[j].name] = makeMethodClosure(methods[j], "")
+            }
+        }
+    }
+    // extension type N(T value) { ... }: a real class with the one field, so N(3).value
+    // and its operators work like any other object.
+    function makeExtTypeStmt(items) {
+        var name = items[0].cname
+        var fieldName = ""
+        var methods = []
+        var statics = []
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (hasOwn(it, "etfield")) { fieldName = it.etfield }
+            else if (hasOwn(it, "ciface")) { continue }
+            else if (hasOwn(it, "method")) { if (it.isStatic === true) { statics.push(it) } else { methods.push(it.method) } }
+        }
+        var ctor = {name: "", params: [{thisf: fieldName}], body: {none: true}, inits: [], factory: false}
+        return function() {
+            declVar(name, buildClass(name, "", [], [{field: fieldName, init: null}], statics, methods, [ctor], []))
+        }
+    }
+
+    // ----- top-level getters and setters -----
+    var topGetters = {}
+    var topSetters = {}
+    function makeTopAccessor(isGet, items) {
+        var m = collectFn2(items)
+        var fn = makeClosureLater(m)
+        return function() {
+            if (isGet) { topGetters["$" + m.name] = fn() }
+            else { topSetters["$" + m.name] = fn() }
+        }
+    }
+    function collectFn2(items) {
+        var m = {name: "", params: [], body: null, amod: ""}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (hasOwn(it, "fname")) { m.name = it.fname }
+            else if (hasOwn(it, "params")) { m.params = it.params }
+            else if (hasOwn(it, "amod")) { m.amod = it.amod }
+            else if (hasOwn(it, "body") || hasOwn(it, "ebody") || hasOwn(it, "none")) { m.body = it }
+        }
+        return m
+    }
+    function makeClosureLater(m) {
+        var bodyStmt = bodyToStmt(m.body)
+        var params = m.params
+        var gen = m.amod == "sync*" || m.amod == "async*"
+        return function() { return makeClosure(params, bodyStmt, scopes, gen) }
+    }
+
+    // ----- super -----
+    function makeSuperMcall(items) {
+        var name = items[0].smname
+        var args = items.slice(1)
+        return function() {
+            var self = findThis()
+            if (self == undefined || self == null) { fail("super outside a method") }
+            var m = findSuperMember(self.__class, getVar("__owner"), name)
+            if (m == null) { fail("no super member '" + name + "'") }
+            return m.fn.apply(undefined, concat2impl([self], evalArgs(args)))
+        }
+    }
+    function makeSuperFieldExpr(items) {
+        var name = items[0].smname
+        return function() {
+            var self = findThis()
+            if (self == undefined || self == null) { fail("super outside a method") }
+            var g = findSuperMember(self.__class, getVar("__owner"), "get$" + name)
+            if (g != null) { return g.fn.apply(undefined, [self]) }
+            return getFieldD(self, name)
+        }
+    }
+
+    // ----- exceptions -----
+    // Dart discriminates catch clauses by type (`on XeA catch (e)`), so the clause list is
+    // walked in order and the first whose type matches wins; `rethrow` re-raises the value
+    // the innermost running catch clause bound.
+    var curExc = []
+    function makeCatchClause(items) {
+        var cl = {catchbody: null, catchname: undefined, catchtype: undefined}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined || it == null) { continue }
+            if (typeof it == "function") { cl.catchbody = it }
+            else if (hasOwn(it, "catchtype")) { cl.catchtype = it.catchtype }
+            else if (hasOwn(it, "catchname")) { cl.catchname = it.catchname }
+        }
+        return cl
+    }
+    function makeRethrow() {
+        return function() {
+            if (curExc.length == 0) { fail("rethrow outside a catch clause") }
+            throw {__exc: true, v: curExc[curExc.length - 1]}
+        }
+    }
+    function dartTry(items) {
+        var tryT = anytype, finallyT = anytype
+        var clauses = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].trybody != undefined) { tryT = items[i].trybody }
+            else if (items[i].finbody != undefined) { finallyT = items[i].finbody }
+            else { clauses.push(items[i]) }
+        }
+        return function() {
+            var savedChain = scopes.slice()
+            var box = {sig: undefined}
+            try {
+                box.sig = tryT()
+            } catch (e) {
+                scopes = savedChain.slice()
+                var hit = null
+                if (excIsUser(e)) {
+                    for (var k = 0; k < clauses.length; k++) {
+                        if (clauses[k].catchtype == undefined || dartIsType(e.v, clauses[k].catchtype)) {
+                            hit = clauses[k]
+                            break
+                        }
+                    }
+                }
+                if (hit == null) { throw e }
+                scopes.push({})
+                if (hit.catchname != undefined) { declVar(hit.catchname, e.v) }
+                curExc.push(e.v)
+                box.sig = hit.catchbody()
+                curExc.pop()
+                scopes.pop()
+            } finally {
+                scopes = savedChain.slice()
+                if (finallyT != undefined) {
+                    var fr = finallyT()
+                    if (fr != undefined) { return fr }
+                }
+            }
+            return box.sig
         }
     }
 
@@ -994,7 +2619,7 @@ KwFactory   = "factory" KwEnd ;
         o = getVar(ref.name)
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
-            if (s.key != undefined) { o = getFieldD(o, s.key) } else { o = dget(o, s.idx()) }
+            if (s.key != undefined) { o = readMember(o, s.key) } else { o = dget(o, s.idx()) }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.key != undefined) { return {obj: o, key: last.key, field: true} }
@@ -1004,22 +2629,40 @@ KwFactory   = "factory" KwEnd ;
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        // ??= is accepted, not implemented; it lowers to a plain assignment.
-        if (op == "??=") { notImpl("??= operator", pos); op = "=" }
         return function() {
             var v = anytype
-            v = valT()
             if (ref.path.length == 0) {
-                if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
+                if (op == "??=") {
+                    var cur0 = getVar(ref.name)
+                    if (cur0 !== null && cur0 !== undefined) { return cur0 }
+                    v = valT()
+                } else {
+                    v = valT()
+                    if (op != "=") { v = applyOp(op, getVar(ref.name), v) }
+                }
                 setVar(ref.name, v)
             } else {
                 var p = resolveRefDart(ref)
                 if (p.field) {
-                    if (op != "=") { v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v) }
-                    p.obj[p.key] = v
+                    var cur = readMember(p.obj, p.key)
+                    if (op == "??=") {
+                        if (cur !== null && cur !== undefined) { return cur }
+                        v = valT()
+                    } else {
+                        v = valT()
+                        if (op != "=") { v = applyOp(op, cur, v) }
+                    }
+                    setFieldD(p.obj, p.key, v)
                 } else {
-                    if (op != "=") { v = applyOp(op, dget(p.obj, p.key), v) }
-                    dsetIndex(p.obj, p.key, v)
+                    if (op == "??=") {
+                        var cur2 = dget(p.obj, p.key)
+                        if (cur2 !== null && cur2 !== undefined) { return cur2 }
+                        v = valT()
+                    } else {
+                        v = valT()
+                        if (op != "=") { v = applyOp(op, dget(p.obj, p.key), v) }
+                    }
+                    dsetIndexD(p.obj, p.key, v)
                 }
             }
             return v
@@ -1035,6 +2678,73 @@ KwFactory   = "factory" KwEnd ;
         }
     }
 
+    // ----- labels, loops and their control signals -----
+    // A labeled statement hands its label to the loop it wraps through pendingLabel: the
+    // loop thunk is already built when the label's tag runs, so the label has to travel at
+    // RUN time. The loop picks it up (and clears it) as its first act.
+    var pendingLabel = ""
+    function takeLabel() {
+        var l = pendingLabel
+        pendingLabel = ""
+        return l
+    }
+    function makeLabeled(items) {
+        var label = items[0].slabel
+        var body = items[1]
+        return function() {
+            pendingLabel = label
+            var r = body()
+            if (isSignal(r) && r.label == label && r.sig == "break") { return undefined }
+            return r
+        }
+    }
+    function isSignal(r) {
+        return r != undefined && r != null && typeof r == "object" && hasOwn(r, "sig") && hasOwn(r, "label")
+    }
+    function makeBreakL(items) {
+        if (items.length == 0) { return makeBreak() }
+        var lb = items[0].label
+        return function() { return {sig: "break", label: lb} }
+    }
+    function makeContinueL(items) {
+        if (items.length == 0) { return makeContinue() }
+        var lb = items[0].label
+        return function() { return {sig: "continue", label: lb} }
+    }
+    // Route one loop-body result: "break", "continue" or "propagate" (return / a signal
+    // for an OUTER label).
+    function loopRoute(r, myLabel) {
+        if (r === BRK) { return "break" }
+        if (r === CONT) { return "continue" }
+        if (myLabel != "" && isSignal(r) && r.label == myLabel) {
+            return (r.sig == "break") ? "break" : "continue"
+        }
+        return "propagate"
+    }
+    // while, with label support (the shared makeWhile has none).
+    makeWhile = function(bodyT, condT) {
+        return function() {
+            var myLabel = takeLabel()
+            while (core.test(condT())) {
+                var r = bodyT()
+                if (r != undefined) {
+                    var act = loopRoute(r, myLabel)
+                    if (act == "break") { break }
+                    if (act == "propagate") { return r }
+                }
+            }
+            return undefined
+        }
+    }
+    function makeAssert(items) {
+        var cond = items[0]
+        var msg = (items.length > 1) ? items[1] : null
+        return function() {
+            if (!core.test(cond())) { fail("assertion failed" + ((msg != null) ? ": " + dstr(msg()) : "")) }
+            return undefined
+        }
+    }
+
     // ----- for and for-in -----
     function makeFor(items) {
         var bodyT = items.pop()
@@ -1045,14 +2755,16 @@ KwFactory   = "factory" KwEnd ;
             if (items[i].k == "post") { post = items[i].t }
         }
         return function() {
+            var myLabel = takeLabel()
             scopes.push({})
             var res = undefined
             if (init != null) { init() }
             while (cond == null || core.test(cond())) {
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) { break }
-                    if (r !== CONT) { res = r; break }
+                    var act = loopRoute(r, myLabel)
+                    if (act == "break") { break }
+                    if (act == "propagate") { res = r; break }
                 }
                 if (post != null) { post() }
             }
@@ -1068,6 +2780,7 @@ KwFactory   = "factory" KwEnd ;
             var it = anytype
             it = iterT()
             if (isDict(it)) { it = it.keys.slice(0) } // for (x in map) walks the keys
+            var myLabel = takeLabel()
             scopes.push({})
             var res = undefined
             var n = dlen(it)
@@ -1075,8 +2788,9 @@ KwFactory   = "factory" KwEnd ;
                 declVar(name, dget(it, i))
                 var r = bodyT()
                 if (r != undefined) {
-                    if (r === BRK) { break }
-                    if (r !== CONT) { res = r; break }
+                    var act = loopRoute(r, myLabel)
+                    if (act == "break") { break }
+                    if (act == "propagate") { res = r; break }
                 }
             }
             scopes.pop()
@@ -1088,13 +2802,49 @@ KwFactory   = "factory" KwEnd ;
     core.lang = "dart"
     core.varMiss = function(name) {
         var self = findThis()
-        if (self != undefined && self != null && hasOwn(self, name)) { return {v: self[name]} }
+        if (self != undefined && self != null) {
+            if (hasOwn(self, name)) { return {v: self[name]} }
+            if (self.__class != undefined) {
+                var g = findMember(self.__class, "get$" + name)
+                if (g != null) { return {v: g.fn.apply(undefined, [self])} }
+                var m = findMember(self.__class, name)
+                if (m != null) { return {v: makeTearOff(self, m.fn)} }
+            }
+        }
+        var oc = ownerClass()
+        if (oc != null && hasOwn(oc.__statics, name)) { return {v: oc.__statics[name]} }
+        if (hasOwn(topGetters, "$" + name)) { return {v: topGetters["$" + name]()} }
         return null
     }
     core.setMiss = function(name, value) {
         var self = findThis()
-        if (self != undefined && self != null && hasOwn(self, name)) { self[name] = value; return true }
+        if (self != undefined && self != null) {
+            if (hasOwn(self, name)) { self[name] = value; return true }
+            if (self.__class != undefined) {
+                var st = findMember(self.__class, "set$" + name)
+                if (st != null) { st.fn.apply(undefined, [self, value]); return true }
+            }
+        }
+        var oc = ownerClass()
+        if (oc != null && hasOwn(oc.__statics, name)) { oc.__statics[name] = value; return true }
+        if (hasOwn(topSetters, "$" + name)) { topSetters["$" + name](value); return true }
         return false
+    }
+    // The class whose method / constructor is running (bound as __owner), or null.
+    function ownerClass() {
+        for (var i = scopes.length - 1; i >= 0; i--) {
+            if (hasOwn(scopes[i], "__owner")) {
+                var n = scopes[i]["__owner"]
+                if (hasOwn(classReg, "$" + n)) { return classReg["$" + n] }
+                return null
+            }
+        }
+        return null
+    }
+    // identical(a, b): reference identity (structural for records, which have no identity).
+    hostGlobals["identical"] = function(a, b) {
+        if (isRec(a) && isRec(b)) { return recEq(a, b) }
+        return a === b
     }
     function findThis() {
         for (var i = scopes.length - 1; i >= 0; i--) {

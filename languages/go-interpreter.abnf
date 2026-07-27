@@ -229,8 +229,52 @@ Fallthrough <~~ push(makeFallthrough()) ~~>
 // (its callee stays visible in call graphs). select likewise has no channel runtime.
 GoStmt      <~~ push(makeGoStmt(pop(), up.pos)) ~~>
             = "go" KwEnd PostfixExpr [ ";" ] ;
-Select      <~~ push(notImplStmt("select statement", up.pos)) ~~>
-            = "select" KwEnd SkipBlock ;
+// select { case v := <-ch: ...; case ch <- x: ...; default: ... }. The arms are tried
+// in source order and the first READY one runs, which under the cooperative model is
+// deterministic. An arm's body is a statement list, so it needs NotSelLabel to stop
+// before the next 'case' / 'default' (both would otherwise parse as an identifier
+// expression, exactly as they would in a switch body - which is why that one is
+// parsed flat instead).
+Select      <~~ push(makeSelect(takeAll())) ~~>
+            = "select" KwEnd "{" { SelArm } "}" ;
+SelArm      = SelRecv | SelSend | SelDefault ;
+SelRecv     <~~ push(makeSelRecv(takeAll())) ~~>
+            = "case" KwEnd [ Id <~~ push(up.in) ~~> [ "," Id <~~ push(up.in) ~~> ] ( ":=" | "=" ) ]
+              "<-" Expression ":" SelBody ;
+SelSend     <~~ push(makeSelSend(takeAll())) ~~>
+            = "case" KwEnd PostfixExpr "<-" Expression ":" SelBody ;
+SelDefault  <~~ push(makeSelDefault(takeAll())) ~~>
+            = "default" KwEnd ":" SelBody ;
+SelBody     <~~ push(makeSeq(takeAll())) ~~>
+            = { SelStmt } ;
+SelStmt     = NotSelLabel Statement ;
+NotSelLabel = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        // Whitespace is not skipped before a guard, so step over it (and over line
+        // comments) before looking at the keyword.
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { return abnf.newToken("\x01end-of-file", 0) }
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            break
+        }
+        var w = ""
+        while (i < 8192 && w.length < 8) {
+            cc = c.peek(i)
+            if (cc < 97 || cc > 122) { break }
+            w += String.fromCharCode(cc)
+            i++
+        }
+        if (w === "case" || w === "default") { return abnf.newToken("\x01select-arm-label", 0) }
+        return undefined
+    })()
+~~) ;
 
 // defer f(args) / defer pkg.fn(args): the function value and the arguments are
 // evaluated now, the call runs when the surrounding function returns (LIFO).
@@ -265,12 +309,17 @@ VarSpec     <~~ push(makeVarDecl(takeAll())) ~~>
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
 // MapOk (v, ok := m[k]) must come first: as a ShortDecl it would miss the flag.
-SimpleStmt  = ( AssertOk | MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) [ ";" ] ;
+SimpleStmt  = ( AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) [ ";" ] ;
 
 // ch <- v: a channel send. The left side is a postfix expression (so the leading
 // '<' of a relational compare is never mistaken for the '<-' send token: a compare
 // is written 'a < -b' with a space). Accepted, then reported not implemented; both
 // operands still evaluate under -warn-unsupported so their calls stay visible.
+// v, ok := <-ch: the received value and whether the channel was still OPEN. It
+// must be tried before ShortDecl, which would destructure the value itself.
+RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "," Id <~~ push(up.in) ~~>
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression ;
 ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
             = PostfixExpr "<-" Expression ;
 
@@ -342,7 +391,7 @@ ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
 FInit       <~~ push({k:"init", t:pop(), names: takeDeclNames()}) ~~> = SimpleStmt2 ;
 FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
-SimpleStmt2 = AssertOk | MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ;
+SimpleStmt2 = AssertOk | RecvOk | MapOk | ShortDecl | IncDecStmt | Assign | ExprOnly ;
 ForCond     <~~ push(makeWhileG(takeAll())) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
 
@@ -553,7 +602,10 @@ MakeCall    <~~ push(makeMakeCall(takeAll())) ~~>
 MakeType    = MakeMapT | MakeSliceT | MakeChanT ;
 MakeMapT    <~~ push({mkind: "map", czero: pop().mzero}) ~~> = MapTypeZ ;
 MakeSliceT  <~~ push({mkind: "slice", cet: pop().cet}) ~~> = "[" "]" CompElemT ;
-MakeChanT   <~~ push({mkind: "chan"}) ~~> = ChanTypeT ;
+// The ELEMENT type comes along: a receive from a closed, drained channel yields it
+// zero-valued (`v, open := <-ch` with open false).
+MakeChanT   <~~ push({mkind: "chan", czero: pop().cet}) ~~>
+            = ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) CompElemT ;
 
 // A conversion whose target type is not a bare identifier: []byte(s), []rune(s),
 // map[K]V(x). The identifier forms (int(x), string(b), ...) go through Call.
@@ -1069,7 +1121,73 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var i = capOf.indexOf(a)
         return (i >= 0 && capVal[i] > a.length) ? capVal[i] : a.length
     }
-    function newChan(n) { return {__chan: true, buf: [], closed: false} }
+    // ----- Channels and goroutines -----
+    // Concurrency is COOPERATIVE and deterministic: `go f()` queues f, and a receive
+    // that finds the channel empty runs the queued goroutines until one fills it. A
+    // send never blocks (an unbuffered channel behaves as one with room), which is what
+    // makes a single-threaded interpreter able to run the handshake at all: the sender
+    // hands its value over and the receiver picks it up when it drains the queue.
+    // A receive on a channel that stays empty with nothing left to run is a deadlock.
+    function newChan(n, zero) { return {__chan: true, buf: [], closed: false, czero: zero} }
+    function isChan(v) { return v != undefined && v != null && typeof v == "object" && v.__chan == true }
+    var goQueue = []
+    function goSpawn(t) { goQueue.push(t) }
+    // Runs every queued goroutine to completion, in spawn order. A goroutine that
+    // spawns another appends to the same queue and is picked up by the same drain.
+    function goDrain() {
+        var guard = 0
+        while (goQueue.length > 0 && guard < 100000) {
+            guard++
+            var t = goQueue[0]
+            for (var i = 1; i < goQueue.length; i++) { goQueue[i - 1] = goQueue[i] }
+            goQueue.pop()
+            t()
+        }
+    }
+    function chanSend(ch, v) {
+        if (!isChan(ch)) fail("send on a non-channel")
+        if (ch.closed) fail("send on closed channel")
+        ch.buf.push(v)
+    }
+    // {v, ok}: ok is false exactly when the channel is closed and drained, and then
+    // v is the element type's zero value (Go's `v, open := <-ch`).
+    function chanRecv(ch) {
+        if (!isChan(ch)) fail("receive from a non-channel")
+        if (ch.buf.length == 0) { goDrain() }
+        if (ch.buf.length == 0) {
+            if (ch.closed) { return {v: zeroOfType2(ch.czero), ok: false} }
+            fail("all goroutines are asleep - deadlock")
+        }
+        var v = ch.buf[0]
+        for (var i = 1; i < ch.buf.length; i++) { ch.buf[i - 1] = ch.buf[i] }
+        ch.buf.pop()
+        return {v: v, ok: true}
+    }
+    // The `for v := range ch` form: like chanRecv, but a channel that is closed and
+    // drained ENDS the loop instead of yielding a zero value.
+    function chanRecvOrDone(ch) {
+        if (!isChan(ch)) fail("range over a non-channel")
+        if (ch.buf.length == 0) { goDrain() }
+        if (ch.buf.length == 0) {
+            if (ch.closed) { return {v: undefined, ok: false} }
+            fail("all goroutines are asleep - deadlock")
+        }
+        var v = ch.buf[0]
+        for (var i = 1; i < ch.buf.length; i++) { ch.buf[i - 1] = ch.buf[i] }
+        ch.buf.pop()
+        return {v: v, ok: true}
+    }
+    // Whether a receive can proceed WITHOUT blocking - what a select's case arms ask
+    // before falling back to the default arm.
+    function chanReady(ch) {
+        if (!isChan(ch)) fail("receive from a non-channel")
+        if (ch.buf.length == 0 && !ch.closed) { goDrain() }
+        return ch.buf.length > 0 || ch.closed
+    }
+    hostGlobals["close"] = function(ch) {
+        if (!isChan(ch)) fail("close() needs a channel")
+        ch.closed = true
+    }
 
     // ----- Conversions -----
     // The named-type conversions (int(x), string(b), []byte(s), ...). Our value model
@@ -1443,7 +1561,10 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             var zero = zeroOfType(d.czero)
             return function() { return newMap(zero) }
         }
-        if (d.mkind == "chan") { return function() { return newChan(capT != null ? capT() : 0) } }
+        if (d.mkind == "chan") {
+            var cz = d.czero
+            return function() { return newChan(capT != null ? capT() : 0, cz) }
+        }
         var ez = d.cet
         return function() {
             var n = lenT != null ? lenT() : 0
@@ -1822,6 +1943,27 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         var vName = names.length > 1 ? names[1] : null
         return function() {
             var arr = listT()
+            // Ranging a CHANNEL yields one received value per iteration (bound to the
+            // FIRST name, not an index) and ends when the channel is closed and drained.
+            if (isChan(arr)) {
+                var cres = undefined
+                scopes.push({})
+                var ctop = scopes.length - 1
+                var cguard = 0
+                while (cguard < 1000000) {
+                    cguard++
+                    var rc = chanRecvOrDone(arr)
+                    if (!rc.ok) { break }
+                    scopes[ctop] = {}
+                    if (iName != null) { declVar(iName, rc.v) }
+                    var rr = bodyT()
+                    var sc2 = loopSig(rr, lbl)
+                    if (sc2 == 1) { break }
+                    if (sc2 == 2) { cres = rr; break }
+                }
+                scopes.pop()
+                return cres
+            }
             var keys = null
             var vals = null
             if (isMap(arr)) { keys = arr.keys.slice(0); vals = arr.vals.slice(0) }
@@ -2057,23 +2199,79 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // Each reports "not implemented" (aborts by default, warns under -warn-unsupported)
     // and still evaluates its operands so their calls stay visible in call graphs.
 
-    // go f(...): the callee is evaluated, the concurrency is not modeled.
+    // go f(...): the call is QUEUED and runs when a receive needs it (see goDrain).
     function makeGoStmt(callT, pos) {
-        notImpl("goroutine", pos)
-        return function() { callT(); return undefined }
+        return function() { goSpawn(callT); return undefined }
     }
-    // ch <- v: both operands are evaluated, the send is not modeled.
+    // ch <- v
     function makeChanSend(items, pos) {
         var chT = items[0]
         var valT = items[1]
-        notImpl("channel send", pos)
-        return function() { chT(); valT(); return undefined }
+        return function() { chanSend(chT(), valT()); return undefined }
     }
-    // <-ch: the operand is evaluated, the receive yields nothing.
+    // <-ch as a value (the single-result form; RecvOk covers `v, ok := <-ch`).
     function makeRecv(chT, pos) {
-        notImpl("channel receive", pos)
-        return function() { chT(); return undefined }
+        return function() { return chanRecv(chT()).v }
     }
+    // v, ok := <-ch / v, ok = <-ch: the value and whether the channel was still open.
+    function makeRecvOk(items) {
+        var vName = items[0]
+        var okName = items[1]
+        var isDecl = items[2].decl
+        var chT = items[3]
+        return function() {
+            var r = chanRecv(chT())
+            if (isDecl) {
+                if (vName != "_") { declVar(vName, r.v) }
+                if (okName != "_") { declVar(okName, r.ok) }
+            } else {
+                if (vName != "_") { setVar(vName, r.v) }
+                if (okName != "_") { setVar(okName, r.ok) }
+            }
+            return undefined
+        }
+    }
+    // select { case v := <-ch: ...; case ch <- x: ...; default: ... }: the arms are
+    // tried in source order and the FIRST ready one runs; without a ready arm the
+    // default runs, and without a default the select waits by draining the goroutine
+    // queue once more (a still-empty channel is then a deadlock, as in Go).
+    function makeSelect(items) {
+        var arms = items
+        return function() {
+            var dflt = null
+            for (var pass = 0; pass < 2; pass++) {
+                for (var i = 0; i < arms.length; i++) {
+                    var a = arms[i]
+                    if (a.kind == "default") { dflt = a; continue }
+                    if (a.kind == "send") { chanSend(a.chT(), a.valT()); return a.body() }
+                    if (chanReady(a.chT())) {
+                        var r = chanRecv(a.chT())
+                        scopes.push({})
+                        if (a.vName != null && a.vName != "_") { declVar(a.vName, r.v) }
+                        if (a.okName != null && a.okName != "_") { declVar(a.okName, r.ok) }
+                        var res = a.body()
+                        scopes.pop()
+                        return res
+                    }
+                }
+                if (dflt != null) { return dflt.body() }
+                if (pass == 0) { goDrain() }
+            }
+            fail("all goroutines are asleep - deadlock")
+        }
+    }
+    function makeSelRecv(items) {
+        var i = 0
+        var vName = null
+        var okName = null
+        while (i < items.length && typeof items[i] == "string") {
+            if (vName == null) { vName = items[i] } else { okName = items[i] }
+            i++
+        }
+        return {kind: "recv", vName: vName, okName: okName, chT: items[i], body: items[i + 1]}
+    }
+    function makeSelSend(items) { return {kind: "send", chT: items[0], valT: items[1], body: items[2]} }
+    function makeSelDefault(items) { return {kind: "default", body: items[0]} }
     // s[lo:hi] / s[lo:hi:max]: accepted, reported not implemented. The base and every
     // bound still evaluate (nested calls stay visible); the value is undefined.
     function makeSliceNI(items, pos) {

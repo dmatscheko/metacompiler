@@ -20,17 +20,43 @@ break/continue, return, assignment (also += -= *= /= %=), postfix ++/--, the ter
 operator, || && with short circuit, == != < > <= >= (== compares objects by identity and
 strings by value) and + - * / % (int arithmetic is 32 bit, / truncates) and unary - !.
 
-Widened surface (parsed so a whole C# file is accepted): generics (<...>), nullable ('?')
-and array type suffixes are parsed and dropped; casts ((Type) expr) are identity;
-modifier keywords are parsed and ignored. Interfaces, structs, enums, delegates,
-nested types, properties ({ get; set; } bodies), lambdas ('=>' as an expression) and LINQ
-query expressions are accepted and reported as not implemented; -warn-unsupported
-downgrades that to a warning so call graphs / CFGs / traces still work on partly
-understood files.
+Also modelled: char as an integral value that renders as its glyph (with the C# escapes
+and the (char)/(int)/(byte) conversions), the full numeric literal set (leading-dot reals,
+hex, binary, digit groups, u/l/f/d/m suffixes), verbatim and raw string literals,
+interpolation with alignment and the D format specifier, typeof / nameof / sizeof /
+default, nullable values with the null-coalescing, null-conditional and null-forgiving
+operators and .HasValue / .Value, nested types, enums (with member initializers over
+earlier members), structs (value copy on a struct-typed declaration, and a zeroed
+default), interfaces with default members and explicit implementations, abstract members,
+extension methods (a static method whose first parameter carries this), unqualified calls
+to members of the enclosing class, using statements and using declarations with Dispose in
+reverse order, local functions, lambdas with typed parameters, default values and a params
+tail, anonymous methods and anonymous types, braced array initializers, and object
+creation as the head of a member chain.
 
-Not genuinely modelled: char/decimal/float literals, overloading, implicit field access
-(fields are reached via this.x or ClassName.x), real exception unwinding, properties,
-delegates/events, async/await and LINQ.
+Also modelled: labels and goto (including goto case / goto default, which re-enter the
+enclosing switch), the throw EXPRESSION, the BCL exception types (a program may throw new
+Exception(...) without declaring one), named and optional arguments (a skipped parameter
+takes its default), collection expressions with a spread element, the index-from-end
+operator and range slicing, delegate { ... } without a parameter list, unsafe blocks,
+implicitly typed and sized-with-initializer arrays, nested and indexed member
+initializers, and explicitly implemented properties.
+
+Widened surface (parsed so a whole C# file is accepted): generics, nullable and array type
+suffixes are parsed and dropped; modifier keywords are parsed and ignored. Delegate
+declarations and LINQ query expressions are accepted and reported as not implemented;
+-warn-unsupported downgrades that to a warning so call graphs / CFGs / traces still work
+on partly understood files.
+
+Not implemented yet (the full-syntax ratchet, tests/csharp-test-full.cs, lists them):
+tuples and deconstruction, patterns and switch expressions, records, delegates and
+events, and iterators and async. Out and ref parameters are parsed and dropped, so a
+custom Deconstruct is not reached.
+
+Not genuinely modelled: method overloading, unqualified FIELD access (fields are reached
+via this.x or ClassName.x; only an unqualified CALL resolves against the enclosing class),
+value semantics for structs outside a struct-typed declaration, disposal on a path that
+leaves a using block by an exception, and LINQ.
 
 Fields live directly on the instance object, methods on the class descriptor; a
 constructor always exists (a default one is generated) and first applies the field
@@ -60,7 +86,9 @@ Using       <~~ resolveImport(pop(), up.pos) ~~>
             = [ "global" KwEnd ] KwUsing [ "static" KwEnd ] [ Id "=" ] QualName ";" ;
 QualName    <~~ push(stripWs(up.in)) ~~> = Id { "." Id } [ "." "*" ] ;
 
-TopDecl     = TopAttr | Namespace | FileNs | UnsupType | ClassDecl ;
+TopDecl     = TopAttr | Namespace | FileNs | UnsupType | TypeDecl ;
+// The type declarations that are genuinely modelled.
+TypeDecl    = ClassDecl | EnumDecl ;
 
 // A standalone attribute section at file scope ('[assembly: ...]' / '[module: ...]'):
 // accepted and ignored (it pushes no declaration).
@@ -76,10 +104,70 @@ Namespace   <~~ takeAll() ~~>
             = KwNamespace QualName "{" { Using | TopDecl } "}" ;
 
 ClassDecl   <~~ buildClass(takeAll()) ~~>
-            = [ LeadMods ] KwClass Id <~~ push(up.in); curClassName = up.in ~~> [ SkipAngle ]
-              [ ":" Id <~~ push({ext: up.in}) ~~> [ SkipAngle ] { "," Type } ] { WhereClause } "{" { Member } "}" ;
+            = [ ClassMods ] ClassKw ClassName [ ClassTPs ] [ PrimaryCtor ]
+              [ ":" BaseSpec [ SkipParen ] { "," Type [ SkipParen ] } ] { WhereClause } "{" { Member } "}" ;
+// The modifiers before a type declaration. Only 'partial' is behavioral: the members of
+// every part of a partial class are merged into one class (see buildClass).
+ClassMods   <~~ push({cmods: stripWs(up.in)}) ~~>
+            = LeadMods ;
+// The type-parameter names of a generic type ('class Pair<TA, TB>'). They are kept so a
+// 'new TB()' inside the body can be resolved through the type arguments the instance was
+// created with (see makeNew / csResolveTypeName).
+ClassTPs    <~~ push({tparams: csTypeArgs(up.in)}) ~~>
+            = SkipAngle ;
+// A primary constructor ('class C(int n) { ... }'): the parameters become instance
+// members of the class, so the class body may name them unqualified.
+PrimaryCtor <~~ push({primary: pop()}) ~~>
+            = ParamList ;
+// The first base type. A qualified name ('B.Inner') keeps its last segment, which is the
+// simple name every type is registered under.
+BaseSpec    <~~ push({ext: csLastSeg(stripWs(up.in))}) ~~>
+            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+// 'class' or 'struct': a struct is built exactly like a class, and additionally copies
+// on a declaration whose declared type names it (C# value semantics) and has a zeroed
+// default instance.
+ClassKw     <~~ push({ckind: stripWs(up.in)}) ~~>
+            = ( "class" | "struct" | "interface" ) KwEnd ;
+// The class name, and the class the enclosing member bodies belong to (curClassName, for
+// 'base.M()'): pushed on a stack so a nested class restores its outer name when it ends.
+ClassName   <~~ push(up.in); classStack.push(curClassName); curClassName = up.in ~~>
+            = Id ;
 
-Member      = NestedType | Ctor | Method | Property | Field ;
+Member      = NestedType | NestedUnsup | DelegateDecl | OperatorDecl | Ctor | Method | AbstractMethod
+            | IndexerDecl | Property | Field ;
+
+// An overloaded operator ('public static Vec operator +(Vec a, Vec b)', also the unary
+// forms) and a user conversion ('public static implicit operator Vec(int n)'). Both are
+// static members of the declaring type; they become '__op1_<sym>' / '__op2_<sym>' and
+// '__conv_<T>' members, which binOp / makeNeg / makeCast / a typed declaration consult.
+OperatorDecl = ConvDecl | BinOpDecl ;
+ConvDecl    <~~ push(makeConvOp(takeAll())) ~~>
+            = Mods ConvKind KwOperator CType ParamList MethodBody ;
+ConvKind    = ( "implicit" | "explicit" ) KwEnd ;
+CType       <~~ push({cty: stripWs(up.in)}) ~~>
+            = Type ;
+BinOpDecl   <~~ push(makeOperatorDecl(takeAll())) ~~>
+            = Mods FType KwOperator OpSym ParamList MethodBody ;
+// Longer symbols first, so '++' is never read as '+'.
+OpSym       <~~ push({opsym: stripWs(up.in)}) ~~>
+            = "<<" | ">>" | "==" | "!=" | "<=" | ">=" | "++" | "--" | "true" KwEnd
+            | "false" KwEnd | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "~" | "!"
+            | "<" | ">" ;
+KwOperator  = "operator" KwEnd ;
+
+// An indexer ('public int this[int i] { get { ... } }'): its accessors become the
+// class' __index / __setindex members, which the index read and the index assignment
+// consult when the receiver is an instance of a class that declares one.
+IndexerDecl <~~ push(makeIndexer(takeAll())) ~~>
+            = Mods FType KwThis IdxParams PropAccs ;
+IdxParams   <~~ push(makeParams(takeAll())) ~~>
+            = "[" [ Param { "," Param } ] "]" ;
+
+// A type declared inside a class body is a real type: it registers under its simple
+// name like a top level one, and the outer class descriptor gets a member of that name so
+// 'Outer.Inner' resolves too.
+NestedType  <~~ push(makeNested()) ~~>
+            = TypeDecl ;
 
 // A constructor: name matches the class; an optional ': base(...)' / ': this(...)'
 // header is parsed and skipped (the implicit base constructor already ran). The body is
@@ -90,18 +178,61 @@ CtorInit    = ":" ( KwBase | KwThis ) SkipParen ;
 CtorBody    = Block | CtorArrow ;
 CtorArrow   <~~ push(exprToStmt(pop())) ~~> = "=>" Expression ";" ;
 
+// A method. The name may be qualified with the interface it explicitly implements
+// ('string ITag.Tag()'); only the last segment is kept, so the member is reachable under
+// its plain name (the interface view is not modelled separately).
 Method      <~~ push(makeMethod(takeAll())) ~~>
-            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList { WhereClause } MethodBody ;
+            = Mods Type MethodName [ SkipAngle ] ParamList { WhereClause } MethodBody ;
+// csSimpleName drops the type arguments of both the interface and the method itself
+// ('IEnumerable<Foo>.GetEnumerator', 'Echo<T>') and keeps the last segment.
+MethodName  <~~ push(csSimpleName(up.in)) ~~>
+            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 MethodBody  = Block | ArrowBody ;
+// A member declared without a body: an abstract method, or an interface method that has
+// no default implementation. It contributes no member, so a subclass' override is what
+// the dispatch finds.
+AbstractMethod <~~ push(makeAbstract(takeAll())) ~~>
+            = Mods Type MethodName [ SkipAngle ] ParamList { WhereClause } ";" ;
 ArrowBody   <~~ push(makeArrowBody(pop())) ~~>
             = "=>" Expression ";" ;
 
-// A property ({ get; set; } / expression bodied): accepted, reported as not implemented.
-Property    <~~ notImpl("property", up.pos) ~~>
-            = LeadMods Type Id ( SkipBlock [ "=" DiscardExpr ";" ] | "=>" DiscardExpr ";" ) ;
+// A property. An automatically implemented accessor pair ('{ get; set; }', 'init' and
+// 'required' included) makes the property a plain FIELD of the class - so an object
+// initializer, a read and a write all work unchanged. An accessor with a body instead
+// becomes a '__get_<name>' / '__set_<name>' member, which the field read (core.getField)
+// and the assignment path consult when the object carries no member of that name.
+Property    <~~ push(makeProperty(takeAll())) ~~>
+            = Mods FType PropName ( PropAccs [ PropInit ] | PropArrow ) ;
+// The name may be qualified with the interface it explicitly implements
+// ('int I.P { get { ... } }'); only the last segment is kept.
+PropName    <~~ push({pname: csSimpleName(up.in)}) ~~>
+            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
+PropAccs    <~~ push({accs: takeAll()}) ~~>
+            = "{" { Accessor } "}" ;
+Accessor    = GetAcc | SetAcc ;
+GetAcc      <~~ push(makeAccessor("get", takeAll())) ~~>
+            = LeadMods "get" KwEnd AccBody ;
+SetAcc      <~~ push(makeAccessor("set", takeAll())) ~~>
+            = LeadMods ( "set" | "init" ) KwEnd AccBody ;
+// An accessor without a body ('get;') is the automatic one.
+AccBody     = ";" | Block | ArrowBody ;
+PropInit    <~~ push({pinit: pop()}) ~~>
+            = "=" InitVal ";" ;
+PropArrow   <~~ push({parrow: pop()}) ~~>
+            = ArrowBody ;
 
-Field       <~~ push(makeField(takeAll())) ~~>
-            = Mods FType Id <~~ push(up.in) ~~> [ "=" Expression ] ";" ;
+// A field declaration may declare SEVERAL names ('public int X, Y;'). Each declarator
+// becomes a field of its own; buildClass flattens the group before the members are read.
+Field       <~~ push(makeFieldGroup(takeAll())) ~~>
+            = Mods FType FieldDecl { "," FieldDecl } ";" ;
+FieldDecl   <~~ push({fdecl: takeAll()}) ~~>
+            = Id <~~ push(up.in) ~~> [ "=" InitVal ] ;
+// An initializer value. The braced array initializer ('int[] a = {1, 2};') is only legal
+// here and in a local declaration, so it is not part of Expression.
+InitVal     = ArrLit | Expression ;
+ArrLit      <~~ push(makeArray(takeAll())) ~~>
+            = "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
+ArrElem     = ArrLit | Expression ;
 
 // Modifiers before a member; ModWord keeps the text so 'static' stays detectable. An
 // attribute section here (e.g. '[Obsolete] static int F') is accepted and dropped.
@@ -112,14 +243,26 @@ ModWord     <~~ push(up.in) ~~>
 FType       <~~ push({ty: up.in}) ~~>
             = Type ;
 
-ParamList   <~~ push({params: takeAll()}) ~~>
+// A parameter list. 'this' on the first parameter marks an extension method and 'params'
+// marks the variadic tail, so both modifiers leave a marker; the rest are dropped.
+ParamList   <~~ push(makeParams(takeAll())) ~~>
             = "(" [ Param { "," Param } ] ")" ;
-Param       = { AttrSection } { ParamMod } Type [ "..." ] Id <~~ push(up.in) ~~> [ "=" DiscardExpr ] ;
-ParamMod    = ( "ref" | "out" | "in" | "params" | "this" | "readonly" ) KwEnd ;
+Param       = { AttrSection } { ParamMod } Type [ "..." ] ParamName [ ParamDflt ] ;
+ParamName   <~~ push(up.in) ~~>
+            = Id ;
+ParamDflt   <~~ push({pdflt: pop()}) ~~>
+            = "=" Expression ;
+ParamMod    = ThisMod | ParamsMod | ( "ref" | "out" | "in" | "readonly" | "scoped" ) KwEnd ;
+ThisMod     <~~ push({thisParam: true}) ~~>
+            = "this" KwEnd ;
+ParamsMod   <~~ push({paramsParam: true}) ~~>
+            = "params" KwEnd ;
 
 // Types are parsed and (apart from field defaults) ignored: generic arguments (<...>),
 // dotted names, array suffixes and the nullable '?' are accepted and dropped.
-Type        = TypeName { "[" { "," } "]" } [ "?" ] ;
+// The pointer suffix ('int*', 'S**') is accepted and dropped: unsafe code parses, and a
+// pointer behaves like the reference it names here.
+Type        = TypeName { "*" | "[" { "," } "]" } [ "?" ] ;
 TypeName    = PrimType | "string" KwEnd | "String" KwEnd | "object" KwEnd | "void" KwEnd
             | "var" KwEnd | "dynamic" KwEnd | UserType ;
 PrimType    = ( "int" | "uint" | "long" | "ulong" | "short" | "ushort" | "byte" | "sbyte"
@@ -128,30 +271,62 @@ UserType    = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   = Block | If | While | Do | ForEach | For | Switch | Return | Break | Continue
-            | Try | Throw | UsingStmt | Lock | Checked | Decl | Empty | ExprStmt ;
+            | Goto | Try | Throw | UsingStmt | Lock | Checked | LocalFunc | Decl | Empty
+            | ExprStmt ;
+
+// 'goto L;' travels as a {sig:"goto"} signal until a block that declares L catches it
+// and resumes there (the same shape go-interpreter.abnf uses); 'goto case c;' and
+// 'goto default;' re-dispatch the enclosing switch instead. The longer forms are
+// listed first, so 'goto default' is never read as a jump to a label named 'default'.
+Goto        = GotoCase | GotoDflt | GotoLabel ;
+GotoCase    <~~ push(makeGotoCase(pop())) ~~>
+            = KwGoto KwCase CondExpr ";" ;
+GotoDflt    <~~ push(makeGotoDefault()) ~~>
+            = KwGoto KwDefault ";" ;
+GotoLabel   <~~ push(makeGoto(pop())) ~~>
+            = KwGoto LabelName ";" ;
+LabelName   <~~ push(up.in) ~~>
+            = Id ;
+
+// A local function: a named closure over the enclosing locals, declared like a method.
+// It is bound before its body can run, so it may call itself.
+LocalFunc   <~~ push(makeLocalFunc(takeAll())) ~~>
+            = Mods Type Id <~~ push(up.in) ~~> [ SkipAngle ] ParamList MethodBody ;
 
 // 'checked { ... }' / 'unchecked { ... }': the block runs (overflow checking is not
 // modelled); the keyword is dropped and the inner block thunk stands in for it.
-Checked     = ( "checked" KwEnd | "unchecked" KwEnd ) Block ;
+Checked     = ( "checked" KwEnd | "unchecked" KwEnd | "unsafe" KwEnd ) Block ;
 
 // 'lock (e) stmt': the monitor is not modelled; the guard expression still runs (so its
 // calls stay visible) and the guarded statement executes.
 Lock        <~~ push(makeLock(pop(), pop())) ~~>
             = "lock" KwEnd "(" Expression ")" Statement ;
 
-// 'using (init) stmt' and the 'using var r = e;' declaration form: disposal is not
-// modelled; the initializer runs, then the body (or the enclosing statements) execute.
-UsingStmt   = KwUsing ( UsingParen | UsingBare ) ;
-UsingParen  <~~ push(makeUsing(pop(), pop())) ~~>
-            = "(" UsingInit ")" Statement ;
-UsingBare   <~~ push(makeUsingDecl(pop())) ~~>
-            = DeclCore ";" ;
+// 'using (init) stmt': the resource is created, the body runs, then Dispose() is called
+// on it - and on several resources in reverse order. The 'using var r = e;' declaration
+// form is a BlockItem rather than a Statement (it scopes the rest of its block, which is
+// exactly the using statement C# rewrites it to - see makeBlockStmt).
+UsingStmt   <~~ push(makeUsing(pop(), pop())) ~~>
+            = KwUsing "(" UsingInit ")" Statement ;
 UsingInit   = UsingDecl | UsingExpr ;
-UsingDecl   = DeclCore ;
-UsingExpr   <~~ push(exprToStmt(pop())) ~~> = Expression ;
+// 'using (new Res())' is an expression, but 'new Res' also reads as a type plus a
+// declarator - so a declaration here must not be followed by an argument list.
+UsingDecl   <~~ push(makeUseDecl(pop())) ~~>
+            = DeclCore !"(" ;
+UsingExpr   <~~ push({useExpr: pop()}) ~~> = Expression ;
 
+// A block. 'using var r = e;' is a BlockItem of its own (not a Statement), so
+// makeBlockStmt sees a marker record and can scope the rest of the block under it.
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
-            = "{" { Statement } "}" ;
+            = "{" { BlockItem } "}" ;
+BlockItem   = UsingItem | LabelItem | Statement ;
+UsingItem   <~~ push({usingItem: pop()}) ~~>
+            = KwUsing UsingDecl ";" ;
+// A label ('done:'). It is a BlockItem of its own rather than a prefix of the statement
+// it marks, so a label may also stand at the very end of a block. The '!":"' keeps the
+// namespace alias qualifier 'A::B' out.
+LabelItem   <~~ push({labelName: pop()}) ~~>
+            = LabelName ":" !":" ;
 
 If          <~~ push(makeIf(takeAll())) ~~>
             = KwIf "(" Expression ")" Statement [ KwElse Statement ] ;
@@ -207,11 +382,26 @@ FinallyClause <~~ push({finbody: pop()}) ~~>
 Throw       <~~ push(excThrow(csThrowVal(takeAll()))) ~~>
             = KwThrow [ Expression ] ";" ;
 
+// A local declaration. The declared type reaches the declarators (DType), so a variable
+// without an initializer - and a bare '= default' - gets that type's default value.
 Decl        = DeclCore ";" ;
-DeclCore    <~~ push(makeSeq(takeAll())) ~~>
-            = Type Declarator { "," Declarator } ;
-Declarator  <~~ push(makeDecl(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> [ "=" Expression ] ;
+DeclCore    <~~ push(makeDeclSeq(takeAll())) ~~>
+            = { LocalMod } DType Declarator { "," Declarator } ;
+// Modifiers a LOCAL declaration may carry. They are parsed and dropped: 'const' and
+// 'readonly' are compile-time promises, and 'ref' / 'scoped' locals alias rather than
+// copy, which this model does not distinguish.
+LocalMod    = ( "const" | "readonly" | "static" | "volatile" | "unsafe" | "ref"
+              | "scoped" | "fixed" ) KwEnd ;
+DType       <~~ push({dty: stripWs(up.in)}) ~~>
+            = Type ;
+Declarator  <~~ push(makeDeclInfo(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> [ DeclInit ] ;
+DeclInit    = DeclDefault | DeclExpr ;
+// '= default' without a type argument takes the declared type's default.
+DeclDefault <~~ push({bareDefault: true}) ~~>
+            = "=" "default" KwEnd !"(" ;
+DeclExpr    <~~ push({dinit: pop()}) ~~>
+            = "=" InitVal ;
 
 Empty       <~~ push(function() {}) ~~>
             = ";" ;
@@ -220,7 +410,12 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression ";" ;
 
 // Every expression production pushes exactly one thunk: function() -> value.
-Expression  = Assignment | CondExpr ;
+// A throw EXPRESSION ('n > 0 ? n : throw new Exception("neg")') raises instead of
+// producing a value, so it may stand wherever a value is expected; its thunk is the
+// same one the throw STATEMENT uses.
+Expression  = Assignment | ThrowExpr | CondExpr ;
+ThrowExpr   <~~ push(excThrow(pop())) ~~>
+            = KwThrow CondExpr ;
 // The compound bitwise/shift forms apply like their arithmetic siblings; '??=' is
 // accepted but reported as not implemented (it needs a null test). Longer operators are
 // listed before their prefixes.
@@ -233,14 +428,14 @@ Assignment  <~~ push(makeAssign(takeAll(), up.pos)) ~~>
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> { "." Id <~~ push({key: up.in}) ~~> | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = "[" Expression { "," DiscardExpr } "]" ;
 
 CondExpr    <~~ push(makeCond(takeAll())) ~~>
             = NullCoal [ "?" Expression ":" Expression ] ;
 
-// Null-coalescing 'a ?? b': accepted, reported as not implemented (it needs a null test).
+// Null-coalescing 'a ?? b': the first operand that is not null wins.
 NullCoal    <~~ push(makeNullCoal(takeAll(), up.pos)) ~~>
-            = OrExpr { "??" OrExpr } ;
+            = OrExpr { "??" ( ThrowExpr | OrExpr ) } ;
 
 OrExpr      <~~ push(makeOrAnd(takeAll(), true)) ~~>
             = AndExpr { "||" AndExpr } ;
@@ -264,13 +459,31 @@ EqExpr      <~~ push(foldBinary(takeAll())) ~~>
 RelExpr     <~~ push(foldBinary(takeAll())) ~~>
             = TypeTest { ( "<=" | ">=" | "<" | ">" ) <~~ push(up.in) ~~> TypeTest } ;
 
-// 'e is Pattern' / 'e as Type': accepted (common declaration/type/null patterns),
-// reported as not implemented (there is no runtime type model).
+// 'e is Pattern' / 'e as Type'. The patterns modelled are the constant ones (null, true,
+// false) and the type pattern, with an optional binding ('o is string s') and an optional
+// 'not'. 'e as T' yields e when it is a T and null otherwise. csIsType is the runtime type
+// test; a binding declares its name in the enclosing scope, as C# does.
 TypeTest    <~~ push(makeTypeTest(takeAll(), up.pos)) ~~>
             = Shift [ IsAs ] ;
-IsAs        <~~ push({typetest: true}) ~~>
-            = KwAs Type | KwIs IsPat ;
-IsPat       = [ "not" KwEnd ] ( "null" KwEnd | "true" KwEnd | "false" KwEnd | Type [ Id ] ) ;
+IsAs        = AsTest | IsTest ;
+AsTest      <~~ push({asty: pop()}) ~~>
+            = KwAs TypeArg ;
+IsTest      <~~ push({ispat: makeIsPat(takeAll())}) ~~>
+            = KwIs IsPat ;
+IsPat       = [ IsNot ] IsPatCore ;
+IsNot       <~~ push({isnot: true}) ~~>
+            = "not" KwEnd ;
+IsPatCore   = IsNullP | IsTrueP | IsFalseP | IsTypeP ;
+IsNullP     <~~ push({isnull: true}) ~~>
+            = "null" KwEnd ;
+IsTrueP     <~~ push({isconst: true}) ~~>
+            = "true" KwEnd ;
+IsFalseP    <~~ push({isconst: false}) ~~>
+            = "false" KwEnd ;
+IsTypeP     <~~ push(makeIsTypePat(takeAll())) ~~>
+            = TypeArg [ IsBind ] ;
+IsBind      <~~ push({isbind: up.in}) ~~>
+            = Id ;
 
 Shift       <~~ push(foldBinary(takeAll())) ~~>
             = AddExpr { ( "<<" | ">>" ) <~~ push(up.in) ~~> AddExpr } ;
@@ -281,7 +494,14 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Cast | Neg | Not | BitNot | PostfixExpr ;
+// 'await e': the async machinery is not modelled (an async member runs synchronously),
+// so await is the identity on its operand - which is what a synchronously completed task
+// means. It is a rule without a tag, so the operand's own thunk stands.
+// PreIncDec comes before Neg, or '--x' reads as the double negation '-(-x)'.
+UnaryExpr   = Await | PreIncDec | Cast | Neg | Not | BitNot | PostfixExpr ;
+PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+Await       = "await" KwEnd UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~>
             = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~>
@@ -292,91 +512,200 @@ BitNot      <~~ push(makeBitNot(pop())) ~~>
 // A cast is identity ((Type) expr yields expr). A primitive cast accepts any unary
 // operand; a reference cast excludes a leading '-'/'+' so '(a) - b' stays subtraction.
 Cast        = PrimCast | RefCast ;
-PrimCast    <~~ push(makeCast(pop())) ~~>
-            = "(" PrimType { "[" "]" } ")" UnaryExpr ;
+PrimCast    <~~ push(makeCast(pop(), pop())) ~~>
+            = "(" CastPrim { "*" | "[" "]" } ")" UnaryExpr ;
+CastPrim    <~~ push({castty: stripWs(up.in)}) ~~>
+            = PrimType ;
 RefCast     <~~ push(makeCast(pop())) ~~>
             = "(" RefType ")" UnaryNoPM ;
 UnaryNoPM   = Not | PostfixExpr ;
-RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "[" "]" } ;
+RefType     = ( "string" KwEnd | "String" KwEnd | UserType ) { "*" | "[" "]" } ;
 
-PostfixExpr = IncDec | NewExpr | BaseCall | CallMember ;
-IncDec      <~~ push(makeIncDec(takeAll())) ~~>
+// 'new C().m()' and 'base.M().n()' continue into the member chain, so an object
+// creation and a base call are SEEDS of the chain (CallSeed), not alternatives beside it.
+PostfixExpr = IncDec | CallMember ;
+IncDec      <~~ push(makeIncDec(takeAll(), false)) ~~>
             = Target ( "++" | "--" ) <~~ push(up.in) ~~> ;
 
 // new Point(1, 2) | new List<int>() | new Dictionary<K,V>() | new int[]{...} | new int[n]
 // | new Foo{ X = 1 } (object initializer) | new Foo(a){ X = 1 } (ctor + initializer)
-NewExpr     = NewObjInit | NewArrLit | NewArrSize | NewObject ;
+NewExpr     = NewAnon | NewImplArr | NewObjInit | NewArrLit | NewArrSize | NewObject ;
+// An anonymous type ('new { X = 1, Y = 2 }'): a plain object with those members.
+NewAnon     <~~ push(makeAnon(pop())) ~~>
+            = KwNew ObjInit ;
 // An object initializer without constructor parens: 'new Foo{ X = 1, Y = 2 }' runs the
 // parameterless constructor, then assigns each named member. Tried before NewArrLit so a
 // collection literal ('new List<int>{1, 2}', whose entries are plain expressions) still
 // falls through to it.
 NewObjInit  <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] ObjInit ;
+            = KwNew NewName ObjInit ;
+// The created type's name. It may be qualified ('new Outer.Inner()', 'new System.Text.X()');
+// only the last segment is kept, which is the simple name every type is registered under.
+NewName     <~~ push({cname: csSimpleName(up.in), targs: csTypeArgs(up.in)}) ~~>
+            = Id [ SkipAngle ] { "." Id [ SkipAngle ] } ;
 // The array type suffix ('[]') is part of Type, so 'new int[]{...}' consumes it here.
 NewArrLit   <~~ push(makeArray(takeAll())) ~~>
-            = KwNew Type "{" [ Expression { "," Expression } ] "}" ;
-NewArrSize  <~~ push(makeNewArray(pop())) ~~>
-            = KwNew Type "[" Expression "]" ;
+            = KwNew Type "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
+// 'new[] { 1, 2, 3 }': an implicitly typed array - no type name at all.
+NewImplArr  <~~ push(makeArray(takeAll())) ~~>
+            = KwNew "[" { "," } "]" "{" [ ArrElem { "," ArrElem } ] [ "," ] "}" ;
+// 'new A[1] { new A() }': a sized array MAY still carry an initializer, which wins.
+NewArrSize  <~~ push(makeSizedArray(takeAll())) ~~>
+            = KwNew Type "[" ArrDim { "," ArrDim } "]" { "[" { "," } "]" } [ ArrInit ] ;
+ArrDim      <~~ push({adim: pop()}) ~~>
+            = Expression ;
+ArrInit     <~~ push({ainit: pop()}) ~~>
+            = ArrLit ;
 NewObject   <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Id <~~ push(up.in) ~~> [ SkipAngle ] "(" [ Expression { "," Expression } ] ")" [ ObjInit | SkipBlock ] ;
+            = KwNew NewName "(" ArgList ")" [ ObjInit | SkipBlock ] ;
 // { X = expr, ... }: the trailing member initializer of an object creation.
 ObjInit     <~~ push({objinit: takeAll()}) ~~>
-            = "{" [ MemberInit { "," MemberInit } ] "}" ;
-MemberInit  <~~ push(makeMemberInit(pop(), pop())) ~~>
+            = "{" [ MemberInit { "," MemberInit } ] [ "," ] "}" ;
+// 'X = e' assigns the member; 'P1 = { X = 1 }' is a NESTED initializer, which assigns
+// into the object the member already holds rather than replacing it; '[k] = e' is an
+// indexed initializer.
+MemberInit  = NestedInit | IndexedInit | PlainInit ;
+PlainInit   <~~ push(makeMemberInit(pop(), pop())) ~~>
             = Id <~~ push(up.in) ~~> "=" Expression ;
+NestedInit  <~~ push(makeNestedInit(pop(), pop())) ~~>
+            = Id <~~ push(up.in) ~~> "=" ObjInit ;
+IndexedInit <~~ push(makeIndexedInit(pop(), pop())) ~~>
+            = "[" Expression "]" "=" Expression ;
 
 // base.M(args): the method search starts at the base class of the class the call
 // appears in (curClassName is set while the class body is being built).
 BaseCall    <~~ push(makeBaseCall(popName(), takeAll())) ~~>
-            = KwBase "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = KwBase "." Id <~~ push({mname: up.in}) ~~> "(" ArgList ")" ;
 
 // A primary followed by method calls, delegate calls, field reads and indexing. A bare
 // '(args)' suffix invokes a delegate / lambda value (a closure call).
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | CallSfx | FieldSfx | IndexSfx
-                      | NCMethodSfx | NCFieldSfx | NCIndexSfx } ;
-MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
-            = "." Id <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
-CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
-            = "(" [ Expression { "," Expression } ] ")" ;
-FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
-IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
-            = "[" Expression "]" ;
+            = CallSeed { MethodSfx | CallSfx | FieldSfx | IndexSfx
+                      | NCMethodSfx | NCFieldSfx | NCIndexSfx | NFSfx } ;
+// The null-forgiving operator 'e!': a compile-time assertion in C#, identity here. The
+// '=' lookahead keeps 'a != b' out.
+NFSfx       <~~ push({kind: "nfg"}) ~~>
+            = "!" !"=" ;
+// The head of a member chain. A bare 'M(args)' call inside a class body means
+// 'this.M(args)' (or the class' own static M) when the enclosing class declares an M;
+// otherwise it is an ordinary call of whatever the name holds (a lambda, a delegate).
+// typeof / nameof / sizeof / default look exactly like a bare call, so they are matched
+// before SelfCall.
+CallSeed    = KwExpr | NewExpr | BaseCall | SelfCall | Primary | VarSeed ;
+// A bare name in SEED position. It pushes its own name beside its thunk, so the member
+// chain above it knows which variable it started at - which is what a call of a HIDDEN
+// method ('public new string Tag()') needs, since C# resolves that one by the DECLARED
+// type of the receiver rather than by the object's own class. Listed after Primary so
+// 'true' / 'false' / 'null' are still keywords rather than identifiers.
+VarSeed     <~~ push({seedvar: up.in, seedt: makeVarRef(up.in)}) ~~>
+            = Id ;
+KwExpr      = TypeofExpr | NameofExpr | SizeofExpr | DefaultExpr ;
+SelfCall    <~~ push(makeSelfCall(popName(), takeAll())) ~~>
+            = Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
 
-// Null-conditional access ('a?.b', 'a?.m(...)', 'a?[i]'): accepted, but a chain that
-// contains one is reported as not implemented (there is no null short-circuit model).
-// The '?' must be followed by '.' or '[' so the ternary '?' is never captured here.
-NCMethodSfx <~~ push({nullcond: true, pos: up.pos}) ~~>
-            = "?" "." Id "(" [ Expression { "," Expression } ] ")" ;
-NCFieldSfx  <~~ push({nullcond: true, pos: up.pos}) ~~>
-            = "?" "." Id ;
-NCIndexSfx  <~~ push({nullcond: true, pos: up.pos}) ~~>
+MethodSfx   <~~ push({kind:"mcall", name: popName(), args: takeAll()}) ~~>
+            = "." Id <~~ push({mname: up.in}) ~~> [ SkipAngle ] "(" ArgList ")" ;
+CallSfx     <~~ push({kind:"call", args: takeAll()}) ~~>
+            = "(" ArgList ")" ;
+FieldSfx    = "." Id <~~ push({kind:"field", name: up.in}) ~~> ;
+
+// A call's argument list. A NAMED argument ('S22Vol(1, d: 5)') keeps its parameter name
+// beside its thunk; csFixArgs turns the mixed list back into a positional one using the
+// parameter names the declaration registered (csParamNames), and fills the skipped slots
+// with the 'omitted' marker (undefined) that the parameter binder answers with the
+// parameter's default. 'ref' / 'out' / 'in' at a call site are parsed and dropped.
+ArgList     = [ Arg { "," Arg } ] ;
+Arg         = NamedArg | PlainArg ;
+NamedArg    <~~ push(csNamedArg(takeAll())) ~~>
+            = ArgName ":" !":" [ ArgRefMod ] Expression ;
+ArgName     <~~ push({argname: up.in}) ~~>
+            = Id ;
+PlainArg    = [ ArgRefMod ] Expression ;
+ArgRefMod   = ( "ref" | "out" | "in" ) KwEnd ;
+
+// A multi-dimensional index ('b[0, 0]') is accepted; the model has only flat arrays,
+// so the further subscripts are evaluated (their calls stay visible) and dropped.
+IndexSfx    <~~ push(csIndexSfx(takeAll())) ~~>
+            = "[" IdxArg { "," IdxArg } "]" ;
+// An index argument: a plain index, an index counted from the END ('^1'), or a range
+// ('1..3', '1..', '..3', '..'), which slices. It is written as one optional index
+// followed by an optional '..' tail, so an ordinary index is still parsed exactly once
+// (a 'range | index' choice would parse every index twice, which nests exponentially).
+IdxArg      = [ IdxOne ] [ IdxTail ] ;
+IdxOne      = FromEnd | Expression ;
+FromEnd     <~~ push({fromEnd: pop()}) ~~>
+            = "^" Expression ;
+IdxTail     <~~ push(csIdxTail(takeAll())) ~~>
+            = ".." [ IdxOne ] ;
+
+// Null-conditional access ('a?.b', 'a?.m(...)', 'a?[i]'): when the receiver is null the
+// WHOLE remaining chain is skipped and the value is null. The '?' must be followed by '.'
+// or '[' so the ternary '?' is never captured here.
+NCMethodSfx <~~ push({kind: "mcall", nullsafe: true, name: popName(), args: takeAll()}) ~~>
+            = "?" "." Id <~~ push({mname: up.in}) ~~> "(" ArgList ")" ;
+NCFieldSfx  = "?" "." Id <~~ push({kind: "field", nullsafe: true, name: up.in}) ~~> ;
+NCIndexSfx  <~~ push({kind: "index", nullsafe: true, idx: pop()}) ~~>
             = "?" "[" Expression "]" ;
 
-Primary     = Lambda | LinqQuery | "(" Expression ")"
-            | TypeofExpr | NameofExpr | SizeofExpr | DefaultExpr
-            | VerbatimStr | InterpStr | DqString | CharLit
-            | CsNum | IntLit | True | False | Null | VarRef ;
+// A collection expression ('int[] xs = [1, 2, 3];', 'List<int> ys = [10, .. xs, 20];').
+// Arrays and List<T> share one representation here, so both spell out the same value; a
+// '..' spread element splices the elements of its operand in place.
+CollExpr    <~~ push(makeCollection(takeAll())) ~~>
+            = "[" [ CollElem { "," CollElem } ] [ "," ] "]" ;
+CollElem    = SpreadElem | Expression ;
+SpreadElem  <~~ push({spread: pop()}) ~~>
+            = ".." Expression ;
 
-// typeof(T) / nameof(x) / sizeof(T) / default(T) / default: accepted, reported as not
-// implemented (there is no type/reflection model).
-TypeofExpr  <~~ push(notImplExpr("typeof", up.pos)) ~~>
-            = "typeof" KwEnd "(" Type ")" ;
-NameofExpr  <~~ push(notImplExpr("nameof", up.pos)) ~~>
-            = "nameof" KwEnd "(" Type ")" ;
-SizeofExpr  <~~ push(notImplExpr("sizeof", up.pos)) ~~>
-            = "sizeof" KwEnd "(" Type ")" ;
-DefaultExpr <~~ push(notImplExpr("default expression", up.pos)) ~~>
-            = "default" KwEnd [ "(" Type ")" ] ;
+Primary     = CollExpr | Lambda | AnonMethod | LinqQuery | "(" Expression ")"
+            | RawStr | VerbatimStr | InterpStr | DqString | CharLit
+            | CsNum | IntLit | True | False | Null ;
 
-// A char literal 'x' is a one character string constant (SqString, from the shared lib).
-CharLit     = SqString ;
+// typeof(T) yields a small type token (a .Name / .FullName carrying object, never null);
+// nameof(x) is the last segment of its argument, resolved at parse time; sizeof(T) is the
+// size of a primitive; default(T) is T's default value (0 / false / the null char / null,
+// and a zeroed instance for a struct). A bare 'default' outside a declaration is null.
+TypeofExpr  <~~ push(makeTypeof(pop())) ~~>
+            = "typeof" KwEnd "(" TypeArg ")" ;
+NameofExpr  <~~ push(makeNameof(pop())) ~~>
+            = "nameof" KwEnd "(" TypeArg ")" ;
+SizeofExpr  <~~ push(makeSizeof(pop())) ~~>
+            = "sizeof" KwEnd "(" TypeArg ")" ;
+DefaultExpr = DefaultOf | DefaultBare ;
+DefaultOf   <~~ push(makeDefaultOf(pop())) ~~>
+            = "default" KwEnd "(" TypeArg ")" ;
+DefaultBare <~~ push(makeDefaultOf("")) ~~>
+            = "default" KwEnd ;
+TypeArg     <~~ push(stripWs(up.in)) ~~>
+            = Type ;
 
-// Verbatim '@"..."' and verbatim/interpolated '$@"..." / @$"..."' strings: accepted,
-// reported as not implemented (verbatim escaping and the $@ interpolation differ from the
-// plain forms). '""' is the escaped quote; every other byte (including newlines) is literal.
-VerbatimStr <~~ push(notImplExpr("verbatim string", up.pos)) ~~>
-            = ( "$@" | "@$" | "@" ) '"' :whitespace() { VbDQuote | VbChar } '"' :whitespace(Whitespace) ;
+// A char literal 'x' (escapes included). C#'s char is an integral type that RENDERS
+// as its glyph, so the value is a real char (a boxed code): it does arithmetic and
+// compares as its code, and prints as the character. Reuses the balanced SkipChar shape.
+CharLit     <~~ push(makeCharLit(up.in)) ~~> = SkipChar ;
+
+// A raw string literal (triple-quoted): no escapes at all, and one or two quotes may
+// appear inside it. Listed before the plain string so the opening triple quote is never
+// read as the empty string followed by junk. A leading newline (the multi-line form) is stripped together
+// with the indentation the closing delimiter sits at - see csRaw.
+RawStr      <~~ push(makeConst(csRaw(up.in))) ~~>
+            = '"' '"' '"' :whitespace() { RawQ2 | RawQ1 | RawPlain } '"' '"' '"' :whitespace(Whitespace) ;
+RawQ2       = '"' '"' RawPlain ;
+RawQ1       = '"' RawPlain ;
+RawPlain    = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
+
+// Verbatim strings. '@"..."' takes every byte literally (including newlines and
+// backslashes); '""' is the escaped quote. '$@"..."' / '@$"..."' is the same text with
+// '{expr}' interpolation holes, so it shares the interpolation productions.
+VerbatimStr = VerbInterp | VerbPlain ;
+VerbInterp  <~~ push(makeTemplate(takeAll())) ~~>
+            = VerbIntro '"' :whitespace() { IsBrace | IsExpr | VbChunk } '"' :whitespace(Whitespace) ;
+VerbIntro   = "$@" | "@$" ;
+VbChunk     <~~ push({s: csVbText(up.in)}) ~~>
+            = VbTxCh { VbTxCh } ;
+VbTxCh      = VbDQuote | VbPlain ;
+VbPlain     = "\x00"..."\x21" | "\x23"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+VerbPlain   <~~ push(makeConst(csVerb(up.in))) ~~>
+            = "@" '"' :whitespace() { VbDQuote | VbChar } '"' :whitespace(Whitespace) ;
 VbDQuote    = '"' '"' ;
 VbChar      = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
 
@@ -384,9 +713,12 @@ VbChar      = "\x00"..."\x21" | "\x23"..."\U0010ffff" ;
 // (0x), binary (0b), reals (a '.' fraction, an exponent or an f/d/m suffix), and decimals
 // with '_' digit groups or an integer u/l suffix. The value is computed by csNum.
 CsNum       <~~ push(makeConst(csNum(up.in))) ~~>
-            = CsHex | CsBin | CsReal | CsDecU | CsDecS ;
+            = CsHex | CsBin | CsDot | CsReal | CsDecU | CsDecS ;
 CsHex       = ( "0x" | "0X" ) :whitespace() CsHexD { CsHexD | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 CsBin       = ( "0b" | "0B" ) :whitespace() CsBit { CsBit | "_" } [ CsISfx ] :whitespace(Whitespace) ;
+// A leading-dot real ('.5'): only a digit may follow the dot, so a member access
+// ('a.b') is never taken for a number.
+CsDot       = "." :whitespace() "0"..."9" { "0"..."9" | "_" } [ CsExp ] [ CsRSfx ] :whitespace(Whitespace) ;
 CsReal      = "0"..."9" :whitespace() { "0"..."9" | "_" } CsRealT :whitespace(Whitespace) ;
 CsDecU      = "0"..."9" :whitespace() { "0"..."9" } "_" { "0"..."9" | "_" } [ CsISfx ] :whitespace(Whitespace) ;
 CsDecS      = "0"..."9" :whitespace() { "0"..."9" } CsISfx :whitespace(Whitespace) ;
@@ -400,17 +732,28 @@ CsRSfx      = "f" | "F" | "d" | "D" | "m" | "M" ;
 // A lambda ('x => e', '(a, b) => { ... }') is a real closure value (a Func / Action
 // delegate): it captures the current scope chain and is invoked at a call site (CallSfx).
 Lambda      <~~ push(makeLambda(takeAll())) ~~>
-            = LambdaHead "=>" LambdaBody ;
+            = [ LambdaMod ] LambdaHead "=>" LambdaBody ;
+// 'static x => ...' / 'async x => ...': parsed and dropped (capture is not restricted).
+LambdaMod   = ( "static" | "async" ) KwEnd ;
 LambdaHead  = LamParenHead | LamBareHead ;
-LamParenHead <~~ push({params: takeAll()}) ~~>
+LamParenHead <~~ push(makeParams(takeAll())) ~~>
             = "(" [ LamParam { "," LamParam } ] ")" ;
-LamBareHead <~~ push({params: takeAll()}) ~~>
-            = Id <~~ push(up.in) ~~> ;
-// A parameter name, with or without a (parsed, ignored) type. The typed form is an
-// ordered alternative so an untyped name is not swallowed by a greedy optional type.
-LamParam    = LamTypedParam | LamBareParam ;
-LamTypedParam = Type Id <~~ push(up.in) ~~> ;
-LamBareParam = Id <~~ push(up.in) ~~> ;
+LamBareHead <~~ push(makeParams(takeAll())) ~~>
+            = LamBareParam ;
+// A lambda parameter is a full parameter (type, 'params', a default value) or a bare
+// name. The full form is an ordered alternative so a bare name is not swallowed by a
+// greedy optional type.
+LamParam    = Param | LamBareParam ;
+LamBareParam <~~ push(up.in) ~~>
+            = Id ;
+// The anonymous-method form 'delegate (int x) { ... }': a lambda with a block body.
+// The parameter list may be omitted entirely ('delegate { ... }'), which in C# means
+// 'whatever this delegate type takes, ignored' - here an empty parameter list.
+AnonMethod  = AnonParams | AnonBare ;
+AnonParams  <~~ push(makeLambda(takeAll())) ~~>
+            = KwDelegate ParamList LamBlock ;
+AnonBare    <~~ push(makeBareAnon(takeAll())) ~~>
+            = KwDelegate LamBlock ;
 LambdaBody  = LamBlock | LamExpr ;
 LamBlock    <~~ push({body: pop()}) ~~> = Block ;
 LamExpr     <~~ push({ebody: pop()}) ~~> = Expression ;
@@ -424,15 +767,25 @@ DiscardExpr <~~ pop() ~~>
 
 Null        <~~ push(makeConst(null)) ~~>  = "null" KwEnd ;
 
-// 'this' and class names resolve like variables.
-VarRef      <~~ push(makeVarRef(up.in)) ~~>
-            = Id ;
 
 // $"...{expr}..." interpolated string; a plain "..." (DqString) does not interpolate.
+// A hole may carry an alignment ('{x,4}' pads to width 4, a negative width pads on the
+// right) and a format specifier ('{x:D3}' is the decimal form zero-padded to 3 digits).
+// '{{' and '}}' are the escaped braces. IsBrace comes first so '{{' is never read as the
+// start of a hole.
 InterpStr   <~~ push(makeTemplate(takeAll())) ~~>
-            = "$" '"' :whitespace() { IsExpr | IsChunk } '"' :whitespace(Whitespace) ;
-IsExpr      <~~ push({e: pop()}) ~~>
-            = "{" :whitespace(Whitespace) Expression :whitespace() "}" ;
+            = "$" '"' :whitespace() { IsBrace | IsExpr | IsChunk } '"' :whitespace(Whitespace) ;
+IsBrace     <~~ push({s: up.in.substring(0, 1)}) ~~>
+            = "{" "{" | "}" "}" ;
+IsExpr      <~~ push(makeIsExpr(takeAll())) ~~>
+            = "{" :whitespace(Whitespace) Expression [ IsAlign ] [ IsFmt ] :whitespace() "}" ;
+IsAlign     <~~ push({align: parseInt(stripWs(up.in).substring(1))}) ~~>
+            = "," :whitespace() IsAlignN :whitespace(Whitespace) ;
+IsAlignN    = "-" IsDigit { IsDigit } | IsDigit { IsDigit } ;
+IsDigit     = "0"..."9" ;
+IsFmt       <~~ push({fmt: up.in.substring(1)}) ~~>
+            = ":" :whitespace() IsFmtCh { IsFmtCh } :whitespace(Whitespace) ;
+IsFmtCh     = "\x20"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
 IsChunk     <~~ push({s: unescapeJs(up.in)}) ~~>
             = IsChar { IsChar } ;
 IsChar      = IsEsc | IsPlain ;
@@ -473,33 +826,42 @@ WhereCon    = "new" KwEnd "(" ")" | Type ;
 KwIs        = "is" KwEnd ;
 KwAs        = "as" KwEnd ;
 
+// 'new' is the method-hiding modifier ('public new string Tag()'). It only reaches here
+// in member position, so the 'new' of an object creation is never taken for a modifier.
 ModKw       = ( "public" | "private" | "protected" | "internal" | "static" | "abstract"
               | "sealed" | "virtual" | "override" | "readonly" | "const" | "partial"
-              | "unsafe" | "async" | "extern" | "volatile" ) KwEnd ;
+              | "unsafe" | "async" | "extern" | "volatile" | "new" | "required" | "event"
+              | "file" | "fixed" ) KwEnd ;
 LeadMods    = { ModKw | AttrSection } ;
 
 // Type declarations accepted structurally, then reported as not implemented (so a whole
 // C# file parses; -warn-unsupported lets the rest run). Bodies are skipped.
-UnsupType   = Interface | StructDecl | EnumDecl | DelegateDecl ;
-Interface   <~~ notImpl("interface", up.pos) ~~>
-            = LeadMods KwInterface Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
-StructDecl  <~~ notImpl("struct", up.pos) ~~>
-            = LeadMods KwStruct Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
-EnumDecl    <~~ notImpl("enum", up.pos) ~~>
-            = LeadMods KwEnum Id [ ":" Type ] SkipBlock ;
+UnsupType   = DelegateDecl ;
+// An enum: a descriptor object of int constants. A member without a value continues
+// from the previous one (starting at 0), and a member's initializer may name the members
+// before it ('AB = A | B'), so the constants are bound in a scope of their own while the
+// initializers run.
+EnumDecl    <~~ buildEnum(takeAll()) ~~>
+            = LeadMods KwEnum EnumName [ ":" Type ] "{" [ EnumMem { "," EnumMem } ] [ "," ] "}" ;
+EnumName    <~~ push(up.in) ~~>
+            = Id ;
+EnumMem     <~~ push(makeEnumMem(takeAll())) ~~>
+            = { AttrSection } Id <~~ push(up.in) ~~> [ EnumInit ] ;
+EnumInit    <~~ push({einit: pop()}) ~~>
+            = "=" Expression ;
 DelegateDecl <~~ notImpl("delegate", up.pos) ~~>
             = LeadMods KwDelegate Type Id [ SkipAngle ] SkipParen ";" ;
 
-// A type declared inside a class body (nested): accepted, reported as not implemented.
-NestedType  <~~ notImpl("nested type", up.pos) ~~>
+// A delegate declaration is legal at file scope AND in a class body; it is listed in
+// Member as well, so a nested one does not fall through to Method (which would then
+// demand a body).
+// A non-class type declared inside a class body: accepted, reported as not implemented.
+NestedUnsup <~~ notImpl("nested type", up.pos) ~~>
             = LeadMods NestedKw Id [ SkipAngle ] [ ":" Type { "," Type } ] SkipBlock ;
-NestedKw    = ( "class" | "interface" | "enum" | "struct" | "record" ) KwEnd ;
+NestedKw    = ( "record" ) KwEnd ;
 
 KwUsing     = "using" KwEnd ;
 KwNamespace = "namespace" KwEnd ;
-KwClass     = "class" KwEnd ;
-KwInterface = "interface" KwEnd ;
-KwStruct    = "struct" KwEnd ;
 KwEnum      = "enum" KwEnd ;
 KwDelegate  = "delegate" KwEnd ;
 KwTry       = "try" KwEnd ;
@@ -523,6 +885,7 @@ KwThis      = "this" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
 KwCase      = "case" KwEnd ;
 KwDefault   = "default" KwEnd ;
+KwGoto      = "goto" KwEnd ;
 KwFrom      = "from" KwEnd ;
 KwSelect    = "select" KwEnd ;
 KwWhere     = "where" KwEnd ;
@@ -544,8 +907,41 @@ KwLet       = "let" KwEnd ;
         Write: function(x) { print(x === undefined ? "" : csStr(x)) }
     }
 
-    // The class whose body is currently being built (for base calls).
+    // The class whose body is currently being built (for base calls), and the stack that
+    // restores the outer name when a nested class ends.
     var curClassName = ""
+    var classStack = []
+    // The class buildClassFrom registered last: a nested declaration has already run when
+    // its marker reaches the enclosing class body, so its name is the one just built.
+    var lastBuiltClass = ""
+    function makeNested() { return {nestedName: lastBuiltClass} }
+
+    // ----- char: a boxed {__char: code} value -----
+    // C#'s char is an integral type that RENDERS as a glyph, so it can be neither a plain
+    // number (then "" + c would print 98) nor a one-character string (then 'a' + 1 would
+    // concatenate). Every operator unboxes it through csNumV; csStr renders the glyph.
+    function csChar(code) { return {__char: code} }
+    function csIsChar(v) { return v !== null && v !== undefined && typeof v == "object" && v.__char !== undefined }
+    function csNumV(v) { return csIsChar(v) ? v.__char : v }
+    // Equality with a char on either side: two chars compare by code, and a char equals
+    // the one-character string it renders as (the twin of the js_jchareq external).
+    function csEq(l, r) {
+        if (csIsChar(l) && typeof r == "string") { return r.length == 1 && r.charCodeAt(0) === l.__char }
+        if (csIsChar(r) && typeof l == "string") { return l.length == 1 && l.charCodeAt(0) === r.__char }
+        if (csIsChar(l) && csIsChar(r)) { return l.__char === r.__char }
+        return l === r
+    }
+    // up.in of a char literal is the whole 'x' form, quotes included (SkipChar keeps any
+    // trailing layout, so cut between the first and the last quote rather than stripWs -
+    // a literal space or tab char would not survive that).
+    function makeCharLit(text) {
+        var a = 0
+        while (a < text.length && text.charAt(a) != "'") { a++ }
+        var z = text.length - 1
+        while (z > a && text.charAt(z) != "'") { z-- }
+        var dec = unescapeJs(text.substring(a + 1, z))
+        return makeConst(csChar(dec.length > 0 ? dec.charCodeAt(0) : 0))
+    }
 
     // C# to-string for the interpolated / concatenated subset (integers as "5").
     function csStr(v) {
@@ -553,6 +949,7 @@ KwLet       = "let" KwEnd ;
         if (v === true) return "true"
         if (v === false) return "false"
         if (typeof v == "string") return v
+        if (csIsChar(v)) return String.fromCharCode(v.__char)
         return "" + v
     }
     function csStr2(v) {
@@ -563,8 +960,12 @@ KwLet       = "let" KwEnd ;
     // two int values, float add as soon as one side carries a fraction (doubles).
     function csAdd(l, r) {
         if (typeof l == "string" || typeof r == "string") return csStr2(l) + csStr2(r)
-        if ((l | 0) == l && (r | 0) == r) { return (l + r) | 0 }
-        return l + r
+        var a = anytype
+        var b = anytype
+        a = csNumV(l)
+        b = csNumV(r)
+        if ((a | 0) == a && (b | 0) == b) { return (a + b) | 0 }
+        return a + b
     }
 
     // Dictionaries (isDict/dictFind/dictSet) mirror the compiled runtime's js_dict
@@ -577,6 +978,12 @@ KwLet       = "let" KwEnd ;
         return o.length
     }
     function csGetIndex(o, i) {
+        // A user indexer ('public int this[int i] { get { ... } }') wins over the built-in
+        // container indexing; the flag keeps a program that declares none on the old path.
+        if (csHasIndexer && o !== null && o !== undefined && typeof o == "object") {
+            var ix = csFindAcc(o, "__index")
+            if (ix != undefined) { return ix(o, i) }
+        }
         if (isDict(o)) {
             var di = dictFind(o, i)
             if (di < 0) fail("KeyError: " + i)
@@ -591,8 +998,27 @@ KwLet       = "let" KwEnd ;
         return o[i]
     }
 
+    // ----- Extension methods -----
+    // A static method whose first parameter carries 'this' is callable as an instance
+    // method on that first argument. The registry is filled while the classes are built,
+    // and consulted at call time - so an instance member of the same name always wins.
+    var csExt = {}
+    function csHasMethod(target, name) {
+        if (target === undefined || target === null) { return false }
+        if (typeof target != "object") { return false }
+        if (target.__isclass === true) { return hasOwn(target, name) }
+        for (var c = target.__class; c != undefined; c = c.__super) { if (hasOwn(c, name)) { return true } }
+        return false
+    }
+
     // ----- Method dispatch (mirrors the js_mcall external of the compiled world) -----
     function mcall(target, name, args) {
+        if (hasOwn(csExt, name) && !csHasMethod(target, name)) {
+            return csExt[name].apply(undefined, concat2impl([target], args))
+        }
+        return mcall0(target, name, args)
+    }
+    function mcall0(target, name, args) {
         if (typeof target == "string") {
             if (name == "Substring") return args.length > 1 ? target.slice(args[0], args[1]) : target.slice(args[0])
             if (name == "IndexOf") return target.indexOf(args[0])
@@ -636,32 +1062,74 @@ KwLet       = "let" KwEnd ;
     // delegate / lambda closure value, '.field' reads a field and '[i]' indexes. Overrides
     // the shared foldCallMember (assignment form, after the include) to add the call case.
     foldCallMember = function(items) {
-        // A chain that carries a null-conditional step ('a?.b', 'a?[i]') is not implemented.
-        for (var q = 0; q < items.length; q++) {
-            if (items[q] != undefined && items[q].nullcond == true) { return notImplExpr("null-conditional access", items[q].pos) }
+        // A VarSeed head carries its own name beside its thunk (see csHidden* below).
+        var seedName = ""
+        var head = items[0]
+        if (head != undefined && head != null && typeof head != "function" && head.seedt != undefined) {
+            seedName = head.seedvar
+            items[0] = head.seedt
         }
         if (items.length == 1) return items[0]
         var primary = items[0]
         var suffixes = items.slice(1)
+        // The declared type of the seed variable, as it stood where this chain was WALKED.
+        // Tags run over the tree in file order, so the most recent declaration of that name
+        // is the lexically preceding one - which is the C# rule for a hidden method.
+        var seedTy = (seedName != "" && hasOwn(csLocalTypes, seedName)) ? csLocalTypes[seedName] : ""
+        // Named arguments are resolved once, here: a suffix record hands back a FRESH
+        // array on every property read, so its argument list is read exactly once.
+        var sfxArgs = []
+        for (var q = 0; q < suffixes.length; q++) {
+            var sq = suffixes[q]
+            if (sq.kind == "mcall") { sfxArgs.push(csFixArgs(sq.args, sq.name)) }
+            else if (sq.kind == "call") { sfxArgs.push(csFixArgs(sq.args, "")) }
+            else { sfxArgs.push(null) }
+        }
         return function() {
             var cur = anytype // A chain hops between types: obj.name.length is object, string, number.
             cur = primary()
             for (var i = 0; i < suffixes.length; i++) {
                 var s = suffixes[i]
+                // 'e!' asserts non-null; there is nothing to check at run time.
+                if (s.kind == "nfg") { continue }
+                // 'a?.b': a null receiver skips the whole rest of the chain.
+                if (s.nullsafe == true && (cur === undefined || cur === null)) { return null }
+                // Nullable<T>.HasValue / .Value. A nullable is the bare value here, so the
+                // test is a null test and .Value is the value itself - but only when the
+                // receiver does not carry a member of that name itself (a user class may).
+                if (s.kind == "field" && (s.name == "HasValue" || s.name == "Value")
+                    && !(cur !== undefined && cur !== null && typeof cur == "object" && hasOwn(cur, s.name))) {
+                    if (s.name == "HasValue") { cur = (cur !== undefined && cur !== null); continue }
+                    if (cur === undefined || cur === null) { fail("Value of a nullable that has no value") }
+                    continue
+                }
                 if (s.kind == "mcall") {
+                    var margs = sfxArgs[i]
                     var argv = []
-                    for (var j = 0; j < s.args.length; j++) argv.push(s.args[j]())
+                    for (var j = 0; j < margs.length; j++) argv.push(margs[j]())
+                    // A method some class HIDES with 'new' is picked by the receiver's
+                    // declared type, not by the object's own class.
+                    if (i == 0 && seedTy != "" && csHasHidden && hasOwn(csHiddenNames, s.name)) {
+                        var hm = csFindFrom(seedTy, s.name)
+                        if (hm != undefined) { cur = hm.apply(undefined, concat2impl([cur], argv)); continue }
+                    }
                     cur = mcall(cur, s.name, argv)
                 } else if (s.kind == "call") {
+                    var cargs = sfxArgs[i]
                     var av = []
-                    for (var k = 0; k < s.args.length; k++) av.push(s.args[k]())
+                    for (var k = 0; k < cargs.length; k++) av.push(cargs[k]())
                     if (typeof cur != "function") fail("call of a non-delegate value")
                     cur = cur.apply(undefined, av)
                 } else if (s.kind == "field") {
                     if (cur === undefined || cur === null) fail("field ." + s.name + " of " + core.nullWord)
                     cur = core.getField(cur, s.name)
+                } else if (s.kind == "slice") {
+                    cur = csSlice(cur, s.lo, s.loEnd == true, s.hi, s.hiEnd == true)
                 } else {
-                    cur = core.getIndex(cur, s.idx())
+                    var ixv = anytype
+                    ixv = s.idx()
+                    if (s.fromend == true) { ixv = cur.length - ixv }
+                    cur = core.getIndex(cur, ixv)
                 }
             }
             return cur
@@ -685,14 +1153,35 @@ KwLet       = "let" KwEnd ;
             if (o === undefined || o === null) fail("null in assignment path of " + ref.name)
         }
         var last = ref.path[ref.path.length - 1]
-        return {obj: o, key: (last.key != undefined) ? last.key : last.idx()}
+        return {obj: o, key: (last.key != undefined) ? last.key : last.idx(), isIndex: last.key == undefined}
+    }
+    // Reads the current value of an assignment target (for '??=', which must not assign
+    // when the place already holds a value).
+    function makeRefRead(ref) {
+        return function() {
+            if (ref.path.length == 0) { return getVar(ref.name) }
+            var p = csResolveRef(ref)
+            if (isDict(p.obj)) {
+                var di = dictFind(p.obj, p.key)
+                return di < 0 ? undefined : p.obj.vals[di]
+            }
+            return hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
+        }
     }
     function makeAssign(items, pos) {
         var ref = items[0]
         var op = items[1]
         var valT = items[2]
-        // '??=' needs a null test we do not model: warn, then behave like a plain '='.
-        if (op == "??=") { notImpl("??= assignment", pos); op = "=" }
+        // 'a ??= b' assigns only when a is null, and yields a's value either way.
+        if (op == "??=") {
+            var readT = makeRefRead(ref)
+            var setT = makeAssign([ref, "=", valT], pos)
+            return function() {
+                var cur = readT()
+                if (cur !== undefined && cur !== null) { return cur }
+                return setT()
+            }
+        }
         return function() {
             var v = anytype
             v = valT()
@@ -704,6 +1193,14 @@ KwLet       = "let" KwEnd ;
                 if (isDict(p.obj)) {
                     if (op != "=") { var di = dictFind(p.obj, p.key); v = applyOp(op, di < 0 ? 0 : p.obj.vals[di], v) }
                     dictSet(p.obj, p.key, v)
+                } else if (p.isIndex == true && csHasIndexer && csFindAcc(p.obj, "__setindex") != undefined) {
+                    if (op != "=") { v = applyOp(op, csGetIndex(p.obj, p.key), v) }
+                    csFindAcc(p.obj, "__setindex")(p.obj, p.key, v)
+                } else if (!hasOwn(p.obj, p.key) && csFindAcc(p.obj, "__set_" + p.key) != undefined) {
+                    // A property with a set accessor body ('b.W = 5').
+                    if (op != "=") { v = applyOp(op, core.getField(p.obj, p.key), v) }
+                    var st = csFindAcc(p.obj, "__set_" + p.key)
+                    if (p.obj.__isclass === true) { st(v) } else { st(p.obj, v) }
                 } else {
                     if (op != "=") v = applyOp(op, hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined, v)
                     p.obj[p.key] = v
@@ -712,30 +1209,88 @@ KwLet       = "let" KwEnd ;
             return v
         }
     }
-    function makeIncDec(items) {
+    // '++x' / 'x++': the same update; the prefix form yields the NEW value, the postfix
+    // form the old one.
+    function makePreIncDec(items) { return makeIncDec([items[1], items[0]], true) }
+    function makeIncDec(items, pre) {
         var ref = items[0]
         var d = (items[1] == "++") ? 1 : -1
         return function() {
             if (ref.path.length == 0) {
                 var n = getVar(ref.name)
-                setVar(ref.name, (n + d) | 0)
-                return n
+                var nn = (n + d) | 0
+                setVar(ref.name, nn)
+                return pre ? nn : n
             }
             var p = csResolveRef(ref)
             if (isDict(p.obj)) {
                 var di = dictFind(p.obj, p.key)
                 var m = di < 0 ? 0 : p.obj.vals[di]
-                dictSet(p.obj, p.key, (m + d) | 0)
-                return m
+                var mn = (m + d) | 0
+                dictSet(p.obj, p.key, mn)
+                return pre ? mn : m
             }
             var m2 = hasOwn(p.obj, p.key) ? p.obj[p.key] : undefined
-            p.obj[p.key] = (m2 + d) | 0
-            return m2
+            var m2n = (m2 + d) | 0
+            p.obj[p.key] = m2n
+            return pre ? m2n : m2
+        }
+    }
+
+    // ----- method hiding ('public new string Tag()') -----
+    // The names some class hides, and the declared type of every local a class-typed
+    // declaration introduced. Both are filled while the file is walked; the flag keeps the
+    // extra test off the member chain of every program that hides nothing.
+    var csHiddenNames = {}
+    var csHasHidden = false
+    var csLocalTypes = {}
+    // The method `name` as class `clsName` sees it: its own, or the nearest inherited one.
+    function csFindFrom(clsName, name) {
+        var cls = hasOwn(globalScope, clsName) ? globalScope[clsName] : undefined
+        for (var c = cls; c != undefined && c !== null; c = c.__super) {
+            if (hasOwn(c, name)) { return c[name] }
+        }
+        return undefined
+    }
+
+    // The members every class declares: class name -> member name -> "static" | "instance".
+    // Filled while the file is walked, so it is complete before any thunk runs.
+    var csClassMembers = {}
+    var csSupers = {}
+    function csMemberKind(cls, name) {
+        var c = cls
+        for (var n = 0; n < 32 && c != "" && c != undefined; n++) {
+            if (hasOwn(csClassMembers, c)) {
+                var t = csClassMembers[c]
+                if (hasOwn(t, name)) { return t[name] }
+            }
+            c = hasOwn(csSupers, c) ? csSupers[c] : ""
+        }
+        return ""
+    }
+    // A bare 'M(args)' call. Inside a class that declares M it is this.M(args) (or the
+    // class' own static M); otherwise the name holds a callable value (a lambda, a
+    // delegate, a local function) and is invoked directly.
+    function makeSelfCall(name, argThunks0) {
+        var argThunks = csFixArgs(argThunks0, name)
+        var defClass = curClassName
+        return function() {
+            // The registry is only complete once the whole file has been walked, so the
+            // decision is made here rather than when the thunk was built.
+            var kind = csMemberKind(defClass, name)
+            var argv = []
+            for (var i = 0; i < argThunks.length; i++) { argv.push(argThunks[i]()) }
+            if (kind == "instance") { return mcall(getVar("this"), name, argv) }
+            if (kind == "static") { return mcall(getVar(defClass), name, argv) }
+            var f = getVar(name)
+            if (typeof f != "function") { fail("call of a non-delegate value: " + name) }
+            return f.apply(undefined, argv)
         }
     }
 
     // base.M(args): the search starts at the base class of the DEFINING class.
-    function makeBaseCall(name, argThunks) {
+    function makeBaseCall(name, argThunks0) {
+        var argThunks = csFixArgs(argThunks0, name)
         var defName = curClassName
         return function() {
             var self = getVar("this")
@@ -752,32 +1307,72 @@ KwLet       = "let" KwEnd ;
     // new Dictionary<K,V>(...). An object initializer ({objinit} marker) assigns the named
     // members after construction; the remaining thunks are the constructor arguments.
     function makeNew(items) {
-        var clsName = items[0]
+        var declName = items[0].cname
+        var targs = items[0].targs
+        var defClass = curClassName
         var args = []
         var minits = null
         for (var i = 1; i < items.length; i++) {
             if (typeof items[i] == "function") { args.push(items[i]) }
+            else if (items[i].argname != undefined) { args.push(items[i]) }
             else if (items[i].objinit != undefined) { minits = items[i].objinit }
         }
+        args = csFixArgs(args, declName)
         return function() {
+            // 'new TB()' where TB is a type parameter of the enclosing class: the factory
+            // the instance was created with builds it.
+            if (csIsTParam(defClass, declName)) {
+                var key = "__tnew_" + declName
+                var holder = csSelfWith(key)
+                if (holder != null) { return holder[key]() }
+            }
+            var clsName = declName
             if (clsName == "List") {
                 for (var i = 0; i < args.length; i++) { args[i]() }
-                return []
+                var la = []
+                if (minits != null) { csApplyInits(la, minits) }
+                return la
             }
             if (clsName == "Dictionary") {
                 for (var j = 0; j < args.length; j++) { args[j]() }
-                return {__dict: true, keys: [], vals: []}
+                var dd = {__dict: true, keys: [], vals: []}
+                if (minits != null) { csApplyInits(dd, minits) }
+                return dd
+            }
+            // A BCL exception the program did not declare: a plain object, not a class.
+            if (globalScope[clsName] == undefined && hasOwn(csBclExc, clsName)) {
+                var msg = anytype
+                msg = clsName
+                for (var m = 0; m < args.length; m++) {
+                    var av = args[m]()
+                    if (m == 0) { msg = av }
+                }
+                return {__excname: clsName, Message: msg}
             }
             var cls = getVar(clsName)
             if (cls == undefined || !cls.__isclass) fail("unknown class: " + clsName)
             var obj = {__class: cls}
+            // Reified type arguments: bind one factory per type parameter on the instance.
+            var tps = hasOwn(csClassTParams, clsName) ? csClassTParams[clsName] : null
+            if (tps != null && targs.length > 0) {
+                for (var t = 0; t < tps.length && t < targs.length; t++) {
+                    obj["__tnew_" + tps[t]] = csTypeFactory(targs[t])
+                }
+            }
             var argv = [obj]
             for (var k = 0; k < args.length; k++) argv.push(args[k]())
             cls.__ctor.apply(undefined, argv)
-            if (minits != null) {
-                for (var q = 0; q < minits.length; q++) obj[minits[q].mfield] = minits[q].mval()
-            }
+            if (minits != null) { csApplyInits(obj, minits) }
             return obj
+        }
+    }
+    // 'new { X = 1, Y = 2 }': a plain object carrying exactly those members.
+    function makeAnon(oi) {
+        var ms = oi.objinit
+        return function() {
+            var o = {}
+            csApplyInits(o, ms)
+            return o
         }
     }
     // { F = e, ... } member initializer entry: the field name and its value thunk.
@@ -797,18 +1392,109 @@ KwLet       = "let" KwEnd ;
             return a
         }
     }
-    // A cast is identity: (Type) expr evaluates to expr.
-    function makeCast(inner) { return inner }
+    // A cast to a reference type is identity. A cast to a primitive type converts: the
+    // integral targets truncate (and unbox a char), '(char)' boxes a code back into a
+    // char, the floating targets only unbox. Anything else stays identity.
+    function makeCast(inner, ty) {
+        if (ty == undefined || ty == null || ty.castty == undefined) { return inner }
+        var t = ty.castty
+        return function() {
+            var v = anytype
+            v = inner()
+            // An explicit user conversion declared on the operand's own class wins.
+            if (csHasOps) {
+                var f = csConvOf(v, t)
+                if (f != undefined) { v = f(v) }
+            }
+            if (t == "char") { return csChar(csNumV(v) | 0) }
+            if (t == "byte" || t == "sbyte") { return csNumV(v) & 255 }
+            if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short" || t == "ushort") {
+                return csNumV(v) | 0
+            }
+            if (t == "double" || t == "float" || t == "decimal") { return csNumV(v) }
+            return v
+        }
+    }
     // ~v flips the 32-bit representation (JS ~).
     function makeBitNot(t) { return function() { return ~t() } }
-    // A '??' chain / 'is'-'as' test / null-conditional chain: parsed, not implemented.
+    // 'a ?? b ?? c': the first operand that is not null wins; the rest never runs.
     function makeNullCoal(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("null-coalescing operator", pos)
+        return function() {
+            var v = anytype
+            for (var i = 0; i < items.length - 1; i++) {
+                v = items[i]()
+                if (v !== undefined && v !== null) { return v }
+            }
+            return items[items.length - 1]()
+        }
+    }
+    // The runtime type test behind 'is' and 'as'. A trailing '?' lets null match; the
+    // generic arguments are ignored (List<int> tests as List), and a user class matches on
+    // its own name or any name along its __super chain.
+    function csIsType(v, t0) {
+        var t = csSimpleName(t0)
+        var opt = false
+        if (t.length > 0 && t.charAt(t.length - 1) == "?") { t = t.substring(0, t.length - 1); opt = true }
+        if (v === null || v === undefined) { return opt }
+        if (t == "object" || t == "Object" || t == "dynamic" || t == "var") { return true }
+        if (t == "string" || t == "String") { return typeof v == "string" }
+        if (t == "bool" || t == "Boolean") { return typeof v == "boolean" }
+        if (t == "char" || t == "Char") { return csIsChar(v) }
+        if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short"
+            || t == "ushort" || t == "byte" || t == "sbyte") {
+            return typeof v == "number" && Math.floor(v) == v
+        }
+        if (t == "double" || t == "float" || t == "decimal") { return typeof v == "number" }
+        if (t == "List" || t == "IList" || t == "Array" || t == "IEnumerable" || t == "ICollection") {
+            return typeof v == "object" && v !== null && typeof v.length == "number"
+        }
+        if (t == "Dictionary" || t == "IDictionary") { return isDict(v) }
+        if (typeof v == "object" && v !== null) {
+            for (var c = v.__class; c != undefined; c = c.__super) { if (c.__name == t) { return true } }
+        }
+        return false
+    }
+    function makeIsTypePat(items) {
+        return {isty: items[0], isbind: items.length > 1 ? items[1].isbind : ""}
+    }
+    function makeIsPat(items) {
+        var p = {kind: "type", not: false, ty: "", bind: "", val: null}
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.isnot == true) { p.not = true; continue }
+            if (it.isnull == true) { p.kind = "null"; continue }
+            if (it.isconst != undefined) { p.kind = "const"; p.val = it.isconst; continue }
+            if (it.isty != undefined) { p.ty = it.isty; p.bind = it.isbind }
+        }
+        return p
+    }
+    // Matching a pattern binds its name in the enclosing scope, as C# does ('o is string s'
+    // makes s usable in the rest of the expression and after it).
+    function csMatch(p, v) {
+        var r = false
+        if (p.kind == "null") { r = (v === null || v === undefined) }
+        else if (p.kind == "const") { r = (v === p.val) }
+        else {
+            r = csIsType(v, p.ty)
+            if (r && p.bind != "") { declVar(p.bind, v) }
+        }
+        return p.not ? !r : r
     }
     function makeTypeTest(items, pos) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("is/as operator", pos)
+        var t = items[0]
+        var m = items[1]
+        if (m.asty != undefined) {
+            var ty = m.asty
+            return function() {
+                var v = anytype
+                v = t()
+                return csIsType(v, ty) ? v : null
+            }
+        }
+        var p = m.ispat
+        return function() { return csMatch(p, t()) }
     }
 
     // Extended numeric literal text (whitespace and '_' removed) to a number: hex (0x),
@@ -831,42 +1517,268 @@ KwLet       = "let" KwEnd ;
             return stmtT()
         }
     }
-    // 'using (init) s': the initializer and body run in a fresh frame; disposal is skipped.
-    function makeUsing(bodyT, initT) {
+    // 'using (init) s': the resources are created in a fresh frame, the body runs, and
+    // then Dispose() is called on every resource in reverse order (also when the body
+    // returns early - the return value travels through r). An exception leaving the body
+    // skips disposal, matching what the compiled world can do.
+    function makeUseDecl(t) { return {useDecl: t, names: lastDeclNames} }
+    function csDispose(res) {
+        for (var i = res.length - 1; i >= 0; i--) {
+            var o = res[i]
+            if (csHasMethod(o, "Dispose")) { mcall(o, "Dispose", []) }
+        }
+    }
+    function makeUsing(bodyT, init) {
         return function() {
             scopes.push({})
-            initT()
+            var res = []
+            if (init.useExpr != undefined) { res.push(init.useExpr()) }
+            else {
+                init.useDecl()
+                for (var i = 0; i < init.names.length; i++) { res.push(getVar(init.names[i])) }
+            }
             var r = bodyT()
+            csDispose(res)
             scopes.pop()
             return r
         }
     }
-    // 'using var r = e;': the declaration runs; disposal is skipped.
-    function makeUsingDecl(t) { return t }
+    // A block. A 'using var r = e;' item scopes the REST of the block: the statements
+    // after it become the body of a using statement over that resource.
+    makeBlockStmt = function(items) {
+        var seq = csBlockSeq(items)
+        return function() {
+            scopes.push({})
+            var r = seq()
+            scopes.pop()
+            return r
+        }
+    }
+    function csBlockSeq(items) {
+        var thunks = []
+        var lnames = []
+        var lidx = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && typeof items[i] != "function" && items[i].usingItem != undefined) {
+                thunks.push(makeUsing(csBlockSeq(items.slice(i + 1)), items[i].usingItem))
+                return csSeqOf(thunks, lnames, lidx)
+            }
+            if (items[i] != undefined && typeof items[i] != "function" && items[i].labelName != undefined) {
+                lnames.push(items[i].labelName)
+                lidx.push(thunks.length)
+                continue
+            }
+            thunks.push(items[i])
+        }
+        return csSeqOf(thunks, lnames, lidx)
+    }
+    // A block with no label of its own is the plain sequence it always was; one that has
+    // labels runs its own loop so a goto signal naming one of them resumes at that index.
+    function csSeqOf(thunks, lnames, lidx) {
+        if (lnames.length == 0) { return makeSeq(thunks) }
+        return function() {
+            var i = 0
+            var guard = 0
+            while (i < thunks.length) {
+                guard++
+                if (guard > 10000000) { fail("goto loop does not terminate") }
+                var r = thunks[i]()
+                if (r != undefined) {
+                    var j = -1
+                    if (typeof r != "function" && r.sig == "goto") { j = csFindLabel(lnames, lidx, r.label) }
+                    if (j >= 0) { i = j; continue }
+                    return r
+                }
+                i++
+            }
+            return undefined
+        }
+    }
+    function csFindLabel(lnames, lidx, name) {
+        for (var i = 0; i < lnames.length; i++) { if (lnames[i] == name) { return lidx[i] } }
+        return -1
+    }
+    // 'delegate { ... }' without a parameter list: an empty one.
+    function makeBareAnon(items) {
+        var a = []
+        a.push(makeParams([]))
+        for (var i = 0; i < items.length; i++) { a.push(items[i]) }
+        return makeLambda(a)
+    }
+    // 'new int[n]' / 'new int[r, c]' / 'new A[1] { ... }': an explicit initializer wins
+    // over the sizes; otherwise the FIRST dimension gives the length (the further ones
+    // are evaluated so their calls stay visible, then dropped - the model is flat).
+    function makeSizedArray(items) {
+        var dims = []
+        var init = null
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].ainit != undefined) { init = items[i].ainit; continue }
+            if (items[i].adim != undefined) { dims.push(items[i].adim) }
+        }
+        if (init != null) { return init }
+        return makeNewArray(dims[0])
+    }
+    // A nested member initializer ('P1 = { X = 1 }') assigns INTO the object the member
+    // already holds; an indexed one ('[k] = e') writes through the index.
+    function makeNestedInit(oi, name) { return {mfield: name, mnest: oi.objinit} }
+    function makeIndexedInit(valT, keyT) { return {mindex: keyT, mval: valT} }
+    function csApplyInits(o, ms) {
+        for (var i = 0; i < ms.length; i++) {
+            var m = ms[i]
+            if (m.mindex != undefined) { csSetIndex(o, m.mindex(), m.mval()); continue }
+            if (m.mnest != undefined) { csApplyInits(o[m.mfield], m.mnest); continue }
+            o[m.mfield] = m.mval()
+        }
+    }
+    function csSetIndex(o, k, v) {
+        if (o != undefined && o != null && typeof o == "object" && o.__dict == true) {
+            for (var i = 0; i < o.keys.length; i++) { if (o.keys[i] === k) { o.vals[i] = v; return } }
+            o.keys.push(k)
+            o.vals.push(v)
+            return
+        }
+        o[k] = v
+    }
+
+    // ----- collection expressions, ranges and index-from-end -----
+    function makeCollection(items) {
+        return function() {
+            var a = []
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i]
+                if (typeof it == "function") { a.push(it()); continue }
+                var sp = it.spread()
+                for (var j = 0; j < sp.length; j++) { a.push(sp[j]) }
+            }
+            return a
+        }
+    }
+    function csIdxTail(items) {
+        var hi = null
+        var hiEnd = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { hi = it }
+            else if (it.fromEnd != undefined) { hi = it.fromEnd; hiEnd = true }
+        }
+        return {idxTail: true, hi: hi, hiEnd: hiEnd}
+    }
+    function csIndexSfx(items) {
+        var lo = null
+        var loEnd = false
+        var tail = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { lo = it }
+            else if (it.idxTail != undefined) { tail = it }
+            else if (it.fromEnd != undefined) { lo = it.fromEnd; loEnd = true }
+        }
+        if (tail == null) { return {kind: "index", idx: lo, fromend: loEnd} }
+        return {kind: "slice", lo: lo, loEnd: loEnd, hi: tail.hi, hiEnd: tail.hiEnd}
+    }
+    // 'a[lo..hi]': the bounds default to 0 and the length, and a '^n' bound counts from
+    // the end. Strings slice too, which is what C#'s range indexer does.
+    function csSlice(cur, lo, loEnd, hi, hiEnd) {
+        var n = cur.length
+        var l = 0
+        var h = n
+        if (lo != null) { l = lo(); if (loEnd) { l = n - l } }
+        if (hi != null) { h = hi(); if (hiEnd) { h = n - h } }
+        if (typeof cur == "string") { return cur.substring(l, h) }
+        return cur.slice(l, h)
+    }
+
+    // ----- named arguments -----
+    // The parameter names of every method / constructor / local function, by name. Filled
+    // while the file is walked, so it is complete before any call thunk runs. Method
+    // overloading is not modelled here either, so one entry per name is enough.
+    var csParamNames = {}
+    function csRegParams(name, pinfo) {
+        if (name != undefined && name != "" && pinfo != undefined && pinfo != null) { csParamNames[name] = pinfo.params }
+    }
+    function csNamedArg(items) { return {argname: items[0].argname, argt: items[1]} }
+    // Turns a mixed positional/named argument list into a positional one. A list with no
+    // named argument is returned unchanged, so an ordinary call costs nothing.
+    function csFixArgs(args, mname) {
+        var i
+        var named = false
+        for (i = 0; i < args.length; i++) { if (typeof args[i] != "function") { named = true } }
+        if (!named) { return args }
+        var names = hasOwn(csParamNames, mname) ? csParamNames[mname] : []
+        var slots = []
+        var pos = 0
+        for (i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (typeof a == "function") { csPutSlot(slots, pos, a); pos++; continue }
+            var k = -1
+            for (var j = 0; j < names.length; j++) { if (names[j] == a.argname) { k = j } }
+            if (k < 0) { k = pos; pos++ }
+            csPutSlot(slots, k, a.argt)
+        }
+        return slots
+    }
+    // A slot no argument reached holds the 'omitted' marker: csBindArgs answers it with
+    // the parameter's default value.
+    function csPutSlot(slots, k, t) {
+        while (slots.length <= k) { slots.push(csOmitted) }
+        slots[k] = t
+    }
+    function csOmitted() { return undefined }
+
+    function makeGoto(name) { return function() { return {sig: "goto", label: name} } }
+    function makeGotoCase(t) { return function() { return {sig: "gotocase", cv: t()} } }
+    function makeGotoDefault() { return function() { return {sig: "gotodefault"} } }
     // A lambda is a real closure value. It captures the scope chain live at the point it is
     // evaluated (a copy of the array, so the scope objects stay shared and later mutations
     // of a captured local stay visible). LINQ stays unimplemented.
     function makeLambda(items) {
-        var params = items[0].params
+        var pinfo = items[0]
         var bm = items[1]
         var bodyT = anytype // A block statement thunk, or a synthesized 'return <expr>'.
         if (bm.body != undefined) { bodyT = bm.body }
         else { bodyT = makeArrowBody(bm.ebody) }
-        return function() { return makeCsClosure(params, bodyT, scopes.slice(0)) }
+        return function() { return makeCsClosure(pinfo, bodyT, scopes.slice(0)) }
     }
-    function makeCsClosure(params, bodyT, defScopes) {
+    // Binds a call's arguments to a parameter list: a missing argument takes the
+    // parameter's default value, and a 'params' tail collects the rest into an array.
+    function csBindArgs(sc, pinfo, args) {
+        var names = pinfo.params
+        for (var j = 0; j < names.length; j++) {
+            if (pinfo.variadic == j) {
+                var rest = []
+                for (var k = j; k < args.length; k++) { rest.push(args[k]) }
+                sc[names[j]] = rest
+            } else if (j < args.length && args[j] !== undefined) {
+                sc[names[j]] = args[j]
+            } else if (pinfo.dflts != undefined && pinfo.dflts[j] != null) {
+                sc[names[j]] = pinfo.dflts[j]()
+            } else {
+                sc[names[j]] = undefined
+            }
+        }
+    }
+    function makeCsClosure(pinfo, bodyT, defScopes) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
             var saved = scopes
             scopes = defScopes.slice(0)
             var sc = {}
-            for (var j = 0; j < params.length; j++) sc[params[j]] = j < args.length ? args[j] : undefined
+            csBindArgs(sc, pinfo, args)
             scopes.push(sc)
             var r = bodyT()
             scopes = saved
             return (r != undefined && r.isRet) ? r.v : undefined
         }
+    }
+    // A local function: a closure over the CURRENT scope chain, bound by name. The chain
+    // is captured by reference, so the binding is visible to the body (recursion works).
+    function makeLocalFunc(items) {
+        var name = items[1]
+        var pinfo = items[2]
+        var bodyT = items[3]
+        csRegParams(name, pinfo)
+        return function() { declVar(name, makeCsClosure(pinfo, bodyT, scopes.slice(0))) }
     }
     function makeLinq(pos) { return notImplExpr("LINQ query", pos) }
 
@@ -877,10 +1789,78 @@ KwLet       = "let" KwEnd ;
     // undefined constant for a bare 'throw;' rethrow (which carries no value in this model).
     function csThrowVal(items) { return items.length > 0 ? items[0] : makeConst(undefined) }
 
-    function makeDecl(items) {
-        var name = items[0]
-        var init = items.length > 1 ? items[1] : makeConst(0)
-        return function() { declVar(name, init()) }
+    // ----- typeof / nameof / sizeof / default -----
+    // A type token: never null, and it answers .Name / .FullName like System.Type does.
+    function makeTypeof(name) { return makeConst({__type: true, Name: name, FullName: name}) }
+    // nameof(a.b.C) is the last segment, decided at parse time (C# does the same).
+    function makeNameof(name) {
+        var t = name.split("<")[0]
+        var parts = t.split(".")
+        return makeConst(parts[parts.length - 1])
+    }
+    // The sizes of the primitive types; anything else (a reference) is one pointer.
+    function csSizeof(t) {
+        if (t == "byte" || t == "sbyte" || t == "bool") { return 1 }
+        if (t == "short" || t == "ushort" || t == "char") { return 2 }
+        if (t == "int" || t == "uint" || t == "float") { return 4 }
+        if (t == "long" || t == "ulong" || t == "double") { return 8 }
+        if (t == "decimal") { return 16 }
+        return 8
+    }
+    function makeSizeof(name) { return makeConst(csSizeof(name)) }
+    // The default value of a type. Resolved at RUN time so a struct - which defaults to a
+    // zeroed instance - can be looked up after its declaration has been built.
+    function csDefaultRT(ty) {
+        var t = ty
+        if (t == "" || t.length == 0) { return null }
+        if (t.charAt(t.length - 1) == "?") { return null }
+        if (t.indexOf("[") >= 0) { return null }
+        if (t == "bool") { return false }
+        if (t == "char") { return csChar(0) }
+        if (t == "int" || t == "uint" || t == "long" || t == "ulong" || t == "short"
+            || t == "ushort" || t == "byte" || t == "sbyte" || t == "double"
+            || t == "float" || t == "decimal") { return 0 }
+        return null
+    }
+    // A struct's default is a zeroed instance of it; everything else is decided by type
+    // name at run time.
+    function makeDefaultOf(ty) {
+        if (hasOwn(csStructs, ty)) { return function() { return getVar(ty).__zero() } }
+        return function() { return csDefaultRT(ty) }
+    }
+
+    // ----- local declarations -----
+    // One declarator: its name, and either an initializer thunk or the bare '= default'
+    // marker (which needs the declared type, so it is resolved in makeDeclSeq).
+    function makeDeclInfo(items) {
+        var info = {dname: items[0], dinit: null, bare: false}
+        if (items.length > 1) {
+            if (items[1].bareDefault == true) { info.bare = true }
+            else { info.dinit = items[1].dinit }
+        }
+        return info
+    }
+    // The names the last DeclCore declared, for the 'using var r = e;' form (whose tag
+    // runs right after this one).
+    var lastDeclNames = []
+    function makeDeclSeq(items) {
+        var ty = items[0].dty
+        var thunks = []
+        var names = []
+        for (var i = 1; i < items.length; i++) {
+            thunks.push(makeDecl(items[i], ty))
+            names.push(items[i].dname)
+            csLocalTypes[items[i].dname] = csSimpleName(ty)
+        }
+        lastDeclNames = names
+        return makeSeq(thunks)
+    }
+    function makeDecl(info, ty) {
+        var name = info.dname
+        var init = (info.dinit != null && !info.bare) ? info.dinit : makeDefaultOf(ty)
+        // 'S v = w;' with a struct type copies: structs are value types.
+        if (hasOwn(csStructs, ty)) { return function() { declVar(name, csStructCopy(csImplicitConv(ty, init()))) } }
+        return function() { declVar(name, csImplicitConv(ty, init())) }
     }
     // An expression bodied method '=> e;' behaves like { return e; }.
     function makeArrowBody(t) {
@@ -913,17 +1893,39 @@ KwLet       = "let" KwEnd ;
                 if (start < 0 && cases[i].v() === v) { start = i }
             }
             if (start < 0) { start = dflt }
-            if (start < 0) { return undefined }
-            for (var j = start; j < cases.length; j++) {
-                var body = cases[j].body
-                for (var k = 0; k < body.length; k++) {
-                    var r = body[k]()
-                    if (r === BRK) { return undefined }
-                    if (r != undefined) { return r }
+            // 'goto case c;' / 'goto default;' re-enter the dispatch: the arriving signal
+            // names the section to resume in, and execution falls through from there
+            // exactly as if the switch had matched it in the first place.
+            var guard = 0
+            while (start >= 0) {
+                guard++
+                if (guard > 10000000) { fail("goto case loop does not terminate") }
+                var next = -2
+                for (var j = start; j < cases.length && next == -2; j++) {
+                    var body = cases[j].body
+                    for (var k = 0; k < body.length; k++) {
+                        var r = body[k]()
+                        if (r === BRK) { return undefined }
+                        if (r != undefined) {
+                            if (typeof r != "function" && r.sig == "gotodefault") { next = dflt; break }
+                            if (typeof r != "function" && r.sig == "gotocase") { next = csCaseIndex(cases, r.cv); break }
+                            return r
+                        }
+                    }
                 }
+                if (next == -2) { return undefined }
+                start = next
             }
             return undefined
         }
+    }
+    // The index of the section whose case constant equals v, or -1.
+    function csCaseIndex(cases, v) {
+        for (var i = 0; i < cases.length; i++) {
+            if (cases[i].isDefault) { continue }
+            if (cases[i].v() === v) { return i }
+        }
+        return -1
     }
     // foreach (var x : coll) body -- pops reversed: body, coll, name.
     function makeForEach(bodyT, arrT, name) {
@@ -974,18 +1976,209 @@ KwLet       = "let" KwEnd ;
     }
 
     // ----- $"...{expr}..." interpolation -----
+    // One hole: the value thunk plus its optional alignment and format specifier.
+    function makeIsExpr(items) {
+        var al = 0
+        var fm = ""
+        for (var i = 1; i < items.length; i++) {
+            if (items[i].align != undefined) { al = items[i].align }
+            if (items[i].fmt != undefined) { fm = items[i].fmt }
+        }
+        return {e: items[0], align: al, fmt: fm}
+    }
+    // The one format specifier that is modelled: 'D'/'d', the decimal form zero-padded to
+    // the given width. Every other specifier renders the value plainly (the compiler
+    // grammar models exactly the same set, so the two engines never disagree).
+    function csFormat(v, fmt) {
+        if (fmt == "") { return csStr(v) }
+        var kind = fmt.charAt(0)
+        if (kind != "D" && kind != "d") { return csStr(v) }
+        var width = fmt.length > 1 ? parseInt(fmt.substring(1)) : 0
+        var body = csStr(csNumV(v))
+        var neg = body.charAt(0) == "-"
+        if (neg) { body = body.substring(1) }
+        while (body.length < width) { body = "0" + body }
+        return neg ? "-" + body : body
+    }
+    // '{x,4}' pads to width 4 on the left, '{x,-4}' on the right.
+    function csAlign(s, align) {
+        if (align == 0) { return s }
+        var w = align < 0 ? 0 - align : align
+        var out = s
+        while (out.length < w) { out = (align < 0) ? out + " " : " " + out }
+        return out
+    }
     function makeTemplate(items) {
         return function() {
             var out = ""
             for (var i = 0; i < items.length; i++) {
                 if (items[i].s != undefined) { out += items[i].s }
-                else { out += csStr(items[i].e()) }
+                else { out += csAlign(csFormat(items[i].e(), items[i].fmt), items[i].align) }
             }
             return out
         }
     }
 
+    // ----- verbatim and raw string literals -----
+    // The text between the first and the last '"' of the token (the trailing layout the
+    // whitespace rule kept must not be cut with stripWs - a verbatim string may end in a
+    // real space or newline).
+    function csQuoted(text, openLen, closeLen) {
+        var a = 0
+        while (a < text.length && text.charAt(a) != '"') { a++ }
+        var z = text.length - 1
+        while (z > a && text.charAt(z) != '"') { z-- }
+        return text.substring(a + openLen, z - (closeLen - 1))
+    }
+    // '""' is the only escape inside a verbatim string.
+    function csVbText(s) {
+        var out = ""
+        var i = 0
+        while (i < s.length) {
+            if (s.charAt(i) == '"' && i + 1 < s.length && s.charAt(i + 1) == '"') { out += '"'; i += 2; continue }
+            out += s.charAt(i)
+            i++
+        }
+        return out
+    }
+    function csVerb(text) { return csVbText(csQuoted(text, 1, 1)) }
+    // A raw string. The single-line form is its text verbatim. The multi-line form (the
+    // content starts with a newline) drops that first newline, the last line break, and
+    // the indentation the closing delimiter sits at, from every line.
+    function csRaw(text) {
+        var body = csQuoted(text, 3, 3)
+        if (body.length == 0 || body.charAt(0) != "\n") {
+            if (body.length > 1 && body.charAt(0) == "\r") { body = body.substring(1) } else { return body }
+        }
+        var t = body.substring(1)
+        var lines = t.split("\n")
+        var last = lines[lines.length - 1]
+        var indent = 0
+        while (indent < last.length && (last.charAt(indent) == " " || last.charAt(indent) == "\t")) { indent++ }
+        var out = ""
+        for (var i = 0; i < lines.length - 1; i++) {
+            var ln = lines[i]
+            if (ln.length >= indent) { ln = ln.substring(indent) }
+            out += (i > 0 ? "\n" : "") + ln
+        }
+        return out
+    }
+
     // ----- Class building -----
+
+    // The last segment of a dotted name ('ITag.Tag' -> 'Tag').
+    function csLastSeg(s) {
+        var parts = s.split(".")
+        return parts[parts.length - 1]
+    }
+    // The simple name of a possibly qualified, possibly generic type reference
+    // ('System.Collections.Generic.List<int>' -> 'List'): the generic arguments are dropped
+    // first (they may themselves be dotted), then the last segment is kept.
+    function csSimpleName(s) {
+        var t = stripWs(s)
+        var out = ""
+        var depth = 0
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "<") { depth++; continue }
+            if (ch == ">") { if (depth > 0) { depth-- }; continue }
+            if (depth == 0) { out += ch }
+        }
+        return csLastSeg(out)
+    }
+    // The generic argument list of a type reference ('Pair<string, List<int>>' ->
+    // ["string", "List<int>"]): the first balanced '<...>' run, split at its top-level
+    // commas. A non-generic reference has none.
+    function csTypeArgs(s) {
+        var t = stripWs(s)
+        var a = t.indexOf("<")
+        if (a < 0) { return [] }
+        var depth = 0
+        var cur = ""
+        var out = []
+        for (var i = a; i < t.length; i++) {
+            var ch = t.charAt(i)
+            if (ch == "<") { depth++; if (depth == 1) { continue } }
+            else if (ch == ">") { depth--; if (depth == 0) { out.push(cur); break } }
+            else if (ch == "," && depth == 1) { out.push(cur); cur = ""; continue }
+            cur += ch
+        }
+        return out
+    }
+    // The BCL exception types a program may 'throw new ...' without declaring them. They
+    // are not real classes here: 'new XException(msg)' builds a plain object carrying
+    // __excname and Message, which is all catch (no type discrimination) and e.Message
+    // need. A class the program declares itself always wins (see makeNew).
+    var csBclExc = {}
+    var csBclExcNames = ["Exception", "SystemException", "ApplicationException",
+        "InvalidOperationException", "ArgumentException", "ArgumentNullException",
+        "ArgumentOutOfRangeException", "NotImplementedException", "NotSupportedException",
+        "IndexOutOfRangeException", "NullReferenceException", "InvalidCastException",
+        "FormatException", "OverflowException", "DivideByZeroException",
+        "KeyNotFoundException", "IOException", "TimeoutException", "ObjectDisposedException",
+        "ArithmeticException", "StackOverflowException", "OutOfMemoryException",
+        "AggregateException", "RankException", "InvalidDataException",
+        "FileNotFoundException", "DirectoryNotFoundException", "UnauthorizedAccessException"]
+    for (var iBcl = 0; iBcl < csBclExcNames.length; iBcl++) { csBclExc[csBclExcNames[iBcl]] = true }
+
+    // The type-parameter names of every generic class ('Pair' -> ["TA", "TB"]). Filled
+    // while the file is walked, so it is complete before any thunk runs.
+    var csClassTParams = {}
+    function csIsTParam(cls, n) {
+        var tps = hasOwn(csClassTParams, cls) ? csClassTParams[cls] : null
+        if (tps == null) { return false }
+        for (var i = 0; i < tps.length; i++) { if (tps[i] == n) { return true } }
+        return false
+    }
+    // Reified type arguments. 'new Pair<string, List<int>>()' stores one FACTORY per type
+    // parameter on the instance ('__tnew_TB'), so a 'new TB()' in the class body is a call
+    // of that factory. A factory is just the object creation the argument spells out, so a
+    // constructed type argument ('List<int>') needs no extra machinery.
+    function csTypeFactory(ts) {
+        return makeNew([{cname: csSimpleName(ts), targs: csTypeArgs(ts)}])
+    }
+    // A parameter list: the names, their default-value thunks, whether the first parameter
+    // carried 'this' (an extension method) and the index of a 'params' tail.
+    function makeParams(items) {
+        var names = []
+        var dflts = []
+        var isExt = false
+        var variadic = -1
+        var pendingThis = false
+        var pendingParams = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "string") {
+                names.push(it)
+                dflts.push(null)
+                if (pendingThis && names.length == 1) { isExt = true }
+                if (pendingParams) { variadic = names.length - 1 }
+                pendingThis = false
+                pendingParams = false
+                continue
+            }
+            if (it.thisParam == true) { pendingThis = true; continue }
+            if (it.paramsParam == true) { pendingParams = true; continue }
+            if (it.pdflt != undefined && dflts.length > 0) { dflts[dflts.length - 1] = it.pdflt }
+        }
+        return {params: names, dflts: dflts, ext: isExt, variadic: variadic}
+    }
+
+    // A method call binds its arguments like a lambda does: a missing argument takes the
+    // parameter's default value, and a 'params' tail collects the rest into an array.
+    function csInvoke(pinfo, body, self, args) {
+        var saved = scopes
+        scopes = [globalScope, {}]
+        if (self != undefined) { declVar("this", self) }
+        var sc = {}
+        csBindArgs(sc, pinfo, args)
+        for (var i = 0; i < pinfo.params.length; i++) { declVar(pinfo.params[i], sc[pinfo.params[i]]) }
+        if (core.framePush != null) core.framePush()
+        var r = body()
+        if (core.framePop != null) core.framePop()
+        scopes = saved
+        return (r != undefined && r.isRet) ? r.v : undefined
+    }
 
     function makeMethod(items) {
         var mods = items[0].mods
@@ -993,11 +2186,62 @@ KwLet       = "let" KwEnd ;
         var params = items[2].params
         var body = items[3]
         var isStatic = false
-        for (var i = 0; i < mods.length; i++) if (mods[i] == "static") isStatic = true
-        return {kind: "method", name: name, statik: isStatic, params: params, body: body}
+        var hides = false
+        for (var i = 0; i < mods.length; i++) {
+            if (mods[i] == "static") { isStatic = true }
+            if (mods[i] == "new") { hides = true }
+        }
+        if (hides) { csHiddenNames[name] = true; csHasHidden = true }
+        csRegParams(name, items[2])
+        return {kind: "method", name: name, statik: isStatic, params: params, body: body,
+                pinfo: items[2], ext: items[2].ext == true}
+    }
+    // A member declared without a body (abstract, or an interface method with no default):
+    // it contributes no callable member, but its NAME is a member of the class, so an
+    // unqualified call to it inside a default implementation resolves to this.M(...).
+    function makeAbstract(items) {
+        var mods = items[0].mods
+        var isStatic = false
+        for (var i = 0; i < mods.length; i++) { if (mods[i] == "static") { isStatic = true } }
+        return {kind: "abstract", name: items[1], statik: isStatic}
     }
     function makeCtor(items) {
-        return {kind: "ctor", name: items[0], params: items[1].params, body: items[2]}
+        csRegParams(items[0], items[1])
+        return {kind: "ctor", name: items[0], params: items[1].params, pinfo: items[1], body: items[2]}
+    }
+    // 'public int X, Y;': one modifier/type prefix, several declarators. The group is
+    // flattened into ordinary field records by csFlatten before a class body is read.
+    function makeFieldGroup(items) {
+        var mods = items[0]
+        var ty = items[1]
+        var out = []
+        for (var i = 2; i < items.length; i++) {
+            var d = items[i].fdecl
+            var one = []
+            one.push(mods)
+            one.push(ty)
+            for (var j = 0; j < d.length; j++) { one.push(d[j]) }
+            out.push(makeField(one))
+        }
+        if (out.length == 1) { return out[0] }
+        return {fgroup: out}
+    }
+    function csFlatten(members) {
+        var any = false
+        var i
+        for (i = 0; i < members.length; i++) { if (members[i] != undefined && members[i].fgroup != undefined) { any = true } }
+        if (!any) { return members }
+        var out = []
+        for (i = 0; i < members.length; i++) {
+            var m = members[i]
+            if (m != undefined && m.fgroup != undefined) {
+                var g = m.fgroup
+                for (var j = 0; j < g.length; j++) { out.push(g[j]) }
+                continue
+            }
+            out.push(m)
+        }
+        return out
     }
     function makeField(items) {
         var mods = items[0].mods
@@ -1015,8 +2259,148 @@ KwLet       = "let" KwEnd ;
         return {kind: "field", name: name, statik: isStatic, init: init, dflt: dflt}
     }
 
-    function buildClassFrom(name, members) {
-        var cls = {__isclass: true, __name: name}
+    // ----- operator overloading and user conversions -----
+    // True as soon as the program declares one, so every arithmetic step of a program that
+    // declares none costs one boolean rather than a class-chain walk.
+    var csHasOps = false
+    function makeOperatorDecl(items) {
+        var sym = ""
+        var pinfo = null
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it.opsym != undefined) { sym = it.opsym; continue }
+            if (it.params != undefined) { pinfo = it; continue }
+            if (typeof it == "function") { body = it }
+        }
+        csHasOps = true
+        return {kind: "op", name: "__op" + pinfo.params.length + "_" + sym, pinfo: pinfo, body: body}
+    }
+    function makeConvOp(items) {
+        var cty = ""
+        var pinfo = null
+        var body = null
+        for (var i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it.cty != undefined) { cty = it.cty; continue }
+            if (it.params != undefined) { pinfo = it; continue }
+            if (typeof it == "function") { body = it }
+        }
+        csHasOps = true
+        return {kind: "op", name: "__conv_" + csSimpleName(cty), pinfo: pinfo, body: body}
+    }
+    // An operator member of the class of either operand ('__op2_+'), or of the operand of a
+    // unary one ('__op1_-'). C# resolves by argument type; there is no type model here, so
+    // the left operand's class is asked first and the right one second.
+    function csFindOp(l, r, key) {
+        var f = csFindAcc(l, key)
+        if (f != undefined) { return f }
+        return csFindAcc(r, key)
+    }
+    // A user conversion TO the named type, declared on the value's own class.
+    function csConvOf(v, tname) {
+        return csFindAcc(v, "__conv_" + tname)
+    }
+
+    // ----- properties and indexers -----
+    // One accessor of a property or indexer: its body thunk, or null for the automatic
+    // form ('get;'), which has no body at all.
+    function makeAccessor(kind, items) {
+        var body = null
+        for (var i = 0; i < items.length; i++) { if (typeof items[i] == "function") { body = items[i] } }
+        return {acc: kind, body: body}
+    }
+    // The parameter lists the synthesized accessor closures are invoked with.
+    var csGetPI = {params: [], dflts: [], ext: false, variadic: -1}
+    var csSetPI = {params: ["value"], dflts: [null], ext: false, variadic: -1}
+    // A property is AUTOMATIC when no accessor carries a body; then it is a plain field
+    // (with the type's default value, or its '= e' initializer). Otherwise the get and set
+    // bodies become accessor members.
+    function makeProperty(items) {
+        var mods = items[0].mods
+        var ty = stripWs(items[1].ty)
+        var name = ""
+        var getT = null
+        var setT = null
+        var auto = true
+        var init = null
+        for (var i = 2; i < items.length; i++) {
+            var it = items[i]
+            if (it.pname != undefined) { name = it.pname; continue }
+            if (it.pinit != undefined) { init = it.pinit; continue }
+            if (it.parrow != undefined) { getT = it.parrow; auto = false; continue }   // '=> e' body
+            if (it.accs != undefined) {
+                var accs = it.accs
+                for (var j = 0; j < accs.length; j++) {
+                    if (accs[j].body == null) { continue }
+                    auto = false
+                    if (accs[j].acc == "get") { getT = accs[j].body } else { setT = accs[j].body }
+                }
+            }
+        }
+        var isStatic = false
+        for (var k = 0; k < mods.length; k++) { if (mods[k] == "static") { isStatic = true } }
+        if (auto) { return csAutoField(name, isStatic, init, ty) }
+        return {kind: "prop", name: name, statik: isStatic, getT: getT, setT: setT}
+    }
+    // An automatic property IS a field: same record, so every field path (the instance
+    // initializers, the static slot, the member table) applies to it unchanged.
+    function csAutoField(name, isStatic, init, ty) {
+        var isNum = (ty == "int" || ty == "uint" || ty == "long" || ty == "ulong" || ty == "short"
+                  || ty == "ushort" || ty == "byte" || ty == "sbyte" || ty == "double"
+                  || ty == "float" || ty == "decimal")
+        var dflt = null
+        if (ty == "bool") { dflt = false }
+        else if (isNum && ty.indexOf("[") < 0) { dflt = 0 }
+        return {kind: "field", name: name, statik: isStatic, init: init, dflt: dflt}
+    }
+    function makeIndexer(items) {
+        var getT = null
+        var setT = null
+        var pinfo = null
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.params != undefined) { pinfo = it; continue }
+            if (it.accs != undefined) {
+                var accs = it.accs
+                for (var j = 0; j < accs.length; j++) {
+                    if (accs[j].body == null) { continue }
+                    if (accs[j].acc == "get") { getT = accs[j].body } else { setT = accs[j].body }
+                }
+            }
+        }
+        csHasIndexer = true
+        return {kind: "indexer", getT: getT, setT: setT, pinfo: pinfo}
+    }
+    // True as soon as the program declares an indexer, so the index read of a program that
+    // declares none costs one boolean rather than a class-chain walk.
+    var csHasIndexer = false
+    // An accessor member ('__get_X', '__index', ...) looked up along the class chain. A
+    // class descriptor answers its own static members, an instance its class' ones.
+    function csFindAcc(o, key) {
+        if (o === undefined || o === null || typeof o != "object") { return undefined }
+        if (o.__isclass === true) { return hasOwn(o, key) ? o[key] : undefined }
+        for (var c = o.__class; c != undefined; c = c.__super) { if (hasOwn(c, key)) { return c[key] } }
+        return undefined
+    }
+
+    // The structs seen so far: name -> its instance field names. A declaration whose
+    // declared type names a struct copies its initializer (C# value semantics) and a
+    // struct without an initializer starts out zeroed.
+    var csStructs = {}
+    function csStructCopy(v) {
+        if (v === undefined || v === null || typeof v != "object") { return v }
+        var cls = v.__class
+        if (cls == undefined || cls.__isstruct !== true) { return v }
+        var o = {__class: cls}
+        var ks = cls.__fieldNames
+        for (var i = 0; i < ks.length; i++) { o[ks[i]] = v[ks[i]] }
+        return o
+    }
+
+    function buildClassFrom(name, members, kind, primary, tparams) {
+        var cls = {__isclass: true, __name: name, __isstruct: kind == "struct"}
+        if (tparams != undefined && tparams != null && tparams.length > 0) { csClassTParams[name] = tparams }
         var fields = []
         var ctorInfo = null
         var sup = null
@@ -1031,8 +2415,11 @@ KwLet       = "let" KwEnd ;
         for (i = 0; i < members.length; i++) {
             var mm = members[i]
             if (mm.kind == "field") {
+                // An INTERFACE declares no storage: its automatic properties are a
+                // contract, not fields, so they must not be inherited as zeroed members
+                // that then shadow an implementor's own get accessor.
                 if (mm.statik) { cls[mm.name] = (mm.init != null) ? mm.init() : mm.dflt }
-                else { fields.push(mm) }
+                else if (kind != "interface") { fields.push(mm) }
             }
             if (mm.kind == "ctor") ctorInfo = mm
         }
@@ -1046,16 +2433,74 @@ KwLet       = "let" KwEnd ;
         }
         if (ctorInfo != null) {
             cls.__ctor = makeCtorClosure(ctorInfo, initFields)
+        } else if (primary != null && primary != undefined) {
+            // A primary constructor: its parameters become instance members, bound by the
+            // same argument binder every other call uses (defaults, 'params' tail).
+            cls.__ctor = makePrimaryClosure(primary, initFields)
         } else {
             cls.__ctor = function() { initFields(arguments[0]) }
         }
+        // The zeroed instance a struct's 'default' yields, and the field name list a
+        // value copy walks (the frozen engine has no for-in, so it must be explicit).
+        var fnames = []
+        for (i = 0; i < fields.length; i++) { fnames.push(fields[i].name) }
+        if (primary != null && primary != undefined) {
+            for (i = 0; i < primary.params.length; i++) { fnames.push(primary.params[i]) }
+        }
+        cls.__fieldNames = fnames
+        cls.__zero = function() {
+            var z = {__class: cls}
+            initFields(z)
+            return z
+        }
+        if (kind == "struct") { csStructs[name] = fnames }
         for (i = 0; i < members.length; i++) {
             var m2 = members[i]
             if (m2.kind == "method") {
                 cls[m2.name] = m2.statik ? makeStaticClosure(m2) : makeInstanceClosure(m2)
+                // 'static T M(this X x, ...)' is also reachable as x.M(...).
+                if (m2.statik && m2.ext) { csExt[m2.name] = cls[m2.name] }
             }
+            // A property with accessor bodies: '__get_X' / '__set_X' members.
+            if (m2.kind == "prop") {
+                if (m2.getT != null) { cls["__get_" + m2.name] = csAccClosure(m2.statik, csGetPI, m2.getT) }
+                if (m2.setT != null) { cls["__set_" + m2.name] = csAccClosure(m2.statik, csSetPI, m2.setT) }
+            }
+            // An overloaded operator or a user conversion: a static member of the class.
+            if (m2.kind == "op") { cls[m2.name] = makeStaticClosure(m2) }
+            if (m2.kind == "indexer") {
+                if (m2.getT != null) { cls.__index = csAccClosure(false, m2.pinfo, m2.getT) }
+                if (m2.setT != null) { cls.__setindex = csAccClosure(false, csIdxSetPI(m2.pinfo), m2.setT) }
+            }
+            // A nested type is a top level class of its own; the outer descriptor only
+            // carries a reference so 'Outer.Inner' resolves.
+            if (m2.nestedName != undefined) { cls[m2.nestedName] = globalScope[m2.nestedName] }
         }
         globalScope[name] = cls
+        lastBuiltClass = name
+        // The member table an unqualified 'M(args)' call consults (see makeSelfCall).
+        var tbl = {}
+        for (i = 0; i < members.length; i++) {
+            var m3 = members[i]
+            if (m3.kind == "method" || m3.kind == "abstract") { tbl[m3.name] = m3.statik ? "static" : "instance" }
+            if (m3.kind == "field") { tbl[m3.name] = m3.statik ? "static" : "instance" }
+        }
+        if (primary != null && primary != undefined) {
+            for (i = 0; i < primary.params.length; i++) { tbl[primary.params[i]] = "instance" }
+        }
+        csClassMembers[name] = tbl
+        if (sup != null) { csSupers[name] = sup.__name }
+    }
+    function makePrimaryClosure(pinfo, initFields) {
+        return function() {
+            var self = arguments[0]
+            initFields(self)
+            var args = []
+            for (var i = 1; i < arguments.length; i++) { args.push(arguments[i]) }
+            var sc = {}
+            csBindArgs(sc, pinfo, args)
+            for (var j = 0; j < pinfo.params.length; j++) { self[pinfo.params[j]] = sc[pinfo.params[j]] }
+        }
     }
     function makeCtorClosure(info, initFields) {
         return function() {
@@ -1063,27 +2508,92 @@ KwLet       = "let" KwEnd ;
             initFields(self)
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            invokeBody(info.params, info.body, self, "this", args)
+            csInvoke(info.pinfo, info.body, self, args)
         }
+    }
+    // An accessor closure: the same shape as a method, so it is called like one.
+    function csAccClosure(isStatic, pinfo, body) {
+        var m = {pinfo: pinfo, body: body}
+        return isStatic ? makeStaticClosure(m) : makeInstanceClosure(m)
+    }
+    // The set accessor of an indexer takes the index parameters plus 'value'.
+    function csIdxSetPI(pinfo) {
+        var names = []
+        var dflts = []
+        for (var i = 0; i < pinfo.params.length; i++) { names.push(pinfo.params[i]); dflts.push(null) }
+        names.push("value")
+        dflts.push(null)
+        return {params: names, dflts: dflts, ext: false, variadic: -1}
     }
     function makeInstanceClosure(m) {
         return function() {
             var self = arguments[0]
             var args = []
             for (var i = 1; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, self, "this", args)
+            return csInvoke(m.pinfo, m.body, self, args)
         }
     }
     function makeStaticClosure(m) {
         return function() {
             var args = []
             for (var i = 0; i < arguments.length; i++) args.push(arguments[i])
-            return invokeBody(m.params, m.body, undefined, "this", args)
+            return csInvoke(m.pinfo, m.body, undefined, args)
         }
     }
 
+    // ----- enums -----
+    function makeEnumMem(items) {
+        return {ename: items[0], einit: items.length > 1 ? items[1].einit : null}
+    }
+    function buildEnum(items) {
+        var name = items[0]
+        var obj = {__isclass: true, __isenum: true, __name: name}
+        var prev = null
+        scopes.push({})
+        for (var i = 1; i < items.length; i++) {
+            var m = items[i]
+            var v = anytype
+            if (m.einit != null) { v = m.einit() }
+            else if (prev == null) { v = 0 }
+            else { v = (csNumV(prev) + 1) | 0 }
+            obj[m.ename] = v
+            declVar(m.ename, v)
+            prev = v
+        }
+        scopes.pop()
+        globalScope[name] = obj
+        lastBuiltClass = name
+    }
+
+    // The members already seen for a 'partial' type, so every later part is built on top
+    // of them (C# merges the parts into one type).
+    var csPartials = {}
     function buildClass(items) {
-        buildClassFrom(items[0], items.slice(1))
+        var cmods = ""
+        var kind = ""
+        var name = ""
+        var primary = null
+        var tparams = []
+        var rest = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "string") { name = it; continue }
+            if (it.cmods != undefined) { cmods = it.cmods; continue }
+            if (it.ckind != undefined) { kind = it.ckind; continue }
+            if (it.tparams != undefined) { tparams = it.tparams; continue }
+            if (it.primary != undefined) { primary = it.primary; continue }
+            rest.push(it)
+        }
+        if (cmods.indexOf("partial") >= 0) {
+            var prev = hasOwn(csPartials, name) ? csPartials[name] : []
+            var all = []
+            for (var p = 0; p < prev.length; p++) { all.push(prev[p]) }
+            for (var q = 0; q < rest.length; q++) { all.push(rest[q]) }
+            rest = all
+            csPartials[name] = all
+        }
+        buildClassFrom(name, csFlatten(rest), kind, primary, tparams)
+        curClassName = classStack.pop()
     }
 
     // ----- Core library config (see lib/interp-core.js) -----
@@ -1094,21 +2604,63 @@ KwLet       = "let" KwEnd ;
         if (name == "Keys") return mcall(o, "keys", [])
         if (name == "Values") return mcall(o, "values", [])
         if (hasOwn(o, name)) { return o[name] }
+        // A property with a get accessor body ('int W { get { ... } }').
+        var g = csFindAcc(o, "__get_" + name)
+        if (g != undefined) { return (o.__isclass === true) ? g() : g(o) }
         return undefined
     }
     core.getIndex = csGetIndex
 
+    // Unqualified access to an instance member. C# lets a member body name a field or a
+    // primary-constructor parameter without 'this.', and a local of the same name shadows
+    // it - so this hook only fires once the scope chain has NO binding for the name, and
+    // then reads it off the innermost 'this'.
+    function csSelfWith(name) {
+        var sc = scopes
+        for (var i = sc.length - 1; i >= 0; i--) {
+            if (hasOwn(sc[i], "this")) {
+                var self = sc[i]["this"]
+                if (self !== undefined && self !== null && typeof self == "object" && hasOwn(self, name)) { return self }
+                return null
+            }
+        }
+        return null
+    }
+    core.varMiss = function(name) {
+        var self = csSelfWith(name)
+        return (self == null) ? null : {v: self[name]}
+    }
+    core.setMiss = function(name, value) {
+        var self = csSelfWith(name)
+        if (self == null) { return false }
+        self[name] = value
+        return true
+    }
+
     // The binary/compound operators, extended with the bitwise and shift forms (32-bit,
     // matching the compiled js_band/js_bor/... externals). The existing arithmetic and
     // comparison cases are preserved exactly; only the bitwise cases are new.
-    binOp = function(op, l, r) {
-        if (op == "+") return core.add(l, r)
+    // A char is unboxed for every operator except '+' (which may be a string concat and
+    // renders the glyph itself), so 'b' - 'a' == 1 and '\n' == (char)10 both hold.
+    binOp = function(op, l0, r0) {
+        // An overloaded operator on either operand's class wins over the built-in meaning.
+        if (csHasOps) {
+            var uf = csFindOp(l0, r0, "__op2_" + op)
+            if (uf != undefined) { return uf(l0, r0) }
+        }
+        if (op == "+") return core.add(l0, r0)
+        var l = anytype
+        var r = anytype
+        l = csNumV(l0)
+        r = csNumV(r0)
         if (op == "-") return (l - r) | 0
         if (op == "*") return (l * r) | 0
         if (op == "/") return (l / r) | 0
         if (op == "%") return (l % r) | 0
-        if (op == "==") return l === r
-        if (op == "!=") return l !== r
+        // == / != compare a char against the one-character string it renders as too, so a
+        // char that has come out of a string (s[i], .ToString()) still compares equal.
+        if (op == "==") return csEq(l0, r0)
+        if (op == "!=") return !csEq(l0, r0)
         if (op == "<")  return l < r
         if (op == ">")  return l > r
         if (op == "<=") return l <= r
@@ -1130,6 +2682,41 @@ KwLet       = "let" KwEnd ;
         if (op == "^=") return a ^ b
         if (op == "<<=") return a << b
         if (op == ">>=") return a >> b
+    }
+
+    // Unary '-' and '!' may be overloaded too.
+    makeNeg = function(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (csHasOps) {
+                var f = csFindAcc(v, "__op1_-")
+                if (f != undefined) { return f(v) }
+            }
+            return (0 - csNumV(v)) | 0
+        }
+    }
+    makeNot = function(t) {
+        return function() {
+            var v = anytype
+            v = t()
+            if (csHasOps) {
+                var f = csFindAcc(v, "__op1_!")
+                if (f != undefined) { return f(v) }
+            }
+            return !v
+        }
+    }
+    // An implicit user conversion at a typed declaration ('S12Vec d = 5;'): the target type
+    // declares 'implicit operator S12Vec(int n)', so the class carries a '__conv_S12Vec'.
+    function csImplicitConv(ty, v) {
+        if (!csHasOps) { return v }
+        if (v !== null && v !== undefined && typeof v == "object" && v.__class != undefined) { return v }
+        var cls = hasOwn(globalScope, ty) ? globalScope[ty] : undefined
+        if (cls == undefined || cls === null || cls.__isclass !== true) { return v }
+        var key = "__conv_" + ty
+        if (!hasOwn(cls, key)) { return v }
+        return cls[key](v)
     }
 
     // Import roots the runtime already provides (Console, collections, ...); importing

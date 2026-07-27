@@ -3,22 +3,28 @@
 IR interpreter and the MetaJS handle runtime (llvm.RunJS).
 
 The subset matches ruby-interpreter.abnf: local variables (create on first assignment,
-plus += -= *= /= %=), integers, double/single quoted strings with '#{expr}'
-interpolation, true/false/nil, symbols :sym (as strings), arithmetic and comparison,
-&& || ! and the words and/or/not, def with implicit return of the last expression and
-explicit return, class C ... end with instance methods, @ivars and C.new, if/elsif/else
-and unless (also as expressions), while/until with break/next, ranges 1..5 / 1...5
-(eager arrays) with .each, arrays with [] get/set, .push/.pop/.size/.length/.each/.map/
-.select/.include?, hashes {k => v} with [] get/set, .size/.keys/.values, blocks
-(do |x| ... end and { |x| ... }, real closures via js_closure) and puts/print.
+plus += -= *= /= %=), the numeric tower (Integer, Float, Rational 3r, Complex 2i - all
+distinct, so 7 / 2 == 3 and 7.0 / 2 == 3.5 hold at once), double/single quoted strings
+with '#{expr}' interpolation, heredocs, the percent literals, true/false/nil, Symbols
+(their own type, not strings), arithmetic and comparison as METHODS (a class with
+def + / def <=> / def [] joins the operator table), && || ! and the words and/or/not,
+def with implicit return of the last expression and explicit return, default / splat /
+keyword / block parameters, yield and block_given?, lambdas and procs, class C ... end
+with instance methods, def self.m class methods, @ivars, @@class variables, $globals,
+C.new and inheritance with super, if/elsif/else and unless (also as expressions),
+case/when (including when Integer and when *arr), while/until with break/next, ranges
+1..5 / 1...5 (eager arrays) with .each, arrays with [] get/set, hashes {k => v},
+blocks (do |x| ... end and { |x| ... }, real closures via js_closure) and puts/print.
 
 Locals, functions, @ivars, methods and blocks lower to the MetaJS handle runtime:
 scopes via js_scope_new / js_pyset_var (Ruby create-on-assign) / js_scope_get, closures
 via js_closure + js_call, objects/@ivars via js_obj_new / js_get / js_set, method
 dispatch via js_rmcall (the Ruby builtin methods on strings/arrays/hashes with Ruby
 truthiness and nil-on-empty; instances carry a __class descriptor, C.new runs initialize),
-arrays via js_arr_new / js_arr_push, indexing via js_pyget / js_pyset, hashes via
-js_dict_new. Ruby truthiness (only nil and false are falsy) is a single handle compare
+arrays via js_arr_new / js_arr_push, indexing via js_rget / js_rset, hashes via
+js_dict_new. The operators are Ruby's own externs (js_radd, js_rdiv, js_rcmp, ...):
+they carry the numeric tower (js_rflo / js_rrat / js_rcpx box Float, Rational and
+Complex), Ruby floor division, un-truncated Integers and the user operator methods. Ruby truthiness (only nil and false are falsy) is a single handle compare
 (a value handle >= the 'true' singleton). The whole program becomes jsmain(env, args);
 a self checking program ends with exit(failures). The same subset is interpreted
 directly by ruby-interpreter.abnf, and the two must agree.") ;
@@ -40,7 +46,11 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // The whole program is a sequence of definitions and statements executed in order.
 Program     <~~ buildMain(takeAll()) ~~>
-            = { Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement } ;
+            = { BodyItem } ;
+// A def / class / module is a STATEMENT in Ruby, not only a top-level item: it may
+// stand inside a method, an if, a block ('it "..." do def helper; end end' is the
+// shape most of a spec suite has). Body and Program therefore accept the same items.
+BodyItem    = Def <~~ push(makeDefStmt(pop())) ~~> | ClassDecl | ModuleDecl | Statement ;
 
 // module M ... end: accepted but not implemented (no namespacing). Its body is a
 // program of the same items; under -warn-unsupported they run in the current scope
@@ -72,7 +82,12 @@ GuardedBody <~~ push({body: makeGuardedBody(takeAll())}) ~~>
 SelfRecv    <~~ push({selfrecv: true}) ~~>
             = ( KwSelf | Name ) "." ;
 ParamList   = "(" [ Param { "," Param } ] ")" ;
-Param       = ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault | ParamSimple ;
+Param       = ParamFwd | ParamDSplat | ParamSplat | ParamBlock | ParamKw | ParamDefault | ParamSimple ;
+// def m(...) - argument forwarding. It is exactly `*__fwd_a, &__fwd_b` under two
+// reserved names, and `m(...)` on the call side splices the same two back out, so no
+// new binding machinery is needed at all.
+ParamFwd    <~~ push({param: "__fwd_a", splat: true}) ; push({param: "__fwd_b", blockp: true}) ~~>
+            = "..." ;
 ParamDSplat <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, kwrest: true}) ~~>
             = "**" [ Name <~~ push(up.in) ~~> ] ;
 ParamSplat  <~~ var n = takeAll(); push({param: n.length > 0 ? n[0] : null, splat: true}) ~~>
@@ -114,7 +129,7 @@ AliasName   = ":" SymName <~~ push(up.in) ~~> | MethodName <~~ push(up.in) ~~> ;
 Superclass  = "<" Name <~~ push({supername: up.in}) ~~> ;
 // Anything else in a class body - @@classvar = v, include M, private, alias - runs
 // as an ordinary statement with `self` bound to the class object.
-ClassBodyStmt <~~ push({cstmt: pop()}) ~~>
+ClassBodyStmt <~~ push({cstmt: pop(), ctext: up.in}) ~~>
             = Statement ;
 AttrDecl    <~~ push(makeAttr(takeAll())) ~~>
             = AttrKind <~~ push({akind: up.in}) ~~> AttrSym { "," AttrSym } ;
@@ -126,7 +141,7 @@ End         = "end" KwEnd ;
 // Body collects its statements into a single marker so the enclosing production
 // (if/while/def/block) sees exactly one item on the stack for its body.
 Body        <~~ push({body: makeBody(takeAll())}) ~~>
-            = { Statement } ;
+            = { BodyItem } ;
 
 // Every statement pushes exactly one thunk: function() -> value | signal.
 // A statement may be a post-condition loop (begin..end while/until COND, runs its
@@ -269,8 +284,11 @@ BitAndExpr  <~~ push(foldBinary(takeAll())) ~~>
 BitAndOp    = "&" !"&" !"." ;
 // A range 1..5 (inclusive) or 1...5 (exclusive), and the endless (5..) / beginless
 // (..9) forms; built as a lazy Range object.
+// The beginless form comes FIRST (PEG): it starts with the operator, so nothing else
+// can match it, and makeRange recognizes it by items[0] being the operator string.
 RangeExpr   <~~ push(makeRange(takeAll())) ~~>
-            = ShiftExpr [ RangeOp <~~ push(up.in) ~~> [ ShiftExpr ] ] ;
+            = RangeOp <~~ push(up.in) ~~> ShiftExpr
+            | ShiftExpr [ RangeOp <~~ push(up.in) ~~> [ ShiftExpr ] ] ;
 RangeOp     = "..." | ".." ;
 // The << and >> operators: on an array << appends (and yields the array, so
 // a << b << c chains), on a string it concatenates, on an integer it shifts.
@@ -321,12 +339,17 @@ MArgs       = "(" [ Arg { "," Arg } ] ")" [ Block ] | Block ;
 // recognition but not implemented - keyword argument (name: v), splat / double-splat
 // (*a, **h) and block pass (&blk, &:sym). The unsupported forms warn and become a
 // placeholder argument, so the call still compiles.
-Arg         = KwArg | SplatArg | BlockArg | Expression ;
+// FwdArg comes LAST: a leading "..." is first offered to Expression, which reads it
+// as a beginless exclusive range and only fails when no operand follows - so `f(...)`
+// forwards while `f(...9)` stays a range.
+Arg         = KwArg | SplatArg | BlockArg | Expression | FwdArg ;
+FwdArg      <~~ push({splatT: makeVarRef("__fwd_a")}) ; push({blkT: makeVarRef("__fwd_b")}) ~~>
+            = "..." ;
 KwArg       <~~ var n = takeAll(); push({kwname: n[0], kwT: n[1]}) ~~>
             = SymName <~~ push(up.in) ~~> ":" !":" Expression ;
 // *arr splices an array into the positional arguments, **h merges a hash into the
 // keyword arguments.
-SplatArg    <~~ push({splatT: pop()}) ~~>
+SplatArg    <~~ push({splatT: pop(), dsplat: up.in.slice(0, 2) == "**"}) ~~>
             = ( "**" | "*" ) Expression ;
 // &expr: pass expr as the call's block. A Proc is passed straight through; a symbol
 // becomes the "call this method on each element" proc (`[1, 2].map(&:to_s)`).
@@ -336,7 +359,7 @@ BlockArg    <~~ push({blkT: makeBlockArg(pop())}) ~~>
 // ->(a, b = 1) { ... } / -> { ... }: a lambda literal. Unlike a block it is a VALUE,
 // and a `return` inside it returns from the lambda itself.
 LambdaLit   <~~ push(makeLambda(takeAll())) ~~>
-            = "->" [ "(" [ Param { "," Param } ] ")" ] LambdaBody ;
+            = "->" [ "(" [ Param { "," Param } ] ")" | Param { "," Param } ] LambdaBody ;
 LambdaBody  = KwDo Body End | "{" [ BlockParams ] Body "}" ;
 
 // A block passed to a method call: a real closure over the current scope.
@@ -344,7 +367,9 @@ Block       <~~ push(makeBlock(takeAll())) ~~>
             = KwDo [ BlockParams ] Body End
             | "{" [ BlockParams ] Body "}" ;
 BlockParams <~~ push({bparams: takeAll()}) ~~>
-            = "|" [ BParam { "," BParam } ] "|" ;
+// The trailing comma is legal and meaningful: `{ |a, | ... }` forces the single
+// argument to be DESTRUCTURED rather than taken whole.
+            = "|" [ BParam { "," BParam } [ "," ] ] "|" ;
 // A block parameter may be a parenthesized group that destructures one element:
 // `[[1, [2, 3]]].each { |a, (b, c)| ... }`.
 BParam      = BGroup | Param ;
@@ -354,6 +379,7 @@ BGroup      <~~ push({pgroup: takeAll()}) ~~>
 Primary     = "(" Expression ")" | LambdaLit
             | IfExpr | UnlessExpr | WhileExpr | UntilExpr | ForExpr | CaseExpr | BeginExpr
             | ReturnExpr | BreakExpr | NextExpr | RedoExpr | RetryExpr | RaiseExpr | YieldExpr | SuperExpr
+            | HeredocLit
             | StrLit | CharLit | PercentLit
             | NumHex | NumBin | NumOct | Oct0Lit | RatLit | ImagLit | FloatLit | NumInt
             | SymLit
@@ -441,6 +467,127 @@ PctBrkPlain = "\x00"..."\x22" | "\x24"..."\x5a" | "\x5e"..."\U0010ffff" ;
 PctBrcChunk <~~ push({s: unescapeJs(up.in)}) ~~> = PctBrcTC { PctBrcTC } ;
 PctBrcTC    = TplEsc | HashChar | PctBrcPlain ;
 PctBrcPlain = "\x00"..."\x22" | "\x24"..."\x5b" | "\x5d"..."\x7a" | "\x7c" | "\x7e"..."\U0010ffff" ;
+
+// A heredoc: <<ID / <<-ID / <<~ID, optionally with a quoted marker (<<~'ID' is raw,
+// <<~"ID" interpolates like the bare form). The body lives on the FOLLOWING lines, so
+// it cannot be described by ordinary productions: HdScan is a lexer that scans from
+// the marker to the terminator line and returns ONE token covering all of it, and
+// makeHeredoc then splits that text back apart (indent strip for <<~, escapes and
+// '#{}' interpolation unless the marker was single-quoted).
+//
+// LIMIT: the marker must be the last thing on its line. Ruby also allows code after
+// it (`f(<<~A, x)`, `<<~A + <<~B`), which would need the body to be consumed at the
+// END of the line rather than at the marker; HdScan refuses those rather than
+// mis-parsing them, so they stay an honest parse failure.
+HeredocLit  <~~ push(makeHeredoc(up.in)) ~~>
+            = HdScan :whitespace(Whitespace) ;
+HdScan = :script(~~
+    (function() {
+        var no = abnf.newToken("\x01noheredoc", 0)
+        // Whitespace is not skipped before a script, so step over it (and comments)
+        // exactly like the token match that follows will.
+        var i = 0
+        var cc = c.peek(i)
+        var steps = 0
+        while (steps < 100000) {
+            steps = steps + 1
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i = i + 1; cc = c.peek(i); continue }
+            if (cc === 35) { while (cc !== 10 && cc !== -1) { i = i + 1; cc = c.peek(i) } continue }
+            break
+        }
+        var start = i
+        if (c.peek(i) !== 60 || c.peek(i + 1) !== 60) { return no }
+        i = i + 2
+        var squiggly = false
+        var dashed = false
+        if (c.peek(i) === 126) { squiggly = true; i = i + 1 }
+        else if (c.peek(i) === 45) { dashed = true; i = i + 1 }
+        var quote = 0
+        var q = c.peek(i)
+        if (q === 39 || q === 34) { quote = q; i = i + 1 }
+        // An unquoted, undecorated marker must start with an upper-case letter or '_',
+        // which is what keeps `a << b' (the append/shift operator) out of here.
+        var f = c.peek(i)
+        var upperOk = (f >= 65 && f <= 90) || f === 95
+        if (!upperOk && quote === 0 && !squiggly && !dashed) { return no }
+        if (!((f >= 65 && f <= 90) || (f >= 97 && f <= 122) || f === 95)) { return no }
+        var id = ""
+        var ch = f
+        while ((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95) {
+            id = id + String.fromCharCode(ch)
+            i = i + 1
+            ch = c.peek(i)
+        }
+        if (quote !== 0) {
+            if (c.peek(i) !== quote) { return no }
+            i = i + 1
+        }
+        // Nothing but blanks (or a comment) may follow the marker on its own line.
+        var j = i
+        var dd = c.peek(j)
+        while (dd === 32 || dd === 9 || dd === 13) { j = j + 1; dd = c.peek(j) }
+        if (dd === 35) { while (dd !== 10 && dd !== -1) { j = j + 1; dd = c.peek(j) } }
+        if (dd !== 10) { return no }
+        j = j + 1
+        // Walk whole lines until one is exactly the marker (indented only when the
+        // heredoc is <<~ or <<-), and stop after that line.
+        var end = -1
+        var guard = 0
+        while (guard < 1000000) {
+            guard = guard + 1
+            var ls = j
+            var k = j
+            var b = c.peek(k)
+            if (b === -1) { end = k; break }
+            if (squiggly || dashed) {
+                while (b === 32 || b === 9) { k = k + 1; b = c.peek(k) }
+            }
+            var m = 0
+            while (m < id.length && c.peek(k + m) === id.charCodeAt(m)) { m = m + 1 }
+            var after = c.peek(k + m)
+            if (m === id.length && (after === 10 || after === 13 || after === -1)) {
+                k = k + m
+                if (c.peek(k) === 13) { k = k + 1 }
+                if (c.peek(k) === 10) { k = k + 1 }
+                end = k
+                break
+            }
+            // Not the terminator: skip the whole line.
+            while (b !== 10 && b !== -1) { k = k + 1; b = c.peek(k) }
+            if (b === -1) { return no }
+            j = k + 1
+            if (ls === j) { return no }
+        }
+        if (end < 0) { return no }
+        // Rebuild the exact source slice as a token. c.peek answers BYTES, so the
+        // UTF-8 has to be decoded here or a non-ASCII body would never match.
+        var out = ""
+        var p = start
+        while (p < end) {
+            var b0 = c.peek(p)
+            if (b0 < 128) { out = out + String.fromCharCode(b0); p = p + 1; continue }
+            if (b0 >= 240) {
+                var cp4 = ((b0 - 240) * 262144) + ((c.peek(p + 1) - 128) * 4096) + ((c.peek(p + 2) - 128) * 64) + (c.peek(p + 3) - 128)
+                var off = cp4 - 65536
+                out = out + String.fromCharCode(55296 + ((off - (off % 1024)) / 1024)) + String.fromCharCode(56320 + (off % 1024))
+                p = p + 4
+                continue
+            }
+            if (b0 >= 224) {
+                out = out + String.fromCharCode(((b0 - 224) * 4096) + ((c.peek(p + 1) - 128) * 64) + (c.peek(p + 2) - 128))
+                p = p + 3
+                continue
+            }
+            if (b0 >= 192) {
+                out = out + String.fromCharCode(((b0 - 192) * 64) + (c.peek(p + 1) - 128))
+                p = p + 2
+                continue
+            }
+            return no
+        }
+        return abnf.newToken(out, 0)
+    })()
+~~) ;
 
 // ?a / ?\n: the one-character string literal. The body may not start with a space,
 // which is exactly what keeps the ternary `c ? a : b` out of it.
@@ -826,6 +973,58 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     include("lib/compile-core.js")
 
     var hidCount = 0
+    // The argument array of the function being emitted (js_rblock reads the block out
+    // of it for block_given? and for a &blk parameter).
+    var curArgsV = null
+    // ----- non-local control flow OUT of a block -----
+    // A block is its own IR function, called from the Go runtime (Array#each, ...), so
+    // a `break' inside it cannot branch to anything in the frame that wrote the block.
+    // Ruby's rule is that `break v' ends the CALL the block was given to and makes that
+    // call yield v, `next v' ends this one block run with v, and `redo' re-runs the
+    // block body with the same bindings.
+    //   next  -> a plain ret of the block function (nothing else to do).
+    //   redo  -> a branch back to curRedoB, the block created right after the parameter
+    //            binding, so the bindings survive.
+    //   break -> js_throw of a marker exception, caught by the js_try that wraps every
+    //            call carrying a literal block (emitBlkBreakCall below). The marker is
+    //            built with js_pyexc, whose {__class:{__name}, args} shape js_is_type
+    //            recognizes on ANY value - so the catch can tell it from a real Ruby
+    //            exception without probing fields of a number or a string.
+    // curIsBlockFn / curRedoB are emit-time state, saved and restored by emitFunc, so a
+    // def or a lambda written INSIDE a block gets the ordinary treatment again.
+    var curIsBlockFn = false
+    var curRedoB = null
+    var blkBrkName = "__blkbrk"
+    // The same marker trick carries `retry' out of a rescue clause closure: the clause
+    // returns it, and the loop makeTry wraps around the js_try re-runs the begin body.
+    var retryName = "__blkretry"
+    var curInRescue = false
+    function hasBlockArg(args) {
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i]
+            if (a != null && a != undefined && typeof a != "function" && a.blkT != undefined) { return true }
+        }
+        return false
+    }
+    // Emit `mk' (a call that was given a literal block) inside a js_try that turns the
+    // block's `break v' marker back into the value of the call, and re-raises anything
+    // else unchanged.
+    function emitBlkBreakCall(b, mk) {
+        var tryIdx = emitFunc([], function(bb) { return mk(bb) }, false)
+        var tryClo = callExt(b, "js_closure", [handle(tryIdx), curScopeV])
+        var catchIdx = emitFunc(["$brk"], function(bb) {
+            var ev = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$brk")])
+            var mineB = curF.NewBlock("")
+            var otherB = curF.NewBlock("")
+            bb.NewCondBr(truthy(bb, callExt(bb, "js_is_type", [ev, emitStr(bb, blkBrkName)])), mineB, otherB)
+            callExt(otherB, "js_throw", [ev])
+            otherB.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+            var argsV = callExt(mineB, "js_get", [ev, emitStr(mineB, "args")])
+            return {b: mineB, v: callExt(mineB, "js_rget", [argsV, emitNum(mineB, 0)])}
+        }, false)
+        var catchClo = callExt(b, "js_closure", [handle(catchIdx), curScopeV])
+        return {b: b, v: callExt(b, "js_try", [tryClo, catchClo, hUndef])}
+    }
 
     function fail(msg) { println("ruby compiler error: " + msg); exit(1) }
 
@@ -873,10 +1072,20 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }
     }
     makeBreak = function(items) {
-        // break value is discarded (loops yield nil); still evaluate it for effects.
+        // In a loop the break value is discarded (loops yield nil); still evaluate it
+        // for effects. Directly in a block body it is the value of the whole call, and
+        // travels there as the js_pyexc marker that emitBlkBreakCall unwraps.
         var t = items.length > 0 ? items[0] : null
         return function(b) {
-            if (t != null) { var r = t(b); b = r.b }
+            var v = hNull
+            if (t != null) { var r = t(b); b = r.b; v = r.v }
+            if (loopStack.length == 0 && curIsBlockFn) {
+                var margs = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [margs, v])
+                callExt(b, "js_throw", [callExt(b, "js_pyexc", [emitStr(b, blkBrkName), margs])])
+                b.NewRet(hUndef) // never reached: js_throw unwinds on the host side
+                return {b: deadBlock(), v: hNull}
+            }
             // A branch to the enclosing loop, or a control signal out of a begin body.
             emitBreak(b)
             return {b: deadBlock(), v: hNull}
@@ -885,7 +1094,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     function makeNext(items) {
         var t = items.length > 0 ? items[0] : null
         return function(b) {
-            if (t != null) { var r = t(b); b = r.b }
+            var v = hNull
+            if (t != null) { var r = t(b); b = r.b; v = r.v }
+            // `next v' directly in a block ends THIS block run with v: an ordinary ret.
+            if (loopStack.length == 0 && curIsBlockFn) {
+                b.NewRet(v)
+                return {b: deadBlock(), v: hNull}
+            }
             emitContinue(b)
             return {b: deadBlock(), v: hNull}
         }
@@ -1029,6 +1244,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         if (items.length == 1) { return items[0] }
         // An endless range (5..) has no upper bound to count to, and the lowering
         // materializes ranges as arrays - so it stays unsupported rather than hanging.
+        if (typeof items[0] == "string") { return notImplExpr("beginless range (..9)", 0) }
         if (items.length < 3) { return notImplExpr("endless range (5..)", 0) }
         var loT = items[0]
         var op = items[1]
@@ -1145,9 +1361,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 else {
                     var r = items[i].e(b)
                     b = r.b
-                    pv = r.v
+                    // '#{v}' is Ruby's to_s: a Float keeps its point, an Array renders
+                    // like #inspect, a Symbol is its bare name.
+                    pv = callExt(b, "js_rstr", [r.v])
                 }
-                v = callExt(b, "js_jadd", [v, pv])
+                v = callExt(b, "js_radd", [v, pv])
             }
             return {b: b, v: v}
         }
@@ -1170,33 +1388,61 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- member chain: .method(args)/.method{block}, .field, [index], .new -----
     // C.new / C.new(args): build the instance, attach __class, run initialize.
     // Works both with parens (mcall) and without (a bare .new field access).
+    // C.new(args). js_rnew attaches __class, then dispatches initialize ON THE
+    // INSTANCE - the lookup that walks __class and its __super chain, so a subclass
+    // without an initialize of its own inherits the one above it. A builtin class
+    // (Proc, the exception classes) is constructed by js_rnew itself.
     function emitNew(b, cur, argThunks) {
-        var objV = callExt(b, "js_obj_new", [])
-        callExt(b, "js_set", [objV, emitStr(b, "__class"), cur])
-        var argsV = callExt(b, "js_arr_new", [])
-        for (var k = 0; k < argThunks.length; k++) {
-            var ra = argThunks[k](b)
-            b = ra.b
-            callExt(b, "js_arr_push", [argsV, ra.v])
-        }
-        // Dispatched on the INSTANCE, not read off the class descriptor: that is the
-        // lookup that walks __class and its __super chain, so a subclass without an
-        // initialize of its own inherits the one above it.
-        callExt(b, "js_rmcall", [objV, emitStr(b, "initialize"), argsV])
-        return {b: b, v: objV}
+        var ea = emitArgs(b, argThunks)
+        b = ea.b
+        return {b: b, v: callExt(b, "js_rnew", [cur, ea.v])}
     }
-    // Ruby's Array#== / Hash#== compare structurally. js_pyeq/js_pyne are exactly that
-    // (Python's == over the same runtime values), so the binary operator table simply
-    // points at them instead of the identity comparisons js_seq/js_sne.
-    binExt["=="] = "js_pyeq"
-    binExt["!="] = "js_pyne"
-    // Ruby's Integer#/ FLOORS (-7 / 2 == -4) and Integer#% takes the sign of the
-    // DIVISOR (-7 % 3 == 2). js_fdiv/js_fmod are exactly those two operations - they
-    // already back Python's // and %, which agree with Ruby here.
-    binExt["/"] = "js_fdiv"
-    binExt["%"] = "js_fmod"
-    binExt["/="] = "js_fdiv"
-    binExt["%="] = "js_fmod"
+    // ----- The Ruby operator table -----
+    // Every binary operator routes to a Ruby specific extern (js_r*, abnf/jsrt.go)
+    // rather than to the shared Java/JS ones, because Ruby's arithmetic differs on
+    // three counts that the shared operators cannot express at once:
+    //   - the NUMERIC TOWER: Integer, Float, Rational and Complex are distinct, so
+    //     7 / 2 == 3 and 7.0 / 2 == 3.5 hold at the same time (js_rflo/js_rrat/js_rcpx
+    //     box the three non-integer kinds);
+    //   - Integer / and % FLOOR (-7 / 2 == -4, -7 % 3 == 2), and an Integer is never
+    //     truncated to 32 bit (10_000_000_000 * 10 is exact);
+    //   - the operators are METHODS: a user class with `def +` / `def <=>` / `def ==`
+    //     dispatches to its own, and String/Array carry their own + - * % << .
+    // The comparisons are Ruby's too: == is structural over Array/Hash and numeric
+    // across the tower, <=> yields nil for incomparable values, === is case equality.
+    binExt["+"] = "js_radd"
+    binExt["-"] = "js_rsub"
+    binExt["*"] = "js_rmul"
+    binExt["/"] = "js_rdiv"
+    binExt["%"] = "js_rmod"
+    binExt["+="] = "js_radd"
+    binExt["-="] = "js_rsub"
+    binExt["*="] = "js_rmul"
+    binExt["/="] = "js_rdiv"
+    binExt["%="] = "js_rmod"
+    binExt["=="] = "js_req"
+    binExt["!="] = "js_rne"
+    binExt["==="] = "js_rcase"
+    binExt["<"] = "js_rlt"
+    binExt[">"] = "js_rgt"
+    binExt["<="] = "js_rle"
+    binExt[">="] = "js_rge"
+    binExt["<=>"] = "js_rcmp"
+    binExt["&"] = "js_rband"
+    binExt["|"] = "js_rbor"
+    binExt["^"] = "js_rbxor"
+    binExt["**"] = "js_rpow"
+    // The shared table truncates - * / % to 32 bit (Java/Kotlin Int semantics); a Ruby
+    // Integer has no width, so nothing is wrapped here.
+    wraps = {}
+    // Unary minus is a tower operation too (-2.5 stays a Float, and a user class may
+    // define -@), so it replaces the shared js_neg + 32 bit wrap.
+    makeNeg = function(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_rneg", [r.v])}
+        }
+    }
 
     core.indexExt = "js_rget"    // [i] over arrays, strings and hashes; nil when absent
     foldCallMember = function(items) {
@@ -1214,6 +1460,22 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                         var rn = emitNew(b, cur, unwrapArgs(s.args))
                         b = rn.b
                         cur = rn.v
+                    } else if (hasBlockArg(s.args)) {
+                        // A call with a literal block can be ended by a `break' inside
+                        // that block; the receiver travels into the try closure through
+                        // a hidden scope slot (an IR value cannot cross a closure).
+                        hidCount++
+                        var recvName = "$blkrecv" + hidCount
+                        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, recvName), cur])
+                        var mname = s.name
+                        var margsT = unwrapArgs(s.args)
+                        var rw = emitBlkBreakCall(b, function(bb) {
+                            var recvV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, recvName)])
+                            var ia = emitArgs(bb, margsT)
+                            return {b: ia.b, v: callExt(ia.b, "js_rmcall", [recvV, emitStr(ia.b, mname), ia.v])}
+                        })
+                        b = rw.b
+                        cur = rw.v
                     } else {
                         var ea = emitArgs(b, unwrapArgs(s.args))
                         b = ea.b
@@ -1272,24 +1534,68 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- blocks: an IR function closed over the defining scope (js_closure) -----
-    function makeBlock(items) {
+    // One parameter record as emitParams wants it: the name plus the form flags. A
+    // parenthesized group ((b, c)) keeps its own sub-parameters.
+    function paramDesc(it) {
+        if (it.pgroup != undefined) {
+            var subs = []
+            for (var g = 0; g < it.pgroup.length; g++) { subs.push(paramDesc(it.pgroup[g])) }
+            hidCount++
+            return {name: "$grp" + hidCount, pgroup: subs}
+        }
+        var pn = it.param
+        if (pn == null || pn == undefined) { pn = "$rest" }
+        return {name: pn, defT: it.defT, splat: it.splat === true, kw: it.kw === true,
+                kwrest: it.kwrest === true, blockp: it.blockp === true}
+    }
+    function blockParams(items) {
         var params = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].bparams != undefined) {
+                var bp = items[i].bparams
+                for (var p = 0; p < bp.length; p++) { params.push(paramDesc(bp[p])) }
+            }
+        }
+        return params
+    }
+    function blockBodyOf(items) {
         var body = null
         for (var i = 0; i < items.length; i++) {
             if (items[i].body != undefined) { body = items[i].body }
-            else { params = items[i].bparams }
         }
-        var pnames = []
-        for (var p = 0; p < params.length; p++) { pnames.push(params[p].param) }
-        var bodyStmt = function(b) {
+        if (body == null) { body = makeBody([]) }
+        return function(b) {
             var r = body(b)
             r.b.NewRet(r.v)
             return {b: deadBlock(), v: hNull}
         }
+    }
+    function makeBlock(items) {
+        var params = blockParams(items)
+        var bodyStmt = blockBodyOf(items)
         return {blkT: function(b) {
-            var idx = emitFunc(pnames, bodyStmt, false)
+            var idx = emitFunc(params, bodyStmt, false, false, true)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
         }}
+    }
+    // ->(a, b = 1) { ... }: a lambda is a VALUE (an ordinary closure), not a block.
+    // js_rlambda marks it so `lambda?` can tell it from a proc.
+    function makeLambda(items) {
+        var params = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].body == undefined && items[i].bparams == undefined
+                && typeof items[i] == "object" && (items[i].param != undefined
+                || items[i].splat === true || items[i].kwrest === true || items[i].pgroup != undefined)) {
+                params.push(paramDesc(items[i]))
+            }
+        }
+        var bps = blockParams(items)
+        for (var q = 0; q < bps.length; q++) { params.push(bps[q]) }
+        var bodyStmt = blockBodyOf(items)
+        return function(b) {
+            var idx = emitFunc(params, bodyStmt, false)
+            return {b: b, v: callExt(b, "js_rlambda", [callExt(b, "js_closure", [handle(idx), curScopeV])])}
+        }
     }
     // A block reaches a call as a marker, so a call can tell it from its arguments.
     // The LLVM lowering keeps the interpreter's older convention of handing the block
@@ -1297,36 +1603,93 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // at the end of the argument list.
     // name: v and *arr / **h call arguments have no lowering yet; each becomes the
     // notImplemented placeholder so the call itself still compiles.
-    function rubyPlainArgs(args) {
-        var out = []
-        for (var i = 0; i < args.length; i++) {
-            if (args[i].kwname != undefined) { out.push(notImplExpr("keyword argument (name:)", 0)) }
-            else if (args[i].splatT != undefined) { out.push(notImplExpr("splat argument (* / **)", 0)) }
-            else { out.push(args[i]) }
+    // An argument list reaches the emitter as a mix of plain thunks and markers, and
+    // stays that way: emitArgs below is what turns it into the runtime argument array.
+    function unwrapArgs(args) { return args }
+    // The Ruby calling convention, built here once for every call form:
+    //   positional args..., [keyword Hash], [block closure]
+    // A *splat splices its array into the positional part, a **splat merges into the
+    // keyword Hash, `name: v` adds one entry to it, and the block (a literal one or
+    // &expr) is always LAST - which is what lets the callee find it with js_rblock
+    // whatever else was passed (see emitParams).
+    emitArgs = function(b, args) {
+        var argsV = callExt(b, "js_arr_new", [])
+        var kw = []
+        var blkT = null
+        var j
+        for (j = 0; j < args.length; j++) {
+            var a = args[j]
+            if (a != null && a != undefined && typeof a != "function" && a.blkT != undefined) { blkT = a.blkT }
         }
-        return out
-    }
-    function splitBlock(args) {
-        var plain = []
-        var blk = null
-        for (var i = 0; i < args.length; i++) {
-            if (args[i].blkT != undefined) { blk = args[i].blkT } else { plain.push(args[i]) }
+        for (j = 0; j < args.length; j++) {
+            var e = args[j]
+            if (e == null || e == undefined) { continue }
+            if (typeof e == "function") {
+                var r = e(b)
+                b = r.b
+                callExt(b, "js_arr_push", [argsV, r.v])
+                continue
+            }
+            if (e.blkT != undefined) { continue }
+            if (e.kwname != undefined) { kw.push(e); continue }
+            if (e.splatT != undefined) {
+                if (e.dsplat === true) { kw.push(e); continue }
+                var rs = e.splatT(b)
+                b = emitSpliceInto(rs.b, argsV, rs.v)
+                continue
+            }
         }
-        return {args: plain, blk: blk}
-    }
-    function unwrapArgs(args) {
-        var sp = splitBlock(rubyPlainArgs(args))
-        if (sp.blk == null) { return sp.args }
-        var out = []
-        for (var i = 0; i < sp.args.length; i++) { out.push(sp.args[i]) }
-        out.push(sp.blk)
-        return out
+        if (kw.length > 0) {
+            var d = callExt(b, "js_dict_new", [])
+            for (j = 0; j < kw.length; j++) {
+                if (kw[j].kwname != undefined) {
+                    var rv = kw[j].kwT(b)
+                    b = rv.b
+                    callExt(b, "js_pyset", [d, callExt(b, "js_sym", [emitStr(b, kw[j].kwname)]), rv.v])
+                } else {
+                    var rh = kw[j].splatT(b)
+                    b = emitMergeDict(rh.b, d, rh.v)
+                }
+            }
+            callExt(b, "js_arr_push", [argsV, d])
+        }
+        if (blkT != null) {
+            var rb = blkT(b)
+            b = rb.b
+            callExt(b, "js_arr_push", [argsV, rb.v])
+        }
+        return {b: b, v: argsV}
     }
     // &expr as an argument: the value is handed over as the block itself.
-    function makeBlockArg(t) { return t }
-    // yield and redo need the block protocol the interpreter grew; not lowered yet.
-    function makeYield(items, pos) { return notImplExpr("yield", pos) }
-    function makeRedo(pos) { return notImplExpr("redo", pos) }
+    // &expr as an argument: a Proc travels straight through, a Symbol becomes the
+    // "call this method on each element" proc (js_rsymproc).
+    function makeBlockArg(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_rsymproc", [r.v])}
+        }
+    }
+    // yield ARGS: call the block the running method was given. The block is the
+    // trailing argument of the call (see emitArgs / emitParams), which js_rblock
+    // reads out of the method's own argument array.
+    function makeYield(items, pos) {
+        var args = unwrapArgs(items)
+        return function(b) {
+            var blkV = callExt(b, "js_rblock", [curArgsV])
+            var ea = emitArgs(b, args)
+            b = ea.b
+            return {b: b, v: callExt(b, "js_call", [blkV, hUndef, ea.v])}
+        }
+    }
+    // redo re-runs the current block body with the SAME bindings: a branch back to the
+    // block emitFunc opened right after binding the parameters.
+    function makeRedo(pos) {
+        return function(b) {
+            if (curRedoB == null) { notImpl("redo outside of a block", pos); return {b: b, v: hUndef} }
+            b.NewBr(curRedoB)
+            return {b: deadBlock(), v: hNull}
+        }
+    }
     // for VAR[, VAR] in COLL ... end, lowered as a counted loop over the collection.
     // `for` opens no scope, so the loop variable is written with the ordinary local
     // assignment rule and outlives the loop, exactly as in Ruby.
@@ -1405,17 +1768,41 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // ----- assignment (locals via create-on-assign, @ivars, index/field paths) -----
     makeTargetRef = function(items) {
         var head = items[0]
-        if (head.gvar != undefined) { notImpl("$global variable", 0) }
-        if (head.cvar != undefined) { notImpl("@@class variable", 0) }
-        return {ivar: head.ivar, name: head.var != undefined ? head.var : head.gvar,
-                path: items.slice(1)}
+        return {ivar: head.ivar, gvar: head.gvar, cvar: head.cvar,
+                name: head.var, path: items.slice(1)}
     }
     function emitHead(b, ref) {
         if (ref.ivar != undefined) {
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             return {b: b, v: callExt(b, "js_get", [selfV, emitStr(b, ref.ivar)])}
         }
+        if (ref.gvar != undefined) {
+            return {b: b, v: callExt(b, "js_rgget", [emitStr(b, ref.gvar)])}
+        }
+        if (ref.cvar != undefined) {
+            var selfC = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            return {b: b, v: callExt(b, "js_rcvget", [selfC, emitStr(b, ref.cvar)])}
+        }
         return {b: b, v: callExt(b, "js_scope_get", [curScopeV, emitStr(b, ref.name)])}
+    }
+    // The write half of emitHead: the four kinds of un-pathed target.
+    function emitHeadSet(b, ref, v) {
+        if (ref.ivar != undefined) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            callExt(b, "js_set", [selfV, emitStr(b, ref.ivar), v])
+            return b
+        }
+        if (ref.gvar != undefined) {
+            callExt(b, "js_rgset", [emitStr(b, ref.gvar), v])
+            return b
+        }
+        if (ref.cvar != undefined) {
+            var selfC = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            callExt(b, "js_rcvset", [selfC, emitStr(b, ref.cvar), v])
+            return b
+        }
+        callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
+        return b
     }
     function emitRefPath(b, ref) {
         var rh = emitHead(b, ref)
@@ -1424,7 +1811,7 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
-            else { var ri = s.idx(b); b = ri.b; o = callExt(b, "js_pyget", [o, ri.v]) }
+            else { var ri = s.idx(b); b = ri.b; o = callExt(b, core.indexExt, [o, ri.v]) }
         }
         var last = ref.path[ref.path.length - 1]
         if (last.key != undefined) { return {b: b, obj: o, key: emitStr(b, last.key), dict: true} }
@@ -1443,21 +1830,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             b = r.b
             var v = r.v
             if (ref.path.length == 0) {
-                if (ref.ivar != undefined) {
-                    var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-                    if (op != "=") {
-                        var old = callExt(b, "js_get", [selfV, emitStr(b, ref.ivar)])
-                        v = emitBin(b, op, old, v)
-                    }
-                    callExt(b, "js_set", [selfV, emitStr(b, ref.ivar), v])
-                } else {
-                    var nameV = emitStr(b, ref.name)
-                    if (op != "=") {
-                        var oldl = callExt(b, "js_scope_get", [curScopeV, nameV])
-                        v = emitBin(b, op, oldl, v)
-                    }
-                    callExt(b, "js_pyset_var", [curScopeV, nameV, v])
+                if (op != "=") {
+                    var rold = emitHead(b, ref)
+                    b = rold.b
+                    v = emitBin(b, op, rold.v, v)
                 }
+                b = emitHeadSet(b, ref, v)
             } else {
                 var p = emitRefPath(b, ref)
                 b = p.b
@@ -1471,10 +1849,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     callExt(b, "js_set", [p.obj, p.key, v])
                 } else {
                     if (op != "=") {
-                        var oldm = callExt(b, "js_pyget", [p.obj, p.key])
+                        var oldm = callExt(b, core.indexExt, [p.obj, p.key])
                         v = emitBin(b, op, oldm, v)
                     }
-                    callExt(b, "js_pyset", [p.obj, p.key, v])
+                    callExt(b, "js_rset", [p.obj, p.key, v])
                 }
             }
             return {b: b, v: v}
@@ -1518,8 +1896,13 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                     var testV
                     if (subject != null) {
                         var subjV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, subjName)])
-                        if (vals[k].isRange) { testV = truthy(b, callExt(b, "js_pyin", [subjV, rv.v])) }
-                        else { testV = truthy(b, callExt(b, "js_seq", [subjV, rv.v])) }
+                        // when V is Ruby's `V === subject`: a Range (an eager array
+                        // here) and a `when *arr` splat match by MEMBERSHIP, a class
+                        // by is_a?, everything else by ==. js_rcase is all three.
+                        if (vals[k].isRange || vals[k].isSplat === true) {
+                            testV = truthy(b, callExt(b, "js_rcase", [rv.v, subjV]))
+                        }
+                        else { testV = truthy(b, callExt(b, "js_rwhen", [rv.v, subjV])) }
                     } else {
                         testV = truthy(b, rv.v)
                     }
@@ -1645,17 +2028,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // items = [v, op, v, op, v, ...]; only << (array append) is lowered.
     function makeShift(items) {
         if (items.length == 1) { return items[0] }
-        for (var k = 1; k < items.length; k += 2) {
-            if (items[k] == ">>") { return notImplExpr(">> (right shift)", 0) }
-        }
         return function(b) {
             var r = items[0](b)
             b = r.b
             var v = r.v
-            for (var i = 2; i < items.length; i += 2) {
-                var rr = items[i](b)
+            for (var i = 1; i < items.length; i += 2) {
+                var rr = items[i + 1](b)
                 b = rr.b
-                callExt(b, "js_arr_push", [v, rr.v])
+                v = callExt(b, items[i] == "<<" ? "js_rshl" : "js_rshr", [v, rr.v])
             }
             return {b: b, v: v}
         }
@@ -1676,14 +2056,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                 else {
                     var ri = st.idx(b)
                     b = ri.b
-                    v = callExt(b, "js_pyget", [v, ri.v])
+                    v = callExt(b, core.indexExt, [v, ri.v])
                 }
             }
             for (var i = 0; i < vals.length; i++) {
                 var rv = vals[i](b)
                 b = rv.b
-                callExt(b, "js_arr_push", [v, rv.v])
+                v = callExt(b, "js_rshl", [v, rv.v])
             }
+            // An array is mutated in place, but a Ruby string is a VALUE here, so the
+            // result has to be written back to the target for `s << "bc"` to update it.
+            b = emitAssignTarget(b, ref, v)
             return {b: b, v: v}
         }
     }
@@ -1691,19 +2074,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // a, b = x, y: evaluate every right-hand value first, then write each target;
     // a single right-hand array is unpacked positionally (js_pyget by index).
     function emitAssignTarget(b, ref, v) {
-        if (ref.path.length == 0) {
-            if (ref.ivar != undefined) {
-                var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
-                callExt(b, "js_set", [selfV, emitStr(b, ref.ivar), v])
-            } else {
-                callExt(b, "js_pyset_var", [curScopeV, emitStr(b, ref.name), v])
-            }
-            return b
-        }
+        if (ref.path.length == 0) { return emitHeadSet(b, ref, v) }
         var p = emitRefPath(b, ref)
         b = p.b
         if (p.dict) { callExt(b, "js_set", [p.obj, p.key, v]) }
-        else { callExt(b, "js_pyset", [p.obj, p.key, v]) }
+        else { callExt(b, "js_rset", [p.obj, p.key, v]) }
         return b
     }
     // a, b = ... : the right-hand side becomes ONE runtime array (a lone array value is
@@ -1812,14 +2187,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var hname = undefined
         var body = null
         var typed = false
+        var etypes = []
         for (var i = 0; i < items.length; i++) {
-            if (items[i].etype != undefined) { typed = true }
+            if (items[i].etype != undefined) { typed = true; etypes.push(items[i].etype) }
             else if (items[i].hname != undefined) { hname = items[i].hname }
             else if (items[i].rbody != undefined) { body = items[i].rbody }
         }
-        // The lowering has no runtime type test, so a typed clause still catches
-        // everything; that is the pre-existing behavior, made explicit.
-        return {handler: body, hname: hname, etypes: typed}
+        // A clause with no class list is a CATCH-ALL here (an empty etypes list).
+        // Ruby's default is StandardError, but this lowering also lets a program raise
+        // a plain value (an Integer, a String, a Hash), which no class would match -
+        // so an untyped clause takes everything except the internal block markers.
+        return {handler: body, hname: hname, etypes: etypes}
     }
     // The begin body and the first rescue compile to ctl closures handed to js_try (so a
     // return/break/next leaving them becomes a control signal that excDispatch re-issues);
@@ -1828,11 +2206,12 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // (a raise in an else is then caught by the rescue - a rare deviation). ensure is a
     // plain (non-ctl) finally closure that js_try always runs.
     function makeTry(items, pos) {
-        var tryT = anytype, handlerT = anytype, hname = anytype, elseT = anytype, finallyT = anytype
+        var tryT = anytype, elseT = anytype, finallyT = anytype
+        var clauses = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].trybody != undefined) { tryT = items[i].trybody }
             else if (items[i].handler != undefined) {
-                if (handlerT == undefined) { handlerT = items[i].handler; hname = items[i].hname }
+                clauses.push({body: items[i].handler, hname: items[i].hname, etypes: items[i].etypes})
             }
             else if (items[i].elsebody != undefined) { elseT = items[i].elsebody }
             else if (items[i].finalbody != undefined) { finallyT = items[i].finalbody }
@@ -1844,18 +2223,72 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             // emitted there is unreachable (the signal already fired).
             bodyT = function(b) { return elseT(tryT(b).b) }
         }
+        // The rescue clauses become ONE catch closure: js_try takes exactly one, so the
+        // typed dispatch has to be EMITTED as a chain of `CLASS === exception' tests
+        // (js_rcase, the same test case/when uses) rather than iterated at run time.
+        // A clause that matches binds the exception under its own => name and runs its
+        // body; when none matches, the exception is re-raised unchanged, so an outer
+        // begin still sees it.
+        var catchT = null
+        if (clauses.length > 0) {
+            catchT = function(b) {
+                curInRescue = true
+                var excV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$exc")])
+                hidCount++
+                var rName = "$resc" + hidCount
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, rName), hNull])
+                var endB = curF.NewBlock("")
+                for (var ci = 0; ci < clauses.length; ci++) {
+                    var cl = clauses[ci]
+                    var runB = curF.NewBlock("")
+                    var nextB = curF.NewBlock("")
+                    if (cl.etypes.length == 0) {
+                        // A catch-all clause: everything but the block break / retry
+                        // markers, which are control flow rather than exceptions.
+                        var notMark = callExt(b, "js_not", [callExt(b, "js_is_type", [excV, emitStr(b, blkBrkName)])])
+                        b.NewCondBr(truthy(b, notMark), runB, nextB)
+                    }
+                    // `rescue A, B => e': any of the listed classes matches.
+                    for (var ti = 0; ti < cl.etypes.length; ti++) {
+                        var moreB = (ti + 1 < cl.etypes.length) ? curF.NewBlock("") : nextB
+                        var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, cl.etypes[ti])])
+                        b.NewCondBr(truthy(b, callExt(b, "js_rcase", [clsV, excV])), runB, moreB)
+                        b = moreB
+                    }
+                    if (cl.hname != undefined) {
+                        callExt(runB, "js_scope_decl", [curScopeV, emitStr(runB, cl.hname), excV])
+                    }
+                    var rr = cl.body(runB)
+                    callExt(rr.b, "js_scope_set", [curScopeV, emitStr(rr.b, rName), rr.v])
+                    rr.b.NewBr(endB)
+                    b = nextB
+                }
+                // No clause matched: re-raise, so the search continues outwards.
+                callExt(b, "js_rraise", [excV, hUndef])
+                b.NewRet(hUndef)
+                curInRescue = false
+                return {b: endB, v: callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, rName)])}
+            }
+        }
         return function(b) {
+            // `retry' re-runs the begin body from the top: the whole js_try sits in a
+            // loop, and a rescue clause that retried answers the marker below.
+            var headB = curF.NewBlock("")
+            b.NewBr(headB)
+            b = headB
             var tryClo = callExt(b, "js_closure", [handle(emitFunc([], bodyT, false, true)), curScopeV])
             var catchClo = hUndef
-            if (handlerT != undefined) {
-                var cn = (hname != undefined) ? hname : "__caught"
-                catchClo = callExt(b, "js_closure", [handle(emitFunc([cn], handlerT, false, true)), curScopeV])
+            if (catchT != null) {
+                catchClo = callExt(b, "js_closure", [handle(emitFunc(["$exc"], catchT, false, true)), curScopeV])
             }
             var finClo = hUndef
             if (finallyT != undefined) {
                 finClo = callExt(b, "js_closure", [handle(emitFunc([], finallyT, false, true)), curScopeV])
             }
             var ctl = callExt(b, "js_try", [tryClo, catchClo, finClo])
+            var afterB = curF.NewBlock("")
+            b.NewCondBr(truthy(b, callExt(b, "js_is_type", [ctl, emitStr(b, retryName)])), headB, afterB)
+            b = afterB
             // excDispatch re-issues any return/break/next signal; when none fired, ctl is
             // the begin's ordinary value and normB (its result block) is reached.
             return {b: excDispatch(b, ctl), v: ctl}
@@ -1865,25 +2298,111 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // bare raise re-raise throws nil); the message argument is ignored.
     function makeRaise(items, pos) {
         var t = items.length > 0 ? items[0] : null
+        var msgT = items.length > 1 ? items[1] : null
         return function(b) {
             var v = hNull
             if (t != null) { var r = t(b); b = r.b; v = r.v }
-            callExt(b, "js_throw", [v])
-            b.NewRet(hUndef) // Never reached: js_throw unwinds on the host side.
+            var msgV = hUndef
+            if (msgT != null) { var rm = msgT(b); b = rm.b; msgV = rm.v }
+            // js_rraise does the whole of Ruby's raise: a CLASS becomes a fresh
+            // instance (its initialize runs, so a default message through `super'
+            // works), a STRING becomes a RuntimeError, and a bare raise re-raises
+            // whatever the running rescue clause caught.
+            callExt(b, "js_rraise", [v, msgV])
+            b.NewRet(hUndef) // Never reached: js_rraise unwinds on the host side.
             return {b: deadBlock(), v: hNull}
         }
     }
 
     // ----- calls, defs, classes -----
+    // The Kernel methods that are not ordinary functions: they are about the CALL
+    // itself (its block, the running method) and are emitted inline.
     function makeCall(items) {
         var name = items[0]
         var args = unwrapArgs(items.slice(1))
+        // lambda { } / proc { } / Proc.new { }: the block IS the value.
+        if ((name == "lambda" || name == "proc") && args.length > 0) {
+            var blkT = null
+            for (var q = 0; q < args.length; q++) {
+                if (args[q] != undefined && typeof args[q] != "function" && args[q].blkT != undefined) { blkT = args[q].blkT }
+            }
+            if (blkT != null) {
+                var isLam = name == "lambda"
+                return function(b) {
+                    var r = blkT(b)
+                    if (!isLam) { return r }
+                    return {b: r.b, v: callExt(r.b, "js_rlambda", [r.v])}
+                }
+            }
+        }
+        // block_given?: did the running method receive a block?
+        if (name == "block_given?" || name == "iterator?") {
+            return function(b) {
+                var blkV = callExt(b, "js_rblock", [curArgsV])
+                return {b: b, v: callExt(b, "js_rne", [blkV, hNull])}
+            }
+        }
+        // __method__: the name of the method being compiled, as a Symbol.
+        if (name == "__method__") {
+            return function(b) {
+                if (curMethName == "") { return {b: b, v: hNull} }
+                return {b: b, v: callExt(b, "js_sym", [emitStr(b, curMethName)])}
+            }
+        }
+        // format / sprintf: the same directives as String#%.
+        if (name == "format" || name == "sprintf") {
+            var fargs = args
+            return function(b) {
+                var ea = emitArgs(b, fargs)
+                b = ea.b
+                return {b: b, v: callExt(b, "js_rformat", [ea.v])}
+            }
+        }
+        // Kernel#loop: an endless loop whose only exit is a `break' out of the block
+        // (or a StopIteration, which this lowering does not model). Emitted here as a
+        // real IR loop calling the block, so the break marker ends the `loop' call.
+        if (name == "loop" && hasBlockArg(args)) {
+            var loopBlkT = null
+            for (var lq = 0; lq < args.length; lq++) {
+                if (args[lq] != undefined && typeof args[lq] != "function" && args[lq].blkT != undefined) { loopBlkT = args[lq].blkT }
+            }
+            return function(b) {
+                return emitBlkBreakCall(b, function(bb) {
+                    var rb = loopBlkT(bb)
+                    bb = rb.b
+                    hidCount++
+                    var cloName = "$loopblk" + hidCount
+                    callExt(bb, "js_scope_decl", [curScopeV, emitStr(bb, cloName), rb.v])
+                    var headB = curF.NewBlock("")
+                    bb.NewBr(headB)
+                    var cloV = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, cloName)])
+                    callExt(headB, "js_call", [cloV, hUndef, callExt(headB, "js_arr_new", [])])
+                    headB.NewBr(headB)
+                    return {b: deadBlock(), v: hNull}
+                })
+            }
+        }
+        var callHasBlk = hasBlockArg(args)
         return function(b) {
             if (selfMethod(curClsName, name)) {
+                if (callHasBlk) {
+                    return emitBlkBreakCall(b, function(bb) {
+                        var sV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "self")])
+                        var ia = emitArgs(bb, args)
+                        return {b: ia.b, v: callExt(ia.b, "js_rmcall", [sV, emitStr(ia.b, name), ia.v])}
+                    })
+                }
                 var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
                 var eam = emitArgs(b, args)
                 b = eam.b
                 return {b: b, v: callExt(b, "js_rmcall", [selfV, emitStr(b, name), eam.v])}
+            }
+            if (callHasBlk) {
+                return emitBlkBreakCall(b, function(bb) {
+                    var fv = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, name)])
+                    var ia = emitArgs(bb, args)
+                    return {b: ia.b, v: callExt(ia.b, "js_call", [fv, hUndef, ia.v])}
+                })
             }
             var fV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
             var ea = emitArgs(b, args)
@@ -1896,7 +2415,98 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // excDispatch). Every function-body emitter (defs, blocks, methods) saves/restores
     // curFTag, so a return inside a def/block defined within a begin body stays a plain
     // ret rather than wrongly re-signalling.
-    function emitFunc(params, bodyStmt, isMethod, isCtl) {
+    // paramNames turns a parameter descriptor list into the plain name list that the
+    // implicit-self registry and `super` need.
+    function paramNames(ps) {
+        var out = []
+        for (var i = 0; i < ps.length; i++) {
+            out.push(typeof ps[i] == "string" ? ps[i] : ps[i].name)
+        }
+        return out
+    }
+    // emitParams binds one function's parameters in its entry block. A parameter is
+    // either a plain name or a descriptor {name, defT, splat, kw, kwrest, blockp}:
+    //   - a positional one reads js_arg by index;
+    //   - a DEFAULT is emitted as a branch on js_rundef, so an explicit nil still
+    //     wins over the default (Ruby distinguishes absent from nil), and the default
+    //     expression is emitted INSIDE the function, so it can use earlier parameters;
+    //   - *rest collects the remaining positional arguments (js_rargrest);
+    //   - a keyword parameter reads the trailing keyword Hash the call built
+    //     (js_rkwargs), **rest takes that Hash minus the named keys;
+    //   - &blk takes the trailing block closure (js_rblock), which sits at the end of
+    //     the argument list whatever else was passed.
+    function emitParams(b, argsV, params, off, isBlock) {
+        var pos = off
+        var kwNames = []
+        var i
+        for (i = 0; i < params.length; i++) {
+            if (typeof params[i] != "string" && params[i].kw === true) { kwNames.push(params[i].name) }
+        }
+        var kwhV = null
+        for (i = 0; i < params.length; i++) {
+            // A fresh anytype local, not a rebound one: under the frozen engine a
+            // variable keeps the type it was first assigned.
+            var p = anytype
+            if (typeof params[i] == "string") { p = {name: params[i]} } else { p = params[i] }
+            var nameV = emitStr(b, p.name)
+            if (p.blockp === true) {
+                callExt(b, "js_scope_decl", [curScopeV, nameV, callExt(b, "js_rblock", [argsV])])
+                continue
+            }
+            if (p.splat === true) {
+                callExt(b, "js_scope_decl", [curScopeV, nameV, callExt(b, "js_rargrest", [argsV, handle(pos)])])
+                continue
+            }
+            if (p.kw === true || p.kwrest === true) {
+                if (kwhV == null) { kwhV = callExt(b, "js_rkwargs", [argsV]) }
+                if (p.kwrest === true) {
+                    var takenV = callExt(b, "js_arr_new", [])
+                    for (var t = 0; t < kwNames.length; t++) {
+                        callExt(b, "js_arr_push", [takenV, callExt(b, "js_sym", [emitStr(b, kwNames[t])])])
+                    }
+                    callExt(b, "js_scope_decl", [curScopeV, nameV, callExt(b, "js_rkwrest", [kwhV, takenV])])
+                    continue
+                }
+                callExt(b, "js_scope_decl", [curScopeV, nameV,
+                    callExt(b, "js_rget", [kwhV, callExt(b, "js_sym", [emitStr(b, p.name)])])])
+                b = emitParamDefault(b, p, "js_seq")
+                continue
+            }
+            var argV = isBlock === true
+                ? callExt(b, "js_rblockarg", [argsV, handle(pos), handle(params.length)])
+                : callExt(b, "js_arg", [argsV, handle(pos)])
+            callExt(b, "js_scope_decl", [curScopeV, nameV, argV])
+            pos = pos + 1
+            if (p.pgroup != undefined) {
+                // |a, (b, c)|: the element is destructured positionally into the group.
+                var gV = callExt(b, "js_scope_get", [curScopeV, nameV])
+                for (var g = 0; g < p.pgroup.length; g++) {
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, p.pgroup[g].name),
+                        callExt(b, "js_rget", [gV, emitNum(b, g)])])
+                }
+                continue
+            }
+            b = emitParamDefault(b, p, "js_rundef")
+        }
+        return b
+    }
+    // The default-value branch of one parameter. `test` is how "not given" is decided:
+    // js_rundef for a positional one (absent, not nil), a nil compare for a keyword.
+    function emitParamDefault(b, p, test) {
+        if (p.defT == undefined || p.defT == null) { return b }
+        var nameV = emitStr(b, p.name)
+        var curV = callExt(b, "js_scope_get", [curScopeV, nameV])
+        var missB = curF.NewBlock("")
+        var contB = curF.NewBlock("")
+        var cond = test == "js_rundef" ? callExt(b, "js_rundef", [curV])
+                                       : callExt(b, "js_seq", [curV, hNull])
+        b.NewCondBr(truthy(b, cond), missB, contB)
+        var rd = p.defT(missB)
+        callExt(rd.b, "js_scope_set", [curScopeV, emitStr(rd.b, p.name), rd.v])
+        rd.b.NewBr(contB)
+        return contB
+    }
+    function emitFunc(params, bodyStmt, isMethod, isCtl, isBlock) {
         funcCount++
         var idx = funcCount
         var savedTag = curFTag
@@ -1904,9 +2514,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         var savedF = curF
         var savedScope = curScopeV
         var savedLoops = loopStack
+        var savedArgs = curArgsV
+        var savedInBlk = curIsBlockFn
+        var savedRedo = curRedoB
+        var savedResc = curInRescue
+        curInRescue = false
         curF = f
         curFTag = idx
+        curArgsV = f.Params[1]
         loopStack = []
+        curIsBlockFn = isBlock === true
+        curRedoB = null
         if (isCtl) { ctlEnter(idx) }
         var b = f.NewBlock("entry")
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
@@ -1915,9 +2533,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "self"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             off = 1
         }
-        for (var i = 0; i < params.length; i++) {
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, params[i]),
-                                         callExt(b, "js_arg", [f.Params[1], handle(i + off)])])
+        b = emitParams(b, f.Params[1], params, off, isBlock)
+        // A block body starts its own basic block, so `redo' has somewhere to branch
+        // back to that is AFTER the parameter binding (redo keeps the bindings).
+        if (isBlock === true) {
+            var redoB = f.NewBlock("")
+            b.NewBr(redoB)
+            b = redoB
+            curRedoB = redoB
         }
         var endB = bodyStmt(b)
         endB.b.NewRet(endB.v)
@@ -1926,6 +2549,10 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curScopeV = savedScope
         loopStack = savedLoops
         curFTag = savedTag
+        curArgsV = savedArgs
+        curIsBlockFn = savedInBlk
+        curRedoB = savedRedo
+        curInRescue = savedResc
         return idx
     }
     function makeFun(items) {
@@ -1938,18 +2565,11 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             if (items[i].selfrecv === true) { singleton = true }
             else if (typeof items[i] == "string") { name = items[i] }
             else if (items[i].body != undefined) { body = items[i].body }
-            else if (items[i].param != undefined || items[i].splat === true || items[i].kwrest === true) {
-                // Only the plain positional parameters are lowered; the fancy forms
-                // still contribute their NAME, so the body stays compilable.
-                if (items[i].defT != undefined) { notImpl("default parameter value", 0) }
-                else if (items[i].splat === true) { notImpl("splat parameter (*args)", 0) }
-                else if (items[i].kwrest === true) { notImpl("double-splat parameter (**kw)", 0) }
-                else if (items[i].kw === true) { notImpl("keyword parameter (name:)", 0) }
-                params.push(items[i].param != null && items[i].param != undefined
-                            ? items[i].param : "$rest")
+            else if (items[i].param != undefined || items[i].splat === true
+                     || items[i].kwrest === true || items[i].pgroup != undefined) {
+                params.push(paramDesc(items[i]))
             }
         }
-        if (singleton) { notImpl("singleton method (def self.m / def obj.m)", 0) }
         return {name: name, params: params, singleton: singleton,
                 body: body != null ? body : makeBody([])}
     }
@@ -1961,13 +2581,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // notImplemented, which keeps the clean file:line report (and -warn-unsupported)
     // instead of a crash.
     //
-    // The numeric tower needs BOXED floats to keep 7 / 2 == 3 apart from 7.0 / 2 ==
-    // 3.5, and the handle runtime has one number type, so the three boxed literal
-    // kinds stay unsupported. mkFlo/mkRat/mkCpx therefore hand makeConst a marker
-    // that the override below turns into the notImplemented placeholder.
-    function mkFlo(x) { return {__unsup: "float literal"} }
-    function mkRat(n, d) { return {__unsup: "rational literal (3r)"} }
-    function mkCpx(re, im) { return {__unsup: "imaginary literal (2i)"} }
+    // The numeric tower: a Float, a Rational and a Complex are BOXED at run time
+    // (jsFlo / jsRat / jsCpx in abnf/jsrt.go), which is what keeps 7 / 2 == 3 apart
+    // from 7.0 / 2 == 3.5 while an Integer stays the plain runtime number. mkFlo /
+    // mkRat / mkCpx hand makeConst a marker that the override below lowers to the
+    // matching boxing extern.
+    function mkFlo(x) { return {rknd: 1, ra: x, rb: 0} }
+    function mkRat(n, d) { return {rknd: 2, ra: n, rb: d} }
+    function mkCpx(re, im) { return {rknd: 3, ra: re, rb: im} }
     // A Symbol is its OWN type, not a string: `:hello == "hello"` is false and :size
     // and "size" are different Hash keys. The runtime models it as jsSym (abnf/jsrt.go,
     // built by the js_sym extern), which renders as the bare name but compares only
@@ -1989,6 +2610,31 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var nm = v.__rsym
             return function(b) { return {b: b, v: callExt(b, "js_sym", [emitStr(b, nm)])} }
         }
+        // A boxed literal of the numeric tower: 1.5 / 3r / 2i.
+        if (v !== null && v !== undefined && typeof v == "object" && v.rknd != undefined) {
+            var kd = v.rknd
+            var xa = v.ra
+            var xb = v.rb
+            return function(b) {
+                if (kd == 1) { return {b: b, v: callExt(b, "js_rflo", [emitNum(b, xa)])} }
+                if (kd == 2) { return {b: b, v: callExt(b, "js_rrat", [emitNum(b, xa), emitNum(b, xb)])} }
+                return {b: b, v: callExt(b, "js_rcpx", [emitNum(b, xa), emitNum(b, xb)])}
+            }
+        }
+        // %w[..] / %i[..]: a constant array of strings (or of symbols).
+        if (v !== null && v !== undefined && typeof v == "object" && v.__words != undefined) {
+            var ws = v.__words
+            var asSym = v.__sym === true
+            return function(b) {
+                var arrV = callExt(b, "js_arr_new", [])
+                for (var i = 0; i < ws.length; i++) {
+                    var ev = emitStr(b, ws[i])
+                    if (asSym) { ev = callExt(b, "js_sym", [ev]) }
+                    callExt(b, "js_arr_push", [arrV, ev])
+                }
+                return {b: b, v: arrV}
+            }
+        }
         return rubyBaseConst(v)
     }
     // "a" 'd' is one string: adjacent literal pieces concatenate.
@@ -2006,6 +2652,103 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: v}
         }
     }
+    function makeHeredoc(text) {
+        var i = 2
+        var squiggly = false
+        if (text.charAt(i) == "~") { squiggly = true; i++ }
+        else if (text.charAt(i) == "-") { i++ }
+        var quote = ""
+        if (text.charAt(i) == "'" || text.charAt(i) == "\"") { quote = text.charAt(i); i++ }
+        var nl = text.indexOf("\n")
+        var body = nl < 0 ? "" : text.slice(nl + 1)
+        // The scanner stopped right after the terminator line, so the LAST line of
+        // what it returned is that terminator; drop it.
+        var trimmed = body
+        if (trimmed.length > 0 && trimmed.charAt(trimmed.length - 1) == "\n") { trimmed = trimmed.slice(0, trimmed.length - 1) }
+        // lastIndexOf does not exist in the frozen engine - walk back by hand.
+        var lastNl = -1
+        for (var b = trimmed.length - 1; b >= 0; b--) {
+            if (trimmed.charAt(b) == "\n") { lastNl = b; break }
+        }
+        body = lastNl < 0 ? "" : body.slice(0, lastNl + 1)
+        if (squiggly) { body = stripHeredocIndent(body) }
+        if (quote == "'") { return makeConst(body) }
+        return makeTemplate(heredocParts(body))
+    }
+    // <<~ removes the SMALLEST indentation of any non-blank line from every line.
+    // No split()/join() and no indexOf FROM-INDEX here: the frozen engine has
+    // neither, so the body is walked line by line by hand.
+    // <<~ removes the SMALLEST indentation of any non-blank line from every line.
+    // No split()/join() and no indexOf FROM-INDEX here: the frozen engine has
+    // neither, so the body is walked line by line by hand.
+    function nlAt(s, from) {
+        for (var i = from; i < s.length; i++) { if (s.charAt(i) == "\n") { return i } }
+        return -1
+    }
+    function stripHeredocIndent(body) {
+        var min = -1
+        var i = 0
+        while (i < body.length) {
+            var e = nlAt(body, i)
+            if (e < 0) { e = body.length }
+            var w = i
+            while (w < e && (body.charAt(w) == " " || body.charAt(w) == "\t")) { w++ }
+            if (w < e) {
+                var ind = w - i
+                if (min < 0 || ind < min) { min = ind }
+            }
+            i = e + 1
+        }
+        if (min <= 0) { return body }
+        var out = ""
+        var j = 0
+        while (j < body.length) {
+            var e2 = nlAt(body, j)
+            var hasNl = e2 >= 0
+            if (e2 < 0) { e2 = body.length }
+            var take = j + min < e2 ? j + min : e2
+            out += body.slice(take, e2)
+            if (hasNl) { out += "\n" }
+            j = e2 + 1
+        }
+        return out
+    }
+    // Split an interpolating body into the {s: text} / {e: thunk} pieces makeTemplate
+    // consumes. The expression of a '#{}' is parsed with the grammar itself, from the
+    // Expression production - the same door require uses to pull in another file.
+    function heredocParts(body) {
+        var parts = []
+        var lit = ""
+        var i = 0
+        while (i < body.length) {
+            var ch = body.charAt(i)
+            if (ch == "\\" && i + 1 < body.length) { lit += ch + body.charAt(i + 1); i += 2; continue }
+            if (ch == "#" && body.charAt(i + 1) == "{") {
+                var depth = 1
+                var j = i + 2
+                while (j < body.length && depth > 0) {
+                    var cj = body.charAt(j)
+                    if (cj == "{") { depth++ }
+                    else if (cj == "}") { depth-- ; if (depth == 0) { break } }
+                    j++
+                }
+                if (depth != 0) { lit += ch; i++; continue }
+                if (lit.length > 0) { parts.push({s: unescapeJs(lit)}) ; lit = "" }
+                parts.push({e: parseFragment(body.slice(i + 2, j))})
+                i = j + 1
+                continue
+            }
+            lit += ch
+            i++
+        }
+        if (lit.length > 0) { parts.push({s: unescapeJs(lit)}) }
+        return parts
+    }
+    function parseFragment(src) {
+        var frag = c.parseFrom(c.agrammar, src, "Expression")
+        return c.compile(frag).stack[0]
+    }
+
     function charLitVal(s) {
         var body = s.slice(1)
         if (body.charCodeAt(0) == 92) { return unescapeJs(body) }
@@ -2015,16 +2758,112 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         for (var i = 0; i < items.length; i++) { if (items[i].raw != undefined) { return items[i].raw } }
         return ""
     }
-    function pctWords(str, asSym) { return {__unsup: "percent word list (%w / %i)"} }
-    function makeWordsThunk(t, asSym) { return notImplExpr("percent word list (%W / %I)", 0) }
-    function makeBitNot(t) { return notImplExpr("~ (bitwise not)", 0) }
+    // %w[a b] / %i[a b]: the raw body split on whitespace into strings / symbols.
+    function pctSplit(str) {
+        var out = []
+        var cur = ""
+        for (var i = 0; i < str.length; i++) {
+            var ch = str.charAt(i)
+            if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r") {
+                if (cur != "") { out.push(cur); cur = "" }
+                continue
+            }
+            cur += ch
+        }
+        if (cur != "") { out.push(cur) }
+        return out
+    }
+    function pctWords(str, asSym) {
+        var words = pctSplit(str)
+        return {__words: words, __sym: asSym}
+    }
+    // %W / %I interpolate first, so the split has to happen at RUN time: the template
+    // thunk yields one string, which js_rsplitw turns into the array of words.
+    function makeWordsThunk(t, asSym) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            return {b: b, v: callExt(b, "js_rsplitw", [r.v, asSym ? hTrue : hFalse])}
+        }
+    }
+    function makeBitNot(t) {
+        return function(b) {
+            var r = t(b)
+            return {b: r.b, v: callExt(r.b, "js_rbnot", [r.v])}
+        }
+    }
+    // ** is right associative and lives in the tower (2 ** -1 is a Float, and a user
+    // class may define **), so it is the js_rpow step.
     function makePow(items) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("** (exponentiation)", 0)
+        var lt = items[0]
+        var rt = items[1]
+        return function(b) {
+            var rl = lt(b)
+            b = rl.b
+            var rr = rt(b)
+            b = rr.b
+            return {b: b, v: callExt(b, "js_rpow", [rl.v, rr.v])}
+        }
     }
-    function makeGvarRef(name) { return notImplExpr("$global variable", 0) }
-    function makeCvarRef(name) { return notImplExpr("@@class variable", 0) }
-    function makeDefined(items) { return notImplExpr("defined?", 0) }
+    function makeGvarRef(name) {
+        return function(b) { return {b: b, v: callExt(b, "js_rgget", [emitStr(b, name)])} }
+    }
+    function makeCvarRef(name) {
+        return function(b) {
+            var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
+            return {b: b, v: callExt(b, "js_rcvget", [selfV, emitStr(b, name)])}
+        }
+    }
+    // defined?(X) answers WHAT X is - "constant", "global-variable", "local-variable",
+    // "method", "expression" - or nil when it is nothing. The argument is never
+    // evaluated, so the kind is decided here from the shape of the source text and only
+    // the EXISTENCE test is emitted (js_rdefined / js_rgdefined answer the kind or nil).
+    function makeDefined(items) {
+        var txt = ""
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].dtext != undefined) { txt = items[i].dtext }
+        }
+        while (txt.length > 0 && (txt.charAt(0) == " " || txt.charAt(0) == "\t" || txt.charAt(0) == "\n" || txt.charAt(0) == "\r")) { txt = txt.slice(1) }
+        while (txt.length > 0) {
+            var lc = txt.charAt(txt.length - 1)
+            if (lc == " " || lc == "\t" || lc == "\n" || lc == "\r") { txt = txt.slice(0, txt.length - 1) } else { break }
+        }
+        if (txt.length > 1 && txt.charAt(0) == "$") {
+            var gname = txt.slice(1)
+            return function(b) {
+                return {b: b, v: callExt(b, "js_rgdefined", [emitStr(b, gname), emitStr(b, "global-variable")])}
+            }
+        }
+        if (txt == "puts" || txt == "print" || txt == "require" || txt == "loop" || txt == "raise") {
+            return function(b) { return {b: b, v: emitStr(b, "method")} }
+        }
+        if (txt.length > 0 && txt.charAt(0) == "@") {
+            return function(b) { return {b: b, v: emitStr(b, "instance-variable")} }
+        }
+        if (!isPlainName(txt)) {
+            return function(b) { return {b: b, v: emitStr(b, "expression")} }
+        }
+        var kind = "local-variable"
+        var c0 = txt.charAt(0)
+        if (c0 >= "A" && c0 <= "Z") { kind = "constant" }
+        return function(b) {
+            // A def of that name is a method, whatever else the scope holds.
+            var k = rubyAllMethods["$" + txt] === true ? "method" : kind
+            return {b: b, v: callExt(b, "js_rdefined", [curScopeV, emitStr(b, txt), emitStr(b, k)])}
+        }
+    }
+    // Whether the text is a single plain identifier (so defined? can classify it).
+    function isPlainName(t) {
+        if (t.length == 0) { return false }
+        for (var i = 0; i < t.length; i++) {
+            var ch = t.charAt(i)
+            var okc = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || ch == "_"
+                      || (i > 0 && ch >= "0" && ch <= "9")
+            if (!okc) { return false }
+        }
+        return true
+    }
     // super / super(args). The runtime's js_supercall takes the class to START the
     // lookup at, so the emitter hands it the __super of the class whose body is being
     // compiled - which is why makeClassStmt publishes the class name, the method name
@@ -2052,12 +2891,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             var selfV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "self")])
             var argsV = callExt(b, "js_arr_new", [])
             if (explicit) {
-                var ua = unwrapArgs(argTs)
-                for (var j = 0; j < ua.length; j++) {
-                    var r = ua[j](b)
-                    b = r.b
-                    callExt(b, "js_arr_push", [argsV, r.v])
-                }
+                var ea = emitArgs(b, unwrapArgs(argTs))
+                b = ea.b
+                argsV = ea.v
             } else {
                 for (var k = 0; k < ownParams.length; k++) {
                     callExt(b, "js_arr_push", [argsV,
@@ -2067,11 +2903,35 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             return {b: b, v: callExt(b, "js_supercall", [supV, selfV, emitStr(b, methName), argsV])}
         }
     }
-    function makeLambda(items) { return notImplExpr("lambda literal (->)", 0) }
-    function makeRetry() { return notImplExpr("retry", 0) }
+    // retry: leave the rescue clause with the marker makeTry's loop tests for.
+    function makeRetry() {
+        return function(b) {
+            if (!curInRescue) { notImpl("retry outside of a rescue clause", 0); return {b: b, v: hUndef} }
+            b.NewRet(callExt(b, "js_pyexc", [emitStr(b, retryName), callExt(b, "js_arr_new", [])]))
+            return {b: deadBlock(), v: hNull}
+        }
+    }
+    // EXPR rescue FALLBACK: the modifier form, a begin/rescue over one expression. It
+    // catches what a bare `rescue' clause catches (see makeExcept).
     function makeRescueMod(items) {
         if (items.length == 1) { return items[0] }
-        return notImplExpr("rescue modifier (EXPR rescue FALLBACK)", 0)
+        var exprT = items[0]
+        var fallbackT = items[1]
+        return function(b) {
+            var tryClo = callExt(b, "js_closure", [handle(emitFunc([], exprT, false, false)), curScopeV])
+            var catchT = function(bb) {
+                var excV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "$exc")])
+                var okB = curF.NewBlock("")
+                var noB = curF.NewBlock("")
+                var notMark = callExt(bb, "js_not", [callExt(bb, "js_is_type", [excV, emitStr(bb, blkBrkName)])])
+                bb.NewCondBr(truthy(bb, notMark), okB, noB)
+                callExt(noB, "js_rraise", [excV, hUndef])
+                noB.NewRet(hUndef)
+                return fallbackT(okB)
+            }
+            var catchClo = callExt(b, "js_closure", [handle(emitFunc(["$exc"], catchT, false, false)), curScopeV])
+            return {b: b, v: callExt(b, "js_try", [tryClo, catchClo, hUndef])}
+        }
     }
     // A def body carrying its own rescue/else/ensure clauses (no `begin`).
     function makeGuardedBody(items) {
@@ -2087,7 +2947,17 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     // registry is consulted when the reference is EMITTED, after every tag has run, so a
     // def anywhere in the file counts.
     var rubyMethods = {}
+    // Every def of the file by name (rubyMethods holds only the zero parameter ones,
+    // which are auto-called); defined? uses this one to answer "method".
+    var rubyAllMethods = {}
     makeVarRef = function(name) {
+        // __method__ is a bare name, not a call: the method being compiled, as a Symbol.
+        if (name == "__method__") {
+            return function(b) {
+                if (curMethName == "") { return {b: b, v: hNull} }
+                return {b: b, v: callExt(b, "js_sym", [emitStr(b, curMethName)])}
+            }
+        }
         return function(b) {
             // Inside a method body a bare name that is a method of the SAME class (or
             // of one above it) is a call on the implicit self - `def intro; speak; end'.
@@ -2128,8 +2998,15 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
     function makeDefStmt(fn) {
         if (fn.params.length == 0) { rubyMethods["$" + fn.name] = true }
+        rubyAllMethods["$" + fn.name] = true
         return function(b) {
+            var savedMN = curMethName
+            var savedMP = curMethParams
+            curMethName = fn.name
+            curMethParams = paramNames(fn.params)
             var idx = emitFunc(fn.params, fn.body, false)
+            curMethName = savedMN
+            curMethParams = savedMP
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, fn.name),
                                          callExt(b, "js_closure", [handle(idx), curScopeV])])
             return {b: b, v: hNull}
@@ -2161,16 +3038,53 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         }}
     }
 
+    // The words that OPEN a class body declaration rather than an ordinary
+    // statement: they reconfigure the class (visibility, mixins, dynamic defs), which
+    // this lowering does not model. Answers the word, or "" for a real statement.
+    function classDeclWord(text) {
+        var words = ["private", "protected", "public", "include", "extend", "prepend",
+                     "module_function", "alias_method", "define_method", "attr_accessor",
+                     "attr_reader", "attr_writer", "freeze", "require", "using"]
+        var t = text
+        while (t.length > 0 && (t.charAt(0) == " " || t.charAt(0) == "\t" || t.charAt(0) == "\n" || t.charAt(0) == "\r")) { t = t.slice(1) }
+        for (var i = 0; i < words.length; i++) {
+            var wd = words[i]
+            if (t.length >= wd.length && t.slice(0, wd.length) == wd) {
+                if (t.length == wd.length) { return wd }
+                var nx = t.charAt(wd.length)
+                if (nx != "_" && !(nx >= "a" && nx <= "z") && !(nx >= "A" && nx <= "Z") && !(nx >= "0" && nx <= "9")) { return wd }
+            }
+        }
+        return ""
+    }
     function makeClassStmt(items) {
         var name = items[0]
         var methods = []
+        var cstmts = []
         var hasInit = false
         var superName = ""
         for (var i = 1; i < items.length; i++) {
             if (items[i].supername != undefined) { superName = items[i].supername }
-            else if (items[i].sblock != undefined) { notImpl("singleton class (class << self)", 0) }
+            else if (items[i].sblock != undefined) {
+                // class << self ... end: every def inside it is a class method.
+                var sb = items[i].sblock
+                for (var q = 0; q < sb.length; q++) {
+                    if (sb[q].method != undefined) {
+                        var sm = sb[q].method
+                        methods.push({name: sm.name, params: sm.params, body: sm.body, singleton: true})
+                    }
+                }
+            }
             else if (items[i].alias != undefined) { notImpl("alias", 0) }
-            else if (items[i].cstmt != undefined) { notImpl("statement in a class body", 0) }
+            else if (items[i].cstmt != undefined) {
+                // A statement in a class body runs with `self` bound to the class
+                // object, which is what makes `@@count = 0` a class variable of it.
+                // The visibility and mixin DECLARATIONS (private, include M, ...) are
+                // not statements in that sense - they reconfigure the class - so they
+                // stay reported as unsupported instead of being run as calls.
+                if (classDeclWord(items[i].ctext)) { notImpl("class body declaration (" + classDeclWord(items[i].ctext) + ")", 0) }
+                else { cstmts.push(items[i].cstmt) }
+            }
             else if (items[i].method != undefined) {
                 methods.push(items[i].method)
                 if (items[i].method.name == "initialize") { hasInit = true }
@@ -2183,7 +3097,9 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
             }
         }
         var mnames = []
-        for (var mi = 0; mi < methods.length; mi++) { mnames.push(methods[mi].name) }
+        for (var mi = 0; mi < methods.length; mi++) {
+            if (methods[mi].singleton !== true) { mnames.push(methods[mi].name) }
+        }
         classMethods["$" + name] = mnames
         if (superName != "") { classSupers["$" + name] = superName }
         return function(b) {
@@ -2197,24 +3113,47 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
                                       callExt(b, "js_scope_get", [curScopeV, emitStr(b, superName)])])
             }
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
+            // The class body statements, with `self` bound to the class object: they
+            // are emitted as a zero parameter method of the class and called at once.
+            if (cstmts.length > 0) {
+                var cbIdx = emitFunc([], makeBody(cstmts), true)
+                var cbArgs = callExt(b, "js_arr_new", [])
+                callExt(b, "js_arr_push", [cbArgs, clsV])
+                callExt(b, "js_call", [callExt(b, "js_closure", [handle(cbIdx), curScopeV]), hUndef, cbArgs])
+            }
             var savedCls = curClsName
             var savedMeth = curMethName
             var savedParams = curMethParams
             curClsName = name
             for (var k = 0; k < methods.length; k++) {
                 curMethName = methods[k].name
-                curMethParams = methods[k].params
+                curMethParams = paramNames(methods[k].params)
                 var idx = emitFunc(methods[k].params, methods[k].body, true)
-                callExt(b, "js_set", [clsV, emitStr(b, methods[k].name),
+                // A singleton method (def self.m / class << self) is a method of the
+                // CLASS OBJECT, so it is stored under a "$s$" prefixed key where it
+                // cannot collide with the instance method of the same name; js_rmcall
+                // looks that key up first when the receiver is a class (abnf/jsrt.go),
+                // exactly as ruby-interpreter.abnf does.
+                var mkey = methods[k].singleton === true ? "$s$" + methods[k].name : methods[k].name
+                callExt(b, "js_set", [clsV, emitStr(b, mkey),
                                       callExt(b, "js_closure", [handle(idx), curScopeV])])
             }
             curClsName = savedCls
             curMethName = savedMeth
             curMethParams = savedParams
-            // A subclass with no initialize of its own INHERITS one, so the empty
-            // default is only for a root class.
-            if (!hasInit && superName == "") {
-                var emptyBody = function(bb) { return {b: bb, v: hNull} }
+            // A subclass with no initialize of its own INHERITS one, so the default is
+            // only emitted when nothing above supplies it: a root class, or one whose
+            // superclass is a BUILTIN (`class MyErr < StandardError'), which carries no
+            // compiled initialize for js_rnew / super to find. The default stores the
+            // constructor arguments under `args', which is where Exception#message
+            // reads the message from - so a user exception class needs no body at all.
+            if (!hasInit && (superName == "" || classMethods["$" + superName] == undefined)) {
+                var emptyBody = function(bb) {
+                    var sV = callExt(bb, "js_scope_get", [curScopeV, emitStr(bb, "self")])
+                    callExt(bb, "js_set", [sV, emitStr(bb, "args"),
+                                           callExt(bb, "js_rargrest", [curArgsV, handle(1)])])
+                    return {b: bb, v: hNull}
+                }
                 var iidx = emitFunc([], emptyBody, true)
                 callExt(b, "js_set", [clsV, emitStr(b, "initialize"),
                                       callExt(b, "js_closure", [handle(iidx), curScopeV])])
@@ -2264,6 +3203,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
     }
 
     // ----- program entry -----
+    // The builtin classes named in ordinary Ruby code: the core value classes, the
+    // module-like ancestors used in a type test, and the standard exception names.
+    var rubyBuiltinClasses = ["Integer", "Float", "Rational", "Complex", "Numeric",
+        "String", "Symbol", "Array", "Hash", "Range", "Proc", "NilClass", "TrueClass",
+        "FalseClass", "Object", "BasicObject", "Kernel", "Comparable", "Enumerable",
+        "Exception", "StandardError", "RuntimeError", "ArgumentError", "TypeError",
+        "NameError", "NoMethodError", "IndexError", "KeyError", "RangeError",
+        "ZeroDivisionError", "StopIteration", "FrozenError", "NotImplementedError"]
     function buildMain(items) {
         // The walk of an imported file ends here too (importDepth > 0): stash its top-level
         // thunks for the real jsmain instead of emitting a second one.
@@ -2277,6 +3224,14 @@ KwPuts      = ( "puts" | "print" ) KwEnd ;
         curScopeV = callExt(b, "js_scope_new", [f.Params[0]])
         var mathV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, "Math")])
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "abs"), callExt(b, "js_get", [mathV, emitStr(b, "abs")])])
+        // The builtin class constants, so `case v when Integer`, `v.is_a?(String)`
+        // and `rescue ArgumentError` name a real class object (js_rclass hands out
+        // one object per name, so the identity comparisons hold).
+        for (var bc = 0; bc < rubyBuiltinClasses.length; bc++) {
+            var bn = rubyBuiltinClasses[bc]
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, bn),
+                                         callExt(b, "js_rclass", [emitStr(b, bn)])])
+        }
         // Imported definitions first, each under its own source, then this file's own items.
         b = emitImportedWith(b, function(item, bb) { return item(bb).b })
         for (var i = 0; i < items.length; i++) { b = items[i](b).b }

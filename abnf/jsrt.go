@@ -348,6 +348,45 @@ type jsrt struct {
 	newTargetStack   []interface{}
 	pendingNewTarget interface{}
 
+	// rubyClasses caches the BUILTIN class objects of ruby-to-llvm-ir.abnf
+	// (Integer, String, Symbol, Array, ...), so that `x.class == Integer` and
+	// `case v when Integer` compare the same object every time. Only js_rclass
+	// fills it; every other grammar leaves it nil.
+	rubyClasses map[string]*jsObject
+
+	// rubyGlobals holds Ruby's $globals, which live outside every scope: a write
+	// inside a method is visible everywhere, and a read of a never-assigned one
+	// answers nil. Only js_rgset / js_rgget (ruby-to-llvm-ir.abnf) touch it.
+	rubyGlobals map[string]interface{}
+
+	// rubyLambdas remembers which closures came from a lambda literal (->) or
+	// Kernel#lambda, which is all that Proc#lambda? needs. Filled by js_rlambda.
+	rubyLambdas map[interface{}]bool
+
+	// rubyCurExc is the exception the innermost js_try handed to a catch clause,
+	// which is what a BARE `raise' inside a rescue re-raises (Ruby's $!). It is
+	// only ever read by js_rraise.
+	rubyCurExc interface{}
+
+	// goPanics is Go's panic state, one entry per compiled Go frame currently
+	// unwinding-aware (js_gotry pushes, js_gorepanic pops). An entry is nil while
+	// the frame runs normally and holds the panic value once one was caught, so a
+	// recover() in one of the frame's deferred functions can take it (js_gorecover
+	// clears the top entry). Only the go-to-llvm-ir grammar emits these.
+	goPanics []interface{}
+	// goDeferAt is the goPanics index of each frame whose deferred functions are
+	// running right now (js_rundefers pushes and pops it). recover() is only
+	// meaningful when it is called BY such a deferred function, so js_gorecover
+	// reads the frame named here rather than the innermost one - the deferred
+	// closure is a compiled Go function and has pushed a goPanics entry of its own.
+	goDeferAt []int
+
+	// goQueue is the compiled Go program's goroutine run queue. Concurrency is
+	// COOPERATIVE and deterministic (see the channel externs and the matching
+	// goSpawn/goDrain in go-interpreter.abnf): `go f()` queues f, and a receive
+	// that finds its channel empty runs the queue until one fills it.
+	goQueue []interface{}
+
 	// trackThis is set by attach when the module actually declares js_this or
 	// js_newtarget, i.e. when the grammar that produced it has a dynamic `this`.
 	// Only then does callInner maintain the two per-call stacks below; for every
@@ -843,6 +882,12 @@ func (rt *jsrt) toNumber(v interface{}) float64 {
 	switch t := v.(type) {
 	case jsChar: // Kotlin's Char does arithmetic and compares as its code.
 		return float64(t.code)
+	case jsFlo: // Ruby's boxed Float / Rational / Complex are numbers.
+		return t.f
+	case jsRat:
+		return t.n / t.d
+	case jsCpx:
+		return t.re
 	case jsUndefT:
 		return math.NaN()
 	case jsNullT:
@@ -910,6 +955,12 @@ func (rt *jsrt) toString(v interface{}) string {
 		return string(rune(t.code))
 	case jsSym: // Ruby's Symbol renders as its bare name.
 		return t.s
+	case jsFlo: // Ruby's Float keeps its decimal point (1000.0), unlike an Integer.
+		return rubyFloStr(t.f)
+	case jsRat:
+		return jsNumString(t.n) + "/" + jsNumString(t.d)
+	case jsCpx:
+		return jsNumString(t.re) + "+" + jsNumString(t.im) + "i"
 	case jsUndefT:
 		return "undefined"
 	case jsNullT:
@@ -955,6 +1006,8 @@ func (rt *jsrt) toGoNatural(v interface{}) interface{} {
 		return string(rune(t.code))
 	case jsSym: // print/println show the symbol's name.
 		return t.s
+	case jsFlo, jsRat, jsCpx: // print/println show Ruby's rendering (1000.0, 1/2, 0+2i).
+		return rt.rubyStr(v)
 	case jsUndefT, jsNullT:
 		return nil
 	case float64:
@@ -1058,6 +1111,202 @@ func (rt *jsrt) strictEq(a, b interface{}) bool {
 		// Objects, arrays, closures and Go natives compare by identity.
 		return identityEq(a, b)
 	}
+}
+
+// goValueEq is Go's ==: structs and arrays are VALUE types and compare element by
+// element, nil equals an unset slice/map/pointer, everything else is strictEq.
+// Used only by the go-to-llvm-ir grammar (js_goeq / js_gone).
+func (rt *jsrt) goValueEq(a, b interface{}) bool {
+	if isUndefOrNull(a) {
+		return isUndefOrNull(b)
+	}
+	if isUndefOrNull(b) {
+		return false
+	}
+	if aa, ok := a.(*jsArray); ok {
+		if ba, ok2 := b.(*jsArray); ok2 {
+			if len(aa.elems) != len(ba.elems) {
+				return false
+			}
+			for i := range aa.elems {
+				if !rt.goValueEq(aa.elems[i], ba.elems[i]) {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	ao, aok := a.(*jsObject)
+	bo, bok := b.(*jsObject)
+	if aok && bok {
+		ac, ahas := ao.props["__class"].(*jsObject)
+		bc, bhas := bo.props["__class"].(*jsObject)
+		if ahas && bhas {
+			an, _ := ac.props["__name"].(string)
+			bn, _ := bc.props["__name"].(string)
+			if an != bn {
+				return false
+			}
+			af, aok2 := ac.props["__fields"].(*jsArray)
+			bf, bok2 := bc.props["__fields"].(*jsArray)
+			if !aok2 || !bok2 || len(af.elems) != len(bf.elems) {
+				return identityEq(a, b)
+			}
+			for i := range af.elems {
+				k := rt.toString(af.elems[i])
+				if k != rt.toString(bf.elems[i]) {
+					return false
+				}
+				av, ahad := ao.props[k]
+				bv, bhad := bo.props[k]
+				if !ahad {
+					av = jsUndef
+				}
+				if !bhad {
+					bv = jsUndef
+				}
+				if !rt.goValueEq(av, bv) {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return rt.strictEq(a, b)
+}
+
+// ----- Go channels and goroutines (go-to-llvm-ir.abnf) -----
+// The model is the interpreter's, so both engines agree: a channel is a queue with
+// no blocking send, `go f()` only QUEUES f, and a receive that finds nothing runs
+// the queued goroutines until one of them fills the channel. That makes the whole
+// handshake deterministic on a single thread; a receive that still finds nothing
+// with nothing left to run is a deadlock, exactly as in Go.
+func goChanParts(v interface{}) (*jsObject, *jsArray, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, nil, false
+	}
+	if tag, has := o.props["__chan"]; !has || tag != true {
+		return nil, nil, false
+	}
+	buf, _ := o.props["buf"].(*jsArray)
+	if buf == nil {
+		return nil, nil, false
+	}
+	return o, buf, true
+}
+
+// goZeroOf is the zero value of a type spelled as text - the runtime twin of the
+// interpreter's zeroOfType2.
+func goZeroOf(ty string) interface{} {
+	if strings.HasPrefix(ty, "int") || strings.HasPrefix(ty, "uint") ||
+		strings.HasPrefix(ty, "byte") || strings.HasPrefix(ty, "rune") ||
+		strings.HasPrefix(ty, "float") {
+		return float64(0)
+	}
+	if strings.HasPrefix(ty, "string") {
+		return ""
+	}
+	if strings.HasPrefix(ty, "bool") {
+		return false
+	}
+	return jsNull
+}
+
+// goDrain runs every queued goroutine to completion, in spawn order.
+func (rt *jsrt) goDrain() {
+	guard := 0
+	for len(rt.goQueue) > 0 && guard < 1000000 {
+		guard++
+		t := rt.goQueue[0]
+		rt.goQueue = rt.goQueue[1:]
+		rt.call(t, jsUndef, nil)
+	}
+}
+
+// goChanRecv takes one value; ok is false exactly when the channel is closed and
+// drained, and the value is then the element type's zero value.
+func (rt *jsrt) goChanRecv(v interface{}) (interface{}, bool) {
+	o, buf, ok := goChanParts(v)
+	if !ok {
+		rt.fail("receive from a non-channel")
+	}
+	if len(buf.elems) == 0 {
+		rt.goDrain()
+	}
+	if len(buf.elems) == 0 {
+		if o.props["closed"] == true {
+			ty, _ := o.props["czero"].(string)
+			return goZeroOf(ty), false
+		}
+		rt.fail("all goroutines are asleep - deadlock")
+	}
+	first := buf.elems[0]
+	buf.elems = buf.elems[1:]
+	return first, true
+}
+
+// goClassOf is the struct descriptor of a Go struct VALUE, or nil.
+func goClassOf(v interface{}) *jsObject {
+	if o, ok := v.(*jsObject); ok {
+		if cls, ok2 := o.props["__class"].(*jsObject); ok2 {
+			return cls
+		}
+	}
+	return nil
+}
+
+// goCopyVal is Go's copy of a value type: a struct is copied field by field (a
+// nested struct with it), an array element by element. Everything else - a slice, a
+// map, a function, a scalar - is a reference or immutable and passes through.
+func (rt *jsrt) goCopyVal(v interface{}) interface{} {
+	if arr, ok := v.(*jsArray); ok {
+		out := &jsArray{elems: make([]interface{}, len(arr.elems))}
+		copy(out.elems, arr.elems)
+		return out
+	}
+	o, ok := v.(*jsObject)
+	if !ok || goClassOf(v) == nil {
+		return v
+	}
+	out := newJSObject()
+	for _, k := range o.keys {
+		out.set(k, rt.goCopyVal(o.props[k]))
+	}
+	return out
+}
+
+// goMethod finds `name` on a Go struct value: on its own descriptor, or promoted
+// from an embedded struct field. It answers the method, the receiver to call it
+// with (a COPY for a value receiver, the struct itself for a pointer receiver) and
+// whether anything was found at all.
+func (rt *jsrt) goMethod(v interface{}, name string) (interface{}, interface{}, bool) {
+	cls := goClassOf(v)
+	if cls == nil {
+		return nil, nil, false
+	}
+	if fn, has := cls.props[name]; has && isCallable(fn) {
+		recv := v
+		if cls.props["__ptr$"+name] != true {
+			recv = rt.goCopyVal(v)
+		}
+		return fn, recv, true
+	}
+	// Promotion: a method of an embedded struct is a method of the outer one.
+	o := v.(*jsObject)
+	if fs, okf := cls.props["__fields"].(*jsArray); okf {
+		for _, f := range fs.elems {
+			inner := o.props[rt.toString(f)]
+			if goClassOf(inner) == nil {
+				continue
+			}
+			if fn, recv, found := rt.goMethod(inner, name); found {
+				return fn, recv, true
+			}
+		}
+	}
+	return nil, nil, false
 }
 
 // identityEq compares two reference values without panicking on uncomparable types.
@@ -2094,6 +2343,113 @@ type jsSym struct {
 	s string
 }
 
+// ----- Ruby's numeric tower: Integer / Float / Rational / Complex -----
+//
+// Ruby needs 7 / 2 == 3 and 7.0 / 2 == 3.5 to hold at the SAME time, so Integer and
+// Float cannot both be the runtime's one number type. An Integer stays the plain
+// float64 (exact to 2^53, and never truncated to 32 bit the way the Java style
+// operators are); Float, Rational and Complex are BOXED comparable value structs,
+// mirroring the {__flo}/{__rat}/{__cpx} boxes of ruby-interpreter.abnf value for
+// value so the two engines agree.
+//
+// Only ruby-to-llvm-ir.abnf ever creates one (the js_rflo / js_rrat / js_rcpx
+// externs below), so every branch added for these three types is unreachable from
+// MetaJS, JS, Java, Kotlin, Go, Python and the rest.
+type jsFlo struct{ f float64 }
+type jsRat struct{ n, d float64 }
+type jsCpx struct{ re, im float64 }
+
+// rubyNumRank orders the tower: int < rational < float < complex. Every arithmetic
+// step promotes both operands to the higher of the two ranks. -1 is "not a number".
+func rubyNumRank(v interface{}) int {
+	switch v.(type) {
+	case float64:
+		return 0
+	case jsRat:
+		return 1
+	case jsFlo:
+		return 2
+	case jsCpx:
+		return 3
+	}
+	return -1
+}
+
+func rubyIsNum(v interface{}) bool { return rubyNumRank(v) >= 0 }
+
+func rubyToF(v interface{}) float64 {
+	switch t := v.(type) {
+	case float64:
+		return t
+	case jsRat:
+		return t.n / t.d
+	case jsFlo:
+		return t.f
+	case jsCpx:
+		return t.re
+	}
+	return 0
+}
+
+func rubyGcd(a, b float64) float64 {
+	x, y := math.Abs(a), math.Abs(b)
+	for y != 0 {
+		x, y = y, math.Mod(x, y)
+	}
+	return x
+}
+
+// rubyMkRat normalizes a Rational: the sign lives in the numerator and the pair is
+// reduced by its gcd, so two equal Rationals are equal as Go values too.
+func rubyMkRat(n, d float64) jsRat {
+	if d < 0 {
+		n, d = -n, -d
+	}
+	if g := rubyGcd(n, d); g > 1 {
+		n, d = n/g, d/g
+	}
+	return jsRat{n: n, d: d}
+}
+
+func rubyReOf(v interface{}) float64 {
+	if c, ok := v.(jsCpx); ok {
+		return c.re
+	}
+	return rubyToF(v)
+}
+
+func rubyImOf(v interface{}) float64 {
+	if c, ok := v.(jsCpx); ok {
+		return c.im
+	}
+	return 0
+}
+
+func rubyAsRat(v interface{}) jsRat {
+	if r, ok := v.(jsRat); ok {
+		return r
+	}
+	return rubyMkRat(rubyToF(v), 1)
+}
+
+// rubyFloStr renders a Float the way Ruby does: with a decimal point even when the
+// value is whole (1000.0), which is what tells it apart from the Integer 1000.
+func rubyFloStr(x float64) string {
+	if x != x {
+		return "NaN"
+	}
+	if math.IsInf(x, 1) {
+		return "Infinity"
+	}
+	if math.IsInf(x, -1) {
+		return "-Infinity"
+	}
+	if x == math.Trunc(x) && math.Abs(x) < 1e16 {
+		return jsNumString(x) + ".0"
+	}
+	return jsNumString(x)
+}
+
 // charCode unboxes a Char to its code and leaves every other value alone, so the
 // arithmetic and comparison paths can treat a Char as its code without special cases.
 func charCode(v interface{}) (interface{}, bool) {
@@ -2316,6 +2672,848 @@ func rubyTruthy(v interface{}) bool {
 	return true
 }
 
+// rubyNumBin is one arithmetic step of the numeric tower, mirroring numBin of
+// ruby-interpreter.abnf: both operands promote to the higher rank, Integer / and %
+// FLOOR (-7 / 2 == -4, -7 % 3 == 2) and Integer ** stays exact unless the exponent
+// is negative. Reached only from rubyBin, i.e. only from the Ruby compiler.
+func (rt *jsrt) rubyNumBin(op string, l, r interface{}) interface{} {
+	rk, rr := rubyNumRank(l), rubyNumRank(r)
+	if rk < 0 || rr < 0 {
+		rt.fail("not a number in '%s'", op)
+	}
+	if rr > rk {
+		rk = rr
+	}
+	if rk == 3 {
+		ar, ai, br, bi := rubyReOf(l), rubyImOf(l), rubyReOf(r), rubyImOf(r)
+		switch op {
+		case "+":
+			return jsCpx{re: ar + br, im: ai + bi}
+		case "-":
+			return jsCpx{re: ar - br, im: ai - bi}
+		case "*":
+			return jsCpx{re: ar*br - ai*bi, im: ar*bi + ai*br}
+		case "/":
+			den := br*br + bi*bi
+			return jsCpx{re: (ar*br + ai*bi) / den, im: (ai*br - ar*bi) / den}
+		}
+		rt.fail("Complex does not support '%s'", op)
+	}
+	if rk == 1 {
+		p, q := rubyAsRat(l), rubyAsRat(r)
+		switch op {
+		case "+":
+			return rubyMkRat(p.n*q.d+q.n*p.d, p.d*q.d)
+		case "-":
+			return rubyMkRat(p.n*q.d-q.n*p.d, p.d*q.d)
+		case "*":
+			return rubyMkRat(p.n*q.n, p.d*q.d)
+		case "/":
+			return rubyMkRat(p.n*q.d, p.d*q.n)
+		}
+	}
+	if rk >= 1 { // Float (and a Rational meeting an operator it has no exact form for).
+		x, y := rubyToF(l), rubyToF(r)
+		switch op {
+		case "+":
+			return jsFlo{f: x + y}
+		case "-":
+			return jsFlo{f: x - y}
+		case "*":
+			return jsFlo{f: x * y}
+		case "/":
+			return jsFlo{f: x / y}
+		case "%":
+			return jsFlo{f: x - math.Floor(x/y)*y}
+		case "**":
+			return jsFlo{f: math.Pow(x, y)}
+		}
+		rt.fail("Float does not support '%s'", op)
+	}
+	x, y := rubyToF(l), rubyToF(r)
+	switch op {
+	case "+":
+		return x + y
+	case "-":
+		return x - y
+	case "*":
+		return x * y
+	case "/":
+		if y == 0 {
+			rt.fail("divided by 0")
+		}
+		return math.Floor(x / y)
+	case "%":
+		if y == 0 {
+			rt.fail("divided by 0")
+		}
+		return x - math.Floor(x/y)*y
+	case "**":
+		if y < 0 {
+			return jsFlo{f: math.Pow(x, y)}
+		}
+		return math.Pow(x, y)
+	case "&":
+		return float64(int64(x) & int64(y))
+	case "|":
+		return float64(int64(x) | int64(y))
+	case "^":
+		return float64(int64(x) ^ int64(y))
+	case "<<":
+		return x * math.Pow(2, y)
+	case ">>":
+		return math.Floor(x / math.Pow(2, y))
+	}
+	rt.fail("Integer does not support '%s'", op)
+	return nil
+}
+
+// rubyUserObj answers whether v is an instance of a user class (it carries a
+// __class descriptor), which is what makes it dispatch its own operator methods.
+func rubyUserObj(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	_, has := o.props["__class"]
+	return has
+}
+
+// rubyFindMethod walks the __class / __super chain of an instance for a method.
+func rubyFindMethod(v interface{}, name string) (interface{}, bool) {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return nil, false
+	}
+	for cls := o.props["__class"]; cls != nil; {
+		clsObj, ok := cls.(*jsObject)
+		if !ok {
+			break
+		}
+		if m, ok := clsObj.props[name]; ok && isCallable(m) {
+			return m, true
+		}
+		cls = clsObj.props["__super"]
+	}
+	return nil, false
+}
+
+// rubyBin is the one binary operator step of ruby-to-llvm-ir.abnf (js_radd and
+// friends below), mirroring radd/rbin of ruby-interpreter.abnf: a user object
+// dispatches to its own operator method, strings and arrays get their Ruby
+// operators, everything else is the numeric tower above.
+func (rt *jsrt) rubyBin(op string, l, r interface{}) interface{} {
+	if rubyUserObj(l) {
+		// An exception instance that defines no + of its own concatenates as its
+		// message, the same rule radd of ruby-interpreter.abnf applies - so
+		// `raise e + "er"' inside a rescue keeps working.
+		if op == "+" {
+			if o, isObj := l.(*jsObject); isObj {
+				if _, isExc := o.props["args"]; isExc {
+					if _, hasOp := rubyFindMethod(l, "+"); !hasOp {
+						return strConcat(rt.rubyStr(l), rt.rubyStr(r))
+					}
+				}
+			}
+		}
+		return rt.rubyMethod(l, op, []interface{}{r})
+	}
+	switch op {
+	case "+":
+		if _, ok := l.(string); ok {
+			return strConcat(rt.rubyStr(l), rt.rubyStr(r))
+		}
+		if _, ok := r.(string); ok {
+			return strConcat(rt.rubyStr(l), rt.rubyStr(r))
+		}
+		if la, ok := l.(*jsArray); ok {
+			if ra, ok2 := r.(*jsArray); ok2 {
+				out := &jsArray{}
+				out.elems = append(append(out.elems, la.elems...), ra.elems...)
+				return out
+			}
+		}
+	case "*":
+		if ls, ok := l.(string); ok {
+			n := int(rubyToF(r))
+			if n < 0 {
+				n = 0
+			}
+			return strings.Repeat(ls, n)
+		}
+		if la, ok := l.(*jsArray); ok {
+			out := &jsArray{}
+			for i := 0; i < int(rubyToF(r)); i++ {
+				out.elems = append(out.elems, la.elems...)
+			}
+			return out
+		}
+	case "-":
+		if la, ok := l.(*jsArray); ok {
+			if ra, ok2 := r.(*jsArray); ok2 {
+				out := &jsArray{}
+				for _, e := range la.elems {
+					drop := false
+					for _, x := range ra.elems {
+						if rt.pyEqual(e, x) {
+							drop = true
+							break
+						}
+					}
+					if !drop {
+						out.elems = append(out.elems, e)
+					}
+				}
+				return out
+			}
+		}
+	case "%":
+		if ls, ok := l.(string); ok {
+			return rt.rubyFormat(ls, r)
+		}
+	case "<<":
+		if la, ok := l.(*jsArray); ok {
+			la.dropIdx()
+			la.elems = append(la.elems, r)
+			return la
+		}
+		if ls, ok := l.(string); ok {
+			return strConcat(ls, rt.rubyStr(r))
+		}
+	}
+	return rt.rubyNumBin(op, l, r)
+}
+
+// rubyNumMethod is the Integer / Float / Rational / Complex method set of
+// js_rmcall. It answers ok=false for a name it does not know, so the caller can
+// carry on with the generic dispatch (and its error message).
+func (rt *jsrt) rubyNumMethod(t interface{}, name string, args []interface{}) (interface{}, bool) {
+	x := rubyToF(t)
+	_, isInt := t.(float64)
+	switch name {
+	case "to_s", "inspect":
+		if isInt && len(args) > 0 {
+			return strconv.FormatInt(int64(x), int(rubyToF(args[0]))), true
+		}
+		return rt.rubyStr(t), true
+	case "to_i", "to_int", "truncate":
+		return math.Trunc(x), true
+	case "to_f":
+		if f, ok := t.(jsFlo); ok {
+			return f, true
+		}
+		return jsFlo{f: x}, true
+	case "to_r":
+		return rubyAsRat(t), true
+	case "abs", "magnitude":
+		if _, ok := t.(jsFlo); ok {
+			return jsFlo{f: math.Abs(x)}, true
+		}
+		return math.Abs(x), true
+	case "floor":
+		return math.Floor(x), true
+	case "ceil":
+		return math.Ceil(x), true
+	case "round":
+		if len(args) > 0 {
+			p := math.Pow(10, rubyToF(args[0]))
+			return jsFlo{f: math.Floor(x*p+0.5) / p}, true
+		}
+		if x < 0 {
+			return -math.Floor(-x + 0.5), true
+		}
+		return math.Floor(x + 0.5), true
+	case "zero?":
+		return x == 0, true
+	case "positive?":
+		return x > 0, true
+	case "negative?":
+		return x < 0, true
+	case "even?":
+		return math.Mod(x, 2) == 0, true
+	case "odd?":
+		return math.Mod(x, 2) != 0, true
+	case "succ", "next":
+		return x + 1, true
+	case "pred":
+		return x - 1, true
+	case "chr":
+		return string(rune(int32(x))), true
+	case "integer?":
+		return isInt, true
+	case "numerator":
+		return rubyAsRat(t).n, true
+	case "denominator":
+		return rubyAsRat(t).d, true
+	case "times": // n.times { |i| ... }
+		for i := 0.0; i < x; i++ {
+			rt.call(argAt(args, 0), jsUndef, []interface{}{i})
+		}
+		return t, true
+	case "upto":
+		for i := x; i <= rubyToF(argAt(args, 0)); i++ {
+			rt.call(argAt(args, 1), jsUndef, []interface{}{i})
+		}
+		return t, true
+	case "downto":
+		for i := x; i >= rubyToF(argAt(args, 0)); i-- {
+			rt.call(argAt(args, 1), jsUndef, []interface{}{i})
+		}
+		return t, true
+	case "divmod":
+		y := rubyToF(argAt(args, 0))
+		return &jsArray{elems: []interface{}{math.Floor(x / y), x - math.Floor(x/y)*y}}, true
+	case "fdiv":
+		return jsFlo{f: x / rubyToF(argAt(args, 0))}, true
+	case "pow", "**":
+		return rt.rubyBin("**", t, argAt(args, 0)), true
+	case "gcd":
+		return rubyGcd(x, rubyToF(argAt(args, 0))), true
+	case "between?":
+		return x >= rubyToF(argAt(args, 0)) && x <= rubyToF(argAt(args, 1)), true
+	case "clamp":
+		lo, hi := rubyToF(argAt(args, 0)), rubyToF(argAt(args, 1))
+		if x < lo {
+			return args[0], true
+		}
+		if x > hi {
+			return args[1], true
+		}
+		return t, true
+	case "real":
+		return rubyReOf(t), true
+	case "imaginary", "imag":
+		return rubyImOf(t), true
+	case "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>":
+		return rt.rubyBin(name, t, argAt(args, 0)), true
+	case "==":
+		return rt.rubyEq(t, argAt(args, 0)), true
+	case "<=>":
+		c, ok := rt.rubySpaceship(t, argAt(args, 0))
+		if !ok {
+			return jsNull, true
+		}
+		return float64(c), true
+	}
+	return nil, false
+}
+
+// rubyClassName is Ruby's #class for the values that are not user instances: the
+// name of the builtin class a runtime value belongs to ("" when there is none).
+func rubyClassName(v interface{}) string {
+	if b, ok := v.(bool); ok {
+		if b {
+			return "TrueClass"
+		}
+		return "FalseClass"
+	}
+	switch t := v.(type) {
+	case float64:
+		return "Integer"
+	case jsFlo:
+		return "Float"
+	case jsRat:
+		return "Rational"
+	case jsCpx:
+		return "Complex"
+	case string:
+		return "String"
+	case jsSym:
+		return "Symbol"
+	case jsNullT, jsUndefT:
+		return "NilClass"
+	case *jsArray:
+		return "Array"
+	case *jsObject:
+		if _, _, isDict := dictParts(t); isDict {
+			return "Hash"
+		}
+	}
+	return ""
+}
+
+// rubyBuiltinClass hands out the ONE class object of a builtin class name, so that
+// `1.class == Integer` and `case v when Integer` compare the same object. The
+// descriptor carries __isclass (like a compiled class) plus __rbuiltin, which is
+// what rubyIsA keys the type test on.
+func (rt *jsrt) rubyBuiltinClass(name string) *jsObject {
+	if rt.rubyClasses == nil {
+		rt.rubyClasses = map[string]*jsObject{}
+	}
+	if c, ok := rt.rubyClasses[name]; ok {
+		return c
+	}
+	c := newJSObject()
+	c.set("__isclass", true)
+	c.set("__rbuiltin", name)
+	c.set("__name", name)
+	rt.rubyClasses[name] = c
+	return c
+}
+
+// rubyExcObj answers whether v is an exception instance: a user object carrying
+// the `args' slot every raise path fills in (rubyExc / the default initialize).
+func rubyExcObj(v interface{}) bool {
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	if _, isCls := o.props["__isclass"]; isCls {
+		return false
+	}
+	_, hasArgs := o.props["args"]
+	_, hasClass := o.props["__class"]
+	return hasArgs && hasClass
+}
+
+// rubyExcParent is the ancestry of the builtin exception classes: the part of
+// Ruby's class tree a `rescue' clause has to know about. Exception is the root.
+var rubyExcParent = map[string]string{
+	"StandardError":       "Exception",
+	"RuntimeError":        "StandardError",
+	"ArgumentError":       "StandardError",
+	"TypeError":           "StandardError",
+	"NameError":           "StandardError",
+	"NoMethodError":       "NameError",
+	"IndexError":          "StandardError",
+	"KeyError":            "IndexError",
+	"RangeError":          "StandardError",
+	"ZeroDivisionError":   "StandardError",
+	"StopIteration":       "IndexError",
+	"FrozenError":         "RuntimeError",
+	"NotImplementedError": "StandardError",
+}
+
+// rubyExcIsA answers `v is an exception of builtin class named bn': it walks the
+// value's own __class/__super chain (so a user subclass counts) and, once that
+// reaches a builtin class, continues up rubyExcParent by name.
+func rubyExcIsA(v interface{}, bn string) bool {
+	if _, known := rubyExcParent[bn]; !known && bn != "Exception" {
+		return false
+	}
+	o, ok := v.(*jsObject)
+	if !ok {
+		return false
+	}
+	for c := o.props["__class"]; c != nil; {
+		co, isObj := c.(*jsObject)
+		if !isObj {
+			return false
+		}
+		name, _ := co.props["__name"].(string)
+		if _, isBuiltin := co.props["__rbuiltin"].(string); isBuiltin {
+			for n := name; n != ""; n = rubyExcParent[n] {
+				if n == bn {
+					return true
+				}
+			}
+			return false
+		}
+		if name == bn {
+			return true
+		}
+		c = co.props["__super"]
+	}
+	return false
+}
+
+// rubyIsA is `v.is_a?(cls)` / `cls === v`: a builtin class matches by the value's
+// runtime kind (with Integer/Float also counting as Numeric and Comparable), a
+// compiled class by walking the instance's __class / __super chain.
+func (rt *jsrt) rubyIsA(v interface{}, cls interface{}) bool {
+	clsObj, ok := cls.(*jsObject)
+	if !ok {
+		return false
+	}
+	if bn, isBuiltin := clsObj.props["__rbuiltin"].(string); isBuiltin {
+		kind := rubyClassName(v)
+		if kind == bn {
+			return true
+		}
+		// `rescue StandardError' has to catch a RuntimeError, and a user class
+		// `class MyErr < StandardError' has to be caught by both - so an exception
+		// name walks the value's class chain and then the builtin parent table.
+		if rubyExcIsA(v, bn) {
+			return true
+		}
+		switch bn {
+		case "Numeric":
+			return rubyIsNum(v)
+		case "Comparable":
+			return rubyIsNum(v) || kind == "String"
+		case "Object", "BasicObject", "Kernel":
+			return true
+		case "Enumerable":
+			return kind == "Array" || kind == "Hash"
+		}
+		return false
+	}
+	for c := interface{}(nil); ; {
+		o, isObj := v.(*jsObject)
+		if !isObj {
+			return false
+		}
+		c = o.props["__class"]
+		for c != nil {
+			if c == cls {
+				return true
+			}
+			co, isO := c.(*jsObject)
+			if !isO {
+				return false
+			}
+			c = co.props["__super"]
+		}
+		return false
+	}
+}
+
+// rubyExc builds an exception instance: {__class: <class>, args: [message]}, the
+// shape the message reader and the rescue type test below both understand.
+func (rt *jsrt) rubyExc(cls *jsObject, args []interface{}) *jsObject {
+	inst := newJSObject()
+	inst.set("__class", cls)
+	inst.set("args", &jsArray{elems: append([]interface{}{}, args...)})
+	return inst
+}
+
+// rubyMakeExc turns the operand of Ruby's `raise' into the exception object to
+// throw, so the compiler grammar (ruby-to-llvm-ir.abnf) needs no runtime type
+// dispatch of its own in IR:
+//   - a class object    -> a fresh instance, the message as its single argument
+//     (its own initialize still runs when the class defines one, so a subclass
+//     that supplies a default message through `super' gets it)
+//   - a string          -> a RuntimeError carrying that message, as in MRI
+//   - nil / undefined   -> a BARE `raise': re-raise what the running rescue caught
+//   - anything else     -> raised unchanged (`raise ArgumentError.new("arg")')
+//
+// The instance always carries `args', which is where rubyExcMessage reads the
+// message from, so a user exception class needs no code of its own.
+func (rt *jsrt) rubyMakeExc(v interface{}, msg interface{}) interface{} {
+	if isUndefOrNull(v) {
+		if rt.rubyCurExc != nil {
+			return rt.rubyCurExc
+		}
+		return rt.rubyExc(rt.rubyBuiltinClass("RuntimeError"), nil)
+	}
+	if s, isStr := v.(string); isStr {
+		return rt.rubyExc(rt.rubyBuiltinClass("RuntimeError"), []interface{}{s})
+	}
+	if o, isObj := v.(*jsObject); isObj {
+		if _, isCls := o.props["__isclass"]; isCls {
+			var argv []interface{}
+			if !isUndefOrNull(msg) {
+				argv = []interface{}{msg}
+			}
+			inst := rt.rubyExc(o, argv)
+			// A user class may define initialize (possibly only through super);
+			// a builtin one, and a class chain without any, needs nothing more.
+			if _, has := rubyFindMethod(inst, "initialize"); has {
+				rt.rubyMethod(inst, "initialize", argv)
+			}
+			return inst
+		}
+	}
+	return v
+}
+
+// rubyExcMessage is Exception#message / #to_s: the first constructor argument,
+// or the class name when the exception was raised without one (MRI's default).
+func (rt *jsrt) rubyExcMessage(o *jsObject) (interface{}, bool) {
+	if arr, ok := o.props["args"].(*jsArray); ok && len(arr.elems) > 0 {
+		return rt.rubyStr(arr.elems[0]), true
+	}
+	if cls, ok := o.props["__class"].(*jsObject); ok {
+		if n, isStr := cls.props["__name"].(string); isStr {
+			return n, true
+		}
+	}
+	return nil, false
+}
+
+// rubyClassOfSelf answers the class a @@class variable belongs to: the class of an
+// instance, or `self` itself when the code runs in a class method / a class body.
+func rubyClassOfSelf(self interface{}) interface{} {
+	o, ok := self.(*jsObject)
+	if !ok {
+		return nil
+	}
+	if _, isCls := o.props["__isclass"]; isCls {
+		return o
+	}
+	return o.props["__class"]
+}
+
+// rubyNeg is unary minus over the tower; a user object dispatches its own -@.
+func (rt *jsrt) rubyNeg(v interface{}) interface{} {
+	switch t := v.(type) {
+	case float64:
+		return -t
+	case jsFlo:
+		return jsFlo{f: -t.f}
+	case jsRat:
+		return jsRat{n: -t.n, d: t.d}
+	case jsCpx:
+		return jsCpx{re: -t.re, im: -t.im}
+	}
+	if rubyUserObj(v) {
+		return rt.rubyMethod(v, "-@", nil)
+	}
+	rt.fail("cannot negate a %s", rt.typeOf(v))
+	return nil
+}
+
+// rubyStr is Ruby's to_s: a Float keeps its decimal point, a Symbol is its bare
+// name, and an Array / Hash renders like #inspect (which is what interpolation of a
+// collection gives in Ruby). It mirrors rstr of ruby-interpreter.abnf.
+func (rt *jsrt) rubyStr(v interface{}) string {
+	switch t := v.(type) {
+	case jsNullT, jsUndefT:
+		return ""
+	case jsFlo:
+		return rubyFloStr(t.f)
+	case jsRat:
+		return jsNumString(t.n) + "/" + jsNumString(t.d)
+	case jsCpx:
+		return jsNumString(t.re) + "+" + jsNumString(t.im) + "i"
+	case *jsArray:
+		return rt.rubyInspect(v)
+	case *jsObject:
+		if _, _, isDict := dictParts(t); isDict {
+			return rt.rubyInspect(v)
+		}
+		if m, ok := rubyFindMethod(t, "to_s"); ok {
+			return rt.rubyStr(rt.call(m, jsUndef, []interface{}{t}))
+		}
+		// An exception instance renders as its message, like Exception#to_s in MRI
+		// (so `"log " + e' and "#{e}" read the way a Ruby program expects).
+		if _, isExc := t.props["args"]; isExc {
+			if msg, ok := rt.rubyExcMessage(t); ok {
+				return rt.toString(msg)
+			}
+		}
+	}
+	return rt.toString(v)
+}
+
+// rubyInspect is Ruby's #inspect: nil, quoted strings, :symbols, and the bracketed
+// forms of Array and Hash.
+func (rt *jsrt) rubyInspect(v interface{}) string {
+	switch t := v.(type) {
+	case jsNullT, jsUndefT:
+		return "nil"
+	case string:
+		return "\"" + t + "\""
+	case jsSym:
+		return ":" + t.s
+	case *jsArray:
+		parts := make([]string, len(t.elems))
+		for i, e := range t.elems {
+			parts[i] = rt.rubyInspect(e)
+		}
+		return "[" + strJoin(parts, ", ") + "]"
+	case *jsObject:
+		if keys, vals, isDict := dictParts(t); isDict {
+			parts := make([]string, len(keys.elems))
+			for i := range keys.elems {
+				parts[i] = rt.rubyInspect(keys.elems[i]) + " => " + rt.rubyInspect(vals.elems[i])
+			}
+			return "{" + strJoin(parts, ", ") + "}"
+		}
+	}
+	return rt.rubyStr(v)
+}
+
+// rubyEq is Ruby's ==: numeric across the whole tower (2.0 == 2, 1r/2r == 0.5), a
+// user class's own == when it defines one, and the structural comparison of
+// Array/Hash (pyEqual) otherwise. A Symbol only equals another Symbol.
+func (rt *jsrt) rubyEq(l, r interface{}) bool {
+	if rubyIsNum(l) && rubyIsNum(r) {
+		if _, lc := l.(jsCpx); lc {
+			return rubyReOf(l) == rubyReOf(r) && rubyImOf(l) == rubyImOf(r)
+		}
+		if _, rc := r.(jsCpx); rc {
+			return rubyReOf(l) == rubyReOf(r) && rubyImOf(l) == rubyImOf(r)
+		}
+		return rubyToF(l) == rubyToF(r)
+	}
+	if rubyUserObj(l) {
+		if m, ok := rubyFindMethod(l, "=="); ok {
+			return rubyTruthy(rt.call(m, jsUndef, []interface{}{l, r}))
+		}
+	}
+	// An exception compares equal to its own message, the same deliberate
+	// divergence rubyEq of ruby-interpreter.abnf makes, so a program that raises a
+	// plain string still reads its rescue value as that string.
+	if s, isStr := r.(string); isStr && rubyExcObj(l) {
+		return rt.rubyStr(l) == s
+	}
+	if s, isStr := l.(string); isStr && rubyExcObj(r) {
+		return rt.rubyStr(r) == s
+	}
+	return rt.pyEqual(l, r)
+}
+
+// rubySpaceship is <=>: nil (a Go nil result reported as jsNull by the caller) for
+// values that cannot be compared, which is exactly Ruby's answer.
+func (rt *jsrt) rubySpaceship(l, r interface{}) (int, bool) {
+	if rubyUserObj(l) {
+		if m, ok := rubyFindMethod(l, "<=>"); ok {
+			return int(rubyToF(rt.call(m, jsUndef, []interface{}{l, r}))), true
+		}
+		return 0, false
+	}
+	if rubyIsNum(l) && rubyIsNum(r) {
+		x, y := rubyToF(l), rubyToF(r)
+		switch {
+		case x < y:
+			return -1, true
+		case x > y:
+			return 1, true
+		}
+		return 0, true
+	}
+	if ls, ok := l.(string); ok {
+		if rs, ok2 := r.(string); ok2 {
+			switch {
+			case ls < rs:
+				return -1, true
+			case ls > rs:
+				return 1, true
+			}
+			return 0, true
+		}
+	}
+	if la, ok := l.(*jsArray); ok {
+		if ra, ok2 := r.(*jsArray); ok2 {
+			for i := 0; i < len(la.elems) && i < len(ra.elems); i++ {
+				if c, ok3 := rt.rubySpaceship(la.elems[i], ra.elems[i]); ok3 && c != 0 {
+					return c, true
+				}
+			}
+			return len(la.elems) - len(ra.elems), true
+		}
+	}
+	return 0, false
+}
+
+// rubyCmp backs < > <= >=, which raise in Ruby when the values cannot be compared.
+func (rt *jsrt) rubyCmp(l, r interface{}) int {
+	c, ok := rt.rubySpaceship(l, r)
+	if !ok {
+		rt.fail("comparison of incompatible values")
+	}
+	return c
+}
+
+// rubyFormat is Kernel#format / String#% - the printf directives Ruby shares with C:
+// %[-][0][width][.prec](d|i|f|s|x|X|o|b|e|%). The right operand is the argument, or
+// an array of them.
+func (rt *jsrt) rubyFormat(spec string, arg interface{}) string {
+	args := []interface{}{arg}
+	if a, ok := arg.(*jsArray); ok {
+		args = a.elems
+	}
+	out := make([]byte, 0, len(spec))
+	ai := 0
+	next := func() interface{} {
+		if ai < len(args) {
+			v := args[ai]
+			ai++
+			return v
+		}
+		ai++
+		return jsNull
+	}
+	for i := 0; i < len(spec); i++ {
+		if spec[i] != '%' {
+			out = append(out, spec[i])
+			continue
+		}
+		i++
+		if i >= len(spec) {
+			out = append(out, '%')
+			break
+		}
+		if spec[i] == '%' {
+			out = append(out, '%')
+			continue
+		}
+		left, zero := false, false
+		for i < len(spec) && (spec[i] == '-' || spec[i] == '0' || spec[i] == '+' || spec[i] == ' ') {
+			if spec[i] == '-' {
+				left = true
+			}
+			if spec[i] == '0' {
+				zero = true
+			}
+			i++
+		}
+		width := 0
+		for i < len(spec) && spec[i] >= '0' && spec[i] <= '9' {
+			width = width*10 + int(spec[i]-'0')
+			i++
+		}
+		prec := -1
+		if i < len(spec) && spec[i] == '.' {
+			i++
+			prec = 0
+			for i < len(spec) && spec[i] >= '0' && spec[i] <= '9' {
+				prec = prec*10 + int(spec[i]-'0')
+				i++
+			}
+		}
+		if i >= len(spec) {
+			break
+		}
+		var body string
+		switch spec[i] {
+		case 'd', 'i':
+			body = jsNumString(math.Trunc(rubyToF(next())))
+		case 'f':
+			if prec < 0 {
+				prec = 6
+			}
+			body = strconv.FormatFloat(rubyToF(next()), 'f', prec, 64)
+		case 'e':
+			if prec < 0 {
+				prec = 6
+			}
+			body = strconv.FormatFloat(rubyToF(next()), 'e', prec, 64)
+		case 's':
+			body = rt.rubyStr(next())
+			if prec >= 0 && prec < len(body) {
+				body = body[:prec]
+			}
+		case 'x':
+			body = strconv.FormatInt(int64(rubyToF(next())), 16)
+		case 'X':
+			body = strings.ToUpper(strconv.FormatInt(int64(rubyToF(next())), 16))
+		case 'o':
+			body = strconv.FormatInt(int64(rubyToF(next())), 8)
+		case 'b':
+			body = strconv.FormatInt(int64(rubyToF(next())), 2)
+		default:
+			body = string(spec[i])
+		}
+		pad := " "
+		if zero && !left {
+			pad = "0"
+		}
+		for len(body) < width {
+			if left {
+				body += " "
+			} else if pad == "0" && len(body) > 0 && (body[0] == '-') {
+				body = "-" + pad + body[1:]
+			} else {
+				body = pad + body
+			}
+		}
+		out = append(out, body...)
+	}
+	return string(out)
+}
+
 // rubyMethod is js_rmcall: the direct method dispatch of the Ruby compiler
 // (ruby-to-llvm-ir.abnf). It mirrors the mcall of ruby-interpreter.abnf exactly
 // for strings, arrays and hashes (Ruby nil-on-empty, Ruby truthiness, .each over
@@ -2324,6 +3522,53 @@ func rubyTruthy(v interface{}) bool {
 // semantics never perturb the Kotlin/Java/Go/Python languages that also use
 // js_mcall.
 func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) interface{} {
+	// Ruby's universal reflective methods, answered for every kind of value.
+	switch name {
+	case "class":
+		if kind := rubyClassName(target); kind != "" {
+			return rt.rubyBuiltinClass(kind)
+		}
+	case "is_a?", "kind_of?", "instance_of?":
+		if rubyClassName(target) != "" && !rubyUserObj(target) {
+			return rt.rubyIsA(target, argAt(args, 0))
+		}
+	case "nil?":
+		return isUndefOrNull(target)
+	case "message", "full_message":
+		// Exception#message: the raise argument, or the class name. Only for an
+		// INSTANCE that does not define a message method of its own, so a user
+		// class named message stays in charge.
+		if o, isObj := target.(*jsObject); isObj {
+			if _, isCls := o.props["__isclass"]; !isCls {
+				if _, hasOwn := rubyFindMethod(target, name); !hasOwn {
+					if msg, ok := rt.rubyExcMessage(o); ok {
+						return msg
+					}
+				}
+			}
+		}
+	case "frozen?":
+		_, isStr := target.(string)
+		return isStr || rubyIsNum(target)
+	case "call", "()", "yield", "[]", "===":
+		// A Proc / lambda / block: p.call(x), p.(x), p[x] and p.yield(x).
+		if isCallable(target) {
+			return rt.call(target, jsUndef, args)
+		}
+	case "lambda?":
+		if isCallable(target) {
+			return rt.rubyLambdas[target]
+		}
+	case "to_proc":
+		if isCallable(target) {
+			return target
+		}
+	}
+	if rubyIsNum(target) {
+		if v, ok := rt.rubyNumMethod(target, name, args); ok {
+			return v
+		}
+	}
 	switch o := target.(type) {
 	case jsSym:
 		switch name {
@@ -2353,6 +3598,10 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 			return strings.ToLower(o)
 		case "include?":
 			return strings.Contains(o, rt.toString(argAt(args, 0)))
+		case "dup", "clone", "freeze", "to_str", "+@", "-@", "itself":
+			// A Ruby String is mutable, so `s = "a".dup` hands back a copy; the
+			// compiler models a String as a value, which makes the copy the value.
+			return o
 		}
 		rt.fail("unknown String method: %s", name)
 	case *jsArray:
@@ -2398,6 +3647,23 @@ func (rt *jsrt) rubyMethod(target interface{}, name string, args []interface{}) 
 				cls = clsObj.props["__super"]
 			}
 			return false
+		}
+		// A singleton (class) method: `def self.m` / `class << self` stores the
+		// method on the class descriptor under a "$s$" prefixed key, so it cannot
+		// collide with the INSTANCE method of the same name (Ruby keeps the two
+		// apart, and only ruby-to-llvm-ir.abnf emits that key). The lookup walks
+		// __super, like the instance one, and passes the class itself as self.
+		if _, isCls := o.props["__isclass"]; isCls {
+			for cls := interface{}(o); cls != nil; {
+				clsObj, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if m, ok := clsObj.props["$s$"+name]; ok && isCallable(m) {
+					return rt.call(m, jsUndef, append([]interface{}{o}, args...))
+				}
+				cls = clsObj.props["__super"]
+			}
 		}
 		// A class instance or class object: the generic dispatch handles it.
 		return rt.memberCall(target, name, args)
@@ -3289,6 +4555,14 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// Hash key and an out-of-range index answer NIL instead of raising - which is
 		// Ruby's Hash#[] / Array#[] / String#[], and what ruby-interpreter.abnf does.
 		"js_rget": func(a []uint64) uint64 {
+			// A Proc answers p[x] by calling itself.
+			if isCallable(u(a[0])) {
+				return w(rt.call(u(a[0]), jsUndef, []interface{}{u(a[1])}))
+			}
+			// A user class defines its own indexing with `def [](i)`.
+			if rubyUserObj(u(a[0])) {
+				return w(rt.rubyMethod(u(a[0]), "[]", []interface{}{u(a[1])}))
+			}
 			if keys, vals, ok := dictParts(u(a[0])); ok {
 				i := rt.dictFind(keys, u(a[1]))
 				if i < 0 {
@@ -3320,6 +4594,41 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				rt.fail("indexing nil")
 			}
 			return w(rt.getMember(u(a[0]), u(a[1])))
+		},
+		// Ruby index assignment: a[i] = v, h[k] = v, obj[i] = v. Like js_pyset except
+		// that a user class dispatches its own `def []=`, a missing Hash key is
+		// APPENDED and an Array GROWS (filling the gap with nil) - all three Ruby.
+		"js_rset": func(a []uint64) uint64 {
+			t := u(a[0])
+			if rubyUserObj(t) {
+				rt.rubyMethod(t, "[]=", []interface{}{u(a[1]), u(a[2])})
+				return 0
+			}
+			if keys, vals, ok := dictParts(t); ok {
+				if i := rt.dictFind(keys, u(a[1])); i >= 0 {
+					vals.elems[i] = u(a[2])
+				} else {
+					dictAppend(keys, vals, u(a[1]), u(a[2]))
+				}
+				return 0
+			}
+			arr, ok := t.(*jsArray)
+			if !ok {
+				rt.fail("item assignment on a %s", rt.typeOf(t))
+			}
+			idx := int(rt.toNumber(u(a[1])))
+			if idx < 0 {
+				idx += len(arr.elems)
+			}
+			if idx < 0 {
+				rt.fail("index %d too small for array", idx)
+			}
+			arr.dropIdx()
+			for len(arr.elems) <= idx {
+				arr.elems = append(arr.elems, jsNull)
+			}
+			arr.elems[idx] = u(a[2])
+			return 0
 		},
 		"js_supercall": func(a []uint64) uint64 { // (super class, this, method name, args array)
 			args, ok := u(a[3]).(*jsArray)
@@ -3491,6 +4800,12 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			return w(inst)
 		},
 		"js_tonum": func(a []uint64) uint64 { return rt.wrapNum(rt.toNumber(u(a[0]))) },
+		// Ruby's `raise' in one step: (operand, message|undef). rubyMakeExc turns a
+		// class / a string / a bare re-raise into the exception object, which is then
+		// thrown exactly like js_throw does.
+		"js_rraise": func(a []uint64) uint64 {
+			panic(&jsThrown{value: rt.rubyMakeExc(u(a[0]), u(a[1]))})
+		},
 		"js_throw": func(a []uint64) uint64 {
 			// Raise the thrown value as a Go panic; the nearest js_try recovers it.
 			// An uncaught one is turned into a clean runtime error at the program
@@ -3525,7 +4840,13 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			result, pending := run(tryC, nil)
 			if pending != nil {
 				if exc, isThrow := pending.(*jsThrown); isThrow && hasCatch {
+					// Ruby's $!: a bare `raise' inside the catch clause re-raises
+					// this value (js_rraise). Restored afterwards so a nested try
+					// hands the outer clause its own exception back.
+					savedCur := rt.rubyCurExc
+					rt.rubyCurExc = exc.value
 					result, pending = run(catchC, []interface{}{exc.value})
+					rt.rubyCurExc = savedCur
 				}
 			}
 			if hasFinally {
@@ -3693,6 +5014,331 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// ----- Ruby's Symbol (see the jsSym type) -----
 		// :name from its name. Only ruby-to-llvm-ir.abnf emits this.
 		"js_sym": func(a []uint64) uint64 { return w(jsSym{s: rt.toString(u(a[0]))}) },
+		// ----- Ruby's numeric tower and operators (see the jsFlo/jsRat/jsCpx types) -----
+		// Only ruby-to-llvm-ir.abnf emits these; every other grammar keeps the shared
+		// js_jadd/js_sub/... operators, whose semantics are untouched by them.
+		"js_rflo": func(a []uint64) uint64 { return w(jsFlo{f: rt.toNumber(u(a[0]))}) },
+		"js_rrat": func(a []uint64) uint64 { return w(rubyMkRat(rt.toNumber(u(a[0])), rt.toNumber(u(a[1])))) },
+		"js_rcpx": func(a []uint64) uint64 { return w(jsCpx{re: rt.toNumber(u(a[0])), im: rt.toNumber(u(a[1]))}) },
+		"js_radd": func(a []uint64) uint64 { return w(rt.rubyBin("+", u(a[0]), u(a[1]))) },
+		"js_rsub": func(a []uint64) uint64 { return w(rt.rubyBin("-", u(a[0]), u(a[1]))) },
+		"js_rmul": func(a []uint64) uint64 { return w(rt.rubyBin("*", u(a[0]), u(a[1]))) },
+		"js_rdiv": func(a []uint64) uint64 { return w(rt.rubyBin("/", u(a[0]), u(a[1]))) },
+		"js_rmod": func(a []uint64) uint64 { return w(rt.rubyBin("%", u(a[0]), u(a[1]))) },
+		"js_rpow": func(a []uint64) uint64 { return w(rt.rubyBin("**", u(a[0]), u(a[1]))) },
+		"js_rband": func(a []uint64) uint64 {
+			if lb, ok := u(a[0]).(bool); ok {
+				return boolH(lb && rubyTruthy(u(a[1])))
+			}
+			return w(rt.rubyBin("&", u(a[0]), u(a[1])))
+		},
+		"js_rbor": func(a []uint64) uint64 {
+			if lb, ok := u(a[0]).(bool); ok {
+				return boolH(lb || rubyTruthy(u(a[1])))
+			}
+			return w(rt.rubyBin("|", u(a[0]), u(a[1])))
+		},
+		"js_rbxor": func(a []uint64) uint64 {
+			if lb, ok := u(a[0]).(bool); ok {
+				return boolH(lb != rubyTruthy(u(a[1])))
+			}
+			return w(rt.rubyBin("^", u(a[0]), u(a[1])))
+		},
+		// << appends to an Array (in place, so `a << b << c` chains), concatenates a
+		// String and shifts an Integer - one operator, three receivers, like Ruby.
+		"js_rshl":  func(a []uint64) uint64 { return w(rt.rubyBin("<<", u(a[0]), u(a[1]))) },
+		"js_rshr":  func(a []uint64) uint64 { return w(rt.rubyBin(">>", u(a[0]), u(a[1]))) },
+		"js_rneg":  func(a []uint64) uint64 { return w(rt.rubyNeg(u(a[0]))) },
+		"js_rbnot": func(a []uint64) uint64 { return w(-rubyToF(u(a[0])) - 1) },
+		"js_req":   func(a []uint64) uint64 { return boolH(rt.rubyEq(u(a[0]), u(a[1]))) },
+		"js_rne":   func(a []uint64) uint64 { return boolH(!rt.rubyEq(u(a[0]), u(a[1]))) },
+		"js_rlt":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) < 0) },
+		"js_rgt":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) > 0) },
+		"js_rle":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) <= 0) },
+		"js_rge":   func(a []uint64) uint64 { return boolH(rt.rubyCmp(u(a[0]), u(a[1])) >= 0) },
+		"js_rcmp": func(a []uint64) uint64 { // <=>: nil when the two cannot be compared
+			c, ok := rt.rubySpaceship(u(a[0]), u(a[1]))
+			if !ok {
+				return w(jsNull)
+			}
+			return rt.wrapNum(float64(c))
+		},
+		// === (case equality): a Range (an eager array here) matches by membership, a
+		// class object by is_a?, everything else by ==.
+		"js_rcase": func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			if la, ok := l.(*jsArray); ok {
+				for _, e := range la.elems {
+					if rt.rubyEq(e, r) {
+						return boolH(true)
+					}
+				}
+				return boolH(false)
+			}
+			if lo, ok := l.(*jsObject); ok {
+				if _, isCls := lo.props["__isclass"]; isCls {
+					return boolH(rt.rubyIsA(r, l))
+				}
+			}
+			return boolH(rt.rubyEq(l, r))
+		},
+		// A plain `when V` value: a class matches by is_a?, everything else by ==
+		// (an Array compares structurally here - only a RANGE means membership,
+		// which is what js_rcase above is for).
+		"js_rwhen": func(a []uint64) uint64 {
+			l, r := u(a[0]), u(a[1])
+			if lo, ok := l.(*jsObject); ok {
+				if _, isCls := lo.props["__isclass"]; isCls {
+					return boolH(rt.rubyIsA(r, l))
+				}
+			}
+			return boolH(rt.rubyEq(l, r))
+		},
+		// ----- Ruby's $globals and @@class variables -----
+		// A $global lives outside every scope (a write in a method is visible
+		// everywhere) and reads as nil until it is first assigned.
+		// ----- Ruby parameter forms (see emitFunc in ruby-to-llvm-ir.abnf) -----
+		// Whether an argument was absent (js_arg answers undefined for one that was
+		// not passed). Ruby's nil is a VALUE and must not trigger a default.
+		"js_rundef": func(a []uint64) uint64 {
+			_, isUndef := u(a[0]).(jsUndefT)
+			return boolH(isUndef)
+		},
+		// *rest: the arguments from index i on, as an array (a trailing block closure
+		// is not one of them).
+		"js_rargrest": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			out := &jsArray{}
+			if !ok {
+				return w(out)
+			}
+			for i := int(a[1]); i < len(arr.elems); i++ {
+				if i == len(arr.elems)-1 && isCallable(arr.elems[i]) {
+					break
+				}
+				out.elems = append(out.elems, arr.elems[i])
+			}
+			return w(out)
+		},
+		// The keyword arguments a call passed: the trailing Hash of the argument
+		// list (a block closure may sit behind it), or an empty Hash.
+		"js_rkwargs": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if ok {
+				for i := len(arr.elems) - 1; i >= 0 && i >= len(arr.elems)-2; i-- {
+					if _, _, isDict := dictParts(arr.elems[i]); isDict {
+						return w(arr.elems[i])
+					}
+				}
+			}
+			return w(&jsObject{props: map[string]interface{}{
+				"__dict": true, "keys": &jsArray{}, "vals": &jsArray{},
+			}})
+		},
+		// **rest: the keyword hash minus the keys the named keyword parameters took.
+		"js_rkwrest": func(a []uint64) uint64 {
+			keys, vals, isDict := dictParts(u(a[0]))
+			out := &jsObject{props: map[string]interface{}{
+				"__dict": true, "keys": &jsArray{}, "vals": &jsArray{},
+			}}
+			if !isDict {
+				return w(out)
+			}
+			taken, _ := u(a[1]).(*jsArray)
+			okeys, ovals, _ := dictParts(out)
+			for i := range keys.elems {
+				drop := false
+				if taken != nil {
+					for _, t := range taken.elems {
+						if rt.rubyEq(t, keys.elems[i]) {
+							drop = true
+							break
+						}
+					}
+				}
+				if !drop {
+					dictAppend(okeys, ovals, keys.elems[i], vals.elems[i])
+				}
+			}
+			return w(out)
+		},
+		// &blk: the block a call was given - the trailing callable of the argument
+		// list - or nil when it was called without one.
+		"js_rblock": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if ok && len(arr.elems) > 0 && isCallable(arr.elems[len(arr.elems)-1]) {
+				return w(arr.elems[len(arr.elems)-1])
+			}
+			return w(jsNull)
+		},
+		// A lambda literal (->) / Kernel#lambda: an ordinary closure, remembered
+		// here so `lambda?` can tell it from a proc (their argument arity and their
+		// `return` differ in Ruby).
+		// C.new(args): build an instance of a compiled class and run its initialize.
+		// Two builtin classes are constructed directly: Proc.new { } is its block, and
+		// an exception class makes the {__class, args} shape the rescue clauses read.
+		"js_rnew": func(a []uint64) uint64 {
+			cls, _ := u(a[0]).(*jsObject)
+			args, _ := u(a[1]).(*jsArray)
+			var argv []interface{}
+			if args != nil {
+				argv = args.elems
+			}
+			if cls != nil {
+				if bn, isBuiltin := cls.props["__rbuiltin"].(string); isBuiltin {
+					if bn == "Proc" {
+						if len(argv) > 0 && isCallable(argv[len(argv)-1]) {
+							return w(argv[len(argv)-1])
+						}
+						return w(jsNull)
+					}
+					return w(rt.rubyExc(cls, argv))
+				}
+			}
+			inst := newJSObject()
+			inst.set("__class", u(a[0]))
+			rt.rubyMethod(inst, "initialize", argv)
+			return w(inst)
+		},
+		// Kernel#format / sprintf: the argument array is [format, args...].
+		"js_rformat": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok || len(arr.elems) == 0 {
+				return rt.wrapStr("")
+			}
+			return rt.wrapStr(rt.rubyFormat(rt.rubyStr(arr.elems[0]), &jsArray{elems: arr.elems[1:]}))
+		},
+		// &:sym as a block argument: the "call this method on each element" proc
+		// (`[1, 2].map(&:to_s)`). A Proc is passed straight through.
+		"js_rsymproc": func(a []uint64) uint64 {
+			sym, isSym := u(a[0]).(jsSym)
+			if !isSym {
+				return a[0]
+			}
+			name := sym.s
+			return w(&hostFunc{name: "&:" + name, fn: func(rt *jsrt, this uint64, args []interface{}) interface{} {
+				rest := []interface{}{}
+				if len(args) > 1 {
+					rest = args[1:]
+				}
+				return rt.rubyMethod(argAt(args, 0), name, rest)
+			}})
+		},
+		// A BLOCK parameter read: Ruby auto-splats a single Array argument over a
+		// block that declares more than one parameter, so `[[1, [2, 3]]].each { |a,
+		// (b, c)| }` sees a=1 rather than the whole pair. A lambda is strict and uses
+		// js_arg instead.
+		"js_rblockarg": func(a []uint64) uint64 {
+			arr, ok := u(a[0]).(*jsArray)
+			if !ok {
+				return jsHUndefined
+			}
+			i, n := int(a[1]), int(a[2])
+			if n > 1 && len(arr.elems) == 1 {
+				if inner, isArr := arr.elems[0].(*jsArray); isArr {
+					if i < len(inner.elems) {
+						return w(inner.elems[i])
+					}
+					return jsHUndefined
+				}
+			}
+			if i < len(arr.elems) {
+				return w(arr.elems[i])
+			}
+			return jsHUndefined
+		},
+		"js_rlambda": func(a []uint64) uint64 {
+			if rt.rubyLambdas == nil {
+				rt.rubyLambdas = map[interface{}]bool{}
+			}
+			rt.rubyLambdas[u(a[0])] = true
+			return a[0]
+		},
+		"js_rgget": func(a []uint64) uint64 {
+			if v, ok := rt.rubyGlobals[rt.toString(u(a[0]))]; ok {
+				return w(v)
+			}
+			return w(jsNull)
+		},
+		"js_rgset": func(a []uint64) uint64 {
+			if rt.rubyGlobals == nil {
+				rt.rubyGlobals = map[string]interface{}{}
+			}
+			rt.rubyGlobals[rt.toString(u(a[0]))] = u(a[1])
+			return 0
+		},
+		// defined?(X): the KIND of a name, or nil when it is nothing. The kind is
+		// decided at compile time from the shape of the name; these two only test
+		// whether it exists (as a $global, or anywhere on the scope chain).
+		"js_rgdefined": func(a []uint64) uint64 {
+			if _, ok := rt.rubyGlobals[rt.toString(u(a[0]))]; ok {
+				return w(u(a[1]))
+			}
+			return w(jsNull)
+		},
+		"js_rdefined": func(a []uint64) uint64 { // (scope, name, kind) -> kind | nil
+			name := rt.toString(u(a[1]))
+			for s := rt.scopeOf(a[0]); s != nil; s = s.parent {
+				if s.has(name) {
+					return w(u(a[2]))
+				}
+			}
+			return w(jsNull)
+		},
+		// A @@class variable belongs to the CLASS, shared by every instance and by
+		// the subclasses: the lookup starts at the class of `self` (or at self when
+		// it already IS a class) and walks __super.
+		"js_rcvget": func(a []uint64) uint64 {
+			for cls := rubyClassOfSelf(u(a[0])); cls != nil; {
+				o, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if v, has := o.props["@@"+rt.toString(u(a[1]))]; has {
+					return w(v)
+				}
+				cls = o.props["__super"]
+			}
+			return w(jsNull)
+		},
+		"js_rcvset": func(a []uint64) uint64 {
+			start := rubyClassOfSelf(u(a[0]))
+			key := "@@" + rt.toString(u(a[1]))
+			for cls := start; cls != nil; {
+				o, ok := cls.(*jsObject)
+				if !ok {
+					break
+				}
+				if _, has := o.props[key]; has {
+					o.set(key, u(a[2]))
+					return 0
+				}
+				cls = o.props["__super"]
+			}
+			if o, ok := start.(*jsObject); ok {
+				o.set(key, u(a[2]))
+			}
+			return 0
+		},
+		// The builtin class objects (Integer, String, Symbol, Array, ...): one object
+		// per name, so `1.class == Integer` and `when Integer` compare identities.
+		"js_rclass": func(a []uint64) uint64 { return w(rt.rubyBuiltinClass(rt.toString(u(a[0])))) },
+		// Ruby's to_s, used for string interpolation and puts.
+		"js_rstr": func(a []uint64) uint64 { return rt.wrapStr(rt.rubyStr(u(a[0]))) },
+		// %W[..] / %I[..]: split an interpolated body on whitespace into an array of
+		// strings (or of symbols when the flag is set).
+		"js_rsplitw": func(a []uint64) uint64 {
+			out := &jsArray{}
+			asSym := rubyTruthy(u(a[1]))
+			for _, word := range strings.Fields(rt.rubyStr(u(a[0]))) {
+				if asSym {
+					out.elems = append(out.elems, jsSym{s: word})
+				} else {
+					out.elems = append(out.elems, word)
+				}
+			}
+			return w(out)
+		},
 		// ----- Kotlin's Char (see the jsChar type) -----
 		// A Char from its code. The Kotlin grammars' char literals compile to this.
 		"js_char": func(a []uint64) uint64 { return w(jsChar{code: int32(int64(a[0]))}) },
@@ -3925,6 +5571,11 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 				}
 				return rt.wrapNum(float64(str[i]))
 			}
+			// f[int] / Stack[K, V]: a generic instantiation. Generics are ERASED in the
+			// Go grammars, so instantiating is the identity on the function it indexes.
+			if isCallable(u(a[0])) {
+				return a[0]
+			}
 			rt.fail("indexing a %s", rt.typeOf(u(a[0])))
 			return 0
 		},
@@ -3997,6 +5648,26 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 		// range loop keep reading it through js_range_len/key/val. Anything else
 		// (int bound, slice, map) passes through unchanged.
 		"js_gorange": func(a []uint64) uint64 {
+			// Ranging a CHANNEL yields one received value per iteration and ends when
+			// the channel is closed and drained. Under the cooperative model every
+			// producer runs to completion inside the first receive, so the sequence is
+			// fully known here: drain it into the same keys/vals shape a map uses, with
+			// the received value as BOTH (the single range name is the value in Go).
+			if _, _, isChan := goChanParts(u(a[0])); isChan {
+				keys := &jsArray{}
+				vals := &jsArray{}
+				for {
+					v, ok := rt.goChanRecv(u(a[0]))
+					if !ok {
+						break
+					}
+					keys.elems = append(keys.elems, v)
+					vals.elems = append(vals.elems, v)
+				}
+				return w(&jsObject{props: map[string]interface{}{
+					"__dict": true, "keys": keys, "vals": vals,
+				}})
+			}
 			s, isStr := u(a[0]).(string)
 			if !isStr {
 				return a[0]
@@ -4230,11 +5901,240 @@ func (rt *jsrt) externs(ma *machine) map[string]func(args []uint64) uint64 {
 			}
 			return a[1] // a named struct / interface type: the value is unchanged
 		},
+		// Go's == is VALUE equality for structs and arrays (both are value types) and
+		// identity for everything else; nil compares equal to an unset slice/map/pointer.
+		// Two struct values are equal when their descriptors agree on name and field
+		// list (so two anonymous struct literals of the same shape compare equal, the
+		// way Go's structural identity for unnamed types does) and every field is equal.
+		// ----- Go's panic / defer / recover -----
+		// A compiled Go function runs its BODY in a closure that js_gotry calls, so a
+		// panic unwinding through the frame is caught HERE: the frame's deferred
+		// functions still run afterwards, and a recover() in one of them takes the
+		// panic value and stops the unwinding. js_gorepanic (emitted after the defers)
+		// re-raises whatever was not recovered.
+		"js_gotry": func(a []uint64) uint64 {
+			rt.goPanics = append(rt.goPanics, nil)
+			res := func() (res interface{}) {
+				depth := len(rt.thisStack)
+				ntDepth := len(rt.newTargetStack)
+				defer func() {
+					if caught := recover(); caught != nil {
+						if rt.trackThis {
+							if len(rt.thisStack) > depth {
+								rt.thisStack = rt.thisStack[:depth]
+							}
+							if len(rt.newTargetStack) > ntDepth {
+								rt.newTargetStack = rt.newTargetStack[:ntDepth]
+							}
+						}
+						rt.goPanics[len(rt.goPanics)-1] = caught
+						res = jsUndef
+					}
+				}()
+				return rt.call(u(a[0]), jsUndef, nil)
+			}()
+			return w(res)
+		},
+		"js_gorepanic": func(a []uint64) uint64 {
+			p := rt.goPanics[len(rt.goPanics)-1]
+			rt.goPanics = rt.goPanics[:len(rt.goPanics)-1]
+			if p != nil {
+				panic(p)
+			}
+			return 0
+		},
+		"js_gopanic": func(a []uint64) uint64 { // panic(v): the argument array is the callee's
+			args, _ := u(a[0]).(*jsArray)
+			var v interface{} = jsUndef
+			if args != nil && len(args.elems) > 0 {
+				v = args.elems[0]
+			}
+			panic(&jsThrown{value: v})
+		},
+		// recover(): the pending panic of the frame whose defers are running, or nil.
+		// A runtime error (rt.fail panics a plain string) recovers as that message,
+		// which is what Go's recover of a runtime error yields in spirit.
+		"js_gorecover": func(a []uint64) uint64 {
+			if len(rt.goDeferAt) == 0 {
+				return w(jsNull)
+			}
+			at := rt.goDeferAt[len(rt.goDeferAt)-1]
+			// Only a function DEFERRED by that frame may recover its panic: it is one
+			// frame deeper (or, for a native callee, none).
+			if at < 0 || at >= len(rt.goPanics) || len(rt.goPanics) > at+2 {
+				return w(jsNull)
+			}
+			if rt.goPanics[at] == nil {
+				return w(jsNull)
+			}
+			p := rt.goPanics[at]
+			rt.goPanics[at] = nil
+			if exc, ok := p.(*jsThrown); ok {
+				return w(exc.value)
+			}
+			return w(fmt.Sprintf("%v", p))
+		},
+		// The completion value of a body closure: a return signal carries the returned
+		// value, a body that just ran off its end returns undefined.
+		"js_gounctl": func(a []uint64) uint64 {
+			if ctl, ok := u(a[0]).(*jsCtl); ok {
+				if ctl.kind == 1 {
+					return w(ctl.value)
+				}
+				return w(jsUndef)
+			}
+			return w(jsUndef)
+		},
+		// Go ints are 64 bit, so << and >> are NOT the 32-bit js_shl/js_shr: they are
+		// multiplication and division by a power of two, exact over the 53 bits a
+		// float64 carries - which covers 1 << 40 and every other form the subset uses.
+		// The interpreter's gshl/gshr do exactly this.
+		"js_goshl": func(a []uint64) uint64 {
+			n := rt.toNumber(u(a[1]))
+			if n >= 53 {
+				return rt.wrapNum(0)
+			}
+			return rt.wrapNum(rt.toNumber(u(a[0])) * math.Pow(2, n))
+		},
+		"js_goshr": func(a []uint64) uint64 {
+			l := rt.toNumber(u(a[0]))
+			n := rt.toNumber(u(a[1]))
+			if n >= 53 {
+				if l < 0 {
+					return rt.wrapNum(-1)
+				}
+				return rt.wrapNum(0)
+			}
+			return rt.wrapNum(math.Trunc(l / math.Pow(2, n)))
+		},
+		// make(chan T[, n]): the buffer size is not modeled (a send never blocks), the
+		// ELEMENT TYPE is, so a receive from a closed channel yields its zero value.
+		"js_gochan_new": func(a []uint64) uint64 {
+			o := newJSObject()
+			o.set("__chan", true)
+			o.set("buf", &jsArray{})
+			o.set("closed", false)
+			o.set("czero", rt.toString(u(a[0])))
+			return w(o)
+		},
+		"js_gochan_send": func(a []uint64) uint64 {
+			o, buf, ok := goChanParts(u(a[0]))
+			if !ok {
+				rt.fail("send on a non-channel")
+			}
+			if o.props["closed"] == true {
+				rt.fail("send on closed channel")
+			}
+			buf.elems = append(buf.elems, u(a[1]))
+			return 0
+		},
+		"js_gochan_recv": func(a []uint64) uint64 {
+			v, _ := rt.goChanRecv(u(a[0]))
+			return w(v)
+		},
+		// v, ok := <-ch: the pair, as a two-element array the emitted code indexes.
+		"js_gochan_recvok": func(a []uint64) uint64 {
+			v, ok := rt.goChanRecv(u(a[0]))
+			return w(&jsArray{elems: []interface{}{v, ok}})
+		},
+		// Can a receive proceed WITHOUT blocking? What a select's arms ask before
+		// falling back to the default arm; it drains the goroutine queue first.
+		"js_gochan_ready": func(a []uint64) uint64 {
+			o, buf, ok := goChanParts(u(a[0]))
+			if !ok {
+				rt.fail("receive from a non-channel")
+			}
+			if len(buf.elems) == 0 && o.props["closed"] != true {
+				rt.goDrain()
+			}
+			return boolH(len(buf.elems) > 0 || o.props["closed"] == true)
+		},
+		"js_gochan_close": func(a []uint64) uint64 { // close(ch): the callee's argument array
+			args, _ := u(a[0]).(*jsArray)
+			if args == nil || len(args.elems) == 0 {
+				rt.fail("close() needs a channel")
+			}
+			o, _, ok := goChanParts(args.elems[0])
+			if !ok {
+				rt.fail("close() needs a channel")
+			}
+			o.set("closed", true)
+			return w(jsUndef)
+		},
+		"js_gospawn": func(a []uint64) uint64 { // go f(...): queue the already-bound call
+			rt.goQueue = append(rt.goQueue, u(a[0]))
+			return 0
+		},
+		"js_godrain": func(a []uint64) uint64 { rt.goDrain(); return 0 },
+		"js_goeq": func(a []uint64) uint64 { return boolH(rt.goValueEq(u(a[0]), u(a[1]))) },
+		"js_gone": func(a []uint64) uint64 { return boolH(!rt.goValueEq(u(a[0]), u(a[1]))) },
+		// A Go field read: the struct's own fields, then the PROMOTED fields of an
+		// embedded struct, then the ordinary member lookup (methods, len, builtins).
+		"js_gofield": func(a []uint64) uint64 {
+			key := rt.toString(u(a[1]))
+			if o, ok := u(a[0]).(*jsObject); ok {
+				if v, has := o.props[key]; has {
+					return w(v)
+				}
+				if cls, isCls := o.props["__class"].(*jsObject); isCls {
+					if fs, okf := cls.props["__fields"].(*jsArray); okf {
+						for _, f := range fs.elems {
+							inner, isObj := o.props[rt.toString(f)].(*jsObject)
+							if !isObj {
+								continue
+							}
+							if _, embedded := inner.props["__class"]; !embedded {
+								continue
+							}
+							if v, has := inner.props[key]; has {
+								return w(v)
+							}
+						}
+					}
+				}
+				// A METHOD VALUE: the receiver is bound now (and a value receiver is
+				// COPIED now), so later writes to the variable do not reach it.
+				if fn, recv, found := rt.goMethod(u(a[0]), key); found {
+					return w(jsHostFunc(key, func(rt *jsrt, this uint64, args []interface{}) interface{} {
+						return rt.call(fn, jsUndef, append([]interface{}{recv}, args...))
+					}))
+				}
+				// A METHOD EXPRESSION: T.m / (*T).m off the descriptor itself. The
+				// compiled method already takes its receiver as the first argument,
+				// so the raw function IS the method expression.
+				if o.props["__isclass"] == true {
+					if fn, has := o.props[key]; has {
+						return w(fn)
+					}
+				}
+			}
+			return w(rt.getMember(u(a[0]), u(a[1])))
+		},
+		// A Go method call: the struct's own methods and the promoted methods of an
+		// embedded struct, with Go's receiver semantics (a value receiver gets a copy).
+		// Anything else - fmt.Println, a string or slice builtin - falls through to the
+		// ordinary member call.
+		"js_gomcall": func(a []uint64) uint64 {
+			args, ok := u(a[2]).(*jsArray)
+			if !ok {
+				rt.fail("js_gomcall args must be an array")
+			}
+			name := rt.toString(u(a[1]))
+			if fn, recv, found := rt.goMethod(u(a[0]), name); found {
+				return w(rt.call(fn, jsUndef, append([]interface{}{recv}, args.elems...)))
+			}
+			return w(rt.memberCall(u(a[0]), name, args.elems))
+		},
 		"js_rundefers": func(a []uint64) uint64 { // Runs collected [f, args] pairs LIFO (Go defer).
 			arr, ok := u(a[0]).(*jsArray)
 			if !ok {
 				rt.fail("js_rundefers needs the defer list")
 			}
+			// Which frame these defers belong to, for a recover() inside one of them
+			// (Go only; goPanics is empty for every other grammar, so at is -1 and
+			// js_gorecover answers nil). Popped even when a defer panics itself.
+			rt.goDeferAt = append(rt.goDeferAt, len(rt.goPanics)-1)
+			defer func() { rt.goDeferAt = rt.goDeferAt[:len(rt.goDeferAt)-1] }()
 			for i := len(arr.elems) - 1; i >= 0; i-- {
 				pair, ok := arr.elems[i].(*jsArray)
 				if !ok || len(pair.elems) != 2 {

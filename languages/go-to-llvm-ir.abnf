@@ -111,8 +111,12 @@ DefinedType <~~ push({under: firstType(up.in)}) ~~>
 // tag, and embedded fields (a bare type name, whose field name is the type).
 StructBody  = "struct" KwEnd "{" { FieldDecl } "}" ;
 FieldDecl   = NamedField | EmbedField ;
-NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine Type [ FieldTag ] [ ";" ] ;
-EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in) ~~> [ FieldTag ] [ ";" ] ;
+NamedField  = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } SameLine FType [ FieldTag ] [ ";" ] ;
+// The field's type TEXT, which gives the field its zero value in a literal that
+// leaves it out (Go zero-fills; an absent property would read back as undefined).
+FType       <~~ push({fty: firstType(up.in)}) ~~> = Type ;
+// An embedded field's NAME is its type name (w.base09, plus the promoted w.id).
+EmbedField  = [ "*" ] [ Id "." ] Id <~~ push(up.in); push({fty: ""}) ~~> [ FieldTag ] [ ";" ] ;
 FieldTag    = RawString <~~ pop() ~~> ;
 IfaceBody   <~~ push({iface: true}) ~~>
             = "interface" KwEnd SkipBlock ;
@@ -124,11 +128,14 @@ TypeGroup   <~~ push(notImplStmt("grouped type declaration", up.pos)) ~~>
             = "type" KwEnd SkipGroup [ ";" ] ;
 
 // const Name [Type] = expr is GENUINELY bound as if it were a var (its value is
-// reused via the var-decl thunk). A grouped const block (const ( A = iota ... )) is
-// balanced-skipped and reported not implemented (iota, implicit repetition and
-// bit-shift expressions are not modeled), so its names are not bound.
-ConstGroup  <~~ push(notImplStmt("grouped const declaration", up.pos)) ~~>
-            = "const" KwEnd SkipGroup [ ";" ] ;
+// reused via the var-decl thunk). A grouped const block binds its names too: `iota`
+// is the index of the spec inside the group, and a spec with no '=' REPEATS the last
+// expression list seen, re-emitted with the new iota (which is how red/green/blue and
+// 1 << (10 * iota) count up).
+ConstGroup  <~~ push(makeConstGroup(takeAll())) ~~>
+            = "const" KwEnd "(" { ConstSpec } ")" [ ";" ] ;
+ConstSpec   <~~ push(makeConstSpec(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } [ SameLine VType ] [ "=" ExprList ] [ ";" ] ;
 ConstSingle <~~ push(makeVarDecl(takeAll())) ~~>
             = "const" KwEnd Id <~~ push(up.in) ~~> [ VType ] [ "=" Expression ] [ ";" ] ;
 
@@ -144,8 +151,10 @@ TypeParams  = "[" TypeParamGrp { "," TypeParamGrp } "]" ;
 TypeParamGrp = Id { "," Id } Constraint ;
 Constraint  = ConstrTerm { "|" ConstrTerm } ;
 ConstrTerm  = [ "~" ] Type ;
+// A POINTER receiver is marked: its method sees the caller's struct, while a value
+// receiver is handed a copy (js_gomcall / js_gofield read the __ptr$name marker).
 Receiver    <~~ push({recv: takeAll()}) ~~>
-            = "(" Id <~~ push(up.in) ~~> [ "*" ] Id <~~ push(up.in) ~~> [ TypeArgs ] ")" ;
+            = "(" Id <~~ push(up.in) ~~> [ "*" <~~ push({byptr: true}) ~~> ] Id <~~ push(up.in) ~~> [ TypeArgs ] ")" ;
 // Parameters: several names may share a type (a, b int), a name may be omitted
 // entirely (func(int), only in type positions), and the last one may be variadic.
 // A named group is tried first; on an unnamed list it fails and the bare-type form
@@ -206,7 +215,11 @@ NamedAhead = :script(~~
 TopVar      = VarGroup | VarDecl ;
 
 Type        = "*" Type | "[" "]" Type | ArrayTypeT | MapTypeT | FuncTypeT | ChanTypeT | IfaceTypeT
-            | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) [ "." Id ] [ TypeArgs ] ;
+            | StructTypeT | ( "int" KwEnd | "string" KwEnd | "bool" KwEnd | Id ) [ "." Id ] [ TypeArgs ] ;
+// An anonymous struct type in a TYPE position (var x struct{ a int }): parsed, its
+// body balanced-skipped. Tried before the bare-name form, which would otherwise read
+// 'struct' as an identifier and stop there.
+StructTypeT = "struct" KwEnd SkipBlock ;
 TypeArgs    = "[" Type { "," Type } "]" ;
 // A pointer type (*T) and a fixed size array ([N]T / [...]T) are parsed in every type
 // position; the pointer is transparent (structs already behave like references) and an
@@ -223,20 +236,63 @@ IfaceTypeT  = "interface" KwEnd SkipBlock ;
 // Every statement production pushes exactly one thunk: function() -> undefined | signal.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = Block | If | For | Switch | Return | Break | Continue | Goto | Defer | GoStmt | Select | Fallthrough
-            | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
+            | ConstGroup | ConstSingle | VarGroup | VarDecl | Labeled | SimpleStmt | Empty ;
 
 // fallthrough: accepted, reported not implemented (our switch has no fallthrough model).
 // fallthrough: continues into the NEXT case body instead of leaving the switch.
 Fallthrough <~~ push({isFallthrough: true}) ~~>
             = "fallthrough" KwEnd [ ";" ] ;
 
-// go f(args) / go pkg.Fn(args): a goroutine. True concurrency is not modeled, so
-// it is reported not implemented; under -warn-unsupported the call still evaluates
-// (its callee stays visible in call graphs). select likewise has no channel runtime.
+// go f(args) / go pkg.Fn(args): a goroutine. Concurrency is COOPERATIVE and
+// deterministic (the model of go-interpreter.abnf, shared through the runtime): the
+// call is emitted into a closure that js_gospawn only QUEUES, and a receive that
+// finds its channel empty runs the queue until one of them fills it.
 GoStmt      <~~ push(makeGoStmt(pop(), up.pos)) ~~>
             = "go" KwEnd PostfixExpr [ ";" ] ;
-Select      <~~ push(notImplStmt("select statement", up.pos)) ~~>
-            = "select" KwEnd SkipBlock ;
+// select { case v := <-ch: ...; case ch <- x: ...; default: ... }: the arms are tried
+// in source order and the first READY one runs. An arm body is a statement list, so
+// NotSelLabel stops it before the next 'case' / 'default' (both would otherwise parse
+// as an identifier expression).
+Select      <~~ push(makeSelect(takeAll())) ~~>
+            = "select" KwEnd "{" { SelArm } "}" ;
+SelArm      = SelRecv | SelSend | SelDefault ;
+SelRecv     <~~ push(makeSelRecv(takeAll())) ~~>
+            = "case" KwEnd [ Id <~~ push(up.in) ~~> [ "," Id <~~ push(up.in) ~~> ] ( ":=" | "=" ) ]
+              "<-" Expression ":" SelBody ;
+SelSend     <~~ push(makeSelSend(takeAll())) ~~>
+            = "case" KwEnd PostfixExpr "<-" Expression ":" SelBody ;
+SelDefault  <~~ push(makeSelDefault(takeAll())) ~~>
+            = "default" KwEnd ":" SelBody ;
+SelBody     <~~ push(makeSeq(takeAll())) ~~>
+            = { SelStmt } ;
+SelStmt     = NotSelLabel Statement ;
+NotSelLabel = :script(~~
+    (function () {
+        var i = 0
+        var cc = 0
+        // Whitespace is not skipped before a guard, so step over it (and over line
+        // comments) before looking at the keyword.
+        while (i < 8192) {
+            cc = c.peek(i)
+            if (cc < 0) { return abnf.newToken("\x01end-of-file", 0) }
+            if (cc === 32 || cc === 9 || cc === 13 || cc === 10) { i++; continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                while (i < 8192 && c.peek(i) >= 0 && c.peek(i) !== 10) { i++ }
+                continue
+            }
+            break
+        }
+        var w = ""
+        while (i < 8192 && w.length < 8) {
+            cc = c.peek(i)
+            if (cc < 97 || cc > 122) { break }
+            w += String.fromCharCode(cc)
+            i++
+        }
+        if (w === "case" || w === "default") { return abnf.newToken("\x01select-arm-label", 0) }
+        return undefined
+    })()
+~~) ;
 
 // defer f(args) / defer pkg.fn(args): the function value and the arguments are
 // evaluated now, the call runs when the surrounding function returns (LIFO).
@@ -271,18 +327,30 @@ VarSpec     <~~ push(makeVarDecl(takeAll())) ~~>
 // Short declarations, assignments, ++/-- and expression statements. The cores do
 // not eat the separator themselves: for headers reuse them between the semicolons.
 // MapOk (v, ok := m[k]) must come first: as a ShortDecl it would miss the flag.
-SimpleStmt  = ( MapOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) [ ";" ] ;
+SimpleStmt  = ( MapOk | TypeOk | RecvOk | ShortDecl | IncDecStmt | Assign | ChanSend | ExprOnly ) [ ";" ] ;
 
 // ch <- v: a channel send. The left side is a postfix expression (so the leading
 // '<' of a relational compare is never mistaken for the '<-' send token: a compare
 // is written 'a < -b' with a space). Accepted, then reported not implemented; both
 // operands still evaluate under -warn-unsupported so their calls stay visible.
+// v, ok := <-ch: the received value and whether the channel was still OPEN. It must
+// be tried before ShortDecl, which would destructure the value itself.
+RecvOk      <~~ push(makeRecvOk(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "," Id <~~ push(up.in) ~~>
+              ( ":=" <~~ push({decl: true}) ~~> | "=" <~~ push({decl: false}) ~~> ) "<-" Expression ;
 ChanSend    <~~ push(makeChanSend(takeAll(), up.pos)) ~~>
             = PostfixExpr "<-" Expression ;
 
 // The comma ok idiom: the value (or the zero value) plus the key presence flag.
 MapOk       <~~ push(makeMapOk(takeAll())) ~~>
             = Id <~~ push(up.in) ~~> "," Id <~~ push(up.in) ~~> ":=" Primary "[" Expression "]" ;
+// The comma ok TYPE ASSERTION: v, ok := x.(T). Without it the pair reads as a plain
+// two-name ShortDecl of one value, which destructures the value itself (a string
+// assertion then bound its first character). Only the Primary base is covered, the
+// same restriction MapOk has.
+TypeOk      <~~ push(makeTypeOk(takeAll())) ~~>
+            = Id <~~ push(up.in) ~~> "," Id <~~ push(up.in) ~~> ":=" Primary "." "(" AssertType ")" ;
+AssertType  <~~ push({at: firstType(up.in)}) ~~> = Type ;
 ExprOnly    <~~ push(exprToStmt(pop())) ~~>
             = Expression ;
 
@@ -330,7 +398,7 @@ ForClassic  <~~ push(makeForClassic(takeAll())) ~~>
 FInit       <~~ push({k:"init", t:pop(), names: takeDeclNames()}) ~~> = SimpleStmt2 ;
 FCond       <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 FPost       <~~ push({k:"post", t:pop()}) ~~> = SimpleStmt2 ;
-SimpleStmt2 = ShortDecl | IncDecStmt | Assign ;
+SimpleStmt2 = MapOk | TypeOk | RecvOk | ShortDecl | IncDecStmt | Assign ;
 ForCond     <~~ push(makeWhileG(takeAll())) ~~>
             = "for" KwEnd <~~ push({lbl: takeLabel()}) ~~> CondOn Expression CondOff Block ;
 
@@ -503,7 +571,7 @@ TypeAssertSfx = "." "(" Type ")" ;
 
 Primary     = "(" Expression ")" | FloatLit | HexLit | OctLit | BinLit | DecULit | DqString | RawString | RuneLit
             | IntLit | True | False | Nil | FuncLit | SliceLit
-            | MapLit | MakeMap | MakeChan | StructLit | CompLitNI | ConvExpr | Call | VarRef ;
+            | MapLit | MakeMap | MakeChan | AnonStructLit | StructLit | CompLitNI | ConvExpr | Call | VarRef ;
 
 // []byte(s) / []rune(s): the bracketed conversions. The identifier-spelled ones
 // (string(r), int(x), ...) are ordinary calls and go through Call.
@@ -568,8 +636,13 @@ MakeMap     <~~ push(makeMakeMap(pop())) ~~>
 
 // make(chan T) / make(chan T, n): a channel. Accepted, reported not implemented; an
 // optional buffer size is parsed and discarded.
-MakeChan    <~~ push(notImplExpr("channel make", up.pos)) ~~>
-            = "make" KwEnd "(" ChanTypeT [ "," Expression <~~ pop() ~~> ] ")" ;
+// make(chan T) / make(chan T, n): the buffer size is parsed and discarded (a send
+// never blocks in this model); the ELEMENT type decides what a receive from a closed
+// channel yields.
+MakeChan    <~~ push(makeMakeChan(takeAll())) ~~>
+            = "make" KwEnd "(" ( "chan" KwEnd [ "<-" ] | "<-" "chan" KwEnd ) ChanElemT
+              [ "," Expression <~~ pop() ~~> ] ")" ;
+ChanElemT   <~~ push({cet: firstType(up.in)}) ~~> = Type ;
 MapTypeZ    = "map" KwEnd "[" Type "]" ZType ;
 ZType       <~~ push({mzero: up.in}) ~~>
             = Type ;
@@ -580,6 +653,13 @@ ZType       <~~ push({mzero: up.in}) ~~>
 StructLit   <~~ push(makeStructLit(takeAll())) ~~>
             = StructGate Id <~~ push(up.in) ~~> [ TypeArgs ]
               "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
+// struct{ a, b int }{10, 20}: an anonymous struct type carries its own field list, so
+// the descriptor is built at the literal site instead of being looked up by name. No
+// StructGate: 'struct' can never open an if/for body.
+AnonStructLit <~~ push(makeAnonStructLit(takeAll())) ~~>
+            = "struct" KwEnd "{" { AnonField } "}"
+              "{" [ LitElem { "," LitElem } [ "," ] ] "}" ;
+AnonField   = Id <~~ push(up.in) ~~> { "," Id <~~ push(up.in) ~~> } FType [ FieldTag ] [ ";" ] ;
 LitElem     = KeyedElem | Expression ;
 KeyedElem   = Id <~~ push({fkey: up.in}) ~~> ":" Expression ;
 
@@ -764,14 +844,19 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // The bitwise and shift externals already exist in the handle runtime; wiring them
     // into binExt puts them on the ordinary emitBin path. js_shl/js_shr are 32 bit,
     // which is what Go's shift results are used for here.
-    binExt["<<"] = "js_shl"
-    binExt[">>"] = "js_shr"
+    binExt["<<"] = "js_goshl"
+    binExt[">>"] = "js_goshr"
     binExt["&"] = "js_band"
     binExt["|"] = "js_bor"
     binExt["^"] = "js_bxor"
 
-    binExt["<<="] = "js_shl"
-    binExt[">>="] = "js_shr"
+    // Go's == on a struct or an array is VALUE equality, not identity (both are value
+    // types), and nil equals an unset slice/map/pointer.
+    binExt["=="] = "js_goeq"
+    binExt["!="] = "js_gone"
+
+    binExt["<<="] = "js_goshl"
+    binExt[">>="] = "js_goshr"
     binExt["&="] = "js_band"
     binExt["|="] = "js_bor"
     binExt["^="] = "js_bxor"
@@ -796,6 +881,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     var hidCount = 0     // Names hidden range-loop counters.
     var structFields = {} // struct name -> field name list (source order).
+    var structFTypes = {} // struct name -> the parallel list of field type texts.
     // The NAMED results of the function being emitted right now (emitFunc saves and
     // restores it around every nested function), read by return and by the fallthrough
     // end of a body.
@@ -861,9 +947,9 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                 if (s.kind == "mcall") {
                     var ea = emitArgs2(b, s.args, s.spread)
                     b = ea.b
-                    cur = callExt(b, "js_mcall", [cur, emitStr(b, s.name), ea.v])
+                    cur = callExt(b, "js_gomcall", [cur, emitStr(b, s.name), ea.v])
                 } else if (s.kind == "field") {
-                    cur = callExt(b, "js_get", [cur, emitStr(b, s.name)])
+                    cur = callExt(b, "js_gofield", [cur, emitStr(b, s.name)])
                 } else if (s.kind == "slice") {
                     var lov = hUndef, hiv = hUndef
                     if (s.lo != null) { var rl = s.lo(b); b = rl.b; lov = rl.v }
@@ -923,6 +1009,12 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
             }
             return {b: b, v: mV}
         }
+    }
+    // items = [{cet}]: make(chan T[, n]). The element type text travels to the runtime,
+    // where a receive from a closed, drained channel answers its zero value.
+    function makeMakeChan(items) {
+        var ty = items[0].cet
+        return function(b) { return {b: b, v: callExt(b, "js_gochan_new", [emitStr(b, ty)])} }
     }
     function makeMakeMap(mz) {
         var zero = mz.mzero
@@ -1000,29 +1092,83 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
 
     // Point{a, b}: the field names are known at compile time.
     // items = [name, ({fkey}? valueThunk)...]: a positional or keyed struct literal.
-    // A field the literal leaves out keeps no entry, which reads back as undefined -
-    // falsy and != a set value, the zero value in every test the subset covers.
+    // Every field the literal leaves out is ZERO-filled from its declared type, the way
+    // Go does - so Point{} and Point{x: 0} are the same value and compare equal.
     function makeStructLit(items) {
         var tyName = items[0]
         var args = items.slice(1)
         return function(b) {
-            var fields = structFields[tyName]
             var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, tyName)])
-            var objV = callExt(b, "js_obj_new", [])
-            callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
-            var pos = 0
-            var key = null
-            for (var i = 0; i < args.length; i++) {
-                if (typeof args[i] != "function") { key = args[i].fkey; continue }
-                var r = args[i](b)
-                b = r.b
-                var name = key
-                if (name == null) { name = fields[pos]; pos++ }
-                key = null
-                callExt(b, "js_set", [objV, emitStr(b, name), r.v])
-            }
-            return {b: b, v: objV}
+            return emitStructVal(b, clsV, structFields[tyName], structFTypes[tyName], args)
         }
+    }
+    // struct{ a, b int }{10, 20}: items = [fieldName..., {fty}, ..., body elements].
+    // The descriptor is built fresh at the literal site (there is no name to look up);
+    // js_goeq compares two anonymous structs by name and field list, not by identity.
+    function makeAnonStructLit(items) {
+        var fields = []
+        var ftypes = []
+        var pending = []
+        var args = []
+        var inBody = false
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (!inBody && typeof it == "string") { pending.push(it); continue }
+            if (!inBody && typeof it == "object" && it != null && it.fty != undefined) {
+                for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(it.fty) }
+                pending = []
+                continue
+            }
+            inBody = true
+            args.push(it)
+        }
+        return function(b) {
+            var clsV = callExt(b, "js_obj_new", [])
+            callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
+            callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, "struct")])
+            emitNameList(b, clsV, "__fields", fields)
+            emitNameList(b, clsV, "__ftypes", ftypes)
+            return emitStructVal(b, clsV, fields, ftypes, args)
+        }
+    }
+    // The shared body of both literal forms: zero-fill, then apply the elements in
+    // order (a keyed one names its field, a positional one takes the next field).
+    function emitStructVal(b, clsV, fields, ftypes, args) {
+        var objV = callExt(b, "js_obj_new", [])
+        callExt(b, "js_set", [objV, emitStr(b, "__class"), clsV])
+        for (var z = 0; z < fields.length; z++) {
+            callExt(b, "js_set", [objV, emitStr(b, fields[z]), emitZeroOf(b, ftypes[z])])
+        }
+        var pos = 0
+        var key = null
+        for (var i = 0; i < args.length; i++) {
+            if (typeof args[i] != "function") { key = args[i].fkey; continue }
+            var r = args[i](b)
+            b = r.b
+            var name = key
+            if (name == null) { name = fields[pos]; pos++ }
+            key = null
+            callExt(b, "js_set", [objV, emitStr(b, name), r.v])
+        }
+        return {b: b, v: objV}
+    }
+    // The zero value of a type, from its type TEXT: 0 for every numeric kind, "" for a
+    // string, false for a bool and nil for everything else (slice, map, pointer, struct).
+    function emitZeroOf(b, t) {
+        if (t == undefined || t == null) { return hNull }
+        if (t.indexOf("int") == 0 || t.indexOf("uint") == 0 || t.indexOf("byte") == 0
+            || t.indexOf("rune") == 0 || t.indexOf("float") == 0) { return emitNum(b, 0) }
+        if (t.indexOf("string") == 0) { return emitStr(b, "") }
+        if (t.indexOf("bool") == 0) { return hFalse }
+        return hNull
+    }
+    // A runtime array of strings, set as one property of a struct descriptor.
+    function emitNameList(b, clsV, prop, names) {
+        var arrV = callExt(b, "js_arr_new", [])
+        for (var i = 0; i < names.length; i++) {
+            callExt(b, "js_arr_push", [arrV, emitStr(b, names[i])])
+        }
+        callExt(b, "js_set", [clsV, emitStr(b, prop), arrV])
     }
 
     function emitRefRead(b, ref) {
@@ -1030,7 +1176,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < ref.path.length; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
-                o = callExt(b, "js_get", [o, emitStr(b, s.key)])
+                o = callExt(b, "js_gofield", [o, emitStr(b, s.key)])
             } else {
                 var r = s.idx(b)
                 b = r.b
@@ -1048,7 +1194,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) {
-                o = callExt(b, "js_get", [o, emitStr(b, s.key)])
+                o = callExt(b, "js_gofield", [o, emitStr(b, s.key)])
             } else {
                 var r = s.idx(b)
                 b = r.b
@@ -1111,6 +1257,22 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         lastDeclNames = []
         return n
     }
+    // items = [vName, okName, baseThunk, {at}]: v gets the value (the assertion is the
+    // identity on it, as for the single-result form), ok gets the dynamic type test.
+    function makeTypeOk(items) {
+        var vName = items[0]
+        var okName = items[1]
+        var baseT = items[2]
+        var ty = items[3].at
+        return function(b) {
+            var r = baseT(b)
+            b = r.b
+            var okV = callExt(b, "js_gotypeis", [r.v, emitStr(b, ty)])
+            if (vName != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, vName), r.v]) }
+            if (okName != "_") { callExt(b, "js_scope_decl", [curScopeV, emitStr(b, okName), okV]) }
+            return b
+        }
+    }
     function makeShortDecl(items) {
         var names = []
         var i = 0
@@ -1159,6 +1321,48 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // items = [name..., {ty}?, initThunk...]: 'var a, b = 1, 2', 'var i int' and
     // 'var q, r int' all go through here. With more names than initializers the single
     // initializer is a multi-value call and gets unpacked, like a multi assignment.
+    // One spec of a grouped const: kept as a RECORD (not a thunk) so the group can
+    // re-emit a spec's expression list for the specs that leave theirs out.
+    function makeConstSpec(items) {
+        var names = []
+        var i = 0
+        for (; i < items.length; i++) {
+            if (typeof items[i] != "string") { break }
+            names.push(items[i])
+        }
+        var ty = ""
+        if (i < items.length && items[i] != undefined && items[i].ty != undefined) { ty = items[i].ty; i++ }
+        return {names: names, ty: ty, inits: items.slice(i)}
+    }
+    // const ( a = iota; b; c ): iota counts the specs, and a spec with no '=' repeats
+    // the previous expression list - re-emitted, so it reads the NEW iota.
+    function makeConstGroup(specs) {
+        return function(b) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "iota"), emitNum(b, 0)])
+            var lastInits = []
+            var lastTy = ""
+            for (var i = 0; i < specs.length; i++) {
+                var sp = specs[i]
+                var inits = sp.inits
+                var ty = sp.ty
+                if (inits.length == 0) { inits = lastInits; ty = lastTy }
+                else { lastInits = inits; lastTy = sp.ty }
+                callExt(b, "js_scope_set", [curScopeV, emitStr(b, "iota"), emitNum(b, i)])
+                var vals = []
+                for (var k = 0; k < inits.length; k++) {
+                    var r = inits[k](b)
+                    b = r.b
+                    vals.push(r.v)
+                }
+                for (var n = 0; n < sp.names.length; n++) {
+                    if (sp.names[n] == "_") { continue }
+                    var v = (n < vals.length) ? vals[n] : emitZeroDecl(b, ty)
+                    callExt(b, "js_scope_decl", [curScopeV, emitStr(b, sp.names[n]), v])
+                }
+            }
+            return b
+        }
+    }
     function makeVarDecl(items) {
         var names = []
         var i = 0
@@ -1183,7 +1387,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     var multi = vals[0]
                     vals = []
                     for (var u = 0; u < names.length; u++) {
-                        vals.push(callExt(b, "js_arr_get", [multi, emitNum(b, u)]))
+                        vals.push(callExt(b, "js_map_get", [multi, emitNum(b, u)]))
                     }
                 }
             }
@@ -1622,33 +1826,143 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                     }
                 }
             }
-            callExt(b, "js_rundefers", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")])])
-            if (curRets.length > 0) { v = readRets(b) }
-            b.NewRet(v)
-            return deadBlock()
+            // The defers run in the frame wrapper (emitFunc), after the body closure
+            // this return leaves - so they also run when a panic unwinds instead.
+            return retStmt(b, v)
         }
     }
     // ----- Widened surface: constructs accepted structurally but not lowered -----
     // Each reports "not implemented" (aborts by default, warns under -warn-unsupported)
     // and still emits its operands so their calls stay visible in call graphs.
 
-    // go f(...): the callee is emitted, the concurrency is not modeled.
+    // go f(...): the whole call goes into a nullary closure that js_gospawn queues.
     function makeGoStmt(callT, pos) {
-        notImpl("goroutine", pos)
-        return function(b) { var r = callT(b); return r.b }
+        return function(b) {
+            callExt(b, "js_gospawn", [emitCallClosure(b, callT)])
+            return b
+        }
     }
-    // ch <- v: both operands are emitted, the send is not modeled.
+    // A nullary closure over the CURRENT scope whose body is one expression thunk.
+    function emitCallClosure(b, t) {
+        funcCount++
+        var gidx = funcCount
+        var gf = m.NewFunc("jsf_" + gidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var closV = callExt(b, "js_closure", [handle(gidx), curScopeV])
+        var savedF = curF
+        var savedScope = curScopeV
+        var savedLoops = loopStack
+        var savedFTag = curFTag
+        curF = gf
+        loopStack = []
+        var gb = gf.NewBlock("entry")
+        curScopeV = gf.Params[0]
+        curFTag = gidx
+        var r = t(gb)
+        r.b.NewRet(hUndef)
+        curF = savedF
+        curScopeV = savedScope
+        loopStack = savedLoops
+        curFTag = savedFTag
+        return closV
+    }
+    // ch <- v
     function makeChanSend(items, pos) {
         var chT = items[0]
         var valT = items[1]
-        notImpl("channel send", pos)
-        return function(b) { var r1 = chT(b); var r2 = valT(r1.b); return r2.b }
+        return function(b) {
+            var r1 = chT(b)
+            var r2 = valT(r1.b)
+            callExt(r2.b, "js_gochan_send", [r1.v, r2.v])
+            return r2.b
+        }
     }
-    // <-ch: the operand is emitted, the receive yields undefined.
+    // <-ch as a value (the single-result form; RecvOk covers `v, ok := <-ch`).
     function makeRecv(chT, pos) {
-        notImpl("channel receive", pos)
-        return function(b) { var r = chT(b); return {b: r.b, v: hUndef} }
+        return function(b) {
+            var r = chT(b)
+            return {b: r.b, v: callExt(r.b, "js_gochan_recv", [r.v])}
+        }
     }
+    // v, ok := <-ch / v, ok = <-ch: the value and whether the channel was still open.
+    function makeRecvOk(items) {
+        var vName = items[0]
+        var okName = items[1]
+        var isDecl = items[2].decl
+        var chT = items[3]
+        return function(b) {
+            var r = chT(b)
+            b = r.b
+            var pairV = callExt(b, "js_gochan_recvok", [r.v])
+            var ext = isDecl ? "js_scope_decl" : "js_scope_set"
+            if (vName != "_") {
+                callExt(b, ext, [curScopeV, emitStr(b, vName), callExt(b, "js_map_get", [pairV, emitNum(b, 0)])])
+            }
+            if (okName != "_") {
+                callExt(b, ext, [curScopeV, emitStr(b, okName), callExt(b, "js_map_get", [pairV, emitNum(b, 1)])])
+            }
+            return b
+        }
+    }
+    // The select arms, in source order: the first READY one runs, then the default;
+    // a send arm never blocks in this model, so reaching one always takes it.
+    function makeSelect(arms) {
+        return function(b) {
+            var endB = curF.NewBlock("")
+            var cur = b
+            var dfltArm = null
+            for (var i = 0; i < arms.length; i++) {
+                var a = arms[i]
+                if (a.kind == "default") { dfltArm = a; continue }
+                var rc = a.chT(cur)
+                cur = rc.b
+                if (a.kind == "send") {
+                    var rv = a.valT(cur)
+                    cur = rv.b
+                    callExt(cur, "js_gochan_send", [rc.v, rv.v])
+                    a.body(cur).NewBr(endB)
+                    cur = deadBlock()
+                    continue
+                }
+                var takeB = curF.NewBlock("")
+                var nextB = curF.NewBlock("")
+                cur.NewCondBr(truthy(cur, callExt(cur, "js_gochan_ready", [rc.v])), takeB, nextB)
+                var pairV = callExt(takeB, "js_gochan_recvok", [rc.v])
+                var savedScope = curScopeV
+                curScopeV = callExt(takeB, "js_scope_new", [curScopeV])
+                if (a.vName != null && a.vName != "_") {
+                    callExt(takeB, "js_scope_decl", [curScopeV, emitStr(takeB, a.vName),
+                                                     callExt(takeB, "js_map_get", [pairV, emitNum(takeB, 0)])])
+                }
+                if (a.okName != null && a.okName != "_") {
+                    callExt(takeB, "js_scope_decl", [curScopeV, emitStr(takeB, a.okName),
+                                                     callExt(takeB, "js_map_get", [pairV, emitNum(takeB, 1)])])
+                }
+                a.body(takeB).NewBr(endB)
+                curScopeV = savedScope
+                cur = nextB
+            }
+            if (dfltArm != null) {
+                dfltArm.body(cur).NewBr(endB)
+            } else {
+                // Nothing ready and no default: run the queue once, then give up.
+                callExt(cur, "js_godrain", [])
+                cur.NewBr(endB)
+            }
+            return endB
+        }
+    }
+    function makeSelRecv(items) {
+        var i = 0
+        var vName = null
+        var okName = null
+        while (i < items.length && typeof items[i] == "string") {
+            if (vName == null) { vName = items[i] } else { okName = items[i] }
+            i++
+        }
+        return {kind: "recv", vName: vName, okName: okName, chT: items[i], body: items[i + 1]}
+    }
+    function makeSelSend(items) { return {kind: "send", chT: items[0], valT: items[1], body: items[2]} }
+    function makeSelDefault(items) { return {kind: "default", body: items[0]} }
     // items = [{lo}?, {hi}?, {mx}?]: the s[lo:hi:max] suffix of a postfix chain.
     function makeSliceSfx(items) {
         var lo = null, hi = null, mx = null
@@ -1829,7 +2143,21 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
     // accepted (marked with {iface}) and reported not implemented.
     function makeTypeDecl(items, pos) {
         var last = items[items.length - 1]
-        if (typeof last == "object" && last != null && last.iface == true) { return notImplStmt("interface", pos) }
+        // An interface declaration binds no runtime value: the value model is dynamic,
+        // so satisfaction is implicit and a method call on an interface value is the
+        // ordinary method call on whatever struct is in it. A constraint interface
+        // (a type set, as in Go 1.18 generics) is erased for the same reason.
+        if (typeof last == "object" && last != null && last.iface == true) {
+            return function(b) { return b }
+        }
+        // type Celsius float64 / type myInt int: the value model has no distinct type
+        // for a defined type, so its NAME becomes the conversion to the underlying type -
+        // which is exactly how a defined type is used in an expression.
+        if (typeof last == "object" && last != null && last.under != undefined) {
+            var dName = items[0]
+            var dUnder = last.under
+            return function(b) { return declConv(b, dName, dUnder) }
+        }
         return makeStructStmt(items)
     }
 
@@ -1870,24 +2198,63 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         for (var nr = 0; nr < curRets.length; nr++) {
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, curRets[nr]), emitNum(b, 0)])
         }
-        var endB = body(b)
-        callExt(endB, "js_rundefers", [callExt(endB, "js_scope_get", [curScopeV, emitStr(endB, "$defers")])])
-        endB.NewRet(readRets(endB))
+        // The BODY is emitted as a closure of its own and called through js_gotry, which
+        // is what makes Go's panic/defer/recover work: a panic unwinding through this
+        // frame is caught there, the frame's deferred functions still run, a recover()
+        // in one of them takes the panic value, and js_gorepanic re-raises whatever was
+        // not recovered. The body closure reuses THIS frame's scope (its env is the
+        // scope, not a parent of it), so declarations, named results and $defers behave
+        // exactly as they did when the body was emitted inline.
+        funcCount++
+        var bidx = funcCount
+        var bf = m.NewFunc("jsf_" + bidx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var ctlV = callExt(b, "js_gotry", [callExt(b, "js_closure", [handle(bidx), curScopeV])])
+        callExt(b, "js_rundefers", [callExt(b, "js_scope_get", [curScopeV, emitStr(b, "$defers")])])
+        callExt(b, "js_gorepanic", [])
+        // Named results are read back AFTER the defers ran, so a deferred function that
+        // assigns one is seen; without them the body's return signal carries the value.
+        if (curRets.length > 0) { b.NewRet(readRets(b)) }
+        else { b.NewRet(callExt(b, "js_gounctl", [ctlV])) }
+        // Now the body itself, inside the closure. A return in it LEAVES the closure, so
+        // it goes out as a control signal (retStmt) that js_gounctl unwraps again.
+        var savedFTag = curFTag
+        curF = bf
+        var bb = bf.NewBlock("entry")
+        curScopeV = bf.Params[0]
+        curFTag = bidx
+        ctlEnter(bidx)
+        body(bb).NewRet(hUndef)
+        ctlLeave()
+        curFTag = savedFTag
         curRets = savedRets
         curF = savedF
         curScopeV = savedScope
         loopStack = savedLoops
         return idx
     }
-    // items = [name, fieldName...]
+    // items = [name, fieldName..., {fty}, fieldName..., {fty}, ...]: the names of one
+    // group share the {fty} that follows them, which gives every field its zero value.
+    // The lists are ALSO emitted onto the descriptor, where js_goeq (struct value
+    // equality) and js_gofield (promotion through an embedded field) read them.
     function makeStructStmt(items) {
         var name = items[0]
-        var fields = items.slice(1)
+        var fields = []
+        var ftypes = []
+        var pending = []
+        for (var i = 1; i < items.length; i++) {
+            if (typeof items[i] == "string") { pending.push(items[i]); continue }
+            for (var k = 0; k < pending.length; k++) { fields.push(pending[k]); ftypes.push(items[i].fty) }
+            pending = []
+        }
+        for (var p = 0; p < pending.length; p++) { fields.push(pending[p]); ftypes.push("") }
         structFields[name] = fields
+        structFTypes[name] = ftypes
         return function(b) {
             var clsV = callExt(b, "js_obj_new", [])
             callExt(b, "js_set", [clsV, emitStr(b, "__isclass"), hTrue])
             callExt(b, "js_set", [clsV, emitStr(b, "__name"), emitStr(b, name)])
+            emitNameList(b, clsV, "__fields", fields)
+            emitNameList(b, clsV, "__ftypes", ftypes)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), clsV])
             return b
         }
@@ -1904,10 +2271,15 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         if (items[i] != undefined && items[i].rets != undefined) { rets = items[i].rets; i++ }
         var body = items[i]
         if (recv != null) {
+            // recv = [name, {byptr}?, typeName]
+            var byPtr = recv.length > 2
+            var rName = recv[0]
+            var rType = recv[recv.length - 1]
             return function(b) {
-                var idx = emitFunc(params, body, recv[0], rets)
-                var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, recv[1])])
+                var idx = emitFunc(params, body, rName, rets)
+                var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, rType)])
                 callExt(b, "js_set", [clsV, emitStr(b, name), callExt(b, "js_closure", [handle(idx), curScopeV])])
+                if (byPtr) { callExt(b, "js_set", [clsV, emitStr(b, "__ptr$" + name), hTrue]) }
                 return b
             }
         }
@@ -1922,6 +2294,20 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         }
     }
 
+    // Binds `name` to the one-argument CONVERSION to type text `ty` (js_goconv, the
+    // runtime mirror of the interpreter's goConvert). Used both for the predeclared
+    // spellings - int(x), string(r), ... - and for a defined type (type Celsius float64),
+    // whose name is exactly the conversion to its underlying type in an expression.
+    function declConv(b, name, ty) {
+        funcCount++
+        var cIdx = funcCount
+        var cf = m.NewFunc("jsf_" + cIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
+        var cb = cf.NewBlock("entry")
+        cb.NewRet(cb.NewCall(getExtern("js_goconv", 2),
+                             [emitStr(cb, ty), cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)])]))
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), callExt(b, "js_closure", [handle(cIdx), curScopeV])])
+        return b
+    }
     // A builtin whose extern takes the callee's ARGUMENT ARRAY (plus an optional
     // constant flag), bound in the jsmain scope under `name`.
     function declBuiltin(b, name, ext, flag) {
@@ -1979,6 +2365,11 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
         b = declBuiltin(b, "min", "js_gominmax", 0)
         b = declBuiltin(b, "max", "js_gominmax", 1)
         b = declBuiltin(b, "clear", "js_goclear", null)
+        // panic(v) raises; recover() answers the pending panic of the frame whose
+        // deferred functions are running (nil outside one) and stops the unwinding.
+        b = declBuiltin(b, "panic", "js_gopanic", null)
+        b = declBuiltin(b, "recover", "js_gorecover", null)
+        b = declBuiltin(b, "close", "js_gochan_close", null)
         // The identifier-spelled conversions - string(r), int(x), byte(x), ... - are
         // ordinary calls, so each gets a one-line function that hands its name and
         // argument to js_goconv (the runtime mirror of the interpreter's goConvert).
@@ -1986,15 +2377,7 @@ SkipGOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\x5f" | "\x61"..."\x
                          "uint32", "uint64", "uintptr", "byte", "rune", "float32", "float64",
                          "string", "bool"]
         for (var cni = 0; cni < convNames.length; cni++) {
-            funcCount++
-            var cIdx = funcCount
-            var cf = m.NewFunc("jsf_" + cIdx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
-            var cb = cf.NewBlock("entry")
-            cb.NewRet(cb.NewCall(getExtern("js_goconv", 2),
-                                 [emitStr(cb, convNames[cni]),
-                                  cb.NewCall(getExtern("js_arg", 2), [cf.Params[1], handle(0)])]))
-            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, convNames[cni]),
-                                         callExt(b, "js_closure", [handle(cIdx), curScopeV])])
+            declConv(b, convNames[cni], convNames[cni])
         }
         // Imported top-level declarations run first (flat in the jsmain scope), so an
         // imported package resolves its OWN names unqualified; then the package objects are
