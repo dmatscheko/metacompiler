@@ -42,7 +42,7 @@ StmtLine    <~~ push({stmt: pop()}) ~~>
 At          = "@" :whitespace() ;
 
 // A statement (also used inside ( ) blocks, where Newlines separate them).
-Stmt        = Rem | EchoCtl | EchoDot | Echo | SetA | Set | If | For | GotoEof | Goto | Call | ExitB | Exit ;
+Stmt        = Rem | EchoCtl | EchoDot | Echo | SetA | SetQ | Set | If | For | GotoEof | Goto | Call | ExitB | Exit ;
 
 // ----- echo -----
 Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
@@ -53,6 +53,15 @@ Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
 // ----- set VAR=value  /  set /a VAR=expr -----
 SetA        <~~ push(makeSetA(takeAll())) ~~>
             = KwSet "/a" :whitespace(Hspace) SetName "=" Arith ;
+// 'set "name=value"' is the quoted form: the quotes delimit the assignment rather than
+// becoming part of the value, which is how a value with a trailing space is written.
+SetQ        <~~ push(makeSet(takeAll())) ~~>
+            = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) ;
+QLineText   <~~ push(makeWord(takeAll())) ~~>
+            = :whitespace() { QLinePart } :whitespace() ;
+QLinePart   = VarPct | ForRef | QLineChars ;
+QLineChars  <~~ push(makeStr(up.in)) ~~> = QLineChar :whitespace() { QLineChar } ;
+QLineChar   = "\x20"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not " or %
 Set         <~~ push(makeSet(takeAll())) ~~>
             = KwSet SetName "=" ( LineText | Empty ) ;
 SetName     <~~ push(up.in) ~~>
@@ -61,7 +70,8 @@ Empty       <~~ push(makeStr("")) ~~> = "" ;
 
 // ----- goto / call / exit -----
 GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
-Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto LabelName :whitespace(Hspace) ;
+// 'goto :label' and 'goto label' are the same jump; ':eof' is matched by GotoEof above.
+Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) ;
 Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { Word } :whitespace(Hspace) ;
 ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" [ Word ] :whitespace(Hspace) ;
 Exit        <~~ push(makeExit(takeAll())) ~~> = KwExit [ Word ] :whitespace(Hspace) ;
@@ -114,8 +124,12 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
             = BareChar :whitespace() { BareChar } :whitespace() ;
 
 // LineText: the rest of the line (for echo / set value), with %expansion%.
+// The FIRST part is matched with the ambient whitespace rule in force, so the single
+// separator after 'echo' is skipped; whitespace is then turned OFF, so a space that sits
+// between two parts is text and survives ('echo a %x% b' really prints 'a 7 b'). Without
+// that the engine's leading skip ate every space that followed an expansion.
 LineText    <~~ push(makeWord(takeAll())) ~~>
-            = { LinePart } :whitespace(Hspace) ;
+            = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = VarPct | ForRef | LineChars ;
 LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
 
@@ -642,13 +656,19 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         var label = items[0]
         return function(b) {
             if (!hasOwn(labelIdx, "$" + label)) { labelMissing(b, label); return deadBlock() }
+            // The call returns to RIGHT HERE, not to the next top-level line: a fresh
+            // continuation block is registered as the return site and handed back as the
+            // current block. Returning to curNextItem instead made a 'call' inside a for
+            // body end the LOOP after one round, and dropped the statements that followed
+            // it in an if body.
+            var contB = curF.NewBlock("")
             var retid = retSites.length
-            retSites.push(curNextItem)
+            retSites.push(contB)
             var sp = b.NewLoad(i32, gCsp)
             b.NewStore(llvm.constant.NewInt(i32, retid), b.NewGetElementPtr(cstackTy, gCstack, zero, sp))
             b.NewStore(b.NewAdd(sp, one), gCsp)
             b.NewBr(Lblocks[labelIdx["$" + label]])
-            return deadBlock()
+            return contB
         }
     }
     function makeExitB(items) {

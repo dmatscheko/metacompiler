@@ -31,7 +31,7 @@ StmtLine    <~~ push({stmt: pop()}) ~~>
 At          = "@" :whitespace() ;
 
 // A statement (also used inside ( ) blocks, where Newlines separate them).
-Stmt        = Rem | EchoCtl | EchoDot | Echo | SetA | Set | If | For | GotoEof | Goto | Call | ExitB | Exit ;
+Stmt        = Rem | EchoCtl | EchoDot | Echo | SetA | SetQ | Set | If | For | GotoEof | Goto | Call | ExitB | Exit ;
 
 // ----- echo -----
 Rem         <~~ push(makeNop()) ~~> = KwRem { NotNL } ;
@@ -42,6 +42,15 @@ Echo        <~~ push(makeEcho(pop())) ~~> = KwEcho LineText ;
 // ----- set VAR=value  /  set /a VAR=expr -----
 SetA        <~~ push(makeSetA(takeAll())) ~~>
             = KwSet "/a" :whitespace(Hspace) SetName "=" Arith ;
+// 'set "name=value"' is the quoted form: the quotes delimit the assignment rather than
+// becoming part of the value, which is how a value with a trailing space is written.
+SetQ        <~~ push(makeSet(takeAll())) ~~>
+            = KwSet '"' :whitespace() SetName "=" ( QLineText | Empty ) '"' :whitespace(Hspace) ;
+QLineText   <~~ push(makeWord(takeAll())) ~~>
+            = :whitespace() { QLinePart } :whitespace() ;
+QLinePart   = VarPct | ForRef | QLineChars ;
+QLineChars  <~~ push(makeStr(up.in)) ~~> = QLineChar :whitespace() { QLineChar } ;
+QLineChar   = "\x20"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // not " or %
 Set         <~~ push(makeSet(takeAll())) ~~>
             = KwSet SetName "=" ( LineText | Empty ) ;
 SetName     <~~ push(up.in) ~~>
@@ -50,7 +59,8 @@ Empty       <~~ push(makeStr("")) ~~> = "" ;
 
 // ----- goto / call / exit -----
 GotoEof     <~~ push(makeGoto("eof")) ~~> = KwGoto ":eof" :whitespace(Hspace) ;
-Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto LabelName :whitespace(Hspace) ;
+// 'goto :label' and 'goto label' are the same jump; ':eof' is matched by GotoEof above.
+Goto        <~~ push(makeGoto(pop())) ~~> = KwGoto [ ":" ] LabelName :whitespace(Hspace) ;
 Call        <~~ push(makeCall(takeAll())) ~~> = KwCall ":" LabelName { Word } :whitespace(Hspace) ;
 ExitB       <~~ push(makeExitB(takeAll())) ~~> = KwExit "/b" [ Word ] :whitespace(Hspace) ;
 Exit        <~~ push(makeExit(takeAll())) ~~> = KwExit [ Word ] :whitespace(Hspace) ;
@@ -103,8 +113,12 @@ Bareword    <~~ push(makeStr(up.in)) ~~>
             = BareChar :whitespace() { BareChar } :whitespace() ;
 
 // LineText: the rest of the line (for echo / set value), with %expansion%.
+// The FIRST part is matched with the ambient whitespace rule in force, so the single
+// separator after 'echo' is skipped; whitespace is then turned OFF, so a space that sits
+// between two parts is text and survives ('echo a %x% b' really prints 'a 7 b'). Without
+// that the engine's leading skip ate every space that followed an expansion.
 LineText    <~~ push(makeWord(takeAll())) ~~>
-            = { LinePart } :whitespace(Hspace) ;
+            = [ LinePart ] :whitespace() { LinePart } :whitespace(Hspace) ;
 LinePart    = VarPct | ForRef | LineChars ;
 LineChars   <~~ push(makeStr(up.in)) ~~> = LineChar :whitespace() { LineChar } ;
 
@@ -277,7 +291,42 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         return function() { setVar(name, intToStr(arithT())); return undefined }
     }
     function makeGoto(name) { return function() { return {gotoLbl: name} } }
-    function makeCall(items) { return function() { return {callLbl: items[0]} } }   // items[0]=label; args ignored (no %1 params)
+    // 'call :label' runs the subroutine INLINE, right where the call stands. It used to
+    // hand a {callLbl} signal to the program counter instead, which made every enclosing
+    // block treat the call as a control transfer: a 'call' inside a for body ended the
+    // LOOP after one round, and the statements after it in an if body never ran.
+    // items[0] = label; the arguments are parsed and dropped (no %1 parameters yet).
+    var progItems = null
+    var progLabels = null
+    function batCall(label) {
+        if (progItems == null || !hasOwn(progLabels, "$" + label)) {
+            println("The system cannot find the batch label specified - " + label)
+            exit(1)
+        }
+        var pc = progLabels["$" + label] + 1
+        while (pc < progItems.length) {
+            var it = progItems[pc]
+            // Running into the next label ends the subroutine, as cmd does.
+            if (it.lbl != undefined) { return undefined }
+            var sig = it.stmt()
+            if (sig != undefined) {
+                if (sig.procexit != undefined) { return sig }   // 'exit' ends the process
+                if (sig.ret != undefined) { return undefined }  // 'exit /b' returns
+                if (sig.gotoLbl != undefined) {
+                    if (sig.gotoLbl == "eof") { return undefined }
+                    if (!hasOwn(progLabels, "$" + sig.gotoLbl)) {
+                        println("The system cannot find the batch label specified - " + sig.gotoLbl)
+                        exit(1)
+                    }
+                    pc = progLabels["$" + sig.gotoLbl] + 1
+                    continue
+                }
+            }
+            pc = pc + 1
+        }
+        return undefined
+    }
+    function makeCall(items) { return function() { return batCall(items[0]) } }
     function makeExitB(items) {
         var codeT = items.length > 0 ? items[0] : null
         return function() { return {ret: codeT != null ? toInt(codeT()) : 0} }
@@ -336,6 +385,8 @@ NotDQPct    = "\x00"..."\x21" | "\x23"..."\x24" | "\x26"..."\U0010ffff" ;   // n
         for (i = 0; i < items.length; i++) {
             if (items[i].lbl != undefined) { labelMap["$" + items[i].lbl] = i }
         }
+        progItems = items
+        progLabels = labelMap
         var callStack = []
         var pc = 0
         while (pc < items.length) {
