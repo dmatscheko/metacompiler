@@ -182,7 +182,89 @@ TopDecl     = [ Modifiers ] ( Interface | ObjectDecl | EnumClass | AnnotationCla
 // use-site targets @field:A / @get:A / @file:A, and annotation arrays @[A B C(x)].
 // Body-shaping modifiers (enum/annotation/companion) are not consumed - those
 // declaration forms route to notImplemented instead.
-Modifiers   = { Modifier | CompanionMod | Annotation | ContextClause } ;
+Modifiers   = { Modifier | CompanionMod | Annotation | ContextClause | AnnEnumMod | VarianceMod } ;
+// `annotation` and `enum` are the two soft keywords that also START a declaration
+// (annotation class / enum class), so they cannot sit in the plain Modifier list - a
+// greedy run would eat the keyword the declaration form needs (see docs/abnf-dialect-
+// gotchas.md, "A greedy modifier list eats the declaration keyword"). They ARE ordinary
+// modifiers everywhere else, and Kotlin's own testData leans on it: psi/SimpleModifiers.kt,
+// psi/SoftKeywords.kt, psi/annotation/Annotations.kt and psi/annotation/options/java.kt
+// all spell a multi-line modifier run with `annotation` or `enum` in the middle of it and
+// carry a clean parse tree. The NotClassW guard is what keeps `annotation class Foo` and
+// `enum class Kind` routed to their own productions: the word only counts as a modifier
+// when `class` does NOT follow it.
+AnnEnumMod  = ( "annotation" | "enum" ) KwEnd NotColon NotClassW ;
+// `in` and `out` are variance modifiers, and Kotlin lets them stand in an ordinary
+// declaration modifier run as well (psi/SimpleModifiers.kt, psi/SoftKeywords.kt and
+// psi/annotation/Annotations.kt all end their multi-line run with `in` / `out` before
+// the `class` keyword, all three with a clean parse tree). They are the two modifier
+// words that are also HARD operators - `a in b`, `for (x in xs)`, `in 1..2 ->` - so they
+// are only taken when a modifier, a declaration keyword or an annotation follows; that
+// keeps every ordinary use of `in` out of the modifier list.
+VarianceMod = ( "in" | "out" ) KwEnd ModWordAhead ;
+// A zero-width guard that fails unless the next token starts a modifier run or a
+// declaration - an `@` annotation, or one of the modifier / declaration keywords.
+ModWordAhead = :script(~~
+    (function() {
+        var kws = "|public|private|protected|internal|open|final|abstract|sealed|data"
+                + "|override|lateinit|const|inner|vararg|noinline|crossinline|tailrec"
+                + "|operator|infix|inline|external|suspend|expect|actual|reified|value"
+                + "|annotation|enum|companion|context|in|out|class|interface|object|fun"
+                + "|val|var|typealias|constructor|init|"
+        var i = 0
+        var steps = 0
+        var cc = c.peek(i)
+        while (steps < 100000) {
+            steps++
+            if (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 12) { i++; cc = c.peek(i); continue }
+            if (cc === 47 && c.peek(i + 1) === 47) {
+                i = i + 2
+                cc = c.peek(i)
+                while (cc >= 0 && cc !== 10 && steps < 100000) { steps++; i++; cc = c.peek(i) }
+                continue
+            }
+            if (cc === 47 && c.peek(i + 1) === 42) {
+                i = i + 2
+                while (steps < 100000) {
+                    steps++
+                    var d = c.peek(i)
+                    if (d < 0) { break }
+                    if (d === 42 && c.peek(i + 1) === 47) { i = i + 2; break }
+                    i++
+                }
+                cc = c.peek(i)
+                continue
+            }
+            break
+        }
+        if (cc === 64) { return undefined }
+        var w = ""
+        var k = 0
+        while (k < 24) {
+            var b2 = c.peek(i + k)
+            var isWord = (b2 >= 48 && b2 <= 57) || (b2 >= 65 && b2 <= 90) || (b2 >= 97 && b2 <= 122) || b2 === 95
+            if (!isWord) { break }
+            w = w + String.fromCharCode(b2)
+            k++
+        }
+        return (w !== "" && kws.indexOf("|" + w + "|") >= 0)
+            ? undefined
+            : abnf.newToken("\x01no-modifier-follows", 0)
+    })()
+~~) ;
+// A zero-width guard that fails when the next word is `class` (the twin of the guard of
+// the same name in kotlin-to-llvm-ir.abnf).
+NotClassW   = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13) { i++; cc = c.peek(i) }
+        return (cc === 99 && c.peek(i + 1) === 108 && c.peek(i + 2) === 97
+                && c.peek(i + 3) === 115 && c.peek(i + 4) === 115)
+            ? abnf.newToken("\x01class-follows", 0)
+            : undefined
+    })()
+~~) ;
 // `companion fun String.f() {}` / `companion val Foo.p get() = 1` (the CompanionBlocks
 // / CompanionExtensions proposal the PSI corpus carries): `companion` acts as a plain
 // declaration modifier there. It is NOT noted like the other modifiers - nothing reads
@@ -195,7 +277,10 @@ CompanionMod = "companion" KwEnd NotColon NotBrace NotObjectKw ;
 ContextClause = "context" KwEnd "(" [ CtxParam ] { "," [ CtxParam ] } ")" ;
 // A context parameter is an optional name - or a label, in a function type
 // (context(label@String)) - followed by its type.
-CtxParam    = { Annotation } [ KId ( ":" | "@" ) ] Type ;
+// The modifiers are what `context(noinline a: () -> Int)` needs (psi/contracts/good/
+// holdsIn/withContextParameters.kt); they are parsed and dropped like every other
+// context-clause part.
+CtxParam    = { Annotation | ParamMod } [ KId ( ":" | "@" ) ] Type ;
 // The trailing NotColon lets a soft-keyword modifier double as an identifier when it
 // is actually a name: a real modifier is never immediately followed by `:`, but a
 // parameter or property named `data`/`value`/`inner` is (data: Intent?). Without the
@@ -217,7 +302,10 @@ Annotation  = "@" [ AnnTarget ":" ] ( AnnSet | AnnEntry ) ;
 AnnTarget   = ( "field" | "property" | "get" | "setparam" | "set" | "receiver"
               | "param" | "delegate" | "file" | "all" ) KwEnd ;
 AnnSet      = "[" { AnnEntry } "]" ;
-AnnEntry    = KId { "." KId } [ SkipParen NotArrow ] ;
+// Each segment may carry type arguments - `@[foo<A, B>(a, b) foo.bar.doo<f>.foo<bar, goo>.foo]`
+// in psi/annotation/Annotations.kt is one annotation set with a clean parse tree - so the
+// angle run is skipped after every name, not only after the last.
+AnnEntry    = KId [ SkipAngle ] { "." KId [ SkipAngle ] } [ SkipParen NotArrow ] ;
 // The argument-less annotation form, for the places where a `(` right after the
 // annotation belongs to the construct being annotated (a destructuring for-loop
 // pattern) rather than to the annotation.
@@ -226,8 +314,10 @@ AnnNoArgs   = "@" [ AnnTarget ":" ] ( AnnSet | KId { "." KId } ) ;
 // package / import headers (same policy as kotlin-to-llvm-ir.abnf): the package
 // name is ignored; each import is resolved against the runtime builtins, and an
 // unresolvable one aborts unless -warn-imports downgrades it to a warning.
-// takeAll rather than pop: a package BODY may leave declaration markers behind it.
-Package     <~~ takeAll() ~~> = KwPackage PkgPath ( "{" { TopDecl } "}" | [ ";" ] ) ;
+// `package foo { ... }` is NOT accepted: the block form was dropped from the language
+// long ago, and Kotlin's own psi/packages/PackageBlockFirst.kt records it as an error
+// ("Expecting a top level declaration"). The compiler half never had it either.
+Package     <~~ takeAll() ~~> = KwPackage PkgPath [ ";" ] ;
 // The package path is an ordinary dotted name. It used to be parsed leniently (a
 // leading, trailing or doubled dot still read as a path) on the grounds that the name
 // is ignored anyway - but every file that leniency won is a psi/packages/* recovery
@@ -311,9 +401,18 @@ ParamList   <~~ push({params: takeAll()}) ~~>
 // empty. `vararg` is genuine too: the matching call-site arguments are packed into a
 // list bound to the parameter (see kfit). The remaining modifiers (noinline,
 // crossinline, the annotations) are parsed and dropped.
+// No SkipAngle after the name. A value parameter is `name [: Type]` and nothing else,
+// so `fun foo(Array<String>)` is a parse error in Kotlin too - the `Array` is read as
+// the NAME and the `<String>` has nowhere to go (psi/ParameterNameMising.kt records
+// exactly that). The type itself stays OPTIONAL, which is Kotlin's parser: `fun test1(a) {}`
+// and `fun (x, y, ): Int` are missing-type SEMANTIC errors and psi/ParameterType.kt /
+// psi/trailingCommaAllowed.kt both carry a clean parse tree.
 Param       <~~ push(makeParam(takeAll())) ~~>
-            = { Annotation | ParamMod } [ ( "val" | "var" ) KwEnd ] KId <~~ push(up.in) ~~> [ SkipAngle ] [ ":" Type ] [ "=" ParamDefault ] ;
-ParamMod    = "vararg" KwEnd NotColon <~~ push({pvararg: true}) ~~> | Modifier ;
+            = { Annotation | ParamMod } [ ( "val" | "var" ) KwEnd ] KId <~~ push(up.in) ~~> [ ":" Type ] [ "=" ParamDefault ] ;
+// AnnEnumMod / VarianceMod for the same reason Modifiers carries them: a parameter's
+// modifier run may hold `annotation`, `enum`, `in` or `out` (psi/SoftKeywords.kt spells
+// a multi-line one inside a primary constructor's parameter list).
+ParamMod    = "vararg" KwEnd NotColon <~~ push({pvararg: true}) ~~> | Modifier | AnnEnumMod | VarianceMod ;
 ParamDefault <~~ push({pdef: pop()}) ~~>
             = Expression ;
 
@@ -402,10 +501,11 @@ PropInit    <~~ push({pinit: pop()}) ~~>
 PropVis     = [ Modifiers ] ( KwGet | KwSet ) NotParen ;
 // get() / set(v) with a body. The setter parameter name defaults to `value`.
 Accessor    = [ Modifiers ] ( Getter | Setter ) [ ";" ] ;
-// The parameter list may be missing entirely (val a: Int get = 1); a body is what
-// separates an accessor from a visibility-only `private set` (see PropVis).
+// The parameter list is REQUIRED: `val a: Int get = 1` is "Accessor body expected" in
+// Kotlin (psi/CommentsBinding.kt records it as an error). A body is what separates an
+// accessor from a visibility-only `private set` (see PropVis).
 Getter      <~~ push({getter: pop()}) ~~>
-            = KwGet [ "(" ")" ] [ ":" Type ] [ ContractClause ] FunBody ;
+            = KwGet "(" ")" [ ":" Type ] [ ContractClause ] FunBody ;
 Setter      <~~ var b = pop(); push({setter: b, sparam: pop()}) ~~>
             = KwSet [ "(" [ { Annotation } KId <~~ push(up.in) ~~> [ ":" Type ] ] [ "," ] ")" ] [ ":" Type ] [ ContractClause ] FunBody ;
 // A delegated property (val/var x [: T] by <delegate>). The `by lazy { init }` form
@@ -629,8 +729,13 @@ CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
 CallChain   <~~ push({chain: takeAll()}) ~~>
             = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
 
+// The chain may carry a `!!` (the non-null assertion, which is the identity for an
+// untyped value and is simply dropped) and a `?.` step - `t!!.i++` and `t?.i++` are both
+// ordinary Kotlin, and psiUtil/isSelectorInExpression.kt spells them out. The `?.` step
+// is read like a plain `.`: on a NON-null receiver, which is the only case a ++ can
+// mean anything on, the two are the same access.
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | TIndex } ;
+            = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | "?." KId <~~ push({key: up.in}) ~~> | "!!" | TIndex } ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
 
@@ -644,11 +749,16 @@ WhenExpr    <~~ push(makeWhen(takeAll())) ~~>
               { WhenElse | WhenArm } "}" ;
 // The subject is a plain expression, or a val/var binding - when (val x = e) { ... } -
 // whose name is in scope in every arm body. The type annotation is parsed and ignored.
-WhenSubj    = WhenBind | WhenExprSubj ;
+WhenSubj    = WhenBind | WhenBindDestr | WhenExprSubj ;
 // The initializer may be missing (when (val x: T) { }); the subject is Unit then.
 WhenBind    <~~ var e = pop(); push({subj: e, subjName: pop()}) ~~>
             = ( "val" | "var" ) KwEnd KId <~~ push(up.in) ~~> [ ":" Type ] "=" Expression
             | ( "val" | "var" ) KwEnd KId <~~ push(up.in); push(makeConst(undefined)) ~~> [ ":" Type ] ;
+// A DESTRUCTURING subject variable - when (val (x, y) = foo) { ... }. The components are
+// parsed and dropped (nothing binds them), so only the subject EXPRESSION is genuine;
+// the arms still see the value they compare against. psi/WhenWithSubjectVariable.kt.
+WhenBindDestr <~~ push({subj: pop()}) ~~>
+            = ( "val" | "var" ) KwEnd SkipParen "=" Expression ;
 WhenExprSubj <~~ push({subj: pop()}) ~~>
             = Expression ;
 // The else arm must be tried first: otherwise 'else' would parse as a variable arm
@@ -892,7 +1002,11 @@ FieldSfx    = "." KId <~~ push({kind:"field", name: up.in}) ~~> ;
 SafeFieldSfx = "?." KId <~~ push({kind:"field", name: up.in, safe: true}) ~~> ;
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
-MArgs       = "(" [ Arg ] { "," [ Arg ] } ")" [ Lambda ] | Lambda ;
+// More than one trailing lambda is a SEMANTIC error in Kotlin, not a syntactic one:
+// psi/CallWithManyClosures.kt writes `f() {} {} {}` and `f {} {} {}` and carries a clean
+// parse tree. Only the FIRST lambda is passed as an argument (makeCall reads one), which
+// is what the single-lambda form already did.
+MArgs       = "(" [ Arg ] { "," [ Arg ] } ")" { Lambda } | Lambda { Lambda } ;
 
 // A call argument: a spread (*array, which splices the array into the positional
 // arguments of a vararg parameter), a NAMED argument (name = value, matched against
@@ -929,8 +1043,11 @@ ThrowExpr   <~~ push(excThrow(pop())) ~~>
 // {__superref, self, cls} marker naming the SUPERCLASS of the class whose body is
 // being walked (curClassTop), so the member lookup starts one level up while `this`
 // stays the same instance.
+// The qualifier is `super<Base>`; an EMPTY `super<>` is "Type expected" in Kotlin
+// (psi/Super.kt), so the angle run must hold at least one item.
 SuperExpr   <~~ push(makeSuperRef(curClassTop())) ~~>
-            = "super" KwEnd [ SkipAngle ] ;
+            = "super" KwEnd [ SkipAngle1 ] ;
+SkipAngle1  = "<" ( SkipAngle | "->" | SkipAngleItem ) { SkipAngle | "->" | SkipAngleItem } ">" ;
 
 // try { ... } catch (e) { ... } used as an EXPRESSION (val x = try { ... } catch ...,
 // or an expression-body function fun f() = try { ... } catch ...). The try/catch/finally
@@ -1030,7 +1147,7 @@ DName       <~~ push(dName(takeAll())) ~~>
 // works as a Primary anywhere, including as an argument to an outer call
 // (modules(module(createdAtStart = true) { ... }, module { ... }, ...)).
 Call        <~~ push(makeCall(takeAll())); retLblPop() ~~>
-            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( "(" [ Arg ] { "," [ Arg ] } ")" [ Lambda ] | Lambda ) ;
+            = KId <~~ push(up.in); retLblPush(up.in, "lam") ~~> [ TypeArgs ] ( "(" [ Arg ] { "," [ Arg ] } ")" { Lambda } | Lambda { Lambda } ) ;
 // The explicit type arguments of a call - tag17<String>(x) - kept so that a reified
 // type parameter inside the callee resolves to the real type name.
 TypeArgs    <~~ push({targs: up.in}) ~~>
@@ -1157,7 +1274,14 @@ CharPlain   = "\x09" | "\x0b"..."\x0c" | "\x20"..."\x26" | "\x28"..."\x5b" | "\x
 // $name / ${expr} interpolation (same maker as Template). A $ directly after an
 // internal quote is consumed as raw text (exotic corner, kept simple).
 RawStr      <~~ push(makeTemplate(takeAll())) ~~>
-            = '"""' :whitespace() { TplExpr | TplVar | RawChunk } '"""' :whitespace(Whitespace) ;
+            = '"""' :whitespace() { TplExpr | TplVar | RawChunk } RawClose :whitespace(Whitespace) ;
+// A raw string ends at the LAST """ of a run of quotes, so the extra quotes in
+// psi/stringTemplates/RawStringsWithManyQuotes.kt (""""""" is the one-character string
+// ") belong to the CONTENT. RawChunk cannot take a quote that is glued to the
+// terminator, so the closer absorbs the surplus itself and pushes it back as text; the
+// ordered choice tries the longer reading first and falls back to the bare terminator.
+RawClose    = RawCloseQ RawClose | '"""' ;
+RawCloseQ   <~~ push({s: up.in}) ~~> = '"' ;
 RawChunk    <~~ push({s: up.in}) ~~>
             = ( RawTwoQ | RawOneQ | RawPlain ) { RawTwoQ | RawOneQ | RawPlain } ;
 RawPlain    = "\x00"..."\x21" | "\x23"..."\x23" | "\x25"..."\U0010ffff" ;

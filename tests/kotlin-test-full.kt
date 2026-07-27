@@ -752,11 +752,12 @@ fun sec26() {
 // Outer.Kind.LEFT resolves. The section exists because the compiler half used to
 // report `nested type declaration not implemented (ignored)` for everything except
 // a plain nested class, which the interpreter has always built.
-// Every nested type below has a DISTINCT simple name on purpose: the compiler's
-// flat class model binds a nested type into one shared program scope under its
-// simple name, so `class A { class Inner }` and `class B { class Inner }` collide
-// there (A.Inner().who() answers "B") while the interpreter keeps them apart.
-// That divergence is pre-existing and orthogonal to whether nesting works at all.
+// Every nested type below has a DISTINCT simple name, which keeps this section
+// about nesting itself; SECTION 29 is the one that makes the simple names COLLIDE
+// across owners. (Both work now. Until the compiler gave each nested declaration
+// its own scope, its flat class model bound every nested type into one shared
+// program scope under its simple name, so `class A { class Inner }` and
+// `class B { class Inner }` shared a slot and A.Inner().who() answered "B".)
 class Holder27(val tag: Int) {
     enum class Kind27 { LEFT, RIGHT }
     interface Shape27 { fun area(): Int }
@@ -837,6 +838,71 @@ fun sec28() {
     check("cta7", order28 == "RI" && store28[1] == 7)
 }
 
+// ===== SECTION 29: nested types with COLLIDING simple names =====
+// Two owners each declaring a nested type of the SAME simple name. The compiler's
+// class model is flat - one program scope - so binding a nested declaration under
+// its simple name made the second owner's declaration win for both: A29.Inner29(1)
+// constructed B29's Inner29 and answered "B". Each nested declaration now runs in
+// its own child scope and the enclosing descriptor closes over THAT scope, so the
+// factory reaches the descriptor declared beside it whatever anyone else declares
+// under the same name. The simple name is still mirrored into the enclosing scope,
+// which is what keeps a bare `Inner29(...)` inside the owner's own body working.
+// KNOWN RESIDUE, identical in BOTH halves (so not a divergence, and deliberately
+// not asserted here): an UNQUALIFIED reference to a nested class from inside its
+// owner's own body still goes through that one mirrored program-scope binding, so
+// with two owners it finds whichever was declared last. Kotlin resolves the owner's
+// own nested type first. Qualified use - `A29.Inner29(1)`, which is the form that
+// diverged - is what this section pins.
+class A29 {
+    class Inner29(val v: Int) { fun who(): String = "A" }
+    enum class Kind29 { LEFT }
+    object Reg29 { val seed: Int = 1 }
+}
+class B29 {
+    class Inner29(val v: Int) { fun who(): String = "B" }
+    enum class Kind29 { RIGHT }
+    object Reg29 { val seed: Int = 2 }
+}
+object C29 {
+    class Inner29(val v: Int) { fun who(): String = "C" }
+}
+class Host29(val tag: Int) {
+    inner class Inner29(val v: Int) { fun who(): String = "H" + tag + v }
+}
+fun sec29() {
+    // Constructed through the enclosing name: each owner gets its OWN nested class.
+    check("col1", A29.Inner29(1).who() == "A" && B29.Inner29(2).who() == "B")
+    check("col2", A29.Inner29(1).v == 1 && B29.Inner29(2).v == 2)
+    check("col3", C29.Inner29(3).who() == "C")
+    // Repeated construction through either owner keeps answering that owner.
+    check("col4", A29.Inner29(6).who() == "A" && A29.Inner29(7).who() == "A")
+    // The same for the value-shaped nested types: an enum and an object.
+    check("col5", A29.Kind29.LEFT.name == "LEFT" && B29.Kind29.RIGHT.name == "RIGHT")
+    check("col6", A29.Reg29.seed == 1 && B29.Reg29.seed == 2)
+    // An INNER class of the same simple name keeps its stored outer receiver.
+    check("col7", Host29(7).Inner29(8).who() == "H78")
+    check("col8", Host29(9).Inner29(0).who() == "H90" && A29.Inner29(1).who() == "A")
+}
+
+// ===== SECTION 30: a raw string ends at the LAST triple quote =====
+// A run of more than three quotes closing a raw string belongs to the CONTENT up to the
+// final three - Kotlin's own psi/stringTemplates/RawStringsWithManyQuotes.kt writes
+// runs of six, seven and eight quotes with a clean parse tree. Both halves used to stop
+// at the FIRST triple quote and then fail on the leftover quote, so a raw string could
+// not end with a quote character at all.
+fun sec30() {
+    val one = """""""
+    val two = """"""""
+    check("raw1", one.length == 1 && one == "\"")
+    check("raw2", two.length == 2 && two == "\"\"")
+    // The empty raw string and a quote in the MIDDLE are unaffected.
+    check("raw3", """""".length == 0)
+    check("raw4", """a""b""" == "a\"\"b")
+    // A raw string whose content ends with one or two quotes.
+    check("raw5", """ok"""" == "ok\"")
+    check("raw6", """ok""""" == "ok\"\"")
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -868,6 +934,8 @@ fun main() {
     sec26() // SECTION-CALL 26
     sec27() // SECTION-CALL 27
     sec28() // SECTION-CALL 28
+    sec29() // SECTION-CALL 29
+    sec30() // SECTION-CALL 30
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }

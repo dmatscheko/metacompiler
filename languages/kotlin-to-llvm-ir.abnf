@@ -1229,7 +1229,12 @@ CharPlain   = "\x00"..."\x09" | "\x0b"..."\x0c" | "\x0e"..."\x26" | "\x28"..."\x
 // $name / ${expr} interpolation (same maker as Template). A $ directly after an
 // internal quote is consumed as raw text (exotic corner, kept simple).
 RawStr      <~~ push(makeTemplate(takeAll())) ~~>
-            = '"""' :whitespace() { TplExpr | TplVar | RawChunk } '"""' :whitespace(Whitespace) ;
+            = '"""' :whitespace() { TplExpr | TplVar | RawChunk } RawClose :whitespace(Whitespace) ;
+// A raw string ends at the LAST """ of a run of quotes, so the surplus quotes belong to
+// the CONTENT (""""""" is the one-character string "). The twin of RawClose in
+// kotlin-interpreter.abnf - without it the two halves disagree on the string's value.
+RawClose    = RawCloseQ RawClose | '"""' ;
+RawCloseQ   <~~ push({s: up.in}) ~~> = '"' ;
 RawChunk    <~~ push({s: up.in}) ~~>
             = ( RawTwoQ | RawOneQ | RawPlain ) { RawTwoQ | RawOneQ | RawPlain } ;
 RawPlain    = "\x00"..."\x21" | "\x23"..."\x23" | "\x25"..."\U0010ffff" ;
@@ -3878,21 +3883,37 @@ KwContract  = "contract" KwEnd ;
     // looks a method CALL up the __class chain (so a construction factory must sit on
     // the descriptor) while js_get on an instance does NOT walk that chain (so a plain
     // read of Outer.Kind must find it on the singleton itself).
+    // PER-OWNER SCOPING. The nested declaration used to run straight into the program
+    // scope, which binds it under its SIMPLE name - so `class A { class Inner }` and
+    // `class B { class Inner }` shared one slot, the second declaration won, and
+    // `A.Inner(1).who()` answered "B" while the interpreter answered "A". Each nested
+    // declaration now runs in its OWN child scope, so the descriptor a factory (and any
+    // method of the nested class) resolves is the one declared right beside it, whatever
+    // some other owner declares under the same simple name. The simple name is still
+    // MIRRORED into the enclosing scope afterwards, because a bare `Inner(1)` written
+    // inside the owner's own body resolves through the ordinary scope chain and must
+    // keep working exactly as it did.
     function emitNestedList(b, holderV, alsoV, nested, ownerName) {
         for (var nc = 0; nc < nested.length; nc++) {
             var savedOuter = emitOuterProps
             if (nested[nc].inner) { emitOuterProps = classOwnProps["$" + ownerName] }
+            var savedScopeV = curScopeV
+            curScopeV = callExt(b, "js_scope_new", [savedScopeV])
+            var ownScopeV = curScopeV
             b = nested[nc].stmt(b)
             emitOuterProps = savedOuter
-            if (nested[nc].name == null) { continue }
+            if (nested[nc].name == null) { curScopeV = savedScopeV; continue }
+            var declV = callExt(b, "js_scope_get", [ownScopeV, emitStr(b, nested[nc].name)])
             var slotV = anytype
             if (nested[nc].asvalue) {
-                slotV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nested[nc].name)])
+                slotV = declV
             } else {
                 slotV = callExt(b, "js_closure", [handle(emitNestedFactory(nested[nc].name,
                                                                           nested[nc].inner,
-                                                                          alsoV != null)), curScopeV])
+                                                                          alsoV != null)), ownScopeV])
             }
+            curScopeV = savedScopeV
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, nested[nc].name), declV])
             callExt(b, "js_set", [holderV, emitStr(b, nested[nc].name), slotV])
             if (alsoV != null) { callExt(b, "js_set", [alsoV, emitStr(b, nested[nc].name), slotV]) }
         }
