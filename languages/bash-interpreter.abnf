@@ -146,13 +146,14 @@ Pipeline    <~~ push(makePipeline(takeAll())) ~~>
 BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
 PipeOp      = "|" NotBar ;
 
-// "((" must be tried before "(" or an arithmetic command parses as nested subshells.
 // A compound command is an ordinary Command, so it can be a pipeline stage
 // (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
 // whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`).
-Command     = ArithCmd | CondCmd | Subshell | BraceGroup | CompoundRedir | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+Command     = CompoundRedir | Subshell | BraceGroup | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
-CompoundCore = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
+// "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
+// is why CompoundRedir comes before Subshell rather than after it.
+CompoundCore = ArithCmd | CondCmd | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
@@ -987,24 +988,28 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 i = j2
                 if (mode == "one") { out = out + v.slice(i); done = true }
             } else {
-                if (i < v.length) { out = out + v.charAt(i) }
-                i = i + 1
+                if (i < v.length) { var cch = chunkAt(v, i); out = out + cch; i = i + cch.length }
+                else { i = i + 1 }
             }
         }
         return out
     }
     function caseMap(v, mode) {
         var out = ""
-        var i
         var up = (mode == "^" || mode == "^^")
         var all = (mode == "^^" || mode == ",,")
-        for (i = 0; i < v.length; i++) {
-            var cc = v.charCodeAt(i)
-            if (all || i == 0) {
-                if (up) { if (cc >= 97 && cc <= 122) { cc = cc - 32 } }
-                else { if (cc >= 65 && cc <= 90) { cc = cc + 32 } }
+        var i = 0
+        var first = true
+        while (i < v.length) {
+            var ch = chunkAt(v, i)
+            i = i + ch.length
+            if ((all || first) && ch.length == 1) {
+                var cc = ch.charCodeAt(0)
+                if (up) { if (cc >= 97 && cc <= 122) { ch = String.fromCharCode(cc - 32) } }
+                else { if (cc >= 65 && cc <= 90) { ch = String.fromCharCode(cc + 32) } }
             }
-            out = out + String.fromCharCode(cc)
+            first = false
+            out = out + ch
         }
         return out
     }
@@ -1189,6 +1194,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     function mkDeclItem(items) { return {a: parseAssign(items)} }
+
+    // A character copied one at a time must carry a SURROGATE PAIR across in one piece: the
+    // script string type re-encodes on every concatenation, so appending a lone surrogate
+    // turns an astral character into U+FFFD. Every loop below that rebuilds text uses this.
+    function chunkAt(s, i) {
+        var cc = s.charCodeAt(i)
+        if (cc >= 55296 && cc <= 56319 && i + 1 < s.length) { return s.slice(i, i + 2) }
+        return s.charAt(i)
+    }
 
     // ---- glob (pathname-style) pattern matching: * ? [...] and a backslash escape ----
     // The same matcher backs case, [[ == ]] and the ${v#pat} family, exactly like the shell.
@@ -1591,8 +1605,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var out = ""
         var i = 0
         while (i < t.length) {
-            var ch = t.charAt(i)
-            if (ch != "\\" || i + 1 >= t.length) { out = out + ch; i = i + 1 }
+            var ch = chunkAt(t, i)
+            if (ch != "\\" || i + 1 >= t.length) { out = out + ch; i = i + ch.length }
             else {
                 var e = t.charAt(i + 1)
                 i = i + 2
@@ -2010,7 +2024,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                         }
                         out = out + piece
                     }
-                } else { out = out + ch; i = i + 1 }
+                } else { var lch = chunkAt(fmt, i); out = out + lch; i = i + lch.length }
             }
             if (!used) { ai = rest.length }
         }
@@ -2113,9 +2127,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
         var out = []
         var cur = ""
-        var i
-        for (i = 0; i < line.length; i++) {
-            var ch = line.charAt(i)
+        var i = 0
+        while (i < line.length) {
+            var ch = chunkAt(line, i)
+            i = i + ch.length
             var isSep = false
             var j
             for (j = 0; j < seps.length; j++) { if (seps.charAt(j) == ch) { isSep = true } }
@@ -2539,8 +2554,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
     // [[ ... ]] : the condition thunks answer a boolean; the command status is its inverse.
+    // 0 true, 1 false, 2 the condition could not be evaluated (a bad =~ pattern).
+    var condErr = 0
     function makeCondCmd(t) {
-        return function() { var st = t() ? 0 : 1; setStatus(st); return st }
+        return function() {
+            condErr = 0
+            var v = t()
+            var st = (condErr != 0) ? condErr : (v ? 0 : 1)
+            setStatus(st)
+            return st
+        }
     }
     function foldCondOr(items) {
         if (items.length == 1) { return items[0] }
@@ -2571,8 +2594,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function bashRegex(src) {
         var key = "$" + src
         if (hasOwn(reCache, key)) { return reCache[key] }
+        // No flags: bash's =~ is a POSIX ERE where ^ and $ anchor the whole subject and "."
+        // does not cross a newline, and nocasematch is off.
         var prog = rxCompile(src, "")
-        if (!prog.ok) { fail("invalid regular expression: " + src + ": " + prog.err) }
         reCache[key] = prog
         return prog
     }
@@ -2580,7 +2604,16 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var lT = items[0], rT = items[2]
         return function() {
             var subj = wordJoin(lT())
-            var re = bashRegex(wordJoin(rT()))
+            var src = wordJoin(rT())
+            var re = bashRegex(src)
+            // A pattern that does not compile is not fatal in bash: it reports on standard
+            // error and gives the [[ ]] status 2.
+            if (!re.ok) {
+                emitErr("bash: [[: invalid regular expression: " + re.err + "\n")
+                condErr = 2
+                arrFromList("BASH_REMATCH", false, [])
+                return false
+            }
             var m = rxSearch(re, subj, 0)
             if (m == null) { arrFromList("BASH_REMATCH", false, []); return false }
             var list = []
@@ -2598,9 +2631,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // Make every glob metacharacter of s literal (a quoted pattern part).
     function globEscape(s) {
         var out = ""
-        var i
-        for (i = 0; i < s.length; i++) {
-            var ch = s.charAt(i)
+        var i = 0
+        while (i < s.length) {
+            var ch = chunkAt(s, i)
+            i = i + ch.length
             if (ch == "*" || ch == "?" || ch == "[" || ch == "]" || ch == "\\") { out = out + "\\" }
             out = out + ch
         }
@@ -2660,9 +2694,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     function stripLeadingTabs(b) {
         var out = ""
         var atLineStart = true
-        var i
-        for (i = 0; i < b.length; i++) {
-            var ch = b.charAt(i)
+        var i = 0
+        while (i < b.length) {
+            var ch = chunkAt(b, i)
+            i = i + ch.length
             if (atLineStart && ch == "\t") { continue }
             atLineStart = (ch == "\n")
             out = out + ch

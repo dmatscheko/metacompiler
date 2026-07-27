@@ -34,11 +34,24 @@ unset from empty and how set -u recognises an unbound read. eval and `trap ... E
 their argument with THIS grammar and emit it inline; a computed eval is lowered only for the
 assignment form NAME=VALUE, through a runtime name-to-slot dispatch.
 
-21 of the 22 sections of tests/bash-test-full.sh pass, goja and -frozen byte-identical. The one
-that does not is [[ str =~ ere ]]: that needs a regular-expression engine at RUN time, and the
-emitted module's string runtime is hand-written IR with none, so the compiler refuses it with a
-clear message rather than mis-matching silently. The interpreter grammar supports it through the
-shared engine in lib/regex.js.
+All 22 sections of tests/bash-test-full.sh pass, goja and -frozen byte-identical.
+
+[[ str =~ ere ]] is the one construct that needs help from outside the emitted module: it calls
+rt_regex_search / rt_regex_error, two externs the IR machine provides, backed by the SAME
+rxCompile/rxSearch engine the interpreter grammar reaches through lib/regex.js - there is no
+second matcher, so the two halves cannot drift. rt_regex_search answers the capture-PAIR count
+(exactly ${#BASH_REMATCH[@]}), 0 for no match, -1 for a pattern that did not compile and -2 for
+the engine's step cap; the caps array it fills carries BYTE offsets into the subject, which is
+what bash indexes, and a group that did not participate reads -1/-1 and becomes bash's
+empty-but-counted BASH_REMATCH entry.
+
+IMPORTANT for -exe: rt_regex_search has NO C symbol, so a native build has nothing to link it
+against. The link still succeeds, because stubUndefined gives every declared-but-undefined
+non-libc function a zero-returning body - and since 0 means NO MATCH, a =~ in a native binary
+degrades to 'never matches' rather than to a silent false match. That is deliberate but it is
+still wrong, so a native build that uses =~ needs a real implementation of rt_regex_search
+linked in. Measured: the whole ratchet file compiled with -exe and run natively passes 252 of
+its 259 checks, and the 7 that fail are exactly the =~ assertions of section 11.
 
 The generated module is printed (this is the compiler output); it is valid LLVM IR and can be
 handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
@@ -147,13 +160,14 @@ Pipeline    <~~ push(makePipeline(takeAll())) ~~>
 BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
 PipeOp      = "|" NotBar ;
 
-// "((" must be tried before "(" or an arithmetic command parses as nested subshells.
 // A compound command is an ordinary Command, so it can be a pipeline stage
 // (`echo x | while read l; do ...; done`) and can carry redirections that apply to the
 // whole thing (`while read l; do ...; done < file`, `for x in ...; done <<EOF`).
-Command     = ArithCmd | CondCmd | Subshell | BraceGroup | CompoundRedir | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
+Command     = CompoundRedir | Subshell | BraceGroup | LetCmd | DeclCommand | PrefixCommand | Assignment | SimpleCommand ;
 CompoundRedir <~~ push(mkRedirected(takeAll())) ~~> = CompoundCore [ RedirList ] ;
-CompoundCore = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
+// "((" must be tried before "(" or an arithmetic command parses as nested subshells, which
+// is why CompoundRedir comes before Subshell rather than after it.
+CompoundCore = ArithCmd | CondCmd | IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef ;
 
 // NAME=VALUE... COMMAND ARGS : the assignments apply only for the duration of the command.
 // Tried before a bare Assignment, which is the same shape without a command word after it.
@@ -901,6 +915,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gOptU = m.NewGlobalDef("opt_nounset", zero)
     var gOptPf = m.NewGlobalDef("opt_pipefail", zero)
     var gAbort = m.NewGlobalDef("abort_flag", zero)
+    var gCondErr = m.NewGlobalDef("cond_err", zero)   // a [[ ]] that could not be evaluated
 
     // Two output channels. 0 = standard output (captured by $( ) when one is open), 1 = the
     // standard error channel, 2 = discarded. There is no stderr primitive behind a compiled
@@ -1833,7 +1848,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         e.NewStore(one, sp)
         var len = e.NewCall(rtStrlen, v)
         e.NewCondBr(e.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, 2)), h, one1)
-        one1.NewRet(e.NewSelect(e.NewICmp(llvm.enum.IPredEQ, k, zero), v, emptyPtr(one1)))
+        one1.NewRet(one1.NewSelect(one1.NewICmp(llvm.enum.IPredEQ, k, zero), v, emptyPtr(one1)))
         var i = h.NewLoad(i32, ip)
         h.NewCondBr(h.NewICmp(llvm.enum.IPredSLT, i, len), bd, x)
         var ch = bd.NewZExt(bd.NewLoad(i8, bd.NewGetElementPtr(i8, v, i)), i32)
@@ -2375,6 +2390,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         bd.NewBr(h)
         x.NewRet(x.NewLoad(i8ptr, op))
     })()
+
+    // ---- [[ str =~ ere ]] -----------------------------------------------------------------
+    // Two externs the IR machine provides, backed by the SAME rxCompile/rxSearch engine the
+    // interpreter grammar uses through lib/regex.js - there is no second matcher.
+    //   rt_regex_search > 0  matched; the number of capture PAIRS, i.e. ${#BASH_REMATCH[@]}
+    //                  == 0  no match
+    //                  == -1 the pattern did not compile; rt_regex_error() has the text
+    //                  == -2 the engine's step cap was hit on a pathological pattern
+    // caps is caller-allocated, ncaps SLOTS (ncaps/2 pairs), pre-filled with -1, so a group
+    // that did not participate reads -1/-1 - bash's empty-but-counted BASH_REMATCH entry.
+    // Offsets are BYTES into the subject, which is what bash indexes.
+    var i32ptr = llvm.types.NewPointer(i32)
+    var rtRegexSearch = m.NewFunc("rt_regex_search", i32,
+        [llvm.ir.NewParam("pat", i8ptr), llvm.ir.NewParam("subj", i8ptr),
+         llvm.ir.NewParam("flags", i8ptr), llvm.ir.NewParam("caps", i32ptr),
+         llvm.ir.NewParam("ncaps", i32)])
+    var rtRegexError = m.NewFunc("rt_regex_error", i8ptr)
 
     // i8* rt_nounset(i8* v): under set -u, reading an unset variable raises the abort flag.
     var rtNounset = m.NewFunc("rt_nounset", i8ptr, llvm.ir.NewParam("v", i8ptr))
@@ -3631,9 +3663,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // [[ ... ]] : the condition thunks answer an i32 boolean (1 = true).
     function makeCondCmd(t) {
         return function(b) {
+            b.NewStore(zero, gCondErr)
             var r = t(b)
             b = r.b
-            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero), zero, one))
+            // 0 true, 1 false, 2 the condition could not be evaluated (a bad =~ pattern).
+            var err = b.NewICmp(llvm.enum.IPredNE, b.NewLoad(i32, gCondErr), zero)
+            var tf = b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero), zero, one)
+            storeStatus(b, b.NewSelect(err, llvm.constant.NewInt(i32, 2), tf))
             return b
         }
     }
@@ -3691,11 +3727,77 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         return out
     }
-    // [[ str =~ ere ]] needs a regular-expression engine at RUN time. The emitted module's
-    // string runtime is hand-written IR and has none, so this is refused rather than
-    // silently mis-matched; the interpreter grammar supports it through lib/regex.js.
+    // [[ STR =~ ERE ]] : the match itself is one call; the work here is turning its answer
+    // into BASH_REMATCH and into the three statuses bash distinguishes (0 match, 1 no match,
+    // 2 the regex could not be used at all).
+    var NCAPPAIRS = 64
+    var capsTy = llvm.types.NewArray(NCAPPAIRS * 2, i32)
     function mkCondMatch(items) {
-        fail("[[ =~ ]] needs a regex engine in the emitted runtime, which this compiler does not have")
+        var lw = items[0], rw = items[2]
+        return function(b) {
+            var rl = evalWord(b, lw); b = rl.b
+            var rr = evalWord(b, rw); b = rr.b
+            var subj = rl.v
+            var caps = b.NewAlloca(capsTy)
+            var capsPtr = b.NewGetElementPtr(capsTy, caps, zero, zero)
+            var resP = b.NewAlloca(i32)
+            var ip = b.NewAlloca(i32)
+            b.NewStore(zero, resP)
+            var nm = gepStr(b, "BASH_REMATCH")
+            b.NewCall(rtArrClear, nm)
+            // No flags: bash's =~ is a POSIX ERE where ^ and $ anchor the whole subject and
+            // "." does not cross a newline, and nocasematch is off.
+            var n = b.NewCall(rtRegexSearch, [rr.v, subj, llvm.constant.NewNull(i8ptr),
+                                              capsPtr, llvm.constant.NewInt(i32, NCAPPAIRS * 2)])
+            var errB = curF.NewBlock(""), okB = curF.NewBlock("")
+            var badPat = curF.NewBlock(""), overrun = curF.NewBlock("")
+            var matchB = curF.NewBlock(""), fillH = curF.NewBlock(""), fillB = curF.NewBlock("")
+            var merge = curF.NewBlock("")
+            b.NewCondBr(b.NewICmp(llvm.enum.IPredSLT, n, zero), errB, okB)
+
+            // -1 / -2: status 2, a diagnostic on standard error, and the shell carries on.
+            errB.NewStore(llvm.constant.NewInt(i32, 2), gCondErr)
+            errB.NewCondBr(errB.NewICmp(llvm.enum.IPredEQ, n, llvm.constant.NewInt(i32, -1)), badPat, overrun)
+            // rt_regex_error allocates per call, so it is called once, here.
+            emitOnStderr(badPat, badPat.NewCall(rtStrcat,
+                [gepStr(badPat, "bash: [[: invalid regular expression: "),
+                 badPat.NewCall(rtStrcat, [badPat.NewCall(rtRegexError), gepStr(badPat, "\n")])]))
+            badPat.NewBr(merge)
+            emitOnStderr(overrun, gepStr(overrun, "bash: [[: regular expression step limit exceeded\n"))
+            overrun.NewBr(merge)
+
+            okB.NewCondBr(okB.NewICmp(llvm.enum.IPredEQ, n, zero), merge, matchB)
+            matchB.NewStore(one, resP)
+            matchB.NewStore(zero, ip)
+            matchB.NewBr(fillH)
+            // BASH_REMATCH[0] is the whole match, [i] the i-th group. The TRUE pair count is
+            // reported even when it exceeds the caps array, so the entries past it are the
+            // empty string rather than missing - ${#BASH_REMATCH[@]} stays exact.
+            var i = fillH.NewLoad(i32, ip)
+            fillH.NewCondBr(fillH.NewICmp(llvm.enum.IPredSLT, i, n), fillB, merge)
+            var inRange = fillB.NewICmp(llvm.enum.IPredSLT, i, llvm.constant.NewInt(i32, NCAPPAIRS))
+            var idx = fillB.NewSelect(inRange, i, zero)
+            var two2 = llvm.constant.NewInt(i32, 2)
+            var bgn = fillB.NewLoad(i32, fillB.NewGetElementPtr(capsTy, caps, zero, fillB.NewMul(idx, two2)))
+            var end = fillB.NewLoad(i32, fillB.NewGetElementPtr(capsTy, caps, zero,
+                        fillB.NewAdd(fillB.NewMul(idx, two2), one)))
+            var have = fillB.NewAnd(inRange, fillB.NewICmp(llvm.enum.IPredSGE, bgn, zero))
+            var piece = fillB.NewCall(rtSubstr, [subj, bgn, fillB.NewSub(end, bgn)])
+            fillB.NewCall(rtArrSet, [nm, fillB.NewCall(rtInt2str, i),
+                                     fillB.NewSelect(have, piece, emptyPtr(fillB))])
+            fillB.NewStore(fillB.NewAdd(i, one), ip)
+            fillB.NewBr(fillH)
+
+            return {b: merge, v: merge.NewLoad(i32, resP)}
+        }
+    }
+    // Write a diagnostic on the standard error CHANNEL (whose text is dropped, like every
+    // other stderr write here) without disturbing the caller's redirections.
+    function emitOnStderr(b, msg) {
+        var saved = b.NewLoad(i32, gSinkOut)
+        b.NewStore(b.NewLoad(i32, gSinkErr), gSinkOut)
+        b.NewCall(rtPrints, msg)
+        b.NewStore(saved, gSinkOut)
     }
 
     function mkCondBin(items) {

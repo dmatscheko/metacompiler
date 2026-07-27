@@ -319,6 +319,23 @@ s11() {
   # an unquoted expansion is not word-split inside [[ ]]
   local spaced="a b"
   if [[ $spaced == "a b" ]]; then check dbr14 yes yes; else check dbr14 no yes; fi
+  # BASH_REMATCH has one entry per capture PAIR, the whole match included
+  if [[ abc123 =~ ^([a-z]+)([0-9]+)$ ]]; then check dbr15 "${#BASH_REMATCH[@]}" 3; else check dbr15 no yes; fi
+  # a group that did not participate is still counted, and expands to nothing
+  if [[ xy =~ (a)?(x) ]]; then check dbr16 "${#BASH_REMATCH[@]}-[${BASH_REMATCH[1]}]" "3-[]"; else check dbr16 no yes; fi
+  # a failed match is status 1 and leaves BASH_REMATCH empty
+  [[ hello =~ ^z ]]
+  check dbr17 "$?" 1
+  check dbr18 "${#BASH_REMATCH[@]}" 0
+  # a pattern that does not compile is status 2, and the shell carries on
+  local bad_re="("
+  [[ x =~ $bad_re ]] 2>/dev/null
+  check dbr19 "$?" 2
+  # ^ and $ anchor the whole subject (no multiline), and matching is case sensitive
+  [[ ABC =~ ^abc$ ]]
+  check dbr20 "$?" 1
+  # backtracking into an alternation, and a match that must reach the end
+  if [[ foobar =~ ^(foo|foobar)bar$ ]]; then check dbr21 "${BASH_REMATCH[1]}" foo; else check dbr21 no yes; fi
 }
 
 # ===== SECTION 12: the test builtin =====
