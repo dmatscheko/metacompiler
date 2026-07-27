@@ -53,7 +53,7 @@ Directive   = ImportD | ExportD | PartD | LibraryD ;
 // URI with its surrounding quotes stripped and hands it to resolveImport; the show/hide
 // combinators and a conditional-import URI are parsed and ignored.
 ImportD     <~~ resolveImport(pop(), up.pos) ~~>
-            = KwImport ImportUri [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
+            = KwImport ImportUri [ KwDeferred ] [ KwAs Id ] { Combinator } [ KwIf SkipParen UriStr ] ";" ;
 ImportUri   <~~ push(uriPath(up.in)) ~~>
             = UriStr ;
 ExportD     <~~ notImpl("export directive", up.pos) ~~>
@@ -71,9 +71,9 @@ QualName    = Id { "." Id } ;
 // declaration of a variable x with the (identifier-shaped) type 'return'.
 Statement   <~~ push(stmtPos(pop())) ~~>
             = [ Annotations ] StatementBody ;
-StatementBody = Block | ClassDecl | EnumDecl | MixinDecl | ExtensionDecl | TypedefDecl
+StatementBody = Block | ClassAlias | ClassDecl | EnumDecl | MixinDecl | ExtensionDecl | TypedefDecl
             | IfCase | If | Switch | While | DoWhile | For | TryStmt | Return
-            | Break | Continue | Rethrow | ThrowStmt | Assert | TopGetter | TopSetter
+            | Break | Continue | Rethrow | ThrowStmt | Yield | Assert | TopGetter | TopSetter
             | FuncDecl | VarDecl | LabeledStmt
             | Empty | PatAssign | ExprStmt ;
 
@@ -99,13 +99,28 @@ MixinDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = [ MixinMods ] KwMixin [ KwClass ] CName [ SkipAngle ] [ KwOn OnType { "," OnType } ]
               [ ImplementsClause ] "{" { Member } "}" ;
 OnType      <~~ push({con: up.in}) ~~> = TypeNamed ;
-ExtensionDecl <~~ push(notImplStmt("extension declaration", up.pos)) ~~>
-            = KwExtension [ KwType ] [ Id ] [ SkipAngle ] KwOn Type SkipBlock ;
+// extension Name on T { ... } adds members to an existing type; extension type N(T v)
+// declares a wrapper type. The extension-type form comes first (it starts with the same
+// two keywords).
+ExtensionDecl = ExtensionType | ExtensionOn ;
+ExtensionOn <~~ push(makeExtensionStmt(takeAll())) ~~>
+            = KwExtension [ EXName ] [ SkipAngle ] KwOn ExtOnType "{" { Member } "}" ;
+EXName      <~~ push({exname: up.in}) ~~> = Id ;
+// The members that follow are NOT a class's, so the accessor/operator tables must not
+// attribute them to whatever class was declared last: curClassName is parked on a name
+// no js_is_type probe can ever answer true for.
+ExtOnType   <~~ push({exton: up.in}); curClassName = "0ext" ~~> = Type ;
+ExtensionType <~~ push(makeExtTypeStmt(takeAll())) ~~>
+            = KwExtension KwType [ KwConst ] CName [ SkipAngle ] "(" ExtTypeField ")"
+              [ ImplementsClause ] "{" { Member } "}" ;
+ExtTypeField <~~ push({etfield: popName()}) ~~> = Type Id <~~ push({mname: up.in}) ~~> ;
 // A typedef only names a type, and all types are erased here, so it compiles to nothing.
 TypedefDecl <~~ push(function(b) { return b }) ~~>
-            = KwTypedef ( TypedefNew | TypedefOld ) ;
+            = KwTypedef ( TypedefNew | TypedefOld | TypedefBare ) ;
 TypedefNew  = Id [ SkipAngle ] "=" Type ";" ;
 TypedefOld  = Type Id [ SkipAngle ] SkipParen ";" ;
+// The legacy form with no return type: typedef Handler(bool e);
+TypedefBare = Id [ SkipAngle ] SkipParen ";" ;
 
 Block       <~~ push(makeBlockStmt(takeAll())) ~~>
             = "{" { Statement } "}" ;
@@ -114,6 +129,13 @@ Block       <~~ push(makeBlockStmt(takeAll())) ~~>
 // interface, sealed, mixin) are parsed and erased so the class still compiles.
 // extends contributes implementation, with contributes mixins (a later one wins over an
 // earlier one) and implements contributes nothing but a nominal type.
+// A mixin application class: `class C = S with M1, M2;` declares a class whose body is
+// exactly S plus the mixins, with S's constructors forwarded. It has to be tried BEFORE
+// ClassDecl (both open with the same modifiers and name) and is told apart by the "=".
+ClassAlias  <~~ push(makeClassStmt(takeAll())) ~~>
+            = [ ClassMods ] KwClass CName [ SkipAngle ] "=" AliasSuper [ WithClause ]
+              [ ImplementsClause ] ";" ;
+AliasSuper  <~~ push({csuper: up.in}) ~~> = TypeNamed ;
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
             = [ ClassMods ] KwClass CName [ SkipAngle ]
               [ ExtendsClause ] [ WithClause ] [ ImplementsClause ] "{" { Member } "}" ;
@@ -191,7 +213,11 @@ MemberBodyKind = MBlock | MArrow | MSemi ;
 MBlock      <~~ push({body: pop()}) ~~>  = Block ;
 MArrow      <~~ push({ebody: pop()}) ~~> = "=>" Expression ";" ;
 MSemi       <~~ push({none: true}) ~~>   = ";" ;
-AsyncMod    <~~ notImpl("async function", up.pos) ~~> = ( "async" | "sync" ) KwEnd [ "*" ] ;
+// async / sync* / async*: with no event loop an async body simply runs synchronously
+// (await is the identity), and a GENERATOR body (the * forms) collects everything it
+// yields into a list, which is what it then returns - so `for (v in gen())` walks it.
+AsyncMod    <~~ push({amod: up.in}) ~~> = ( "async" | "sync" ) KwEnd [ AsyncStar ] ;
+AsyncStar   <~~ push({astar: true}) ~~> = "*" ;
 
 // Fields: (Type | var | final [Type]) name [= init] { , name [= init] } ; - separate
 // complete alternatives so the leading-type / no-type cases never get stuck in an optional.
@@ -227,29 +253,38 @@ ParamList   <~~ push({params: takeAll()}) ~~>
 ParamItems  = TailGroup | Param { "," Param } [ "," TailGroup ] [ "," ] ;
 TailGroup   = NamedGroup | OptGroup ;
 Param       = [ ParamMods ] ParamCore ;
-ParamCore   = ThisParam | SuperParam | TypedParam | PlainParam ;
+ParamCore   = TypedThisParam | ThisParam | SuperParam | TypedParam | FnPlainParam | PlainParam ;
 ParamMods   = ParamMod { ParamMod } ;
 ParamMod    = ( "covariant" | "required" | "final" ) KwEnd ;
 ThisParam   <~~ push({thisf: popName()}) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+// A field-initialising formal may be written with its type: `const Pair(A this.fst)`.
+TypedThisParam <~~ push({thisf: popName()}) ~~>
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
 // A super parameter (2.17): IhKid(super.v) forwards v to the superclass constructor.
 SuperParam  <~~ push(makeSuperParam(false, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+// A parameter may itself be function-typed, in the old positional style:
+// `void forEach(callback(E element))`, `bool test(Object error)?`.
 TypedParam  <~~ push({pname: popName()}) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] ;
+            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] [ "?" ] ;
+FnPlainParam <~~ push({pname: popName()}) ~~>
+            = Id <~~ push({mname: up.in}) ~~> SkipParen [ "?" ] ;
 PlainParam  <~~ push({pname: up.in}) ~~> = Id ;
 
 // Named (curly) parameters: foo({int a = 1, required int b, this.x = 0}). Optional, each
 // with a default; unsupplied ones fall back to the default, else null. Marked named:true.
 NamedGroup  = "{" NamedParam { "," NamedParam } [ "," ] "}" ;
 NamedParam  = [ ParamMods ] NamedParamCore ;
-NamedParamCore = NamedThisParam | NamedSuperParam | NamedTypedParam | NamedPlainParam ;
+NamedParamCore = NamedTypedThisParam | NamedThisParam | NamedSuperParam | NamedTypedParam | NamedPlainParam ;
 NamedThisParam  <~~ push(makeNamedParam(true, takeAll())) ~~>
             = "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+NamedTypedThisParam <~~ push(makeNamedParam(true, takeAll())) ~~>
+            = Type "this" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 NamedSuperParam <~~ push(makeSuperParam(true, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 NamedTypedParam <~~ push(makeNamedParam(false, takeAll())) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] [ "?" ] [ "=" AssignExpr ] ;
 NamedPlainParam <~~ push(makeNamedParam(false, takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
@@ -263,7 +298,7 @@ OptThisParam  <~~ push(makeOptParam(true, takeAll())) ~~>
 OptSuperParam <~~ push(makeSuperParam(false, takeAll())) ~~>
             = "super" KwEnd "." Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 OptTypedParam <~~ push(makeOptParam(false, takeAll())) ~~>
-            = Type Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
+            = Type Id <~~ push({mname: up.in}) ~~> [ SkipParen ] [ "?" ] [ "=" AssignExpr ] ;
 OptPlainParam <~~ push(makeOptParam(false, takeAll())) ~~>
             = Id <~~ push({mname: up.in}) ~~> [ "=" AssignExpr ] ;
 
@@ -388,7 +423,10 @@ While       <~~ push(makeWhile(pop(), pop())) ~~>
             = KwWhile "(" Expression ")" Statement ;
 
 // for (x in coll) is tried before the C-style for; both start with 'for ('.
-For         = ForInPat | ForInTyped | ForInBare | ForCStyle ;
+For         = ForAwait | ForInPat | ForInTyped | ForInBare | ForCStyle ;
+// await for (v in stream): with no event loop the stream is already a plain iterable.
+ForAwait    = KwAwait ForInAny ;
+ForInAny    = ForInPat | ForInTyped | ForInBare ;
 // for (var (a, b) in pairs) - a pattern per element.
 ForInPat    <~~ push(makeForInPat(takeAll())) ~~>
             = KwFor "(" ( KwVar | KwFinal ) PatDeclHead KwIn Expression ")" Statement ;
@@ -415,6 +453,10 @@ Break       <~~ push(makeBreakL(takeAll(), up.pos)) ~~>    = KwBreak [ LoopLabel
 Continue    <~~ push(makeContinueL(takeAll(), up.pos)) ~~> = KwContinue [ LoopLabel ] ";" ;
 LoopLabel   <~~ push({label: up.in}) ~~> = Id ;
 Empty       <~~ push(function(b) { return b }) ~~>  = ";" ;
+// yield / yield* inside a sync* / async* body: append one value, or every element of an
+// iterable, to the list the generator is collecting.
+Yield       <~~ push(makeYield(takeAll())) ~~> = KwYield [ YieldStar ] Expression ";" ;
+YieldStar   <~~ push({ystar: true}) ~~> = "*" ;
 
 // A switch statement over patterns. There is no fallthrough in Dart: a non-empty case
 // body ends the switch, while an EMPTY body shares the next case's body (makeSwitch runs
@@ -542,12 +584,18 @@ CascadeSection <~~ push(makeCascadeSec(takeAll())) ~~>
 CascadeOp   <~~ push({casc: up.in}) ~~> = "?.." | ".." ;
 CascadeHead = CascadeMcall | CascadeField | IndexSfx ;
 CascadeMcall <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = Id <~~ push({mname: up.in}) ~~> "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+            = Id <~~ push({mname: up.in}) ~~> [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
 CascadeField = Id <~~ push({kind: "field", name: up.in}) ~~> ;
 CascadeAssign <~~ push({cassign: pop()}) ~~> = "=" CascadeValue ;
 CascadeValue = ThrowExpr | CondExpr ;
-Target      <~~ push(makeTargetRef(takeAll())) ~~>
-            = Id <~~ push(up.in) ~~> { DotTarget | IndexTarget } ;
+// An assignment target: a name, or a CALL, followed by any run of .field / [index]
+// steps. The call seed is what makes `E0(c0).m1 = 0` and `f(x)[0] = 1` assignable; the
+// call form is tried first because it is the more specific of the two.
+Target      <~~ push(makeDartTarget(takeAll())) ~~>
+            = TargetSeed { DotTarget | IndexTarget } ;
+TargetSeed  = TargetCall | TargetName ;
+TargetCall  <~~ push({seed: pop()}) ~~> = Call ;
+TargetName  <~~ push(up.in) ~~> = Id ;
 DotTarget   = "." Id <~~ push({key: up.in}) ~~> ;
 IndexTarget <~~ push({idx: pop()}) ~~> = "[" Expression "]" ;
 
@@ -589,8 +637,12 @@ AddExpr     <~~ push(foldBinary(takeAll())) ~~>
 MulExpr     <~~ push(foldBinary(takeAll())) ~~>
             = UnaryExpr { ( "*" | "~/" | "/" | "%" ) <~~ push(up.in) ~~> UnaryExpr } ;
 
-UnaryExpr   = Await | Neg | Not | BitNot | PostfixExpr ;
-Await       <~~ notImpl("await", up.pos) ~~> = "await" KwEnd UnaryExpr ;
+// The prefix ++ / -- come BEFORE Neg: "--i" would otherwise read as the double negation
+// -(-i), which parses and quietly means something else.
+UnaryExpr   = Await | PreIncDec | Neg | Not | BitNot | PostfixExpr ;
+PreIncDec   <~~ push(makePreIncDec(takeAll())) ~~>
+            = ( "++" | "--" ) <~~ push(up.in) ~~> Target ;
+Await       = KwAwait UnaryExpr ;
 Neg         <~~ push(makeNeg(pop())) ~~> = "-" UnaryExpr ;
 Not         <~~ push(makeNot(pop())) ~~> = "!" UnaryExpr ;
 BitNot      <~~ push(makeBitNot(pop())) ~~> = "~" UnaryExpr ;
@@ -605,7 +657,15 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 // A primary followed by any mix of method calls, field reads, index reads and the (not
 // implemented) postfix null-assertion ! . The !"=" lookahead keeps a != b intact.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
+            = Primary { MethodSfx | GenFieldSfx | FieldSfx | CallSfx | IndexSfx
+                      | NullMethodSfx | NullFieldSfx | NullIndexSfx | BangSfx } ;
+// A call of whatever the chain has produced so far: foo(10)(20), f!(b), map['k']!(4, 2).
+// Without it a curried or stored function can only be called through a variable.
+CallSfx     <~~ push({kind: "callv", args: takeAll()}) ~~>
+            = [ TypeArgs ] "(" [ Arg { "," Arg } [ "," ] ] ")" ;
+// A generic tear-off: `o.method<int>` with no argument list (the parenthesized form is
+// MethodSfx, which is tried first). The type arguments are erased.
+GenFieldSfx = "." Id <~~ push({kind:"field", name: up.in}) ~~> TypeArgs ;
 BangSfx     <~~ push({kind:"bang"}) ~~> = "!" !"=" ;
 // Null-aware access (?., ?.(), ?[]): a null receiver short-circuits the whole remaining
 // suffix chain to null, exactly like Dart.
@@ -625,7 +685,7 @@ RecPosName  = "$" :whitespace() "0"..."9" { "0"..."9" } :whitespace(Whitespace) 
 IndexSfx    <~~ push({kind:"index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 
-Primary     = ArrowFn | SuperExpr | SwitchExpr | RecordLit | "(" Expression ")" | TypedColl | ListLit | MapLit | SetLit | StrLit | NumLit
+Primary     = ArrowFn | SuperExpr | SwitchExpr | SymbolLit | RecordLit | "(" Expression ")" | TypedColl | ListLit | MapLit | SetLit | StrLit | NumLit
             | True | False | Null | NewExpr | QualCall | QualRef | Call | VarRef ;
 
 // A generic type used as a receiver: List<int>.filled(10, null), Future<Object?>.value().
@@ -652,6 +712,13 @@ SwitchExpr  <~~ push(makeSwitchExpr(takeAll())) ~~>
 SwExprCase  <~~ push(makeSwExprCase(takeAll())) ~~>
             = Pattern [ SwGuard ] "=>" AssignExpr ;
 
+// A symbol literal: #foo, #a.b, #== . It names a member without calling it; with no
+// mirrors here it compiles to the plain string of that name. The whitespace scoping is
+// the RecPosName idiom - no space may sit between the # and the name.
+SymbolLit   <~~ push(makeConst(stripWs(up.in).substring(1))) ~~>
+            = "#" :whitespace() SymName :whitespace(Whitespace) ;
+SymName     = Id { "." Id } ;
+
 // A record literal (Dart 3). It is told apart from a parenthesized expression by needing
 // either two fields, a trailing comma after a single one, or a named field - which is why
 // the three shapes are separate alternatives and RecordLit comes before "(" Expression ")".
@@ -674,7 +741,11 @@ NumLit      = NumHex | NumDec | NumInt ;
 
 // A collection literal with an explicit type argument: <int>[...], <K,V>{...}. The type
 // argument is erased and the list/map/set is built as usual.
-TypedColl   = SkipAngle ( ListLit | MapLit | SetLit ) ;
+// The type argument of a collection literal is REMEMBERED so that a reified test like
+// `<Object>[1] is! List<int>` can answer what Dart answers.
+TypedColl   <~~ push(makeTypedColl(takeAll())) ~~>
+            = CollTypeArgs ( ListLit | MapLit | SetLit ) ;
+CollTypeArgs <~~ push({ctargs: up.in}) ~~> = TypeArgs ;
 
 // A set literal { e, e, ... }: a brace literal whose elements are not key:value pairs.
 // MapLit is tried first, so a bare {} and every {k: v, ...} is a map and only the rest
@@ -826,6 +897,9 @@ KwIs        = "is" KwEnd ;
 KwAs        = "as" KwEnd ;
 KwThrow     = "throw" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
+KwDeferred  = "deferred" KwEnd ;
+KwYield     = "yield" KwEnd ;
+KwAwait     = "await" KwEnd ;
 KwCase      = "case" KwEnd ;
 KwDefault   = "default" KwEnd ;
 KwWhen      = "when" KwEnd ;
@@ -1026,11 +1100,24 @@ KwSuper     = "super" KwEnd ;
         var mk = items[1]
         if (mk.tt == "as") { return operand }
         var tn = baseName(items[2].tname)
+        var targ = typeArgOf(items[2].tname)
         var neg = stripWs(mk.tt) != "is"
         return function(b) {
             var r = operand(b)
             b = r.b
-            var v = callExt(b, "js_is_type", [r.v, emitStr(b, tn)])
+            // js_is_type does not know Dart's Function type; js_typeof does.
+            var v = (tn == "Function")
+                    ? callExt(b, "js_seq", [callExt(b, "js_typeof", [r.v]), emitStr(b, "function")])
+                    : callExt(b, "js_is_type", [r.v, emitStr(b, tn)])
+            // `is List<int>`: a list built as a typed literal carries its element type,
+            // and one written with a different argument is NOT of this type.
+            if (targ != "" && anyTypedColl && (tn == "List" || tn == "Iterable")) {
+                var er = emitETGet(b, r.v)
+                b = er.b
+                v = callExt(b, "js_band", [v, callExt(b, "js_bor",
+                        [callExt(b, "js_seq", [er.v, emitStr(b, "")]),
+                         callExt(b, "js_seq", [er.v, emitStr(b, targ)])])])
+            }
             if (neg) { v = callExt(b, "js_not", [v]) }
             return {b: b, v: v}
         }
@@ -1301,6 +1388,35 @@ KwSuper     = "super" KwEnd ;
     }
 
     // ----- functions, closures, methods -----
+    // A generator body: the values it yields are collected in "0gen", declared in the
+    // function's own scope, and that list is what the function returns.
+    function genWrap(bodyStmt) {
+        return function(b) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0gen"), callExt(b, "js_arr_new", [])])
+            b = bodyStmt(b)
+            b.NewRet(callExt(b, "js_kget", [curScopeV, emitStr(b, "0gen")]))
+            return deadBlock()
+        }
+    }
+    // True when the body descriptors carry a `sync*` / `async*` modifier.
+    function isGenBody(items) {
+        for (var i = 0; i < items.length; i++) {
+            if (items[i] != undefined && items[i].astar === true) { return true }
+        }
+        return false
+    }
+    function makeYield(items) {
+        var star = items.length > 1
+        var t = items[items.length - 1]
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            var sink = callExt(b, "js_kget", [curScopeV, emitStr(b, "0gen")])
+            if (star) { callExt(b, "js_pyspread", [sink, r.v]) }
+            else { callExt(b, "js_arr_push", [sink, r.v]) }
+            return b
+        }
+    }
     function bodyToStmt(bd) {
         if (bd.body != undefined) { return bd.body }
         if (bd.ebody != undefined) {
@@ -1343,7 +1459,8 @@ KwSuper     = "super" KwEnd ;
     }
     function makeArrow(items) {
         var params = items[0].params
-        var bodyStmt = bodyToStmt(items[1])
+        var bodyStmt = bodyToStmt(items[items.length - 1])
+        if (isGenBody(items)) { bodyStmt = genWrap(bodyStmt) }
         return function(b) {
             var idx = emitFunc(params, bodyStmt, false)
             return {b: b, v: callExt(b, "js_closure", [handle(idx), curScopeV])}
@@ -1352,7 +1469,8 @@ KwSuper     = "super" KwEnd ;
     function makeFuncDecl(items) {
         var name = items[0].fname
         var params = items[1].params
-        var bodyStmt = bodyToStmt(items[2])
+        var bodyStmt = bodyToStmt(items[items.length - 1])
+        if (isGenBody(items)) { bodyStmt = genWrap(bodyStmt) }
         return function(b) {
             var idx = emitFunc(params, bodyStmt, false)
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name),
@@ -1388,6 +1506,8 @@ KwSuper     = "super" KwEnd ;
                 b = emitCallArgsInto(b, sArgs, args)
                 return {b: b, v: callExt(b, "js_call", [sfV, hUndef, sArgs])}
             }
+            // ExInt(6): an explicit extension application is the identity on its operand.
+            if (extensionTypes["$" + name] == 1 && args.length == 1) { return args[0](b) }
             if (classNames[name] == 1) {
                 var clsV = callExt(b, "js_kget", [curScopeV, emitStr(b, name)])
                 var objV = callExt(b, "js_obj_new", [])
@@ -1481,6 +1601,10 @@ KwSuper     = "super" KwEnd ;
                         // test, not a membership test over its characters.
                         var isStr = truthy(b, callExt(b, "js_is_type", [cur, emitStr(b, "String")]))
                         cur = callExt(b, "js_pyin", [ar.v, b.NewSelect(isStr, cur, callExt(b, "js_pyiter", [cur]))])
+                    } else if (extNames["$" + s.name] == 1 && methodNames["$" + s.name] == undefined) {
+                        var xr = extCall(b, s.name, cur, s.args)
+                        b = xr.b
+                        cur = xr.v
                     } else {
                         var margs = callExt(b, "js_arr_new", [])
                         b = emitCallArgsInto(b, margs, s.args)
@@ -1493,6 +1617,10 @@ KwSuper     = "super" KwEnd ;
                     else if (s.name == "keys") { cur = callExt(b, "js_mcall", [cur, emitStr(b, "keys"), callExt(b, "js_arr_new", [])]) }
                     else if (s.name == "values") { var vr2 = emitValuesRead(b, cur); b = vr2.b; cur = vr2.v }
                     else { var gr = emitGetterRead(b, cur, s.name); b = gr.b; cur = gr.v }
+                } else if (s.kind == "callv") {
+                    var cvArgs = callExt(b, "js_arr_new", [])
+                    b = emitCallArgsInto(b, cvArgs, s.args)
+                    cur = callExt(b, "js_call", [cur, hUndef, cvArgs])
                 } else if (s.kind == "bang") {
                     cur = cur // the postfix ! is a no-op (accepted, not implemented)
                 } else {
@@ -1646,6 +1774,10 @@ KwSuper     = "super" KwEnd ;
     // itself; it emits one js_is_type test per declaring class instead (and a program that
     // declares none emits exactly the IR it did before).
     function noteDecl(tbl, nm) {
+        // An `extension X on T` body is not a class body (ExtOnType parks curClassName on
+        // "0ext"), so its members must not enter the accessor / method tables: they are
+        // resolved through extNames instead.
+        if (curClassName == "0ext") { return }
         var key = "$" + nm
         if (tbl[key] == undefined) { tbl[key] = [] }
         var lst = tbl[key]
@@ -1658,7 +1790,7 @@ KwSuper     = "super" KwEnd ;
         if (prefix == "get$") { noteDecl(getterNames, nm) }
         else if (prefix == "set$") { noteDecl(setterNames, nm) }
         else { noteDecl(operatorNames, nm) }
-        return {method: {name: prefix + nm, params: paramsOf(items), body: bodyOf(items)}}
+        return {method: {name: prefix + nm, params: paramsOf(items), body: bodyOf(items), gen: isGenBody(items)}}
     }
     // The disjunction "recv is one of the classes that declare this member".
     function emitDeclProbe(b, recv, classes) {
@@ -1722,7 +1854,7 @@ KwSuper     = "super" KwEnd ;
         if (!isTyped && name == curClassName) {
             return {ctor: {name: "", params: params, body: body, inits: initsOf(items), factory: false}}
         }
-        return {method: {name: name, params: params, body: body}}
+        return {method: {name: name, params: params, body: body, gen: isGenBody(items)}}
     }
     // A named constructor (C.foo) or a factory. Both become a descriptor property named
     // after the constructor, so `C.foo(a)` reaches it through the ordinary method-call
@@ -1874,6 +2006,7 @@ KwSuper     = "super" KwEnd ;
             return {b: mB, v: mB.NewPhi([llvm.ir.NewIncoming(tv, tB), llvm.ir.NewIncoming(gv2, gB)])}
         }
         var classes = getterNames["$" + name]
+        if (extNames["$get$" + name] == 1) { return extCall(b, "get$" + name, recv, null) }
         if (classes == undefined) { return {b: b, v: callExt(b, "js_get", [recv, emitStr(b, name)])} }
         var callB = curF.NewBlock("")
         var plainB = curF.NewBlock("")
@@ -2130,13 +2263,17 @@ KwSuper     = "super" KwEnd ;
                 callExt(b, "js_set", [clsV, emitStr(b, sfields[k].sfield), sv])
             }
             for (k = 0; k < methods.length; k++) {
-                var mi = emitFunc(methods[k].params, bodyToStmt(methods[k].body), true)
+                var mb = bodyToStmt(methods[k].body)
+                if (methods[k].gen === true) { mb = genWrap(mb) }
+                var mi = emitFunc(methods[k].params, mb, true)
                 callExt(b, "js_set", [clsV, emitStr(b, methods[k].name), callExt(b, "js_closure", [handle(mi), curScopeV])])
             }
             for (k = 0; k < smethods.length; k++) {
                 // A class descriptor has no __class, so memberCall invokes its properties
                 // WITHOUT prepending the receiver: a static takes args from index 0.
-                var si = emitFunc(smethods[k].params, bodyToStmt(smethods[k].body), false)
+                var sb = bodyToStmt(smethods[k].body)
+                if (smethods[k].gen === true) { sb = genWrap(sb) }
+                var si = emitFunc(smethods[k].params, sb, false)
                 callExt(b, "js_set", [clsV, emitStr(b, smethods[k].name), callExt(b, "js_closure", [handle(si), curScopeV])])
             }
             // The unnamed constructor (or a synthesized one that only initialises fields).
@@ -2167,6 +2304,56 @@ KwSuper     = "super" KwEnd ;
             return b
         }
     }
+    // ----- extensions -----
+    // extension X on T { ... }: the members are emitted as ordinary method closures and
+    // parked in the enclosing scope under "0ext$<member>", so a use site can call one with
+    // the receiver as its `this` argument. Which names exist is known at walk time, so a
+    // program with no extension emits exactly the IR it did before.
+    var extNames = {}
+    var extensionTypes = {}
+    function extCall(b, key, recv, argThunks) {
+        var f = callExt(b, "js_kget", [curScopeV, emitStr(b, "0ext$" + key)])
+        var a = callExt(b, "js_arr_new", [])
+        callExt(b, "js_arr_push", [a, recv])
+        if (argThunks != null) { b = emitCallArgsInto(b, a, argThunks) }
+        return {b: b, v: callExt(b, "js_call", [f, hUndef, a])}
+    }
+    function makeExtensionStmt(items) {
+        var methods = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.exname != undefined) { extensionTypes["$" + it.exname] = 1 }
+            else if (it.method != undefined) { methods.push(it.method); extNames["$" + it.method.name] = 1 }
+        }
+        return function(b) {
+            for (var j = 0; j < methods.length; j++) {
+                var mi = emitFunc(methods[j].params, bodyToStmt(methods[j].body), true)
+                callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0ext$" + methods[j].name),
+                                             callExt(b, "js_closure", [handle(mi), curScopeV])])
+            }
+            return b
+        }
+    }
+    // extension type N(T value) { ... }: a real class with the one field, so N(3).value and
+    // its operators work like any other object. Rewritten into the shape makeClassStmt
+    // takes, which is also what gives it its constructor and its operator members.
+    function makeExtTypeStmt(items) {
+        var rest = []
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it == undefined) { continue }
+            if (it.etfield != undefined) {
+                rest.push({field: it.etfield, init: null})
+                rest.push({ctor: {name: "", params: [{thisf: it.etfield}], body: {none: true},
+                                  inits: [], factory: false}})
+                continue
+            }
+            rest.push(it)
+        }
+        return makeClassStmt(rest)
+    }
+
     // ----- enums -----
     // An enum reuses the whole class emitter: its members go through makeClassStmt, and
     // the values are then built once, right after the descriptor, as canonical instances
@@ -2951,6 +3138,71 @@ KwSuper     = "super" KwEnd ;
         }
     }
 
+    // ----- reified collection element types -----
+    // Dart's generics are reified: <Object>[1] is not a List<int>. The type argument
+    // cannot be stored ON the list (the runtime's arrays take no properties), so a pair of
+    // append-only side arrays in the ROOT scope records it, newest entry wins, capped so a
+    // literal inside a long loop cannot grow them without bound (the test then simply
+    // falls back to the unreified answer). Declared and consulted ONLY by a program that
+    // writes a typed collection literal.
+    var anyTypedColl = false
+    function emitETSet(b, v, ty) {
+        var ksV = callExt(b, "js_kget", [curScopeV, emitStr(b, "0etk")])
+        var vsV = callExt(b, "js_kget", [curScopeV, emitStr(b, "0etv")])
+        var roomB = curF.NewBlock("")
+        var contB = curF.NewBlock("")
+        b.NewCondBr(truthy(b, callExt(b, "js_lt", [callExt(b, "js_pylen", [ksV]), emitNum(b, 256)])), roomB, contB)
+        callExt(roomB, "js_arr_push", [ksV, v])
+        callExt(roomB, "js_arr_push", [vsV, emitStr(roomB, ty)])
+        roomB.NewBr(contB)
+        return contB
+    }
+    function emitETGet(b, v) {
+        var ksV = callExt(b, "js_kget", [curScopeV, emitStr(b, "0etk")])
+        var vsV = callExt(b, "js_kget", [curScopeV, emitStr(b, "0etv")])
+        callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0eti"), callExt(b, "js_pylen", [ksV])])
+        var headB = curF.NewBlock("")
+        var stepB = curF.NewBlock("")
+        var hitB = curF.NewBlock("")
+        var missB = curF.NewBlock("")
+        var endB = curF.NewBlock("")
+        b.NewBr(headB)
+        var iH = callExt(headB, "js_scope_get", [curScopeV, emitStr(headB, "0eti")])
+        headB.NewCondBr(truthy(headB, callExt(headB, "js_gt", [iH, emitNum(headB, 0)])), stepB, missB)
+        var iS = callExt(stepB, "js_sub", [callExt(stepB, "js_scope_get", [curScopeV, emitStr(stepB, "0eti")]),
+                                           emitNum(stepB, 1)])
+        callExt(stepB, "js_scope_set", [curScopeV, emitStr(stepB, "0eti"), iS])
+        stepB.NewCondBr(truthy(stepB, callExt(stepB, "js_seq", [callExt(stepB, "js_pyget", [ksV, iS]), v])),
+                        hitB, headB)
+        var hv = callExt(hitB, "js_pyget", [vsV, callExt(hitB, "js_scope_get", [curScopeV, emitStr(hitB, "0eti")])])
+        hitB.NewBr(endB)
+        var mv = emitStr(missB, "")
+        missB.NewBr(endB)
+        return {b: endB, v: endB.NewPhi([llvm.ir.NewIncoming(hv, hitB), llvm.ir.NewIncoming(mv, missB)])}
+    }
+    // The first type argument of List<int> / Map<K,V>, as written.
+    function typeArgOf(t) {
+        var s3 = stripWs(t)
+        var i = s3.indexOf("<")
+        if (i < 0) { return "" }
+        var out = ""
+        for (var j = i + 1; j < s3.length; j++) {
+            var ch = s3.charAt(j)
+            if (ch == ">" || ch == ",") { break }
+            out = out + ch
+        }
+        return out
+    }
+    function makeTypedColl(items) {
+        anyTypedColl = true
+        var ty = stripWs(items[0].ctargs)
+        ty = ty.substring(1, ty.length - 1)
+        var t = items[1]
+        return function(b) {
+            var r = t(b)
+            return {b: emitETSet(r.b, r.v, ty), v: r.v}
+        }
+    }
     function makeTemplate(items) {
         return function(b) {
             var v = emitStr(b, "")
@@ -3000,8 +3252,17 @@ KwSuper     = "super" KwEnd ;
             return b
         }
     }
+    // items[0] is either the plain name string or a {seed} wrapper around a call thunk.
+    function makeDartTarget(items) {
+        if (items[0] != undefined && items[0].seed != undefined) {
+            return {name: "", seed: items[0].seed, path: items.slice(1)}
+        }
+        return {name: items[0], path: items.slice(1)}
+    }
     function emitRefPath(b, ref) {
-        var o = callExt(b, "js_kget", [curScopeV, emitStr(b, ref.name)])
+        var o = anytype
+        if (ref.seed != undefined) { var sr0 = ref.seed(b); b = sr0.b; o = sr0.v }
+        else { o = callExt(b, "js_kget", [curScopeV, emitStr(b, ref.name)]) }
         for (var i = 0; i < ref.path.length - 1; i++) {
             var s = ref.path[i]
             if (s.key != undefined) { o = callExt(b, "js_get", [o, emitStr(b, s.key)]) }
@@ -3016,6 +3277,7 @@ KwSuper     = "super" KwEnd ;
     function makeRefRead(ref) {
         return function(b) {
             if (ref.path.length == 0) {
+                if (ref.seed != undefined) { return ref.seed(b) }
                 return {b: b, v: callExt(b, "js_kget", [curScopeV, emitStr(b, ref.name)])}
             }
             var p = emitRefPath(b, ref)
@@ -3035,6 +3297,7 @@ KwSuper     = "super" KwEnd ;
             var r = valT(b)
             b = r.b
             var v = r.v
+            if (ref.path.length == 0 && ref.seed != undefined) { return ref.seed(b) }
             if (ref.path.length == 0) {
                 var nameV = emitStr(b, ref.name)
                 // A static of the enclosing class, or a top-level setter, rather than a
@@ -3079,6 +3342,19 @@ KwSuper     = "super" KwEnd ;
                 }
             }
             return {b: b, v: v}
+        }
+    }
+    // Prefix ++x / --x: the same update as the postfix form, but the value of the
+    // expression is the NEW one.
+    function makePreIncDec(items) {
+        var extName = (items[0] == "++") ? "js_add" : "js_sub"
+        var ref = items[1]
+        return function(b) {
+            var nameV = emitStr(b, ref.name)
+            var oldV = callExt(b, "js_tonum", [callExt(b, "js_kget", [curScopeV, nameV])])
+            var newV = intWrap(b, callExt(b, extName, [oldV, callExt(b, "js_num_i", [handle(1)])]))
+            callExt(b, "js_kset", [curScopeV, nameV, newV])
+            return {b: b, v: newV}
         }
     }
     function makeIncDec(items) {
@@ -3290,6 +3566,10 @@ KwSuper     = "super" KwEnd ;
         // Dart print writes its argument followed by a newline (like println).
         callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "print"),
                                      callExt(b, "js_scope_get", [curScopeV, emitStr(b, "println")])])
+        if (anyTypedColl) {
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0etk"), callExt(b, "js_arr_new", [])])
+            callExt(b, "js_scope_decl", [curScopeV, emitStr(b, "0etv"), callExt(b, "js_arr_new", [])])
+        }
         // Imported declarations first, then the main file's own top level.
         b = emitImported(b)
         b = makeSeq(items)(b)
