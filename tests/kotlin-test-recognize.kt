@@ -23,9 +23,10 @@ fun weightedSum(base: Int, factor: Int = 2, vararg extra: Int): Int {
 fun helper(x: Int): Int = x * 3
 fun boxOf(k: Int): Holder = Holder(k)
 
-// A class carrying a nested type declaration: recognised but not lowered (the subset
-// has a flat class model). Under -warn-unsupported the nested type is skipped and the
-// enclosing class's own members still work.
+// A class carrying nested type declarations. GENUINE in both halves since the
+// compiler grew NestedType: the nested declaration lowers like a top-level one and the
+// enclosing descriptor gets it under its simple name (see SECTION 27 of
+// tests/kotlin-test-full.kt, which asserts the values). Here it only has to parse.
 class Holder(val tag: Int) {
     data class Slot(val name: String, val on: Boolean = true)
     enum class Kind { LEFT, RIGHT }
@@ -102,14 +103,19 @@ fun main() {
     val destructured = nums.map { (a, b) -> 0 }
     if (destructured.size != 4) { fails = fails + 1 }
 
-    // the enclosing class with a nested type still works (the nested type was skipped)
+    // the enclosing class with a nested type still works, and the nested type itself
+    // is now built: Holder.Kind is a real enum descriptor in both halves.
     if (Holder(21).doubled() != 42) { fails = fails + 1 }
+    if (Holder.Kind.LEFT.name != "LEFT") { fails = fails + 1 }
 
-    // an assignment whose left side contains a call is recognised but not written: the
-    // target is a call result / plusAssign, not a modelled lvalue. Both sides still run
-    // (the calls stay observable), but the placeholder writes nothing.
+    // an assignment whose left side ENDS IN A CALL is still not a modelled lvalue:
+    // both sides run (the calls stay observable), but the placeholder writes nothing.
     helper(3) += 1                   // plusAssign on a call result: notImpl, sides run
-    boxOf(9).tag = 100               // foo(x).field = y: write not modelled, sides run
+    // A chain that ends in a FIELD is genuine in both halves now - the write happens.
+    // boxOf makes a FRESH Holder per call, so the write is unobservable here by
+    // construction; SECTION 28 of tests/kotlin-test-full.kt asserts the observable
+    // form against a shared object.
+    boxOf(9).tag = 100               // foo(x).field = y: genuine write, then discarded
     if (boxOf(9).tag != 9) { fails = fails + 1 }
 
     // a range as a VALUE (outside a for-loop / when-in) is recognised but not modelled

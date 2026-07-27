@@ -83,7 +83,106 @@ func init() {
 		// The text of a value: what println writes, what "$v" interpolates and what
 		// v.toString() answers.
 		m["js_ktstr"] = func(a []uint64) uint64 { return rt.wrapStr(rt.ktpRender(u(a[0]), 0)) }
+
+		// js_ktsmcall is the Kotlin method-call entry point: kotlin's STRING member
+		// surface first, then the Regex dispatcher (js_rxktmcall), then the shared
+		// js_mcall. It exists because the shared js_mcall carries the JAVA String
+		// builtins - length/charAt/equals/substring/indexOf/isEmpty and nothing else -
+		// while kotlin-interpreter.abnf's own mcall answers a further nine names. Every
+		// one of those was a cross-half divergence: `"aBc".uppercase()` printed ABC in
+		// the interpreter and aborted the compiler with `unknown String method:
+		// uppercase`. The bodies below are the Go twins of the `typeof target ==
+		// "string"` branch of that mcall and MUST stay in step with it.
+		//
+		// The delegate is looked up LAZILY: rxExtraExterns runs its registrars in file
+		// order, so js_rxktmcall (abnf/jsrtregexkt.go, a later file name) does not exist
+		// yet at this point - capturing it here would bind nil and lose the whole Regex
+		// method surface.
+		baseMcall := m["js_mcall"]
+		m["js_ktsmcall"] = func(a []uint64) uint64 {
+			arr, ok := u(a[2]).(*jsArray)
+			if !ok {
+				rt.fail("js_ktsmcall args must be an array")
+			}
+			if s, isStr := u(a[0]).(string); isStr {
+				name := rt.toString(u(a[1]))
+				// A pattern argument belongs to the Regex dispatcher: `s.contains(re)`
+				// is a regex search, `s.contains("B")` is a substring test.
+				pat := len(arr.elems) > 0 && ktRxIsRegex(arr.elems[0])
+				if v, handled := rt.ktStrMethod(s, name, arr.elems); handled && !pat {
+					return rt.wrap(v)
+				}
+			}
+			if next := m["js_rxktmcall"]; next != nil {
+				return next(a)
+			}
+			return baseMcall(a)
+		}
 	})
+	// js_ktsmcall reads its argument array in position 2, exactly like js_mcall and
+	// js_rxktmcall: the handle must arrive as the array itself, not as a value.
+	jsThroughArgs["js_ktsmcall"] = 1 << 2
+}
+
+// ktStrMethod is the Go twin of the String branch of `mcall` in
+// kotlin-interpreter.abnf. It answers (value, true) for the names the shared
+// js_mcall does NOT carry and (nil, false) for everything else, so a name js_mcall
+// already implements keeps exactly the behaviour it had.
+func (rt *jsrt) ktStrMethod(s, name string, args []interface{}) (interface{}, bool) {
+	switch name {
+	case "isNotEmpty":
+		return len(s) > 0, true
+	case "get":
+		return jsChar{code: int32(rt.strCodeAt(s, jsToInt(rt.toNumber(argAt(args, 0)))))}, true
+	case "plus":
+		return s + rt.ktStr2(argAt(args, 0)), true
+	case "compareTo":
+		o := rt.ktStr2(argAt(args, 0))
+		if s < o {
+			return float64(-1), true
+		}
+		if s > o {
+			return float64(1), true
+		}
+		return float64(0), true
+	case "repeat":
+		n := jsToInt(rt.toNumber(argAt(args, 0)))
+		out := ""
+		for i := 0; i < n; i++ {
+			out += s
+		}
+		return out, true
+	// Kotlin 1.5 renamed toUpperCase/toLowerCase to uppercase/lowercase; the old
+	// spellings are deprecated but still resolve, so both halves accept all four.
+	case "uppercase", "toUpperCase":
+		return strings.ToUpper(s), true
+	case "lowercase", "toLowerCase":
+		return strings.ToLower(s), true
+	case "contains":
+		return rt.strIndexOf(s, rt.ktStr2(argAt(args, 0))) >= 0, true
+	case "hashCode":
+		return float64(ktStrHash(rt, s)), true
+	}
+	return nil, false
+}
+
+// ktStr2 is kstr2: a string is itself, everything else renders through ktpRender.
+func (rt *jsrt) ktStr2(v interface{}) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return rt.ktpRender(v, 0)
+}
+
+// ktStrHash is java.lang.String.hashCode over UTF-16 CODE UNITS, which is what
+// strHash in kotlin-interpreter.abnf computes (the script string type is UTF-16).
+func ktStrHash(rt *jsrt, s string) int32 {
+	var h int32
+	n := rt.strLen(s)
+	for i := 0; i < n; i++ {
+		h = 31*h + int32(rt.strCodeAt(s, i))
+	}
+	return h
 }
 
 // ktpLine is the text one println/print call writes. Kotlin's println has only

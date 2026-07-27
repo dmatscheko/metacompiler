@@ -2429,8 +2429,11 @@ NotMemberKw = :script(~~
             if (name == "plus") return target + kstr2(args[0])
             if (name == "compareTo") return target < args[0] ? -1 : (target > args[0] ? 1 : 0)
             if (name == "repeat") { var rs = ""; for (var ri = 0; ri < args[0]; ri++) { rs += target }; return rs }
-            if (name == "uppercase") return target.toUpperCase()
-            if (name == "lowercase") return target.toLowerCase()
+            // Kotlin 1.5 renamed toUpperCase/toLowerCase to uppercase/lowercase; the
+            // old spellings are deprecated but still resolve, so all four are accepted
+            // here and in the compiled twin's js_ktsmcall (abnf/jsrtkotlin.go).
+            if (name == "uppercase" || name == "toUpperCase") return target.toUpperCase()
+            if (name == "lowercase" || name == "toLowerCase") return target.toLowerCase()
             if (name == "contains") return target.indexOf(kstr2(args[0])) >= 0
             if (name == "hashCode") return kHash(target)
             return mfallback(target, name, args, "String")

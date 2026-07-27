@@ -378,12 +378,27 @@ CompanionBlk <~~ notImpl("companion block", up.pos) ~~>
             = KwCompanion SkipBlock ;
 NestedClass <~~ push({nested: makeNested(takeAll())}) ~~>
             = [ "inner" KwEnd <~~ push({isinner: true}) ~~> ] ClassDecl ;
-// A nested type declaration (a data/enum/annotation class, plain class, interface or
-// object inside another class or object). Recognised but not lowered - the subset has
-// a flat, non-nested class model - so it is reported as not implemented and its body
-// skipped; the `data` modifier was already consumed by the Member's Modifiers. notImpl
-// pushes nothing, so makeClassStmt simply skips it.
-NestedType  <~~ notImpl("nested type declaration", up.pos) ~~>
+// A nested TYPE that is not a plain class - an enum class, an interface, an object
+// declaration or an annotation class inside another class. GENUINE, and the twin of
+// NestedType in kotlin-interpreter.abnf: the declaration is lowered exactly like a
+// top-level one (so it binds under its own simple name), and the enclosing descriptor
+// then gets the resulting DESCRIPTOR under the nested name, so `Outer.Kind.LEFT` and
+// `Outer.Nested.member` resolve. A nested class keeps its own rule above, because a
+// class needs a FACTORY (it is constructed) rather than the descriptor itself.
+// Each alternative names the REAL builder, never the notImplemented fallback, so
+// makeNestedValue can rely on lastDeclaredType having just been set.
+NestedType  = NestedEnum | NestedIface | NestedObj | NestedErased | NestedTypeSkip ;
+NestedEnum  <~~ push({nested: makeNestedValue(pop())}) ~~> = EnumReal ;
+NestedIface <~~ push({nested: makeNestedValue(pop())}) ~~> = InterfaceReal ;
+NestedObj   <~~ push({nested: makeNestedValue(pop())}) ~~> = ObjectReal | ObjectNoBody ;
+// An annotation class is ERASED (see AnnotationClass): it declares metadata only, so
+// there is no descriptor to attach. The erased thunk is dropped here.
+NestedErased <~~ pop() ~~> = AnnotationClass ;
+// The fallback for a nested type declaration whose SHAPE is outside the subset (an
+// enum with an entry body, an interface with a primary constructor, a data class the
+// class rule could not take). Recognised, reported as not implemented and skipped;
+// notImpl pushes nothing, so makeClassStmt simply skips it.
+NestedTypeSkip <~~ notImpl("nested type declaration", up.pos) ~~>
             = [ KwEnum | KwAnnotation | DataMod KwEnd ] KwClass KId [ SkipAngle ] [ CtorParamsSkip ] [ ":" SuperList ] [ SkipBlock ]
             | [ KwFun ] KwInterface KId [ SkipAngle ] [ ":" SuperList ] [ SkipBlock ]
             | KwObject KId [ ":" SuperList ] [ SkipBlock ] ;
@@ -620,14 +635,20 @@ ExprStmt    <~~ push(exprToStmt(pop())) ~~>
 Expression  = Assignment | CallAssign | OrExpr ;
 Assignment  <~~ push(makeAssign(takeAll())) ~~>
             = Target ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
-// An assignment whose left side is a postfix expression containing a call, not a plain
-// variable/field/index target: map.getOrPut(k) { ... } += v, foo(x).field = y. The
-// target is not a modelled lvalue (a call result or a plusAssign call), so the write
-// is not implemented; BOTH sides are still evaluated so their calls stay visible in a
-// call graph. Tried only after Assignment fails - i.e. when a plain Target (KId rooted,
-// dot/index steps) cannot cover the whole left side because a `(` call breaks the chain.
+// An assignment whose left side is a postfix expression containing a call, so a plain
+// Target (KId rooted, dot/index steps) cannot cover it: foo(x).field = y,
+// items(k)[0] += 1. GENUINE - the chain up to the last step is evaluated once and the
+// last step is written like any other slot, exactly as makeAssign writes p.obj/p.key.
+// A chain that ENDS in a call is not an lvalue, and only that case stays unimplemented
+// (both sides still run, so their calls stay visible in a call graph). Tried only after
+// Assignment fails - i.e. when a `(` call breaks the chain.
 CallAssign  <~~ push(makeCallAssign(takeAll(), up.pos)) ~~>
-            = CallMember ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+            = CallChain ( "+=" | "-=" | "*=" | "/=" | "%=" | "=" ) <~~ push(up.in) ~~> Expression ;
+// The same postfix chain as CallMember, but kept UNFOLDED so the assignment can split
+// off the last step: everything before it is the container, and the last `.name` or
+// `[i]` is the slot written. The twin of CallChain in kotlin-interpreter.abnf.
+CallChain   <~~ push({chain: takeAll()}) ~~>
+            = Primary { MethodSfx | SafeMethodSfx | FieldSfx | SafeFieldSfx | IndexSfx | "!!" } ;
 
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = KId <~~ push(up.in) ~~> { "." KId <~~ push({key: up.in}) ~~> | TIndex } ;
@@ -1642,7 +1663,7 @@ KwContract  = "contract" KwEnd ;
         b.NewCondBr(emitClassProbe(b, l, cls), objB, primB)
         var argsV = callExt(objB, "js_arr_new", [])
         callExt(objB, "js_arr_push", [argsV, r])
-        var ov = callExt(objB, "js_mcall", [l, emitStr(objB, mth), argsV])
+        var ov = callExt(objB, "js_ktsmcall", [l, emitStr(objB, mth), argsV])
         if (op == "!=") { ov = callExt(objB, "js_not", [ov]) }
         objB.NewBr(mergeB)
         var pr = emitPrimBin(primB, op, l, r)
@@ -1697,7 +1718,7 @@ KwContract  = "contract" KwEnd ;
             var primB = curF.NewBlock("")
             var mergeB = curF.NewBlock("")
             b.NewCondBr(emitClassProbe(b, r.v, cls), objB, primB)
-            var ov = callExt(objB, "js_mcall", [r.v, emitStr(objB, "unaryMinus"), callExt(objB, "js_arr_new", [])])
+            var ov = callExt(objB, "js_ktsmcall", [r.v, emitStr(objB, "unaryMinus"), callExt(objB, "js_arr_new", [])])
             objB.NewBr(mergeB)
             var pv = callExt(primB, "js_jfneg", [r.v])
             primB.NewBr(mergeB)
@@ -1712,7 +1733,7 @@ KwContract  = "contract" KwEnd ;
         var primB = curF.NewBlock("")
         var mergeB = curF.NewBlock("")
         b.NewCondBr(emitClassProbe(b, recvV, cls), objB, primB)
-        var ov = callExt(objB, "js_mcall", [recvV, emitStr(objB, mth), argsV])
+        var ov = callExt(objB, "js_ktsmcall", [recvV, emitStr(objB, mth), argsV])
         objB.NewBr(mergeB)
         var pv = fallback(primB)
         primB.NewBr(mergeB)
@@ -1729,7 +1750,7 @@ KwContract  = "contract" KwEnd ;
         b.NewCondBr(emitClassProbe(b, recvV, cls), objB, primB)
         var argsV = callExt(objB, "js_arr_new", [])
         for (var i = 0; i < argVs.length; i++) { callExt(objB, "js_arr_push", [argsV, argVs[i]]) }
-        var ov = callExt(objB, "js_mcall", [recvV, emitStr(objB, mth), argsV])
+        var ov = callExt(objB, "js_ktsmcall", [recvV, emitStr(objB, mth), argsV])
         objB.NewBr(mergeB)
         var pv = fallback(primB)
         primB.NewBr(mergeB)
@@ -2062,7 +2083,7 @@ KwContract  = "contract" KwEnd ;
                     // A user infix function: a.op(b) through the ordinary method path.
                     var iargsV = callExt(b, "js_arr_new", [])
                     callExt(b, "js_arr_push", [iargsV, r2.v])
-                    v = callExt(b, "js_mcall", [v, emitStr(b, op), iargsV])
+                    v = callExt(b, "js_ktsmcall", [v, emitStr(b, op), iargsV])
                 } else if (op == "to") {
                     v = emitPair(b, v, r2.v)
                 } else if (op == "and") { v = callExt(b, "js_jband", [v, r2.v]) }
@@ -2161,7 +2182,7 @@ KwContract  = "contract" KwEnd ;
                 b = rc.b
                 var argsV = callExt(b, "js_arr_new", [])
                 callExt(b, "js_arr_push", [argsV, v])
-                var hit = callExt(b, "js_mcall", [rc.v, emitStr(b, "contains"), argsV])
+                var hit = callExt(b, "js_ktsmcall", [rc.v, emitStr(b, "contains"), argsV])
                 if (items[i].inop == "!in") { hit = callExt(b, "js_not", [hit]) }
                 v = hit
             }
@@ -2370,7 +2391,7 @@ KwContract  = "contract" KwEnd ;
                     var lamB = curF.NewBlock("")
                     var mrg = curF.NewBlock("")
                     b.NewCondBr(emitClassProbe(b, lamRecv, mcls), objB2, lamB)
-                    var mv = callExt(objB2, "js_mcall", [lamRecv, emitStr(objB2, s.name), margsV])
+                    var mv = callExt(objB2, "js_ktsmcall", [lamRecv, emitStr(objB2, s.name), margsV])
                     objB2.NewBr(mrg)
                     var lv2 = callExt(lamB, "js_call", [lamV, hUndef, callArgsV])
                     lamB.NewBr(mrg)
@@ -2393,7 +2414,7 @@ KwContract  = "contract" KwEnd ;
                 // the String members that take a pattern); it hands every other
                 // receiver straight to js_mcall, so this is behaviour-preserving for
                 // a program that uses no regexps. See abnf/jsrtregexkt.go.
-                return {b: ea.b, v: callExt(ea.b, "js_rxktmcall", [cur, emitStr(ea.b, s.name), ea.v])}
+                return {b: ea.b, v: callExt(ea.b, "js_ktsmcall", [cur, emitStr(ea.b, s.name), ea.v])}
             }
             if (s.kind == "field") {
                 // An extension property wins only when no builtin and no class property
@@ -2558,7 +2579,7 @@ KwContract  = "contract" KwEnd ;
                                         [callExt(notListB, "js_typeof", [srcV]), emitStr(notListB, "object")])),
                                     truthy(notListB, callExt(notListB, "js_sne", [srcV, hNull])))
         notListB.NewCondBr(isObj, objB, elseB)
-        var ov = callExt(objB, "js_mcall", [srcV, emitStr(objB, "component" + (k + 1)),
+        var ov = callExt(objB, "js_ktsmcall", [srcV, emitStr(objB, "component" + (k + 1)),
                                            callExt(objB, "js_arr_new", [])])
         objB.NewBr(mergeB)
         elseB.NewBr(mergeB)
@@ -2742,7 +2763,7 @@ KwContract  = "contract" KwEnd ;
             for (var i = 0; i < params.length; i++) {
                 callExt(b, "js_arr_push", [argsV, callExt(b, "js_scope_get", [curScopeV, emitStr(b, params[i])])])
             }
-            b.NewRet(callExt(b, "js_mcall", [dV, emitStr(b, mname), argsV]))
+            b.NewRet(callExt(b, "js_ktsmcall", [dV, emitStr(b, mname), argsV]))
             return deadBlock()
         }
         return emitFunc(params, body, true)
@@ -2783,7 +2804,7 @@ KwContract  = "contract" KwEnd ;
             callExt(b, "js_set", [objV, emitStr(b, props[p].prop), r.v])
         }
         curScopeV = saved
-        return {b: b, v: objV}
+        return {b: b, v: objV, cls: clsV}
     }
     function makeObjectExpr(items) {
         var hdr = takeHeader(items, 0)
@@ -2839,7 +2860,7 @@ KwContract  = "contract" KwEnd ;
                 && funNames["$" + name] != true && classMethodNames["$" + name] == true) {
                 var selfV = callExt(b, "js_kget", [curScopeV, emitStr(b, "this")])
                 var ma = emitArgs(b, orderArgs(args, methodParams["$" + name]))
-                return {b: ma.b, v: callExt(ma.b, "js_mcall", [selfV, emitStr(ma.b, name), ma.v])}
+                return {b: ma.b, v: callExt(ma.b, "js_ktsmcall", [selfV, emitStr(ma.b, name), ma.v])}
             }
             if (classNames[name] == 1) {
                 var clsV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, name)])
@@ -2932,14 +2953,49 @@ KwContract  = "contract" KwEnd ;
             return {b: b, v: v}
         }
     }
-    // An assignment to a non-lvalue left side (a postfix expression ending in or
-    // containing a call). Not implemented as a write, but both sides are emitted so
-    // their calls stay observable; the left side is emitted first (as Kotlin evaluates
-    // the receiver of a plusAssign before its argument).
+    // An assignment whose left side is a postfix chain containing a call.
+    // items = [{chain}, op, rhs]. The chain is UNFOLDED, so the last step can be split
+    // off as the slot to write. The twin of makeCallAssign in kotlin-interpreter.abnf,
+    // including the evaluation ORDER: receiver, then right-hand side, then (for an
+    // indexed slot) the index.
     function makeCallAssign(items, pos) {
-        notImpl("assignment to a computed target", pos)
-        var lhsT = items[0]
+        var chain = items[0].chain
+        var op = items[1]
         var rhsT = items[2]
+        var last = chain[chain.length - 1]
+        if (chain.length > 1 && last != undefined && last != null && (last.kind == "field" || last.kind == "index")) {
+            var baseT = foldCallMember(chain.slice(0, chain.length - 1))
+            var isField = (last.kind == "field")
+            var fname = isField ? last.name : ""
+            return function(b) {
+                var rb = baseT(b)
+                var objV = rb.v
+                var rv = rhsT(rb.b)
+                var bb = rv.b
+                var v = rv.v
+                var keyV = anytype
+                if (isField) {
+                    keyV = emitStr(bb, fname)
+                } else {
+                    var ir = last.idx(bb)
+                    bb = ir.b
+                    keyV = ir.v
+                }
+                if (op != "=") {
+                    var ro = emitOpBin(bb, op, callExt(bb, "js_get", [objV, keyV]), v)
+                    bb = ro.b
+                    v = ro.v
+                }
+                callExt(bb, "js_set", [objV, keyV, v])
+                return {b: bb, v: v}
+            }
+        }
+        // The chain ends in a CALL, so it is not a slot: not implemented as a write,
+        // but both sides are emitted so their calls stay observable, and the left side
+        // is emitted first (as Kotlin evaluates the receiver of a plusAssign before its
+        // argument).
+        notImpl("assignment to a computed target", pos)
+        var lhsT = foldCallMember(chain)
         return function(b) {
             var r0 = lhsT(b)
             var r1 = rhsT(r0.b)
@@ -3793,7 +3849,17 @@ KwContract  = "contract" KwEnd ;
         var inner = false
         var at = 0
         if (items[at] != undefined && items[at].isinner != undefined) { inner = true; at++ }
-        return {name: lastDeclaredClass, inner: inner, stmt: items[at]}
+        return {name: lastDeclaredClass, inner: inner, asvalue: false, stmt: items[at]}
+    }
+    // The same, for a nested type that is NOT a class: an enum, an interface or an
+    // object declaration. makeEnumStmt / makeInterfaceStmt / makeObjectStmt record the
+    // name they just declared here, and only those three builders are reachable from
+    // NestedEnum / NestedIface / NestedObj, so the name is always the right one.
+    // asvalue means the enclosing descriptor gets the DESCRIPTOR itself rather than a
+    // construction factory - an enum, an interface and an object are never `new`ed.
+    var lastDeclaredType = null
+    function makeNestedValue(stmt) {
+        return {name: lastDeclaredType, inner: false, asvalue: true, stmt: stmt}
     }
     // The factory the enclosing descriptor exposes under the nested class's name. It is
     // an ordinary callable property, so `Outer.Nested(a)` (memberCall on a descriptor
@@ -3801,7 +3867,42 @@ KwContract  = "contract" KwEnd ;
     // prepends the receiver) both reach it. For an inner class the prepended receiver is
     // the enclosing instance and is stored as __outer; a plain nested class has no
     // receiver in front, so its arguments start at slot 0.
-    function emitNestedFactory(clsName, inner) {
+    // Attach the nested declarations of a body to the value that holds its statics -
+    // the descriptor of a class / enum / interface, the singleton of an object. Each
+    // nested declaration runs FIRST (that is what binds it under its simple name), and
+    // the holder then gets either a construction factory (a nested or inner class) or
+    // the declared value itself (an enum, an interface, an object). The Go twin is
+    // attachNested in kotlin-interpreter.abnf, which is called from the class, object,
+    // enum and interface builders alike - so this helper is too.
+    // alsoV is a SECOND holder or null. An object declaration needs both: the runtime
+    // looks a method CALL up the __class chain (so a construction factory must sit on
+    // the descriptor) while js_get on an instance does NOT walk that chain (so a plain
+    // read of Outer.Kind must find it on the singleton itself).
+    function emitNestedList(b, holderV, alsoV, nested, ownerName) {
+        for (var nc = 0; nc < nested.length; nc++) {
+            var savedOuter = emitOuterProps
+            if (nested[nc].inner) { emitOuterProps = classOwnProps["$" + ownerName] }
+            b = nested[nc].stmt(b)
+            emitOuterProps = savedOuter
+            if (nested[nc].name == null) { continue }
+            var slotV = anytype
+            if (nested[nc].asvalue) {
+                slotV = callExt(b, "js_scope_get", [curScopeV, emitStr(b, nested[nc].name)])
+            } else {
+                slotV = callExt(b, "js_closure", [handle(emitNestedFactory(nested[nc].name,
+                                                                          nested[nc].inner,
+                                                                          alsoV != null)), curScopeV])
+            }
+            callExt(b, "js_set", [holderV, emitStr(b, nested[nc].name), slotV])
+            if (alsoV != null) { callExt(b, "js_set", [alsoV, emitStr(b, nested[nc].name), slotV]) }
+        }
+        return b
+    }
+    // dropRecv: the factory is reached through an INSTANCE (a nested class of an
+    // `object` declaration), so the runtime's memberCall has prepended the receiver and
+    // the constructor arguments start one slot later - but there is no enclosing
+    // instance to record, because a nested class of an object is never `inner`.
+    function emitNestedFactory(clsName, inner, dropRecv) {
         funcCount++
         var idx = funcCount
         var f = m.NewFunc("jsf_" + idx, i64, [llvm.ir.NewParam("env", i64), llvm.ir.NewParam("args", i64)])
@@ -3817,6 +3918,7 @@ KwContract  = "contract" KwEnd ;
         var ctorArgsV = callExt(b, "js_arr_new", [])
         callExt(b, "js_arr_push", [ctorArgsV, objV])
         var from = 0
+        if (dropRecv) { from = 1 }
         if (inner) {
             callExt(b, "js_set", [objV, emitStr(b, "__outer"), callExt(b, "js_arg", [f.Params[1], handle(0)])])
             from = 1
@@ -4026,17 +4128,7 @@ KwContract  = "contract" KwEnd ;
             }
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
             emitClassNames.pop()
-            // Nested classes: their own declaration runs first (it binds the descriptor
-            // under its simple name), then the enclosing descriptor gets the factory.
-            for (var nc = 0; nc < parts.nested.length; nc++) {
-                var savedOuter = emitOuterProps
-                if (parts.nested[nc].inner) { emitOuterProps = classOwnProps["$" + name] }
-                b = parts.nested[nc].stmt(b)
-                emitOuterProps = savedOuter
-                callExt(b, "js_set", [clsV, emitStr(b, parts.nested[nc].name),
-                                      callExt(b, "js_closure", [handle(emitNestedFactory(parts.nested[nc].name,
-                                                                                         parts.nested[nc].inner)), curScopeV])])
-            }
+            b = emitNestedList(b, clsV, null, parts.nested, name)
             emitSuperName = savedSuper
             if (dmod != null) { b = emitDataMembers(b, clsV, name, hdr.cparams, dmod == "data", own) }
             if (comp != null) { b = emitCompanion(b, clsV, comp, parts.compName) }
@@ -4059,6 +4151,7 @@ KwContract  = "contract" KwEnd ;
         var parts = splitMembers(items, i)
         var methods = parts.methods
         classNames[name] = 1
+        lastDeclaredType = name
         ctorParamNames["$" + name] = ctorSig(hdr.cparams).params
         var own = {}
         for (var cm = 0; cm < methods.length; cm++) {
@@ -4112,6 +4205,7 @@ KwContract  = "contract" KwEnd ;
                 callExt(b, "js_scope_decl", [curScopeV, emitStr(b, entries[e].ename), objV])
             }
             curScopeV = saved
+            b = emitNestedList(b, clsV, null, parts.nested, name)
             return b
         }
     }
@@ -4164,11 +4258,17 @@ KwContract  = "contract" KwEnd ;
         var props = parts.props
         var methods = parts.methods
         classNames[name] = 2   // A singleton: named like a class, but never constructed.
+        lastDeclaredType = name
         for (var om = 0; om < methods.length; om++) { classMethodNames["$" + methods[om].name] = true }
         return function(b) {
             var r = emitObjectInstance(b, name, methods, props, hdr.supers, parts.accprops)
             b = r.b
             callExt(b, "js_scope_decl", [curScopeV, emitStr(b, name), r.v])
+            // A nested type of an object hangs on the object's DESCRIPTOR, not on the
+            // singleton instance: the runtime's memberCall looks a call up the __class
+            // chain (which is how Outer.Nested(1) reaches the factory), and js_get on
+            // an instance falls through to the same chain for a plain read.
+            b = emitNestedList(b, r.cls, r.v, parts.nested, name)
             return b
         }
     }
@@ -4180,6 +4280,7 @@ KwContract  = "contract" KwEnd ;
         var parts = splitMembers(items, hdr.i)
         var methods = parts.methods
         interfaceNames["$" + name] = true
+        lastDeclaredType = name
         var sig = []
         for (var i = 0; i < methods.length; i++) {
             sig.push({name: methods[i].name, params: methods[i].params})
@@ -4208,6 +4309,7 @@ KwContract  = "contract" KwEnd ;
             for (var ap = 0; ap < parts.accprops.length; ap++) { b = emitAccessorPair(b, clsV, parts.accprops[ap]) }
             emitClassNames.pop()
             emitSuperName = savedSuper
+            b = emitNestedList(b, clsV, null, parts.nested, name)
             return b
         }
     }

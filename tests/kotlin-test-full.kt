@@ -701,6 +701,142 @@ fun sec25() {
     check("ren20", 'c'.toString() == "c" && "s".toString() == "s")
 }
 
+// ===== SECTION 26: the String member surface =====
+// The members java.lang.String / kotlin.text define on a String. The section
+// exists because the two halves carried DIFFERENT tables: kotlin-interpreter.abnf
+// answered nine names its own mcall implements, while the compiler dispatched to
+// the shared js_mcall, whose String switch is the JAVA one
+// (length/charAt/equals/substring/indexOf/isEmpty) - so "aBc".uppercase() printed
+// ABC in the interpreter and aborted the compiler with
+// `unknown String method: uppercase`. Every check below therefore runs in BOTH
+// halves; abnf/jsrtkotlin.go's js_ktsmcall is the Go twin of that mcall branch.
+// No kotlinc on this machine: the expected values are Kotlin's documented
+// semantics (kotlin.text.uppercase/lowercase are locale-invariant, hashCode is
+// java.lang.String.hashCode = the 31*h + char fold, compareTo is
+// lexicographic by code unit).
+fun sec26() {
+    val s = "aBc"
+    // Kotlin 1.5 renamed toUpperCase/toLowerCase to uppercase/lowercase. Both
+    // spellings resolve (the old pair is deprecated, not removed), and BOTH halves
+    // must accept all four - the divergence this section pins.
+    check("str1", s.uppercase() == "ABC")
+    check("str2", s.lowercase() == "abc")
+    check("str3", s.toUpperCase() == "ABC")
+    check("str4", s.toLowerCase() == "abc")
+    check("str5", "".uppercase() == "" && "9!".lowercase() == "9!")
+    check("str6", s.uppercase().lowercase() == "abc")
+    // The rest of the surface the compiler half was missing.
+    check("str7", s.repeat(2) == "aBcaBc" && s.repeat(0) == "")
+    check("str8", s.contains("B") && !s.contains("z") && s.contains(""))
+    check("str9", s.plus("!") == "aBc!")
+    check("str10", s.compareTo("aBd") < 0 && s.compareTo("aBc") == 0 && s.compareTo("aBa") > 0)
+    check("str11", s.isNotEmpty() && !"".isNotEmpty())
+    check("str12", s.get(1) == 'B' && s.get(0) == 'a')
+    check("str13", s.hashCode() == 95362 && "".hashCode() == 0)
+    check("str14", "abc".hashCode() == "abc".hashCode() && "abc".hashCode() != "abd".hashCode())
+    // The names the shared table already carried keep working.
+    check("str15", s.length == 3 && s.isEmpty() == false && s.equals("aBc"))
+    check("str16", s.substring(1) == "Bc" && s.indexOf("B") == 1)
+    // charAt is the JAVA spelling. Real Kotlin has no String.charAt at all (it is
+    // get / the indexing operator, both of which answer a Char); both grammars
+    // carry it as a builtin that answers a one-character STRING, so that is what is
+    // asserted - the point of this section is that the two halves agree.
+    check("str18", s.charAt(0) == "a" && s[0] == 'a' && s.get(0) == 'a')
+    check("str17", s.toString() == "aBc")
+}
+
+// ===== SECTION 27: nested type declarations =====
+// A nested enum / interface / object / annotation class, in each of the four
+// things that can hold one. Genuine in both halves: the declaration lowers like a
+// top-level one and the enclosing descriptor gets it under its simple name, so
+// Outer.Kind.LEFT resolves. The section exists because the compiler half used to
+// report `nested type declaration not implemented (ignored)` for everything except
+// a plain nested class, which the interpreter has always built.
+// Every nested type below has a DISTINCT simple name on purpose: the compiler's
+// flat class model binds a nested type into one shared program scope under its
+// simple name, so `class A { class Inner }` and `class B { class Inner }` collide
+// there (A.Inner().who() answers "B") while the interpreter keeps them apart.
+// That divergence is pre-existing and orthogonal to whether nesting works at all.
+class Holder27(val tag: Int) {
+    enum class Kind27 { LEFT, RIGHT }
+    interface Shape27 { fun area(): Int }
+    object Reg27 { val seed: Int = 5 }
+    annotation class Mark27
+    class Slot27(val n: Int)
+    fun doubled(): Int = tag * 2
+}
+object Outer27 {
+    enum class Mode27 { UP }
+    class Cell27(val v: Int)
+    fun go(): Int = 1
+}
+enum class Top27 { A, B;
+    class Helper27(val n: Int)
+}
+interface Iface27 {
+    object Registry27 { val seed: Int = 7 }
+}
+fun sec27() {
+    // The enclosing class's own members are unaffected by the nested declarations.
+    check("nst1", Holder27(21).doubled() == 42)
+    // A nested enum: the entries, their names and their ordinals.
+    check("nst2", Holder27.Kind27.LEFT.name == "LEFT" && Holder27.Kind27.RIGHT.name == "RIGHT")
+    check("nst3", Holder27.Kind27.LEFT.ordinal == 0 && Holder27.Kind27.RIGHT.ordinal == 1)
+    check("nst4", Holder27.Kind27.LEFT.toString() == "LEFT")
+    // A nested object is a singleton reached through the enclosing name.
+    check("nst5", Holder27.Reg27.seed == 5)
+    // A nested class is CONSTRUCTED through the enclosing name.
+    check("nst6", Holder27.Slot27(3).n == 3)
+    // The same four holders: an object, an enum class and an interface.
+    check("nst7", Outer27.go() == 1 && Outer27.Mode27.UP.name == "UP")
+    check("nst8", Outer27.Cell27(4).v == 4)
+    check("nst9", Top27.A.name == "A" && Top27.Helper27(5).n == 5)
+    check("nst10", Iface27.Registry27.seed == 7)
+}
+
+// ===== SECTION 28: assignment to a computed target =====
+// An assignment whose left side is a postfix chain containing a CALL, so a plain
+// variable/field/index target cannot cover it: boxOf(9).tag = 100, boxes()[0] = 9.
+// Genuine in both halves - the chain up to the last step is evaluated ONCE and the
+// last `.name` / `[i]` step is written like any other slot. The section exists
+// because the compiler half used to report `assignment to a computed target not
+// implemented (ignored)` and silently write nothing, while the interpreter's
+// makeCallAssign performed the write.
+class Box28(var tag: Int)
+val shared28 = Box28(1)
+val store28 = mutableListOf(1, 2, 3)
+var order28 = ""
+fun boxOf28(k: Int): Box28 = Box28(k)
+fun sharedOf28(): Box28 = shared28
+fun boxes28(): MutableList<Int> = store28
+fun lhs28(): Box28 { order28 = order28 + "L"; return shared28 }
+fun rhs28(): Int { order28 = order28 + "R"; return 7 }
+fun idx28(): Int { order28 = order28 + "I"; return 1 }
+fun sec28() {
+    // A fresh object each call: the write happens, and is then unobservable.
+    boxOf28(9).tag = 100
+    check("cta1", boxOf28(9).tag == 9)
+    // The same object: the write IS observable.
+    sharedOf28().tag = 42
+    check("cta2", shared28.tag == 42)
+    // A compound operator reads and writes the same slot.
+    sharedOf28().tag += 8
+    check("cta3", shared28.tag == 50)
+    // An indexed slot behind a call.
+    boxes28()[0] = 9
+    check("cta4", store28[0] == 9)
+    boxes28()[2] -= 1
+    check("cta5", store28[2] == 2)
+    // Kotlin evaluates the receiver before the right-hand side, and the index of an
+    // indexed slot after both. Pinned so the two halves cannot drift on the order.
+    order28 = ""
+    lhs28().tag = rhs28()
+    check("cta6", order28 == "LR" && shared28.tag == 7)
+    order28 = ""
+    boxes28()[idx28()] = rhs28()
+    check("cta7", order28 == "RI" && store28[1] == 7)
+}
+
 // ===== END SECTIONS =====
 
 fun main() {
@@ -729,6 +865,9 @@ fun main() {
     s23() // SECTION-CALL 23
     sec24() // SECTION-CALL 24
     sec25() // SECTION-CALL 25
+    sec26() // SECTION-CALL 26
+    sec27() // SECTION-CALL 27
+    sec28() // SECTION-CALL 28
     println("full: $checks checks, $fails failures")
     exitProcess(fails)
 }
