@@ -52,21 +52,21 @@ CloseTag    = "?>" :whitespace(Whitespace) ;
 // A function definition: function name($a, $b) { ... } with explicit return. An
 // optional parameter type hint and return type are accepted and ignored (dynamic).
 Def         <~~ push(makeFun(takeAll())) ~~>
-            = KwFunction Name <~~ push(up.in) ~~> ParamList [ ReturnType ] Block ;
+            = [ AttrGrp ] KwFunction [ "&" ] Name <~~ push(up.in) ~~> ParamList [ ReturnType ] Block ;
 ParamList   = "(" [ Param { "," Param } [ "," ] ] ")" ;
 // A parameter accepts real-world surface: promotion modifiers (public/readonly...),
 // a type hint, by-reference '&', variadic '...', and a default value. All but the
 // name are accepted and dropped (dynamic, create-on-assign); the default expression
 // is parsed then popped so only {param} reaches makeFun.
-Param       = { Modifier } [ TypeHint ] [ "&" ] [ "..." ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
-ParamDefault <~~ pop() ~~> = "=" Expression ;
+Param       = [ AttrGrp ] { Modifier } [ TypeHint ] [ "&" ] [ "..." ] DollarName <~~ push({param: pop()}) ~~> [ ParamDefault ] ;
+ParamDefault <~~ pop() ~~> = PlainEq Expression ;
 TypeHint    = [ "?" ] TypeAtom { ( "|" | "&" ) [ "?" ] TypeAtom } ;
 TypeAtom    = KwArray | [ "\\" ] Id { "\\" Id } ;
 ReturnType  = ":" TypeHint ;
 
 // class C { public function m() {...} } -- method modifiers are accepted and ignored.
 ClassDecl   <~~ push(makeClassStmt(takeAll())) ~~>
-            = { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ] [ KwImplements ImplList ] "{" { Member } "}" ;
+            = [ AttrGrp ] { ClassMod } KwClass Name <~~ push(up.in) ~~> [ KwExtends ExtName <~~ push({ext: up.in}) ~~> ] [ KwImplements ImplList ] "{" { Member } "}" ;
 ClassMod    = ( "abstract" | "final" | "readonly" ) KwEnd ;
 ExtName     = [ "\\" ] Id { "\\" Id } ;
 ImplList    = ExtName { "," ExtName } ;
@@ -74,7 +74,7 @@ Member      = MethodDecl | ClassConst | UseTrait | PropDecl ;
 // A method: modifiers and a reference-return '&' are accepted and ignored; an
 // abstract/interface method has no body (';' instead of a block -> empty method).
 MethodDecl  <~~ push({method: makeFun(takeAll())}) ~~>
-            = { Modifier } KwFunction [ "&" ] MethodName <~~ push(up.in) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
+            = [ AttrGrp ] { Modifier } KwFunction [ "&" ] MethodName <~~ push(up.in) ~~> ParamList [ ReturnType ] ( Block | ";" ) ;
 // Class constants and 'use Trait;' adaptations: recognized and routed to
 // notImplemented (no static/const model). They push a {prop} marker makeClassStmt
 // ignores, exactly like a property declaration.
@@ -86,7 +86,7 @@ UseTrait    <~~ notImpl("trait use", up.pos); push({prop: true}) ~~>
 // interface / trait / namespace / use-import: accepted structurally and routed to
 // notImplemented (no runtime model for them in this subset).
 TypeDecl    <~~ push(notImplStmt("interface/trait declaration", up.pos)) ~~>
-            = ( KwInterface | KwTrait ) SkipHead SkipBlock ;
+            = [ AttrGrp ] ( KwInterface | KwTrait ) SkipHead SkipBlock ;
 NsDecl      <~~ push(notImplStmt("namespace", up.pos)) ~~>
             = KwNamespace { Id | "\\" } ";" ;
 UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
@@ -94,7 +94,7 @@ UseDecl     <~~ push(notImplStmt("use import", up.pos)) ~~>
 // enum Name : backing-type implements I { case A; ... }: recognized structurally and
 // routed to notImplemented; the body (cases, methods, consts) is balanced-skipped.
 EnumDecl    <~~ push(notImplStmt("enum", up.pos)) ~~>
-            = KwEnum Name [ ":" TypeAtom ] [ KwImplements ImplList ] SkipBlock ;
+            = [ AttrGrp ] KwEnum Name [ ":" TypeAtom ] [ KwImplements ImplList ] SkipBlock ;
 SkipHead    = { Id | "," | "\\" } ;
 SkipBlock   = "{" { SkipItem } "}" ;
 SkipItem    = SkipDq | SkipSq | SkipBlock | SkipOther ;
@@ -108,23 +108,38 @@ SkipOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x7a" | "\x7c" | "\x
 // ignored; string literals inside are matched first so their parens never miscount.
 SkipParen   = "(" { SkipDq | SkipSq | SkipParen | SkipPOther } ")" ;
 SkipPOther  = "\x00"..."\x21" | "\x23"..."\x26" | "\x2a"..."\U0010ffff" ;
+// An attribute group '#[Foo(1), Bar]': balanced-skipped wherever PHP allows one.
+// Attributes carry no runtime meaning in this subset, so they are recognized and
+// dropped rather than routed to notImplemented.
+AttrGrp     = Attr { Attr } ;
+Attr        = "#[" { AttrItem } "]" ;
+AttrItem    = SkipDq | SkipSq | AttrBr | AttrOther ;
+AttrBr      = "[" { AttrItem } "]" ;
+AttrOther   = "\x00"..."\x21" | "\x23"..."\x26" | "\x28"..."\x5a" | "\x5c" | "\x5e"..."\U0010ffff" ;
 // A property declaration 'public $x;' or 'public int $x = e;'. The type hint is
 // dropped (dynamic), but the DEFAULT VALUE is kept: makeNew replays the declared
 // defaults down the inheritance chain, so "$o->val" reads 7 before anything is
 // assigned. A 'static' property has no runtime model here and is dropped, which
 // is why the modifier text is captured rather than skipped.
 PropDecl    <~~ push({propdecl: makeProp(takeAll())}) ~~>
-            = { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ";" ;
+            = [ AttrGrp ] { PropMod } [ TypeHint ] DollarName [ "=" Expression ] ";" ;
 PropMod     <~~ push({mod: up.in}) ~~> = Modifier ;
-Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd ;
+// 'private(set)' / 'protected(set)' is PHP 8.4 asymmetric visibility: the setter is
+// more restricted than the getter. Visibility is not enforced in this subset, so the
+// '(set)' suffix is simply accepted.
+Modifier    = ( "public" | "private" | "protected" | "static" | "final" | "abstract" | "readonly" ) KwEnd [ SetVis ] ;
+SetVis      = "(" "set" ")" ;
 
 // Body of a control structure / function: braces around a statement sequence.
 Block       <~~ push({body: makeBody(takeAll())}) ~~>
             = "{" { Statement } "}" ;
 
 // Every statement pushes exactly one thunk: function(block) -> block.
+// A declaration is a statement too: PHP allows `if (...) { class Foo {} }`, and a
+// conditionally declared class is common enough in real files to be worth parsing.
 Statement   = EchoStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEach | For
             | Switch | DoWhile | Try | Throw | Declare
+            | ClassDecl | EnumDecl | TypeDecl | ConstDecl | NsDecl | UseDecl
             | Return | Break | Continue | Empty | ExprStmt ;
 
 // ----- widened statement surface -----
@@ -136,7 +151,8 @@ Statement   = EchoStmt | GlobalStmt | StaticVarStmt | Block | If | While | ForEa
 StaticVarStmt <~~ takeAll(); push(notImplStmt("static local variable", up.pos)) ~~>
             = KwStatic DollarName [ "=" Expression ] { "," DollarName [ "=" Expression ] } ";" ;
 Switch      <~~ takeAll(); push(notImplStmt("switch", up.pos)) ~~>
-            = KwSwitch SkipParen SkipBlock ;
+            = KwSwitch SkipParen ( SkipBlock | SwitchAlt ) ;
+SwitchAlt   = ":" { Statement } KwEndswitch ";" ;
 DoWhile     <~~ takeAll(); push(notImplStmt("do-while", up.pos)) ~~>
             = KwDo Block KwWhile SkipParen ";" ;
 // try/catch/finally + throw are genuinely compiled: throw calls js_throw, each try/catch/
@@ -176,26 +192,47 @@ Empty       <~~ push(makeConstStmt()) ~~>
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
             = Expression ";" ;
 
+// Both spellings of every compound statement: braces, and PHP's colon/endXXX form.
+// The alternative form is tried FIRST because it is decided by a single ':' - it is
+// AltBody that then has to be careful: a bare 'endif' would otherwise parse as a
+// constant-reference statement and swallow the terminator, which is why the five
+// endXXX words are reserved in NotKw.
 If          <~~ push(makeIf(takeAll())) ~~>
-            = KwIf "(" Expression ")" Block { ElseIf } [ KwElse Block <~~ push({els: pop().body}) ~~> ] ;
+            = KwIf "(" Expression ")" ( AltIfTail | Block { ElseIf } [ KwElse Block <~~ push({els: pop().body}) ~~> ] ) ;
 ElseIf      <~~ var b = pop(); push({elifCond: pop(), elifBody: b.body}) ~~>
             = KwElseif "(" Expression ")" Block ;
+AltIfTail   = ":" AltBody { AltElseIf } [ KwElse ":" AltBody <~~ push({els: pop().body}) ~~> ] KwEndif ";" ;
+AltElseIf   <~~ var b2 = pop(); push({elifCond: pop(), elifBody: b2.body}) ~~>
+            = KwElseif "(" Expression ")" ":" AltBody ;
+// A statement run that ends at the enclosing endXXX / else / elseif keyword. It
+// pushes the same {body} record a Block does, so every builder is reused unchanged.
+AltBody     <~~ push({body: makeBody(takeAll())}) ~~>
+            = { Statement } ;
 
 While       <~~ push(makeWhile(pop().body, pop())) ~~>
-            = KwWhile "(" Expression ")" Block ;
+            = KwWhile "(" Expression ")" ( AltWhileBody | Block | BodyStmt ) ;
+AltWhileBody = ":" AltBody KwEndwhile ";" ;
 
 // for (init; cond; post) { body }. The three clauses are optional and wrapped
 // with a kind marker so the builder can tell them apart on the stack.
 For         <~~ push(makeFor(takeAll())) ~~>
-            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" Block ;
+            = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" ( AltForBody | Block | BodyStmt ) ;
+AltForBody  = ":" AltBody KwEndfor ";" ;
 ForInit     <~~ push({k: "init", t: exprToStmt(pop())}) ~~> = Expression ;
 ForCond     <~~ push({k: "cond", t: pop()}) ~~> = Expression ;
 ForPost     <~~ push({k: "post", t: exprToStmt(pop())}) ~~> = Expression ;
 
 // foreach ($arr as $v) / foreach ($arr as $k => $v)
 ForEach     <~~ push(makeForeach(takeAll())) ~~>
-            = KwForeach "(" Expression KwAs ForeachVars ")" Block ;
-ForeachVars = DollarName <~~ push({v1: pop()}) ~~> [ "=>" DollarName <~~ push({v2: pop()}) ~~> ] ;
+            = KwForeach "(" Expression KwAs ForeachVars ")" ( AltForeachBody | Block | BodyStmt ) ;
+AltForeachBody = ":" AltBody KwEndforeach ";" ;
+ForeachVars = ForeachV1 [ "=>" ForeachV2 ] ;
+ForeachV1   = [ FeRef ] DollarName <~~ push({v1: pop()}) ~~> ;
+ForeachV2   = [ FeRef ] DollarName <~~ push({v2: pop()}) ~~> ;
+// 'as &$v' aliases the array ELEMENT, so writing $v writes back into the array.
+// There is no reference cell in this compiler's value model, so the form is
+// recognized and routed to notImplemented rather than compiled as a copy.
+FeRef       <~~ notImpl("foreach by reference", up.pos) ~~> = "&" ;
 
 Return      <~~ push(makeReturn(takeAll())) ~~>
             = KwReturn [ Expression ] ";" ;
@@ -243,7 +280,22 @@ AssignOp    = "**=" | "<<=" | ">>=" | "??=" | "+=" | "-=" | "*=" | "/=" | "%=" |
 PlainEq     = "=" !"=" !">" ;
 Target      <~~ push(makeTargetRef(takeAll())) ~~>
             = TargetHead { ArrowField | TIndex | TAppend } ;
-TargetHead  = DollarName <~~ push({var: pop()}) ~~> ;
+// A static property (self::$made = ..., C::$made++) and a variable variable
+// ($$name = e, ${expr} = e) are assignable heads too. Neither has a runtime model
+// here, so both are recognized and routed to notImplemented; each pushes the same
+// {var} record a plain variable does, so makeTargetRef is unchanged. The static form
+// must be tried FIRST or PlainHead never sees it.
+TargetHead  = StaticHead | PlainHead | VarVarHead ;
+StaticHead  <~~ takeAll(); notImpl("static property target", up.pos); push({var: "\x00static"}) ~~>
+            = StaticBase "::" DollarName ;
+StaticBase  = ExtName | DollarName ;
+// A single-statement body ('while (...) $i++;', 'foreach (...) ;'). It pushes the
+// same {body} record a Block does, so every loop builder is reused unchanged.
+BodyStmt    <~~ push({body: makeBody(takeAll())}) ~~>
+            = Statement ;
+PlainHead   = DollarName <~~ push({var: pop()}) ~~> ;
+VarVarHead  <~~ takeAll(); notImpl("variable variable", up.pos); push({var: "\x00varvar"}) ~~>
+            = "$" ( VarRef | "{" Expression "}" ) ;
 ArrowField  = "->" MethodName <~~ push({key: up.in}) ~~> ;
 TIndex      <~~ push({idx: pop()}) ~~>
             = "[" Expression "]" ;
@@ -331,16 +383,38 @@ IncDec      <~~ push(makeIncDec(takeAll())) ~~>
 
 // A primary followed by any mix of ->method(args), ->field, [index], (call), ::static.
 CallMember  <~~ push(foldCallMember(takeAll())) ~~>
-            = Primary { MethodSfx | FieldSfx | IndexSfx | CallSfx | StaticSfx } ;
+            = Primary { MethodSfx | DynMethodSfx | FieldSfx | DynFieldSfx | IndexSfx | CallSfx | StaticSfx } ;
 MethodSfx   <~~ push({kind: "mcall", name: popName(), args: takeAll()}) ~~>
-            = ( "?->" | "->" ) MethodName <~~ push({mname: up.in}) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = ( "?->" | "->" ) MethodName <~~ push({mname: up.in}) ~~> "(" [ ArgList ] ")" ;
+// $o->$meth(...) / $o->{"add"}(...) / $o->$prop: the member name is computed at run
+// time. There is no dynamic-member dispatch here, so both forms are recognized and
+// routed to notImplemented; each still pushes exactly one chain suffix.
+DynMethodSfx <~~ takeAll(); push({kind: "field", name: "\x00dynamic"}); notImpl("dynamic method name", up.pos) ~~>
+            = ( "?->" | "->" ) DynName "(" [ ArgList ] ")" ;
+DynName     = VarRef | "{" Expression "}" ;
+DynFieldSfx <~~ takeAll(); push({kind: "field", name: "\x00dynamic"}); notImpl("dynamic property name", up.pos) ~~>
+            = ( "?->" | "->" ) DynName ;
 FieldSfx    = ( "?->" | "->" ) MethodName <~~ push({kind: "field", name: up.in}) ~~> ;
 IndexSfx    <~~ push({kind: "index", idx: pop()}) ~~>
             = "[" Expression "]" ;
 CallSfx     <~~ push({kind: "call", args: takeAll()}) ~~>
-            = "(" [ Expression { "," Expression } ] ")" ;
+            = "(" [ ArgList ] ")" ;
+// An argument list: positional, named (h: 5), spread (...$a) or the PHP 8.1
+// first-class callable placeholder (strlen(...)), with an optional trailing comma.
+// Only the positional form has a runtime model here; each of the other three pushes
+// exactly one thunk, so every call site keeps its item count.
+ArgList     = Arg { "," Arg } [ "," ] ;
+Arg         = NamedArg | SpreadArg | FccArg | PosArg ;
+NamedArg    <~~ takeAll(); push(notImplExpr("named argument", up.pos)) ~~>
+            = ArgLabel Expression ;
+ArgLabel    = Id ":" !":" ;
+SpreadArg   <~~ takeAll(); push(notImplExpr("spread argument", up.pos)) ~~>
+            = "..." Expression ;
+FccArg      <~~ push(notImplExpr("first-class callable", up.pos)) ~~>
+            = "..." ;
+PosArg      = Expression ;
 StaticSfx   <~~ push(makeStatic(takeAll(), up.pos)) ~~>
-            = "::" MethodName [ "(" [ Expression { "," Expression } ] ")" ] ;
+            = "::" MethodName [ "(" [ ArgList ] ")" ] ;
 
 Primary     = "(" Expression ")"
             | NewAnon | NewExpr | ClosureExpr | ArrowFn | Match | ArrayLit
@@ -364,15 +438,20 @@ IncDyn      <~~ push({incdyn: pop()}) ~~>
 // A bareword constant reference: a global/class constant or magic constant (PHP_EOL,
 // M_PI, __DIR__, __LINE__, ...). No constant model here, so it is routed to
 // notImplemented. Placed last so calls, statics and keywords are matched first.
+// A namespace-qualified name in expression position: \PHP_EOL, Foo\Bar::baz(),
+// new \ReflectionClass(...). Namespaces have no runtime model here (NsDecl and
+// UseDecl are notImplemented), so a qualified name resolves on its LAST segment,
+// which is what makes the common `\Exception` / `\strlen` spelling work.
+QName       = [ "\\" ] Name { "\\" MethodName } ;
 ConstRef    <~~ push(notImplExpr("constant reference", up.pos)) ~~>
-            = Name ;
+            = QName ;
 
 NewExpr     <~~ push(makeNew(takeAll())) ~~>
-            = KwNew Name <~~ push({cls: up.in}) ~~> [ "(" [ Expression { "," Expression } ] ")" ] ;
+            = KwNew QName <~~ push({cls: lastSeg(stripWs(up.in))}) ~~> [ "(" [ ArgList ] ")" ] ;
 // new class (args) extends B implements I { ... }: an anonymous class, recognized and
 // routed to notImplemented (constructor arguments and body are dropped).
 NewAnon     <~~ takeAll(); push(notImplExpr("anonymous class", up.pos)) ~~>
-            = KwNew KwClass [ "(" [ Expression { "," Expression } ] ")" ] [ KwExtends ExtName ] [ KwImplements ImplList ] SkipBlock ;
+            = KwNew KwClass [ "(" [ ArgList ] ")" ] [ KwExtends ExtName ] [ KwImplements ImplList ] SkipBlock ;
 
 // fn (params) => expr : an arrow function (auto-capturing, single-expression), and
 // match (subject) { arms }: a match expression. Both recognized and routed to
@@ -385,29 +464,39 @@ Match       <~~ push(notImplExpr("match expression", up.pos)) ~~>
 // Class::CONST / Class::method() / Class::$prop / static::/self::/parent:: : accepted
 // structurally and routed to notImplemented.
 StaticExpr  <~~ takeAll(); push(notImplExpr("static / :: access", up.pos)) ~~>
-            = ( "static" KwEnd | Name ) "::" ( MethodName | DollarName ) [ "(" [ Expression { "," Expression } ] ")" ] ;
+            = ( "static" KwEnd | QName ) "::" ( MethodName | DollarName ) [ "(" [ ArgList ] ")" ] ;
 
 // A closure: function($a) use ($b, $c) { ... } (optionally 'static'). The use list is
 // captured lexically (this subset captures the whole defining scope).
 ClosureExpr <~~ push(makeClosure(takeAll())) ~~>
             = [ "static" KwEnd ] KwFunction ParamList [ UseClause ] [ ReturnType ] Block ;
-UseClause   = KwUse "(" [ UseVar { "," UseVar } ] ")" ;
-UseVar      = DollarName <~~ push({use: pop()}) ~~> ;
+UseClause   = KwUse "(" [ UseVar { "," UseVar } ] [ "," ] ")" ;
+// 'use (&$x)' captures the variable by REFERENCE, so a write inside the closure is
+// visible outside it. This subset captures the whole defining scope by value, so the
+// '&' is recognized and routed to notImplemented.
+UseVar      = [ UseRef ] DollarName <~~ push({use: pop()}) ~~> ;
+UseRef      <~~ notImpl("closure use by reference", up.pos) ~~> = "&" ;
 
 // [1, 2] / [k => v] / array(1, 2). '=>' entries make an associative array
 // (ordered map); plain entries make an indexed array.
 ArrayLit    <~~ push(makeArray(takeAll())) ~~>
             = "[" [ ArrayItem { "," ArrayItem } [ "," ] ] "]"
             | KwArray "(" [ ArrayItem { "," ArrayItem } [ "," ] ] ")" ;
-ArrayItem   = KeyedItem | PlainItem ;
+ArrayItem   = SpreadItem | KeyedItem | PlainItem ;
+// [...$a] merges another array in; array(&$a) makes the element a reference. Both
+// are recognized and routed to notImplemented (no spread and no reference cell in
+// this value model), and each still pushes exactly one item.
+SpreadItem  <~~ takeAll(); push({elem: notImplExpr("array spread", up.pos)}) ~~>
+            = "..." Expression ;
 KeyedItem   <~~ var v = pop(); push({hk: pop(), hv: v}) ~~>
             = Expression "=>" Expression ;
 PlainItem   <~~ push({elem: pop()}) ~~>
-            = Expression ;
+            = [ ArrRef ] Expression ;
+ArrRef      <~~ notImpl("array element by reference", up.pos) ~~> = "&" !"&" ;
 
 // f(args): a top-level function or builtin call.
 Call        <~~ push(makeCall(takeAll())) ~~>
-            = Name <~~ push(up.in) ~~> "(" [ Expression { "," Expression } ] ")" ;
+            = Name <~~ push(up.in) ~~> "(" [ ArgList ] ")" ;
 
 // A float literal. It has to be tried BEFORE IntLit, because "3.5" and "1e3" both
 // start exactly like an integer - without it "3.5" parsed as the integer 3, the
@@ -618,7 +707,12 @@ NotKw       = :script(~~
                    "protected", "static", "final", "abstract", "const", "interface",
                    "trait", "namespace", "extends", "implements", "instanceof", "global",
                    "try", "catch", "finally", "throw", "match", "fn", "clone", "enum",
-                   "declare", "include", "include_once", "require", "require_once"]
+                   "declare", "include", "include_once", "require", "require_once",
+                   // The alternative-syntax terminators and 'insteadof' must be
+                   // reserved, or AltBody's statement run parses 'endif' as a
+                   // constant reference and eats the terminator.
+                   "endif", "endwhile", "endfor", "endforeach", "endswitch",
+                   "insteadof", "goto"]
         for (var k = 0; k < kws.length; k++) {
             if (kws[k] === s) { return abnf.newToken("\x01reserved", 0) }
         }
@@ -653,6 +747,11 @@ KwStatic    = "static" KwEnd ;
 KwConst     = "const" KwEnd ;
 KwEnum      = "enum" KwEnd ;
 KwSwitch    = "switch" KwEnd ;
+KwEndif     = "endif" KwEnd ;
+KwEndwhile  = "endwhile" KwEnd ;
+KwEndfor    = "endfor" KwEnd ;
+KwEndforeach = "endforeach" KwEnd ;
+KwEndswitch = "endswitch" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwTry       = "try" KwEnd ;
 KwCatch     = "catch" KwEnd ;
