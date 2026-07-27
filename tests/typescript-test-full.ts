@@ -560,6 +560,30 @@ function s21() {
     let counted: number = 0;
     for (let k: number = 0; k < 3; k++) { if (/z/g.test("z")) { counted = counted + 1; } }
     check("re43", counted === 3);
+    // Named backreferences, including a FORWARD one (the group is declared later).
+    check("re44", /(?<n>a)\k<n>/.test("aa") && !/(?<n>a)\k<n>/.test("ab"));
+    check("re45", /\k<n>(?<n>a)/.test("a"));
+    check("re46", /(?<w>ab)-\k<w>/.exec("zab-ab")![0] === "ab-ab");
+    check("re47", "xayb".replace(/(?<c>[ab])/g, "[$<c>]") === "x[a]y[b]");
+    // Annex B legacy octal: a backslash-digit escape with no such group is a
+    // CHARACTER, not a backreference. \1 is U+0001, so it cannot match the empty
+    // string; 8 and 9 are not octal digits and stay identity escapes; and 4-7 admit
+    // only two more digits, which is why \400 reads as \40 followed by "0".
+    check("re48", !/\1/.test("") && /(a)\1/.test("aa") && !/(a)\2/.test("a"));
+    check("re49", /\12/.test("\n") && /\101/.test("A") && /\400/.test(" 0"));
+    check("re50", /\8/.test("8") && /\9/.test("9"));
+    // Sticky: the match must BEGIN at lastIndex, not merely after it.
+    const sticky: RegExp = /b/y;
+    sticky.lastIndex = 1;
+    check("re51", sticky.test("ab") && sticky.lastIndex === 2);
+    const sticky2: RegExp = /b/y;
+    sticky2.lastIndex = 0;
+    check("re52", !sticky2.test("ab"));
+    // \Q ... \E is a Java/Kotlin quote region and NOT a JavaScript one: here \Q and
+    // \E are identity escapes, so this pattern is the literal text "Qa.bE". The
+    // shared engine offers quote regions behind a dialect flag that JavaScript does
+    // not pass, and this check is what keeps it from creeping in.
+    check("re53", !/\Qa.b\E/.test("a.b") && /\Qa.b\E/.test("Qa.bE"));
 }
 
 // ===== END SECTIONS =====

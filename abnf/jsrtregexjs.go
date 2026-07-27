@@ -44,7 +44,12 @@ func jsxCanonFlags(flags string) string {
 }
 
 func jsxNeutral(flags string) string {
-	out := ""
+	// "o" is unconditional: in a non-unicode pattern a backslash-digit escape with no
+	// such group is a LEGACY OCTAL character escape (Annex B), not a backreference -
+	// /\1/.test("") is false in node because \1 is U+0001. Under u/v that spelling is
+	// a SyntaxError, which the ReStrictU parse guard already refuses before anything
+	// reaches the engine.
+	out := "o"
 	if jsxHasFlag(flags, 'i') {
 		out += "i"
 	}
@@ -102,6 +107,16 @@ func (rt *jsrt) jsxProg(o *jsObject) *rxRe {
 		rt.fail("invalid regular expression: /%s/: %s", src, re.err)
 	}
 	return re
+}
+
+// jsxMatchAt is the sticky-flag counterpart of jsxSearch: the match must BEGIN at
+// `at`, with no scanning forward.
+func (rt *jsrt) jsxMatchAt(re *rxRe, text []rune, at int) *rxMatch {
+	m, ok := re.matchAt(text, at)
+	if !ok {
+		rt.fail("regexp: step limit exceeded")
+	}
+	return m
 }
 
 func (rt *jsrt) jsxSearch(re *rxRe, text []rune, at int) *rxMatch {
@@ -182,9 +197,13 @@ func (rt *jsrt) jsxExec(o *jsObject, s string) interface{} {
 		}
 		return jsNull
 	}
-	m := rt.jsxSearch(re, text, at)
-	if m != nil && jsxBool(o, "sticky") && m.begin != at {
-		m = nil
+	// Sticky is the engine's own anchored entry point: matchAt tries ONE position
+	// instead of searching forward and then throwing the answer away.
+	var m *rxMatch
+	if jsxBool(o, "sticky") {
+		m = rt.jsxMatchAt(re, text, at)
+	} else {
+		m = rt.jsxSearch(re, text, at)
 	}
 	if m == nil {
 		if useLast {

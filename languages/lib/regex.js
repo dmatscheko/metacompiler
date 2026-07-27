@@ -34,11 +34,26 @@
 // ----- API -----
 //   rxCompile(pattern, flags) -> re          flags: i (fold case), s (dot matches
 //                                            newline), m (^ and $ are line anchors),
-//                                            x (extended: skip whitespace/# comments)
+//                                            x (extended: skip whitespace/# comments),
+//                                            o (JavaScript Annex B: a backslash-digit
+//                                            escape with no such group is a LEGACY
+//                                            OCTAL character escape; without o it is
+//                                            an "invalid group reference" error, which
+//                                            is what Python, Ruby, Java and Kotlin do),
+//                                            q (Java/Kotlin \Q...\E quote regions; in
+//                                            JavaScript \Q is an identity escape and
+//                                            /\Qa.b\E/ matches "Qa.bE", so this is a
+//                                            flag and NOT the default)
 //                                            re.ok is false and re.err is set on a
 //                                            bad pattern.
 //   rxSearch(re, text, start) -> m | null    m.begin, m.end, m.caps (2*(n+1) ints,
 //                                            -1 when the group did not take part)
+//   rxMatchAt(re, text, at) -> m | null       the match must BEGIN at `at` (sticky)
+//   rxMatchWhole(re, text, at) -> m | null    the match must run from `at` (0 for
+//                                            the ordinary case) to the very END.
+//                                            NOT a search plus a length check: an
+//                                            alternation has to backtrack into its
+//                                            longer branch.
 //   rxTest(re, text) -> bool
 //   rxGroup(re, text, m, i) -> string|null   i is 0 for the whole match
 //   rxGroupNamed(re, text, m, name)
@@ -195,8 +210,94 @@ function rxClsMatch(cls, c, icase) {
 //   gidx  capture index for "group" (-1: non-capturing), assertion kind for "assert",
 //         group index for "bref", 1 for a negative "look"
 
+// rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
+// Whitespace and # are included because the x (extended) flag would otherwise drop
+// them, and - because it is a range operator inside a character class.
+function rxIsMetaCh(ch) {
+    return "\\^$.|?*+()[]{}-#/ \t\n\r\f\v".indexOf(ch) >= 0
+}
+
+// rxExpandQuotes rewrites every \Q...\E region into the equivalent escaped text, as
+// a PRE-PASS over the pattern rather than a parser mode. An unterminated \Q runs to
+// the end of the pattern (Java's rule). Doing it here means a quantifier after \E
+// binds to the LAST quoted character - \Qab\E+ is ab+ - which is also Java's rule,
+// and it keeps the parser itself free of a quoting state that every rule would have
+// to respect.
+function rxExpandQuotes(p) {
+    if (p.indexOf("\\Q") < 0) { return p }
+    var out = ""
+    var i = 0
+    while (i < p.length) {
+        if (p.charAt(i) != "\\" || i + 1 >= p.length) {
+            out += p.charAt(i)
+            i = i + 1
+            continue
+        }
+        if (p.charAt(i + 1) != "Q") {
+            out += p.substring(i, i + 2)
+            i = i + 2
+            continue
+        }
+        i = i + 2
+        while (i < p.length) {
+            if (p.charAt(i) == "\\" && i + 1 < p.length && p.charAt(i + 1) == "E") {
+                i = i + 2
+                break
+            }
+            var ch = p.charAt(i)
+            if (rxIsMetaCh(ch)) { out += "\\" }
+            out += ch
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// rxCountGroups is a cheap PRE-PASS over the pattern, counting the capturing groups
+// before the real parse starts. A backslash-digit escape can only be read correctly
+// once the total is known: \1 in a pattern with one group is a backreference, and in a
+// pattern with none it is either a legacy octal escape (JavaScript, flag o) or an
+// error (everywhere else) - and the octal reading has to CONSUME the following digits,
+// which the parser cannot undo after the fact.
+function rxCountGroups(p) {
+    var n = 0
+    var i = 0
+    var incls = false
+    while (i < p.length) {
+        var c = p.charCodeAt(i)
+        if (c == 92) { i = i + 2; continue }
+        if (incls) {
+            if (c == 93) { incls = false }
+            i = i + 1
+            continue
+        }
+        if (c == 91) { incls = true; i = i + 1; continue }
+        if (c != 40) { i = i + 1; continue }
+        if (i + 1 >= p.length || p.charCodeAt(i + 1) != 63) { n = n + 1; i = i + 1; continue }
+        // (?<name> and (?'name' capture; (?<= and (?<! are lookbehind, and every other
+        // (? form is non-capturing.
+        var c2 = i + 2 < p.length ? p.charCodeAt(i + 2) : 0
+        var c3 = i + 3 < p.length ? p.charCodeAt(i + 3) : 0
+        if (c2 == 39 || (c2 == 60 && c3 != 61 && c3 != 33)) { n = n + 1 }
+        i = i + 2
+    }
+    return n
+}
+
 function rxNode(t) {
-    return {t: t, items: [], cls: rxNewCls(), min: 0, max: 0, greedy: true, gidx: -1}
+    // bname carries the NAME of a \k<name> backreference until rxCompile resolves it
+    // to a group number; it stays "" for every other node.
+    return {t: t, items: [], cls: rxNewCls(), min: 0, max: 0, greedy: true, gidx: -1, bname: ""}
+}
+
+// rxNameIdx is the group NUMBER a name was declared for, or -1.
+function rxNameIdx(names, groups, name) {
+    var i = 0
+    while (i < names.length) {
+        if (names[i] == name) { return groups[i] }
+        i = i + 1
+    }
+    return -1
 }
 
 function rxErr(st, msg) {
@@ -284,8 +385,32 @@ function rxEsc(st, inClass) {
         return res
     }
     if (!inClass && c >= 49 && c <= 57) { // \1 .. \9
-        res.kind = 2
-        res.ch = c - 48
+        // A backreference only if the pattern HAS that group (rxCountGroups counted
+        // them before the parse began).
+        if (c - 48 <= st.ntotal) {
+            res.kind = 2
+            res.ch = c - 48
+            return res
+        }
+        if (!st.octal) {
+            rxErr(st, "invalid group reference " + (c - 48))
+            return res
+        }
+        // JavaScript Annex B. 8 and 9 are not octal digits, so they are an identity
+        // escape; 0-3 admit three octal digits and 4-7 only two, which is what makes
+        // node read /\400/ as the two characters \40 and "0".
+        if (c > 55) { res.ch = c; return res }
+        var oval = c - 48
+        var omax = c <= 51 ? 3 : 2
+        var ogot = 1
+        while (ogot < omax && st.i < st.n) {
+            var oc = p.charCodeAt(st.i)
+            if (oc < 48 || oc > 55) { break }
+            oval = oval * 8 + (oc - 48)
+            st.i = st.i + 1
+            ogot = ogot + 1
+        }
+        res.ch = oval
         return res
     }
     res.ch = c
@@ -475,6 +600,17 @@ function rxParseAtom(st) {
     if (c == 92) { // backslash: the zero-width escapes first
         var nxt = 0
         if (st.i + 1 < st.n) { nxt = p.charCodeAt(st.i + 1) }
+        // \k<name>: a NAMED backreference. The group it names may be declared LATER
+        // in the pattern (a forward reference is legal), so the node is parked on
+        // st.pending and resolved once the whole pattern has been read.
+        if (nxt == 107 && st.i + 2 < st.n && p.charCodeAt(st.i + 2) == 60) {
+            st.i = st.i + 3
+            var knm = rxReadGroupName(st, 62)
+            var kb = rxNode("bref")
+            kb.bname = knm
+            st.pending.push(kb)
+            return kb
+        }
         if (nxt == 98 || nxt == 66 || nxt == 65 || nxt == 122 || nxt == 90) {
             st.i = st.i + 2
             var a = rxNode("assert")
@@ -781,6 +917,8 @@ function rxCompile(pattern, flags) {
     var dotall = false
     var multi = false
     var ext = false
+    var octal = false
+    var quoting = false
     var fi = 0
     while (fi < flags.length) {
         var f = flags.charAt(fi)
@@ -788,15 +926,31 @@ function rxCompile(pattern, flags) {
         else if (f == "s") { dotall = true }
         else if (f == "m") { multi = true }
         else if (f == "x") { ext = true }
+        else if (f == "o") { octal = true }
+        else if (f == "q") { quoting = true }
         fi = fi + 1
     }
+    // \Q...\E is expanded before anything else looks at the text, so neither the
+    // group counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL
+    // pattern, which is what a language's .source / inspect reports.
+    var pat = quoting ? rxExpandQuotes(pattern) : pattern
     var st = {
-        p: pattern, i: 0, n: pattern.length, err: "",
-        ngroups: 0, names: [], nameGroups: [], ext: ext, dotall: dotall
+        p: pat, i: 0, n: pat.length, err: "",
+        ngroups: 0, names: [], nameGroups: [], pending: [], ext: ext, dotall: dotall,
+        octal: octal, ntotal: rxCountGroups(pat)
     }
     var ast = rxParseAlt(st)
+    // Resolve every \k<name> now that the whole name table is known.
+    var pend = st.pending
+    var pi = 0
+    while (pi < pend.length) {
+        var gi = rxNameIdx(st.names, st.nameGroups, pend[pi].bname)
+        if (gi < 0) { rxErr(st, "unknown group name '" + pend[pi].bname + "'") }
+        pend[pi].gidx = gi
+        pi = pi + 1
+    }
     if (st.err == "" && st.i < st.n) {
-        if (pattern.charCodeAt(st.i) == 41) { rxErr(st, "unmatched ) in pattern") }
+        if (pat.charCodeAt(st.i) == 41) { rxErr(st, "unmatched ) in pattern") }
         else { rxErr(st, "unexpected character in pattern") }
     }
     if (st.err != "") {
@@ -939,6 +1093,13 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
                 sp = sp + len
             }
         } else if (op == RX_MATCH) {
+            // rxMatchWhole CONSTRAINS THE RUN rather than rewriting the pattern: a
+            // match that stops short of mustEnd is refused right here, so the VM
+            // keeps backtracking for a longer one. Rewriting the pattern to
+            // \A(?:...)\z would work too, but every caller that tried it had to
+            // rediscover that under the x flag a trailing # comment swallows the
+            // wrapper's own closing paren. Constraining the run has no such edge.
+            if (st.mustEnd >= 0 && sp != st.mustEnd) { return -1 }
             return sp
         } else {
             return -1
@@ -950,34 +1111,61 @@ function rxRun(re, text, pcIn, spIn, caps, marks, st) {
 // rxSearch finds the leftmost match at or after `start`. It answers null for no
 // match, and a record {begin, end, caps} otherwise; caps[2i]/caps[2i+1] bound
 // group i, and are -1 when the group did not take part.
+// rxAttempt runs the program ONCE, starting at `at`. mustEnd is -1 for an
+// ordinary match and the required end position for a whole-input match; it is the
+// one knob rxSearch, rxMatchAt and rxMatchWhole differ by.
+function rxAttempt(re, text, at, mustEnd) {
+    var nslots = 2 * (re.ngroups + 1)
+    var caps = []
+    var i = 0
+    while (i < nslots) {
+        caps.push(-1)
+        i = i + 1
+    }
+    var marks = []
+    i = 0
+    while (i < re.nmarks) {
+        marks.push(-1)
+        i = i + 1
+    }
+    var st = {steps: 0, over: false, mustEnd: mustEnd}
+    var end = rxRun(re, text, 0, at, caps, marks, st)
+    if (st.over) { rxFail("step limit exceeded") }
+    if (end >= 0) { return {begin: caps[0], end: caps[1], caps: caps} }
+    return null
+}
+
 function rxSearch(re, text, start) {
     if (!re.ok) { rxFail("invalid regexp: " + re.err) }
     var from = start
     if (from < 0) { from = 0 }
-    var nslots = 2 * (re.ngroups + 1)
     var at = from
     while (at <= text.length) {
-        var caps = []
-        var i = 0
-        while (i < nslots) {
-            caps.push(-1)
-            i = i + 1
-        }
-        var marks = []
-        i = 0
-        while (i < re.nmarks) {
-            marks.push(-1)
-            i = i + 1
-        }
-        var st = {steps: 0, over: false}
-        var end = rxRun(re, text, 0, at, caps, marks, st)
-        if (st.over) { rxFail("step limit exceeded") }
-        if (end >= 0) {
-            return {begin: caps[0], end: caps[1], caps: caps}
-        }
+        var m = rxAttempt(re, text, at, -1)
+        if (m != null) { return m }
         at = at + 1
     }
     return null
+}
+
+// rxMatchAt: the match must BEGIN at `at` - no scanning forward. This is what a
+// sticky (JavaScript /y/) match and Python's re.match(pattern, s, pos) want, and
+// it is strictly cheaper than searching and then rejecting begin != at.
+function rxMatchAt(re, text, at) {
+    if (!re.ok) { rxFail("invalid regexp: " + re.err) }
+    if (at < 0 || at > text.length) { return null }
+    return rxAttempt(re, text, at, -1)
+}
+
+// rxMatchWhole: the match must cover the WHOLE input. This cannot be a search plus
+// a length check - `(a|ab)` against "ab" has to BACKTRACK into the alternation,
+// and a leftmost search answers "a" and would wrongly report no match. Python's
+// re.fullmatch, Kotlin's Regex.matches / matchEntire and Ruby's \A...\z idiom all
+// want exactly this.
+function rxMatchWhole(re, text, at) {
+    if (!re.ok) { rxFail("invalid regexp: " + re.err) }
+    if (at < 0 || at > text.length) { return null }
+    return rxAttempt(re, text, at, text.length)
 }
 
 function rxTest(re, text) {

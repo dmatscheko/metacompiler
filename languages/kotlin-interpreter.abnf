@@ -1892,7 +1892,11 @@ NotMemberKw = :script(~~
             if (Array.isArray(opts)) { for (var i = 0; i < opts.length; i++) { list.push(kstr2(opts[i])) } }
             else { list.push(kstr2(opts)) }
         }
-        var flags = ""
+        // "q" unconditionally: the JVM regex dialect always understands \Q...\E quote
+        // regions, which is what Pattern.quote (Regex.escape / RegexOption.LITERAL)
+        // emits. It is a FLAG rather than the engine's default because in JavaScript
+        // \Q is an identity escape and /\Qa.b\E/ matches the text "Qa.bE".
+        var flags = "q"
         var literal = false
         for (var k = 0; k < list.length; k++) {
             var o = list[k]
@@ -1906,32 +1910,23 @@ NotMemberKw = :script(~~
         }
         return {flags: flags, literal: literal}
     }
-    // Regex.escape / RegexOption.LITERAL. Kotlin answers Pattern.quote's \Q...\E here;
-    // the shared engine has no \Q, so every metacharacter is backslashed instead. The
-    // MATCH is the same, the returned TEXT is not - see the grammar description.
+    // Regex.escape / RegexOption.LITERAL is Pattern.quote: a \Q...\E quote region,
+    // which the shared engine now understands, so this returns the SAME TEXT the JVM
+    // does and not merely an equivalent one. An embedded \E has to close and reopen
+    // the region, exactly as java.util.regex.Pattern.quote spells it.
     function krxQuote(s) {
-        var out = ""
-        for (var i = 0; i < s.length; i++) {
-            var c = s.charAt(i)
-            var code = s.charCodeAt(i)
-            if (code == 10) { out += "\\n"; continue }
-            if (code == 13) { out += "\\r"; continue }
-            if (code == 9) { out += "\\t"; continue }
-            // A bare space and a # are ignored under the extended flag, so they are
-            // quoted too - LITERAL must beat COMMENTS.
-            if (code == 32 || c == "#" || c == "\\" || c == "." || c == "^" || c == "$" || c == "|"
-                || c == "?" || c == "*" || c == "+" || c == "(" || c == ")" || c == "["
-                || c == "]" || c == "{" || c == "}" || c == "-") { out += "\\" }
-            out += c
+        var out = "\\Q"
+        var i = 0
+        while (i < s.length) {
+            if (s.charAt(i) == "\\" && i + 1 < s.length && s.charAt(i + 1) == "E") {
+                out += "\\E\\\\E\\Q"
+                i = i + 2
+                continue
+            }
+            out += s.charAt(i)
+            i = i + 1
         }
-        return out
-    }
-    // Under COMMENTS (the engine's x) a trailing '# ...' comment runs to the end of
-    // the LINE, so it would swallow the closing ')' of the anchoring wrapper below.
-    // A newline closes the comment and is itself ignored in extended mode.
-    function krxWrapSep(flags) {
-        for (var i = 0; i < flags.length; i++) { if (flags.charAt(i) == "x") { return "\n" } }
-        return ""
+        return out + "\\E"
     }
     function mkKRegex(pat, opts) {
         var fo = krxFlags(opts)
@@ -1940,11 +1935,9 @@ NotMemberKw = :script(~~
         if (hasOwn(krxCache, key)) { return krxCache[key] }
         var prog = rxCompile(src, fo.flags)
         if (!prog.ok) { fail("invalid regex '" + src + "': " + prog.err) }
-        // matches()/matchEntire() anchor BOTH ends, which the engine spells \A ... \z.
-        // The wrapper group is non-capturing, so the group numbering is unchanged.
-        var wprog = rxCompile("\\A(?:" + src + krxWrapSep(fo.flags) + ")\\z", fo.flags)
-        if (!wprog.ok) { fail("invalid regex '" + src + "': " + wprog.err) }
-        var v = {__krx: true, src: src, flags: fo.flags, prog: prog, wprog: wprog}
+        // matches() / matchEntire() want the WHOLE input, which is rxMatchWhole -
+        // one program, no second compile and no anchoring wrapper to get wrong.
+        var v = {__krx: true, src: src, flags: fo.flags, prog: prog}
         krxCache[key] = v
         return v
     }
@@ -2102,7 +2095,7 @@ NotMemberKw = :script(~~
             // untouched.
             if (args.length > 0 && isKRegex(args[0])) {
                 var rx = args[0]
-                if (name == "matches") { return {v: rxSearch(rx.wprog, target, 0) != null} }
+                if (name == "matches") { return {v: rxMatchWhole(rx.prog, target, 0) != null} }
                 if (name == "contains") { return {v: rxTest(rx.prog, target)} }
                 if (name == "split") { return {v: krxSplit(rx.prog, target, krxArgInt(args, 1, 0))} }
                 if (name == "replace") {
@@ -2114,7 +2107,7 @@ NotMemberKw = :script(~~
             return null
         }
         if (isKRegex(target)) {
-            if (name == "matches") { return {v: rxSearch(target.wprog, kstr2(args[0]), 0) != null} }
+            if (name == "matches") { return {v: rxMatchWhole(target.prog, kstr2(args[0]), 0) != null} }
             if (name == "containsMatchIn") { return {v: rxTest(target.prog, kstr2(args[0]))} }
             if (name == "find") {
                 var fs = kstr2(args[0])
@@ -2124,8 +2117,8 @@ NotMemberKw = :script(~~
             if (name == "findAll") { return {v: krxFindAll(target, kstr2(args[0]))} }
             if (name == "matchEntire") {
                 var es = kstr2(args[0])
-                var em = rxSearch(target.wprog, es, 0)
-                return {v: em == null ? null : krxMk(target, target.wprog, es, em)}
+                var em = rxMatchWhole(target.prog, es, 0)
+                return {v: em == null ? null : krxMk(target, target.prog, es, em)}
             }
             if (name == "replace") {
                 if (typeof args[1] == "function") { return {v: krxReplaceFn(target, kstr2(args[0]), args[1])} }

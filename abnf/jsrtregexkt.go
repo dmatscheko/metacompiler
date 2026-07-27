@@ -73,21 +73,16 @@ func ktRxOrig(md interface{}) *rxRe {
 	return rxGet(src, flags)
 }
 
-// ktRxWhole is the both-ends-anchored twin of a program. Kotlin's matches() and
-// matchEntire() require the WHOLE input; the engine spells that \A ... \z, and the
-// wrapper group is non-capturing so the group numbering is unchanged.
-func ktRxWhole(re *rxRe) *rxRe {
-	return rxGet(`\A(?:`+re.src+ktRxWrapSep(re.flags)+`)\z`, re.flags)
-}
-
-// Under COMMENTS (the engine's x) a trailing '# ...' comment runs to the end of the
-// LINE, so it would swallow the closing ')' of the anchoring wrapper. A newline
-// closes the comment and is itself ignored in extended mode.
-func ktRxWrapSep(flags string) string {
-	if strings.ContainsRune(flags, 'x') {
-		return "\n"
+// ktRxWhole answers Kotlin's matches() / matchEntire(): the pattern must cover the
+// WHOLE input. That is the engine's own matchWhole - one program, no anchoring
+// wrapper, and therefore no quarrel with the x flag's trailing comments.
+func (rt *jsrt) ktRxWhole(re *rxRe, text []rune) *rxMatch {
+	rt.ktRxCheck(re)
+	m, ok := re.matchWhole(text, 0)
+	if !ok {
+		rt.fail("regexp: step limit exceeded")
 	}
-	return ""
+	return m
 }
 
 func (rt *jsrt) ktRxCheck(re *rxRe) *rxRe {
@@ -125,7 +120,11 @@ func (rt *jsrt) ktRxFlags(opts interface{}) (string, bool) {
 			names = append(names, rt.toString(opts))
 		}
 	}
-	flags, literal := "", false
+	// "q" unconditionally: the JVM regex dialect always understands \Q...\E quote
+	// regions, which is what Pattern.quote (Regex.escape / RegexOption.LITERAL) emits.
+	// It is a FLAG rather than the engine's default because in JavaScript \Q is an
+	// identity escape and /\Qa.b\E/ matches the text "Qa.bE".
+	flags, literal := "q", false
 	for _, o := range names {
 		switch o {
 		case "IGNORE_CASE":
@@ -147,31 +146,12 @@ func (rt *jsrt) ktRxFlags(opts interface{}) (string, bool) {
 	return flags, literal
 }
 
-// ktRxQuote is Regex.escape / RegexOption.LITERAL. Kotlin answers Pattern.quote's
-// \Q...\E here; the shared engine has no \Q, so every metacharacter is backslashed
-// instead. The MATCH is the same, the returned TEXT is not.
+// ktRxQuote is Regex.escape / RegexOption.LITERAL: Pattern.quote, i.e. a \Q...\E
+// quote region, which the shared engine now understands - so this returns the SAME
+// TEXT the JVM does and not merely an equivalent one. An embedded \E has to close and
+// reopen the region, exactly as java.util.regex.Pattern.quote spells it.
 func ktRxQuote(s string) string {
-	var out strings.Builder
-	for _, c := range s {
-		switch c {
-		case '\n':
-			out.WriteString(`\n`)
-			continue
-		case '\r':
-			out.WriteString(`\r`)
-			continue
-		case '\t':
-			out.WriteString(`\t`)
-			continue
-		}
-		// A bare space and a # are ignored under the extended flag, so they are
-		// quoted too - LITERAL must beat COMMENTS.
-		if strings.ContainsRune(" #\\.^$|?*+()[]{}-", c) {
-			out.WriteRune('\\')
-		}
-		out.WriteRune(c)
-	}
-	return out.String()
+	return `\Q` + strings.ReplaceAll(s, `\E`, `\E\\E\Q`) + `\E`
 }
 
 func (rt *jsrt) ktRxNew(pat, opts interface{}) *jsObject {
@@ -181,7 +161,6 @@ func (rt *jsrt) ktRxNew(pat, opts interface{}) *jsObject {
 		src = ktRxQuote(src)
 	}
 	rt.ktRxCheck(rxGet(src, flags))
-	rt.ktRxCheck(rxGet(`\A(?:`+src+ktRxWrapSep(flags)+`)\z`, flags))
 	return rxNewRegexObj(src, flags)
 }
 
@@ -437,7 +416,7 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 			re := rxObjRe(args[0])
 			switch name {
 			case "matches":
-				return rt.ktRxSearch(ktRxWhole(re), []rune(s), 0) != nil, true
+				return rt.ktRxWhole(re, []rune(s)) != nil, true
 			case "contains":
 				return rt.ktRxSearch(re, []rune(s), 0) != nil, true
 			case "split":
@@ -457,7 +436,7 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 		re := rxObjRe(target)
 		switch name {
 		case "matches":
-			return rt.ktRxSearch(ktRxWhole(re), []rune(rt.toString(argAt(args, 0))), 0) != nil, true
+			return rt.ktRxWhole(re, []rune(rt.toString(argAt(args, 0)))) != nil, true
 		case "containsMatchIn":
 			return rt.ktRxSearch(re, []rune(rt.toString(argAt(args, 0))), 0) != nil, true
 		case "find":
@@ -471,12 +450,11 @@ func (rt *jsrt) ktRxMethod(target interface{}, name string, args []interface{}) 
 			return rt.ktRxFindAll(re, rt.toString(argAt(args, 0))), true
 		case "matchEntire":
 			s := rt.toString(argAt(args, 0))
-			w := ktRxWhole(re)
-			m := rt.ktRxSearch(w, []rune(s), 0)
+			m := rt.ktRxWhole(re, []rune(s))
 			if m == nil {
 				return jsNull, true
 			}
-			return ktRxNewMatch(w, re.src, s, m), true
+			return ktRxNewMatch(re, re.src, s, m), true
 		case "replace":
 			if isCallable(argAt(args, 1)) {
 				return rt.ktRxReplaceFn(re, rt.toString(argAt(args, 0)), args[1]), true

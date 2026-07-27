@@ -493,9 +493,9 @@ fun s22() {
 // Regex and MatchResult over the shared engine (languages/lib/regex.js for the
 // interpreter, abnf/jsrtregex.go + abnf/jsrtregexkt.go for the compiler). Kotlin
 // has no regexp literal, so every pattern arrives as Regex("...") or
-// "...".toRegex(). Deviation from the JVM: Regex.escape answers explicitly
-// backslashed text rather than Pattern.quote's \Q...\E, so only its BEHAVIOUR is
-// asserted here; RegexOption.CANON_EQ and UNIX_LINES are reported as unsupported
+// "...".toRegex(). Regex.escape is Pattern.quote and answers the same \Q...\E TEXT
+// the JVM does (verified against java.util.regex on this machine);
+// RegexOption.CANON_EQ and UNIX_LINES are reported as unsupported
 // instead of being silently ignored, and lookbehind, POSIX brackets and \p{...}
 // are not implemented by the engine.
 fun s23() {
@@ -566,6 +566,18 @@ fun s23() {
     check("re40", Regex("a+?b").find("aaab")!!.value == "aaab")
     check("re41", Regex("colou?r").matches("color") && Regex("x{2,3}").find("xxxx")!!.value == "xxx")
     check("re42", Regex("(?=a)[a-z]").find("za")!!.range.first == 1)
+    // Regex.escape IS Pattern.quote: the \Q...\E text, not merely an equivalent
+    // pattern. Checked against java.util.regex.Pattern.quote.
+    check("re43", Regex.escape("a.b") == "\\Qa.b\\E" && Regex.escape("a+b*c") == "\\Qa+b*c\\E")
+    check("re44", Regex.escape("a").length == 5)
+    // \Q...\E quote regions, written out by hand: every character between them is a
+    // literal, and a quantifier after \E binds to the LAST quoted character.
+    check("re45", Regex("\\Qa.b\\E").matches("a.b") && !Regex("\\Qa.b\\E").matches("axb"))
+    check("re46", Regex("x\\Qa+b\\Ey").containsMatchIn("xa+by") && Regex("\\Qab\\E+").matches("abb"))
+    check("re47", Regex("a.b", RegexOption.LITERAL).matches("a.b")
+                  && !Regex("a.b", RegexOption.LITERAL).matches("axb"))
+    // Named backreferences inside a pattern.
+    check("re48", Regex("(?<n>a)\\k<n>").matches("aa") && !Regex("(?<n>a)\\k<n>").matches("ab"))
 }
 
 // ===== END SECTIONS =====

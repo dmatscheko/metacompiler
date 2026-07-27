@@ -1128,14 +1128,12 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (typeof fl == "number") { n = fl | 0 }
         return n
     }
-    // Translate the P-spellings and count capturing groups on the way, so a
-    // (?P=name) can become the numbered backreference the engine understands.
-    // Escapes and character classes are stepped over, so `[(?P<]` is left alone.
+    // Translate Python's P-spellings into the neutral engine's: (?P<name>...) is
+    // (?<name>...) and (?P=name) is the named backreference \k<name>. Escapes and
+    // character classes are stepped over, so `[(?P<]` is left alone. An unknown
+    // name is the ENGINE's error to report, which is why nothing is counted here.
     function pyRePat(src) {
         var out = ""
-        var names = []
-        var idxs = []
-        var ngrp = 0
         var i = 0
         var incls = false
         while (i < src.length) {
@@ -1153,9 +1151,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var j = i + 4
                 while (j < src.length && src.charAt(j) != ">") { j = j + 1 }
                 if (j >= src.length) { return {ok: false, err: "unterminated group name"} }
-                ngrp = ngrp + 1
-                names.push(src.substring(i + 4, j))
-                idxs.push(ngrp)
                 out += "(?<" + src.substring(i + 4, j) + ">"
                 i = j + 1
                 continue
@@ -1164,29 +1159,10 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 var k = i + 4
                 while (k < src.length && src.charAt(k) != ")") { k = k + 1 }
                 if (k >= src.length) { return {ok: false, err: "unterminated group name"} }
-                var nm = src.substring(i + 4, k)
-                var gi = -1
-                for (var q = 0; q < names.length; q++) { if (names[q] == nm) { gi = idxs[q] } }
-                if (gi < 0) { return {ok: false, err: "unknown group name '" + nm + "'"} }
-                if (gi > 9) { return {ok: false, err: "named backreference to group " + gi + " is not supported"} }
-                // Wrapped, so a digit right after the reference cannot be read as
-                // part of the group number.
-                out += "(?:\\" + gi + ")"
+                out += "\\k<" + src.substring(i + 4, k) + ">"
                 i = k + 1
                 continue
             }
-            if (src.substring(i, i + 3) == "(?<" && src.substring(i, i + 4) != "(?<="
-                && src.substring(i, i + 4) != "(?<!") {
-                ngrp = ngrp + 1
-                var j2 = i + 3
-                while (j2 < src.length && src.charAt(j2) != ">") { j2 = j2 + 1 }
-                names.push(src.substring(i + 3, j2))
-                idxs.push(ngrp)
-                out += src.substring(i, j2 + 1)
-                i = j2 + 1
-                continue
-            }
-            if (src.charAt(i + 1) != "?") { ngrp = ngrp + 1 }
             out += ch
             i = i + 1
         }
@@ -1212,15 +1188,6 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function isPyRe(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pyre === true }
     function isPyMatch(v) { return v !== null && v !== undefined && typeof v == "object" && v.__pymatch === true }
-    // The anchored programs behind .match() and .fullmatch().
-    function pyReAnchored(rv, whole) {
-        // Under the x flag a trailing `# comment` runs to END OF LINE, so it would
-        // swallow the wrapper's own closing paren. One newline in x-mode ends it.
-        var sep = rv.__nf.indexOf("x") >= 0 ? "\n" : ""
-        var src = "\\A(?:" + rv.__src + sep + ")"
-        if (whole) { src += "\\z" }
-        return pyReProg(src, rv.__nf)
-    }
     function pyMkMatch(rv, prog, s, m) {
         return {__pymatch: true, re: rv, string: s, prog: prog, m: m}
     }
@@ -1233,15 +1200,15 @@ NotNewline  = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (m == null) { return undefined }
         return pyMkMatch(rv, rv.prog, s, m)
     }
-    // \A pins the match to position 0 of the searched text, so the anchored form
-    // has no way to express Python's `pos` argument; it is refused rather than
-    // silently answering the wrong thing.
+    // re.match / re.fullmatch. These are NOT a search plus a position check: a
+    // fullmatch has to BACKTRACK into an alternation, so re.fullmatch("a|ab", "ab")
+    // is "ab" and not None. The engine's own anchored entry points express both,
+    // including Python's `pos` argument - and unlike the \A(?:...)\z wrapper this
+    // used to build, they have no quarrel with the x flag's trailing comments.
     function pyReAnchoredMatch(rv, s, from, whole) {
-        if (from != 0) { fail("re: the pos argument of match()/fullmatch() is not supported") }
-        var prog = pyReAnchored(rv, whole)
-        var m = rxSearch(prog, s, 0)
+        var m = whole ? rxMatchWhole(rv.prog, s, from) : rxMatchAt(rv.prog, s, from)
         if (m == null) { return undefined }
-        return pyMkMatch(rv, prog, s, m)
+        return pyMkMatch(rv, rv.prog, s, m)
     }
     function pyMGroupIdx(md, k) {
         if (typeof k == "number") {

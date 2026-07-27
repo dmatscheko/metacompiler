@@ -718,6 +718,16 @@ def s22():
     # comment would otherwise swallow the wrapper's own closing paren.
     check("re34", re.fullmatch(r"\d+ # num", "24", re.X).group(0) == "24")
     check("re35", re.match(r"\d+ # num", "24x", re.X).group(0) == "24")
+    # The pos argument: match/fullmatch anchor at pos, but ^ still means the real
+    # start of the string (CPython's documented rule).
+    q = re.compile(r"\d+")
+    check("re36", q.match("ab12", 2).group(0) == "12" and q.match("ab12", 0) == None)
+    check("re37", q.fullmatch("ab12", 2).group(0) == "12")
+    check("re38", re.compile(r"^b").match("ab", 1) == None)
+    # (?P=name) is a named backreference; the group it names may be past number 9.
+    ten = r"(?P<a>x)(?P<b>y)(?P<c>z)(?P<d>1)(?P<e>2)(?P<f>3)(?P<g>4)(?P<h>5)(?P<i>6)(?P<j>7)(?P=j)"
+    check("re39", re.search(ten, "xyz123456777").group(0) == "xyz12345677")
+    check("re40", re.search(ten, "xyz1234567 7") == None)
 
 # ===== END SECTIONS =====
 

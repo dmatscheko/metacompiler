@@ -58,15 +58,12 @@ func pyReFlagStr(n int) string {
 	return s
 }
 
-// pyRePat translates Python's (?P<name>...) and (?P=name) spellings into the
-// (?<name>...) and numbered-backreference forms the neutral engine accepts, and
-// counts capturing groups on the way so (?P=name) can find its number. Escapes and
-// character classes are stepped over, so `[(?P<]` is left alone.
+// pyRePat translates Python's P-spellings into the neutral engine's:
+// (?P<name>...) is (?<name>...) and (?P=name) is the named backreference \k<name>.
+// Escapes and character classes are stepped over, so `[(?P<]` is left alone. An
+// unknown name is the ENGINE's error to report, which is why nothing is counted here.
 func pyRePat(src string) (string, string) {
 	var out strings.Builder
-	var names []string
-	var idxs []int
-	ngrp := 0
 	inCls := false
 	for i := 0; i < len(src); {
 		ch := src[i]
@@ -106,9 +103,6 @@ func pyRePat(src string) (string, string) {
 			if j >= len(src) {
 				return "", "unterminated group name"
 			}
-			ngrp++
-			names = append(names, src[i+4:j])
-			idxs = append(idxs, ngrp)
 			out.WriteString("(?<" + src[i+4:j] + ">")
 			i = j + 1
 			continue
@@ -121,43 +115,9 @@ func pyRePat(src string) (string, string) {
 			if k >= len(src) {
 				return "", "unterminated group name"
 			}
-			nm := src[i+4 : k]
-			gi := -1
-			for q := range names {
-				if names[q] == nm {
-					gi = idxs[q]
-				}
-			}
-			if gi < 0 {
-				return "", "unknown group name '" + nm + "'"
-			}
-			if gi > 9 {
-				return "", "named backreference to group " + string(rune('0'+gi)) + " is not supported"
-			}
-			// Wrapped, so a digit right after the reference cannot be read as part
-			// of the group number.
-			out.WriteString("(?:\\" + string(rune('0'+gi)) + ")")
+			out.WriteString("\\k<" + src[i+4:k] + ">")
 			i = k + 1
 			continue
-		}
-		if strings.HasPrefix(src[i:], "(?<") && !strings.HasPrefix(src[i:], "(?<=") &&
-			!strings.HasPrefix(src[i:], "(?<!") {
-			ngrp++
-			j := i + 3
-			for j < len(src) && src[j] != '>' {
-				j++
-			}
-			if j >= len(src) {
-				return "", "unterminated group name"
-			}
-			names = append(names, src[i+3:j])
-			idxs = append(idxs, ngrp)
-			out.WriteString(src[i : j+1])
-			i = j + 1
-			continue
-		}
-		if i+1 >= len(src) || src[i+1] != '?' {
-			ngrp++
 		}
 		out.WriteByte(ch)
 		i++
@@ -245,30 +205,6 @@ func rxPyReOf(v interface{}) *rxRe {
 	return rxGet(src, nf)
 }
 
-// rxPyAnchored is the program behind .match() / .fullmatch(). Those are NOT a
-// search plus a position check: `re.fullmatch("a|ab", "ab")` has to backtrack INTO
-// the alternation, and a leftmost search answers "a" and would wrongly report no
-// match. Anchoring the pattern is both correct and cheap.
-func (rt *jsrt) rxPyAnchored(rv *jsObject, whole bool) (*rxRe, string) {
-	src, _ := rv.props["__src"].(string)
-	nf, _ := rv.props["__nf"].(string)
-	// Under the x flag a trailing `# comment` runs to END OF LINE, so it would
-	// swallow the wrapper's own closing paren. One newline in x-mode ends it.
-	sep := ""
-	if strings.ContainsRune(nf, 'x') {
-		sep = "\n"
-	}
-	anchored := "\\A(?:" + src + sep + ")"
-	if whole {
-		anchored += "\\z"
-	}
-	re := rxGet(anchored, nf)
-	if !re.ok {
-		rt.fail("re.error: %s", re.err)
-	}
-	return re, anchored
-}
-
 func rxPyMkMatch(rv *jsObject, re *rxRe, anchoredSrc, s string, m *rxMatch) *jsObject {
 	o := rxNewMatchObj(anchoredSrc, re.flags, s, m)
 	o.set("__pymatch", true)
@@ -290,22 +226,29 @@ func (rt *jsrt) rxPySearch(rv *jsObject, s string, from int) interface{} {
 	return rxPyMkMatch(rv, re, src, s, m)
 }
 
+// rxPyAnchoredMatch is re.match / re.fullmatch. These are NOT a search plus a
+// position check: a fullmatch has to BACKTRACK into an alternation, so
+// re.fullmatch("a|ab", "ab") is "ab" and not None. The engine's own anchored entry
+// points express both, including Python's `pos` argument - and unlike the
+// \A(?:...)\z wrapper this used to build, they have no quarrel with the x flag's
+// trailing comments.
 func (rt *jsrt) rxPyAnchoredMatch(rv *jsObject, s string, from int, whole bool) interface{} {
-	// \A pins the match to position 0 of the searched text, so this form has no way
-	// to express Python's `pos` argument; it is refused rather than silently
-	// answering the wrong thing.
-	if from != 0 {
-		rt.fail("re: the pos argument of match()/fullmatch() is not supported")
+	re := rxPyReOf(rv)
+	src, _ := rv.props["__src"].(string)
+	var m *rxMatch
+	var ok bool
+	if whole {
+		m, ok = re.matchWhole([]rune(s), from)
+	} else {
+		m, ok = re.matchAt([]rune(s), from)
 	}
-	re, anchored := rt.rxPyAnchored(rv, whole)
-	m, ok := re.search([]rune(s), 0)
 	if !ok {
 		rt.fail("regexp: step limit exceeded")
 	}
 	if m == nil {
 		return jsUndef
 	}
-	return rxPyMkMatch(rv, re, anchored, s, m)
+	return rxPyMkMatch(rv, re, src, s, m)
 }
 
 // ----- Match accessors -----

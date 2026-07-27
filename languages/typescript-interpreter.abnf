@@ -2609,7 +2609,12 @@ NotFuncHead = :script(~~
         return out
     }
     function jsReNeutral(flags) {
-        var out = ""
+        // "o" is unconditional: in a non-unicode pattern a backslash-digit escape with
+        // no such group is a LEGACY OCTAL character escape (Annex B), not a
+        // backreference - /\1/.test("") is false in node because \1 is U+0001. Under
+        // u/v that spelling is a SyntaxError, which the ReStrictU parse guard already
+        // refuses before anything reaches the engine.
+        var out = "o"
         if (jsReHas(flags, "i")) { out = out + "i" }
         if (jsReHas(flags, "s")) { out = out + "s" }
         if (jsReHas(flags, "m")) { out = out + "m" }
@@ -2721,8 +2726,9 @@ NotFuncHead = :script(~~
             if (typeof at != "number") { at = 0 }
         }
         if (at < 0 || at > s.length) { if (useLast) { rv.lastIndex = 0 } return null }
-        var m = rxSearch(prog, s, at)
-        if (m != null && rv.sticky && m.begin != at) { m = null }
+        // Sticky is the engine's own anchored entry point: rxMatchAt tries ONE
+        // position instead of searching forward and then throwing the answer away.
+        var m = rv.sticky ? rxMatchAt(prog, s, at) : rxSearch(prog, s, at)
         if (m == null) { if (useLast) { rv.lastIndex = 0 } return null }
         if (useLast) { rv.lastIndex = m.end }
         return reResult(rv, s, m)

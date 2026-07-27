@@ -182,6 +182,9 @@ type rxNode struct {
 	max    int
 	greedy bool
 	gidx   int
+	// bname carries the NAME of a \k<name> backreference until rxCompile resolves
+	// it to a group number; it stays "" for every other node.
+	bname string
 }
 
 func rxNewNode(t string) *rxNode {
@@ -196,8 +199,121 @@ type rxSt struct {
 	ngroups    int
 	names      []string
 	nameGroups []int
-	ext        bool
-	dotall     bool
+	// pending holds the \k<name> nodes still waiting for their group number.
+	pending []*rxNode
+	ext     bool
+	dotall  bool
+	// octal is the o flag (JavaScript Annex B legacy octal escapes), and ntotal the
+	// capturing-group count from the rxCountGroups pre-pass.
+	octal  bool
+	ntotal int
+}
+
+// rxIsMetaCh answers whether a character has to be backslashed to stay a literal.
+// Whitespace and # are included because the x (extended) flag would otherwise drop
+// them, and - because it is a range operator inside a character class.
+func rxIsMetaCh(ch rune) bool {
+	return strings.ContainsRune("\\^$.|?*+()[]{}-#/ \t\n\r\f\v", ch)
+}
+
+// rxExpandQuotes rewrites every \Q...\E region into the equivalent escaped text, as a
+// PRE-PASS over the pattern rather than a parser mode. An unterminated \Q runs to the
+// end of the pattern (Java's rule). Doing it here means a quantifier after \E binds to
+// the LAST quoted character - \Qab\E+ is ab+ - which is also Java's rule, and it keeps
+// the parser itself free of a quoting state that every rule would have to respect.
+func rxExpandQuotes(p []rune) []rune {
+	if !strings.Contains(string(p), `\Q`) {
+		return p
+	}
+	var out []rune
+	for i := 0; i < len(p); {
+		if p[i] != '\\' || i+1 >= len(p) {
+			out = append(out, p[i])
+			i++
+			continue
+		}
+		if p[i+1] != 'Q' {
+			out = append(out, p[i], p[i+1])
+			i += 2
+			continue
+		}
+		i += 2
+		for i < len(p) {
+			if p[i] == '\\' && i+1 < len(p) && p[i+1] == 'E' {
+				i += 2
+				break
+			}
+			if rxIsMetaCh(p[i]) {
+				out = append(out, '\\')
+			}
+			out = append(out, p[i])
+			i++
+		}
+	}
+	return out
+}
+
+// rxCountGroups is a cheap PRE-PASS over the pattern, counting the capturing groups
+// before the real parse starts. A backslash-digit escape can only be read correctly
+// once the total is known: \1 in a pattern with one group is a backreference, and in a
+// pattern with none it is either a legacy octal escape (JavaScript, flag o) or an
+// error (everywhere else) - and the octal reading has to CONSUME the following digits,
+// which the parser cannot undo after the fact.
+func rxCountGroups(p []rune) int {
+	n := 0
+	inCls := false
+	for i := 0; i < len(p); {
+		c := p[i]
+		if c == '\\' {
+			i += 2
+			continue
+		}
+		if inCls {
+			if c == ']' {
+				inCls = false
+			}
+			i++
+			continue
+		}
+		if c == '[' {
+			inCls = true
+			i++
+			continue
+		}
+		if c != '(' {
+			i++
+			continue
+		}
+		if i+1 >= len(p) || p[i+1] != '?' {
+			n++
+			i++
+			continue
+		}
+		// (?<name> and (?'name' capture; (?<= and (?<! are lookbehind, and every
+		// other (? form is non-capturing.
+		var c2, c3 rune
+		if i+2 < len(p) {
+			c2 = p[i+2]
+		}
+		if i+3 < len(p) {
+			c3 = p[i+3]
+		}
+		if c2 == '\'' || (c2 == '<' && c3 != '=' && c3 != '!') {
+			n++
+		}
+		i += 2
+	}
+	return n
+}
+
+// nameIdx is the group NUMBER a name was declared for, or -1.
+func (st *rxSt) nameIdx(name string) int {
+	for i, n := range st.names {
+		if n == name {
+			return st.nameGroups[i]
+		}
+	}
+	return -1
 }
 
 func (st *rxSt) fail(msg string) {
@@ -321,7 +437,35 @@ func (st *rxSt) esc(inClass bool) rxEscRes {
 		return rxEscRes{ch: rune(v)}
 	}
 	if !inClass && c >= '1' && c <= '9' {
-		return rxEscRes{kind: 2, ch: c - '0'}
+		// A backreference only if the pattern HAS that group (rxCountGroups counted
+		// them before the parse began).
+		if int(c-'0') <= st.ntotal {
+			return rxEscRes{kind: 2, ch: c - '0'}
+		}
+		if !st.octal {
+			st.fail("invalid group reference " + string(c))
+			return res
+		}
+		// JavaScript Annex B. 8 and 9 are not octal digits, so they are an identity
+		// escape; 0-3 admit three octal digits and 4-7 only two, which is what makes
+		// node read /\400/ as the two characters \40 and "0".
+		if c > '7' {
+			return rxEscRes{ch: c}
+		}
+		oval := c - '0'
+		omax := 2
+		if c <= '3' {
+			omax = 3
+		}
+		for ogot := 1; ogot < omax && st.i < st.n; ogot++ {
+			oc := st.p[st.i]
+			if oc < '0' || oc > '7' {
+				break
+			}
+			oval = oval*8 + (oc - '0')
+			st.i++
+		}
+		return rxEscRes{ch: oval}
 	}
 	return rxEscRes{ch: c}
 }
@@ -510,6 +654,16 @@ func (st *rxSt) parseAtom() *rxNode {
 		var nxt rune
 		if st.i+1 < st.n {
 			nxt = st.p[st.i+1]
+		}
+		// \k<name>: a NAMED backreference. The group it names may be declared LATER
+		// in the pattern (a forward reference is legal), so the node is parked on
+		// st.pending and resolved once the whole pattern has been read.
+		if nxt == 'k' && st.i+2 < st.n && st.p[st.i+2] == '<' {
+			st.i += 3
+			kb := rxNewNode("bref")
+			kb.bname = st.readGroupName('>')
+			st.pending = append(st.pending, kb)
+			return kb
 		}
 		if nxt == 'b' || nxt == 'B' || nxt == 'A' || nxt == 'z' || nxt == 'Z' {
 			st.i += 2
@@ -831,9 +985,27 @@ func rxCompile(pattern, flags string) *rxRe {
 	dotall := strings.ContainsRune(flags, 's')
 	multi := strings.ContainsRune(flags, 'm')
 	ext := strings.ContainsRune(flags, 'x')
-	st := &rxSt{p: []rune(pattern), ext: ext, dotall: dotall}
+	octal := strings.ContainsRune(flags, 'o')
+	quoting := strings.ContainsRune(flags, 'q')
+	// \Q...\E is expanded before anything else looks at the text, so neither the group
+	// counter nor the parser needs a quoting mode. re.src keeps the ORIGINAL pattern,
+	// which is what a language's .source / inspect reports.
+	pat := []rune(pattern)
+	if quoting {
+		pat = rxExpandQuotes(pat)
+	}
+	st := &rxSt{p: pat, ext: ext, dotall: dotall, octal: octal}
 	st.n = len(st.p)
+	st.ntotal = rxCountGroups(st.p)
 	ast := st.parseAlt()
+	// Resolve every \k<name> now that the whole name table is known.
+	for _, nd := range st.pending {
+		gi := st.nameIdx(nd.bname)
+		if gi < 0 {
+			st.fail("unknown group name '" + nd.bname + "'")
+		}
+		nd.gidx = gi
+	}
 	if st.err == "" && st.i < st.n {
 		if st.p[st.i] == ')' {
 			st.fail("unmatched ) in pattern")
@@ -862,6 +1034,9 @@ func rxCompile(pattern, flags string) *rxRe {
 type rxRunSt struct {
 	steps int
 	over  bool
+	// mustEnd is -1 for an ordinary match and the required end position for a
+	// whole-input match (see rxRe.matchWhole).
+	mustEnd int
 }
 
 func (re *rxRe) assertOK(text []rune, kind, sp int) bool {
@@ -1006,6 +1181,15 @@ func (re *rxRe) run(text []rune, pcIn, spIn int, caps, marks []int, st *rxRunSt)
 			pc++
 			sp += length
 		case rxOpMatch:
+			// matchWhole CONSTRAINS THE RUN rather than rewriting the pattern: a
+			// match that stops short of mustEnd is refused right here, so the VM
+			// keeps backtracking for a longer one. Rewriting the pattern to
+			// \A(?:...)\z would work too, but every caller that tried it had to
+			// rediscover that under the x flag a trailing # comment swallows the
+			// wrapper's own closing paren. Constraining the run has no such edge.
+			if st.mustEnd >= 0 && sp != st.mustEnd {
+				return -1
+			}
 			return sp
 		default:
 			return -1
@@ -1026,25 +1210,59 @@ func (re *rxRe) search(text []rune, start int) (*rxMatch, bool) {
 	if from < 0 {
 		from = 0
 	}
-	nslots := 2 * (re.ngroups + 1)
 	for at := from; at <= len(text); at++ {
-		caps := make([]int, nslots)
-		for i := range caps {
-			caps[i] = -1
-		}
-		marks := make([]int, re.nmarks)
-		for i := range marks {
-			marks[i] = -1
-		}
-		st := &rxRunSt{}
-		if end := re.run(text, 0, at, caps, marks, st); end >= 0 {
-			return &rxMatch{begin: caps[0], end: caps[1], caps: caps}, true
-		}
-		if st.over {
+		m, ok := re.attempt(text, at, -1)
+		if !ok {
 			return nil, false
+		}
+		if m != nil {
+			return m, true
 		}
 	}
 	return nil, true
+}
+
+// attempt runs the program ONCE, starting at `at`. mustEnd is -1 for an ordinary
+// match and the required end position for a whole-input match; it is the one knob
+// search, matchAt and matchWhole differ by.
+func (re *rxRe) attempt(text []rune, at, mustEnd int) (*rxMatch, bool) {
+	nslots := 2 * (re.ngroups + 1)
+	caps := make([]int, nslots)
+	for i := range caps {
+		caps[i] = -1
+	}
+	marks := make([]int, re.nmarks)
+	for i := range marks {
+		marks[i] = -1
+	}
+	st := &rxRunSt{mustEnd: mustEnd}
+	if end := re.run(text, 0, at, caps, marks, st); end >= 0 {
+		return &rxMatch{begin: caps[0], end: caps[1], caps: caps}, true
+	}
+	if st.over {
+		return nil, false
+	}
+	return nil, true
+}
+
+// matchAt: the match must BEGIN at `at` - no scanning forward. This is what a
+// sticky (JavaScript /y/) match and Python's re.match(pattern, s, pos) want, and it
+// is strictly cheaper than searching and then rejecting begin != at.
+func (re *rxRe) matchAt(text []rune, at int) (*rxMatch, bool) {
+	if at < 0 || at > len(text) {
+		return nil, true
+	}
+	return re.attempt(text, at, -1)
+}
+
+// matchWhole: the match must cover the WHOLE input. This cannot be a search plus a
+// length check - `(a|ab)` against "ab" has to BACKTRACK into the alternation, and a
+// leftmost search answers "a" and would wrongly report no match.
+func (re *rxRe) matchWhole(text []rune, at int) (*rxMatch, bool) {
+	if at < 0 || at > len(text) {
+		return nil, true
+	}
+	return re.attempt(text, at, len(text))
 }
 
 func (re *rxRe) group(text []rune, m *rxMatch, i int) (string, bool) {
