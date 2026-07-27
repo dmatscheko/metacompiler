@@ -278,9 +278,20 @@ expectations_for() {
             # Because the signal is exact, kotlin gets the HARD 'reject'
             # expectation (like test262's fail/), not the informational
             # 'reject?': we are scored on actually refusing these.
+            # Two companion FORMATS, and only one of them can hold a
+            # PsiErrorElement. testData/psi/ ships a parse TREE; testData/lexer/
+            # ships a TOKEN DUMP, where the lexer records a rejected character
+            # as BAD_CHARACTER (and an unterminated string as DANGLING_NEWLINE)
+            # and the word PsiErrorElement never appears. Testing only for
+            # PsiErrorElement therefore demanded that we parse every lexer file,
+            # including the ones Kotlin itself refuses - which is how the
+            # vertical tab, NEL, LS and PS files came to look like grammar gaps
+            # when in fact kotlinc rejects them and so should we. (Only the form
+            # feed is real Kotlin whitespace: pageBreak.txt absorbs it into
+            # WHITE_SPACE. Both VT and FF are legal INSIDE a string literal.)
             while IFS= read -r f; do
                 t="${f%.$ext}.txt"
-                if [ -f "$t" ] && grep -q 'PsiErrorElement' "$t"; then
+                if [ -f "$t" ] && grep -qE 'PsiErrorElement|BAD_CHARACTER|DANGLING_NEWLINE' "$t"; then
                     printf 'reject|%s\n' "$f"
                 else
                     printf 'parse|%s\n' "$f"
