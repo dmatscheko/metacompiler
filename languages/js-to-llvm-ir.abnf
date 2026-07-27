@@ -196,7 +196,7 @@ For         <~~ push(makeFor(takeAll())) ~~>
             = KwFor "(" [ ForInit ] ";" [ ForCond ] ";" [ ForPost ] ")" NestedStatement ;
 ForInit     <~~ push({k:"init", t:pop()}) ~~> = ForVar | ForExpr ;
 ForVar      = VarDeclCore ;
-ForExpr     <~~ push(exprToClause(pop())) ~~> = Expression ;
+ForExpr     <~~ push(exprToClause(pop())) ~~> = NotLetBracket Expression ;
 ForCond     <~~ push({k:"cond", t:pop()}) ~~> = Expression ;
 ForPost     <~~ push({k:"post", t:exprToClause(pop())}) ~~> = Expression ;
 
@@ -254,7 +254,7 @@ Empty       <~~ push(function(b) { return b }) ~~>
             = ";" ;
 
 ExprStmt    <~~ push(exprToStmt(pop())) ~~>
-            = Expression [ ";" ] ;
+            = NotLetBracket Expression [ ";" ] ;
 
 // Every expression production pushes exactly one thunk: function(block) -> {b, v}.
 // The comma (sequence) operator is ACCEPTED but not lowered. With no comma this level
@@ -1409,6 +1409,36 @@ NotThis     = :script(~~
 // the for-OF head, where the spec says a target starting with 'let' is ALWAYS the
 // declaration form, making 'for (let of y)' and 'for (let.a of 0)' syntax errors. Same
 // shape as NotThis: the impossible token FAILS the guard when the word ahead is 'let'.
+// The 'let [' lookahead restriction. The spec forbids an ExpressionStatement and a
+// C-style for-head from STARTING with 'let [' - ExpressionStatement carries
+// '[lookahead notin { {, function, async function, class, let [ }]' - because that
+// spelling is always the start of a lexical declaration with an array binding pattern.
+// Without the restriction 'let [a = let];' quietly reads as the index expression
+// 'let[a = let]' and parses, where the spec makes it the syntax error it is: a
+// destructuring declaration must have an initializer.
+//
+// Only those two positions are restricted. 'let' stays an ordinary identifier
+// everywhere else in sloppy code, so 'a = let[0]' and 'for (a in let) {}' keep working.
+// Returns the impossible token to FAIL, undefined to succeed.
+NotLetBracket = :script(~~
+    (function() {
+        var i = 0, cc = c.peek(0)
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        if (cc !== 108 || c.peek(i + 1) !== 101 || c.peek(i + 2) !== 116) { return undefined }
+        i = i + 3
+        cc = c.peek(i)
+        // Glued to an identifier character it is a longer name ('lets', 'let_').
+        if ((cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || cc === 95 || cc === 36 || (cc >= 97 && cc <= 122)) { return undefined }
+        while (cc === 32 || cc === 9 || cc === 10 || cc === 13 || cc === 11 || cc === 12) {
+            i = i + 1
+            cc = c.peek(i)
+        }
+        return (cc === 91) ? abnf.newToken("\x01let-bracket", 0) : undefined
+    })()
+~~) ;
 NotLet      = :script(~~
     (function() {
         var i = 0, cc = c.peek(0)

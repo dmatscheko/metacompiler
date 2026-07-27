@@ -10,6 +10,13 @@ package abnf
 //   - unreachable: a production is defined but can never be reached from the
 //     start rule (following identifiers, including the ones in command
 //     parameters like :whitespace(Whitespace)). A warning - dead grammar.
+//   - dupfunc: two top-level functions in the grammar's script share a name.
+//     This one is not a name-consistency nicety, it is a trap that has cost
+//     hours: the second declaration wins as a VALUE, but a tag that was bound
+//     to the first keeps pointing at it, so a production silently executes the
+//     WRONG tag. The observed symptom is a correct parse tree whose nodes run
+//     each other's actions - nothing points at the duplicated name, and the
+//     other checks here all pass. An error, because no grammar wants it.
 //
 // The check walks the a-grammar purely by NAME, so it needs no reference
 // resolution pass and never mutates a rule. Run it on a FULLY ASSEMBLED grammar
@@ -33,7 +40,9 @@ type VerifyIssue struct {
 }
 
 // IsError reports whether the issue breaks the grammar (vs. a mere warning).
-func (vi VerifyIssue) IsError() bool { return vi.Kind == "undefined" || vi.Kind == "badrange" }
+func (vi VerifyIssue) IsError() bool {
+	return vi.Kind == "undefined" || vi.Kind == "badrange" || vi.Kind == "dupfunc"
+}
 
 // Message renders the issue as a human sentence (without the location).
 func (vi VerifyIssue) Message() string {
@@ -44,6 +53,9 @@ func (vi VerifyIssue) Message() string {
 		return "production '" + vi.Name + "' is defined but never reached from the start rule (dead)"
 	case "badrange":
 		return "malformed range: the bound " + quote(vi.Name) + " must be exactly one " + vi.Detail
+	case "dupfunc":
+		return "the script declares function '" + vi.Name + "' twice (first at line " + vi.Detail +
+			"): a tag bound to the earlier one keeps calling it, so a production silently runs the wrong tag"
 	}
 	return vi.Kind + " " + vi.Name
 }
@@ -99,6 +111,91 @@ func ProductionNames(aGrammar *r.Rules) map[string]bool {
 	return names
 }
 
+// dupScriptFuncs finds top-level functions declared twice in the grammar's
+// script blocks.
+//
+// Why this is worth a static check rather than a comment: redeclaring a name in
+// the script does NOT produce a JS error, and it does not corrupt the parse
+// tree. What it corrupts is which tag a production runs - a rule bound to the
+// first declaration keeps calling it while the name now resolves to the second,
+// so (real example) a Method node executed the Ctor tag and every class reported
+// "constructor name does not match class". Every symptom pointed at the grammar
+// rules; the actual cause was a duplicated function name several hundred lines
+// away, and finding it took a bisect of the whole script.
+//
+// Scope: only TOP-LEVEL declarations, which in every grammar here sit at four
+// spaces of indent inside the script block (a nested helper is at eight or more,
+// and shadowing one inside a function body is ordinary JS). Matching by
+// indentation keeps this to the scope where the hazard actually lives, at the
+// cost of missing a top-level function written at an unusual indent - an
+// acceptable trade for zero false positives on the existing 26 grammars.
+func dupScriptFuncs(source string) []VerifyIssue {
+	if source == "" {
+		return nil
+	}
+	firstAt := map[string]int{}
+	var issues []VerifyIssue
+	for i, line := range strings.Split(source, "\n") {
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if indent == 0 || indent > 4 {
+			continue
+		}
+		rest := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(rest, "function ") {
+			continue
+		}
+		name := strings.TrimSpace(rest[len("function "):])
+		if p := strings.IndexAny(name, "( \t"); p >= 0 {
+			name = name[:p]
+		}
+		if name == "" || !isIdentName(name) {
+			continue
+		}
+		if prev, seen := firstAt[name]; seen {
+			issues = append(issues, VerifyIssue{
+				Kind: "dupfunc", Name: name, Line: i + 1,
+				Detail: itoa(prev),
+			})
+			continue
+		}
+		firstAt[name] = i + 1
+	}
+	return issues
+}
+
+// isIdentName reports whether s is a plain JS identifier (letters, digits, '_',
+// '$', not starting with a digit) - enough to keep the scan off comment text.
+func isIdentName(s string) bool {
+	for i, c := range s {
+		switch {
+		case c == '_' || c == '$' ||
+			(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+		case c >= '0' && c <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// itoa renders a small non-negative int without pulling in strconv here.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}
+
 // Verify checks an (assembled) a-grammar and returns the issues found, sorted by
 // source line. source is the grammar text the a-grammar was compiled from,
 // scanned to locate each name's line; pass "" to omit line numbers.
@@ -132,6 +229,7 @@ func Verify(aGrammar *r.Rules, source string, ownNames map[string]bool) []Verify
 		return fallback()
 	}
 	var issues []VerifyIssue
+	issues = append(issues, dupScriptFuncs(source)...)
 
 	// Checks 1 & 2 walk every rule once:
 	//   - undefined: an Identifier whose name has no production. One issue per
