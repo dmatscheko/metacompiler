@@ -1,28 +1,49 @@
-:title("Bash interpreter (subset)") ;
-:description("Parses a bounded, honest subset of Bash and executes it directly during the
+:title("Bash interpreter") ;
+:description("Parses a large practical subset of Bash and executes it directly during the
 compile walk, without generating code. Every value is a string (Bash's only data type);
 integer arithmetic converts on demand. Commands return an integer exit status (0 = success,
 like the shell); a 'return' inside a function yields the wrapper {ret: n} that the enclosing
-statement thunks pass on. echo writes to stdout, and 'exit N' ends the run with code N, so a
-test script is self checking: it echoes PASS/FAIL lines and exits with the failure count.
+statement thunks pass on, and an 'exit' yields the same wrapper marked isExit, so it unwinds
+past callers but is caught by a subshell. echo writes to stdout, and 'exit N' ends the run
+with code N, so a test script is self checking: it echoes PASS/FAIL lines and exits with the
+failure count.
 
-Supported subset:
-  - variable assignment name=value (no spaces around =), expansion $name and ${name}
-  - strings: double \"...\" with $var / ${var} / $((..)) interpolation, single '...' literal
-  - echo with multiple space-joined args (trailing newline; echo -n suppresses it)
-  - integer arithmetic $(( expr )): + - * / %, unary minus, parentheses, comparisons
-    < > <= >= == != (result 1 or 0); bare names and $names are read as operands
-  - if/elif/else/fi and while, both testing a command list's status; the test builtin
-    [ cond ] with -eq -ne -lt -le -gt -ge (ints) and = == != -z -n (strings)
-  - && and || between simple commands (short circuit on exit status)
-  - for name in w1 w2 ...; do ...; done  and  while [ cond ]; do ...; done
-  - functions: name() { ...; } definitions and calls; positional $1..$9, $#, and $? work
-  - true / false / : builtins, exit N, return N, and # line comments
+Supported:
+  - assignment name=value, expansion $name, and the whole ${...} family that does not need
+    a pattern: ${name}, ${#name}, ${!name}, ${v:-d} ${v-d} ${v:=d} ${v:+a} ${v:?m}
+  - quoting: double \"...\" with interpolation, single '...', $'...' ANSI-C escapes, an
+    unquoted backslash escape and a backslash-newline line continuation
+  - command substitution $(...) and `...`, nested, with the trailing newlines stripped;
+    v=$(cmd) leaves cmd's status in $?
+  - arithmetic $(( )) and the (( )) command and let: the full operator set (** * / % + -
+    << >> comparisons == != & ^ | && || ?: assignment forms ++ -- and the comma), with
+    hexadecimal, octal and BASE#DIGITS literals
+  - if/elif/else, while, until, for name in words, for (( init; cond; step )), case with
+    glob patterns and the ;; ;& ;;& terminators, and [[ ]] conditionals (glob == and !=,
+    string and integer comparisons, ! && || and parentheses)
+  - the test builtin, [ ... ] and test ..., as a real expression: unary and binary
+    operators, ! -a -o and parenthesized groups
+  - functions in both spellings, name() and 'function' name; positional $1.., $#, $*, $@,
+    $?, $FUNCNAME; local with REAL dynamic scoping (saved and restored per call frame),
+    plus declare/typeset/export/readonly and unset
+  - pipelines with |, ! to negate a pipeline's status, && and || lists; each pipeline stage
+    runs with its stdout captured and handed to the next stage as standard input, and the
+    read builtin consumes it
+  - subshells ( LIST ) with variable, positional-parameter and exit isolation, and brace
+    groups { LIST; } that run in the current shell
+  - redirections >, >>, <, >&, <&, &>, >| and the here-string <<< ; and shift
 
-Deliberately OUT OF SCOPE (avoid them): pipes |, redirection > <, real command substitution
-$(cmd), subshells, globbing, brace/tilde expansion, arrays, case, word splitting of an
-expanded variable, and external commands. A leading # always starts a comment, so do not put
-a bare # inside an unquoted word (quote it).") ;
+There is NO filesystem behind a grammar run, so the file predicates (-e -f -d ...) answer
+from a small model of the standard paths (/dev/null and friends exist, / and /tmp and a few
+others are directories, everything else is absent), and an output redirection DISCARDS the
+output instead of writing a file, while an input redirection other than a here-string is
+end of file at once.
+
+Still OUT OF SCOPE: here-documents (<< and <<-), arrays (indexed and associative), brace
+and tilde expansion, the pattern-based ${v#p} ${v%p} ${v/p/r} and case-conversion forms,
+the =~ regex operator, word splitting of an unquoted expansion, set -e / -u / traps,
+printf, eval, and external commands. A leading # always starts a comment, so do not put a
+bare # inside an unquoted word (quote it).") ;
 
 
 // --- main rules
@@ -41,7 +62,7 @@ OptSep      = [ Sep ] ;
 Sep         = SepTok { SepTok } ;
 SepTok      = ";" | "\n" ;
 
-Statement   = IfStmt | ForStmt | WhileStmt | FuncDef | AndOrList ;
+Statement   = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef | AndOrList ;
 
 // A brace / keyword delimited body: at least one statement. The trailing OptSep swallows the
 // final ; or newline before the closing keyword (fi / done / }), and a reserved word in
@@ -62,9 +83,31 @@ ElifClause  <~~ push(mkCond(takeAll())) ~~>
 ElseClause  <~~ push(mkElse(pop())) ~~>
             = KwElse CompoundList ;
 
-// while LIST; do LIST; done
+// case WORD in [(] PAT [| PAT]... ) LIST ;; ... esac
+// The body of a clause is an ordinary statement list, except that its separator run must not
+// swallow the leading ";" of the ";;" that ends the clause - which is what NotCaseTerm guards.
+CaseStmt    <~~ push(makeCase(takeAll())) ~~>
+            = KwCase Word KwIn CaseSepOpt { CaseClause } KwEsac ;
+CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
+            = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
+CasePats    <~~ push({pats: takeAll()}) ~~> = Word { "|" Word } ;
+CaseBody    <~~ push(makeSeq(takeAll())) ~~>
+            = CaseSepOpt [ Statement { CaseSep Statement } CaseSepOpt ] ;
+CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
+CaseSepOpt  = [ CaseSep ] ;
+CaseTerm    = CaseNl CaseTermTok ;
+CaseNl      = { "\n" } ;
+CaseTermTok <~~ push({cterm: up.in}) ~~> = ";;&" | ";;" | ";&" ;
+
+// while LIST; do LIST; done   /   until LIST; do LIST; done (the negated condition)
 WhileStmt   <~~ push(makeWhile(takeAll())) ~~>
             = KwWhile CompoundList KwDo CompoundList KwDone ;
+UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
+            = KwUntil CompoundList KwDo CompoundList KwDone ;
+
+// for (( init; cond; step )); do LIST; done
+CForStmt    <~~ push(makeCFor(takeAll())) ~~>
+            = KwFor "((" :whitespace(Whitespace) ArList ";" ArList ";" ArList "))" OptSep KwDo CompoundList KwDone ;
 
 // for NAME in WORD...; do LIST; done  -- each word is one iteration value (no re-splitting).
 ForStmt     <~~ push(makeFor(takeAll())) ~~>
@@ -74,9 +117,10 @@ ForName     <~~ push({fname: up.in}) ~~>
 ForWords    <~~ push({words: takeAll()}) ~~>
             = { Word } ;
 
-// NAME() { LIST; }  -- registers the body thunk when the definition statement runs.
+// NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
-            = FuncName "(" ")" OptSep "{" CompoundList "}" ;
+            = FuncDefHead OptSep "{" CompoundList "}" ;
+FuncDefHead = ( KwFunction FuncName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
 FuncName    <~~ push({fname: up.in}) ~~>
             = Name ;
 
@@ -86,12 +130,53 @@ Name        = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 // --- simple commands, && / || lists and assignments
 
 // cmd1 && cmd2 || cmd3 : left to right, short circuit on the running exit status.
-AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
-            = Command { AndOrOp Command } ;
 AndOrOp     <~~ push({op: up.in}) ~~>
             = "&&" | "||" ;
 
-Command     = Assignment | SimpleCommand ;
+// A pipeline is what && / || and ! actually operate on. Each stage runs with its stdout
+// captured and handed to the next stage as its standard input.
+AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
+            = Pipeline { AndOrOp Pipeline } ;
+Pipeline    <~~ push(makePipeline(takeAll())) ~~>
+            = [ BangOp ] Command { PipeOp Command } ;
+BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
+PipeOp      = "|" NotBar ;
+
+// "((" must be tried before "(" or an arithmetic command parses as nested subshells.
+Command     = ArithCmd | CondCmd | Subshell | BraceGroup | LetCmd | DeclCommand | Assignment | SimpleCommand ;
+
+// ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
+Subshell    <~~ push(makeSubshell(pop())) ~~> = "(" CompoundList ")" [ RedirList ] ;
+// { LIST; } is a plain grouping: it runs in the CURRENT shell.
+BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" CompoundList "}" [ RedirList ] ;
+// (( expr )) as a command: status 0 when the value is non-zero.
+ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+// [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
+CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
+
+RedirList   = Redir { Redir } ;
+
+// let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
+LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetArg { LetArg } ;
+KwLet       = "let" KwEnd ;
+LetArg      = LetDq | LetSq | ArAssign ;
+LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
+LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
+
+// local / declare / typeset / export / readonly [-flags] NAME[=WORD] ...
+// Spelled as its own production (rather than an ordinary command with word arguments)
+// because the declared NAME has to be known statically: the compiler needs it to pick a
+// variable slot, and `local` needs it to record the save entry for the current call frame.
+DeclCommand <~~ push(makeDecl(takeAll())) ~~>
+            = DeclKw { DeclFlag } { DeclItem } ;
+DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
+DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
+DeclFlag    <~~ push({dflag: up.in}) ~~> = "-" :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
+DeclFlagCh  = "a" | "A" | "i" | "r" | "x" | "u" | "l" | "g" | "n" | "p" | "f" | "F" ;
+DeclItem    = DeclAssign | DeclName ;
+DeclAssign  <~~ push(mkDeclItem(takeAll())) ~~>
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() "=" :whitespace() [ Word ] ;
+DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 
 // name=value : the = must stick to the name (no surrounding spaces), so the disable
 // (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
@@ -103,7 +188,17 @@ AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
 SimpleCommand <~~ push(makeSimpleCommand(takeAll())) ~~>
-            = NotReserved Word { Word } ;
+            = NotReserved Word { CmdSuffix } ;
+CmdSuffix   = Redir | Word ;
+
+// Redirections. Here-documents (<< and <<-) are NOT supported, so `<` declines a second "<"
+// rather than mis-parsing a here-document as two input redirections.
+Redir       <~~ push(mkRedir(takeAll())) ~~>
+            = [ IoNum ] RedirOp [ Word ] ;
+IoNum       <~~ push({iofd: up.in}) ~~> = "0"..."9" :whitespace() { "0"..."9" } ;
+RedirOp     <~~ push({redir: up.in}) ~~> = RedirTok ;
+RedirTok    = "<<<" | "&>>" | "&>" | ">>" | ">&" | ">|" | "<&" | ">" | LtOne ;
+LtOne       = "<" NotLt ;
 
 
 // --- words: a run of segments with NO whitespace between them ---------------------
@@ -113,18 +208,28 @@ SimpleCommand <~~ push(makeSimpleCommand(takeAll())) ~~>
 
 Word        <~~ push(mkWord(takeAll())) ~~>
             = WordSeg :whitespace() { WordSeg } ;
-WordSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | BareSeg ;
+WordSeg     = SqSeg | DqSeg | AnsiSeg | ExpSeg | LineCont | EscSeg | BareSeg ;
+
+// A backslash immediately followed by a newline is a line continuation: both vanish.
+LineCont    <~~ push(makeConst("")) ~~> = "\\" "\n" ;
+
+// $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN ...).
+AnsiSeg     = "$'" :whitespace() AnsiBody "'" ;
+AnsiBody    <~~ push(makeConst(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
+AnsiEsc     = "\\" AnyCh ;
+AnsiLit     = !@+"'\\" ;
 
 // 'single quoted' : everything up to the next ' is literal (no escapes, may span lines).
 SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 
 // "double quoted" : literal runs, escapes and $ expansions concatenated.
 DqSeg       <~~ push(mkWord(takeAll())) ~~>
-            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
-            = !@+"\"$\\" ;
+            = !@+"\"$\\`" ;
 DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
             = "\\" AnyCh ;
+DqCont      <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 
 // An unquoted \x escape: the backslash is dropped, the next char is literal (\  -> space).
 EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
@@ -139,13 +244,40 @@ AnyCh       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // --- $ expansions -----------------------------------------------------------------
 
-ExpSeg      = ArithExp | DollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+ExpSeg      = ArithExp | CmdSub | BackSub | DollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+
+// $( LIST ) and the older `LIST` : run the list with stdout captured, and the value of the
+// word segment is that output with its trailing newlines removed (exactly like the shell).
+// The list is parsed with the normal whitespace rule; the enclosing word's "no skipping"
+// state is restored automatically when the production returns.
+CmdSub      <~~ push(mkCmdSub(pop())) ~~>
+            = "$(" :whitespace(Whitespace) CompoundList ")" ;
+BackSub     <~~ push(mkCmdSub(pop())) ~~>
+            = "`" :whitespace(Whitespace) CompoundList "`" ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
 ArithExp    <~~ push(mkArith(pop())) ~~>
-            = "$((" :whitespace(Whitespace) ArCmp "))" ;
+            = "$((" :whitespace(Whitespace) ArList "))" ;
 
-DollarBrace = "${" VarName <~~ push(mkVarRef(up.in)) ~~> "}" ;
+// ${...} : the whole parameter-expansion family. Inside the braces whitespace is NOT
+// skipped (a default word may contain spaces), and the enclosing state is restored on return.
+DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
+            = "${" :whitespace() PeBody "}" ;
+PeBody      = PeLen | PeInd | PeOpForm | PePlain ;
+PeLen       <~~ push({pe: "len"}) ~~> = "#" PeName ;
+PeInd       <~~ push({pe: "ind"}) ~~> = "!" PeName ;
+PeOpForm    = PeName PeOp [ BraceWord ] ;
+PePlain     = PeName ;
+PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
+PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
+PeIdent     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+PeDigits    = "0"..."9" { "0"..."9" } ;
+// Longest first: ":-" must be tried before "-" (see the ordered-choice rule).
+PeOp        <~~ push({op: up.in}) ~~> = ":-" | ":=" | ":?" | ":+" | "-" | "=" | "?" | "+" ;
+// A word inside ${...}: anything up to the closing brace, expansions included.
+BraceWord   <~~ push(mkWord(takeAll())) ~~> = BraceSeg { BraceSeg } ;
+BraceSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | BraceBare ;
+BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
 DollarSpecial = DollarHash | DollarQ ;
@@ -157,30 +289,89 @@ VarName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 ArgDigit    = "0"..."9" ;
 
 
-// --- $(( )) arithmetic: precedence comparison < additive < multiplicative < unary --------
+// --- $(( )) arithmetic: the full bash operator set ---------------------------------
+// Precedence, loosest first: , then assignment, ?:, ||, &&, |, ^, &, == !=, comparison,
+// shifts, + -, * / %, ** (right associative), unary, primary.
 
-ArCmp       <~~ push(foldBin(takeAll())) ~~>
-            = ArAdd { ArCmpOp ArAdd } ;
-ArCmpOp     <~~ push({op: up.in}) ~~> = "<=" | ">=" | "==" | "!=" | "<" | ">" ;
-ArAdd       <~~ push(foldBin(takeAll())) ~~>
-            = ArMul { ArAddOp ArMul } ;
-ArAddOp     <~~ push({op: up.in}) ~~> = "+" | "-" ;
-ArMul       <~~ push(foldBin(takeAll())) ~~>
-            = ArUnary { ArMulOp ArUnary } ;
-ArMulOp     <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
-ArUnary     = ArNeg | ArPrimary ;
-ArNeg       <~~ push(mkNeg(pop())) ~~> = "-" ArUnary ;
+ArList      <~~ push(foldComma(takeAll())) ~~> = ArAssign { "," ArAssign } ;
+ArAssign    = ArAssignForm | ArCond ;
+ArAssignForm <~~ push(mkArAssign(takeAll())) ~~> = ArLhs ArAsgOp ArAssign ;
+ArLhs       <~~ push({lhs: up.in}) ~~> = ArName ;
+ArAsgOp     <~~ push({aop: up.in}) ~~>
+            = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
+ArPlainAsg  = "=" NotEq ;
+
+ArCond      <~~ push(mkArCond(takeAll())) ~~> = ArLor [ "?" ArAssign ":" ArAssign ] ;
+ArLor       <~~ push(foldBin(takeAll())) ~~> = ArLand { ArLorOp ArLand } ;
+ArLorOp     <~~ push({op: up.in}) ~~> = "||" ;
+ArLand      <~~ push(foldBin(takeAll())) ~~> = ArBor { ArLandOp ArBor } ;
+ArLandOp    <~~ push({op: up.in}) ~~> = "&&" ;
+ArBor       <~~ push(foldBin(takeAll())) ~~> = ArBxor { ArBorOp ArBxor } ;
+ArBorOp     <~~ push({op: up.in}) ~~> = "|" NotBar ;
+ArBxor      <~~ push(foldBin(takeAll())) ~~> = ArBand { ArBxorOp ArBand } ;
+ArBxorOp    <~~ push({op: up.in}) ~~> = "^" NotEq ;
+ArBand      <~~ push(foldBin(takeAll())) ~~> = ArEq { ArBandOp ArEq } ;
+ArBandOp    <~~ push({op: up.in}) ~~> = "&" NotAmp ;
+ArEq        <~~ push(foldBin(takeAll())) ~~> = ArCmp { ArEqOp ArCmp } ;
+ArEqOp      <~~ push({op: up.in}) ~~> = "==" | "!=" ;
+ArCmp       <~~ push(foldBin(takeAll())) ~~> = ArShift { ArCmpOp ArShift } ;
+ArCmpOp     <~~ push({op: up.in}) ~~> = "<=" | ">=" | "<" | ">" ;
+ArShift     <~~ push(foldBin(takeAll())) ~~> = ArAdd { ArShiftOp ArAdd } ;
+ArShiftOp   <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
+ArAdd       <~~ push(foldBin(takeAll())) ~~> = ArMul { ArAddOp ArMul } ;
+ArAddOp     <~~ push({op: up.in}) ~~> = "+" NotPlus | "-" NotMinus ;
+ArMul       <~~ push(foldBin(takeAll())) ~~> = ArPow { ArMulOp ArPow } ;
+ArMulOp     <~~ push({op: up.in}) ~~> = "*" NotStar | "/" | "%" ;
+ArPow       <~~ push(foldPow(takeAll())) ~~> = ArUnary [ ArPowOp ArPow ] ;
+ArPowOp     <~~ push({op: up.in}) ~~> = "**" ;
+
+ArUnary     = ArPreInc | ArNeg | ArPos | ArNot | ArBnot | ArPrimary ;
+ArPreInc    <~~ push(mkIncDec(takeAll())) ~~> = ArIncOp ArLhs ;
+ArIncOp     <~~ push({iop: up.in, pre: 1}) ~~> = "++" | "--" ;
+ArNeg       <~~ push(mkUn("-", pop())) ~~> = "-" ArUnary ;
+ArPos       <~~ push(mkUn("+", pop())) ~~> = "+" ArUnary ;
+ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
+ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
+
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArNum | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArVar ;
-ArGroup     = "(" ArCmp ")" ;
-ArNum       <~~ push(mkInt(up.in)) ~~>
-            = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+ArPrimary   = ArGroup | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
+ArGroup     = "(" ArList ")" ;
+ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
+ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
+ArNum       <~~ push(mkNum(up.in)) ~~> = ArNumTok :whitespace(Whitespace) ;
+ArNumTok    = ArHex | ArBase | ArDec ;
+ArHex       = ArHexPfx :whitespace() ArHexDig { ArHexDig } ;
+ArHexPfx    = "0x" | "0X" ;
+ArHexDig    = "0"..."9" | "a"..."f" | "A"..."F" ;
+ArBase      = ArDec :whitespace() "#" ArAlnum { ArAlnum } ;
+ArAlnum     = "0"..."9" | "a"..."z" | "A"..."Z" | "@" | "_" ;
+ArDec       = "0"..."9" :whitespace() { "0"..."9" } ;
 ArVar       <~~ push(mkArVar(up.in)) ~~> = ArName ;
 ArDollarVar = "$" ArName <~~ push(mkArVar(up.in)) ~~> ;
+ArDollarBrace <~~ push(mkArOfStr(pop())) ~~> = DollarBrace :whitespace(Whitespace) ;
 ArDollarDigit = "$" ArgDigit <~~ push(mkArVar(up.in)) ~~> :whitespace(Whitespace) ;
 ArDollarHash <~~ push(mkArVar("#")) ~~> = "$#" :whitespace(Whitespace) ;
 ArDollarQ   <~~ push(mkArVar("?")) ~~> = "$?" :whitespace(Whitespace) ;
 ArName      = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+// $( LIST ) inside $(( )) : the captured output is read as an integer.
+ArCmdSub    <~~ push(mkArCmdSub(pop())) ~~> = CmdSub :whitespace(Whitespace) ;
+
+
+// --- [[ ... ]] conditional expressions ----------------------------------------------
+
+CondOr      <~~ push(foldCondOr(takeAll())) ~~> = CondAnd { "||" CondAnd } ;
+CondAnd     <~~ push(foldCondAnd(takeAll())) ~~> = CondNot { "&&" CondNot } ;
+CondNot     = CondNeg | CondPrim ;
+CondNeg     <~~ push(mkCondNot(pop())) ~~> = "!" CondNot ;
+CondPrim    = CondParen | CondUn | CondBin | CondSingle ;
+CondParen   = "(" CondOr ")" ;
+CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp Word ;
+CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
+CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
+CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp Word ;
+CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
+CondBinTok  = "==" | "!=" | "=~" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
+CondSingle  <~~ push(mkCondSingle(pop())) ~~> = Word ;
 
 
 // --- keywords, keyword boundary and the reserved-word guard ------------------------
@@ -195,6 +386,44 @@ KwWhile     = "while" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwDone      = "done" KwEnd ;
 KwIn        = "in" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwUntil     = "until" KwEnd ;
+KwFunction  = "function" KwEnd ;
+KwEsac      = "esac" KwEnd ;
+
+// Fails when the next thing (after any run of blanks and newlines) is a clause terminator,
+// so a case body's separator run stops in front of ";;" / ";&" / ";;&".
+// "|" that is not the front of "||", and "<" that is not the front of "<<" - both anchored
+// to the very next byte, which a !"literal" lookahead cannot do (it skips whitespace first).
+NotBar = :script(~~
+    (function() {
+        if (c.peek(0) === 124) { return abnf.newToken("\x01bar", 0) }
+    })()
+~~) ;
+NotLt = :script(~~
+    (function() {
+        if (c.peek(0) === 60) { return abnf.newToken("\x01lt", 0) }
+    })()
+~~) ;
+
+NotEq    = :script(~~ (function() { if (c.peek(0) === 61) { return abnf.newToken("\x01eq", 0) } })() ~~) ;
+NotAmp   = :script(~~ (function() { if (c.peek(0) === 38) { return abnf.newToken("\x01amp", 0) } })() ~~) ;
+NotStar  = :script(~~ (function() { if (c.peek(0) === 42) { return abnf.newToken("\x01star", 0) } })() ~~) ;
+NotPlus  = :script(~~ (function() { if (c.peek(0) === 43 || c.peek(0) === 61) { return abnf.newToken("\x01plus", 0) } })() ~~) ;
+NotMinus = :script(~~ (function() { if (c.peek(0) === 45 || c.peek(0) === 61) { return abnf.newToken("\x01minus", 0) } })() ~~) ;
+
+NotCaseTerm = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9 || cc == 10 || cc == 13) { i = i + 1; cc = c.peek(i) }
+        if (cc == 59) {
+            var nx = c.peek(i + 1)
+            if (nx == 59 || nx == 38) { return abnf.newToken("\x01case-term", 0) }
+        }
+        return undefined
+    })()
+~~) ;
 
 // A keyword only counts when the next char is a word terminator (whitespace, a separator or
 // a metacharacter), so 'done1', 'ifx' and 'in_it' stay ordinary words. Returns the impossible
@@ -221,7 +450,7 @@ NotReserved = :script(~~
         cc = c.peek(i)
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { w = w + String.fromCharCode(cc); i = i + 1; cc = c.peek(i) }
         var boundary = (cc == -1 || cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 59 || cc == 38 || cc == 124 || cc == 40 || cc == 41 || cc == 60 || cc == 62 || cc == 35)
-        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "while" || w == "do" || w == "done" || w == "in")
+        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "while" || w == "do" || w == "done" || w == "in" || w == "case" || w == "esac" || w == "until" || w == "function")
         if (kw && boundary) { return abnf.newToken("\x01reserved-word", 0) }
         return undefined
     })()
@@ -305,33 +534,268 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ---- interpreter state ----
 
     var vars = {}        // variables:  vars["$" + name] = string value
+    var varsHas = {}     // set-ness:   varsHas["$" + name] = true|false (unset keeps the key)
     var funcs = {}       // functions:  funcs["$" + name] = body thunk
     var posParams = []   // current positional parameters $1.. (an array of strings)
     var lastStatus = 0   // $? : exit status of the most recent command
 
+    // `local` is dynamic scoping: each function call pushes a frame, every name declared
+    // local inside records its previous value there, and the frame is unwound on return.
+    var localFrames = []
+
+    // Output capture for $( ) / ` ` : while the stack is non-empty every byte a command
+    // would print is appended to its top entry instead of reaching stdout.
+    var capStack = []
+    var cmdSubRan = false   // did the word just evaluated contain a substitution? ($? rule)
+
+    function emitOut(s) {
+        if (capStack.length > 0) { capStack[capStack.length - 1] = capStack[capStack.length - 1] + s }
+        else { print(s) }
+    }
+
     function setStatus(s) { lastStatus = s | 0 }
 
-    function setVarVal(name, val) { vars["$" + name] = val }
+    var varNames = []    // every name ever created, so a subshell can snapshot the whole set
+
+    function touchVar(name) {
+        if (!hasOwn(varsHas, "$" + name)) { varNames.push(name) }
+    }
+    function setVarVal(name, val) { touchVar(name); vars["$" + name] = val; varsHas["$" + name] = true }
+    function snapshotVars() {
+        var snap = []
+        var i
+        for (i = 0; i < varNames.length; i++) {
+            var k = "$" + varNames[i]
+            snap.push({v: hasOwn(vars, k) ? vars[k] : "", h: hasOwn(varsHas, k) ? varsHas[k] : false})
+        }
+        return snap
+    }
+    function restoreVars(snap) {
+        var i
+        for (i = 0; i < snap.length; i++) {
+            var k = "$" + varNames[i]
+            vars[k] = snap[i].v
+            varsHas[k] = snap[i].h
+        }
+    }
+
+    // The standard input the shell hands to `read`: filled by a pipeline stage or a
+    // here-string, empty (immediate end of file) otherwise.
+    var stdinBuf = ""
+    var stdinPos = 0
+    function isSetVar(name) {
+        var key = "$" + name
+        if (!hasOwn(varsHas, key)) { return false }
+        return varsHas[key]
+    }
+    function unsetVar(name) { touchVar(name); vars["$" + name] = ""; varsHas["$" + name] = false }
+
+    function pushLocalFrame() { localFrames.push([]) }
+    function popLocalFrame() {
+        var fr = localFrames.pop()
+        var i
+        for (i = fr.length - 1; i >= 0; i--) {
+            var e = fr[i]
+            vars["$" + e.name] = e.val
+            varsHas["$" + e.name] = e.had
+        }
+    }
+    // Record NAME's current binding in the innermost call frame, so it is restored on return.
+    function declareLocal(name) {
+        if (localFrames.length == 0) { return }
+        var fr = localFrames[localFrames.length - 1]
+        fr.push({name: name, had: isSetVar(name), val: getVarVal(name)})
+    }
+
+    function allDigits(s) {
+        if (s.length == 0) { return false }
+        var i
+        for (i = 0; i < s.length; i++) { var cc = s.charCodeAt(i); if (cc < 48 || cc > 57) { return false } }
+        return true
+    }
+    function joinParams(sep) {
+        var out = ""
+        var i
+        for (i = 0; i < posParams.length; i++) { if (i > 0) { out = out + sep }; out = out + posParams[i] }
+        return out
+    }
     function getVarVal(name) {
         if (name == "?") { return numToStr(lastStatus) }
         if (name == "#") { return numToStr(posParams.length) }
-        if (name.length == 1) {
-            var cc = name.charCodeAt(0)
-            if (cc >= 48 && cc <= 57) {
-                var idx = cc - 48
-                if (idx == 0) { return "" }
-                if (idx <= posParams.length) { return posParams[idx - 1] }
-                return ""
-            }
+        if (name == "*" || name == "@") { return joinParams(ifsFirst()) }
+        if (allDigits(name)) {
+            var idx = strToInt(name)
+            if (idx == 0) { return "bash" }
+            if (idx <= posParams.length) { return posParams[idx - 1] }
+            return ""
         }
         var key = "$" + name
         if (hasOwn(vars, key)) { return vars[key] }
         return ""
     }
+    // "$*" joins with the FIRST character of IFS (a space when IFS is unset).
+    function ifsFirst() {
+        if (!isSetVar("IFS")) { return " " }
+        var v = vars["$IFS"]
+        if (v.length == 0) { return "" }
+        return v.charAt(0)
+    }
+
+    // ${...} : items are [{pe}?, {pname}, {op}?, defaultWordThunk?]
+    function mkParamExp(items) {
+        var pe = "", name = "", op = ""
+        var wordT = null
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { wordT = it }
+            else if (it.pe != undefined) { pe = it.pe }
+            else if (it.pname != undefined) { name = it.pname }
+            else if (it.op != undefined) { op = it.op }
+        }
+        if (pe == "len") { return function() { return numToStr(getVarVal(name).length) } }
+        if (pe == "ind") { return function() { return getVarVal(getVarVal(name)) } }
+        if (op == "") { return function() { return getVarVal(name) } }
+        return function() {
+            var v = getVarVal(name)
+            var colon = (op.charAt(0) == ":")
+            var o = colon ? op.slice(1) : op
+            var blank = colon ? (!isSetVar(name) || v == "") : (!isSetVar(name))
+            if (o == "-") { return blank ? ((wordT != null) ? wordT() : "") : v }
+            if (o == "+") { return blank ? "" : ((wordT != null) ? wordT() : "") }
+            if (o == "=") {
+                if (blank) { var d = (wordT != null) ? wordT() : ""; setVarVal(name, d); return d }
+                return v
+            }
+            if (o == "?") {
+                if (blank) { fail(name + ": " + ((wordT != null) ? wordT() : "parameter null or not set")) }
+                return v
+            }
+            return v
+        }
+    }
+
+    // items = [{dkw}, {dflag}*, ({dname} | {aname, val})*]
+    function makeDecl(items) {
+        var kw = items[0].dkw
+        var names = []
+        var vals = []
+        var i
+        for (i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it.dflag != undefined) { continue }
+            if (it.dname != undefined) { names.push(it.dname); vals.push(null) }
+            else { names.push(it.aname); vals.push(it.val) }
+        }
+        return function() {
+            var k
+            for (k = 0; k < names.length; k++) {
+                if (kw == "local") { declareLocal(names[k]) }
+                if (vals[k] != null) { setVarVal(names[k], vals[k]()) }
+                else if (kw == "local") { unsetVar(names[k]) }
+            }
+            setStatus(0)
+            return 0
+        }
+    }
+    // items = [{aname}] or [{aname}, valueWordThunk]
+    function mkDeclItem(items) {
+        return {aname: items[0].aname, val: (items.length > 1) ? items[1] : null}
+    }
+
+    // ---- glob (pathname-style) pattern matching: * ? [...] and a backslash escape ----
+    // The same matcher backs case, [[ == ]] and the ${v#pat} family, exactly like the shell.
+
+    // Match p[pi..] against s[si..]. Recursive with backtracking over each "*".
+    function globAt(p, pi, s, si) {
+        while (pi < p.length) {
+            var pc = p.charCodeAt(pi)
+            if (pc == 42) { // "*"
+                while (pi < p.length && p.charCodeAt(pi) == 42) { pi = pi + 1 }
+                if (pi >= p.length) { return true }
+                var k = si
+                while (k <= s.length) {
+                    if (globAt(p, pi, s, k)) { return true }
+                    k = k + 1
+                }
+                return false
+            }
+            if (si >= s.length) { return false }
+            var sc = s.charCodeAt(si)
+            if (pc == 63) { pi = pi + 1; si = si + 1 }          // "?"
+            else if (pc == 91) {                                 // "["
+                var r = globClass(p, pi, sc)
+                if (r.ok == 0) { if (sc != 91) { return false }; pi = pi + 1; si = si + 1 }
+                else if (r.hit == 0) { return false }
+                else { pi = r.next; si = si + 1 }
+            }
+            else if (pc == 92 && pi + 1 < p.length) {            // backslash escape
+                if (p.charCodeAt(pi + 1) != sc) { return false }
+                pi = pi + 2; si = si + 1
+            }
+            else {
+                if (pc != sc) { return false }
+                pi = pi + 1; si = si + 1
+            }
+        }
+        return si >= s.length
+    }
+    // A bracket expression at p[pi] ("["). ok=0 means unterminated (a literal "[").
+    function globClass(p, pi, ch) {
+        var j = pi + 1
+        var neg = false
+        if (j < p.length) {
+            var c0 = p.charCodeAt(j)
+            if (c0 == 33 || c0 == 94) { neg = true; j = j + 1 }
+        }
+        var hit = false
+        var first = true
+        var done = false
+        while (!done) {
+            if (j >= p.length) { return {ok: 0, hit: 0, next: pi + 1} }
+            var cj = p.charCodeAt(j)
+            if (cj == 93 && !first) { done = true }
+            else {
+                first = false
+                var lo = cj
+                if (j + 2 < p.length && p.charCodeAt(j + 1) == 45 && p.charCodeAt(j + 2) != 93) {
+                    var hi = p.charCodeAt(j + 2)
+                    if (ch >= lo && ch <= hi) { hit = true }
+                    j = j + 3
+                } else {
+                    if (ch == lo) { hit = true }
+                    j = j + 1
+                }
+            }
+        }
+        if (neg) { hit = !hit }
+        return {ok: 1, hit: hit ? 1 : 0, next: j + 1}
+    }
+    function globMatch(pat, s) { return globAt(pat, 0, s, 0) }
 
     // ---- word / expansion thunks: function() -> string ----
 
     function makeConst(s) { return function() { return s } }
+
+    // Command substitution: run the list with stdout diverted into a buffer, then hand back
+    // the buffer with its trailing newlines stripped. capStack makes nesting work.
+    function stripTrailNL(s) {
+        var n = s.length
+        while (n > 0 && s.charAt(n - 1) == "\n") { n = n - 1 }
+        return s.slice(0, n)
+    }
+    function mkCmdSub(bodyT) {
+        return function() {
+            capStack.push("")
+            var r = anytype
+            r = bodyT()
+            var out = capStack.pop()
+            if (typeof r == "object") { setStatus(r.ret) } else { setStatus(r) }
+            cmdSubRan = true
+            return stripTrailNL(out)
+        }
+    }
+    function mkArCmdSub(subT) { return function() { return strToInt(subT()) } }
     function mkVarRef(name) { return function() { return getVarVal(name) } }
     function mkArith(intThunk) { return function() { return numToStr(intThunk()) } }
     function mkWord(segThunks) {
@@ -344,6 +808,45 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
 
     // Unquoted \x : drop the backslash, keep the char (\  -> space, \$ -> $, \\ -> \).
+    // $'...' body -> the decoded string (bash's ANSI-C escapes).
+    function ansiC(t) {
+        var out = ""
+        var i = 0
+        while (i < t.length) {
+            var ch = t.charAt(i)
+            if (ch != "\\" || i + 1 >= t.length) { out = out + ch; i = i + 1 }
+            else {
+                var e = t.charAt(i + 1)
+                i = i + 2
+                if (e == "n") { out = out + "\n" }
+                else if (e == "t") { out = out + "\t" }
+                else if (e == "r") { out = out + "\r" }
+                else if (e == "a") { out = out + String.fromCharCode(7) }
+                else if (e == "b") { out = out + String.fromCharCode(8) }
+                else if (e == "e" || e == "E") { out = out + String.fromCharCode(27) }
+                else if (e == "f") { out = out + String.fromCharCode(12) }
+                else if (e == "v") { out = out + String.fromCharCode(11) }
+                else if (e == "0") { out = out + String.fromCharCode(0) }
+                else if (e == "\\") { out = out + "\\" }
+                else if (e == "'") { out = out + "'" }
+                else if (e == "\"") { out = out + "\"" }
+                else if (e == "x") {
+                    var v = 0, n = 0
+                    while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
+                    out = out + String.fromCharCode(v)
+                }
+                else { out = out + "\\" + e }
+            }
+        }
+        return out
+    }
+    function hexVal(cc) {
+        if (cc >= 48 && cc <= 57) { return cc - 48 }
+        if (cc >= 97 && cc <= 102) { return cc - 87 }
+        if (cc >= 65 && cc <= 70) { return cc - 55 }
+        return -1
+    }
+
     function escChar(t) { return t.slice(1) }
     // Double quoted \x : the backslash stays literal UNLESS it escapes $ " \ or `.
     function dqEsc(t) {
@@ -354,6 +857,107 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     // ---- arithmetic thunks: function() -> int ----
 
+    // A numeric literal: 0xHH hexadecimal, BASE#DIGITS, a leading 0 octal, else decimal.
+    function parseNumLit(t) {
+        if (t.length > 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) {
+            return digitsInBase(t.slice(2), 16)
+        }
+        var h = -1
+        var i
+        for (i = 0; i < t.length; i++) { if (t.charAt(i) == "#") { h = i } }
+        if (h > 0) { return digitsInBase(t.slice(h + 1), strToInt(t.slice(0, h))) }
+        if (t.length > 1 && t.charAt(0) == "0") { return digitsInBase(t.slice(1), 8) }
+        return strToInt(t)
+    }
+    function digitsInBase(t, base) {
+        var v = 0
+        var i
+        for (i = 0; i < t.length; i++) {
+            var cc = t.charCodeAt(i)
+            var d = -1
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 122) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 90) { d = cc - 55 }
+            if (d < 0 || d >= base) { d = 0 }
+            v = (v * base + d) | 0
+        }
+        return v
+    }
+    function mkNum(text) { var n = parseNumLit(text); return function() { return n } }
+    function mkArOfStr(t) { return function() { return strToInt(t()) } }
+    function mkUn(op, t) {
+        return function() {
+            var v = t()
+            if (op == "-") { return (0 - v) | 0 }
+            if (op == "+") { return v | 0 }
+            if (op == "!") { return (v == 0) ? 1 : 0 }
+            return (~v) | 0
+        }
+    }
+    // items = [thunk] | [{iop,pre}, {lhs}] | [{lhs}, {iop,pre}]
+    function mkIncDec(items) {
+        var lhs = "", iop = "++", pre = 0
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.lhs != undefined) { lhs = it.lhs } else { iop = it.iop; pre = it.pre }
+        }
+        return function() {
+            var v = strToInt(getVarVal(lhs))
+            var nv = (iop == "++") ? ((v + 1) | 0) : ((v - 1) | 0)
+            setVarVal(lhs, numToStr(nv))
+            return (pre == 1) ? nv : v
+        }
+    }
+    // items = [{lhs}, {aop}, valueThunk]
+    function mkArAssign(items) {
+        var lhs = items[0].lhs
+        var aop = items[1].aop
+        var t = items[2]
+        return function() {
+            var cur = strToInt(getVarVal(lhs))
+            var r = t()
+            var nv = r
+            if (aop == "+=") { nv = (cur + r) | 0 }
+            else if (aop == "-=") { nv = (cur - r) | 0 }
+            else if (aop == "*=") { nv = (cur * r) | 0 }
+            else if (aop == "/=") { nv = (r == 0) ? 0 : ((cur / r) | 0) }
+            else if (aop == "%=") { nv = (r == 0) ? 0 : ((cur % r) | 0) }
+            else if (aop == "<<=") { nv = (cur << r) | 0 }
+            else if (aop == ">>=") { nv = (cur >> r) | 0 }
+            else if (aop == "&=") { nv = cur & r }
+            else if (aop == "^=") { nv = cur ^ r }
+            else if (aop == "|=") { nv = cur | r }
+            setVarVal(lhs, numToStr(nv))
+            return nv
+        }
+    }
+    // items = [condThunk] or [condThunk, thenThunk, elseThunk]
+    function mkArCond(items) {
+        if (items.length == 1) { return items[0] }
+        var c0 = items[0], t1 = items[1], t2 = items[2]
+        return function() { return (c0() != 0) ? t1() : t2() }
+    }
+    function foldComma(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var v = 0
+            var i
+            for (i = 0; i < items.length; i++) { v = items[i]() }
+            return v
+        }
+    }
+    function foldPow(items) {
+        if (items.length == 1) { return items[0] }
+        var b0 = items[0], e0 = items[2]
+        return function() {
+            var bs = b0(), ex = e0()
+            var v = 1
+            var i
+            for (i = 0; i < ex; i++) { v = (v * bs) | 0 }
+            return v
+        }
+    }
     function mkInt(text) { var n = strToInt(text); return function() { return n } }
     function mkArVar(name) { return function() { return strToInt(getVarVal(name)) } }
     function mkNeg(t) { return function() { return (0 - t()) | 0 } }
@@ -369,6 +973,13 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == ">=") { return (l >= r) ? 1 : 0 }
         if (op == "==") { return (l == r) ? 1 : 0 }
         if (op == "!=") { return (l != r) ? 1 : 0 }
+        if (op == "<<") { return (l << r) | 0 }
+        if (op == ">>") { return (l >> r) | 0 }
+        if (op == "&") { return l & r }
+        if (op == "|") { return l | r }
+        if (op == "^") { return l ^ r }
+        if (op == "&&") { return (l != 0 && r != 0) ? 1 : 0 }
+        if (op == "||") { return (l != 0 || r != 0) ? 1 : 0 }
         return 0
     }
     // items = [thunk, {op}, thunk, {op}, thunk, ...] -> one left folded int thunk.
@@ -389,24 +1000,115 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var name = items[0].aname
         var valT = (items.length > 1) ? items[1] : null
         return function() {
+            cmdSubRan = false
             var v = (valT != null) ? valT() : ""
             setVarVal(name, v)
-            setStatus(0)
-            return 0
+            // v=$(cmd) leaves $? at cmd's status; a plain assignment always succeeds.
+            if (!cmdSubRan) { setStatus(0) }
+            return lastStatus
         }
     }
 
-    // words[0] is the command word thunk, the rest are argument word thunks.
-    function makeSimpleCommand(words) {
-        var cmdT = words[0]
-        var argTs = words.slice(1)
+    // items[0] is the command word thunk; the rest are argument word thunks and redirections.
+    function makeSimpleCommand(items) {
+        var cmdT = items[0]
+        var argTs = []
+        var redirs = []
+        var i
+        for (i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { argTs.push(it) } else { redirs.push(it) }
+        }
         return function() {
             var cmd = cmdT()
             var args = []
-            var i
-            for (i = 0; i < argTs.length; i++) { args.push(argTs[i]()) }
-            return runCommand(cmd, args)
+            var k
+            for (k = 0; k < argTs.length; k++) { args.push(argTs[k]()) }
+            if (redirs.length == 0) { return runCommand(cmd, args) }
+            var rs = openRedirs(redirs)
+            var st = anytype
+            st = runCommand(cmd, args)
+            closeRedirs(rs)
+            return st
         }
+    }
+
+    // Apply a redirection list: an output redirection swallows the command's output (there is
+    // no filesystem here), an input redirection other than a here-string gives end of file.
+    function openRedirs(redirs) {
+        var suppress = false
+        var newIn = null
+        var i
+        for (i = 0; i < redirs.length; i++) {
+            var r = redirs[i]
+            var tgt = (r.target != null) ? r.target() : ""
+            if (r.rd == "<<<") { newIn = tgt + "\n" }
+            else if (r.rd == "<") { newIn = "" }
+            else if (r.rd == ">&" || r.rd == "<&") { }
+            else { if (r.iofd == "" || r.iofd == "1") { suppress = true } }
+        }
+        var st = {sup: suppress, inb: stdinBuf, inp: stdinPos, hadIn: (newIn != null)}
+        if (suppress) { capStack.push("") }
+        if (newIn != null) { stdinBuf = newIn; stdinPos = 0 }
+        return st
+    }
+    function closeRedirs(st) {
+        if (st.sup) { capStack.pop() }
+        if (st.hadIn) { stdinBuf = st.inb; stdinPos = st.inp }
+    }
+
+    // read [-r] [-a NAME] NAME... : one line of standard input, split on IFS, the last name
+    // taking the rest. Returns 1 at end of file, exactly like the shell.
+    function readBuiltin(args) {
+        var names = []
+        var i = 0
+        while (i < args.length) {
+            var a = args[i]
+            if (a == "-a" || a == "-d" || a == "-n" || a == "-N" || a == "-p" || a == "-t" || a == "-u") { i = i + 1 }
+            else if (a.length > 1 && a.charAt(0) == "-") { }
+            else { names.push(a) }
+            i = i + 1
+        }
+        if (stdinPos >= stdinBuf.length) {
+            var z
+            for (z = 0; z < names.length; z++) { setVarVal(names[z], "") }
+            return 1
+        }
+        var e = stdinPos
+        while (e < stdinBuf.length && stdinBuf.charAt(e) != "\n") { e = e + 1 }
+        var line = stdinBuf.slice(stdinPos, e)
+        stdinPos = (e < stdinBuf.length) ? (e + 1) : e
+        if (names.length == 0) { setVarVal("REPLY", line); return 0 }
+        var fields = splitIFS(line)
+        var k
+        for (k = 0; k < names.length; k++) {
+            if (k == names.length - 1) {
+                var rest = ""
+                var j
+                for (j = k; j < fields.length; j++) { if (j > k) { rest = rest + " " }; rest = rest + fields[j] }
+                setVarVal(names[k], rest)
+            } else {
+                setVarVal(names[k], (k < fields.length) ? fields[k] : "")
+            }
+        }
+        return 0
+    }
+    // Split on the characters of IFS (default: space, tab and newline), dropping empty fields.
+    function splitIFS(line) {
+        var seps = isSetVar("IFS") ? vars["$IFS"] : " \t\n"
+        var out = []
+        var cur = ""
+        var i
+        for (i = 0; i < line.length; i++) {
+            var ch = line.charAt(i)
+            var isSep = false
+            var j
+            for (j = 0; j < seps.length; j++) { if (seps.charAt(j) == ch) { isSep = true } }
+            if (isSep) { if (cur != "") { out.push(cur) }; cur = "" }
+            else { cur = cur + ch }
+        }
+        if (cur != "") { out.push(cur) }
+        return out
     }
 
     function echoCmd(args) {
@@ -422,7 +1124,94 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             i = i + 1
         }
         if (newline) { out = out + "\n" }
-        print(out)
+        emitOut(out)
+    }
+
+    // ---- the test builtin -------------------------------------------------------------
+    // There is no real filesystem behind a grammar run, so the file predicates answer from a
+    // small MODEL of the standard paths every shell can rely on. Anything else is "absent".
+    // 0 = absent, 1 = exists and is not a directory, 2 = directory.
+    function fsKind(p) {
+        if (p == "/dev/null" || p == "/dev/zero" || p == "/dev/tty") { return 1 }
+        if (p == "/dev/stdin" || p == "/dev/stdout" || p == "/dev/stderr") { return 1 }
+        if (p == "/" || p == "/dev" || p == "/tmp" || p == "/usr" || p == "/etc") { return 2 }
+        if (p == "/var" || p == "/bin" || p == "/usr/bin") { return 2 }
+        return 0
+    }
+
+    function isTestUnary(t) {
+        if (t == "-z" || t == "-n" || t == "-v") { return true }
+        if (t == "-e" || t == "-f" || t == "-d" || t == "-s" || t == "-r" || t == "-w") { return true }
+        if (t == "-x" || t == "-h" || t == "-L" || t == "-b" || t == "-c" || t == "-p") { return true }
+        if (t == "-S" || t == "-t" || t == "-g" || t == "-u" || t == "-k" || t == "-O") { return true }
+        return false
+    }
+    function isTestBinary(t) {
+        if (t == "=" || t == "==" || t == "!=" || t == "<" || t == ">") { return true }
+        if (t == "-eq" || t == "-ne" || t == "-lt" || t == "-le" || t == "-gt" || t == "-ge") { return true }
+        if (t == "-nt" || t == "-ot" || t == "-ef") { return true }
+        return false
+    }
+    function testUnary(op, s) {
+        if (op == "-z") { return (s == "") ? 0 : 1 }
+        if (op == "-n") { return (s != "") ? 0 : 1 }
+        if (op == "-v") { return isSetVar(s) ? 0 : 1 }
+        if (op == "-d") { return (fsKind(s) == 2) ? 0 : 1 }
+        if (op == "-e" || op == "-r" || op == "-w") { return (fsKind(s) != 0) ? 0 : 1 }
+        if (op == "-f" || op == "-s") { return (fsKind(s) == 1) ? 0 : 1 }
+        if (op == "-c" || op == "-b") { return (fsKind(s) == 1) ? 0 : 1 }
+        return 1
+    }
+    function testBinary(l, op, r) {
+        if (op == "-eq") { return (strToInt(l) == strToInt(r)) ? 0 : 1 }
+        if (op == "-ne") { return (strToInt(l) != strToInt(r)) ? 0 : 1 }
+        if (op == "-lt") { return (strToInt(l) < strToInt(r)) ? 0 : 1 }
+        if (op == "-le") { return (strToInt(l) <= strToInt(r)) ? 0 : 1 }
+        if (op == "-gt") { return (strToInt(l) > strToInt(r)) ? 0 : 1 }
+        if (op == "-ge") { return (strToInt(l) >= strToInt(r)) ? 0 : 1 }
+        if (op == "=" || op == "==") { return (l == r) ? 0 : 1 }
+        if (op == "!=") { return (l != r) ? 0 : 1 }
+        if (op == "<") { return (l < r) ? 0 : 1 }
+        if (op == ">") { return (l > r) ? 0 : 1 }
+        fail("unknown binary test operator: " + op)
+        return 2
+    }
+
+    // A recursive descent over the ARGUMENT LIST: or := and { -o and }, and := not { -a not },
+    // not := "!" not | prim, prim := "(" or ")" | UNOP word | word [ BINOP word ] | word.
+    function tstAt(a, st) { return (st.i < a.length) ? a[st.i] : "\x00end" }
+    function tstPrim(a, st) {
+        var t = tstAt(a, st)
+        if (t == "(") {
+            st.i = st.i + 1
+            var r = tstOr(a, st)
+            if (tstAt(a, st) == ")") { st.i = st.i + 1 }
+            return r
+        }
+        if (t == "!") { st.i = st.i + 1; var r2 = tstPrim(a, st); return (r2 == 0) ? 1 : 0 }
+        if (isTestUnary(t) && st.i + 1 < a.length && !isTestBinary(a[st.i + 1])) {
+            var opnd = a[st.i + 1]
+            st.i = st.i + 2
+            return testUnary(t, opnd)
+        }
+        st.i = st.i + 1
+        if (st.i + 1 < a.length + 0 && isTestBinary(tstAt(a, st))) {
+            var op = tstAt(a, st)
+            var rhs = a[st.i + 1]
+            st.i = st.i + 2
+            return testBinary(t, op, rhs)
+        }
+        return (t != "") ? 0 : 1
+    }
+    function tstAnd(a, st) {
+        var v = tstPrim(a, st)
+        while (tstAt(a, st) == "-a") { st.i = st.i + 1; var r = tstPrim(a, st); if (r != 0) { v = 1 } }
+        return v
+    }
+    function tstOr(a, st) {
+        var v = tstAnd(a, st)
+        while (tstAt(a, st) == "-o") { st.i = st.i + 1; var r = tstAnd(a, st); if (r == 0) { v = 0 } }
+        return v
     }
 
     // The test builtin: [ ... ] (drops the closing ]) or `test ...`.
@@ -434,29 +1223,8 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
         if (a.length == 0) { return 1 }
         if (a.length == 1) { return (a[0] != "") ? 0 : 1 }
-        if (a.length == 2) {
-            var op1 = a[0]
-            var s = a[1]
-            if (op1 == "-z") { return (s == "") ? 0 : 1 }
-            if (op1 == "-n") { return (s != "") ? 0 : 1 }
-            fail("unknown unary test operator: " + op1)
-        }
-        if (a.length == 3) {
-            var l = a[0]
-            var op = a[1]
-            var r = a[2]
-            if (op == "-eq") { return (strToInt(l) == strToInt(r)) ? 0 : 1 }
-            if (op == "-ne") { return (strToInt(l) != strToInt(r)) ? 0 : 1 }
-            if (op == "-lt") { return (strToInt(l) < strToInt(r)) ? 0 : 1 }
-            if (op == "-le") { return (strToInt(l) <= strToInt(r)) ? 0 : 1 }
-            if (op == "-gt") { return (strToInt(l) > strToInt(r)) ? 0 : 1 }
-            if (op == "-ge") { return (strToInt(l) >= strToInt(r)) ? 0 : 1 }
-            if (op == "=" || op == "==") { return (l == r) ? 0 : 1 }
-            if (op == "!=") { return (l != r) ? 0 : 1 }
-            fail("unknown binary test operator: " + op)
-        }
-        fail("test: too many arguments")
-        return 2
+        var st = {i: 0}
+        return tstOr(a, st)
     }
 
     // Dispatch a command by its (already expanded) name. Returns an int status, or {ret: n}
@@ -465,17 +1233,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (cmd == "echo") { echoCmd(args); setStatus(0); return 0 }
         if (cmd == "[" || cmd == "test") { var st = testBuiltin(cmd, args); setStatus(st); return st }
         if (cmd == "true" || cmd == ":") { setStatus(0); return 0 }
+        if (cmd == "unset") {
+            var ui
+            for (ui = 0; ui < args.length; ui++) { unsetVar(args[ui]) }
+            setStatus(0)
+            return 0
+        }
         if (cmd == "false") { setStatus(1); return 1 }
+        if (cmd == "read") { var rst = readBuiltin(args); setStatus(rst); return rst }
+        if (cmd == "shift") {
+            var n = (args.length > 0) ? strToInt(args[0]) : 1
+            posParams = (n <= posParams.length) ? posParams.slice(n) : []
+            setStatus(0)
+            return 0
+        }
         if (cmd == "exit") {
             var code = (args.length > 0) ? strToInt(args[0]) : lastStatus
-            exit(code)
+            return {ret: code, isExit: 1}
         }
         if (cmd == "return") {
             var rc = (args.length > 0) ? strToInt(args[0]) : lastStatus
             return {ret: rc}
         }
         var key = "$" + cmd
-        if (hasOwn(funcs, key)) { var st2 = callFunc(cmd, args); setStatus(st2); return st2 }
+        if (hasOwn(funcs, key)) {
+            var st2 = anytype
+            st2 = callFunc(cmd, args)
+            if (typeof st2 == "object") { return st2 }
+            setStatus(st2)
+            return st2
+        }
         fail("command not found: " + cmd)
         return 127
     }
@@ -485,10 +1272,17 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var body = funcs["$" + name]
         var saved = posParams
         posParams = args
+        pushLocalFrame()
+        declareLocal("FUNCNAME")
+        setVarVal("FUNCNAME", name)
         var r = anytype
         r = body()
+        popLocalFrame()
         posParams = saved
-        if (typeof r == "object") { return r.ret }
+        if (typeof r == "object") {
+            if (r.isExit != undefined) { return r }   // an exit unwinds past the caller too
+            return r.ret
+        }
         return r
     }
 
@@ -527,7 +1321,217 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    // items = [{pats}, bodyThunk, {cterm}?]
+    function mkCaseClause(items) {
+        var pats = []
+        var body = null
+        var term = ";;"
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { body = it }
+            else if (it.pats != undefined) { pats = it.pats }
+            else if (it.cterm != undefined) { term = it.cterm }
+        }
+        return {pats: pats, body: body, cterm: term}
+    }
+    // items = [subjectWordThunk, clause...]
+    function makeCase(items) {
+        var subjT = items[0]
+        var clauses = items.slice(1)
+        return function() {
+            var s = subjT()
+            var i = 0
+            var fall = false
+            var last = 0
+            var stop = false
+            while (i < clauses.length && !stop) {
+                var cl = clauses[i]
+                var hit = fall
+                var k
+                for (k = 0; k < cl.pats.length; k++) { if (globMatch(cl.pats[k](), s)) { hit = true } }
+                fall = false
+                if (hit) {
+                    var r = anytype
+                    r = cl.body()
+                    if (typeof r == "object") { return r }
+                    last = r
+                    setStatus(r)
+                    if (cl.cterm == ";&") { fall = true }
+                    else if (cl.cterm != ";;&") { stop = true }
+                }
+                i = i + 1
+            }
+            if (!stop) { setStatus(last) }
+            return last
+        }
+    }
+
+    // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----
+
+    // items = [{bang}?, stageThunk...] : each stage but the last runs with its stdout
+    // captured, and that capture becomes the next stage's standard input.
+    function makePipeline(items) {
+        var bang = false
+        var stages = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { stages.push(it) } else { bang = true }
+        }
+        if (!bang && stages.length == 1) { return stages[0] }
+        return function() {
+            var savedIn = stdinBuf, savedPos = stdinPos
+            var st = anytype
+            st = 0
+            var k
+            for (k = 0; k < stages.length; k++) {
+                var lastStage = (k == stages.length - 1)
+                if (!lastStage) { capStack.push("") }
+                st = stages[k]()
+                if (!lastStage) {
+                    var out = capStack.pop()
+                    stdinBuf = out
+                    stdinPos = 0
+                }
+                if (typeof st == "object") { k = stages.length }
+            }
+            stdinBuf = savedIn
+            stdinPos = savedPos
+            if (typeof st == "object") { return st }
+            if (bang) { st = (st == 0) ? 1 : 0 }
+            setStatus(st)
+            return st
+        }
+    }
+
+    // ( LIST ) : variables and positional parameters are restored afterwards, and both a
+    // `return` and an `exit` inside end only the subshell.
+    function makeSubshell(bodyT) {
+        return function() {
+            var saved = snapshotVars()
+            var savedPos = posParams
+            var savedFrames = localFrames
+            localFrames = []
+            var r = anytype
+            r = bodyT()
+            localFrames = savedFrames
+            restoreVars(saved)
+            posParams = savedPos
+            var st = 0
+            if (typeof r == "object") { st = r.ret } else { st = r }
+            setStatus(st)
+            return st
+        }
+    }
+    // { LIST; } runs in the current shell, so it is just its body.
+    function makeGroup(bodyT) { return bodyT }
+
+    // (( expr )) : status 0 when the value is non-zero (the opposite of C).
+    function makeArithCmd(exprT) {
+        return function() { var st = (exprT() != 0) ? 0 : 1; setStatus(st); return st }
+    }
+    // let EXPR ... : same evaluator, status from the LAST expression.
+    function makeLetCmd(items) {
+        return function() {
+            var v = 0
+            var i
+            for (i = 0; i < items.length; i++) { v = items[i]() }
+            var st = (v != 0) ? 0 : 1
+            setStatus(st)
+            return st
+        }
+    }
+    // [[ ... ]] : the condition thunks answer a boolean; the command status is its inverse.
+    function makeCondCmd(t) {
+        return function() { var st = t() ? 0 : 1; setStatus(st); return st }
+    }
+    function foldCondOr(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var i
+            for (i = 0; i < items.length; i++) { if (items[i]()) { return true } }
+            return false
+        }
+    }
+    function foldCondAnd(items) {
+        if (items.length == 1) { return items[0] }
+        return function() {
+            var i
+            for (i = 0; i < items.length; i++) { if (!items[i]()) { return false } }
+            return true
+        }
+    }
+    function mkCondNot(t) { return function() { return !t() } }
+    function mkCondSingle(w) { return function() { return w() != "" } }
+    function mkCondUn(items) {
+        var op = items[0].cop
+        var w = items[1]
+        return function() { return testUnary(op, w()) == 0 }
+    }
+    function mkCondBin(items) {
+        var l = items[0], op = items[1].cop, r = items[2]
+        return function() {
+            var lv = l()
+            var rv = r()
+            // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
+            if (op == "==" || op == "=") { return globMatch(rv, lv) }
+            if (op == "!=") { return !globMatch(rv, lv) }
+            if (op == "=~") { fail("[[ =~ ]] (regex matching) is not supported") }
+            return testBinary(lv, op, rv) == 0
+        }
+    }
+
+    // Redirection: without a filesystem, an output redirection DISCARDS the output and an
+    // input redirection other than a here-string yields end of file at once.
+    function mkRedir(items) {
+        var op = "", fd = "", t = null
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { t = it }
+            else if (it.redir != undefined) { op = it.redir }
+            else if (it.iofd != undefined) { fd = it.iofd }
+        }
+        return {rd: op, iofd: fd, target: t}
+    }
+
     function mkCond(items) { return {cond: items[0], body: items[1]} }
+    function makeUntil(items) {
+        var condT = items[0], bodyT = items[1]
+        return function() {
+            var last = 0
+            var cst = anytype
+            var r = anytype
+            var loop = true
+            while (loop) {
+                cst = condT()
+                if (typeof cst == "object") { return cst }
+                if (cst == 0) { loop = false } else {
+                    r = bodyT()
+                    if (typeof r == "object") { return r }
+                    last = r
+                }
+            }
+            return last
+        }
+    }
+    // items = [initExpr, condExpr, stepExpr, bodyThunk]
+    function makeCFor(items) {
+        var initT = items[0], condT = items[1], stepT = items[2], bodyT = items[3]
+        return function() {
+            var last = 0
+            var r = anytype
+            initT()
+            while (condT() != 0) {
+                r = bodyT()
+                if (typeof r == "object") { return r }
+                last = r
+                stepT()
+            }
+            return last
+        }
+    }
     function mkElse(bodyT) { return {els: bodyT} }
     // clauses = [{cond,body} (if), {cond,body} (elif)*, {els} (else)?].
     function makeIf(clauses) {
@@ -613,7 +1617,10 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var r = anytype
         for (i = 0; i < stmts.length; i++) {
             r = stmts[i]()
-            if (typeof r == "object") { setStatus(r.ret) }
+            if (typeof r == "object") {
+                if (r.isExit != undefined) { exit(r.ret) }
+                setStatus(r.ret)
+            }
         }
         exit(lastStatus)
     }

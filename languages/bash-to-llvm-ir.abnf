@@ -1,33 +1,40 @@
-:title("Bash to LLVM IR compiler (subset)") ;
-:description("Compiles the same bounded Bash subset that bash-interpreter.abnf interprets to an
-LLVM IR module, then runs it with the built-in IR interpreter. Where the interpreter walks the
-tree and executes it, this grammar composes a code generator ('thunk') per tag and emits real
-IR: control flow (if/elif/else, while, for, && / ||, functions and return) becomes basic
-blocks and branches, and every Bash value is an i8* into a runtime string world.
+:title("Bash to LLVM IR compiler") ;
+:description("Compiles the same Bash subset that bash-interpreter.abnf interprets to an LLVM IR
+module, then runs it with the built-in IR interpreter. Where the interpreter walks the tree and
+executes it, this grammar composes a code generator ('thunk') per tag and emits real IR: control
+flow (if/elif/else, while, until, for, C-style for, case, pipelines, subshells, && / ||,
+functions and return) becomes basic blocks and branches, and every Bash value is an i8* into a
+runtime string world.
 
-Bash has exactly one data type, the string, so the emitted module carries a tiny string
-runtime, hand-built as IR functions: rt_bump bump-allocates from a global arena (the string
-heap), rt_strlen / rt_streq / rt_strcat operate on NUL-terminated i8*, and rt_int2str /
-rt_str2int convert between strings and i32 (the arithmetic type of $(( )) and the test builtin).
-String and arithmetic thunks return {b: block, v: value}; statement thunks return the block the
-following code continues in. A word made only of literals is interned as one constant global;
-anything with a $expansion concatenates at run time through rt_strcat.
+Bash has exactly one data type, the string, so the emitted module carries a string runtime,
+hand-built as IR functions: rt_bump bump-allocates from a global arena (the string heap),
+rt_strlen / rt_streq / rt_strcmp / rt_strcat operate on NUL-terminated i8*, rt_int2str /
+rt_str2int convert between strings and i32, rt_glob / rt_class are the glob matcher behind case
+and [[ == ]], rt_putc / rt_cap_begin / rt_cap_end implement output capture for command
+substitution and pipelines, and rt_fskind models the handful of standard paths the file
+predicates ask about. String and arithmetic thunks return {b: block, v: value}; statement thunks
+return the block the following code continues in. A word made only of literals is interned as
+one constant global; anything with an expansion concatenates at run time through rt_strcat.
 
-Variables are global i8* slots (Bash has no lexical scope without `local`), so a function that
-assigns a name is visible to its caller, exactly like the interpreter. A user function becomes
-an IR function bashfn_NAME(p1..p9, argc): the positional parameters are passed as arguments, so
-recursion just uses the IR call stack, and a `return N` is an IR `ret`. `exit N` sets a global
-flag+code and branches to the current function's exit block; the flag is re-checked after every
-function call, so an exit deep inside a callee unwinds all the way out to main, whose return
-value (the last status, or the exit code) becomes the process exit code of the whole run - so a
-compiled test script is self checking, just like the interpreted one.
+Variables live in ONE global array of i8* indexed by a compile-time slot id, which is what makes
+'local' work: rt_push_local records a slot's previous value on a save stack, a function snapshots
+the stack depth on entry, and every ret unwinds back to it - so a local binding never leaks to the
+caller, and neither does $FUNCNAME. A subshell snapshots the whole array (rt_ss_save) and restores
+it, and redirects the exit target so an 'exit' inside it ends only the subshell. A variable that
+was never assigned holds a distinct empty string, the unset marker, which is how ${v-default}
+tells unset from empty. A user function becomes an IR function bashfn_NAME(p1..p9, argc): the
+positional parameters are passed as arguments, so recursion just uses the IR call stack, and a
+'return N' is an IR ret. 'exit N' sets a global flag+code and branches to the current exit block;
+the flag is re-checked after every call, so an exit deep inside a callee unwinds out to main,
+whose return value becomes the process exit code - a compiled test script is self checking, just
+like the interpreted one.
 
 The generated module is printed (this is the compiler output); it is valid LLVM IR and can be
 handed to clang. Passing -exe PATH to mec links it into a native executable with clang directly
-(mec languages/bash-to-llvm-ir.abnf script.sh -exe out && ./out). The supported subset, and
-everything deliberately out of scope, is exactly the one documented in bash-interpreter.abnf. In addition, the compiler currently requires the
-command word of a simple command to be a literal (static dispatch): a computed command name and
-a computed test operator are not yet lowered.") ;
+(mec languages/bash-to-llvm-ir.abnf script.sh -exe out && ./out). The supported language, and
+everything deliberately out of scope, is the one documented in bash-interpreter.abnf. In addition,
+this compiler requires the command word of a simple command to be a literal (static dispatch), and
+does not lower the read and shift builtins.") ;
 
 
 // --- main rules
@@ -46,7 +53,7 @@ OptSep      = [ Sep ] ;
 Sep         = SepTok { SepTok } ;
 SepTok      = ";" | "\n" ;
 
-Statement   = IfStmt | ForStmt | WhileStmt | FuncDef | AndOrList ;
+Statement   = IfStmt | CForStmt | ForStmt | WhileStmt | UntilStmt | CaseStmt | FuncDef | AndOrList ;
 
 // A brace / keyword delimited body: at least one statement. The trailing OptSep swallows the
 // final ; or newline before the closing keyword (fi / done / }), and a reserved word in
@@ -67,9 +74,31 @@ ElifClause  <~~ push(mkCond(takeAll())) ~~>
 ElseClause  <~~ push(mkElse(pop())) ~~>
             = KwElse CompoundList ;
 
-// while LIST; do LIST; done
+// case WORD in [(] PAT [| PAT]... ) LIST ;; ... esac
+// The body of a clause is an ordinary statement list, except that its separator run must not
+// swallow the leading ";" of the ";;" that ends the clause - which is what NotCaseTerm guards.
+CaseStmt    <~~ push(makeCase(takeAll())) ~~>
+            = KwCase Word KwIn CaseSepOpt { CaseClause } KwEsac ;
+CaseClause  <~~ push(mkCaseClause(takeAll())) ~~>
+            = [ "(" ] CasePats ")" CaseBody [ CaseTerm ] CaseSepOpt ;
+CasePats    <~~ push({pats: takeAll()}) ~~> = Word { "|" Word } ;
+CaseBody    <~~ push(makeSeq(takeAll())) ~~>
+            = CaseSepOpt [ Statement { CaseSep Statement } CaseSepOpt ] ;
+CaseSep     = NotCaseTerm SepTok { NotCaseTerm SepTok } ;
+CaseSepOpt  = [ CaseSep ] ;
+CaseTerm    = CaseNl CaseTermTok ;
+CaseNl      = { "\n" } ;
+CaseTermTok <~~ push({cterm: up.in}) ~~> = ";;&" | ";;" | ";&" ;
+
+// while LIST; do LIST; done   /   until LIST; do LIST; done (the negated condition)
 WhileStmt   <~~ push(makeWhile(takeAll())) ~~>
             = KwWhile CompoundList KwDo CompoundList KwDone ;
+UntilStmt   <~~ push(makeUntil(takeAll())) ~~>
+            = KwUntil CompoundList KwDo CompoundList KwDone ;
+
+// for (( init; cond; step )); do LIST; done
+CForStmt    <~~ push(makeCFor(takeAll())) ~~>
+            = KwFor "((" :whitespace(Whitespace) ArList ";" ArList ";" ArList "))" OptSep KwDo CompoundList KwDone ;
 
 // for NAME in WORD...; do LIST; done  -- each word is one iteration value (no re-splitting).
 ForStmt     <~~ push(makeFor(takeAll())) ~~>
@@ -79,9 +108,10 @@ ForName     <~~ push({fname: up.in}) ~~>
 ForWords    <~~ push({words: takeAll()}) ~~>
             = { Word } ;
 
-// NAME() { LIST; }  -- registers the body thunk when the definition statement runs.
+// NAME() { LIST; }, and the `function NAME [()]  { LIST; }` keyword form.
 FuncDef     <~~ push(makeFuncDef(takeAll())) ~~>
-            = FuncName "(" ")" OptSep "{" CompoundList "}" ;
+            = FuncDefHead OptSep "{" CompoundList "}" ;
+FuncDefHead = ( KwFunction FuncName [ "(" ")" ] ) | ( FuncName "(" ")" ) ;
 FuncName    <~~ push({fname: up.in}) ~~>
             = Name ;
 
@@ -91,12 +121,53 @@ Name        = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 // --- simple commands, && / || lists and assignments
 
 // cmd1 && cmd2 || cmd3 : left to right, short circuit on the running exit status.
-AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
-            = Command { AndOrOp Command } ;
 AndOrOp     <~~ push({op: up.in}) ~~>
             = "&&" | "||" ;
 
-Command     = Assignment | SimpleCommand ;
+// A pipeline is what && / || and ! actually operate on. Each stage runs with its stdout
+// captured and handed to the next stage as its standard input.
+AndOrList   <~~ push(makeAndOr(takeAll())) ~~>
+            = Pipeline { AndOrOp Pipeline } ;
+Pipeline    <~~ push(makePipeline(takeAll())) ~~>
+            = [ BangOp ] Command { PipeOp Command } ;
+BangOp      <~~ push({bang: 1}) ~~> = "!" KwEnd ;
+PipeOp      = "|" NotBar ;
+
+// "((" must be tried before "(" or an arithmetic command parses as nested subshells.
+Command     = ArithCmd | CondCmd | Subshell | BraceGroup | LetCmd | DeclCommand | Assignment | SimpleCommand ;
+
+// ( LIST ) runs in a copy of the shell: variable changes and `exit` stay inside.
+Subshell    <~~ push(makeSubshell(pop())) ~~> = "(" CompoundList ")" [ RedirList ] ;
+// { LIST; } is a plain grouping: it runs in the CURRENT shell.
+BraceGroup  <~~ push(makeGroup(pop())) ~~> = "{" CompoundList "}" [ RedirList ] ;
+// (( expr )) as a command: status 0 when the value is non-zero.
+ArithCmd    <~~ push(makeArithCmd(pop())) ~~> = "((" :whitespace(Whitespace) ArList "))" ;
+// [[ ... ]] : the conditional command (no word splitting, glob and regex matching).
+CondCmd     <~~ push(makeCondCmd(pop())) ~~> = "[[" :whitespace(Whitespace) CondOr "]]" ;
+
+RedirList   = Redir { Redir } ;
+
+// let EXPR ... : the same evaluator as (( )); a quoted argument is parsed as arithmetic.
+LetCmd      <~~ push(makeLetCmd(takeAll())) ~~> = KwLet LetArg { LetArg } ;
+KwLet       = "let" KwEnd ;
+LetArg      = LetDq | LetSq | ArAssign ;
+LetDq       = '"' :whitespace(Whitespace) ArList '"' ;
+LetSq       = "'" :whitespace(Whitespace) ArList "'" ;
+
+// local / declare / typeset / export / readonly [-flags] NAME[=WORD] ...
+// Spelled as its own production (rather than an ordinary command with word arguments)
+// because the declared NAME has to be known statically: the compiler needs it to pick a
+// variable slot, and `local` needs it to record the save entry for the current call frame.
+DeclCommand <~~ push(makeDecl(takeAll())) ~~>
+            = DeclKw { DeclFlag } { DeclItem } ;
+DeclKw      <~~ push({dkw: up.in}) ~~> = DeclWord KwEnd ;
+DeclWord    = "local" | "declare" | "typeset" | "export" | "readonly" ;
+DeclFlag    <~~ push({dflag: up.in}) ~~> = "-" :whitespace() DeclFlagCh { DeclFlagCh } :whitespace(Whitespace) ;
+DeclFlagCh  = "a" | "A" | "i" | "r" | "x" | "u" | "l" | "g" | "n" | "p" | "f" | "F" ;
+DeclItem    = DeclAssign | DeclName ;
+DeclAssign  <~~ push(mkDeclItem(takeAll())) ~~>
+            = AsgIdent <~~ push({aname: up.in}) ~~> :whitespace() "=" :whitespace() [ Word ] ;
+DeclName    <~~ push({dname: up.in}) ~~> = Name ;
 
 // name=value : the = must stick to the name (no surrounding spaces), so the disable
 // (:whitespace()) sits in THIS sequence, right after the identifier. The value is optional
@@ -108,7 +179,17 @@ AsgIdent    = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 // A command word followed by argument words. NotReserved blocks a bare reserved keyword in
 // command position (so 'done' / 'fi' / ... end an enclosing list instead of being commands).
 SimpleCommand <~~ push(makeSimpleCommand(takeAll())) ~~>
-            = NotReserved Word { Word } ;
+            = NotReserved Word { CmdSuffix } ;
+CmdSuffix   = Redir | Word ;
+
+// Redirections. Here-documents (<< and <<-) are NOT supported, so `<` declines a second "<"
+// rather than mis-parsing a here-document as two input redirections.
+Redir       <~~ push(mkRedir(takeAll())) ~~>
+            = [ IoNum ] RedirOp [ Word ] ;
+IoNum       <~~ push({iofd: up.in}) ~~> = "0"..."9" :whitespace() { "0"..."9" } ;
+RedirOp     <~~ push({redir: up.in}) ~~> = RedirTok ;
+RedirTok    = "<<<" | "&>>" | "&>" | ">>" | ">&" | ">|" | "<&" | ">" | LtOne ;
+LtOne       = "<" NotLt ;
 
 
 // --- words: a run of segments with NO whitespace between them ---------------------
@@ -118,18 +199,28 @@ SimpleCommand <~~ push(makeSimpleCommand(takeAll())) ~~>
 
 Word        <~~ push(mkWord(takeAll())) ~~>
             = WordSeg :whitespace() { WordSeg } ;
-WordSeg     = SqSeg | DqSeg | ExpSeg | EscSeg | BareSeg ;
+WordSeg     = SqSeg | DqSeg | AnsiSeg | ExpSeg | LineCont | EscSeg | BareSeg ;
+
+// A backslash immediately followed by a newline is a line continuation: both vanish.
+LineCont    <~~ push(makeConst("")) ~~> = "\\" "\n" ;
+
+// $'...' : ANSI-C quoting. The body is taken raw and decoded by ansiC (\n \t \xHH \0NNN ...).
+AnsiSeg     = "$'" :whitespace() AnsiBody "'" ;
+AnsiBody    <~~ push(makeConst(ansiC(up.in))) ~~> = { AnsiEsc | AnsiLit } ;
+AnsiEsc     = "\\" AnyCh ;
+AnsiLit     = !@+"'\\" ;
 
 // 'single quoted' : everything up to the next ' is literal (no escapes, may span lines).
 SqSeg       = "'" :whitespace() { !@+"'" } <~~ push(makeConst(up.in)) ~~> "'" ;
 
 // "double quoted" : literal runs, escapes and $ expansions concatenated.
 DqSeg       <~~ push(mkWord(takeAll())) ~~>
-            = '"' :whitespace() { ExpSeg | DqEsc | DqLit } '"' ;
+            = '"' :whitespace() { ExpSeg | DqCont | DqEsc | DqLit } '"' ;
 DqLit       <~~ push(makeConst(up.in)) ~~>
-            = !@+"\"$\\" ;
+            = !@+"\"$\\`" ;
 DqEsc       <~~ push(makeConst(dqEsc(up.in))) ~~>
             = "\\" AnyCh ;
+DqCont      <~~ push(makeConst("")) ~~> = "\\" "\n" ;
 
 // An unquoted \x escape: the backslash is dropped, the next char is literal (\  -> space).
 EscSeg      <~~ push(makeConst(escChar(up.in))) ~~>
@@ -144,13 +235,40 @@ AnyCh       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 // --- $ expansions -----------------------------------------------------------------
 
-ExpSeg      = ArithExp | DollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+ExpSeg      = ArithExp | CmdSub | BackSub | DollarBrace | DollarName | DollarDigit | DollarSpecial | DollarLit ;
+
+// $( LIST ) and the older `LIST` : run the list with stdout captured, and the value of the
+// word segment is that output with its trailing newlines removed (exactly like the shell).
+// The list is parsed with the normal whitespace rule; the enclosing word's "no skipping"
+// state is restored automatically when the production returns.
+CmdSub      <~~ push(mkCmdSub(pop())) ~~>
+            = "$(" :whitespace(Whitespace) CompoundList ")" ;
+BackSub     <~~ push(mkCmdSub(pop())) ~~>
+            = "`" :whitespace(Whitespace) CompoundList "`" ;
 
 // $(( expr )) : whitespace IS allowed inside; the value is the decimal string of the result.
 ArithExp    <~~ push(mkArith(pop())) ~~>
-            = "$((" :whitespace(Whitespace) ArCmp "))" ;
+            = "$((" :whitespace(Whitespace) ArList "))" ;
 
-DollarBrace = "${" VarName <~~ push(mkVarRef(up.in)) ~~> "}" ;
+// ${...} : the whole parameter-expansion family. Inside the braces whitespace is NOT
+// skipped (a default word may contain spaces), and the enclosing state is restored on return.
+DollarBrace <~~ push(mkParamExp(takeAll())) ~~>
+            = "${" :whitespace() PeBody "}" ;
+PeBody      = PeLen | PeInd | PeOpForm | PePlain ;
+PeLen       <~~ push({pe: "len"}) ~~> = "#" PeName ;
+PeInd       <~~ push({pe: "ind"}) ~~> = "!" PeName ;
+PeOpForm    = PeName PeOp [ BraceWord ] ;
+PePlain     = PeName ;
+PeName      <~~ push({pname: up.in}) ~~> = PeNameTok ;
+PeNameTok   = PeIdent | PeDigits | "@" | "*" | "#" | "?" | "!" | "$" | "-" ;
+PeIdent     = ( "a"..."z" | "A"..."Z" | "_" ) { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } ;
+PeDigits    = "0"..."9" { "0"..."9" } ;
+// Longest first: ":-" must be tried before "-" (see the ordered-choice rule).
+PeOp        <~~ push({op: up.in}) ~~> = ":-" | ":=" | ":?" | ":+" | "-" | "=" | "?" | "+" ;
+// A word inside ${...}: anything up to the closing brace, expansions included.
+BraceWord   <~~ push(mkWord(takeAll())) ~~> = BraceSeg { BraceSeg } ;
+BraceSeg    = SqSeg | DqSeg | ExpSeg | EscSeg | BraceBare ;
+BraceBare   <~~ push(makeConst(up.in)) ~~> = !@+"}\"'\\$`" ;
 DollarName  = "$" VarName <~~ push(mkVarRef(up.in)) ~~> ;
 DollarDigit = "$" ArgDigit <~~ push(mkVarRef(up.in)) ~~> ;
 DollarSpecial = DollarHash | DollarQ ;
@@ -162,30 +280,89 @@ VarName     = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"...
 ArgDigit    = "0"..."9" ;
 
 
-// --- $(( )) arithmetic: precedence comparison < additive < multiplicative < unary --------
+// --- $(( )) arithmetic: the full bash operator set ---------------------------------
+// Precedence, loosest first: , then assignment, ?:, ||, &&, |, ^, &, == !=, comparison,
+// shifts, + -, * / %, ** (right associative), unary, primary.
 
-ArCmp       <~~ push(foldBin(takeAll())) ~~>
-            = ArAdd { ArCmpOp ArAdd } ;
-ArCmpOp     <~~ push({op: up.in}) ~~> = "<=" | ">=" | "==" | "!=" | "<" | ">" ;
-ArAdd       <~~ push(foldBin(takeAll())) ~~>
-            = ArMul { ArAddOp ArMul } ;
-ArAddOp     <~~ push({op: up.in}) ~~> = "+" | "-" ;
-ArMul       <~~ push(foldBin(takeAll())) ~~>
-            = ArUnary { ArMulOp ArUnary } ;
-ArMulOp     <~~ push({op: up.in}) ~~> = "*" | "/" | "%" ;
-ArUnary     = ArNeg | ArPrimary ;
-ArNeg       <~~ push(mkNeg(pop())) ~~> = "-" ArUnary ;
+ArList      <~~ push(foldComma(takeAll())) ~~> = ArAssign { "," ArAssign } ;
+ArAssign    = ArAssignForm | ArCond ;
+ArAssignForm <~~ push(mkArAssign(takeAll())) ~~> = ArLhs ArAsgOp ArAssign ;
+ArLhs       <~~ push({lhs: up.in}) ~~> = ArName ;
+ArAsgOp     <~~ push({aop: up.in}) ~~>
+            = "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "^=" | "|=" | ArPlainAsg ;
+ArPlainAsg  = "=" NotEq ;
+
+ArCond      <~~ push(mkArCond(takeAll())) ~~> = ArLor [ "?" ArAssign ":" ArAssign ] ;
+ArLor       <~~ push(foldBin(takeAll())) ~~> = ArLand { ArLorOp ArLand } ;
+ArLorOp     <~~ push({op: up.in}) ~~> = "||" ;
+ArLand      <~~ push(foldBin(takeAll())) ~~> = ArBor { ArLandOp ArBor } ;
+ArLandOp    <~~ push({op: up.in}) ~~> = "&&" ;
+ArBor       <~~ push(foldBin(takeAll())) ~~> = ArBxor { ArBorOp ArBxor } ;
+ArBorOp     <~~ push({op: up.in}) ~~> = "|" NotBar ;
+ArBxor      <~~ push(foldBin(takeAll())) ~~> = ArBand { ArBxorOp ArBand } ;
+ArBxorOp    <~~ push({op: up.in}) ~~> = "^" NotEq ;
+ArBand      <~~ push(foldBin(takeAll())) ~~> = ArEq { ArBandOp ArEq } ;
+ArBandOp    <~~ push({op: up.in}) ~~> = "&" NotAmp ;
+ArEq        <~~ push(foldBin(takeAll())) ~~> = ArCmp { ArEqOp ArCmp } ;
+ArEqOp      <~~ push({op: up.in}) ~~> = "==" | "!=" ;
+ArCmp       <~~ push(foldBin(takeAll())) ~~> = ArShift { ArCmpOp ArShift } ;
+ArCmpOp     <~~ push({op: up.in}) ~~> = "<=" | ">=" | "<" | ">" ;
+ArShift     <~~ push(foldBin(takeAll())) ~~> = ArAdd { ArShiftOp ArAdd } ;
+ArShiftOp   <~~ push({op: up.in}) ~~> = "<<" | ">>" ;
+ArAdd       <~~ push(foldBin(takeAll())) ~~> = ArMul { ArAddOp ArMul } ;
+ArAddOp     <~~ push({op: up.in}) ~~> = "+" NotPlus | "-" NotMinus ;
+ArMul       <~~ push(foldBin(takeAll())) ~~> = ArPow { ArMulOp ArPow } ;
+ArMulOp     <~~ push({op: up.in}) ~~> = "*" NotStar | "/" | "%" ;
+ArPow       <~~ push(foldPow(takeAll())) ~~> = ArUnary [ ArPowOp ArPow ] ;
+ArPowOp     <~~ push({op: up.in}) ~~> = "**" ;
+
+ArUnary     = ArPreInc | ArNeg | ArPos | ArNot | ArBnot | ArPrimary ;
+ArPreInc    <~~ push(mkIncDec(takeAll())) ~~> = ArIncOp ArLhs ;
+ArIncOp     <~~ push({iop: up.in, pre: 1}) ~~> = "++" | "--" ;
+ArNeg       <~~ push(mkUn("-", pop())) ~~> = "-" ArUnary ;
+ArPos       <~~ push(mkUn("+", pop())) ~~> = "+" ArUnary ;
+ArNot       <~~ push(mkUn("!", pop())) ~~> = "!" NotEq ArUnary ;
+ArBnot      <~~ push(mkUn("~", pop())) ~~> = "~" ArUnary ;
+
 // A $-prefixed operand (Bash expands it before evaluating): $name, $1..$9, $# and $?.
-ArPrimary   = ArGroup | ArNum | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArVar ;
-ArGroup     = "(" ArCmp ")" ;
-ArNum       <~~ push(mkInt(up.in)) ~~>
-            = "0"..."9" :whitespace() { "0"..."9" } :whitespace(Whitespace) ;
+ArPrimary   = ArGroup | ArNum | ArPostInc | ArCmdSub | ArDollarDigit | ArDollarHash | ArDollarQ | ArDollarVar | ArDollarBrace | ArVar ;
+ArGroup     = "(" ArList ")" ;
+ArPostInc   <~~ push(mkIncDec(takeAll())) ~~> = ArLhs ArPostOp ;
+ArPostOp    <~~ push({iop: up.in, pre: 0}) ~~> = "++" | "--" ;
+ArNum       <~~ push(mkNum(up.in)) ~~> = ArNumTok :whitespace(Whitespace) ;
+ArNumTok    = ArHex | ArBase | ArDec ;
+ArHex       = ArHexPfx :whitespace() ArHexDig { ArHexDig } ;
+ArHexPfx    = "0x" | "0X" ;
+ArHexDig    = "0"..."9" | "a"..."f" | "A"..."F" ;
+ArBase      = ArDec :whitespace() "#" ArAlnum { ArAlnum } ;
+ArAlnum     = "0"..."9" | "a"..."z" | "A"..."Z" | "@" | "_" ;
+ArDec       = "0"..."9" :whitespace() { "0"..."9" } ;
 ArVar       <~~ push(mkArVar(up.in)) ~~> = ArName ;
 ArDollarVar = "$" ArName <~~ push(mkArVar(up.in)) ~~> ;
+ArDollarBrace <~~ push(mkArOfStr(pop())) ~~> = DollarBrace :whitespace(Whitespace) ;
 ArDollarDigit = "$" ArgDigit <~~ push(mkArVar(up.in)) ~~> :whitespace(Whitespace) ;
 ArDollarHash <~~ push(mkArVar("#")) ~~> = "$#" :whitespace(Whitespace) ;
 ArDollarQ   <~~ push(mkArVar("?")) ~~> = "$?" :whitespace(Whitespace) ;
 ArName      = ( "a"..."z" | "A"..."Z" | "_" ) :whitespace() { "a"..."z" | "A"..."Z" | "0"..."9" | "_" } :whitespace(Whitespace) ;
+// $( LIST ) inside $(( )) : the captured output is read as an integer.
+ArCmdSub    <~~ push(mkArCmdSub(pop())) ~~> = CmdSub :whitespace(Whitespace) ;
+
+
+// --- [[ ... ]] conditional expressions ----------------------------------------------
+
+CondOr      <~~ push(foldCondOr(takeAll())) ~~> = CondAnd { "||" CondAnd } ;
+CondAnd     <~~ push(foldCondAnd(takeAll())) ~~> = CondNot { "&&" CondNot } ;
+CondNot     = CondNeg | CondPrim ;
+CondNeg     <~~ push(mkCondNot(pop())) ~~> = "!" CondNot ;
+CondPrim    = CondParen | CondUn | CondBin | CondSingle ;
+CondParen   = "(" CondOr ")" ;
+CondUn      <~~ push(mkCondUn(takeAll())) ~~> = CondUnOp Word ;
+CondUnOp    <~~ push({cop: up.in}) ~~> = CondUnTok KwEnd ;
+CondUnTok   = "-z" | "-n" | "-v" | "-e" | "-f" | "-d" | "-s" | "-r" | "-w" | "-x" | "-h" | "-L" | "-b" | "-c" | "-p" | "-S" | "-t" | "-o" ;
+CondBin     <~~ push(mkCondBin(takeAll())) ~~> = Word CondBinOp Word ;
+CondBinOp   <~~ push({cop: up.in}) ~~> = CondBinTok ;
+CondBinTok  = "==" | "!=" | "=~" | "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" | "-nt" | "-ot" | "-ef" | "=" | "<" | ">" ;
+CondSingle  <~~ push(mkCondSingle(pop())) ~~> = Word ;
 
 
 // --- keywords, keyword boundary and the reserved-word guard ------------------------
@@ -200,6 +377,44 @@ KwWhile     = "while" KwEnd ;
 KwDo        = "do" KwEnd ;
 KwDone      = "done" KwEnd ;
 KwIn        = "in" KwEnd ;
+KwCase      = "case" KwEnd ;
+KwUntil     = "until" KwEnd ;
+KwFunction  = "function" KwEnd ;
+KwEsac      = "esac" KwEnd ;
+
+// Fails when the next thing (after any run of blanks and newlines) is a clause terminator,
+// so a case body's separator run stops in front of ";;" / ";&" / ";;&".
+// "|" that is not the front of "||", and "<" that is not the front of "<<" - both anchored
+// to the very next byte, which a !"literal" lookahead cannot do (it skips whitespace first).
+NotBar = :script(~~
+    (function() {
+        if (c.peek(0) === 124) { return abnf.newToken("\x01bar", 0) }
+    })()
+~~) ;
+NotLt = :script(~~
+    (function() {
+        if (c.peek(0) === 60) { return abnf.newToken("\x01lt", 0) }
+    })()
+~~) ;
+
+NotEq    = :script(~~ (function() { if (c.peek(0) === 61) { return abnf.newToken("\x01eq", 0) } })() ~~) ;
+NotAmp   = :script(~~ (function() { if (c.peek(0) === 38) { return abnf.newToken("\x01amp", 0) } })() ~~) ;
+NotStar  = :script(~~ (function() { if (c.peek(0) === 42) { return abnf.newToken("\x01star", 0) } })() ~~) ;
+NotPlus  = :script(~~ (function() { if (c.peek(0) === 43 || c.peek(0) === 61) { return abnf.newToken("\x01plus", 0) } })() ~~) ;
+NotMinus = :script(~~ (function() { if (c.peek(0) === 45 || c.peek(0) === 61) { return abnf.newToken("\x01minus", 0) } })() ~~) ;
+
+NotCaseTerm = :script(~~
+    (function() {
+        var i = 0
+        var cc = c.peek(i)
+        while (cc == 32 || cc == 9 || cc == 10 || cc == 13) { i = i + 1; cc = c.peek(i) }
+        if (cc == 59) {
+            var nx = c.peek(i + 1)
+            if (nx == 59 || nx == 38) { return abnf.newToken("\x01case-term", 0) }
+        }
+        return undefined
+    })()
+~~) ;
 
 // A keyword only counts when the next char is a word terminator (whitespace, a separator or
 // a metacharacter), so 'done1', 'ifx' and 'in_it' stay ordinary words. Returns the impossible
@@ -226,7 +441,7 @@ NotReserved = :script(~~
         cc = c.peek(i)
         while ((cc >= 97 && cc <= 122) || (cc >= 65 && cc <= 90)) { w = w + String.fromCharCode(cc); i = i + 1; cc = c.peek(i) }
         var boundary = (cc == -1 || cc == 32 || cc == 9 || cc == 10 || cc == 13 || cc == 59 || cc == 38 || cc == 124 || cc == 40 || cc == 41 || cc == 60 || cc == 62 || cc == 35)
-        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "while" || w == "do" || w == "done" || w == "in")
+        var kw = (w == "if" || w == "then" || w == "elif" || w == "else" || w == "fi" || w == "for" || w == "while" || w == "do" || w == "done" || w == "in" || w == "case" || w == "esac" || w == "until" || w == "function")
         if (kw && boundary) { return abnf.newToken("\x01reserved-word", 0) }
         return undefined
     })()
@@ -241,6 +456,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
 
 // ---
+
 :startScript(~~
 
     // ===================================================================================
@@ -259,6 +475,45 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     }
     function hasOwn(o, name) { return Object.prototype.hasOwnProperty.call(o, name) }
     function fail(msg) { println("bash-to-llvm-ir error: " + msg); exit(2) }
+
+    // $'...' body -> the decoded string (bash's ANSI-C escapes).
+    function ansiC(t) {
+        var out = ""
+        var i = 0
+        while (i < t.length) {
+            var ch = t.charAt(i)
+            if (ch != "\\" || i + 1 >= t.length) { out = out + ch; i = i + 1 }
+            else {
+                var e = t.charAt(i + 1)
+                i = i + 2
+                if (e == "n") { out = out + "\n" }
+                else if (e == "t") { out = out + "\t" }
+                else if (e == "r") { out = out + "\r" }
+                else if (e == "a") { out = out + String.fromCharCode(7) }
+                else if (e == "b") { out = out + String.fromCharCode(8) }
+                else if (e == "e" || e == "E") { out = out + String.fromCharCode(27) }
+                else if (e == "f") { out = out + String.fromCharCode(12) }
+                else if (e == "v") { out = out + String.fromCharCode(11) }
+                else if (e == "0") { out = out + String.fromCharCode(0) }
+                else if (e == "\\") { out = out + "\\" }
+                else if (e == "'") { out = out + "'" }
+                else if (e == "\"") { out = out + "\"" }
+                else if (e == "x") {
+                    var v = 0, n = 0
+                    while (n < 2 && i < t.length && hexVal(t.charCodeAt(i)) >= 0) { v = v * 16 + hexVal(t.charCodeAt(i)); i = i + 1; n = n + 1 }
+                    out = out + String.fromCharCode(v)
+                }
+                else { out = out + "\\" + e }
+            }
+        }
+        return out
+    }
+    function hexVal(cc) {
+        if (cc >= 48 && cc <= 57) { return cc - 48 }
+        if (cc >= 97 && cc <= 102) { return cc - 87 }
+        if (cc >= 65 && cc <= 70) { return cc - 55 }
+        return -1
+    }
 
     function escChar(t) { return t.slice(1) }
     function dqEsc(t) {
@@ -303,7 +558,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var extPutchar = m.NewFunc("putchar", i32, llvm.ir.NewParam("", i32))
 
     // The string heap: one big byte arena plus a bump offset. rt_bump hands out slices.
-    var ARENA = 1 << 18
+    var ARENA = 1 << 22
     var arenaTy = llvm.types.NewArray(ARENA, i8)
     var gArena = m.NewGlobalDef("arena", llvm.constant.NewZeroInitializer(arenaTy))
     var gApos = m.NewGlobalDef("arena_pos", zero)
@@ -317,6 +572,66 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     var gEmpty = m.NewGlobalDef("empty", llvm.constant.NewCharArrayFromString("\x00"))
     var emptyTy = llvm.types.NewArray(1, i8)
     function emptyPtr(b) { return b.NewGetElementPtr(emptyTy, gEmpty, zero, zero) }
+
+    // A SECOND empty string, at a different address: the "variable is unset" marker. It reads
+    // as "" everywhere (so no expansion has to special case it), but a pointer comparison
+    // against it answers ${v-default} / ${v:+alt} and friends.
+    var gUnset = m.NewGlobalDef("unset_marker", llvm.constant.NewCharArrayFromString("\x00"))
+    function unsetPtr(b) { return b.NewGetElementPtr(emptyTy, gUnset, zero, zero) }
+
+    // Variable storage is ONE global array of i8*, indexed by a compile-time id, so the
+    // `local` unwinder can restore a slot chosen at run time (a per-name global could only
+    // be reached through a generated dispatch).
+    var NVARS = 1024
+    var gvarsTy = llvm.types.NewArray(NVARS, i8ptr)
+    var gVars = m.NewGlobalDef("gvars", llvm.constant.NewZeroInitializer(gvarsTy))
+
+    var varIds = {}       // "$"+name -> slot index
+    var varIdList = []    // index -> name (creation order, for the deterministic init run)
+    function getVarId(name) {
+        var key = "$" + name
+        if (hasOwn(varIds, key)) { return varIds[key] }
+        var id = varIdList.length
+        if (id >= NVARS) { fail("too many distinct variables (limit " + NVARS + ")") }
+        varIds[key] = id
+        varIdList.push(name)
+        return id
+    }
+    function varPtr(b, name) {
+        return b.NewGetElementPtr(gvarsTy, gVars, zero, llvm.constant.NewInt(i32, getVarId(name)))
+    }
+    function loadVar(b, name) { return b.NewLoad(i8ptr, varPtr(b, name)) }
+    function storeVar(b, name, v) { b.NewStore(v, varPtr(b, name)) }
+
+    // The `local` save stack: (slot id, previous value) pairs. A function records the stack
+    // depth on entry and unwinds back to it at every return, so a `return` from anywhere -
+    // including out of a loop - restores every name the call declared local.
+    var LSMAX = 512
+    var lsIdTy = llvm.types.NewArray(LSMAX, i32)
+    var lsValTy = llvm.types.NewArray(LSMAX, i8ptr)
+    var gLsId = m.NewGlobalDef("ls_id", llvm.constant.NewZeroInitializer(lsIdTy))
+    var gLsVal = m.NewGlobalDef("ls_val", llvm.constant.NewZeroInitializer(lsValTy))
+    var gLsTop = m.NewGlobalDef("ls_top", zero)
+
+    // Output capture for $( ) / ` ` : a stack of fixed-size arena buffers. While the depth is
+    // non-zero every byte a command would print lands in the innermost buffer instead of on
+    // stdout, which is what makes nesting ( $(echo "$(echo x)") ) work.
+    var CAPMAX = 16
+    var CAPSZ = 8192
+    var capBufTy = llvm.types.NewArray(CAPMAX, i8ptr)
+    var capLenTy = llvm.types.NewArray(CAPMAX, i32)
+    var gCapBuf = m.NewGlobalDef("cap_buf", llvm.constant.NewZeroInitializer(capBufTy))
+    var gCapLen = m.NewGlobalDef("cap_len", llvm.constant.NewZeroInitializer(capLenTy))
+    var gCapDepth = m.NewGlobalDef("cap_depth", zero)
+
+    // Subshell isolation: ( LIST ) snapshots the whole variable array and restores it.
+    var SSDEPTH = 8
+    var ssTy = llvm.types.NewArray(SSDEPTH * NVARS, i8ptr)
+    var gSs = m.NewGlobalDef("ss_save", llvm.constant.NewZeroInitializer(ssTy))
+    var gSsDepth = m.NewGlobalDef("ss_depth", zero)
+    var gNvars = m.NewGlobalDef("nvars", zero)   // filled by main's entry block
+    // The standard input a pipeline stage hands on (the compiler has no `read` yet).
+    var gStdin = m.NewGlobalDef("stdin_buf", llvm.constant.NewNull(i8ptr))
 
     // ===================================================================================
     //  Emitter state.
@@ -347,19 +662,9 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return b.NewGetElementPtr(r.ty, r.g, zero, zero)
     }
 
-    // Variable storage: "$"+name -> global i8*. Initialized to null, but main()'s entry
-    // block overwrites every slot with &empty before the body runs (a null would trap on
-    // the first load), so an unset variable reads as "".
-    var varSlots = {}
-    var varSlotList = []  // creation order, for a deterministic init sequence
-    function getVarSlot(name) {
-        var key = "$" + name
-        if (hasOwn(varSlots, key)) { return varSlots[key] }
-        var g = m.NewGlobalDef("gv_" + name, nullStr)
-        varSlots[key] = g
-        varSlotList.push(g)
-        return g
-    }
+    // i8* rt_getvar_byname(i8* name): ${!ptr} indirection. Its body is a chain over every
+    // variable name the program mentions, so it can only be emitted once the walk is over.
+    var rtGetByName = m.NewFunc("rt_getvar_byname", i8ptr, llvm.ir.NewParam("n", i8ptr))
 
     var funcs = {}        // user functions: "$"+name -> IR func (bashfn_NAME)
     var fnCount = 0
@@ -420,6 +725,34 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         cont.NewBr(h)
         ne.NewRet(zero)
         eq.NewRet(one)
+    })()
+
+    // i32 rt_strcmp(i8* a, i8* b): -1 / 0 / 1 by unsigned byte order (the shell's < and >).
+    var rtStrcmp = m.NewFunc("rt_strcmp", i32, [llvm.ir.NewParam("a", i8ptr), llvm.ir.NewParam("b", i8ptr)])
+    ;(function() {
+        var a = rtStrcmp.Params[0], b2 = rtStrcmp.Params[1]
+        var e = rtStrcmp.NewBlock("entry")
+        var h = rtStrcmp.NewBlock("head")
+        var ck = rtStrcmp.NewBlock("ck")
+        var lt = rtStrcmp.NewBlock("lt")
+        var gt = rtStrcmp.NewBlock("gt")
+        var eq = rtStrcmp.NewBlock("eq")
+        var cont = rtStrcmp.NewBlock("cont")
+        var ip = e.NewAlloca(i32)
+        e.NewStore(zero, ip)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        var ca = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, a, i)), i32)
+        var cb = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, b2, i)), i32)
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredSLT, ca, cb), lt, ck)
+        ck.NewCondBr(ck.NewICmp(llvm.enum.IPredSGT, ca, cb), gt, cont)
+        var step = rtStrcmp.NewBlock("step")
+        cont.NewCondBr(cont.NewICmp(llvm.enum.IPredEQ, ca, zero), eq, step)
+        step.NewStore(step.NewAdd(i, one), ip)
+        step.NewBr(h)
+        lt.NewRet(llvm.constant.NewInt(i32, -1))
+        gt.NewRet(one)
+        eq.NewRet(zero)
     })()
 
     // i8* rt_strcat(i8* a, i8* b): fresh arena string = a followed by b.
@@ -557,7 +890,230 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         dx.NewRet(dx.NewMul(dx.NewLoad(i32, vp), dx.NewLoad(i32, sp)))
     })()
 
-    // rt_prints(i8* s): putchar each byte until NUL (no trailing newline).
+    // ---- glob (pathname-style) matching in IR: * ? [...] and a backslash escape ------
+    // The same matcher backs case and [[ == ]], exactly like the shell. Both functions walk
+    // raw i8* pointers; "*" backtracks by CALLING rt_glob again, so the IR call stack is the
+    // backtracking stack.
+
+    // i32 rt_class(i8* p, i32 ch): p points at "[". Returns -1 when the bracket expression is
+    // unterminated (the "[" is then a literal), else (bytesConsumed << 1) | matched.
+    var rtClass = m.NewFunc("rt_class", i32, [llvm.ir.NewParam("p", i8ptr), llvm.ir.NewParam("ch", i32)])
+    ;(function() {
+        var p2 = rtClass.Params[0], ch = rtClass.Params[1]
+        var e = rtClass.NewBlock("entry")
+        var h = rtClass.NewBlock("head")
+        var it = rtClass.NewBlock("item")
+        var mr = rtClass.NewBlock("maybe_range")
+        var rg = rtClass.NewBlock("range")
+        var sg = rtClass.NewBlock("single")
+        var un = rtClass.NewBlock("unterm")
+        var dn = rtClass.NewBlock("done")
+        var jp = e.NewAlloca(i32), np = e.NewAlloca(i32), mp = e.NewAlloca(i32), fp = e.NewAlloca(i32)
+        e.NewStore(one, jp); e.NewStore(zero, np); e.NewStore(zero, mp); e.NewStore(one, fp)
+        var c0 = e.NewZExt(e.NewLoad(i8, e.NewGetElementPtr(i8, p2, one)), i32)
+        var isNeg = e.NewOr(e.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, 33)),
+                            e.NewICmp(llvm.enum.IPredEQ, c0, llvm.constant.NewInt(i32, 94)))
+        e.NewStore(e.NewSelect(isNeg, one, zero), np)
+        e.NewStore(e.NewSelect(isNeg, llvm.constant.NewInt(i32, 2), one), jp)
+        e.NewBr(h)
+
+        var j = h.NewLoad(i32, jp)
+        var cj = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, p2, j)), i32)
+        var atEnd = h.NewICmp(llvm.enum.IPredEQ, cj, zero)
+        var closes = h.NewAnd(h.NewICmp(llvm.enum.IPredEQ, cj, llvm.constant.NewInt(i32, 93)),
+                              h.NewICmp(llvm.enum.IPredEQ, h.NewLoad(i32, fp), zero))
+        var h2 = rtClass.NewBlock("h2")
+        h.NewCondBr(atEnd, un, h2)
+        h2.NewCondBr(closes, dn, it)
+
+        it.NewStore(zero, fp)
+        var cn = it.NewZExt(it.NewLoad(i8, it.NewGetElementPtr(i8, p2, it.NewAdd(j, one))), i32)
+        it.NewCondBr(it.NewICmp(llvm.enum.IPredEQ, cn, llvm.constant.NewInt(i32, 45)), mr, sg)
+
+        var cn2 = mr.NewZExt(mr.NewLoad(i8, mr.NewGetElementPtr(i8, p2, mr.NewAdd(j, llvm.constant.NewInt(i32, 2)))), i32)
+        var okRange = mr.NewAnd(mr.NewICmp(llvm.enum.IPredNE, cn2, zero),
+                                mr.NewICmp(llvm.enum.IPredNE, cn2, llvm.constant.NewInt(i32, 93)))
+        mr.NewCondBr(okRange, rg, sg)
+
+        var inR = rg.NewAnd(rg.NewICmp(llvm.enum.IPredSGE, ch, cj), rg.NewICmp(llvm.enum.IPredSLE, ch, cn2))
+        rg.NewStore(rg.NewSelect(inR, one, rg.NewLoad(i32, mp)), mp)
+        rg.NewStore(rg.NewAdd(j, llvm.constant.NewInt(i32, 3)), jp)
+        rg.NewBr(h)
+
+        var eq1 = sg.NewICmp(llvm.enum.IPredEQ, ch, cj)
+        sg.NewStore(sg.NewSelect(eq1, one, sg.NewLoad(i32, mp)), mp)
+        sg.NewStore(sg.NewAdd(j, one), jp)
+        sg.NewBr(h)
+
+        un.NewRet(llvm.constant.NewInt(i32, -1))
+
+        var mv = dn.NewLoad(i32, mp)
+        var neg = dn.NewICmp(llvm.enum.IPredNE, dn.NewLoad(i32, np), zero)
+        var fin = dn.NewSelect(neg, dn.NewSub(one, mv), mv)
+        dn.NewRet(dn.NewOr(dn.NewMul(dn.NewAdd(dn.NewLoad(i32, jp), one), llvm.constant.NewInt(i32, 2)), fin))
+    })()
+
+    // i32 rt_glob(i8* pat, i8* s): 1 when the whole subject matches the whole pattern.
+    var rtGlob = m.NewFunc("rt_glob", i32, [llvm.ir.NewParam("p", i8ptr), llvm.ir.NewParam("s", i8ptr)])
+    ;(function() {
+        var p0 = rtGlob.Params[0], s0 = rtGlob.Params[1]
+        var e = rtGlob.NewBlock("entry")
+        var h = rtGlob.NewBlock("head")
+        var pend = rtGlob.NewBlock("pend")
+        var nostar = rtGlob.NewBlock("nostar")
+        var starsk = rtGlob.NewBlock("starsk")
+        var staraf = rtGlob.NewBlock("staraf")
+        var kloop = rtGlob.NewBlock("kloop")
+        var knext = rtGlob.NewBlock("knext")
+        var havec = rtGlob.NewBlock("havec")
+        var qm = rtGlob.NewBlock("qmark")
+        var nq = rtGlob.NewBlock("nq")
+        var brk = rtGlob.NewBlock("brack")
+        var cls = rtGlob.NewBlock("cls")
+        var clsok = rtGlob.NewBlock("clsok")
+        var nb = rtGlob.NewBlock("nb")
+        var esc = rtGlob.NewBlock("esc")
+        var escok = rtGlob.NewBlock("escok")
+        var lit = rtGlob.NewBlock("lit")
+        var litok = rtGlob.NewBlock("litok")
+        var r0 = rtGlob.NewBlock("ret0")
+        var r1 = rtGlob.NewBlock("ret1")
+        var two = llvm.constant.NewInt(i32, 2)
+
+        var pp = e.NewAlloca(i8ptr), sp = e.NewAlloca(i8ptr)
+        e.NewStore(p0, pp); e.NewStore(s0, sp)
+        e.NewBr(h)
+
+        var pcur = h.NewLoad(i8ptr, pp)
+        var pc = h.NewZExt(h.NewLoad(i8, h.NewGetElementPtr(i8, pcur, zero)), i32)
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, pc, zero), pend, nostar)
+
+        var sat = pend.NewZExt(pend.NewLoad(i8, pend.NewGetElementPtr(i8, pend.NewLoad(i8ptr, sp), zero)), i32)
+        pend.NewCondBr(pend.NewICmp(llvm.enum.IPredEQ, sat, zero), r1, r0)
+
+        nostar.NewCondBr(nostar.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 42)), starsk, havec)
+
+        // skip a run of "*"
+        var sk = starsk.NewLoad(i8ptr, pp)
+        var skc = starsk.NewZExt(starsk.NewLoad(i8, starsk.NewGetElementPtr(i8, sk, zero)), i32)
+        var skadv = rtGlob.NewBlock("skadv")
+        starsk.NewCondBr(starsk.NewICmp(llvm.enum.IPredEQ, skc, llvm.constant.NewInt(i32, 42)), skadv, staraf)
+        skadv.NewStore(skadv.NewGetElementPtr(i8, sk, one), pp)
+        skadv.NewBr(starsk)
+
+        var pafter = staraf.NewLoad(i8ptr, pp)
+        var pac = staraf.NewZExt(staraf.NewLoad(i8, staraf.NewGetElementPtr(i8, pafter, zero)), i32)
+        staraf.NewCondBr(staraf.NewICmp(llvm.enum.IPredEQ, pac, zero), r1, kloop)
+
+        var scur = kloop.NewLoad(i8ptr, sp)
+        var rec = kloop.NewCall(rtGlob, [pafter, scur])
+        kloop.NewCondBr(kloop.NewICmp(llvm.enum.IPredNE, rec, zero), r1, knext)
+        var kc = knext.NewZExt(knext.NewLoad(i8, knext.NewGetElementPtr(i8, scur, zero)), i32)
+        var kadv = rtGlob.NewBlock("kadv")
+        knext.NewCondBr(knext.NewICmp(llvm.enum.IPredEQ, kc, zero), r0, kadv)
+        kadv.NewStore(kadv.NewGetElementPtr(i8, scur, one), sp)
+        kadv.NewBr(kloop)
+
+        var scur2 = havec.NewLoad(i8ptr, sp)
+        var sc = havec.NewZExt(havec.NewLoad(i8, havec.NewGetElementPtr(i8, scur2, zero)), i32)
+        var havec2 = rtGlob.NewBlock("havec2")
+        havec.NewCondBr(havec.NewICmp(llvm.enum.IPredEQ, sc, zero), r0, havec2)
+        havec2.NewCondBr(havec2.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 63)), qm, nq)
+
+        qm.NewStore(qm.NewGetElementPtr(i8, pcur, one), pp)
+        qm.NewStore(qm.NewGetElementPtr(i8, scur2, one), sp)
+        qm.NewBr(h)
+
+        nq.NewCondBr(nq.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 91)), brk, nb)
+
+        var cr = brk.NewCall(rtClass, [pcur, sc])
+        brk.NewCondBr(brk.NewICmp(llvm.enum.IPredSLT, cr, zero), lit, cls)
+        var matched = cls.NewAnd(cr, one)
+        var off = cls.NewSDiv(cr, two)
+        cls.NewCondBr(cls.NewICmp(llvm.enum.IPredEQ, matched, zero), r0, clsok)
+        clsok.NewStore(clsok.NewGetElementPtr(i8, pcur, off), pp)
+        clsok.NewStore(clsok.NewGetElementPtr(i8, scur2, one), sp)
+        clsok.NewBr(h)
+
+        var nc = nb.NewZExt(nb.NewLoad(i8, nb.NewGetElementPtr(i8, pcur, one)), i32)
+        var isEsc = nb.NewAnd(nb.NewICmp(llvm.enum.IPredEQ, pc, llvm.constant.NewInt(i32, 92)),
+                              nb.NewICmp(llvm.enum.IPredNE, nc, zero))
+        nb.NewCondBr(isEsc, esc, lit)
+        esc.NewCondBr(esc.NewICmp(llvm.enum.IPredEQ, nc, sc), escok, r0)
+        escok.NewStore(escok.NewGetElementPtr(i8, pcur, two), pp)
+        escok.NewStore(escok.NewGetElementPtr(i8, scur2, one), sp)
+        escok.NewBr(h)
+
+        lit.NewCondBr(lit.NewICmp(llvm.enum.IPredEQ, pc, sc), litok, r0)
+        litok.NewStore(litok.NewGetElementPtr(i8, pcur, one), pp)
+        litok.NewStore(litok.NewGetElementPtr(i8, scur2, one), sp)
+        litok.NewBr(h)
+
+        r0.NewRet(zero)
+        r1.NewRet(one)
+    })()
+
+    // i32 rt_putc(i32 c): one output byte - into the innermost capture buffer if a command
+    // substitution is running, otherwise to stdout.
+    var rtPutc = m.NewFunc("rt_putc", i32, llvm.ir.NewParam("c", i32))
+    ;(function() {
+        var cv = rtPutc.Params[0]
+        var e = rtPutc.NewBlock("entry")
+        var cap = rtPutc.NewBlock("cap")
+        var out = rtPutc.NewBlock("out")
+        var x = rtPutc.NewBlock("exit")
+        var d = e.NewLoad(i32, gCapDepth)
+        e.NewCondBr(e.NewICmp(llvm.enum.IPredSGT, d, zero), cap, out)
+        var idx = cap.NewSub(d, one)
+        var buf = cap.NewLoad(i8ptr, cap.NewGetElementPtr(capBufTy, gCapBuf, zero, idx))
+        var lenp = cap.NewGetElementPtr(capLenTy, gCapLen, zero, idx)
+        var l = cap.NewLoad(i32, lenp)
+        cap.NewStore(cap.NewTrunc(cv, i8), cap.NewGetElementPtr(i8, buf, l))
+        cap.NewStore(cap.NewAdd(l, one), lenp)
+        cap.NewBr(x)
+        out.NewCall(extPutchar, cv)
+        out.NewBr(x)
+        x.NewRet(zero)
+    })()
+
+    // i32 rt_cap_begin(i32): open a fresh capture buffer.
+    var rtCapBegin = m.NewFunc("rt_cap_begin", i32, llvm.ir.NewParam("u", i32))
+    ;(function() {
+        var e = rtCapBegin.NewBlock("entry")
+        var d = e.NewLoad(i32, gCapDepth)
+        var buf = e.NewCall(rtBump, llvm.constant.NewInt(i32, CAPSZ))
+        e.NewStore(buf, e.NewGetElementPtr(capBufTy, gCapBuf, zero, d))
+        e.NewStore(zero, e.NewGetElementPtr(capLenTy, gCapLen, zero, d))
+        e.NewStore(e.NewAdd(d, one), gCapDepth)
+        e.NewRet(zero)
+    })()
+
+    // i8* rt_cap_end(i32): close the innermost buffer, drop its trailing newlines, NUL it.
+    var rtCapEnd = m.NewFunc("rt_cap_end", i8ptr, llvm.ir.NewParam("u", i32))
+    ;(function() {
+        var e = rtCapEnd.NewBlock("entry")
+        var h = rtCapEnd.NewBlock("head")
+        var chk = rtCapEnd.NewBlock("chk")
+        var bd = rtCapEnd.NewBlock("body")
+        var dn = rtCapEnd.NewBlock("done")
+        var d2 = e.NewSub(e.NewLoad(i32, gCapDepth), one)
+        e.NewStore(d2, gCapDepth)
+        var buf = e.NewLoad(i8ptr, e.NewGetElementPtr(capBufTy, gCapBuf, zero, d2))
+        var lp = e.NewAlloca(i32)
+        e.NewStore(e.NewLoad(i32, e.NewGetElementPtr(capLenTy, gCapLen, zero, d2)), lp)
+        e.NewBr(h)
+        var l = h.NewLoad(i32, lp)
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredSGT, l, zero), chk, dn)
+        var lm = chk.NewSub(chk.NewLoad(i32, lp), one)
+        var ch = chk.NewLoad(i8, chk.NewGetElementPtr(i8, buf, lm))
+        chk.NewCondBr(chk.NewICmp(llvm.enum.IPredEQ, ch, llvm.constant.NewInt(i8, 10)), bd, dn)
+        bd.NewStore(bd.NewSub(bd.NewLoad(i32, lp), one), lp)
+        bd.NewBr(h)
+        dn.NewStore(zero8, dn.NewGetElementPtr(i8, buf, dn.NewLoad(i32, lp)))
+        dn.NewRet(buf)
+    })()
+
+    // rt_prints(i8* s): emit each byte until NUL (no trailing newline).
     var rtPrints = m.NewFunc("rt_prints", i32, llvm.ir.NewParam("s", i8ptr))
     ;(function() {
         var s = rtPrints.Params[0]
@@ -571,8 +1127,83 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         var i = h.NewLoad(i32, ip)
         var ch = h.NewLoad(i8, h.NewGetElementPtr(i8, s, i))
         h.NewCondBr(h.NewICmp(llvm.enum.IPredEQ, ch, zero8), x, bd)
-        bd.NewCall(extPutchar, bd.NewZExt(ch, i32))
+        bd.NewCall(rtPutc, bd.NewZExt(ch, i32))
         bd.NewStore(bd.NewAdd(i, one), ip)
+        bd.NewBr(h)
+        x.NewRet(zero)
+    })()
+
+    // i32 rt_ss_save(i32) / rt_ss_restore(i32): push and pop a whole variable snapshot.
+    var rtSsSave = m.NewFunc("rt_ss_save", i32, llvm.ir.NewParam("u", i32))
+    ;(function() {
+        var e = rtSsSave.NewBlock("entry")
+        var h = rtSsSave.NewBlock("head")
+        var bd = rtSsSave.NewBlock("body")
+        var x = rtSsSave.NewBlock("exit")
+        var d = e.NewLoad(i32, gSsDepth)
+        var base = e.NewMul(d, llvm.constant.NewInt(i32, NVARS))
+        var ip = e.NewAlloca(i32)
+        e.NewStore(zero, ip)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredSLT, i, h.NewLoad(i32, gNvars)), bd, x)
+        var v = bd.NewLoad(i8ptr, bd.NewGetElementPtr(gvarsTy, gVars, zero, i))
+        bd.NewStore(v, bd.NewGetElementPtr(ssTy, gSs, zero, bd.NewAdd(base, i)))
+        bd.NewStore(bd.NewAdd(i, one), ip)
+        bd.NewBr(h)
+        x.NewStore(x.NewAdd(d, one), gSsDepth)
+        x.NewRet(zero)
+    })()
+    var rtSsRestore = m.NewFunc("rt_ss_restore", i32, llvm.ir.NewParam("u", i32))
+    ;(function() {
+        var e = rtSsRestore.NewBlock("entry")
+        var h = rtSsRestore.NewBlock("head")
+        var bd = rtSsRestore.NewBlock("body")
+        var x = rtSsRestore.NewBlock("exit")
+        var d = e.NewSub(e.NewLoad(i32, gSsDepth), one)
+        e.NewStore(d, gSsDepth)
+        var base = e.NewMul(d, llvm.constant.NewInt(i32, NVARS))
+        var ip = e.NewAlloca(i32)
+        e.NewStore(zero, ip)
+        e.NewBr(h)
+        var i = h.NewLoad(i32, ip)
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredSLT, i, h.NewLoad(i32, gNvars)), bd, x)
+        var v = bd.NewLoad(i8ptr, bd.NewGetElementPtr(ssTy, gSs, zero, bd.NewAdd(base, i)))
+        bd.NewStore(v, bd.NewGetElementPtr(gvarsTy, gVars, zero, i))
+        bd.NewStore(bd.NewAdd(i, one), ip)
+        bd.NewBr(h)
+        x.NewRet(zero)
+    })()
+
+    // i32 rt_push_local(i32 id): remember gvars[id]'s current value on the local save stack.
+    var rtPushLocal = m.NewFunc("rt_push_local", i32, llvm.ir.NewParam("id", i32))
+    ;(function() {
+        var id = rtPushLocal.Params[0]
+        var e = rtPushLocal.NewBlock("entry")
+        var t = e.NewLoad(i32, gLsTop)
+        e.NewStore(id, e.NewGetElementPtr(lsIdTy, gLsId, zero, t))
+        var v = e.NewLoad(i8ptr, e.NewGetElementPtr(gvarsTy, gVars, zero, id))
+        e.NewStore(v, e.NewGetElementPtr(lsValTy, gLsVal, zero, t))
+        e.NewStore(e.NewAdd(t, one), gLsTop)
+        e.NewRet(zero)
+    })()
+
+    // i32 rt_pop_locals(i32 depth): restore every entry above `depth` (innermost first).
+    var rtPopLocals = m.NewFunc("rt_pop_locals", i32, llvm.ir.NewParam("d", i32))
+    ;(function() {
+        var d = rtPopLocals.Params[0]
+        var e = rtPopLocals.NewBlock("entry")
+        var h = rtPopLocals.NewBlock("head")
+        var bd = rtPopLocals.NewBlock("body")
+        var x = rtPopLocals.NewBlock("exit")
+        e.NewBr(h)
+        var t = h.NewLoad(i32, gLsTop)
+        h.NewCondBr(h.NewICmp(llvm.enum.IPredSLE, t, d), x, bd)
+        var t2 = bd.NewSub(t, one)
+        bd.NewStore(t2, gLsTop)
+        var sid = bd.NewLoad(i32, bd.NewGetElementPtr(lsIdTy, gLsId, zero, t2))
+        var sv = bd.NewLoad(i8ptr, bd.NewGetElementPtr(lsValTy, gLsVal, zero, t2))
+        bd.NewStore(sv, bd.NewGetElementPtr(gvarsTy, gVars, zero, sid))
         bd.NewBr(h)
         x.NewRet(zero)
     })()
@@ -596,7 +1227,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
                 return curFrame.params[idx - 1]
             }
         }
-        return b.NewLoad(i8ptr, getVarSlot(name))
+        return loadVar(b, name)
     }
 
     // ===================================================================================
@@ -605,6 +1236,57 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
 
     function makeConst(s) {
         return {fn: function(b) { return {b: b, v: gepStr(b, s)} }, c: s}
+    }
+    // Command substitution: divert output into a capture buffer, run the list, take the buffer.
+    function mkCmdSub(bodyT) {
+        return {s: true, c: undefined, fn: function(b) {
+            b.NewCall(rtCapBegin, zero)
+            b = bodyT(b)
+            var v = b.NewCall(rtCapEnd, zero)
+            return {b: b, v: v}
+        }}
+    }
+    function mkArCmdSub(sub) {
+        return function(b) { var r = sub.fn(b); return {b: r.b, v: r.b.NewCall(rtStr2int, r.v)} }
+    }
+    // ${...} : items are [{pe}?, {pname}, {op}?, defaultWordObj?]
+    function mkParamExp(items) {
+        var pe = "", name = "", op = ""
+        var wordT = null
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.fn != undefined) { wordT = it }
+            else if (it.pe != undefined) { pe = it.pe }
+            else if (it.pname != undefined) { name = it.pname }
+            else if (it.op != undefined) { op = it.op }
+        }
+        if (pe == "len") {
+            return {c: undefined, fn: function(b) {
+                return {b: b, v: b.NewCall(rtInt2str, b.NewCall(rtStrlen, varString(b, name)))}
+            }}
+        }
+        if (pe == "ind") {
+            return {c: undefined, fn: function(b) {
+                return {b: b, v: b.NewCall(rtGetByName, varString(b, name))}
+            }}
+        }
+        if (op == "") { return mkVarRef(name) }
+        var colon = (op.charAt(0) == ":")
+        var o = colon ? op.slice(1) : op
+        return {c: undefined, fn: function(b) {
+            var v = varString(b, name)
+            // ":" forms treat "" like unset; the bare forms only test set-ness, which the
+            // unset marker (a distinct empty string) records.
+            var blank = colon ? isEmptyStr(b, v)
+                              : b.NewICmp(llvm.enum.IPredEQ, v, unsetPtr(b))
+            var d = emptyPtr(b)
+            if (wordT != null) { var r = wordT.fn(b); b = r.b; d = r.v }
+            if (o == "+") { return {b: b, v: b.NewSelect(blank, emptyPtr(b), d)} }
+            var picked = b.NewSelect(blank, d, v)
+            if (o == "=") { storeVar(b, name, picked) }
+            return {b: b, v: picked}
+        }}
     }
     function mkVarRef(name) {
         return {fn: function(b) { return {b: b, v: varString(b, name)} }, c: undefined}
@@ -615,14 +1297,15 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // A word is the concatenation of its segment objects. All static -> one interned constant.
     function mkWord(segs) {
         if (segs.length == 0) { return makeConst("") }
-        var allConst = true, joined = ""
+        var allConst = true, joined = "", anySub = false
         var i
         for (i = 0; i < segs.length; i++) {
+            if (segs[i].s == true) { anySub = true }
             if (segs[i].c == undefined) { allConst = false } else { joined = joined + segs[i].c }
         }
         if (allConst) { return makeConst(joined) }
         if (segs.length == 1) { return segs[0] }
-        return {fn: function(b) {
+        return {s: anySub, fn: function(b) {
             var r = segs[0].fn(b)
             var bb = r.b, v = r.v
             var k
@@ -640,6 +1323,117 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
     // ===================================================================================
 
     function mkInt(text) { var c = llvm.constant.NewInt(i32, parseDec(text)); return function(b) { return {b: b, v: c} } }
+    // A numeric literal: 0xHH hexadecimal, BASE#DIGITS, a leading 0 octal, else decimal.
+    function digitsInBase(t, base) {
+        var v = 0
+        var i
+        for (i = 0; i < t.length; i++) {
+            var cc = t.charCodeAt(i)
+            var d = -1
+            if (cc >= 48 && cc <= 57) { d = cc - 48 }
+            else if (cc >= 97 && cc <= 122) { d = cc - 87 }
+            else if (cc >= 65 && cc <= 90) { d = cc - 55 }
+            if (d < 0 || d >= base) { d = 0 }
+            v = (v * base + d) | 0
+        }
+        return v
+    }
+    function parseNumLit(t) {
+        if (t.length > 2 && t.charAt(0) == "0" && (t.charAt(1) == "x" || t.charAt(1) == "X")) {
+            return digitsInBase(t.slice(2), 16)
+        }
+        var h = -1
+        var i
+        for (i = 0; i < t.length; i++) { if (t.charAt(i) == "#") { h = i } }
+        if (h > 0) { return digitsInBase(t.slice(h + 1), parseDec(t.slice(0, h))) }
+        if (t.length > 1 && t.charAt(0) == "0") { return digitsInBase(t.slice(1), 8) }
+        return parseDec(t)
+    }
+    function mkNum(text) { var c = llvm.constant.NewInt(i32, parseNumLit(text)); return function(b) { return {b: b, v: c} } }
+    function mkArOfStr(o) { return function(b) { var r = o.fn(b); return {b: r.b, v: r.b.NewCall(rtStr2int, r.v)} } }
+    function mkUn(op, t) {
+        return function(b) {
+            var r = t(b)
+            var bb = r.b
+            if (op == "-") { return {b: bb, v: bb.NewSub(zero, r.v)} }
+            if (op == "+") { return {b: bb, v: r.v} }
+            if (op == "!") { return {b: bb, v: bb.NewZExt(bb.NewICmp(llvm.enum.IPredEQ, r.v, zero), i32)} }
+            return {b: bb, v: bb.NewXor(r.v, llvm.constant.NewInt(i32, -1))}
+        }
+    }
+    function mkIncDec(items) {
+        var lhs = "", iop = "++", pre = 0
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.lhs != undefined) { lhs = it.lhs } else { iop = it.iop; pre = it.pre }
+        }
+        return function(b) {
+            var v = b.NewCall(rtStr2int, varString(b, lhs))
+            var nv = (iop == "++") ? b.NewAdd(v, one) : b.NewSub(v, one)
+            storeVar(b, lhs, b.NewCall(rtInt2str, nv))
+            return {b: b, v: (pre == 1) ? nv : v}
+        }
+    }
+    function mkArAssign(items) {
+        var lhs = items[0].lhs
+        var aop = items[1].aop
+        var t = items[2]
+        return function(b) {
+            var cur = b.NewCall(rtStr2int, varString(b, lhs))
+            var r = t(b)
+            b = r.b
+            var nv = r.v
+            if (aop != "=") {
+                var res = arOp(b, aop.slice(0, aop.length - 1), cur, r.v)
+                b = res.b
+                nv = res.v
+            }
+            storeVar(b, lhs, b.NewCall(rtInt2str, nv))
+            return {b: b, v: nv}
+        }
+    }
+    function mkArCond(items) {
+        if (items.length == 1) { return items[0] }
+        var c0 = items[0], t1 = items[1], t2 = items[2]
+        return function(b) {
+            var rc = c0(b)
+            var r1 = t1(rc.b)
+            var r2 = t2(r1.b)
+            var bb = r2.b
+            return {b: bb, v: bb.NewSelect(bb.NewICmp(llvm.enum.IPredNE, rc.v, zero), r1.v, r2.v)}
+        }
+    }
+    function foldComma(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var v = zero
+            var i
+            for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = r.v }
+            return {b: b, v: v}
+        }
+    }
+    // base ** exponent : a counted multiply loop (the exponent can be a run time value).
+    function foldPow(items) {
+        if (items.length == 1) { return items[0] }
+        var bt = items[0], et = items[2]
+        return function(b) {
+            var rb = bt(b)
+            var re = et(rb.b)
+            b = re.b
+            var acc = b.NewAlloca(i32), ip = b.NewAlloca(i32)
+            b.NewStore(one, acc)
+            b.NewStore(zero, ip)
+            var h = curF.NewBlock(""), bd = curF.NewBlock(""), x = curF.NewBlock("")
+            b.NewBr(h)
+            var iv = h.NewLoad(i32, ip)
+            h.NewCondBr(h.NewICmp(llvm.enum.IPredSLT, iv, re.v), bd, x)
+            bd.NewStore(bd.NewMul(bd.NewLoad(i32, acc), rb.v), acc)
+            bd.NewStore(bd.NewAdd(iv, one), ip)
+            bd.NewBr(h)
+            return {b: x, v: x.NewLoad(i32, acc)}
+        }
+    }
     function mkArVar(name) { return function(b) { return {b: b, v: b.NewCall(rtStr2int, varString(b, name))} } }
     function mkNeg(t) { return function(b) { var r = t(b); return {b: r.b, v: r.b.NewSub(zero, r.v)} } }
     // Returns {b, v}: only / and % branch (a zero divisor yields 0, like the interpreter's
@@ -664,6 +1458,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         if (op == ">=") { pred = llvm.enum.IPredSGE }
         if (op == "==") { pred = llvm.enum.IPredEQ }
         if (op == "!=") { pred = llvm.enum.IPredNE }
+        if (pred == null) {
+            if (op == "<<") { return {b: b, v: b.NewShl(l, r)} }
+            if (op == ">>") { return {b: b, v: b.NewAShr(l, r)} }
+            if (op == "&") { return {b: b, v: b.NewAnd(l, r)} }
+            if (op == "|") { return {b: b, v: b.NewOr(l, r)} }
+            if (op == "^") { return {b: b, v: b.NewXor(l, r)} }
+            var ln = b.NewICmp(llvm.enum.IPredNE, l, zero)
+            var rn = b.NewICmp(llvm.enum.IPredNE, r, zero)
+            if (op == "&&") { return {b: b, v: b.NewZExt(b.NewAnd(ln, rn), i32)} }
+            if (op == "||") { return {b: b, v: b.NewZExt(b.NewOr(ln, rn), i32)} }
+            fail("unsupported arithmetic operator: " + op)
+        }
         return {b: b, v: b.NewZExt(b.NewICmp(pred, l, r), i32)}
     }
     function foldBin(items) {
@@ -697,10 +1503,47 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         return function(b) {
             var val
             if (valT != null) { var r = valT.fn(b); b = r.b; val = r.v } else { val = emptyPtr(b) }
-            b.NewStore(val, getVarSlot(name))
+            storeVar(b, name, val)
+            // v=$(cmd) leaves $? at cmd's status; a plain assignment always succeeds.
+            if (valT == null || valT.s != true) { storeStatusI(b, 0) }
+            return b
+        }
+    }
+
+    // Every `ret` out of a user function first unwinds the local save stack back to the
+    // depth the call recorded on entry, so `local` bindings do not leak to the caller.
+    function emitFnRet(b, v) {
+        if (curFrame != null) { b.NewCall(rtPopLocals, b.NewLoad(i32, curFrame.depth)) }
+        b.NewRet(v)
+    }
+
+    // items = [{dkw}, {dflag}*, ({dname} | {aname, val})*]
+    function makeDecl(items) {
+        var kw = items[0].dkw
+        var names = []
+        var vals = []
+        var i
+        for (i = 1; i < items.length; i++) {
+            var it = items[i]
+            if (it.dflag != undefined) { continue }
+            if (it.dname != undefined) { names.push(it.dname); vals.push(null) }
+            else { names.push(it.aname); vals.push(it.val) }
+        }
+        return function(b) {
+            var k
+            for (k = 0; k < names.length; k++) {
+                if (kw == "local" && curFrame != null) {
+                    b.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId(names[k])))
+                }
+                if (vals[k] != null) { var r = vals[k].fn(b); b = r.b; storeVar(b, names[k], r.v) }
+                else if (kw == "local") { storeVar(b, names[k], unsetPtr(b)) }
+            }
             storeStatusI(b, 0)
             return b
         }
+    }
+    function mkDeclItem(items) {
+        return {aname: items[0].aname, val: (items.length > 1) ? items[1] : null}
     }
 
     // After a call that might transitively `exit`, bail out to the current function's exit.
@@ -733,33 +1576,131 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b = r.b
             b.NewCall(rtPrints, r.v)
         }
-        if (newline) { b.NewCall(extPutchar, llvm.constant.NewInt(i32, 10)) }
+        if (newline) { b.NewCall(rtPutc, llvm.constant.NewInt(i32, 10)) }
         storeStatusI(b, 0)
         return b
     }
 
-    // status i32 (0 true / 1 false) for a resolved test with a compile-time operator.
-    function testStatus(b, vals, op) {
-        function fromCmp(pred, il, ir) { return b.NewSelect(b.NewICmp(pred, il, ir), zero, one) }
-        function isEmpty(v) { return b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtStrlen, v), zero) }
-        if (vals.length == 0) { return one }
-        if (vals.length == 1) { return b.NewSelect(isEmpty(vals[0].v), one, zero) }
-        if (vals.length == 2) {
-            if (op == "-z") { return b.NewSelect(isEmpty(vals[1].v), zero, one) }
-            if (op == "-n") { return b.NewSelect(isEmpty(vals[1].v), one, zero) }
-            fail("unsupported unary test operator (must be a literal -z/-n): " + op)
+    // ---- the test builtin ------------------------------------------------------------
+    // The operand VALUES are runtime i8*, but the operators are literals, so the argument
+    // list is parsed into an expression at COMPILE time and lowered without any branching:
+    // every leaf yields an i32 status (0 true / 1 false), `-a` is a bitwise or of the two
+    // statuses, `-o` a bitwise and, and `!` an xor with 1.
+    //
+    // There is no real filesystem behind a compiled run either, so the file predicates go
+    // through rt_fskind, a model of the standard paths (see bash-interpreter.abnf).
+    var fsFiles = ["/dev/null", "/dev/zero", "/dev/tty", "/dev/stdin", "/dev/stdout", "/dev/stderr"]
+    var fsDirs = ["/", "/dev", "/tmp", "/usr", "/etc", "/var", "/bin", "/usr/bin"]
+    var rtFskind = m.NewFunc("rt_fskind", i32, llvm.ir.NewParam("p", i8ptr))
+    ;(function() {
+        var p2 = rtFskind.Params[0]
+        var e = rtFskind.NewBlock("entry")
+        var k = zero
+        var i
+        for (i = 0; i < fsFiles.length; i++) {
+            var hit = e.NewICmp(llvm.enum.IPredNE, e.NewCall(rtStreq, [p2, gepStr(e, fsFiles[i])]), zero)
+            k = e.NewSelect(hit, one, k)
         }
-        var l = vals[0].v, r = vals[2].v
-        if (op == "=" || op == "==") { return b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [l, r]), zero), zero, one) }
-        if (op == "!=") { return b.NewSelect(b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [l, r]), zero), one, zero) }
-        var il = b.NewCall(rtStr2int, l), ir = b.NewCall(rtStr2int, r)
-        if (op == "-eq") { return fromCmp(llvm.enum.IPredEQ, il, ir) }
-        if (op == "-ne") { return fromCmp(llvm.enum.IPredNE, il, ir) }
-        if (op == "-lt") { return fromCmp(llvm.enum.IPredSLT, il, ir) }
-        if (op == "-le") { return fromCmp(llvm.enum.IPredSLE, il, ir) }
-        if (op == "-gt") { return fromCmp(llvm.enum.IPredSGT, il, ir) }
-        if (op == "-ge") { return fromCmp(llvm.enum.IPredSGE, il, ir) }
+        for (i = 0; i < fsDirs.length; i++) {
+            var hit2 = e.NewICmp(llvm.enum.IPredNE, e.NewCall(rtStreq, [p2, gepStr(e, fsDirs[i])]), zero)
+            k = e.NewSelect(hit2, llvm.constant.NewInt(i32, 2), k)
+        }
+        e.NewRet(k)
+    })()
+
+    function isTestUnary(t) {
+        if (t == "-z" || t == "-n" || t == "-v") { return true }
+        if (t == "-e" || t == "-f" || t == "-d" || t == "-s" || t == "-r" || t == "-w") { return true }
+        if (t == "-x" || t == "-h" || t == "-L" || t == "-b" || t == "-c" || t == "-p") { return true }
+        if (t == "-S" || t == "-t" || t == "-g" || t == "-u" || t == "-k" || t == "-O") { return true }
+        return false
+    }
+    function isTestBinary(t) {
+        if (t == "=" || t == "==" || t == "!=" || t == "<" || t == ">") { return true }
+        if (t == "-eq" || t == "-ne" || t == "-lt" || t == "-le" || t == "-gt" || t == "-ge") { return true }
+        if (t == "-nt" || t == "-ot" || t == "-ef") { return true }
+        return false
+    }
+    function isEmptyStr(b, v) { return b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtStrlen, v), zero) }
+    function isNonEmptyStr(b, v) { return b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStrlen, v), zero) }
+    function boolStatus(b, i1) { return b.NewSelect(i1, zero, one) }
+
+    function testUnaryIR(b, op, arg) {
+        if (op == "-z") { return boolStatus(b, isEmptyStr(b, arg.v)) }
+        if (op == "-n") { return boolStatus(b, isNonEmptyStr(b, arg.v)) }
+        if (op == "-v") {
+            if (arg.c == undefined) { fail("test -v needs a literal variable name in this compiler") }
+            return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, loadVar(b, arg.c), unsetPtr(b)))
+        }
+        var k = b.NewCall(rtFskind, arg.v)
+        if (op == "-d") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, llvm.constant.NewInt(i32, 2))) }
+        if (op == "-e" || op == "-r" || op == "-w") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, k, zero)) }
+        if (op == "-f" || op == "-s" || op == "-c" || op == "-b") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, k, one)) }
+        return one
+    }
+    function testBinaryIR(b, l, op, r) {
+        if (op == "=" || op == "==") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, b.NewCall(rtStreq, [l.v, r.v]), zero)) }
+        if (op == "!=") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, b.NewCall(rtStreq, [l.v, r.v]), zero)) }
+        if (op == "<") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSLT, b.NewCall(rtStrcmp, [l.v, r.v]), zero)) }
+        if (op == ">") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSGT, b.NewCall(rtStrcmp, [l.v, r.v]), zero)) }
+        var il = b.NewCall(rtStr2int, l.v), ir = b.NewCall(rtStr2int, r.v)
+        if (op == "-eq") { return boolStatus(b, b.NewICmp(llvm.enum.IPredEQ, il, ir)) }
+        if (op == "-ne") { return boolStatus(b, b.NewICmp(llvm.enum.IPredNE, il, ir)) }
+        if (op == "-lt") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSLT, il, ir)) }
+        if (op == "-le") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSLE, il, ir)) }
+        if (op == "-gt") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSGT, il, ir)) }
+        if (op == "-ge") { return boolStatus(b, b.NewICmp(llvm.enum.IPredSGE, il, ir)) }
         fail("unsupported binary test operator (must be a literal): " + op)
+        return one
+    }
+
+    // The literal text of argument st.i, or a sentinel for "runtime value" / "past the end".
+    function tcAt(a, st) {
+        if (st.i >= a.length) { return "\x00end" }
+        if (a[st.i].c == undefined) { return "\x00val" }
+        return a[st.i].c
+    }
+    function tcPrim(b, a, st) {
+        var t = tcAt(a, st)
+        if (t == "(") {
+            st.i = st.i + 1
+            var r = tcOr(b, a, st)
+            if (tcAt(a, st) == ")") { st.i = st.i + 1 }
+            return r
+        }
+        if (t == "!") {
+            st.i = st.i + 1
+            return b.NewXor(tcPrim(b, a, st), one)
+        }
+        if (isTestUnary(t) && st.i + 1 < a.length && !isTestBinary(tcNext(a, st))) {
+            var opnd = a[st.i + 1]
+            st.i = st.i + 2
+            return testUnaryIR(b, t, opnd)
+        }
+        var lhs = a[st.i]
+        st.i = st.i + 1
+        if (st.i + 1 < a.length && isTestBinary(tcAt(a, st))) {
+            var op = tcAt(a, st)
+            var rhs = a[st.i + 1]
+            st.i = st.i + 2
+            return testBinaryIR(b, lhs, op, rhs)
+        }
+        return boolStatus(b, isNonEmptyStr(b, lhs.v))
+    }
+    function tcNext(a, st) {
+        if (st.i + 1 >= a.length) { return "\x00end" }
+        if (a[st.i + 1].c == undefined) { return "\x00val" }
+        return a[st.i + 1].c
+    }
+    function tcAnd(b, a, st) {
+        var v = tcPrim(b, a, st)
+        while (tcAt(a, st) == "-a") { st.i = st.i + 1; v = b.NewOr(v, tcPrim(b, a, st)) }
+        return v
+    }
+    function tcOr(b, a, st) {
+        var v = tcAnd(b, a, st)
+        while (tcAt(a, st) == "-o") { st.i = st.i + 1; v = b.NewAnd(v, tcAnd(b, a, st)) }
+        return v
     }
 
     function emitTest(b, cmd, args) {
@@ -768,23 +1709,178 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (a.length == 0 || a[a.length - 1].c != "]") { fail("[ used without the closing ]") }
             a = a.slice(0, a.length - 1)
         }
-        if (a.length > 3) { fail("test: too many arguments (subset supports up to 3)") }
-        var op = null
-        if (a.length == 2) { op = a[0].c }
-        if (a.length == 3) { op = a[1].c }
-        if ((a.length == 2 || a.length == 3) && op == undefined) { fail("test operator must be a literal in this compiler") }
         var bbox = {b: b}
         var vals = evalArgs(bbox, a)
         b = bbox.b
-        storeStatus(b, testStatus(b, vals, op))
+        if (vals.length == 0) { storeStatusI(b, 1); return b }
+        if (vals.length == 1) {
+            storeStatus(b, boolStatus(b, isNonEmptyStr(b, vals[0].v)))
+            return b
+        }
+        var st = {i: 0}
+        storeStatus(b, tcOr(b, vals, st))
         return b
     }
 
-    // words[0] is the command word (must be a literal here), the rest are arguments.
-    function makeSimpleCommand(words) {
-        var cmdT = words[0]
-        var argTs = words.slice(1)
+    // ---- pipelines, subshells, groups, (( )), [[ ]], redirections ----
+
+    function makePipeline(items) {
+        var bang = false
+        var stages = []
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { stages.push(it) } else { bang = true }
+        }
+        if (!bang && stages.length == 1) { return stages[0] }
         return function(b) {
+            var k
+            for (k = 0; k < stages.length; k++) {
+                var isLast = (k == stages.length - 1)
+                if (!isLast) { b.NewCall(rtCapBegin, zero) }
+                b = stages[k](b)
+                if (!isLast) { b.NewStore(b.NewCall(rtCapEnd, zero), gStdin) }
+            }
+            if (bang) {
+                storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredEQ, b.NewLoad(i32, gStatus), zero), one, zero))
+            }
+            return b
+        }
+    }
+
+    // ( LIST ) : the variable array is snapshotted and restored, and an `exit` inside branches
+    // to the subshell's own end block instead of the enclosing function's.
+    function makeSubshell(bodyT) {
+        return function(b) {
+            b.NewCall(rtSsSave, zero)
+            var savedExit = curExit
+            var subEnd = curF.NewBlock("")
+            curExit = subEnd
+            var eb = bodyT(b)
+            eb.NewBr(subEnd)
+            curExit = savedExit
+            var wasEx = subEnd.NewICmp(llvm.enum.IPredNE, subEnd.NewLoad(i32, gExited), zero)
+            var st = subEnd.NewSelect(wasEx, subEnd.NewLoad(i32, gExitCode), subEnd.NewLoad(i32, gStatus))
+            subEnd.NewStore(zero, gExited)
+            subEnd.NewCall(rtSsRestore, zero)
+            subEnd.NewStore(st, gStatus)
+            return subEnd
+        }
+    }
+    function makeGroup(bodyT) { return bodyT }
+
+    function makeArithCmd(exprT) {
+        return function(b) {
+            var r = exprT(b)
+            b = r.b
+            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero), zero, one))
+            return b
+        }
+    }
+    function makeLetCmd(items) {
+        return function(b) {
+            var v = zero
+            var i
+            for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = r.v }
+            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, v, zero), zero, one))
+            return b
+        }
+    }
+
+    // [[ ... ]] : the condition thunks answer an i32 boolean (1 = true).
+    function makeCondCmd(t) {
+        return function(b) {
+            var r = t(b)
+            b = r.b
+            storeStatus(b, b.NewSelect(b.NewICmp(llvm.enum.IPredNE, r.v, zero), zero, one))
+            return b
+        }
+    }
+    function foldCondOr(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var v = zero
+            var i
+            for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = b.NewOr(v, r.v) }
+            return {b: b, v: v}
+        }
+    }
+    function foldCondAnd(items) {
+        if (items.length == 1) { return items[0] }
+        return function(b) {
+            var v = one
+            var i
+            for (i = 0; i < items.length; i++) { var r = items[i](b); b = r.b; v = b.NewAnd(v, r.v) }
+            return {b: b, v: v}
+        }
+    }
+    function mkCondNot(t) {
+        return function(b) { var r = t(b); return {b: r.b, v: r.b.NewXor(r.v, one)} }
+    }
+    function mkCondSingle(w) {
+        return function(b) {
+            var r = w.fn(b)
+            return {b: r.b, v: r.b.NewZExt(isNonEmptyStr(r.b, r.v), i32)}
+        }
+    }
+    function mkCondUn(items) {
+        var op = items[0].cop
+        var w = items[1]
+        return function(b) {
+            var r = w.fn(b)
+            b = r.b
+            var st = testUnaryIR(b, op, {v: r.v, c: w.c})
+            return {b: b, v: b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, st, zero), i32)}
+        }
+    }
+    function mkCondBin(items) {
+        var lw = items[0], op = items[1].cop, rw = items[2]
+        return function(b) {
+            var rl = lw.fn(b); b = rl.b
+            var rr = rw.fn(b); b = rr.b
+            // == and != glob-match their right hand side inside [[ ]]; = is a synonym of ==.
+            if (op == "==" || op == "=") { return {b: b, v: b.NewCall(rtGlob, [rr.v, rl.v])} }
+            if (op == "!=") { return {b: b, v: b.NewXor(b.NewCall(rtGlob, [rr.v, rl.v]), one)} }
+            if (op == "=~") { fail("[[ =~ ]] (regex matching) is not supported") }
+            var st = testBinaryIR(b, {v: rl.v, c: lw.c}, op, {v: rr.v, c: rw.c})
+            return {b: b, v: b.NewZExt(b.NewICmp(llvm.enum.IPredEQ, st, zero), i32)}
+        }
+    }
+
+    function mkRedir(items) {
+        var op = "", fd = "", t = null
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (it.fn != undefined) { t = it }
+            else if (it.redir != undefined) { op = it.redir }
+            else if (it.iofd != undefined) { fd = it.iofd }
+        }
+        return {rd: op, iofd: fd, target: t}
+    }
+    // An output redirection discards the output (there is no filesystem here); a here-string
+    // feeds the pipeline's stdin buffer; every other input redirection is end of file at once.
+    function redirSuppresses(redirs) {
+        var i
+        for (i = 0; i < redirs.length; i++) {
+            var r = redirs[i]
+            if (r.rd == "<<<" || r.rd == "<" || r.rd == ">&" || r.rd == "<&") { continue }
+            if (r.iofd == "" || r.iofd == "1") { return true }
+        }
+        return false
+    }
+
+    // words[0] is the command word (must be a literal here), the rest are arguments.
+    function makeSimpleCommand(items0) {
+        var cmdT = items0[0]
+        var argTs = []
+        var redirs = []
+        var ri
+        for (ri = 1; ri < items0.length; ri++) {
+            var it0 = items0[ri]
+            if (it0.rd != undefined) { redirs.push(it0) } else { argTs.push(it0) }
+        }
+        var inner = function(b) {
             var cmd = cmdT.c
             if (cmd == undefined) { fail("a computed command name is not supported by this compiler") }
             if (cmd == "echo") { return emitEcho(b, argTs) }
@@ -802,8 +1898,20 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             if (cmd == "return") {
                 var rv = null
                 if (argTs.length > 0) { var r2 = argTs[0].fn(b); b = r2.b; rv = b.NewCall(rtStr2int, r2.v) } else { rv = b.NewLoad(i32, gStatus) }
-                if (curFrame != null) { b.NewRet(rv); return deadBlock() }
+                if (curFrame != null) { emitFnRet(b, rv); return deadBlock() }
                 storeStatus(b, rv); return b
+            }
+            if (cmd == "read" || cmd == "shift") {
+                fail("the " + cmd + " builtin is not lowered by this compiler yet")
+            }
+            if (cmd == "unset") {
+                var uk
+                for (uk = 0; uk < argTs.length; uk++) {
+                    if (argTs[uk].c == undefined) { fail("unset needs a literal name in this compiler") }
+                    storeVar(b, argTs[uk].c, unsetPtr(b))
+                }
+                storeStatusI(b, 0)
+                return b
             }
             var f = hasOwn(funcs, "$" + cmd) ? funcs["$" + cmd] : null
             if (f != null) {
@@ -825,6 +1933,23 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             b.NewStore(one, gExited)
             b.NewBr(curExit)
             return deadBlock()
+        }
+        if (redirs.length == 0) { return inner }
+        return function(b) {
+            var sup = redirSuppresses(redirs)
+            var i
+            for (i = 0; i < redirs.length; i++) {
+                var rr = redirs[i]
+                if (rr.rd == "<<<" && rr.target != null) {
+                    var rt2 = rr.target.fn(b)
+                    b = rt2.b
+                    b.NewStore(b.NewCall(rtStrcat, [rt2.v, gepStr(b, "\n")]), gStdin)
+                }
+            }
+            if (sup) { b.NewCall(rtCapBegin, zero) }
+            b = inner(b)
+            if (sup) { b.NewCall(rtCapEnd, zero) }
+            return b
         }
     }
 
@@ -852,6 +1977,51 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             var i
             for (i = 0; i < thunks.length; i++) { b = thunks[i](b) }
             return b
+        }
+    }
+
+    // items = [{pats}, bodyThunk, {cterm}?]
+    function mkCaseClause(items) {
+        var pats = []
+        var body = null
+        var term = ";;"
+        var i
+        for (i = 0; i < items.length; i++) {
+            var it = items[i]
+            if (typeof it == "function") { body = it }
+            else if (it.pats != undefined) { pats = it.pats }
+            else if (it.cterm != undefined) { term = it.cterm }
+        }
+        return {pats: pats, body: body, cterm: term}
+    }
+    // items = [subjectWordObj, clause...]. One clause = one pattern test and one body block;
+    // ";;&" branches on to the NEXT clause after its body instead of to the merge block.
+    function makeCase(items) {
+        var subjT = items[0]
+        var clauses = items.slice(1)
+        return function(b) {
+            var r0 = subjT.fn(b)
+            b = r0.b
+            var subj = r0.v
+            var merge = curF.NewBlock("")
+            var i
+            for (i = 0; i < clauses.length; i++) {
+                var cl = clauses[i]
+                var hit = zero
+                var k
+                for (k = 0; k < cl.pats.length; k++) {
+                    var rp = cl.pats[k].fn(b)
+                    b = rp.b
+                    hit = b.NewOr(hit, b.NewCall(rtGlob, [rp.v, subj]))
+                }
+                var thenB = curF.NewBlock(""), nextB = curF.NewBlock("")
+                b.NewCondBr(b.NewICmp(llvm.enum.IPredNE, hit, zero), thenB, nextB)
+                var tb = cl.body(thenB)
+                if (cl.cterm == ";;&") { tb.NewBr(nextB) } else { tb.NewBr(merge) }
+                b = nextB
+            }
+            b.NewBr(merge)
+            return merge
         }
     }
 
@@ -897,6 +2067,36 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         }
     }
 
+    function makeUntil(items) {
+        var condT = items[0], bodyT = items[1]
+        return function(b) {
+            var head = curF.NewBlock(""), body = curF.NewBlock(""), ex = curF.NewBlock("")
+            b.NewBr(head)
+            var hb = condT(head)
+            hb.NewCondBr(hb.NewICmp(llvm.enum.IPredEQ, hb.NewLoad(i32, gStatus), zero), ex, body)
+            var bb = bodyT(body)
+            bb.NewBr(head)
+            return ex
+        }
+    }
+    // items = [initExpr, condExpr, stepExpr, bodyThunk]
+    function makeCFor(items) {
+        var initT = items[0], condT = items[1], stepT = items[2], bodyT = items[3]
+        return function(b) {
+            var r0 = initT(b)
+            b = r0.b
+            var head = curF.NewBlock(""), body = curF.NewBlock(""), step = curF.NewBlock(""), ex = curF.NewBlock("")
+            b.NewBr(head)
+            var rc = condT(head)
+            rc.b.NewCondBr(rc.b.NewICmp(llvm.enum.IPredNE, rc.v, zero), body, ex)
+            var bb = bodyT(body)
+            bb.NewBr(step)
+            var rs = stepT(step)
+            rs.b.NewBr(head)
+            return ex
+        }
+    }
+
     // items = [{fname}, {words:[wordObjs]}, bodyThunk]. The word list is static -> unrolled.
     function makeFor(items) {
         var fname = "", wordThunks = null, bodyT = null
@@ -912,7 +2112,7 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             for (k = 0; k < wordThunks.length; k++) {
                 var r = wordThunks[k].fn(b)
                 b = r.b
-                b.NewStore(r.v, getVarSlot(fname))
+                storeVar(b, fname, r.v)
                 b = bodyT(b)
             }
             return b
@@ -936,12 +2136,18 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
             curF = f
             var entry = f.NewBlock("entry")
             curExit = f.NewBlock("exit")
-            curExit.NewRet(curExit.NewLoad(i32, gStatus))
             var pvals = []
             for (i = 0; i < 9; i++) { pvals.push(f.Params[i]) }
-            curFrame = {params: pvals, argc: f.Params[9]}
+            // The local-save-stack depth at entry: every ret unwinds back to it.
+            var dslot = entry.NewAlloca(i32)
+            entry.NewStore(entry.NewLoad(i32, gLsTop), dslot)
+            curFrame = {params: pvals, argc: f.Params[9], depth: dslot}
+            // $FUNCNAME: a local of the call, so the save stack restores it on return.
+            entry.NewCall(rtPushLocal, llvm.constant.NewInt(i32, getVarId("FUNCNAME")))
+            storeVar(entry, "FUNCNAME", gepStr(entry, fname))
+            emitFnRet(curExit, curExit.NewLoad(i32, gStatus))
             var endb = bodyT(entry)
-            endb.NewRet(endb.NewLoad(i32, gStatus))
+            emitFnRet(endb, endb.NewLoad(i32, gStatus))
             curF = savedF; curExit = savedExit; curFrame = savedFrame
             storeStatusI(b, 0)
             return b
@@ -960,15 +2166,29 @@ NotNL       = "\x00"..."\x09" | "\x0b"..."\U0010ffff" ;
         curExit = main.NewBlock("exit")
         curExit.NewRet(curExit.NewLoad(i32, gExitCode)) // explicit `exit N`
         curFrame = null
-        // Emit the whole program into `body`; getVarSlot fills varSlotList as a side effect.
+        // Emit the whole program into `body`; getVarId fills varIdList as a side effect.
         var b = body
         var i
         for (i = 0; i < stmts.length; i++) { b = stmts[i](b) }
         b.NewRet(b.NewLoad(i32, gStatus)) // normal completion -> exit code is $?
-        // Now that every variable slot is known, initialize them all to "" in entry.
-        var ep = emptyPtr(entry)
-        for (i = 0; i < varSlotList.length; i++) { entry.NewStore(ep, varSlotList[i]) }
+        // Now that every variable slot is known, mark them all unset in entry (a raw null
+        // would trap on the first load, so the marker is a real pointer to a NUL byte).
+        var up0 = unsetPtr(entry)
+        for (i = 0; i < varIdList.length; i++) {
+            entry.NewStore(up0, entry.NewGetElementPtr(gvarsTy, gVars, zero, llvm.constant.NewInt(i32, i)))
+        }
+        entry.NewStore(llvm.constant.NewInt(i32, varIdList.length), gNvars)
         entry.NewBr(body)
+        // ${!name}: compare against every known name and load the matching slot.
+        var gb = rtGetByName.NewBlock("entry")
+        var nm = rtGetByName.Params[0]
+        var sel = unsetPtr(gb)
+        for (i = 0; i < varIdList.length; i++) {
+            var hit = gb.NewICmp(llvm.enum.IPredNE, gb.NewCall(rtStreq, [nm, gepStr(gb, varIdList[i])]), zero)
+            var slot = gb.NewLoad(i8ptr, gb.NewGetElementPtr(gvarsTy, gVars, zero, llvm.constant.NewInt(i32, i)))
+            sel = gb.NewSelect(hit, slot, sel)
+        }
+        gb.NewRet(sel)
     }
 
     c.compile(c.asg)
